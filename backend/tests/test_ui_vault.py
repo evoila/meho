@@ -86,6 +86,7 @@ from tests._vault_fakes import install_fake_client
 _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _OP_OPERATOR = "op-operator"
+_OP_READ_ONLY = "op-read-only"
 
 #: A secret value sentinel: a list response must never carry it, and a
 #: read response must never write it to a log/audit row.
@@ -1096,3 +1097,52 @@ def test_vault_ui_index_links_to_status_view(
     # top-level nav surface (no ``/ui/vault/status`` href in the sidebar nav,
     # which would duplicate the surface). The header link is the only one.
     assert body.count('href="/ui/vault/status"') == 1
+
+
+# ===========================================================================
+# Role floor: read_only gets 403 on every vault page, and nothing is dispatched
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/ui/vault",
+        "/ui/vault/list",
+        "/ui/vault/read",
+        "/ui/vault/versions",
+        "/ui/vault/status",
+        "/ui/vault/auth",
+    ],
+)
+def test_vault_ui_pages_read_only_forbidden_403_no_dispatch(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """A ``read_only`` session gets ``403 operator_required``; no operation runs.
+
+    Every vault console page sits on the same ``operator`` floor as the
+    REST ``/api/v1/operations/call`` route. The recording ``call_operation``
+    double sees no call, so no secret value and no run row can come out of
+    a read-only session.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    received: list[dict[str, Any]] = []
+
+    async def _recording_call(operator: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        received.append(arguments)
+        return {"status": "ok", "result": {}, "handle": None, "error": None}
+
+    monkeypatch.setattr("meho_backplane.ui.routes.vault.routes.call_operation", _recording_call)
+    monkeypatch.setattr("meho_backplane.ui.routes.vault.status.call_operation", _recording_call)
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_READ_ONLY, role=TenantRole.READ_ONLY
+    )
+    with mock:
+        response = client.get(
+            path,
+            params={"mount": "secret", "path": _tenant_path(_TENANT_A, "app/db")},
+            headers={"HX-Request": "true"},
+        )
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}
+    assert received == []

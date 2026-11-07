@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -39,6 +40,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.usage import RequestUsage
 from sqlalchemy import select
 
 from meho_backplane.agent.invocation import (
@@ -59,6 +61,12 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.main import app
 from meho_backplane.operations.agent_run import create_run
+from meho_backplane.operations.identity_budget import (
+    MODEL_PRICING,
+    BudgetWindowKind,
+    get_remaining,
+    set_limits,
+)
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -677,6 +685,78 @@ async def test_rest_sse_returns_429_pre_stream_when_budget_exceeded(
     assert isinstance(body["detail"], dict), body
     assert body["detail"]["error"] == "budget_exceeded"
     assert "global kill switch" in body["detail"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_rest_sse_charges_the_run_and_refuses_the_next_at_the_cost_cap(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streamed run counts against the person's daily cost cap.
+
+    The daily cost cap equals the price of one run. The first streamed run
+    runs and is charged. The second is refused with 429 before the stream
+    opens, the same as a run that is not streamed.
+    """
+    model_id = "anthropic:claude-sonnet-5-5"
+    monkeypatch.setenv("AGENT_DEFAULT_MODEL", model_id)
+    get_settings.cache_clear()
+    input_tokens, output_tokens = 2_000, 500
+    pricing = MODEL_PRICING[model_id]
+    one_run_cost = (
+        pricing.input * Decimal(input_tokens) + pricing.output * Decimal(output_tokens)
+    ) / Decimal(1_000_000)
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart("charged answer")],
+            usage=RequestUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+        )
+
+    reset_agent_invoker_for_testing(
+        AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: FunctionModel(fn)))
+    )
+    await _seed_definition()
+    sub = "op-streamed-cap"
+    async with get_sessionmaker()() as session:
+        await set_limits(
+            session,
+            tenant_id=_TENANT_A,
+            principal_sub=sub,
+            window_kind=BudgetWindowKind.DAILY,
+            cost_limit=one_run_cost,
+        )
+        await session.commit()
+
+    key = make_rsa_keypair("kid-budget-sse-cap")
+    headers = {"Authorization": f"Bearer {_token(key, sub=sub)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        with client.stream(
+            "POST", "/api/v1/agents/triage/run/events", json={"input": "go"}, headers=headers
+        ) as first:
+            assert first.status_code == 200, first.read()
+            first_body = "".join(first.iter_text())
+        second = client.post(
+            "/api/v1/agents/triage/run/events", json={"input": "go"}, headers=headers
+        )
+
+    assert "event: final" in first_body
+    assert "charged answer" in first_body
+    async with get_sessionmaker()() as session:
+        reading = await get_remaining(
+            session,
+            tenant_id=_TENANT_A,
+            principal_sub=sub,
+            window_kind=BudgetWindowKind.DAILY,
+        )
+        run_row = (
+            await session.execute(select(AgentRun).where(AgentRun.identity_sub == sub))
+        ).scalar_one()
+    assert reading.cost_consumed == one_run_cost
+    assert run_row.cost == one_run_cost
+    assert second.status_code == 429, second.text
+    assert second.json()["detail"]["error"] == "budget_exceeded"
 
 
 # ---------------------------------------------------------------------------

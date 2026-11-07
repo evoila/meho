@@ -85,7 +85,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 import httpx
 import structlog
@@ -112,6 +112,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakAdminCredentialsLoader,
@@ -150,6 +151,12 @@ _DEFAULT_TOKEN_TTL_SECONDS: float = 60.0
 #: idempotent-GET retry decorator (re-firing a side effect on a transient
 #: 5xx is the bug that guard prevents).
 _MUTATING_METHODS: frozenset[str] = frozenset({"POST", "PUT", "DELETE"})
+
+#: What the flight recorder stores in place of an Admin REST answer that is
+#: not JSON, or that the mask could not walk. Keycloak answers JSON on every
+#: recorded call; anything else is left out of the trace rather than stored
+#: unread.
+_TRACE_BODY_WITHHELD: Final[str] = "<response body left out: MEHO could not mask it>"
 
 
 @dataclass(frozen=True)
@@ -614,6 +621,32 @@ class KeycloakConnector(HttpConnector):
             probed_at=fp.probed_at,
         )
 
+    # -- flight recorder trace mask -------------------------------------
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Record Admin REST answers with every secret field masked.
+
+        The flight recorder stores the vendor answer of each recorded call.
+        A client representation carries the confidential client's
+        ``secret``, a user representation can carry ``credentials``, and a
+        realm's ``smtpServer`` map carries a ``password``. The trace gets
+        the same scrub the operation result gets
+        (:func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`),
+        so the stored trace and the agent copy hold ``***REDACTED***`` where
+        the result does. An empty body is recorded as it is. A body that is
+        not JSON is replaced by a fixed marker. Never raises.
+        """
+        if not response.content:
+            return None
+        try:
+            body = response.json()
+        except ValueError:
+            return _TRACE_BODY_WITHHELD
+        try:
+            return redact_secret_fields(body)
+        except Exception:  # a trace must never break the call, and never hold a secret
+            return _TRACE_BODY_WITHHELD
+
     # -- admin-auth JSON GET helpers ------------------------------------
 
     async def _get_admin_json(
@@ -799,7 +832,9 @@ class KeycloakConnector(HttpConnector):
         try:
             role = await self._get_admin_json(
                 target,
-                fill_path(_ROLE_PATH, {"realm": managed_realm, "role-name": role_name}),
+                fill_path(
+                    _ROLE_PATH, {"realm": managed_realm, "role-name": quote_segment(role_name)}
+                ),
                 operator=operator,
             )
         except httpx.HTTPStatusError as exc:
@@ -1120,6 +1155,16 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_authflow_ensure_approval_flow(self, operator, target, params)
 
+    async def authflow_ensure_passkey_code_skip(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_passkey_code_skip``."""
+        from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
+            keycloak_authflow_ensure_passkey_code_skip,
+        )
+
+        return await keycloak_authflow_ensure_passkey_code_skip(self, operator, target, params)
+
     async def identity_provider_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1160,7 +1205,8 @@ class KeycloakConnector(HttpConnector):
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
         ``user.check_login`` (one login test) rides the same walk, and so do
-        ``authflow.ensure_approval_flow`` and ``identity_provider.list``.
+        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``
+        and ``identity_provider.list``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
@@ -1170,6 +1216,9 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_authflow import (
             APPROVAL_FLOW_OPS,
             WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+        )
+        from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
+            PASSKEY_CODE_SKIP_OPS,
         )
         from meho_backplane.connectors.keycloak.ops_identity_provider import (
             IDENTITY_PROVIDER_OPS,
@@ -1206,6 +1255,7 @@ class KeycloakConnector(HttpConnector):
             *WRITE_OPS,
             *LOGIN_CHECK_OPS,
             *APPROVAL_FLOW_OPS,
+            *PASSKEY_CODE_SKIP_OPS,
             *IDENTITY_PROVIDER_OPS,
         ):
             handler = getattr(cls, op.handler_attr, None)

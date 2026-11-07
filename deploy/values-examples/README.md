@@ -36,11 +36,20 @@ request.
 
 ## Files
 
+Every file here except `values-openshift.yaml` brings its own PostgreSQL,
+Keycloak and Vault (or GSM), so each sets `corePostgres.enabled`,
+`coreKeycloak.enabled` and `coreVault.enabled` to `false`. Since chart
+0.2.0 the three built-in parts are on by default (#4047); a values file of
+your own that brings its own parts needs the same three lines. For the
+built-in core, start from `deploy/linux-server/values-single-node.yaml`
+instead, or from `values-openshift.yaml` on OpenShift.
+
 | File | Targets | Backed by |
 | --- | --- | --- |
 | [`values-rdc-example.yaml`](./values-rdc-example.yaml) | The RDC Hetzner lab (`*.evba.lab` hosts, rke2-infra ingress-nginx, cluster-internal Postgres + Vault + Keycloak). | The actual, private file lives in `evoila-bosnia/claude-rdc-hetzner-dc`'s `manifests/meho/values-rdc.yaml`; this file is the sanitized template for other Vault-+-Keycloak-+-Postgres-shaped labs. |
 | [`values-gsm-example.yaml`](./values-gsm-example.yaml) | A **Vault-free, GCP-native** install (Initiative #2227) — credentials + the `/api/v1/health` federation proof resolve through GCP Secret Manager (`config.credentialBackend: gsm`) instead of Vault. `vault.address` is left blank; the schema requires it only when `credentialBackend: vault`. | The GSM SA-direct backend (#2230, Phase 1). `gsm.workloadIdentityFederation.*` is left empty here — for the per-operator token-exchange (WIF) shape see `values-gsm-wif-example.yaml`. |
 | [`values-gsm-wif-example.yaml`](./values-gsm-wif-example.yaml) | The GSM backend with **per-operator Workload Identity Federation** (#2232, Phase 2) — credential reads run under the calling operator's Keycloak identity, and the `gsm.workloadIdentityFederation.*` keys render first-class as `GSM_WIF_*` (no `extraEnv`, #2667). Targets the on-prem/no-ambient-identity shape, so it also enables the `checkRunner` service principal (#2642) that background dispatch needs. | The GSM WIF path (#2232); the `GSM_WIF_*` chart rendering landed in #2659. |
+| [`values-openshift.yaml`](./values-openshift.yaml) | **OpenShift** with the built-in core, installed by an admin of one project under the default security rule `restricted-v2` (#4102). `global.openshift: true` lets OpenShift pick every pod's user id; the router turns the Ingress into Routes. The network rules stay off until the chart lets the router in (#4050). | Tested on a single-node OpenShift 4.22 in the lab on 2026-11-04. Your own values file adds `image.tag`, `ingress.host`, `coreKeycloak.hostname` and `coreKeycloak.firstTenantId`. |
 | [`values-bring-your-own-fixture.yaml`](./values-bring-your-own-fixture.yaml) | **Not a template — a test fixture** (#4039). With the built-in core parts off, `helm template` of this file must stay the same from one chart version to the next; `backend/tests/test_chart_bring_your_own_render.py` compares it with a saved copy. | Built from the non-secret parts of the values file of our own bring-your-own install, with example host names and addresses. |
 
 ## Using `values-rdc-example.yaml`
@@ -218,6 +227,7 @@ Two resources combine to materialise a Secret the chart can consume:
 | `secret/meho/postgres` (property `url`) | The full `DATABASE_URL`: `postgresql+asyncpg://<user>:<pass>@<host>:<port>/<db>` | The Deployment env `DATABASE_URL` via `postgres.credentialsSecret` |
 | `secret/meho/keycloak/client_secret` (property `client_secret`) | The Keycloak OAuth client secret backing `keycloak.audience` | v0.2 federation wiring (rendered optionally today for end-to-end sync verification) |
 | `secret/meho/agent` (property `api_key`) | The Anthropic API key the G11.1 agent LLM loop authenticates with | The Deployment env `ANTHROPIC_API_KEY` via `agent.secretName` (resolved through `meho.agentSecretName`) when `agent.enabled: true` |
+| `secret/meho/agent-openai` (property `api_key`) | The API key of the OpenAI-compatible model endpoint | The Deployment env `OPENAI_API_KEY` via `agent.openai.secretName` (resolved through `meho.agentOpenaiSecretName`) when `agent.openai.enabled: true` |
 | `secret/meho/keycloak/admin_client_secret` (property `client_secret`) | The G11.2 Keycloak Admin client secret gating agent-principal registration | The Deployment env `KEYCLOAK_ADMIN_CLIENT_SECRET` via `keycloakAdmin.clientSecret.secretName` (resolved through `meho.keycloakAdminSecretName`) when `keycloakAdmin.enabled: true` |
 
 The `secret/meho` base is configurable via `vault.paths.kv` — adjust the
@@ -266,6 +276,90 @@ env vars resolve when both opt-ins are enabled. The
 chart with both opt-ins on and greps for the `secretKeyRef` shape so
 a regression flipping `ANTHROPIC_API_KEY` to plaintext is rejected
 before merge.
+
+## OpenAI-compatible model endpoint (#5851)
+
+MEHO's own agents can use a model server that accepts the same requests
+as OpenAI's API, for example vLLM, Ollama or OpenAI itself. The
+`agent.openai` block sets the three backplane settings for it:
+
+| Value | Env var | How it is passed |
+| --- | --- | --- |
+| `agent.openai.secretName` + `agent.openai.secretKey` (default `api_key`) | `OPENAI_API_KEY` | `secretKeyRef` only. There is no value for the key itself; the chart refuses one. |
+| `agent.openai.baseUrl` | `OPENAI_BASE_URL` | Plain value. Empty: not set, and the backplane uses OpenAI's own service. |
+| `agent.openai.defaultModel` | `OPENAI_DEFAULT_MODEL` | Plain value. Empty: not set, and the backplane uses its own default. |
+
+```yaml
+agent:
+  openai:
+    enabled: true
+    baseUrl: https://model.example.internal/v1
+    defaultModel: openai:meta-llama/Llama-3.1-8B-Instruct
+    secretName: model-endpoint-creds   # a Secret you make, key `api_key`
+  modelBackend: openai   # AGENT_MODEL_BACKEND: send agent runs to this endpoint
+```
+
+`agent.modelBackend` sets `AGENT_MODEL_BACKEND`, the backend every agent
+run uses: `anthropic`, `openai`, `bedrock` or `vcf-paif`. Empty (the
+default): the chart does not set it, and the backplane uses `anthropic`.
+
+- The block is separate from `agent.enabled` (the Anthropic key). Turn
+  on one of them or both.
+- Off by default. Then the chart renders exactly what it rendered before
+  this block existed.
+- The key comes from a Secret you make (`secretName`), or from Vault
+  through the External Secrets Operator: set
+  `eso.agentOpenai.enabled: true` and `eso.secretStore.name`, and leave
+  `secretName` empty. The chart then makes the `<release>-agent-openai`
+  Secret from `secret/meho/agent-openai`, property `api_key`
+  (`eso.agentOpenai.remoteKey` / `remoteProperty` change this).
+- A model server that needs no key still needs some value in the Secret.
+  The backplane refuses to start an agent with an empty key.
+- `enabled: true` with neither Secret path fails at `helm template` with
+  a message that names both.
+- `helm test <release>` runs a small Pod
+  (`templates/tests/test-agent-openai-config.yaml`) that checks the env
+  vars resolve. It never calls the model server.
+
+### Let the backplane reach the model server
+
+With `networkPolicy.enabled: true` (the default), the backplane cannot
+reach the model server until you open it in `networkPolicy.extraEgress`.
+Open only the address and port of the model server.
+
+A model server outside the cluster, by address range:
+
+```yaml
+networkPolicy:
+  extraEgress:
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.0/28   # the model server's addresses
+      ports:
+        - port: 443
+          protocol: TCP
+```
+
+A model server in the same cluster, by its namespace and Pod labels:
+
+```yaml
+networkPolicy:
+  extraEgress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: model-server
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vllm
+      ports:
+        - port: 8000      # the Pod's port, not the Service port
+          protocol: TCP
+```
+
+The rule is checked against the Pod the connection reaches, so use the
+port the model server's container listens on (vLLM uses 8000 by
+default), even when `baseUrl` names a Service on another port.
 
 ## Operator-console (browser BFF) OAuth wiring (#2594)
 

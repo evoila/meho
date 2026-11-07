@@ -102,7 +102,7 @@ about names that another file defines.
 | memory | `MemTotal` at least 7 GiB, which a machine with 8 GB shows | `/proc/meminfo` |
 | disk | at least 80 GB free for `/var/lib` | `df -P -k /var/lib` |
 | other runtime | none of `k3s`, `rke2`, `kubelet`, `containerd`, `dockerd`, `crio` is on `PATH` or runs | `command -v`, `pgrep -x` |
-| ports | TCP 80, 443, 6443, 9345, 10250, 2379, 2380, 2381, 9099 and UDP 8472 are free | `ss -H -l -n` |
+| ports | TCP 80, 443, 6443, 9345, 10250, 2379, 2380, 2381, 9099, 8081, 9091 and UDP 8472 are free, and the ports that parts of RKE2 listen on only on 127.0.0.1: TCP 2382, 10010, 10248, 10249, 10256, 10257, 10258, 10259 | `ss -H -l -n` |
 | clock | the clock is synchronised | `timedatectl show --property=NTPSynchronized` |
 | host name | a fully qualified name; default `hostname -f`, in lower case | `--hostname` |
 | DNS | the name has an A record in DNS; `/etc/hosts` does not count | see below |
@@ -180,16 +180,14 @@ command that shows RKE2's log.
 
 `write_place_values` writes `/etc/meho/values-place.yaml` (form-2 design,
 section 6): the host name as `ingress.host` and `coreKeycloak.hostname`,
-the first tenant's id, the two user names, and the pod range as the two
-network-policy ranges, so MEHO may reach the built-in PostgreSQL and
-OpenBao. Without `--first-tenant-id`, the id comes from an existing
-`values-place.yaml`, so a second run keeps the id Keycloak already uses;
-on a fresh machine it is a new UUID read once from
-`/proc/sys/kernel/random/uuid`. The two network-policy ranges are wiring
-until the chart derives them from its built-in parts (#4047), not a place
-answer. The update writes the file again from the answers in `install.json`,
-so when #4047 drops the two keys, the next update removes them from the
-file. The file holds no secret.
+the first tenant's id and the two user names. Without `--first-tenant-id`,
+the id comes from an existing `values-place.yaml`, so a second run keeps the
+id Keycloak already uses; on a fresh machine it is a new UUID read once from
+`/proc/sys/kernel/random/uuid`. The chart reaches its built-in parts by pod
+label (#4047), so the file holds no network-policy range. Older installs
+wrote the pod range there as `networkPolicy.postgresCIDR` and `vaultCIDR`;
+the update writes the file again from the answers in `install.json`, which
+removes them. The file holds no secret.
 
 `install_core` runs the download's Helm:
 
@@ -493,10 +491,9 @@ kernel, the script prints a note to restart the machine after the update.
 `networkPolicy.ingressControllerNamespace: kube-system` (RKE2's Traefik
 runs there) and `ingress.tls.secretName: meho-core-tls`, the self-signed
 certificate the install makes. Every storage class stays at the chart's
-default, empty, so the volumes use the default class. Until the chart
-derives them from its built-in parts (#4047), the file also names the
-PostgreSQL Secret the install makes (`postgres.credentialsSecret`) and the
-built-in OpenBao's address (`vault.address`, `config.vaultAddr`).
+default, empty, so the volumes use the default class. The chart points
+MEHO at the built-in parts itself (#4047), so the file names no database
+Secret and no OpenBao address.
 
 It also turns on the web console (`uiConsole`) and the approval hand-off
 key (`approvalHandoff`), with the Secrets that the chart's secrets Job
@@ -618,8 +615,10 @@ customer's security team. `render_firewall_rules` writes it.
     clients, ping, IPv6 neighbour discovery, and the multicast listener
     reports of MLD versions 1 and 2. Linux sends version 2 by default
     (`force_mld_version` is 0), so the chain accepts
-    `mld2-listener-report` next to the design's list. The rule for the
-    customer's log server comes with `meho-host log-server` (#4739).
+    `mld2-listener-report` next to the design's list. On the appliance,
+    `meho-host log-server` (#5752) adds one more rule in front of the
+    counter: the way out to the customer's log server, to its addresses
+    and TCP port only ([linux-server-meho-host.md](linux-server-meho-host.md)).
   - `fib daddr type local` in `output` is for kube-proxy's destination
     NAT. A connection from this machine to a service whose endpoint is
     this machine, for example the Kubernetes API service `10.43.0.1:443`,
@@ -731,9 +730,14 @@ the SSH session, `none`, or `meho-host admin-network`.
 - `firewall_port_list` prints the ports as a port scan from another
   machine must see them: `80/tcp open`, `443/tcp open`,
   `22/tcp admin-network`, and RKE2's ports as `closed` (6443, 9345, 10250,
-  2379, 2380, 2381, 9099, 30000-32767 and 8472/udp). The arrays are in
-  `lib/firewall.sh`. The release test of form 2 (#4742) reads this list.
-  A test checks that every port of the free-port check of step 1 is in it.
+  2379, 2380, 2381, 9099, 8081, 9091, 30000-32767 and 8472/udp). 8081
+  (flanneld) and 9091 (calico-node) are Canal's: they listen on every
+  address, as `ss -tulpn` showed on the week-4 install (#4741). The arrays
+  are in `lib/firewall.sh`. The release test of form 2 (#4742) reads this
+  list. A test checks that every port of the free-port check of step 1 is
+  in it. The ports that parts of RKE2 listen on only on 127.0.0.1
+  (`REQUIRED_LOCAL_TCP_PORTS` in `lib/checks.sh`) are not in it: they
+  never answer from another machine. Step 1 checks that they are free.
 - The SSH rule reads the set `admin_network`. `meho-host admin-network`
   (#4739) changes only that set and its note, so a change to the rendering
   of the set must keep the lines it looks for (`set admin_network {`,
@@ -1103,12 +1107,9 @@ Tasks add in this folder are checked by the same job.
   an update refuses. A machine whose DNS record changed since the install
   is a case for support.
 
-- **Three parts of the core are not on `main` yet, so an install cannot be
-  green on a real machine until they land:** the OpenBao init Job and the
-  unseal Secret (#4044, #4046; the script warns and writes no key file),
-  the chart's own wiring of the built-in parts (#4047; three keys in
-  `values-single-node.yaml` do it by hand until then), and
-  `meho status --first-start` (#4042; the result names the list as missing).
+- **`meho status --first-start` is not on `main` yet** (#4042; the result
+  names the list as missing), so an install cannot show its first-start
+  checks until it lands.
 - **The Helm time limit is 15 minutes per operation:** the wait for the
   pods, and each hook Job, so the whole install may take longer. The
   week-4 install (#4741) shows whether a 4-processor machine needs more.

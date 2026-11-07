@@ -44,12 +44,14 @@ _FULL_PLAN: dict[str, Any] = {
     "make": [
         {"name": "rel-core-postgres-superuser", "kind": "postgres-superuser"},
         {"name": "rel-core-postgres-meho", "kind": "postgres-meho", "host": "rel-postgres"},
+        {"name": "rel-core-postgres-meho-app", "kind": "postgres-meho-app", "host": "rel-postgres"},
         {"name": "rel-core-postgres-keycloak", "kind": "postgres-keycloak"},
         {"name": "rel-core-keycloak-bootstrap", "kind": "keycloak-bootstrap"},
         {"name": "rel-core-keycloak-admin", "kind": "keycloak-admin"},
         {"name": "rel-core-ui-auth", "kind": "ui-auth"},
         {"name": "rel-core-check-runner", "kind": "check-runner"},
         {"name": "rel-core-approval-handoff", "kind": "approval-handoff"},
+        {"name": "rel-core-params-hash", "kind": "params-hash"},
         {"name": "rel-core-broadcast-auth", "kind": "broadcast-auth"},
         {"name": "rel-core-tls", "kind": "tls", "host": "meho.example.org"},
     ],
@@ -59,12 +61,14 @@ _FULL_PLAN: dict[str, Any] = {
 _EXPECTED_KEYS = {
     "rel-core-postgres-superuser": {"password"},
     "rel-core-postgres-meho": {"password", "url"},
+    "rel-core-postgres-meho-app": {"password", "url"},
     "rel-core-postgres-keycloak": {"password"},
     "rel-core-keycloak-bootstrap": {"client_id", "client_secret"},
     "rel-core-keycloak-admin": {"client_secret"},
     "rel-core-ui-auth": {"session_encryption_key", "client_secret"},
     "rel-core-check-runner": {"client_secret"},
     "rel-core-approval-handoff": {"approval_handoff_encryption_key"},
+    "rel-core-params-hash": {"params_hash_key"},
     "rel-core-broadcast-auth": {"requirepass"},
     "rel-core-tls": {"tls.crt", "tls.key", "ca.crt"},
 }
@@ -133,6 +137,7 @@ async def test_passwords_are_32_alphanumeric_characters() -> None:
     passwords = [
         store.secrets["rel-core-postgres-superuser"]["password"],
         store.secrets["rel-core-postgres-meho"]["password"],
+        store.secrets["rel-core-postgres-meho-app"]["password"],
         store.secrets["rel-core-postgres-keycloak"]["password"],
         store.secrets["rel-core-keycloak-bootstrap"]["client_id"],
         store.secrets["rel-core-keycloak-bootstrap"]["client_secret"],
@@ -140,6 +145,7 @@ async def test_passwords_are_32_alphanumeric_characters() -> None:
         store.secrets["rel-core-ui-auth"]["client_secret"],
         store.secrets["rel-core-check-runner"]["client_secret"],
         store.secrets["rel-core-broadcast-auth"]["requirepass"],
+        store.secrets["rel-core-params-hash"]["params_hash_key"],
     ]
     for password in passwords:
         assert _ALNUM_32.match(password)
@@ -158,11 +164,17 @@ async def test_fernet_keys_and_database_url_have_the_right_format() -> None:
         fernet = Fernet(store.secrets[name][key].encode("ascii"))
         assert fernet.decrypt(fernet.encrypt(b"probe")) == b"probe"
 
-    meho = store.secrets["rel-core-postgres-meho"]
-    url = urlsplit(meho["url"])
-    assert url.scheme == "postgresql+asyncpg"
-    assert (url.username, url.password) == ("meho", meho["password"])
-    assert (url.hostname, url.port, url.path) == ("rel-postgres", 5432, "/meho")
+    # The owner login and the login of the running backplane: two roles,
+    # two passwords, one database.
+    for name, user in (
+        ("rel-core-postgres-meho", "meho"),
+        ("rel-core-postgres-meho-app", "meho_app"),
+    ):
+        secret = store.secrets[name]
+        url = urlsplit(secret["url"])
+        assert url.scheme == "postgresql+asyncpg"
+        assert (url.username, url.password) == (user, secret["password"])
+        assert (url.hostname, url.port, url.path) == ("rel-postgres", 5432, "/meho")
 
 
 async def test_existing_core_secret_is_kept_untouched(

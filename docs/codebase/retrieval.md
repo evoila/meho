@@ -40,6 +40,8 @@ async def retrieve(
     session: AsyncSession | None = None,
     metadata_filters: dict[str, Any] | None = None,
     principal_sub: str | None = None,
+    memory_eligibility: MemoryEligibility | None = None,
+    all_principals: bool = False,
 ) -> list[RetrievalHit]
 ```
 
@@ -67,10 +69,10 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   only narrow, never widen, the visible set. Tenant-broadcast kinds
   (`memory-tenant` / `memory-target`) and every non-memory source
   (`kb` / `operations` / `docs`) are unaffected — they carry no
-  per-principal `user_sub`. `None` (default) disables the predicate for
-  callers that already scope by `user_sub` themselves (e.g.
-  `MemoryService.search_memories`, which now also passes it as
-  belt-and-suspenders) or that query non-principal sources. This is the
+  per-principal `user_sub`. `None` (default) is allowed only for a call
+  where no Memory row can be a candidate (a `source` other than
+  `"memory"`), a call that passes `memory_eligibility`, or a call that
+  sets `all_principals=True` (see below). This is the
   #1797 cross-principal-leak fix: before it, `POST /api/v1/retrieve
   {source:"memory"}` and the MCP retrieve resource returned other
   principals' user-scoped memories within the same tenant.
@@ -84,6 +86,12 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   resource, and the UI diagnostics page (`POST /ui/retrieval/diagnostics`)
   pass it whenever Memory rows can be candidates (`source="memory"` or
   no source). Other sources pass `None`.
+- `all_principals` — the caller says on purpose that a Memory search may
+  rank the user memories of every principal in the tenant. Default
+  `False`: a call with `source="memory"` or no source and neither
+  `principal_sub` nor `memory_eligibility` raises `ValueError`, so no
+  caller can drop the per-principal rule by leaving the argument out.
+  Only tests set it today.
 - **Memory expiry is always enforced in SQL.** Every `source='memory'`
   row must have no `expires_at`, or a valid ISO 8601 timestamp later
   than the database `now()`. Malformed values, `now`, `epoch`, and
@@ -372,7 +380,21 @@ never holds a query or a body, and it never averages across groups.
   operator); GIN index `documents_metadata_gin_idx` (migration `0033`,
   default `jsonb_ops` opclass) backs the lookup.
 - **fastembed** — the `EmbeddingService` wraps a `BAAI/bge-small-en-v1.5`
-  ONNX model (384-dim).
+  ONNX model (384-dim). The model gets one thread per CPU the container
+  may use: `retrieval/cpu_limit.py` reads the CPU limit of the process's
+  own cgroup and of every cgroup above it (the path comes from
+  `/proc/self/cgroup`; cgroup v2 `cpu.max`, or cgroup v1
+  `cpu.cfs_quota_us` / `cpu.cfs_period_us`), takes the smallest, rounds
+  it down to whole CPUs (at least 1) and passes it as
+  `TextEmbedding(threads=...)`. In a pod the own cgroup is the root; on
+  a host it is a few levels down, for example a `systemd-run` scope.
+  Without a limit the ONNX runtime keeps its default (one thread per
+  host core). `EmbeddingService(threads=...)` forces a count; only the
+  ingest health benchmark uses it. Why: more threads than the limit make
+  the kernel pause the whole process, the event loop too, so health
+  checks time out during a large spec ingest. The benchmark
+  `backend/scripts/ingest_health_benchmark.py` shows it (see
+  `spec-ingestion.md`).
 - **SQLAlchemy 2.0 async** — `AsyncSession` for both candidate queries
   + the hydration `IN` fetch. Raw `text()` for the two candidate SQL
   statements because `@@` / `<=>` / `@>` have no first-class ORM
@@ -395,6 +417,12 @@ never holds a query or a body, and it never averages across groups.
 - **Retrieval eval counts passages.** `retrieval/eval/runner.py` asks
   for `k` rows and folds passages of one entry into one slug, so fewer
   than `k` slugs can come back.
+- **Retrieval eval runs as the caller.** `eval_all` / `eval_surface`
+  take `principal_sub` and pass it to every `retrieve` call, so the
+  answer of `POST /api/v1/retrieve/eval`, the console Eval tab and the
+  retire checklist (`compute_retire_checklist`) lists no user memory of
+  another person. The memory surface with the real retriever and no
+  `principal_sub` raises `ValueError`.
 - **Per-query re-embed.** Every retrieval calls `encode_one(query)`;
   there is no embedding cache in v0.2. v0.2.next may add an LRU once
   cache-hit ratios are measured.

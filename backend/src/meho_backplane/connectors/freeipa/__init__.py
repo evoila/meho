@@ -17,7 +17,11 @@ The product must equal the part of the implementation ID before the first
 hyphen (``freeipa``), or the backplane does not start.
 
 It also queues the typed-operation registrar, which stores the FreeIPA
-operations at start-up. The connector has typed operations only.
+operations at start-up. The connector has typed operations only. Loading the
+package also registers the approval previews of ``freeipa.host.delete``
+(:mod:`meho_backplane.connectors.freeipa.writes`), ``freeipa.hbacrule.disable``
+and ``freeipa.pwpolicy.set``
+(:mod:`meho_backplane.connectors.freeipa.access_writes`).
 """
 
 from typing import Final

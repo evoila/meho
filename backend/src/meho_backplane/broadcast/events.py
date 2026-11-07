@@ -87,6 +87,7 @@ __all__ = [
     "BroadcastEvent",
     "classify_op",
     "holds_hidden_param_values",
+    "is_secret_name_value_pair",
     "is_secret_param_name",
     "redact_payload",
     "resolve_op_class",
@@ -943,15 +944,19 @@ def redact_payload(
 #: Name-tokens that mark a param key as secret-bearing wherever they
 #: appear in the normalised (snake-cased) token list: ``password`` /
 #: ``user_password`` / ``passphrase`` / ``kubeconfig`` are secret
-#: material in any position. ``key`` alone is deliberately NOT here
-#: (``ssh_public_key`` / ``label_key`` would over-match) -- key-ish
-#: names are covered by the pair combinations below.
+#: material in any position. The plurals ``passwords`` and
+#: ``passphrases`` are the same material as a list (a VPN session lists
+#: its pre-shared keys as ``passphrases``). ``key`` alone is deliberately
+#: NOT here (``ssh_public_key`` / ``label_key`` would over-match) --
+#: key-ish names are covered by the pair combinations below.
 _SECRET_NAME_TOKENS_ANYWHERE: Final[frozenset[str]] = frozenset(
     {
         "password",
+        "passwords",
         "passwd",
         "pwd",
         "passphrase",
+        "passphrases",
         "apikey",
         "kubeconfig",
     }
@@ -965,6 +970,8 @@ _SECRET_NAME_TOKENS_ANYWHERE: Final[frozenset[str]] = frozenset(
 #: Vault AppRole write surface, ``secret_name`` / ``secret_path`` as
 #: k8s/Vault references) -- those carry no secret material and must
 #: not collapse a vetted full-detail write broadcast to aggregate.
+#: ``psk`` is the pre-shared key of an IPsec VPN session (``psk``,
+#: ``ipsec_psk``); ``psk_length`` would be an attribute of it.
 _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
     {
         "secret",
@@ -972,6 +979,7 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
         "token",
         "credential",
         "credentials",
+        "psk",
     }
 )
 
@@ -979,7 +987,8 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
 #: positional rules above don't (``api_key``, ``private_key``,
 #: ``secret_id`` -- the Vault AppRole SecretID is secret material
 #: even though ``secret`` is non-final there; ``license_key`` -- a
-#: product licence is a credential a vendor file may show in clear;
+#: product licence is a credential a vendor file may show in clear, and
+#: ``licenseKeys`` is a list of them (the vSphere licence source);
 #: ``product_key`` -- the Windows product key of a vSphere guest
 #: customization spec, the same kind of value).
 _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
@@ -990,10 +999,31 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("encryption", "key"),
         ("license", "key"),
         ("licence", "key"),
+        ("license", "keys"),
+        ("licence", "keys"),
         ("product", "key"),
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),
+    }
+)
+
+#: Adjacent token pairs that mark a key as secret-bearing only when they
+#: **end** the name. ``secret_key`` / ``sharedKey`` / ``pre_shared_key``
+#: name the key itself: an OSPF or BGP authentication secret, the
+#: pre-shared key of a VPN connection, the secret half of an access key
+#: pair. Followed by more tokens the pair is a reference, not the
+#: secret: the Kubernetes ``secret_key_ref`` names a Secret and a key in
+#: it, and must stay a plain field. ``connection_string`` is a database or
+#: service URL with its password in it (Azure's ``primaryConnectionString``);
+#: ``connection_string_ref`` only names one.
+_SECRET_NAME_FINAL_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("secret", "key"),
+        ("shared", "key"),
+        ("preshared", "key"),
+        ("connection", "string"),
+        ("connection", "strings"),
     }
 )
 
@@ -1030,6 +1060,8 @@ def _tokens_are_secret(normalised: str) -> bool:
         return True
     if tokens[-1] in _SECRET_NAME_TOKENS_FINAL:
         return True
+    if tuple(tokens[-2:]) in _SECRET_NAME_FINAL_TOKEN_PAIRS:
+        return True
     return any(pair in _SECRET_NAME_TOKEN_PAIRS for pair in itertools.pairwise(tokens))
 
 
@@ -1044,9 +1076,41 @@ def is_secret_param_name(name: str) -> bool:
     return _is_secret_param_name(name)
 
 
+#: Every pair, in any position: the lowercased check below matches more
+#: names than the exact rule, never fewer, so a final-only pair counts
+#: anywhere there.
+_SECRET_NAME_TOKEN_PAIRS_LOOSE: Final[frozenset[tuple[str, str]]] = (
+    _SECRET_NAME_TOKEN_PAIRS | _SECRET_NAME_FINAL_TOKEN_PAIRS
+)
+
+
+def is_secret_name_value_pair(
+    node: Mapping[Any, Any], *, plain_names: frozenset[str] = frozenset()
+) -> bool:
+    """True when *node* is a name/value pair whose ``name`` is a secret name.
+
+    A vendor often lists the fields of an object as pairs,
+    ``[{"name": "USER", "value": "root"}, {"name": "PASSWORD", "value": "..."}]``,
+    so the secret sits under the key ``value`` and the key-name rule
+    alone would keep it. Every walk that hides secret-named values asks
+    this before it looks at the keys of a mapping, and then hides the
+    ``value`` of such a pair as it hides the value of a secret-named key.
+    A name in *plain_names* is a field the operation declared as plain,
+    so its pair keeps the value. A pair without a ``value`` key has
+    nothing to hide.
+    """
+    name = node.get("name")
+    return (
+        "value" in node
+        and isinstance(name, str)
+        and name not in plain_names
+        and _is_secret_param_name(name)
+    )
+
+
 #: Each adjacent pair written as one word, for a name whose case is lost.
 _SECRET_NAME_PAIRS_JOINED: Final[frozenset[str]] = frozenset(
-    first + second for first, second in _SECRET_NAME_TOKEN_PAIRS
+    first + second for first, second in _SECRET_NAME_TOKEN_PAIRS_LOOSE
 )
 
 
@@ -1075,7 +1139,7 @@ def is_secret_param_name_lowercased(name: str) -> bool:
     return any(
         left.endswith(first) and right.startswith(second)
         for left, right in itertools.pairwise(tokens)
-        for first, second in _SECRET_NAME_TOKEN_PAIRS
+        for first, second in _SECRET_NAME_TOKEN_PAIRS_LOOSE
     )
 
 
@@ -1091,7 +1155,9 @@ def _scrub_secret_named_keys(
     key-name-aware complement: any mapping entry whose key is
     secret-shaped has its whole value subtree replaced (a nested value
     under a ``credentials`` key is secret material regardless of its
-    inner structure).
+    inner structure). The ``value`` of a name/value pair whose ``name`` is
+    secret-shaped (:func:`is_secret_name_value_pair`) is replaced the same
+    way.
 
     Bare scalars (bool / int / float / ``None``) under a secret-shaped
     key pass through unflagged: secret material is a string or a blob,
@@ -1108,12 +1174,14 @@ def _scrub_secret_named_keys(
     if isinstance(node, Mapping):
         found = False
         scrubbed: dict[str, Any] = {}
+        hide_pair_value = is_secret_name_value_pair(node, plain_names=plain_names)
         for key, value in node.items():
             name = str(key)
             if name in plain_names:
                 scrubbed[name] = value
                 continue
-            if _is_secret_param_name(name) and _is_secret_value(value, hide_numbers):
+            secret_named = _is_secret_param_name(name) or (hide_pair_value and name == "value")
+            if secret_named and _is_secret_value(value, hide_numbers):
                 scrubbed[name] = _REDACTED_PARAM
                 found = True
                 continue

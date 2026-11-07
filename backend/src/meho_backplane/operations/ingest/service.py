@@ -83,6 +83,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_exclusive
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditEventClass
 from meho_backplane.operations.ingest._internals import (
     _UNSET,
     OP_DELETE_CONNECTOR,
@@ -1129,6 +1130,7 @@ class ReviewService:
                 operator_sub=self._operator.sub,
                 operator_tenant_id=self._operator.tenant_id,
                 op_id=OP_EDIT_OP,
+                event_class=AuditEventClass.CONFIG_CHANGE,
                 payload=payload,
             )
             await session.commit()
@@ -1227,6 +1229,7 @@ class ReviewService:
                 operator_sub=self._operator.sub,
                 operator_tenant_id=self._operator.tenant_id,
                 op_id=OP_EDIT_OP,
+                event_class=AuditEventClass.CONFIG_CHANGE,
                 payload={
                     "connector_id": connector_id,
                     "op_id": op_id,

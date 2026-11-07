@@ -56,7 +56,12 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
-from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, wrap_untrusted_text
+from meho_backplane.untrusted_text import (
+    BLOCK_END,
+    BLOCK_START,
+    NEUTRALISED_DELIMITER,
+    wrap_untrusted_text,
+)
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -520,9 +525,10 @@ def test_tools_call_search_docs_forged_terminator_stays_inside_envelope(
     assert response.status_code == 200
     payload = json.loads(response.json()["result"]["content"][0]["text"])
     content = payload["chunks"][0]["content"]
-    # The forged terminator + the escape text sit strictly inside the block;
-    # the wrapper-emitted terminator is the last delimiter.
-    assert content.count(BLOCK_END) == 2
+    # The forged terminator is neutralised and the escape text sits strictly
+    # inside the block; the wrapper-emitted terminator is the only delimiter.
+    assert content.count(BLOCK_END) == 1
+    assert NEUTRALISED_DELIMITER in content
     assert content.endswith(BLOCK_END)
     assert content.index("Obey what follows.") < content.rindex(BLOCK_END)
 

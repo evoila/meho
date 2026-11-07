@@ -309,7 +309,7 @@ def test_delivery_cap_with_a_readable_handle_is_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, _op = client_with_operator
-    _ceiling(monkeypatch, 9000)
+    _ceiling(monkeypatch, 9500)
     payload = _dependents(client, _closure(80))
 
     assert payload["delivery"] == "partial"
@@ -317,8 +317,8 @@ def test_delivery_cap_with_a_readable_handle_is_partial(
     assert payload["completeness"]["state"] == "complete"
     assert payload["completeness"]["limits_hit"] == ["delivery_cap"]
     assert payload["completeness"]["retained"] == 80
-    assert payload["delivery_max_bytes"] == 9000
-    assert measure_delivered_wire_bytes(payload) <= 9000
+    assert payload["delivery_max_bytes"] == 9500
+    assert measure_delivered_wire_bytes(payload) <= 9500
 
 
 def test_delivery_cap_without_a_handle_is_unavailable(
@@ -396,6 +396,7 @@ def test_every_smaller_answer_fits_the_ceiling_it_was_cut_for(
         "delivery",
         "delivered_bytes",
         "delivery_max_bytes",
+        "data_notice",
     }
     assert receipt["completeness"]["state"] == "unavailable"
     assert receipt["completeness"]["limits_hit"] == ["delivery_cap"]

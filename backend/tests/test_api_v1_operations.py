@@ -868,6 +868,46 @@ def test_post_call_not_found_result_rides_200_envelope(
     assert dispatch_mock.await_args.kwargs["op_id"] == "vmware.vm.info"
 
 
+def test_post_call_never_marks_a_web_session(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3980: a REST call with a person's token is never a web interface call.
+
+    Only the web interface session counts as a person. A token claim, a
+    header or a body field cannot turn the flag on, so the call follows the
+    token rule (only ``safe`` operations run at once).
+    """
+    missing = ConnectorResourceNotFoundError(["x"], "stub: not found")
+    dispatch_mock = AsyncMock(
+        return_value=result_connector_not_found("vmware.vm.info", missing, duration_ms=1.0)
+    )
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    key = make_rsa_keypair("kid-A")
+    token = mint_token(
+        key,
+        sub="op-1",
+        tenant_role=TenantRole.OPERATOR.value,
+        extra_claims={"web_session": True},
+    )
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vmware-rest-9.0",
+                "op_id": "vmware.vm.info",
+                "target": None,
+                "params": {"name": "x"},
+            },
+            headers={"Authorization": f"Bearer {token}", "Web-Session": "true"},
+        )
+    assert response.status_code == 200, response.text
+    dispatch_mock.assert_awaited_once()
+    operator = dispatch_mock.await_args.kwargs["operator"]
+    assert operator.principal_kind.value == "user"
+    assert operator.web_session is False
+
+
 @pytest.mark.asyncio
 async def test_post_call_rate_limited_rides_200_envelope(
     client: TestClient, monkeypatch: pytest.MonkeyPatch

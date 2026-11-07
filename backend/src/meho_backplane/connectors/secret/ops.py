@@ -103,16 +103,20 @@ _SECRET_MOVE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "status": {"type": "string", "const": "moved"},
-        "value_sha256": {
+        "value_fingerprint": {
             "type": "string",
-            "description": "Hex SHA-256 of the moved value — provenance, never the value.",
+            "description": (
+                "Keyed fingerprint of the moved value (HMAC-SHA256 under the "
+                "server key, 64 hex characters), never the value. The same "
+                "value gives the same fingerprint on this install."
+            ),
         },
         "length": {
             "type": "integer",
             "description": "Byte length of the moved value.",
         },
     },
-    "required": ["status", "value_sha256", "length"],
+    "required": ["status", "value_fingerprint", "length"],
     "additionalProperties": False,
 }
 
@@ -126,7 +130,7 @@ _SECRET_MOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Submit references, never values: --from/--to are '<kind>:<ref>' "
         "strings. The move is change-class: it requires approval before "
         "it executes, and the response returns only the move status, the "
-        "value's SHA-256, and its length — never the value."
+        "value's keyed fingerprint, and its length — never the value."
     ),
     "parameter_hints": {
         "from": "Required. Source '<kind>:<ref>' (e.g. 'vault:secret/db/prod#password').",
@@ -134,7 +138,7 @@ _SECRET_MOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "reason": "Optional. Human-readable justification for the approver/audit trail.",
     },
     "output_shape": (
-        "On success: {'status': 'moved', 'value_sha256': <hex>, "
+        "On success: {'status': 'moved', 'value_fingerprint': <hex>, "
         "'length': <int>}. The value never appears."
     ),
 }
@@ -163,9 +167,10 @@ async def secret_move(operator: Operator, target: Any, params: dict[str, Any]) -
        a :class:`~.endpoints.SecretMaterial`);
     4. ``write_secret`` to the sink — entirely server-side.
 
-    Returns ONLY ``{'status': 'moved', 'value_sha256': <hex>, 'length':
-    <int>}``. The value is never in the params, the return value, a log
-    event, or (therefore) the audit row — only its hash + length. The
+    Returns ONLY ``{'status': 'moved', 'value_fingerprint': <hex>,
+    'length': <int>}``. The value is never in the params, the return value,
+    a log event, or (therefore) the audit row — only its keyed fingerprint
+    + length. The
     ``reason`` param (when supplied) is operator-facing justification and
     is intentionally not read here; it is recorded by the dispatcher's
     audit row via the validated params hash and is surfaced to the
@@ -185,12 +190,12 @@ async def secret_move(operator: Operator, target: Any, params: dict[str, Any]) -
         "secret_broker.move",
         from_kind=source_ref.kind,
         to_kind=sink_ref.kind,
-        value_sha256=material.value_sha256,
+        value_fingerprint=material.fingerprint,
         length=material.length,
     )
     return {
         "status": "moved",
-        "value_sha256": material.value_sha256,
+        "value_fingerprint": material.fingerprint,
         "length": material.length,
     }
 

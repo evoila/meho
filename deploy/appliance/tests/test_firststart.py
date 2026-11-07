@@ -7,21 +7,28 @@ that no secret reaches a log, and the console banner."""
 
 from __future__ import annotations
 
+import re
 import time
 import unittest
 
 from firststart_harness import (
+    APPLIANCE,
+    BANNER_SH,
+    DOWNLOAD,
     JOIN_TOKEN,
     PASSWORD,
     SSH_KEY,
     STATE,
     STATIC_FIELDS,
     STEPS,
+    FakeAppliance,
     FirstStartTestCase,
     ovf_env,
 )
 
 ALL_MARKERS = sorted(f"{number}-{name}.done" for number, name in enumerate(STEPS, start=1))
+# 22 letters and digits: long enough, but no other character (#5749).
+LETTERS_AND_DIGITS = "Only20LettersAndDigit5"
 
 
 class FirstStartTests(FirstStartTestCase):
@@ -44,7 +51,8 @@ class FirstStartTests(FirstStartTestCase):
             self.vm.read("/etc/systemd/timesyncd.conf.d/50-meho.conf"),
         )
         self.assertIn(
-            "useradd --create-home --shell /bin/bash --groups sudo admin", self.vm.calls()
+            "useradd --create-home --shell /bin/bash --groups sudo --gid admin admin",
+            self.vm.calls(),
         )
         self.assertIn("passwd --expire admin", self.vm.calls())
         self.assertEqual(f"{SSH_KEY}\n", self.vm.read("/home/admin/.ssh/authorized_keys"))
@@ -56,6 +64,40 @@ class FirstStartTests(FirstStartTestCase):
         )
         self.assertEqual(ALL_MARKERS, self.vm.markers())
         self.assertTrue(self.vm.host_path("/var/lib/meho/firststart.done").is_file())
+
+    def test_the_admin_start_up_files_and_the_logs_get_at_most_0640(self) -> None:
+        # CIS 7.2.10 and 6.1.4.1, as the first lab import found them.
+        files = {
+            "/home/admin/.bashrc": 0o644,
+            "/home/admin/.profile": 0o644,
+            "/home/admin/.bash_logout": 0o644,
+            "/var/log/aide/aideinit.log": 0o644,
+            "/var/log/apt/history.log": 0o644,
+            "/var/log/apt/eipp.log.xz": 0o644,
+            "/var/log/apt/term.log": 0o600,
+        }
+        for path, mode in files.items():
+            self.vm.host_file(path, "")
+            self.vm.host_path(path).chmod(mode)
+        self.vm.host_file("/etc/outside", "")
+        self.vm.host_path("/etc/outside").chmod(0o644)
+        self.vm.host_path("/var/log/apt/link").symlink_to(self.vm.host_path("/etc/outside"))
+
+        self.assert_succeeds(self.vm.run())
+
+        for path, mode in files.items():
+            with self.subTest(path=path):
+                self.assertEqual(0o600 if mode == 0o600 else 0o640, self.vm.mode(path))
+        self.assertEqual(0o644, self.vm.mode("/etc/outside"))
+
+    def test_without_an_admin_group_useradd_makes_its_own(self) -> None:
+        self.vm.answer("group", "root:x:0:\nsudo:x:27:\n")
+
+        self.assert_succeeds(self.vm.run())
+
+        self.assertIn(
+            "useradd --create-home --shell /bin/bash --groups sudo admin", self.vm.calls()
+        )
 
     def test_the_steps_run_in_the_order_of_the_design(self) -> None:
         self.assert_succeeds(self.vm.run())
@@ -72,6 +114,7 @@ class FirstStartTests(FirstStartTestCase):
             "timedatectl show --property=NTPSynchronized --value",
             "install.sh --from-disk --hostname meho.example.com",
             "update-grub",
+            "aideinit --yes --force",
         ]
         calls = self.vm.calls()
         self.assertEqual(order, [call for call in calls if call in order])
@@ -105,19 +148,6 @@ class FirstStartTests(FirstStartTestCase):
 
         self.assertEqual(f"admin:{PASSWORD}\n", (self.vm.fake / "chpasswd_input").read_text())
 
-    def test_no_wizard_fields_stops_at_step_3_and_changes_nothing(self) -> None:
-        self.vm.no_answer("guestinfo-ovfenv")
-
-        result = self.vm.run()
-
-        line = self.assert_fails_once(
-            result, "Step 3 (wizard-fields)", "no wizard fields", "ovftool"
-        )
-        self.assertEqual("ubuntu\n", self.vm.read("/etc/hostname"))
-        self.assertFalse(self.vm.host_path("/etc/netplan/50-meho.yaml").exists())
-        self.assertEqual(ALL_MARKERS[:2], self.vm.markers())
-        self.assertEqual(f"{line}\n", self.vm.read(f"{STATE}/failed"))
-
     def test_a_short_password_is_refused_before_anything_changes(self) -> None:
         self.vm.wizard({"admin.password": "only13letters"})
 
@@ -128,6 +158,27 @@ class FirstStartTests(FirstStartTestCase):
         self.assertEqual([], self.vm.calls("chpasswd"))
         self.assertEqual([], self.vm.calls("netplan"))
         self.assertNotIn("only13letters", self.output(result))
+
+    def test_a_password_of_letters_and_digits_only_is_refused_before_the_account_is_made(
+        self,
+    ) -> None:
+        self.vm.wizard({"admin.password": LETTERS_AND_DIGITS})
+
+        result = self.vm.run()
+
+        line = self.assert_fails_once(
+            result,
+            "Step 3 (wizard-fields)",
+            "refused: The password contains less than 1 non-alphanumeric characters.",
+            "It needs at least 14 characters, with an uppercase letter",
+            "power the VM off, correct the field in the VM's vApp options",
+        )
+        self.assertNotIn("sudo reboot", line)
+        self.assertEqual(["pwscore admin"], self.vm.calls("pwscore"))
+        self.assertEqual([], self.vm.calls("useradd"))
+        self.assertEqual([], self.vm.calls("chpasswd"))
+        self.assertEqual("ubuntu\n", self.vm.read("/etc/hostname"))
+        self.assertNotIn(LETTERS_AND_DIGITS, self.output(result))
 
     def test_each_wrong_field_is_refused_before_anything_changes(self) -> None:
         wrong = {
@@ -215,6 +266,10 @@ class FirstStartTests(FirstStartTestCase):
             'CLASS="--class gnu-linux --class gnu --class os --unrestricted"\n',
             self.vm.read("/etc/grub.d/10_linux"),
         )
+        self.assertEqual(
+            "GRUB_TIMEOUT_STYLE=menu\nGRUB_TIMEOUT=5\nGRUB_RECORDFAIL_TIMEOUT=5\n",
+            self.vm.read("/etc/default/grub.d/90-meho-boot-menu.cfg"),
+        )
 
     def test_an_unknown_10_linux_stops_step_6(self) -> None:
         self.vm.host_file("/etc/grub.d/10_linux", 'CLASS="--class something-else"\n')
@@ -293,6 +348,16 @@ class FirstStartTests(FirstStartTestCase):
         self.assertEqual(ALL_MARKERS, self.vm.markers())
         self.assertFalse(self.vm.host_path(f"{STATE}/failed").exists())
 
+    def test_a_refused_chpasswd_says_to_restart_from_vcenter(self) -> None:
+        # The account exists, but it has no password, so nobody can log in.
+        self.vm.stub("chpasswd", "cat >/dev/null\nexit 1\n")
+
+        line = self.assert_fails_once(
+            self.vm.run(), "Step 3 (wizard-fields)", "power the VM off and on in vCenter"
+        )
+
+        self.assertNotIn("sudo reboot", line)
+
     def test_a_failed_meho_host_stops_step_3(self) -> None:
         self.vm.answer("meho_host_rc", "1")
 
@@ -300,6 +365,244 @@ class FirstStartTests(FirstStartTestCase):
 
         self.assert_fails_once(result, "Step 3 (wizard-fields)", "exit code 1")
         self.assertEqual(ALL_MARKERS[:2], self.vm.markers())
+
+
+def console(*answers: str) -> str:
+    """What an admin types on the VM console: one line per answer."""
+    return "".join(f"{answer}\n" for answer in answers)
+
+
+# The answers to the console questions, in their order, for the same
+# appliance as STATIC_FIELDS.
+STATIC_ANSWERS = {
+    "hostname": "MEHO.Example.com",
+    "net.ntp": "ntp1.example.com,10.0.0.4",
+    "net.mode": "static",
+    "net.ip": "10.0.0.10/24",
+    "net.gateway": "10.0.0.1",
+    "net.dns": "10.0.0.2, 10.0.0.3",
+    "net.admin_network": "10.0.50.0/24",
+    "admin.password": PASSWORD,
+    "admin.password again": PASSWORD,
+    "admin.ssh_key": SSH_KEY,
+}
+
+
+def with_passwords(*passwords: str) -> list[str]:
+    """The static answers, with these answers in place of the two passwords."""
+    answers = list(STATIC_ANSWERS.values())
+    start = list(STATIC_ANSWERS).index("admin.password")
+    answers[start : start + 2] = passwords
+    return answers
+
+
+class ConsoleSetupTests(FirstStartTestCase):
+    """An import without vCenter's vApp options: no OVF environment, so first
+    start asks for the fields on the VM console."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.vm.no_answer("guestinfo-ovfenv")
+
+    def test_the_console_setup_ends_like_a_wizard_import(self) -> None:
+        wizard = FakeAppliance()
+        self.addCleanup(wizard.close)
+        self.assert_succeeds(wizard.run())
+
+        result = self.vm.run(console(*STATIC_ANSWERS.values()))
+
+        self.assert_succeeds(result)
+        for path in (
+            "/etc/hostname",
+            "/etc/netplan/50-meho.yaml",
+            "/etc/systemd/timesyncd.conf.d/50-meho.conf",
+            "/home/admin/.ssh/authorized_keys",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(wizard.read(path), self.vm.read(path))
+                self.assertEqual(wizard.mode(path), self.vm.mode(path))
+        self.assertEqual(
+            (wizard.fake / "chpasswd_input").read_text(),
+            (self.vm.fake / "chpasswd_input").read_text(),
+        )
+
+        def commands(vm: FakeAppliance) -> list[str]:
+            # Only the search for the OVF environment differs.
+            search = ("vmtoolsd", "mount", "umount")
+            return [
+                call.replace(str(vm.root), "")
+                for call in vm.calls()
+                if call.split(" ", 1)[0] not in search
+            ]
+
+        self.assertEqual(commands(wizard), commands(self.vm))
+        self.assertEqual(ALL_MARKERS, self.vm.markers())
+        self.assertIn("no wizard fields", self.vm.read("/dev/tty1"))
+
+    def test_dhcp_asks_for_no_address(self) -> None:
+        answers = dict(STATIC_ANSWERS, **{"net.mode": "dhcp"})
+        for key in ("net.ip", "net.gateway", "net.dns"):
+            del answers[key]
+
+        result = self.vm.run(console(*answers.values()))
+
+        self.assert_succeeds(result)
+        self.assertNotIn("IP address with prefix", self.output(result))
+        self.assertIn("      dhcp4: true\n", self.vm.read("/etc/netplan/50-meho.yaml"))
+
+    def test_an_empty_network_answer_means_static(self) -> None:
+        answers = dict(STATIC_ANSWERS, **{"net.mode": ""})
+
+        self.assert_succeeds(self.vm.run(console(*answers.values())))
+
+        self.assertIn("addresses: [10.0.0.10/24]", self.vm.read("/etc/netplan/50-meho.yaml"))
+
+    def test_a_wrong_answer_is_asked_again(self) -> None:
+        wrong = {
+            "hostname": ("meho", "not a full DNS name"),
+            "net.ntp": ("ntp;reboot", "time server 'ntp;reboot'"),
+            "net.mode": ("manual", "must be static or dhcp"),
+            "net.ip": ("10.0.0.10", "with a prefix"),
+            "net.gateway": ("gateway", "default gateway"),
+            "net.dns": ("", "No DNS server"),
+            "net.admin_network": ("10.0.50.7/24", "admin network"),
+            "admin.ssh_key": ("not a key", "SSH public key"),
+        }
+        for key, (answer, fragment) in wrong.items():
+            with self.subTest(field=key):
+                answers = list(STATIC_ANSWERS.values())
+                position = list(STATIC_ANSWERS).index(key)
+                answers.insert(position, answer)
+                for marker in self.vm.host_path(STATE).glob("*"):
+                    marker.unlink()
+
+                result = self.vm.run(console(*answers))
+
+                self.assert_succeeds(result)
+                self.assertIn(fragment, self.output(result))
+                self.assertIn("Try again.", self.output(result))
+                self.assertEqual("meho.example.com\n", self.vm.read("/etc/hostname"))
+
+    def test_a_password_that_breaks_a_rule_is_asked_again(self) -> None:
+        refused = {
+            "only13letters": "The password is shorter than 14 characters.",
+            LETTERS_AND_DIGITS: "less than 1 non-alphanumeric characters.",
+        }
+        for password, reason in refused.items():
+            with self.subTest(password=password):
+                for marker in self.vm.host_path(STATE).glob("*"):
+                    marker.unlink()
+
+                result = self.vm.run(
+                    console(*with_passwords(password, password, PASSWORD, PASSWORD))
+                )
+
+                self.assert_succeeds(result)
+                self.assertIn(f"{reason} It needs at least 14 characters", self.output(result))
+                self.assertIn("simple pattern. Try again.", self.output(result))
+                self.assertNotIn(password, self.output(result))
+                self.assertEqual(
+                    f"admin:{PASSWORD}\n", (self.vm.fake / "chpasswd_input").read_text()
+                )
+
+    def test_the_console_names_the_same_password_rules_as_the_wizard(self) -> None:
+        result = self.vm.run(console(*STATIC_ANSWERS.values()))
+
+        self.assert_succeeds(result)
+        rules = re.search(r"The appliance admin password needs (.+)\.\n", self.output(result))
+        self.assertIsNotNone(rules, self.output(result))
+        section = (APPLIANCE / "product-section.xml").read_text()
+        description = re.search(
+            r'ovf:key="admin\.password".*?<Description>(.*?)</Description>', section, re.DOTALL
+        )
+        self.assertIsNotNone(description)
+        self.assertIn(f"It needs {rules[1]}.", description[1])
+
+    def test_two_different_passwords_are_asked_again(self) -> None:
+        answers = with_passwords(PASSWORD, PASSWORD + "x", PASSWORD, PASSWORD)
+
+        result = self.vm.run(console(*answers))
+
+        self.assert_succeeds(result)
+        self.assertIn("The two passwords differ. Try again.", self.output(result))
+        self.assertEqual(f"admin:{PASSWORD}\n", (self.vm.fake / "chpasswd_input").read_text())
+
+    def test_an_empty_ssh_key_leaves_ssh_closed(self) -> None:
+        answers = dict(STATIC_ANSWERS, **{"admin.ssh_key": ""})
+
+        result = self.vm.run(console(*answers.values()))
+
+        self.assert_succeeds(result)
+        self.assertFalse(self.vm.host_path("/home/admin/.ssh/authorized_keys").exists())
+        self.assertIn("SSH stays closed", self.output(result))
+        self.assertEqual(["meho-host admin-network 10.0.50.0/24"], self.vm.calls("meho-host"))
+
+    def test_an_empty_ssh_key_removes_the_key_of_an_earlier_try(self) -> None:
+        self.vm.host_file("/home/admin/.ssh/authorized_keys", f"{SSH_KEY}\n")
+        answers = dict(STATIC_ANSWERS, **{"admin.ssh_key": ""})
+
+        self.assert_succeeds(self.vm.run(console(*answers.values())))
+
+        self.assertFalse(self.vm.host_path("/home/admin/.ssh/authorized_keys").exists())
+
+    def test_input_that_ends_early_stops_step_3_and_changes_nothing(self) -> None:
+        for answered in (0, 3, 7):
+            with self.subTest(answered=answered):
+                result = self.vm.run(console(*list(STATIC_ANSWERS.values())[:answered]))
+
+                line = self.assert_fails_once(
+                    result,
+                    "Step 3 (wizard-fields)",
+                    "console setup ended",
+                    "power the VM off and on",
+                )
+                self.assertEqual("ubuntu\n", self.vm.read("/etc/hostname"))
+                self.assertEqual([], self.vm.calls("netplan"))
+                self.assertEqual([], self.vm.calls("chpasswd"))
+                self.assertEqual(ALL_MARKERS[:2], self.vm.markers())
+                self.assertEqual(f"{line}\n", self.vm.read(f"{STATE}/failed"))
+
+    def test_no_password_reaches_the_output_the_console_or_a_command_line(self) -> None:
+        answers = with_passwords(
+            "only13letters", "only13letters", PASSWORD, PASSWORD + "x", PASSWORD, PASSWORD
+        )
+
+        result = self.vm.run(console(*answers))
+
+        self.assert_succeeds(result)
+        places = {
+            "output": self.output(result),
+            "console": self.vm.read("/dev/tty1"),
+            "command lines": (self.vm.fake / "calls.log").read_text(),
+        }
+        for place, text in places.items():
+            for secret in ("only13letters", "Wizard&Pass"):
+                with self.subTest(place=place, secret=secret[:6]):
+                    self.assertNotIn(secret, text)
+
+    def test_ctrl_c_or_ctrl_backslash_on_the_console_does_not_stop_first_start(self) -> None:
+        # The console is the script's terminal, so a key's signal goes to its
+        # whole process group, the running command too: kill 0 does the same.
+        # Ctrl+Z cannot be tested this way: the kernel drops SIGTSTP for a
+        # process group whose parent is in another session.
+        for signal in ("INT", "QUIT"):
+            with self.subTest(signal=signal):
+                self.vm.stub("netplan", f"kill -{signal} 0\n")
+                for marker in self.vm.host_path(STATE).glob("*"):
+                    marker.unlink()
+
+                result = self.vm.run(console(*STATIC_ANSWERS.values()))
+
+                self.assert_succeeds(result)
+                self.assertEqual(ALL_MARKERS, self.vm.markers())
+
+    def test_a_wizard_import_still_needs_the_ssh_key(self) -> None:
+        self.vm.wizard({"admin.ssh_key": ""})
+
+        result = self.vm.run(console(*STATIC_ANSWERS.values()))
+
+        self.assert_fails_once(result, "Step 3 (wizard-fields)", "SSH public key", "vApp Options")
+        self.assertNotIn("no wizard fields", self.output(result))
 
 
 class BannerTests(FirstStartTestCase):
@@ -332,8 +635,18 @@ class BannerTests(FirstStartTestCase):
         self.assertIn("First start stopped:\n", banner)
         self.assertIn(line, banner)
         self.assertNotIn("Console:", banner)
-        self.assertNotIn("Log in as admin", banner)
-        self.assertIn("The admin account does not exist yet.", banner)
+        self.assertNotIn("Log in", banner)
+        self.assertIn("Nobody can log in as admin yet. Follow the fix above from vCenter.", banner)
+
+    def test_a_failed_step_while_the_admin_has_no_password_does_not_say_to_log_in(self) -> None:
+        # What the lab saw: chpasswd refused the password after useradd.
+        self.vm.stub("chpasswd", "cat >/dev/null\nexit 1\n")
+        self.assert_fails_once(self.vm.run(), "Step 3 (wizard-fields)")
+
+        banner = self.vm.banner()
+
+        self.assertNotIn("Log in", banner)
+        self.assertIn("Nobody can log in as admin yet.", banner)
 
     def test_a_failed_step_after_the_admin_account_exists_says_to_log_in(self) -> None:
         self.vm.answer("install_rc", "1")
@@ -354,25 +667,95 @@ class BannerTests(FirstStartTestCase):
     def test_the_admin_password_expiry_warning(self) -> None:
         self.assert_succeeds(self.vm.run())
         today = int(time.time()) // 86400
-        cases = {
-            "must change at the first login": ("0", None),
-            "never expires": (str(today), "99999"),
-            "expires in 20 days": (str(today - 345), "365"),
-            "expired": (str(today - 400), "365"),
-            "expires in 100 days": (str(today - 265), "365"),
+        locked = (
+            "The admin account cannot log in with its password or use sudo: the password is"
+            " locked, or the account is disabled."
+        )
+        expired = "Nobody can log in as admin: the account has expired."
+        # What the boot menu's root shell must run for each of the two.
+        advice = {
+            locked: "and set a new password (passwd admin). The steps:",
+            expired: "and remove its expiry date (chage -E -1 admin) and set a new password"
+            " (passwd admin). The steps:",
         }
-        for name, (last_change, max_days) in cases.items():
+        # The shadow fields password, last change, maximum and inactive days and
+        # the account's expiry date (the CIS settings: 365 and 45 days), and the
+        # banner line, or None for no warning.
+        cases = {
+            "must change at the first login": ("$y$hash", 0, 365, 45, "", None),
+            "never expires": ("$y$hash", today, 99999, "", "", None),
+            "expires in 20 days": (
+                "$y$hash",
+                today - 345,
+                365,
+                45,
+                "",
+                "[WARN] The password of admin expires in 20 days. Log in",
+            ),
+            "expires in 100 days": ("$y$hash", today - 265, 365, 45, "", None),
+            "expired, not yet disabled": (
+                "$y$hash",
+                today - 410,
+                365,
+                45,
+                "",
+                "[WARN] The password of admin has expired. Log in",
+            ),
+            "disabled 45 days after it expired": ("$y$hash", today - 411, 365, 45, "", locked),
+            "locked": ("!$y$hash", today, 365, 45, "", locked),
+            "locked, no password": ("*", today, 365, 45, "", locked),
+            "the account expires tomorrow": ("$y$hash", today, 365, 45, today + 1, None),
+            "the account expired": ("$y$hash", today, 365, 45, today, expired),
+            "the account expired, and its password is locked": (
+                "!$y$hash",
+                today,
+                365,
+                45,
+                today - 1,
+                expired,
+            ),
+        }
+        for name, (password, last_change, max_days, inactive, expire, line) in cases.items():
             with self.subTest(case=name):
-                self.vm.answer("shadow", f"admin:$y$hash:{last_change}:0:{max_days or ''}:7:::\n")
+                self.vm.answer(
+                    "shadow",
+                    f"admin:{password}:{last_change}:0:{max_days}:7:{inactive}:{expire}:\n",
+                )
 
                 banner = self.vm.banner()
 
-                if name == "expires in 20 days":
-                    self.assertIn("[WARN] The password of admin expires in 20 days.", banner)
-                elif name == "expired":
-                    self.assertIn("[WARN] The password of admin has expired.", banner)
-                else:
+                if line is None:
                     self.assertNotIn("[WARN]", banner)
+                else:
+                    self.assertIn(line, banner)
+                if line in advice:
+                    self.assertNotIn("Log in", banner)
+                    self.assertIn(advice[line], banner)
+                    self.assertIn("appliance-firststart.md", banner)
+                if line == locked:
+                    self.assertNotIn("chage", banner)
+
+    def test_the_boot_menu_link_follows_the_commit_of_the_scripts_not_the_download(
+        self,
+    ) -> None:
+        self.assert_succeeds(self.vm.run())
+        self.vm.answer("shadow", "admin:!$y$hash:0:0:365:7:45::\n")
+        # Newer scripts on an older release download, whose tag has no such doc.
+        self.vm.host_file(f"{DOWNLOAD}/VERSION", "MEHO_VERSION=0.43.0\n")
+        link = "The steps: https://github.com/evoila/meho/blob/{}/docs/codebase/appliance-firststart.md,\n"
+
+        self.assertIn(link.format("main"), self.vm.banner())
+
+        # build.sh writes the commit of the scripts into this one line.
+        script = BANNER_SH.read_text()
+        self.assertEqual(1, script.count("\nreadonly DOCS_REF=main\n"))
+        stamped = self.vm.fake / "banner.sh"
+        stamped.write_text(
+            script.replace("\nreadonly DOCS_REF=main\n", "\nreadonly DOCS_REF=0123abc\n")
+        )
+        stamped.chmod(0o755)
+
+        self.assertIn(link.format("0123abc"), self.vm.banner(stamped))
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ replicas: 1
 
 # -- Pod-level security context. Matches the umbrella chart's `runAsNonRoot`
 # discipline; UID 999 is the upstream Valkey image's default user.
+# `global.openshift: true` leaves out `runAsUser` and `fsGroup`.
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 999

@@ -120,6 +120,10 @@ from meho_backplane.mcp.tools._connector_shared import (
     _model_dump_json_safe,
     raise_invalid_params_for_spec_error,
 )
+from meho_backplane.operations._ingested_owner import (
+    IngestedOperationsNotAccepted,
+    build_ingested_ops_not_accepted_detail,
+)
 from meho_backplane.operations.ingest import (
     IngestionPipelineResult,
     IngestionPipelineService,
@@ -340,6 +344,10 @@ async def _run_inline_ingest(
                 else None
             ),
         )
+    except IngestedOperationsNotAccepted as exc:
+        raise McpInvalidParamsError(
+            str(exc), data=build_ingested_ops_not_accepted_detail(exc)
+        ) from exc
     except SPEC_ERROR_TYPES as exc:
         # The whole typed SpecError sibling set maps onto JSON-RPC -32602
         # with the shared structured ``data`` envelope; the dispatch table
@@ -523,6 +531,8 @@ def _job_to_response(job: IngestJob) -> IngestJobStatusResponse:
         spec_uris=list(job.spec_uris),
         started_at=job.started_at,
         ended_at=job.ended_at,
+        phase=job.phase,
+        phase_started_at=job.phase_started_at,
         ingestion=ingestion_model,
         grouping=grouping_model,
         error=job.error,
@@ -691,7 +701,10 @@ register_mcp_tool(
             "confirm the connector populated) or 'failed' (carries "
             "error_class + error). While the pipeline runs the status is "
             "'running' and the result clusters are null; branch on "
-            "status rather than presence-checking the fields. Reads the "
+            "status rather than presence-checking the fields. 'phase' "
+            "says which step runs now (parse, register, then grouping) "
+            "and 'phase_started_at' when that step started, so a slow "
+            "run can be told from a stuck one. Reads the "
             "same in-memory job registry the REST "
             "GET /api/v1/connectors/ingest/jobs/{job_id} endpoint uses, "
             "so a run started over either surface is pollable from the "

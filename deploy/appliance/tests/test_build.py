@@ -48,11 +48,13 @@ class BuildWithoutVmInfoTest(unittest.TestCase):
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         (bin_dir / "govc").write_text(STUB_GOVC)
-        for tool in ("ssh", "scp", "ssh-keygen", "curl"):
+        for tool in ("scp", "ssh-keygen", "curl"):
             (bin_dir / tool).write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / "ssh").write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$SSH_LOG"\n')
         for tool in bin_dir.iterdir():
             tool.chmod(0o755)
         self.log = self.root / "govc.log"
+        self.ssh_log = self.root / "ssh.log"
         self.power_state = self.root / "power-state"
         self.found = self.root / "found"
         self.found.write_text("")
@@ -68,6 +70,7 @@ class BuildWithoutVmInfoTest(unittest.TestCase):
         self.env = {
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "GOVC_LOG": str(self.log),
+            "SSH_LOG": str(self.ssh_log),
             "GOVC_POWER_STATE": str(self.power_state),
             "GOVC_FOUND": str(self.found),
             "GOVC_OVF": str(OVF),
@@ -143,6 +146,49 @@ class BuildWithoutVmInfoTest(unittest.TestCase):
         sums = (out / "SHA256SUMS").read_text()
         self.assertEqual(f"{hashlib.sha256(ova.read_bytes()).hexdigest()}  {VM}.ova\n", sums)
         self.assertEqual(f"vm.destroy {VM}", self.govc_calls()[-1])
+
+    def test_the_banner_gets_the_commit_of_the_scripts_not_the_download_version(self) -> None:
+        commit = subprocess.run(
+            ["git", "-C", str(APPLIANCE), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+
+        # Step 3 stops later at the CIS content, which the stub curl does not fetch.
+        self.run_build("--from-step", "3")
+
+        self.assertIn(
+            f"sudo sed -i 's/^readonly DOCS_REF=main$/readonly DOCS_REF={commit or 'main'}/'"
+            " /opt/meho/appliance/firststart/banner.sh",
+            self.ssh_log.read_text(),
+        )
+
+    def test_a_stopped_hardening_still_brings_back_the_result_list(self) -> None:
+        stubs = {
+            # The CIS content: the stub curl writes the archive, the stub
+            # sha512sum and tar accept it.
+            "curl": 'while [ $# -gt 1 ]; do [ "$1" = -o ] && : >"$2"; shift; done\n',
+            "sha512sum": "cat >/dev/null\n",
+            "tar": "",
+            # harden.sh stops, as on a rule in neither list.
+            "ssh": 'printf "%s\\n" "$*" >>"$SSH_LOG"\ncase "$*" in *harden.sh*) exit 1 ;; esac\n',
+            "scp": 'printf "scp %s\\n" "$*" >>"$SSH_LOG"\n',
+        }
+        for name, body in stubs.items():
+            stub = self.root / "bin" / name
+            stub.write_text("#!/bin/sh\n" + body)
+            stub.chmod(0o755)
+
+        result = self.run_build("--from-step", "3")
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn("cis/harden.sh stopped on the build VM (exit code 1).", result.stderr)
+        log = self.ssh_log.read_text().splitlines()
+        [harden] = [index for index, line in enumerate(log) if "harden.sh" in line]
+        self.assertIn("sudo rm -f /run/meho-cis-results.txt", "\n".join(log[:harden]))
+        copy = f"/run/meho-cis-results.txt {self.root}/out/meho-appliance-{VERSION}-cis.txt"
+        self.assertTrue(any(copy in line for line in log[harden + 1 :]), log)
 
 
 if __name__ == "__main__":

@@ -187,20 +187,32 @@ async def test_resume_refuses_when_pinned_target_no_longer_resolves(
         tenant_role=TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
     )
-    # Minimal stand-in for the ApprovalRequest ORM row: the resume helper
-    # reads id / target_id / op_id / connector_id / params / reveal_secret / work_ref /
-    # agent_session_id / request_audit_id (#2086 lineage re-binds) off it.
-    request = SimpleNamespace(
-        id=uuid.uuid4(),
-        target_id=target_id,
-        op_id="vault.kv.put",
-        connector_id="vault-1.x",
-        params={"path": "secret/x", "value": "s3cr3t"},
-        reveal_secret=False,
-        work_ref=None,
-        agent_session_id=None,
-        request_audit_id=None,
-    )
+    # A real approved row: the refusal takes the one-resumer claim and
+    # stores the refusal on it, so a stand-in object is not enough.
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+    from meho_backplane.operations._validate import compute_params_hash
+
+    request_id = uuid.uuid4()
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            ApprovalRequest(
+                id=request_id,
+                tenant_id=_TENANT_A,
+                run_id=None,
+                principal_sub="svc-parker",
+                op_id="vault.kv.put",
+                connector_id="vault-1.x",
+                target_id=target_id,
+                params_hash=compute_params_hash({"path": "secret/x", "value": "s3cr3t"}),
+                params=None,
+                proposed_effect={"op_id": "vault.kv.put", "connector_id": "vault-1.x"},
+                status=ApprovalRequestStatus.APPROVED.value,
+            )
+        )
+    async with get_sessionmaker()() as session:
+        request = await session.get(ApprovalRequest, request_id)
+    assert request is not None
 
     # The pinned target no longer resolves (soft-deleted between request
     # and approval). The resume helper (now in the service layer) imports
@@ -226,13 +238,14 @@ async def test_resume_refuses_when_pinned_target_no_longer_resolves(
 
     result = await approvals_module._resume_dispatch_after_approval(
         operator=operator,
-        request=request,  # type: ignore[arg-type]
+        request=request,
         params={"path": "secret/x", "value": "s3cr3t"},
     )
 
     assert dispatch_calls == [], "dispatch was called despite an unresolvable target"
     assert result.status == "denied", result
     assert result.op_id == "vault.kv.put"
+    assert result.extras["error_code"] == "target_gone_since_approval"
     assert str(target_id) in (result.error or "")
 
 

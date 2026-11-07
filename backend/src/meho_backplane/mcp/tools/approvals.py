@@ -126,6 +126,8 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     ``result_state`` and ``resume_outcome`` (#3486, #3543) match the REST
     view: whether an approved request ran, and a short summary of how the
     run ended. The result body stays on the owner-only REST ``/result``.
+    ``reveal_secret`` matches the REST view too: ``True`` when the approved
+    run returns the hidden values of the answer to the requester.
     """
     result_state = approval_result_state(row)
     outcome = resume_outcome(row)
@@ -140,6 +142,9 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         "connector_id": row.connector_id,
         "target_id": str(row.target_id) if row.target_id else None,
         "proposed_effect": row.proposed_effect,
+        # True when the approved run returns the hidden values of the answer
+        # to the requester (the requester sent ``reveal_secret: true``).
+        "reveal_secret": bool(row.reveal_secret),
         "status": row.status,
         "result_state": result_state.value if result_state is not None else None,
         "resume_outcome": (
@@ -336,6 +341,8 @@ register_mcp_tool(
             "Operator-level. Returns the full detail including "
             "proposed_effect (human-readable description of what the op "
             "would do) so an operator can decide before approving. "
+            "`reveal_secret: true` means the approved run returns the "
+            "hidden values of the answer to the requester. "
             "Cross-tenant / absent ids return approval_request_not_found. "
             "Pass either `approval_request_id` (canonical name) "
             "or the deprecated `id` alias."

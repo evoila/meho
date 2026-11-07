@@ -223,18 +223,22 @@ The Deployment renders `startupProbe`, `livenessProbe`, and
 
 | Probe | Endpoint | Failure semantics | Default timings (operator-tunable) |
 | --- | --- | --- | --- |
-| `startupProbe` | `/healthz` | Pod **restarts** once the budget is exhausted; disables liveness/readiness until it first passes | `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 30` (30 × 10s = 300s / 5-min first-boot budget) |
+| `startupProbe` | `/healthz` | Pod **restarts** once the budget is exhausted; disables liveness/readiness until it first passes | `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 90` (90 × 10s = 900s / 15-min first-boot budget) |
 | `livenessProbe` | `/healthz` (always 200 if the process is up) | Pod **restarts** on failure | `initialDelaySeconds: 30`, `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 3` |
 | `readinessProbe` | `/ready` (200 only when every registered probe in the readiness registry passes; 503 with an empty registry at the chassis stage) | Pod **removed from Service endpoints**, no restart | `initialDelaySeconds: 5`, `periodSeconds: 5`, `timeoutSeconds: 2`, `failureThreshold: 3` |
 
 The `startupProbe` (Issue #2393) exists because first boot registers the
 full typed-op catalog and preloads the fastembed embedding model inside the
-FastAPI lifespan **before** the app binds `:8000` — ~2-3 minutes, and longer
-on a cold install where the fastembed cache PVC is empty and the model
-weights are downloaded. The kubelet disables the liveness and readiness
+FastAPI lifespan **before** the app binds `:8000`. On an empty database
+every operation also gets its embedding. On 2026-11-04 (#4102, OpenShift,
+v0.43.0) that took about 5 minutes for 1,302 operations at the 1-CPU limit;
+later boots, which find the rows, took about 20 seconds. Since #5019 a start
+that is stopped keeps none of the new rows, so the whole first boot must fit
+in one budget: with the old 300s, a fresh `helm install --wait` failed on
+the first try. The kubelet disables the liveness and readiness
 probes until the startup probe first succeeds, so a slow-but-healthy first
 boot no longer trips the short-delay liveness probe into a
-CrashLoopBackOff. The budget is `failureThreshold × periodSeconds` (300s by
+CrashLoopBackOff. The budget is `failureThreshold × periodSeconds` (900s by
 default); once it passes, the liveness probe's fast 30s detection window
 takes over for genuine hang detection. Inflating
 `probes.liveness.initialDelaySeconds` (the old-only lever) is strictly
@@ -295,13 +299,30 @@ a writable tempdir. These defaults match cert-manager, ArgoCD, and Flux,
 and they're the minimum surface that admits a Pod under the cluster's
 **restricted** PodSecurity profile.
 
+On OpenShift, `global.openshift: true` makes every pod of the chart and its
+subcharts (the backplane, the setup and migration Jobs, Valkey, PostgreSQL,
+Keycloak, OpenBao and the `helm test` pods) leave out `runAsUser`,
+`runAsGroup` and `fsGroup`, through the shared helper
+`meho.core.podSecurityContext`. OpenShift's default rule `restricted-v2`
+then picks the user id from the project's range. The backplane image's files
+belong to group 0, which that user is in. Everything else above stays.
+`backend/tests/test_chart_openshift.py` checks every pod, and
+`deploy/values-examples/values-openshift.yaml` holds the tested OpenShift
+values (#4102).
+
 ### NetworkPolicy
 
 `networkPolicy.enabled: true` ships a default-deny policy with explicit
 egress rules to:
 
-- Postgres — `tcp/5432` to `networkPolicy.postgresCIDR`
-- Vault — `tcp/8200` to `networkPolicy.vaultCIDR`
+- Postgres — `tcp/5432` to `networkPolicy.postgresCIDR`; with the built-in
+  PostgreSQL (`corePostgres.enabled`) instead to a `podSelector` matching
+  its pod (`app.kubernetes.io/name: postgres` and the release), and
+  `postgresCIDR` is not used (#4047)
+- Vault — `tcp/8200` to `networkPolicy.vaultCIDR`; with the built-in
+  OpenBao (`coreVault.enabled`) instead to a `podSelector` matching its pod
+  (`app.kubernetes.io/name: openbao` and the release), and `vaultCIDR` is
+  not used (#4047)
 - Keycloak — `tcp/443` to `networkPolicy.keycloakCIDR`; with the built-in
   Keycloak (`coreKeycloak.enabled`) instead `tcp/8080` to a `podSelector`
   matching its pod (`app.kubernetes.io/name: keycloak` and the release),
@@ -330,6 +351,27 @@ sit behind an in-cluster ingress, traffic arrives at the ingress Pod's own
 port (Traefik `websecure` 8443), the fixed `tcp/8200` / `tcp/443` rules do
 not match, and the operator adds an `extraEgress` rule selecting the
 ingress Pods on that port.
+
+An OpenAI-compatible model endpoint (`agent.openai`, #5851) is reached
+the same way: there is no fixed rule for it. The operator adds one
+`extraEgress` rule, either an `ipBlock` with the endpoint's address range
+and port, or, for a model server in the cluster, a `namespaceSelector` +
+`podSelector` on the model server's Pods and the container port (for
+vLLM 8000), not the Service port. Both examples are in the
+`networkPolicy.extraEgress` comment in `values.yaml` and in
+`deploy/values-examples/README.md` ("OpenAI-compatible model endpoint").
+
+The `agent.openai` block itself renders `OPENAI_API_KEY` as a
+`secretKeyRef` (to `agent.openai.secretName`, or to the
+`<release>-agent-openai` Secret that `eso.agentOpenai.enabled` makes from
+`<vault.paths.kv>/agent-openai`), and `OPENAI_BASE_URL` /
+`OPENAI_DEFAULT_MODEL` as plain values only when they are set. The schema
+has no field for the key, so a plain key is refused. `agent.modelBackend`
+renders `AGENT_MODEL_BACKEND` (which backend every agent run uses) only
+when set; the schema accepts `anthropic`, `openai`, `bedrock` and
+`vcf-paif`. Both are off by default, and
+then the render is unchanged; `backend/tests/test_chart_openai_endpoint.py`
+and a step in `.github/workflows/chart.yml` check both.
 
 The broadcast clause above is an **egress** allowance on the backplane
 side. A Pod is ingress-isolated only when *some* NetworkPolicy selects it,
@@ -506,6 +548,48 @@ may create Secrets, read and patch only the `<release>-core-*` names, and
 read the Secrets the operator names in values.
 Secret table, rules and rights: [core-secrets.md](core-secrets.md).
 
+### Wiring the built-in core to the backplane (`templates/_core-wiring.tpl`, #4047)
+
+The three built-in parts are on by default (chart 0.2.0). With a part on,
+the chart derives the backplane's settings for it from the subchart, and
+the values keys of the bring-your-own part stay unused. The Keycloak half
+is `meho.keycloakSettings` in `_core-keycloak.tpl` (#4591).
+
+| Part on | The backplane gets | Must stay empty (the render stops otherwise) |
+| --- | --- | --- |
+| `corePostgres` | `DATABASE_URL` from `<release>-core-postgres-meho`, key `url` (`migrate` init container, helm test pod; the running backplane uses `<release>-core-postgres-meho-app`, #5699); NetworkPolicy egress by pod | `postgres.credentialsSecret` (or that name), `eso.enabled` |
+| `coreVault` | `VAULT_ADDR=http://<release>-vault:<coreVault.service.port>`, `VAULT_OIDC_ROLE=meho-mcp`, `VAULT_OIDC_MOUNT_PATH=jwt`, `VAULT_SCHEDULER_TOKEN_FILE` from `<release>-core-vault-scheduler` (an optional Secret volume, so the pod starts before the setup Job made it, and the file is read at every use); NetworkPolicy egress by pod | `vault.address`, `config.vaultAddr`; `config.credentialBackend` must be `vault`; `extraEnv` must not set `VAULT_KV_TENANT_SCOPE_PREFIX` empty |
+| any part | `APPROVAL_HANDOFF_ENCRYPTION_KEY` from `<release>-core-approval-handoff` while `approvalHandoff.enabled` is unset; `PARAMS_HASH_KEY` from `<release>-core-params-hash` while `paramsHashKey.secretName` is empty; the Ingress certificate `<release>-core-tls` while `ingress.tls.secretName` is empty | |
+
+**Tenant separation.** The setup Job makes one login role, `meho-mcp`, for
+every tenant: it copies the token's `tenant_id` into the login, and the
+tenant policies allow only `secret/tenants/<that id>/`
+([core-vault-init.md](core-vault-init.md)). So the chart leaves
+`VAULT_OIDC_ROLE_BY_TENANT` empty, and it never sets
+`VAULT_KV_TENANT_SCOPE_PREFIX`: the code default
+`secret/tenants/{tenant_id}/` makes the backplane refuse a path outside
+the caller's tenant before it asks OpenBao.
+
+**Bring-your-own.** Set `corePostgres.enabled`, `coreKeycloak.enabled` and
+`coreVault.enabled` to `false` and fill `postgres:`, `keycloak:` /
+`config.keycloak*`, `vault:` / `config.vaultAddr` and the three
+NetworkPolicy CIDRs as before. With all three off the chart renders
+exactly what it rendered before the built-in core;
+`backend/tests/test_chart_bring_your_own_render.py` compares the render of
+`deploy/values-examples/values-bring-your-own-fixture.yaml` with a saved
+copy, with only the chart version evened out.
+
+**Not wired yet.** Valkey and the backplane keep reading the broadcast
+subchart's own `<release>-broadcast-auth`, not `<release>-core-broadcast-auth`:
+the subchart cannot read the parent's `core*` switches, so it needs a
+`global` value or a subchart value first.
+
+**The scheduler's OpenBao token.** The scheduler renews it itself, every
+hour and after each successful read or write
+(`backend/src/meho_backplane/scheduler/vault_credentials.py`). If it has
+expired anyway, a later run of the setup Job makes a new one, and the
+backplane reads the new file without a restart.
+
 ### Broadcast subchart (`charts/broadcast/`)
 
 A custom in-tree Helm subchart deploys Valkey 9.x as the
@@ -661,11 +745,15 @@ Design: the internal core design note, §2 (one database server) and §1
   wins). The image is built FROM the official `postgres:17-bookworm` image,
   so the official entrypoint runs. PostgreSQL 18 is not used: it moves the
   data directory layout.
-- **Two databases, two roles.** One SQL file (`core.sql` in the ConfigMap)
+- **Two databases, three roles.** One SQL file (`core.sql` in the ConfigMap)
   makes the roles `meho` and `keycloak` (`LOGIN NOSUPERUSER NOCREATEDB
   NOCREATEROLE`, connection limits 60 and 25), the databases `meho` and
   `keycloak`, each owned by its role, takes CONNECT and TEMPORARY away from
-  PUBLIC, and creates `vector` in `meho` as the image superuser. Every
+  PUBLIC, and creates `vector` in `meho` as the image superuser. It also
+  makes `meho_app`, the login of the running backplane (same role
+  settings, connection limit 60, `CONNECT` on `meho`, owns nothing); the
+  migration, which runs as the owner `meho`, grants it its rights on the
+  tables (`docs/codebase/migrations.md`, "The runtime role"). Every
   statement is safe to run twice (`CREATE` is guarded with `\gexec`).
   Passwords reach SQL only as psql variables (`\getenv`).
 - **Two paths, one file.** On an empty disk the entrypoint runs `apply.sh`
@@ -679,11 +767,11 @@ Design: the internal core design note, §2 (one database server) and §1
   (`/var/run/postgresql`, an emptyDir) through initdb's `local all all
   trust` line. It never needs the superuser password.
 - **Secrets.** The chart makes no password. It reads
-  `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key
-  `password`), which the install's secrets Job makes (#4041). The
+  `<release>-core-postgres-superuser`, `-meho`, `-meho-app` and `-keycloak`
+  (key `password`), which the install's secrets Job makes (#4041). The
   superuser Secret is mounted by the `postgres` container alone, as
   `POSTGRES_PASSWORD_FILE`; initdb reads it once. The sidecar mounts only
-  the two role Secrets. `corePostgres.existingSecrets.{superuser,keycloak}`
+  the three role Secrets. `corePostgres.existingSecrets.{superuser,keycloak}`
   names operator-made Secrets instead.
 - **Logins.** `POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256`: TCP logins
   from inside the pod (127.0.0.1, also `kubectl port-forward`) need a
@@ -706,18 +794,24 @@ Design: the internal core design note, §2 (one database server) and §1
   backplane pods (`networkPolicy.backplanePodLabels`; the `migrate` init
   container runs in the backplane pod, and the helm test pod carries the
   same labels) and the Keycloak pods
-  (`networkPolicy.keycloakPodLabels`) of the release. The parent policy's
-  egress rule to the built-in database (by pod, not CIDR) comes with #4050.
+  (`networkPolicy.keycloakPodLabels`) of the release. The parent policy
+  reaches the database by pod, not CIDR (#4047).
 - **Disk lifetime.** The PVC outlives `helm uninstall` (StatefulSet default).
   Delete the PVC and the generated Secrets together, or neither.
 - **After a restore.** A restored dump brings the role passwords of the
   dump. Restart the pod after a restore: the sidecar then sets the
   passwords from the Secrets again (it also does so on the next Secret
   change, but not on its own clock).
-- **What wires it to the backplane.** Not this subchart. The migration
-  runs as the backplane's `migrate` init container in this mode (#5233,
-  see [Migration Job](#migration-job-templatesmigration-jobyaml)). The
-  `DATABASE_URL` default and the schema conditionals come with #4047.
+- **What wires it to the backplane.** Not this subchart, the parent. The
+  migration runs as the backplane's `migrate` init container in this mode
+  (#5233, see [Migration Job](#migration-job-templatesmigration-jobyaml)),
+  with the owner login from `<release>-core-postgres-meho` (key `url`,
+  `meho.databaseSecretName` in `templates/_core-wiring.tpl`, #4047) and
+  `DATABASE_RUNTIME_ROLE=meho_app`; the backplane container reads
+  `DATABASE_URL` from `<release>-core-postgres-meho-app` (parent helpers
+  `meho.postgres.*` in `templates/_helpers.tpl`). `postgres.credentialsSecret`
+  must stay empty or name `<release>-core-postgres-meho`, and `eso.enabled`
+  must be off; the render stops otherwise.
 
 **Helm test.** `templates/tests/test-pgvector.yaml` runs on the same
 image (`corePostgres.image`), in both modes, as user 999. It needs no
@@ -1278,7 +1372,7 @@ them).
 | `service.type` / `service.port` | `ClusterIP` / `8000` | Service shape. |
 | `ingress.className` | `""` | Cluster default IngressClass when empty. |
 | `probes.liveness.*` / `probes.readiness.*` | `/healthz` / `/ready` httpGet + tuned timings | Operator-tunable; never disabled. |
-| `probes.startup.*` | `/healthz` httpGet + 5-min first-boot budget (#2393) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
+| `probes.startup.*` | `/healthz` httpGet + 15-min first-boot budget (#2393, #4102) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
 | `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
@@ -1483,8 +1577,38 @@ claude-rdc-hetzner-dc#610 / #715) and shares the
 hardening conventions of `image.yml` (Task #33): job-level fork-PR guard,
 SHA-pinned actions with `# vX.Y.Z` comments, minimum `permissions:` block
 (`contents: read`, `packages: write`, `id-token: write`), per-job
-`timeout-minutes`, and a `concurrency:` group that cancels stale runs per
-ref.
+`timeout-minutes`, and a `concurrency:` group (see "Every main commit gets
+its image and chart" below).
+
+### Every main commit gets its image and chart
+
+`image.yml` and `chart.yml` put each run in a `concurrency:` group:
+
+- **Push to `main`:** one group per commit (the group name ends with the
+  commit sha). A newer push never cancels an older push's run. So every
+  `main` commit gets its own image (`:sha-<commit>`) and its own chart
+  (`0.1.<date>-<short-sha>`).
+- **Pull request:** one group per pull request. A new push to the pull
+  request cancels the old run, as before.
+- **Tag push (`v*`):** one group per tag, as before.
+
+Why: a merge lands on `main` about every 15 minutes, and the image build
+takes about 25 minutes. With one group per branch, each new merge
+cancelled the build of the merge before it, and for hours no `main`
+commit got its image. Only turning off `cancel-in-progress` would not
+fix this. GitHub keeps one waiting run per group, and a newer run
+replaces the waiting one.
+
+What it costs:
+
+- Two or three `main` image builds can run at the same time. They use
+  the `meho-runners-ci` pool (the same pool as the integration test
+  shards), so they take two or three of its runners for about 25
+  minutes. The chart jobs on this pool take a few minutes.
+- Runs can finish out of order. The moving `:main` image alias then
+  points at an older commit for a short time, until the newer run
+  finishes. `:main` is never a deploy target: deploys pin
+  `sha-<commit>` or a release tag.
 
 ### Triggers and locked publish behaviour
 
@@ -1664,7 +1788,9 @@ these workflows:
   `cancel-in-progress: ${{ github.event_name != 'merge_group' }}`. A
   cancelled queue check fails the merge attempt and drops the PR out of
   the queue, so `merge_group` runs are never cancelled; `pull_request` /
-  `push` runs still cancel their own predecessors as before.
+  `push` runs still cancel their own predecessors as before. In
+  `chart.yml` a push to `main` has its own group per commit, so nothing
+  cancels it (see "Every main commit gets its image and chart").
 - **The runs of a dropped group are cancelled.** GitHub does not stop the
   runs of a group that leaves the queue. Two helpers do it, so the runs
   stop using our runners:
@@ -2870,27 +2996,70 @@ scope the cosign-signed `image.yml` release build restores from; the
 release image's trust chain never depends on cache produced by unmerged
 code, while the per-PR build keeps its warm-cache read.
 
-## Dependabot waits 7 days before it takes a new version
+## Dependencies wait 7 days before we take a new version
 
-Every entry in `.github/dependabot.yml` has a `cooldown` block with
-`default-days: 7`. Dependabot opens a version-update pull request for a
-new release (a GitHub Action, a Python package in `backend/uv.lock`, or
-a base image in a Dockerfile) only when that release is at least 7 days
-old.
+We take a new version of a dependency only when it is at least 7 days
+old. A new release can carry harmful code, for example when someone
+takes over a maintainer's account. Such releases are usually found and
+removed within a few days. The wait skips them. Two settings do this:
 
-- **Why.** A new release can carry harmful code, for example when an
-  attacker takes over a maintainer's account. Such releases are usually
-  found and removed within a few days. The wait skips them.
-- **Security updates are not delayed.** Dependabot's `cooldown` applies
-  to version updates only. A security update still comes at once.
-- **Without the block, Dependabot already waits 3 days** on github.com.
-  The block makes the wait visible in the file and sets it to 7 days.
-- **A manual upgrade does not wait.** `uv lock --upgrade` or a hand
-  edit of a Dockerfile digest can still take a release that is younger
-  than 7 days. The matching uv setting (`exclude-newer` in
-  `backend/pyproject.toml`) is not set yet; it needs a lock file in
-  which every locked version is already 7 days old, otherwise
-  `uv lock` moves packages back.
+- **Dependabot.** Every entry in `.github/dependabot.yml` has a
+  `cooldown` block with `default-days: 7`. Dependabot opens a
+  version-update pull request for a new release (a GitHub Action, a
+  Python package in `backend/uv.lock`, or a base image in a Dockerfile)
+  only when that release is at least 7 days old. Without the block,
+  Dependabot already waits 3 days on github.com. The block makes the
+  wait visible in the file and sets it to 7 days.
+- **uv.** `[tool.uv]` in `backend/pyproject.toml` has
+  `exclude-newer = "7 days"`. uv ignores every package version uploaded
+  in the last 7 days, in every lock: Dependabot's, a person's and an
+  agent's (`uv add`, `uv lock --upgrade`). `backend/uv.lock` records the
+  wait as `exclude-newer-span = "P7D"` under `[options]`. The span is
+  relative, so `uv sync --locked` keeps passing as days go by. The
+  `exclude-newer = "0001-01-01T00:00:00Z"` line next to it has no
+  effect; uv writes it for older uv versions. Relative values need uv
+  0.9.17 or newer. CI uses uv 0.13.0, the image build uses uv 0.11.12.
+
+**Security updates.** Dependabot's `cooldown` applies to version updates
+only. A security update still comes at once. But uv cannot tell a
+security update from a normal release. Dependabot runs uv with our
+settings, so a security update to a version that is younger than 7 days
+fails to lock until that version is 7 days old.
+
+**How to take an urgent fix at once.** Lift the wait for that one
+package, and only for that package:
+
+1. Add this line to `[tool.uv]` in `backend/pyproject.toml`, with the
+   name of the package:
+
+   ```toml
+   exclude-newer-package = { <package> = false }
+   ```
+
+   When the fixed version needs a version of another package that is
+   also younger than 7 days, name that package in the same line. For
+   example, a boto3 release needs the botocore release of the same day:
+   `{ boto3 = false, botocore = false }`.
+2. Run `cd backend && uv lock --upgrade-package <package>`. A plain
+   `uv lock` is not enough: it keeps the version that is in the lock
+   file. The flag tells uv to take the newest version of that package.
+   uv writes the exception into `uv.lock` under
+   `[options.exclude-newer-package]`.
+3. Check the version in the lock file. It must be the version with the
+   fix:
+
+   ```bash
+   grep -A1 '^name = "<package>"$' backend/uv.lock
+   ```
+
+   An older version means a package it needs is still inside the wait.
+   Add that package to the line and run step 2 again.
+4. Run `uv sync --locked --all-groups`, then the tests of the code that
+   uses the package.
+5. Remove the line only once the fixed version is 7 days old, and run
+   `uv lock` again. uv then keeps the version and drops the exception
+   from `uv.lock`. Removed earlier, `uv lock` goes back to the newest
+   version that is old enough, and the fix is gone.
 
 ## Dependencies
 

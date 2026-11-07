@@ -51,6 +51,15 @@ The op is registered under the natural key
 `safety_level="safe"` + `requires_approval=False` make it
 agent-auto-runnable and ungated.
 
+**The nine `net.*` ops need no approval.** Their address fields (`host`,
+`url`, and the `resolver` of `net.dns_lookup`) carry no
+`x-meho-caller-address` marker, so the caller-address floor
+(`docs/codebase/spec-ingestion.md`, "Caller-address floor") does not
+apply to them. The probe allowlist below is their guard. So a Sensor can
+run them. The contract check lists these fields in
+`NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`) with
+this reason.
+
 ## `net.dns_lookup` — full `dig` parity (#2409)
 
 `net.dns_lookup(name, type?, resolver?, timeout_seconds?)` resolves DNS
@@ -111,9 +120,9 @@ system resolver config with no chosen resolver maps to
 
 That opposite default is why the two do not share a parser: reusing the
 SSRF guard verbatim would carry its permissive-when-unset default into a
-surface where unset must mean closed. Because `net.*` ops are
-`safety_level="safe"` (agent-auto-runnable), this allowlist is the
-**sole floor** on a network-vantage recon primitive.
+surface where unset must mean closed. The `net.*` network checks are
+`safety_level="safe"` (an agent can run them), so the allow-list limits
+where checks can connect.
 
 Matching:
 
@@ -524,7 +533,7 @@ audit-visible via `raw_payload`.
 
 It shares the `net-probe-1.x` identity, and is `safety_level="safe"` +
 `requires_approval=False`: a read-only handshake that offers no credential
-and sends no application data, so the probe allowlist is the sole floor.
+and sends no application data; the allow-list limits where checks can connect.
 
 ## `net.tls_inspect` — full presented certificate chain (T2, #2407)
 

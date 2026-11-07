@@ -742,6 +742,34 @@ async def test_operation_status_refuses_a_reference_of_another_subscription(
 
 
 @pytest.mark.asyncio
+async def test_operation_status_refuses_a_reference_that_is_a_vm_read(
+    _dispatch_env: None, clock: _Clock
+) -> None:
+    await _fresh_connector()
+    vm_read = (
+        f"{ARM_BASE}/subscriptions/{SUBSCRIPTION_A}/resourceGroups/rg-app/providers/"
+        "Microsoft.Compute/virtualMachines/vm-01?$expand=userData&api-version=2024-07-01"
+    )
+    reference = OperationReference(vm_read, "location", None, "t0").as_dict()
+
+    with respx.mock(assert_all_called=False) as mock:
+        login = mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        arm = mock.get(url__startswith=ARM_BASE).respond(200, json={})
+        result = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.operation.status",
+            target=AzureTargetStub(),
+            params={"operation": reference},
+        )
+
+    assert result.status == "error"
+    assert result.extras["exception_class"] == "AzureUrlRefusedError"
+    assert not login.called
+    assert not arm.called
+
+
+@pytest.mark.asyncio
 async def test_the_dispatcher_adds_no_tries_and_returns_the_throttling_error(
     _dispatch_env: None, clock: _Clock
 ) -> None:

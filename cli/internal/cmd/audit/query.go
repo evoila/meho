@@ -28,7 +28,7 @@ import (
 //	  [--principal P]              # part of the user id or the name
 //	  [--op-id PATTERN]            # glob: vsphere.vm.*
 //	  [--op-class C]               # read | write | credential_read | audit_query | other
-//	  [--result-status S]          # ok | error | denied | pending
+//	  [--result-status S]          # ok | error | denied | pending | withdrawn
 //	  [--since DUR]                # 24h | 7d | ISO-8601
 //	  [--until DUR]
 //	  [--limit N]                  # 1..1000, default 100 (server-side)
@@ -108,7 +108,7 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opClass, "op-class", "",
 		"narrow to one op-class (read|write|credential_read|audit_query|other)")
 	cmd.Flags().StringVar(&resultStatus, "result-status", "",
-		"narrow to one result-status (ok|error|denied|pending); pending is history: "+
+		"narrow to one result-status (ok|error|denied|pending|withdrawn); pending is history: "+
 			"the run stopped to wait for approval and the row stays pending after the "+
 			"decision; use 'meho approvals list' to see what waits now")
 	cmd.Flags().StringVar(&since, "since", "",
@@ -321,7 +321,8 @@ func postQuery(
 // printQueryTable renders the audit page as a compact, scannable
 // table. Columns: AUDIT_ID, TIME, TENANT, PRINCIPAL, TARGET, OP_ID,
 // CLASS, STATUS. TENANT is the tenant name, or the tenant id when the
-// backend has no name for it (#5238). The audit id comes first and
+// backend has no name for it (#5238). PRINCIPAL ends with "via <actor>"
+// when an agent acted for the person (#5773). The audit id comes first and
 // is printed whole (#4858), so an operator can paste it into
 // `meho audit show` without re-running the query with --json. When `next_cursor` is set, a final NEXT
 // line tells the operator how to paste-paginate.
@@ -336,6 +337,9 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 		principal := row.PrincipalSub
 		if name := strDeref(row.PrincipalName); name != "" {
 			principal = fmt.Sprintf("%s (%s)", name, row.PrincipalSub)
+		}
+		if actor := strDeref(row.ActorSub); actor != "" {
+			principal = fmt.Sprintf("%s via %s", principal, actor)
 		}
 		target := strDeref(row.TargetName)
 		if target == "" {

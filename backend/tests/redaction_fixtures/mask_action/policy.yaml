@@ -1,0 +1,17 @@
+# Action-shape fixture: pins the ``mask`` action replacement format
+# produced by the engine. Mask is length-preserving with a 4-char
+# trailing suffix. A future engine change to the replacement format
+# will break this fixture loudly. The ``hash`` action is not pinned
+# here: its string depends on the server key of the install, so
+# ``test_redaction_hash_action.py`` checks it against the key instead.
+
+id: roundtrip-mask
+version: 1
+description: |
+  Round-trip fixture pinning the mask action replacement shape.
+  One narrow rule (uuid mask); no scope.
+rules:
+  - name: mask-uuid
+    pattern: uuid
+    action: mask
+    reason: "shape-correlatable mask"

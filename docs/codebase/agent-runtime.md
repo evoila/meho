@@ -55,7 +55,12 @@ All public types are re-exported from `meho_backplane.agent`
   accounting. On a successful run `request_count` is persisted as the run
   row's `turns` at finalize (#2743) — the streamed path tallies the same
   count off its `TURN` events — so `run_status` reports the model-request
-  turn total instead of a constant 0.
+  turn total instead of a constant 0. `request_usages` carries the token
+  usage of each model request (the run's own and those of its child
+  runs, also the requests a child run completed before it failed), so
+  the cost can use a per-request price (see
+  `docs/codebase/identity-budget.md`). The token totals hold the
+  uncached input apart from the cached streams, as `TokenUsage` does.
 - **`AgentRunStatus`** — closed enum: `RUNNING` / `SUCCEEDED` / `FAILED`.
 - **`AgentRunError`** — domain exception raised when a run cannot start or
   its result is unavailable (turn budget exhausted, a tool raised, the
@@ -470,8 +475,11 @@ carry the child's run id (see [Lineage](#lineage--the-cascade-tree-is-reconstruc
   as the record of the parent's `invoke_agent` call.
 - **Row shape.** `method="AGENT"`, `path="/agent/tools/call/<tool>"`. The
   payload holds `op_id` (the tool name), `params_hash`, `op_class`,
-  `error_type` on a failure, and the agent model and provider. Arguments and
-  error text are never stored.
+  `error_type` on a failure, and the agent model and provider. A call the
+  toolset refused also holds `error` with `error_code` `denied`, a
+  `reason_code` (`role_insufficient` or `connector_not_allowed`) and a short
+  `reason` that names the rule (#5773). Arguments and error text are never
+  stored.
 - **Status.** 200 success, 403 a call the toolset refused (role floor or
   connector allow-list; `_make_meta_tool` raises `ToolRefusedRetry`), 400 bad
   arguments, a retry the tool asked for, or a call to a tool name the run
@@ -595,6 +603,10 @@ stream T1's `stream` deferred to T4. It drives the framework node graph
 the seam (`AgentRunEvent` is a plain value object; `AgentRunEventKind` a
 closed enum). A tripped turn budget surfaces as a terminal `error` event,
 not a raised exception, so an SSE consumer always sees a terminal frame.
+The `final` event also carries the run's usage (`usage` and
+`request_usages`, with the requests of child runs), outside `data`. The
+invoker passes it to `_finalize_run`, so a streamed run gets its cost and
+is charged to the person's spend cap like a run that is not streamed.
 
 ### Fronts
 
@@ -746,7 +758,7 @@ model may write back in one answer. The setting
 
 Why the builders always send a value: since pydantic-ai 2.52, an unset
 `max_tokens` means the model's maximum (128,000 for
-`claude-sonnet-4-6`), and pydantic-ai then sends the request as a
+`claude-sonnet-5-5`), and pydantic-ai then sends the request as a
 stream.
 
 What a higher value costs:
@@ -1188,10 +1200,15 @@ of two sources, in order of authority:
    reaches into `Settings`.
 2. **Settings-driven default.** `default_openai_backend_builder()`
    reads `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_DEFAULT_MODEL`
-   from process environment — wired the same way `ANTHROPIC_API_KEY`
-   is on Helm deploys (G0.18-T10 #1363): a first-class chart `agent.*`
-   block, `secretKeyRef` only, optional ExternalSecret rendering via
-   `eso.agent.enabled`. Empty `OPENAI_API_KEY` is fail-closed: the
+   from process environment. On Helm deploys the chart's
+   `agent.openai` block sets them (#5851): the key as a `secretKeyRef`
+   only (to `agent.openai.secretName`, or to the Secret that
+   `eso.agentOpenai.enabled` makes), the base URL and the model as plain
+   values. It is separate from `agent.enabled`, which sets
+   `ANTHROPIC_API_KEY`. The network policy blocks the endpoint until the
+   operator opens it in `networkPolicy.extraEgress`
+   (`deploy/values-examples/README.md`, "OpenAI-compatible model
+   endpoint"). Empty `OPENAI_API_KEY` is fail-closed: the
    builder raises `AgentRunError` rather than starting a loop with no
    credentials. Use this only when the whole deploy talks to one
    OpenAI-compat endpoint — the moment you need per-tenant routing,

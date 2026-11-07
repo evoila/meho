@@ -28,7 +28,7 @@ per line: the Secrets this Job makes, then the ones the realm stage (#4043:
 `first-login`, `console-admin`, `ci-login`) makes.
 */}}
 {{- define "meho.core.secretNames" -}}
-{{- range list "postgres-superuser" "postgres-meho" "postgres-keycloak" "keycloak-bootstrap" "keycloak-admin" "ui-auth" "check-runner" "approval-handoff" "broadcast-auth" "tls" "first-login" "console-admin" "ci-login" }}
+{{- range list "postgres-superuser" "postgres-meho" "postgres-meho-app" "postgres-keycloak" "keycloak-bootstrap" "keycloak-admin" "ui-auth" "check-runner" "approval-handoff" "params-hash" "broadcast-auth" "tls" "first-login" "console-admin" "ci-login" }}
 {{ printf "%s-core-%s" $.Release.Name . }}
 {{- end }}
 {{- end }}
@@ -48,6 +48,8 @@ the install.
 {{- $want = append $want (dict "kind" "postgres-superuser" "named" .Values.corePostgres.existingSecrets.superuser "valuesKey" "corePostgres.existingSecrets.superuser" "keys" (list "password")) -}}
 {{- /* The database Service is `<release>-postgres` (core design §1, #4039). */ -}}
 {{- $want = append $want (dict "kind" "postgres-meho" "named" .Values.postgres.credentialsSecret "valuesKey" "postgres.credentialsSecret" "keys" (list "password" "url") "host" (printf "%s-postgres" $rel)) -}}
+{{- /* The login of the running backplane; the owner login above stays for the migration. */ -}}
+{{- $want = append $want (dict "kind" "postgres-meho-app" "named" .Values.postgres.runtime.credentialsSecret "valuesKey" "postgres.runtime.credentialsSecret" "keys" (list "password" "url") "host" (printf "%s-postgres" $rel)) -}}
 {{- $want = append $want (dict "kind" "postgres-keycloak" "named" .Values.corePostgres.existingSecrets.keycloak "valuesKey" "corePostgres.existingSecrets.keycloak" "keys" (list "password")) -}}
 {{- end -}}
 {{- if .Values.coreKeycloak.enabled -}}
@@ -57,6 +59,7 @@ the install.
 {{- $want = append $want (dict "kind" "check-runner" "named" .Values.checkRunner.clientSecret.secretName "valuesKey" "checkRunner.clientSecret.secretName" "keys" (list .Values.checkRunner.clientSecret.secretKey)) -}}
 {{- end -}}
 {{- $want = append $want (dict "kind" "approval-handoff" "named" .Values.approvalHandoff.secretName "valuesKey" "approvalHandoff.secretName" "keys" (list .Values.approvalHandoff.secretKey)) -}}
+{{- $want = append $want (dict "kind" "params-hash" "named" .Values.paramsHashKey.secretName "valuesKey" "paramsHashKey.secretName" "keys" (list .Values.paramsHashKey.secretKey)) -}}
 {{- if and .Values.broadcast.enabled .Values.broadcast.auth.enabled -}}
 {{- $want = append $want (dict "kind" "broadcast-auth" "named" .Values.broadcast.auth.existingSecret "valuesKey" "broadcast.auth.existingSecret" "keys" (list .Values.broadcast.auth.existingSecretPasswordKey)) -}}
 {{- end -}}

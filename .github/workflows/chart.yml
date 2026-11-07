@@ -90,8 +90,11 @@ permissions:
   # and CodeRabbit's same finding. See the `publish` job below.
 
 concurrency:
-  # On main/tag pushes: keep one in-flight publish per ref so a fast follow-up
-  # commit cancels its predecessor. On PRs: scoped by PR ref the same way.
+  # Pushes to main: one group per commit (the sha suffix), so a newer push
+  # never cancels or replaces an older push's run. Every main commit gets
+  # its own chart (0.1.<date>-<short-sha>), like the image in image.yml.
+  # Pull requests: one group per PR, so a new push cancels the old run.
+  # Tag pushes: one group per tag, as before (the sha suffix is empty).
   # The `${{ github.event_name }}` suffix keeps pull_request / push /
   # merge_group runs in distinct cancellation domains (mirrors ci.yml,
   # security-scan.yml, secret-scan.yml, dependency-license-check.yml).
@@ -99,8 +102,10 @@ concurrency:
   # IMPORTANT: already-running merge_group jobs must NEVER be cancelled — a
   # cancelled queue check fails the merge attempt and drops the PR out of the
   # queue, defeating the queue's purpose (#769). cancel-in-progress is
-  # therefore scoped OFF for merge_group and stays ON for pull_request / push.
-  group: chart-${{ github.ref }}-${{ github.event_name }}
+  # therefore scoped OFF for merge_group and stays ON for pull_request / push
+  # (a main push has its own group, so in practice only PRs and a re-pushed
+  # tag cancel an older run).
+  group: chart-${{ github.ref }}-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
@@ -223,6 +228,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -249,6 +257,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -281,24 +292,16 @@ jobs:
 
       - name: Validate the built-in core secrets Job render (#4041)
         # The core secrets Job, its hook ServiceAccount, Role and
-        # RoleBinding render only when a built-in part is on, so the
-        # default render above never shows them. Render them with both
-        # parts on and check them against the same Kubernetes schemas.
+        # RoleBinding render only when a built-in part is on. Render the
+        # default values (every part on) with only the answers of a place,
+        # check them against the same Kubernetes schemas, and check that the
+        # chart wires the backplane to the parts (#4591, #4047).
         run: |
           set -euo pipefail
           helm template test deploy/charts/meho/ \
             --set image.tag=test \
             --set ingress.host=meho.test \
-            --set ingress.tls.secretName=test-core-tls \
-            --set postgres.credentialsSecret=test-core-postgres-meho \
-            --set vault.address=https://vault.test \
-            --set config.vaultAddr=https://vault.test \
-            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
-            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
-            --set corePostgres.enabled=true \
-            --set coreKeycloak.enabled=true \
             --set coreKeycloak.hostname=meho.test \
-            --set coreVault.enabled=true \
             --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c > /tmp/rendered-core.yaml  # gitleaks:allow
           kubeconform \
             -strict \
@@ -323,6 +326,16 @@ jobs:
           # Its setup Job (#4044), named by a hash of its setup.
           grep -Eq 'name: test-vault-init-[0-9a-f]{8}$' /tmp/rendered-core.yaml \
             || { echo "::error::OpenBao setup Job (test-vault-init-<hash>) did not render with coreVault on"; exit 1; }
+          # The backplane reads the built-in PostgreSQL and OpenBao (#4047).
+          grep -Eq '^[[:space:]]*VAULT_ADDR:[[:space:]]*"http://test-vault:8200"[[:space:]]*$' /tmp/rendered-core.yaml \
+            || { echo "::error::VAULT_ADDR not derived from the built-in OpenBao (#4047)"; exit 1; }
+          grep -A3 -F -e '- name: DATABASE_URL' /tmp/rendered-core.yaml | grep -q 'name: test-core-postgres-meho' \
+            || { echo "::error::DATABASE_URL does not come from test-core-postgres-meho (#4047)"; exit 1; }
+          grep -A3 -F -e '- name: APPROVAL_HANDOFF_ENCRYPTION_KEY' /tmp/rendered-core.yaml | grep -q 'name: "test-core-approval-handoff"' \
+            || { echo "::error::the approval hand-off key is not on by default with the built-in core (#4047)"; exit 1; }
+          if grep -Eq '^[[:space:]]*VAULT_KV_TENANT_SCOPE_PREFIX:|name: VAULT_KV_TENANT_SCOPE_PREFIX$' /tmp/rendered-core.yaml; then
+            echo "::error::the chart sets VAULT_KV_TENANT_SCOPE_PREFIX; the code default keeps tenants apart (#4047)"; exit 1
+          fi
 
       - name: Render the chart the way the form-2 download build does (#4820)
         # build-download.sh and check-download.sh render the chart with
@@ -365,6 +378,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -417,6 +433,53 @@ jobs:
           fi
           echo ">> agent-runtime env wiring verified: secretKeyRef on confidential values, plain env on operator config, no leakage when unset"
 
+      - name: Assert the OpenAI-compatible model endpoint key wires via secretKeyRef (#5851)
+        # With `agent.openai.enabled: true` the chart sets OPENAI_API_KEY
+        # from a Secret only, and OPENAI_BASE_URL / OPENAI_DEFAULT_MODEL as
+        # plain values. The default render from the steps above must carry
+        # none of the three.
+        run: |
+          set -euo pipefail
+          helm template test deploy/charts/meho/ \
+            --set image.tag=test \
+            --set ingress.host=meho.test \
+            --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
+            --set postgres.credentialsSecret=meho-postgres \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+            --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
+            --set agent.openai.enabled=true \
+            --set agent.openai.secretName=model-creds \
+            --set agent.openai.baseUrl=https://model.example.internal/v1 \
+            --set agent.openai.defaultModel=openai:test-model \
+            > /tmp/rendered-openai.yaml
+
+          kubeconform -strict -kubernetes-version 1.28.0 -ignore-missing-schemas -summary /tmp/rendered-openai.yaml
+
+          grep -A2 -F -e '- name: OPENAI_API_KEY' /tmp/rendered-openai.yaml \
+            | grep -F 'secretKeyRef' \
+            || { echo "::error::OPENAI_API_KEY is not wired via secretKeyRef (#5851 regression)"; exit 1; }
+          grep -A1 -F -e '- name: OPENAI_BASE_URL' /tmp/rendered-openai.yaml \
+            | grep -F 'value: "https://model.example.internal/v1"' \
+            || { echo "::error::OPENAI_BASE_URL is not wired as plain env (#5851 regression)"; exit 1; }
+          grep -A1 -F -e '- name: OPENAI_DEFAULT_MODEL' /tmp/rendered-openai.yaml \
+            | grep -F 'value: "openai:test-model"' \
+            || { echo "::error::OPENAI_DEFAULT_MODEL is not wired as plain env (#5851 regression)"; exit 1; }
+
+          if grep -qE '^\s+- name: OPENAI_' /tmp/rendered.yaml; then
+            echo "::error::default render sets OPENAI_* env vars without opt-in (#5851 regression)"
+            exit 1
+          fi
+          echo ">> OpenAI-compatible endpoint wiring verified: secretKeyRef on the key, plain env on URL and model, nothing when unset"
+
       - name: Assert check-runner principal + GSM WIF wire first-class (#2642)
         # #2642: background sensor dispatch needs a credential identity, and
         # a per-operator-WIF GSM install needs the `GSM_WIF_*` env the chart
@@ -433,6 +496,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -503,6 +569,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -553,6 +622,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -604,9 +676,10 @@ jobs:
           echo ">> observability scrape wiring verified: renders on opt-in, absent by default"
 
       - name: Helm template + kubeconform with the built-in PostgreSQL (#4039)
-        # `corePostgres` is off by default, so the render above never shows
-        # the PostgreSQL subchart. Render it on (and once with
-        # global.openshift=true) and validate the manifests the same way.
+        # The renders above turn every built-in part off. Render the
+        # PostgreSQL subchart on its own (and once with global.openshift=true)
+        # and validate the manifests the same way. The backplane then reads
+        # the Secret the install makes, so no credentialsSecret is set (#4047).
         run: |
           set -euo pipefail
           for extra in "" "--set global.openshift=true"; do
@@ -615,7 +688,8 @@ jobs:
               --set image.tag=test \
               --set ingress.host=meho.test \
               --set ingress.tls.secretName=meho-tls \
-              --set postgres.credentialsSecret=meho-postgres \
+              --set coreKeycloak.enabled=false \
+              --set coreVault.enabled=false \
               --set vault.address=https://vault.test \
               --set keycloak.issuer=https://keycloak.test/realms/meho \
               --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
@@ -652,7 +726,8 @@ jobs:
         # the object and its template file. The `helm-test` job proves the same
         # on a real cluster by installing as a namespace admin.
         #
-        # OpenBao (#4044) is off in all of those, so it gets two more renders.
+        # The base turns the built-in parts off, so the example files render
+        # as bring-your-own and OpenBao (#4044) gets two more renders.
         # The one allowed exception is the system:auth-delegator
         # ClusterRoleBinding with `coreVault.authDelegator=true`; that render
         # passes only with `--allow-auth-delegator`.
@@ -665,6 +740,9 @@ jobs:
             --set image.tag=test
             --set ingress.host=meho.test
             --set ingress.tls.secretName=meho-tls
+            --set corePostgres.enabled=false
+            --set coreKeycloak.enabled=false
+            --set coreVault.enabled=false
             --set postgres.credentialsSecret=meho-postgres
             --set vault.address=https://vault.test
             --set keycloak.issuer=https://keycloak.test/realms/meho
@@ -692,6 +770,9 @@ jobs:
             --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c  # gitleaks:allow
             --set keycloak.issuer=
             --set config.keycloakIssuerUrl=
+            --set postgres.credentialsSecret=
+            --set vault.address=
+            --set config.vaultAddr=
           )
           helm template test deploy/charts/meho/ "${base[@]}" "${vault_on[@]}" \
             | python3 scripts/ci/check_chart_namespace_scope.py --namespace meho-scope --label "coreVault on"
@@ -958,8 +1039,9 @@ jobs:
             --set broadcast.networkPolicy.enabled=false \
             --set broadcast.auth.enabled=false \
             --set corePostgres.enabled=true \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set corePostgres.image.digest= \
-            --set postgres.credentialsSecret=meho-test-core-postgres-meho \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
             --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
@@ -1027,7 +1109,11 @@ jobs:
         # The roles are not superusers, each database is fenced to its
         # owner, `vector` is in `meho`, and after a changed Secret plus a
         # pod restart the reconcile sidecar sets the new password (the
-        # failure shape of a regenerated database password).
+        # failure shape of a regenerated database password). The running
+        # backplane is logged in as `meho_app`, the role the migration
+        # granted: it can add and read audit rows and empty `raw_payload`,
+        # but not change or delete a row, truncate the table or add a
+        # trigger, and it owns nothing.
         run: |
           set -euo pipefail
           pg() {
@@ -1036,10 +1122,22 @@ jobs:
           }
           test "$(pg -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'meho'")" = f
           test "$(pg -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'keycloak'")" = f
+          test "$(pg -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'meho_app'")" = f
           test "$(pg -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'keycloak'")" = keycloak
+          test "$(pg -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'meho'")" = meho
           test "$(pg -d meho -c "SELECT extname FROM pg_extension WHERE extname = 'vector'")" = vector
           test "$(pg -c "SELECT has_database_privilege('keycloak', 'meho', 'CONNECT')")" = f
           test "$(pg -c "SELECT has_database_privilege('meho', 'keycloak', 'CONNECT')")" = f
+          test "$(pg -c "SELECT has_database_privilege('meho_app', 'meho', 'CONNECT')")" = t
+          test "$(pg -d meho -c "SELECT count(*) > 0 FROM pg_stat_activity WHERE usename = 'meho_app' AND datname = 'meho'")" = t
+          test "$(pg -d meho -c "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND pg_get_userbyid(c.relowner) = 'meho_app'")" = 0
+          test "$(pg -d meho -c "SELECT has_table_privilege('meho_app', 'audit_log', 'SELECT') AND has_table_privilege('meho_app', 'audit_log', 'INSERT')")" = t
+          test "$(pg -d meho -c "SELECT has_column_privilege('meho_app', 'audit_log', 'raw_payload', 'UPDATE')")" = t
+          test "$(pg -d meho -c "SELECT has_column_privilege('meho_app', 'audit_log', 'status_code', 'UPDATE')")" = f
+          for right in UPDATE DELETE TRUNCATE TRIGGER; do
+            test "$(pg -d meho -c "SELECT has_table_privilege('meho_app', 'audit_log', '$right')")" = f
+          done
+          test "$(pg -d meho -c "SELECT bool_and(has_table_privilege('meho_app', c.oid, 'SELECT, INSERT, UPDATE, DELETE')) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'audit_log'")" = t
 
           new_pw=$(openssl rand -hex 16)
           kubectl -n meho-test create secret generic meho-test-core-postgres-keycloak \
@@ -1058,7 +1156,7 @@ jobs:
           done
           kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \
             env PGPASSWORD="$new_pw" psql -X -tA -h 127.0.0.1 -U keycloak -d keycloak -c 'SELECT 1'
-          echo ">> built-in PostgreSQL verified: no superuser roles, fenced databases, vector, reconcile"
+          echo ">> built-in PostgreSQL verified: no superuser roles, fenced databases, vector, reconcile, meho_app rights"
 
       - name: Broadcast load + chaos verification (G6.1-T9)
         # G6.1-T9 (#433) acceptance:
@@ -1607,9 +1705,11 @@ jobs:
       - name: Start a bring-your-own PostgreSQL outside the release (#5412)
         # This is the customer's database. It is the chart's own PostgreSQL
         # objects (`--show-only`), applied with kubectl and not with Helm, so
-        # they are not part of the release below. The three Secrets they read
+        # they are not part of the release below. The four Secrets they read
         # are made here with throwaway passwords. Their names, keys and URL
-        # shape are those the install's secrets Job uses.
+        # shape are those the install's secrets Job uses. The release below
+        # runs with one login (`postgres.runtime` empty), so `meho_app` is
+        # created by the database but not used here.
         #
         # The database start-up script creates the `vector` extension as the
         # superuser. That is the one step a customer's database admin does by
@@ -1626,6 +1726,10 @@ jobs:
           kubectl -n meho-test create secret generic meho-test-core-postgres-meho \
             --from-literal=password="$meho_pw" \
             --from-literal=url="postgresql+asyncpg://meho:${meho_pw}@meho-test-postgres:5432/meho"
+          app_pw=$(openssl rand -hex 16)
+          kubectl -n meho-test create secret generic meho-test-core-postgres-meho-app \
+            --from-literal=password="$app_pw" \
+            --from-literal=url="postgresql+asyncpg://meho_app:${app_pw}@meho-test-postgres:5432/meho"
           kubectl -n meho-test create secret generic meho-test-core-postgres-keycloak \
             --from-literal=password="$(openssl rand -hex 16)"
           helm template meho-test ./deploy/charts/meho \
@@ -1641,6 +1745,8 @@ jobs:
             --set config.vaultAddr=https://vault.test \
             --set config.backplaneUrl=https://meho-test.test \
             --set corePostgres.enabled=true \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set corePostgres.image.digest= \
             --show-only charts/corePostgres/templates/configmap.yaml \
             --show-only charts/corePostgres/templates/service.yaml \
@@ -1682,6 +1788,9 @@ jobs:
             --set broadcast.networkPolicy.enabled=false \
             --set broadcast.auth.enabled=false \
             --set broadcast.image.digest= \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set corePostgres.image.digest= \
             --set postgres.credentialsSecret=meho-test-core-postgres-meho \
             --set vault.address=https://vault.test \

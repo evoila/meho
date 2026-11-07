@@ -99,6 +99,8 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
     monkeypatch.setenv("CORPUS_URL", _CORPUS_URL)
     monkeypatch.setenv("CORPUS_AUDIENCE", "")
+    # The hosts the repoint tests below move a collection to.
+    monkeypatch.setenv("CORPUS_ALLOWED_HOSTS", "corpus-new.test,docs.corpus-ns.svc.cluster.local")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -395,6 +397,27 @@ async def test_update_endpoint_screen_rejects_non_public(bad_endpoint: str) -> N
             _make_operator(),
             DocCollectionUpdate(backend={"type": "corpus-http", "ref": {"endpoint": bad_endpoint}}),
         )
+    row = await _fetch_row("vmware")
+    assert row.backend == {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}
+
+
+@pytest.mark.asyncio
+async def test_update_refuses_a_repoint_to_a_host_the_deployment_did_not_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repoint to a public host that is not a docs-service host is refused; the row stays."""
+    monkeypatch.delenv("CORPUS_ALLOWED_HOSTS", raising=False)
+    get_settings.cache_clear()
+    collection = await _insert_collection()
+    with pytest.raises(DocCollectionEndpointError) as exc:
+        await _run_update(
+            collection.id,
+            _make_operator(),
+            DocCollectionUpdate(
+                backend={"type": "corpus-http", "ref": {"endpoint": "https://other.test/v1/search"}}
+            ),
+        )
+    assert "CORPUS_ALLOWED_HOSTS" in str(exc.value)
     row = await _fetch_row("vmware")
     assert row.backend == {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}
 

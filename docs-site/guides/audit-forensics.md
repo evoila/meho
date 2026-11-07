@@ -35,14 +35,15 @@ Each `AuditEntry` carries the forensic fields you filter and pivot on:
 | `principal_sub` / `principal_name` | the subject that acted (the JWT `sub`) |
 | `target_name` | the target it acted on |
 | `op_id` / `op_class` | the operation and its sensitivity class |
-| `result_status` | `ok` / `error` / `denied` |
+| `result_status` | `ok` / `error` / `denied`, or `withdrawn` when the sender took its approval request back (the operation never ran) |
 | `policy_decision` | the gate verdict: `auto-execute`, `needs-approval`, or `deny` |
 | `agent_session_id` | the originating agent's MCP session id — the key for session tracing |
 | `parent_audit_id` | the id of the row that caused this one. An approval's decision row and run row point at the approval request row. |
 | `work_ref` | an external change-ticket reference, when one was stamped |
-| `event_class` | what kind of record it is: `operation_execution`, `policy_decision`, `approval_decision`, `security_event`, or `legacy_request` (every row from before this field existed) |
+| `event_class` | what kind of record it is: `operation_execution`, `policy_decision`, `approval_decision`, `security_event`, `config_change` (an operator changed the settings of an operation or group, for example turned it on or off for one tenant; it did not run), or `legacy_request` (every row from before this field existed) |
 | `sandbox_mode` | `true` when MEHO ran in sandbox mode when it wrote the row, else `false` |
-| `method` / `path` / `status_code` / `duration_ms` / `payload` | the request particulars |
+| `actor_sub` / `actor_name` | the agent that acted for the person in `principal_sub`, in an agent run the person started (`agent:<name>`, and the name alone); empty when nobody acted for another login |
+| `method` / `path` / `status_code` / `duration_ms` / `payload` | the request particulars. A refused call keeps why under `payload.error`: a `reason_code` (for example `agent_grant_denied` or `role_insufficient`) and a short `reason` text |
 
 ## The filter surface
 

@@ -23,10 +23,10 @@ never runs. This module proves the *refinement* this task adds:
   carry no value substring.
 * **Time-boxed scope** — an AGENT principal holding an
   ``op_pattern="secret.*"`` / ``verdict="auto-execute"`` grant whose
-  ``expires_at`` is in the past is refused (the move never executes); a
-  *live* grant only lifts the verdict off the ``dangerous`` deny baseline
-  to ``needs-approval`` (the ceiling for a ``dangerous`` op caps an agent
-  at park — it can never auto-execute a credential move). A parked row
+  ``expires_at`` is in the past waits for a person (the move never
+  executes); a *live* ``auto-execute`` grant is capped at
+  ``needs-approval`` (the ceiling for a ``dangerous`` op caps an agent at
+  park — it can never auto-execute a credential move). A parked row
   swept to ``EXPIRED`` by ``expire_stale_requests`` is no longer decidable
   (``/decide`` → HTTP 409) and the stores stay un-touched.
 * **Exactly-once on approval** — a four-eyes ``/decide`` re-dispatches
@@ -362,12 +362,10 @@ async def test_expired_grant_not_honored(
 
     The resolver excludes a grant whose ``expires_at`` is in the past, so
     the agent reverts to the ``dangerous`` baseline, which for an agent is
-    ``deny`` (``_SAFETY_DEFAULT["dangerous"]`` in
-    :mod:`meho_backplane.auth.permissions`). The point of the criterion —
-    an expired grant grants nothing, and ``read_secret`` / ``write_secret``
-    never run — holds: the move is refused outright. (An agent move parks
-    only while a live grant raises the verdict off the deny baseline; see
-    ``test_active_grant_parks_not_auto_executes``.)
+    ``needs-approval`` (``_SAFETY_DEFAULT["dangerous"]`` in
+    :mod:`meho_backplane.auth.permissions`, #3980). The point of the
+    criterion — an expired grant grants nothing, and ``read_secret`` /
+    ``write_secret`` never run — holds: the move waits for a person.
     """
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
     agent_sub = "agent:expired-grant"
@@ -378,9 +376,8 @@ async def test_expired_grant_not_honored(
 
     result = await _dispatch_move(_make_operator(agent_sub, principal_kind=PrincipalKind.AGENT))
 
-    # Refused — not parked, not executed. The dangerous baseline denies an
-    # agent with no live grant; the expired grant authorizes nothing.
-    assert result.status == "denied", result.error
+    # Parked, not executed: the expired grant authorizes nothing.
+    assert result.status == "awaiting_approval", result.error
     assert fake.secrets.kv.v2.read_calls == []
     assert fake.secrets.kv.v2.put_calls == []
 
@@ -396,9 +393,7 @@ async def test_active_grant_parks_not_auto_executes(
     ceiling is ``needs-approval`` (``_SAFETY_CEILING["dangerous"]``), so a
     grant of ``verdict="auto-execute"`` is capped to ``needs-approval`` —
     an agent can NEVER auto-execute a credential move, even with a
-    standing grant. The live grant's only effect is to raise the verdict
-    off the deny baseline (deny → needs-approval), so the move parks
-    instead of being denied. The stores stay un-touched on the park.
+    standing grant. The move parks. The stores stay un-touched on the park.
     """
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
     agent_sub = "agent:active-grant"
@@ -409,7 +404,7 @@ async def test_active_grant_parks_not_auto_executes(
 
     result = await _dispatch_move(_make_operator(agent_sub, principal_kind=PrincipalKind.AGENT))
 
-    # Parked (the live grant lifted deny → needs-approval), never executed.
+    # Parked (the grant is capped at needs-approval), never executed.
     assert result.status == "awaiting_approval", result.error
     assert fake.secrets.kv.v2.read_calls == []
     assert fake.secrets.kv.v2.put_calls == []
@@ -502,11 +497,12 @@ async def test_decide_redispatch_executes_move_once(
     key = make_rsa_keypair("kid-decider")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
+        # An admin may approve another person's dangerous change (#3328).
         token = mint_token(
             key,
             fresh_sign_in=True,
             sub="operator:decider",  # different from the requester
-            tenant_role=TenantRole.OPERATOR.value,
+            tenant_role=TenantRole.TENANT_ADMIN.value,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:

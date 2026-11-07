@@ -48,6 +48,7 @@ _EXPECTED_NAMES = {
     "password_hash",
     "ceph_key",
     "bind_key_secret",
+    "url_secret",
     "uuid",
     "ipv4",
     "ipv6",
@@ -83,6 +84,8 @@ _PUNCT_DOLLAR_HASH_FIXTURE = "password" + ": " + "hunter2" + "$plus#tail"
 # BIND key block (#4617): ``secret "<base64>";`` inside a ``key`` statement.
 _BIND_KEY_SECRET_FIXTURE_POS = 'secret "' + "exampleTsig" + 'Value==";'
 _BIND_KEY_SECRET_FIXTURE_NEG = 'the secret is in the vault; key "rndc-key" { algorithm hmac-md5; };'
+_URL_SECRET_FIXTURE_POS = "https://files.example.com/a.iso?sp=r&sig=made-up-sig"
+_URL_SECRET_FIXTURE_NEG = "https://files.example.com/a.iso?sp=r&se=2026-12-01"
 # PEM blocks and crypt(3) hashes, built from fragments so secret scanners
 # do not flag this file.
 _PEM_DASHES = "-" * 5
@@ -719,6 +722,9 @@ def test_get_pattern_unknown_raises() -> None:
             _BIND_KEY_SECRET_FIXTURE_NEG,
             False,
         ),
+        # url_secret: the signature of a signed link, not its other params
+        ("url_secret", _URL_SECRET_FIXTURE_POS, True),
+        ("url_secret", _URL_SECRET_FIXTURE_NEG, False),
         # uuid: RFC 4122 canonical hex form
         (
             "uuid",
@@ -855,6 +861,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("pem_private_key", _PEM_PUBLIC_KEY_FIXTURE_NEG, False),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_POS, True),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_NEG, False),
+    ("url_secret", _URL_SECRET_FIXTURE_POS, True),
+    ("url_secret", _URL_SECRET_FIXTURE_NEG, False),
     ("password_hash", _SHADOW_LINE_FIXTURE, True),
     ("password_hash", "daemon:*:19000:0:99999:7:::", False),
     ("ceph_key", _CEPH_KEYRING_FIXTURE, True),

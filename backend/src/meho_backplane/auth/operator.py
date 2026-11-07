@@ -157,17 +157,20 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   comes from the platform admin group (#5239). The audit rows of the
   request record it as ``tenant_role_source: platform_admin``.
 
-Email validation uses pydantic's ``EmailStr`` (powered by
-``email-validator``); a malformed ``email`` claim from Keycloak is a
-configuration bug and surfaces as a 401 rather than silently propagating
-garbage downstream.
+``email`` is a plain string, not pydantic's ``EmailStr`` (#5561). It is
+soft identity, shown and recorded but never used to decide access, so an
+address on a reserved domain such as ``.local`` or ``.test`` (which
+``email-validator`` refuses) must not stop a person from using MEHO.
+:func:`~meho_backplane.auth.jwt._extract_email` checks only the shape of
+the claim; a malformed value is dropped with a warning in the log, and
+the token stays valid.
 """
 
 from enum import StrEnum
 from typing import NamedTuple
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "MACHINE_PRINCIPAL_KINDS",
@@ -336,7 +339,7 @@ class Operator(BaseModel):
 
     sub: str
     name: str | None = None
-    email: EmailStr | None = None
+    email: str | None = None
     raw_jwt: str = Field(repr=False)
     tenant_id: UUID
     tenant_role: TenantRole
@@ -390,6 +393,12 @@ class Operator(BaseModel):
     tenant_chosen: bool = True
     #: The role comes from the platform admin group, not a role group (#5239).
     role_from_platform_admin: bool = False
+    #: This call came from a person's web interface session (#3980). Only
+    #: :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`
+    #: sets it. No token claim, header or request field can set it, and REST
+    #: and MCP never do. Off means the call came with a token: it follows the
+    #: agent rule, so only ``safe`` operations run at once.
+    web_session: bool = False
 
     @property
     def may_self_approve(self) -> bool:

@@ -31,8 +31,9 @@ adds a ``/api/v1`` endpoint, exactly as ``ui/routes/corpus/routes.py`` fronts
   ``since`` (:class:`~meho_backplane.retrieval.usage.SinceValueError`) renders an
   inline 400 error card, never a 500.
 * ``POST /ui/retrieval/eval`` (#1889) -- runs in-process
-  :func:`~meho_backplane.retrieval.eval.eval_all` own-tenant with **no
-  baseline** (the server-side baseline path is 501 today), and swaps
+  :func:`~meho_backplane.retrieval.eval.eval_all` own-tenant and with the
+  operator's ``sub`` (so a user memory of another person never ranks), with
+  **no baseline** (the server-side baseline path is 501 today), and swaps
   ``retrieval/_eval_results.html`` with per-surface ``precision_at_5`` / ``mrr``
   / ``coverage`` + a green/yellow/red verdict pill (mapped in the template from
   the verdict token the service returns verbatim) + the ``overall_verdict``.
@@ -89,7 +90,7 @@ Operator reconstruction
 -----------------------
 
 The :class:`~meho_backplane.ui.auth.middleware.UISessionContext` the
-``require_ui_session`` dependency hands route handlers carries only
+``require_ui_operator`` dependency hands route handlers carries only
 ``operator_sub`` / ``tenant_id`` -- not the full
 :class:`~meho_backplane.auth.operator.Operator` (with its ``sub`` for the
 per-principal predicate). The handler reconstructs the operator from the
@@ -113,8 +114,9 @@ fresh mint + re-set. See :func:`_resolve_fragment_csrf`.
 Tenant scoping + RBAC
 ---------------------
 
-``operator`` role minimum (enforced by ``require_ui_session``; matches the
-OPERATOR floor the ``POST /api/v1/retrieve`` route carries). Diagnostics is
+``operator`` role minimum, enforced by ``require_ui_operator`` on every
+route of the surface: a ``read_only`` session gets ``403 operator_required``.
+This matches the OPERATOR floor the ``POST /api/v1/retrieve`` route carries. Diagnostics is
 **own-tenant only** -- tenant identity is derived from ``session.tenant_id``
 via the reconstructed operator, there is no ``tenant_filter`` (that is the
 sibling T3 concern). The whole surface is read-only -- no confirm gates.
@@ -159,11 +161,12 @@ from meho_backplane.retrieval.usage import (
     parse_since,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token, verify_csrf_token
 from meho_backplane.ui.templating import get_templates
 
@@ -211,10 +214,12 @@ _MAX_TENANT_FILTER_LENGTH: Final[int] = 64
 #: parser accepts.
 _SINCE_OPTIONS: Final[tuple[str, ...]] = ("24h", "7d", "30d", "90d")
 
-#: Module-level ``Depends`` closure for the operator-session gate. Built once
+#: Module-level ``Depends`` closure for the operator-role gate. Built once
 #: (rather than inline) to satisfy ruff B008, matching the convention the
-#: corpus / kb / dashboard routes established.
-_require_session = Depends(require_ui_session)
+#: corpus / kb / dashboard routes established. ``require_ui_operator`` checks
+#: the role in the session's access token, so every route of the surface has
+#: the same ``operator`` floor as its REST twin.
+_require_session = Depends(require_ui_operator)
 
 
 async def _resolve_operator(session: UISessionContext) -> Operator:
@@ -270,7 +275,7 @@ async def _resolve_operator_softly(session: UISessionContext) -> Operator | None
     except Exception as exc:
         log.info(
             "ui_retrieval_operator_probe_unavailable",
-            session_id=str(session.session_id),
+            session_ref=session_ref(session.session_id),
             reason=type(exc).__name__,
         )
         return None
@@ -768,7 +773,8 @@ async def _render_eval(
     (``retrieve_eval.py``) since v0.2 ships no checked-in corpus snapshot, so
     this surface never offers a baseline toggle and never reaches that path.
     Unlike usage, ``eval_all`` takes **no session** (it owns its own retrieval
-    plumbing), so it is called as ``await eval_all(tenant_id=operator.tenant_id)``.
+    plumbing), so it is called with the operator's tenant and ``sub``: a user
+    memory of another person never ranks in the answer.
 
     Swaps ``retrieval/_eval_results.html`` into ``#retrieval-eval-results``: per
     surface, ``precision_at_5`` / ``mrr`` / ``coverage`` and a green/yellow/red
@@ -794,11 +800,12 @@ async def _render_eval(
 async def _run_eval(operator: Operator) -> EvalResult:
     """Run in-process ``eval_all`` own-tenant with no baseline.
 
-    Scoped to ``operator.tenant_id``; ``eval_all`` runs every shipped surface's
-    corpus (the default) and computes MEHO-only metrics -- no ``baseline``
-    argument, so the 501 baseline path is never reached.
+    Scoped to ``operator.tenant_id`` and ``operator.sub`` (the per-person rule
+    on user memories); ``eval_all`` runs every shipped surface's corpus (the
+    default) and computes MEHO-only metrics -- no ``baseline`` argument, so the
+    501 baseline path is never reached.
     """
-    result = await eval_all(tenant_id=operator.tenant_id)
+    result = await eval_all(tenant_id=operator.tenant_id, principal_sub=operator.sub)
     log.info(
         "ui_retrieval_eval_completed",
         operator_sub=operator.sub,
@@ -918,6 +925,7 @@ async def _run_retire(
             session=db_session,
             surfaces=list(SURFACE_VERDICT_ORDER),
             tenant_id=target_tenant,
+            principal_sub=operator.sub,
             source="request_usage",
         )
     log.info(

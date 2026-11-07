@@ -10,7 +10,10 @@
 #      16 GB, a 120 GB thin disk (section 5)
 #   2. the form-2 install from the form-2 download, with the placeholder
 #      host name and no settings
-#   3. the appliance pieces under /opt/meho/appliance, and cloud-init off
+#   3. the appliance pieces under /opt/meho/appliance, and cloud-init off;
+#      then the OS hardening to the CIS Ubuntu 24.04 Benchmark, Level 1 -
+#      Server, and its scan (cis/harden.sh); the scan's result list goes
+#      next to the OVA
 #   4. clean for copying: clean.sh, started with systemd-run outside any
 #      SSH session; it checks itself and powers off
 #   5. export: hardware version 20 (section 6), govc export.ovf, our product
@@ -35,6 +38,13 @@ readonly APPLIANCE_DIR
 # the SHA256SUMS file next to it. To move to a newer serial, change both.
 readonly DEFAULT_BASE_IMAGE_URL=https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.ova
 readonly DEFAULT_BASE_IMAGE_SHA256=ce599f89777c6eaa1a3156698f004b7938dcc16680132d5f10da1269770e74a2
+# The CIS content of ComplianceAsCode, one release, and the sha512 from the
+# .sha512 file next to it. To move to a newer release, change all three and
+# check cis/tailoring.xml against its rules.
+readonly CIS_CONTENT_VERSION=0.1.82
+readonly CIS_CONTENT_URL=https://github.com/ComplianceAsCode/content/releases/download/v$CIS_CONTENT_VERSION/scap-security-guide-$CIS_CONTENT_VERSION.tar.gz
+readonly CIS_CONTENT_SHA512=fba053c2aeb8a6c4534b356bdc5c463268862b6b72771cc54748792dad84a6a60afab7c6d110c41d60328b360cbbe3097bba581f245eeba00ef19d0d76dad9d7
+readonly CIS_DATA_STREAM=ssg-ubuntu2404-ds.xml
 readonly VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 readonly CPUS=4
 readonly MEMORY_MB=16384
@@ -63,9 +73,11 @@ Usage:
   build.sh [--from-step <1-5>] <version> <out-dir>
 
   <version>      The MEHO version without the leading "v", for example 0.40.0.
-  <out-dir>      The folder for meho-appliance-<version>.ova and SHA256SUMS.
+  <out-dir>      The folder for meho-appliance-<version>.ova, SHA256SUMS and
+                 the CIS scan's result list meho-appliance-<version>-cis.txt.
   --from-step N  Go on from step N with the build VM that exists: 2 the
-                 form-2 install, 3 the appliance pieces, 4 the clean,
+                 form-2 install, 3 the appliance pieces and the hardening,
+                 4 the clean,
                  5 the export. Default: 1, a new build VM. 2 works only
                  when install.sh stopped before it started RKE2 (its
                  step 3). 4 works only when clean.sh stopped in its
@@ -96,10 +108,15 @@ Settings, from the environment:
   MEHO_BASE_IMAGE_URL, MEHO_BASE_IMAGE_SHA256
                            The Ubuntu cloud image OVA and its sha256.
                            Default: the pinned serial in this script.
-  MEHO_BASE_IMAGE_CACHE    A folder that keeps the downloaded base image
-                           between builds. Default: <out-dir>/.cache.
+  MEHO_BASE_IMAGE_CACHE    A folder that keeps the downloaded base image and
+                           the CIS content between builds. Default:
+                           <out-dir>/.cache.
 
-Tools on PATH: govc, ssh, scp, ssh-keygen, curl, tar, sha256sum, base64.
+The build VM must reach the Ubuntu archive in step 3: the hardening
+installs packages.
+
+Tools on PATH: govc, ssh, scp, ssh-keygen, curl, tar, sha256sum,
+sha512sum, base64.
 HELP
 }
 
@@ -182,7 +199,7 @@ check_settings() {
         usage_error "MEHO_BUILD_SSH_KEY must name a private key with its public key next to it as $MEHO_BUILD_SSH_KEY.pub."
     [[ $MEHO_BUILD_ADDRESS == */* ]] || usage_error "MEHO_BUILD_ADDRESS must have a prefix, for example 10.0.0.10/24."
     [[ $MEHO_BUILD_HOSTNAME == *.* ]] || usage_error "MEHO_BUILD_HOSTNAME must be a full DNS name."
-    need_tools govc ssh scp ssh-keygen curl tar sha256sum base64
+    need_tools govc ssh scp ssh-keygen curl tar sha256sum sha512sum base64
     VM=${MEHO_BUILD_VM:-meho-appliance-$VERSION}
     SSH_KEY=$MEHO_BUILD_SSH_KEY
     SSH_OPTIONS=(
@@ -346,8 +363,11 @@ run_form2_install() {
 }
 
 add_appliance_pieces() {
-    local name
+    local name docs_ref
     name=$(basename "$MEHO_DOWNLOAD" .tar)
+    # The banner links to the docs of the commit these scripts come from,
+    # not of the download's version, which may be an older release.
+    docs_ref=$(git -C "$APPLIANCE_DIR" rev-parse HEAD 2>/dev/null) || docs_ref=main
     # The unpacked download without the RKE2 files and the image archive,
     # which are already where RKE2 reads them: install.sh --from-disk needs
     # the rest at first start.
@@ -361,13 +381,52 @@ add_appliance_pieces() {
     scp_build -r "$APPLIANCE_DIR/firststart" "$BUILD_USER@${MEHO_BUILD_ADDRESS%/*}:meho-firststart"
     ssh_build "sudo install -d -m 0755 /opt/meho/appliance/firststart &&
         sudo install -m 0755 meho-firststart/firststart.sh meho-firststart/banner.sh /opt/meho/appliance/firststart/ &&
+        sudo sed -i 's/^readonly DOCS_REF=main\$/readonly DOCS_REF=$docs_ref/' /opt/meho/appliance/firststart/banner.sh &&
         sudo install -m 0644 meho-firststart/meho-firststart.service meho-firststart/meho-banner.service /etc/systemd/system/ &&
         rm -rf meho-firststart &&
         sudo systemctl daemon-reload &&
         sudo systemctl enable meho-firststart.service meho-banner.service"
-    # shortcut: the OS hardening (#4640) is not built yet; add its install
-    # lines here when it lands.
     ok "the appliance pieces are under /opt/meho/appliance, cloud-init is off, and first start runs at the first boot"
+}
+
+download_cis_content() {
+    local cache=${MEHO_BASE_IMAGE_CACHE:-$OUT_DIR/.cache} archive
+    archive=$cache/${CIS_CONTENT_URL##*/}
+    mkdir -p "$cache"
+    if [[ ! -f $archive ]]; then
+        note "downloading $CIS_CONTENT_URL"
+        curl -fsSL -o "$archive.part" "$CIS_CONTENT_URL"
+        mv -f "$archive.part" "$archive"
+    fi
+    echo "$CIS_CONTENT_SHA512  $archive" | sha512sum -c - >/dev/null ||
+        fail "The CIS content $archive does not have the sha512 in build.sh." \
+            "delete the file and run the build again; if it is wrong again, check CIS_CONTENT_VERSION and CIS_CONTENT_SHA512."
+    tar -xzOf "$archive" "scap-security-guide-$CIS_CONTENT_VERSION/$CIS_DATA_STREAM" >"$WORK/$CIS_DATA_STREAM"
+    ok "the CIS content of ComplianceAsCode $CIS_CONTENT_VERSION is checksum-verified"
+}
+
+# harden_os: cis/harden.sh on the build VM. Its result list holds rule names
+# and results only, nothing of the lab, so it can be a public artifact.
+harden_os() {
+    local results=meho-appliance-$VERSION-cis.txt build_host=$BUILD_USER@${MEHO_BUILD_ADDRESS%/*} rc=0
+    download_cis_content
+    # No list of an earlier run, so a list that comes back is of this run.
+    ssh_build "rm -rf meho-cis && sudo rm -f /run/meho-cis-results.txt"
+    scp_build -r "$APPLIANCE_DIR/cis" "$build_host:meho-cis"
+    scp_build "$WORK/$CIS_DATA_STREAM" "$build_host:meho-cis/$CIS_DATA_STREAM"
+    # /run is a RAM disk, so neither the list nor the logs are in the OVA.
+    ssh_build "sudo bash meho-cis/harden.sh --content meho-cis/$CIS_DATA_STREAM --results /run/meho-cis-results.txt" || rc=$?
+    if ((rc != 0)); then
+        # When harden.sh got to its scan, the list names the rules to fix.
+        if scp_build "$build_host:/run/meho-cis-results.txt" "$OUT_DIR/$results" 2>/dev/null; then
+            note "the scan's result list is $OUT_DIR/$results"
+        fi
+        fail "cis/harden.sh stopped on the build VM (exit code $rc)." \
+            "read its [FAIL] line and any [WARN] lines above, fix the cause, then go on with --from-step 3."
+    fi
+    scp_build "$build_host:/run/meho-cis-results.txt" "$OUT_DIR/$results"
+    ssh_build "rm -rf meho-cis"
+    ok "the OS is hardened to CIS Ubuntu 24.04 Level 1 - Server; the scan's result list is $OUT_DIR/$results"
 }
 
 run_clean() {
@@ -446,8 +505,9 @@ main() {
         run_form2_install
     fi
     if ((FROM_STEP <= 3)); then
-        step "Step 3: the appliance pieces"
+        step "Step 3: the appliance pieces and the OS hardening"
         add_appliance_pieces
+        harden_os
     fi
     if ((FROM_STEP <= 4)); then
         step "Step 4: clean for copying"

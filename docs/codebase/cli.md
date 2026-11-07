@@ -185,6 +185,8 @@ cli/
     ├── auth/
     │   ├── devicecode.go      # OAuth 2.0 device-code flow + OIDC discovery.
     │   ├── devicecode_test.go # httptest-driven flow + discovery tests.
+    │   ├── endpointurl.go     # discovery document checks: issuer is the realm, addresses use https (http only to loopback); redirect check for every identity provider request (WithRedirectCheck); IsLoopbackHost.
+    │   ├── endpointurl_test.go # issuer, scheme, loopback and redirect tests; the sign-in opens only web links.
     │   ├── resolver.go        # --resolve host:port:ip parsing + pinned-dial http.Client (split-DNS escape hatch, #2107).
     │   ├── resolver_test.go   # parse matrix + pinned-dial proof + AC#2 device-auth-POST honours-pin test.
     │   ├── store.go           # TokenStore interface + keyring/file backends.
@@ -264,7 +266,7 @@ cli/
     │   │   ├── connector.go      # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus helpers.
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated. Converts a `file://` / `docs:` Swagger 2.0 spec to OpenAPI 3 before the upload (see swagger2.go); `--save-converted <file>` keeps the converted copy.
     │   │   ├── swagger2.go       # Local Swagger 2.0 → OpenAPI 3.0 conversion for `connector ingest` (#5028), via kin-openapi `openapi2conv`. Fetches nothing; refuses a `$ref` to another file or URL by name; prints a one-line summary per converted spec to stderr.
-    │   │   ├── ingest_status.go  # `meho connector ingest-status <job-id> [--wait] [--json]` (#1621) — post-`--no-wait` poll/inspect verb. Snapshot by default (running → identity+lifecycle echo, exit 0), `--wait` polls to terminal; terminal render + poll loop reuse ingest.go's renderIngestTerminal / pollIngestJob (no duplicated switch). Closes the PR #1618 loop the `--no-wait` hint now names.
+    │   │   ├── ingest_status.go  # `meho connector ingest-status <job-id> [--wait] [--json]` (#1621) — post-`--no-wait` poll/inspect verb. Snapshot by default (running → identity+lifecycle echo with the current phase, exit 0), `--wait` polls to terminal; terminal render + poll loop reuse ingest.go's renderIngestTerminal / pollIngestJob (no duplicated switch). Closes the PR #1618 loop the `--no-wait` hint now names.
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
@@ -519,6 +521,26 @@ Authorization Grant (RFC 8628). End-to-end shape:
    OIDC well-known isn't published, the CLI falls back to
    `<issuer>/.well-known/oauth-authorization-server`
    (RFC 8414 OAuth 2.0 Authorization Server Metadata).
+   * **Document checks.** `FetchDiscovery` (`auth/endpointurl.go`)
+     refuses a document whose `issuer` is not the realm address it
+     was fetched from (a trailing slash is ignored; OpenID Connect
+     Discovery §4.3, RFC 8414 §3.3). The issuer and the
+     `device_authorization_endpoint`, `token_endpoint` and
+     `authorization_endpoint` must use `https://`. Plain `http://` is
+     accepted only for a loopback host (`localhost`, `127.0.0.0/8`,
+     `::1`), the same rule as for the backplane URL. The discovery
+     URL itself is checked with that rule before the request is sent.
+     Token refresh and the approval sign-in load the document through
+     the same function. `RunFreshSignIn` checks the
+     `authorization_endpoint` again before it gives the link to the
+     system browser opener.
+   * **Redirects.** Every request to the identity provider (discovery,
+     device-code request, token polling, the code exchange of the
+     approval sign-in, token refresh) runs through a client from
+     `WithRedirectCheck` (`auth/endpointurl.go`). It follows a
+     redirect only to an `https://` address, or to `http://` on a
+     loopback host, and checks the new address before the request
+     goes there. Up to ten redirects are followed, as in `net/http`.
 3. **Device-code initiation.** Using
    [`golang.org/x/oauth2`](https://pkg.go.dev/golang.org/x/oauth2)'s
    `Config.DeviceAuth`, the CLI POSTs `client_id` + `scope` (default
@@ -959,6 +981,26 @@ another flag of the command (`--query --json`) is skipped, so it does
 not count as a setting. `usage_errors_test.go` walks every command and
 checks that an unknown flag prints a message that names the flag. Missing
 required flags (`MarkFlagRequired`) are not covered by this path yet.
+
+### Server text on the terminal
+
+Text that comes from the server can hold characters a terminal does not
+print as text: ESC (cursor moves, line erases), CR, BEL, Unicode bidi
+controls and other format characters. `output.SafeText`
+(`internal/output/safetext.go`) shows each of them as a visible escape
+(`\x1b`, `\x0d`, `\u202e`) and leaves other text as it is.
+`output.SafeLines` does the same for each line of a block that spans
+lines (indented JSON, an error message) and keeps the line breaks.
+
+- The approval commands (`meho approvals show`, `list`, `approve`,
+  `approve --work-ref ... --in-order`, `withdraw`) pass every
+  server string through them. So the request the approver reads right
+  before "Type yes" is the request the server holds: a subject or
+  summary cannot overwrite the risk level line.
+- `output.RenderError` passes the human error line through `SafeLines`,
+  so a server body in an error message is shown the same way. The
+  `--json` paths are unchanged: JSON encoding already escapes control
+  characters.
 
 ### Sensitive-data discipline
 

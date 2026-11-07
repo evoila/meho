@@ -102,6 +102,7 @@ from meho_backplane.api.v1.events_ingest import router as api_v1_events_ingest_r
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
+from meho_backplane.api.v1.instance_settings import router as api_v1_instance_settings_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
 from meho_backplane.api.v1.operation_overrides import (
@@ -184,7 +185,7 @@ from meho_backplane.memory import (
     start_memory_expiry_sweeper,
     stop_memory_expiry_sweeper,
 )
-from meho_backplane.metrics import render_metrics
+from meho_backplane.metrics import VAULT_TENANT_SCOPE_ENFORCED, render_metrics
 from meho_backplane.metrics_access import verify_metrics_access
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import operation_catalog_write, set_default_reducer
@@ -218,6 +219,8 @@ from meho_backplane.operations.shutdown_drain import (
     reset_drain_state,
     wait_for_running_operations,
 )
+from meho_backplane.operations.unpriced_model import warn_if_model_unpriced
+from meho_backplane.request_body_limit import RequestBodyLimitMiddleware
 from meho_backplane.request_usage.retention import (
     start_request_usage_retention_sweeper,
     stop_request_usage_retention_sweeper,
@@ -238,6 +241,7 @@ from meho_backplane.ui.auth import (
 )
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.csrf import CSRFMiddleware
+from meho_backplane.ui.fragment_guard import FragmentNavigationMiddleware
 from meho_backplane.ui.paths import ensure_static_dist_dir, static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.security_headers import UIFramingHeadersMiddleware
@@ -348,7 +352,9 @@ def _advise_vault_tenant_scope_unenforced() -> None:
     lifespan uses (e.g. :func:`_preload_embedding_model`): a single
     ``structlog`` event, no f-strings, no raise.
     """
-    if not get_settings().vault_kv_tenant_scope_prefix:
+    enforced = bool(get_settings().vault_kv_tenant_scope_prefix)
+    VAULT_TENANT_SCOPE_ENFORCED.set(1 if enforced else 0)
+    if not enforced:
         structlog.get_logger().warning(
             "vault_tenant_scope_unenforced",
             enable_via="VAULT_KV_TENANT_SCOPE_PREFIX",
@@ -518,6 +524,9 @@ async def _run_lifespan_startup() -> None:
     # (#1673).
     _assert_mcp_resource_uri_configured()
     _advise_vault_tenant_scope_unenforced()
+    # #5771: a default model with no price row costs 0, so the spend
+    # limits would not count it. Warn, but start.
+    warn_if_model_unpriced(get_settings().agent_default_model)
     # G10.0-T5 (#866) — ensure ``ui/static/dist/`` exists so the
     # StaticFiles mount does not crash on a fresh clone where
     # ``tailwindcss --watch`` has not yet materialised the compiled
@@ -862,11 +871,30 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         reset_drain_state()
 
 
+def api_docs_enabled() -> bool:
+    """Return whether the API docs pages (``/openapi.json``, ``/docs``, ``/redoc``) are on.
+
+    They are off unless ``API_DOCS_ENABLED`` is set to a true value. They
+    need no login, so a production instance serves them only when the
+    deployment asks for it. The env var is read directly, like
+    ``MEHO_ENABLE_RBAC_TEST_ROUTE`` below: the app is built at import time,
+    before the chassis settings may have been pinned. The CLI's committed
+    ``cli/api/openapi.json`` snapshot is written from ``app.openapi()`` and
+    does not need the route.
+    """
+    return parse_bool_env(os.environ.get("API_DOCS_ENABLED"))
+
+
+_API_DOCS_ON: Final[bool] = api_docs_enabled()
+
 app: FastAPI = FastAPI(
     title=_APP_NAME,
     version=__version__,
     description="MEHO governance-layer backplane (chassis-only in v0.1).",
     lifespan=lifespan,
+    openapi_url="/openapi.json" if _API_DOCS_ON else None,
+    docs_url="/docs" if _API_DOCS_ON else None,
+    redoc_url="/redoc" if _API_DOCS_ON else None,
 )
 
 # Middleware registration order matters for ASGI: ``add_middleware``
@@ -874,7 +902,8 @@ app: FastAPI = FastAPI(
 # outermost layer (its ``__call__`` runs first on the request side and
 # last on the response side). The required runtime order for v0.2 is:
 #
-#   client → UIFramingHeadersMiddleware → UISessionMiddleware
+#   client → UIFramingHeadersMiddleware → FragmentNavigationMiddleware
+#          → UISessionMiddleware
 #          → CSRFMiddleware → RequestContextMiddleware
 #          → BroadcastDetailMiddleware → AuditMiddleware → router
 #          → handler
@@ -890,6 +919,13 @@ app: FastAPI = FastAPI(
 #   through unstamped) and is header-only: it never reads the body,
 #   the session, or the request context, so its position relative to
 #   the inner chain is not load-bearing beyond "outside the redirect".
+# - ``FragmentNavigationMiddleware`` (#769) outside
+#   ``UISessionMiddleware`` so it sees what a console route actually
+#   rendered. A navigation that lands on a fragment URL (a tab left on
+#   ``/ui/approvals/badge``, a bookmark) would otherwise show a bare
+#   partial as a whole page; the guard sends it to the parent page
+#   instead. It only acts on ``200 text/html``, so the inner
+#   middleware's 302-to-login passes through untouched.
 # - ``UISessionMiddleware`` (G10.0-T4 #865, mounted by T5 #866)
 #   outermost so unauthenticated ``/ui/*`` requests 302 to
 #   ``/ui/auth/login`` BEFORE any inner middleware does
@@ -930,6 +966,7 @@ app: FastAPI = FastAPI(
 # rule, ``AuditMiddleware`` is registered *first* (becomes innermost),
 # then ``BroadcastDetailMiddleware``, then ``RequestContextMiddleware``,
 # then ``CSRFMiddleware``, then ``UISessionMiddleware``, then
+# ``FragmentNavigationMiddleware``, then
 # ``UIFramingHeadersMiddleware`` (becomes outermost). Middleware is
 # registered before routers so every endpoint (including the Task #19
 # health/version/ready surfaces and the Task #20 ``/metrics`` route)
@@ -939,7 +976,14 @@ app.add_middleware(BroadcastDetailMiddleware)
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(UISessionMiddleware)
+app.add_middleware(FragmentNavigationMiddleware)
 app.add_middleware(UIFramingHeadersMiddleware)
+# ``RequestBodyLimitMiddleware`` is the outermost layer: a request body
+# above ``HTTP_MAX_REQUEST_BODY_BYTES`` gets a 413 before any inner
+# middleware or handler reads it. Header-only on the way in, so its
+# position relative to the chain below is not load-bearing beyond
+# "outside everything that buffers a body".
+app.add_middleware(RequestBodyLimitMiddleware)
 
 # G0.25 (#1694): app-level HTTPException handler. Intercepts exactly
 # the BFF refresh path's ``401 session_expired`` on ``/ui/*`` paths
@@ -1037,6 +1081,11 @@ app.include_router(api_v1_targets_router)
 # capture policy (PATCH /api/v1/tenants/flight-recorder-policy;
 # tenant-scoped, tenant_admin). Operator-plane REST + CLI only; no MCP tool.
 app.include_router(api_v1_tenants_router)
+# Settings file (core.md §5): GET /api/v1/settings/export, POST
+# /api/v1/settings/import (?preview=true), GET /api/v1/settings/history.
+# tenant_admin (own tenant) or platform_admin (several tenants); human-only
+# import. Operator-plane REST + CLI only; no MCP tool.
+app.include_router(api_v1_instance_settings_router)
 # T3 (#2880) -- event_source registry admin surface at
 # /api/v1/event-sources*. Tenant-scoped CRUD (operator reads,
 # tenant_admin writes) the inbound webhook ingest (#2881) resolves a

@@ -1,8 +1,12 @@
 {
-  "kit_version": "1.0",
+  "kit_version": "1.2",
   "names": {
     "AuthModel": {
       "kind": "class"
+    },
+    "CALLER_ADDRESS_MARKER": {
+      "kind": "value",
+      "type": "str"
     },
     "Connector": {
       "kind": "class"
@@ -127,6 +131,9 @@
     "ProbeResult": {
       "kind": "class"
     },
+    "RetiredOp": {
+      "kind": "class"
+    },
     "Target": {
       "kind": "class",
       "parts": {
@@ -204,6 +211,14 @@
       "kind": "function",
       "returns": "dict[str, object]"
     },
+    "register_connector_catalog": {
+      "inputs": [
+        "package: str",
+        "resource: str = 'catalog.yaml'"
+      ],
+      "kind": "function",
+      "returns": "None"
+    },
     "register_connector_v2": {
       "inputs": [
         "*",
@@ -227,6 +242,14 @@
       "inputs": [
         "op_id: str",
         "builder: PreviewBuilder"
+      ],
+      "kind": "function",
+      "returns": "None"
+    },
+    "register_retired_operations": {
+      "inputs": [
+        "package: str",
+        "ops: Iterable[RetiredOp]"
       ],
       "kind": "function",
       "returns": "None"

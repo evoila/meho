@@ -8,8 +8,9 @@ Covers the connector's load-bearing contracts on the ``net.*`` mould:
 * ``mail.send`` is a **synthetic** targetless typed op: it dispatches
   with ``target=None``, the wire ``connector_id`` ``mail-smtp-1.x``
   round-trips through the parser, and the descriptor row carries
-  ``safety_level="caution"`` + ``requires_approval=False`` (operators
-  auto-run; agents ride the policy gate's needs-approval default).
+  ``safety_level="caution"`` + ``requires_approval=False`` (a person in
+  the web interface runs it at once; a token call and an agent wait for
+  approval, #3980).
 * The recipient allowlist ``MAIL_RECIPIENT_ALLOWLIST`` has **inverted**
   semantics: empty ⇒ every send refused *before any SMTP connection
   opens*; full-address and domain entries admit recipients.
@@ -52,7 +53,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.mail import ops as mail_ops
@@ -63,10 +64,7 @@ from meho_backplane.connectors.mail.allowlist import (
     parse_recipient_allowlist,
 )
 from meho_backplane.connectors.mail.ops import register_mail_typed_operations
-from meho_backplane.connectors.mail.tenant_policy import (
-    reset_tenant_mail_policy_cache_for_testing,
-    resolve_tenant_recipient_allowlist,
-)
+from meho_backplane.connectors.mail.tenant_policy import resolve_tenant_recipient_allowlist
 from meho_backplane.connectors.mail.transport import MailSendResult, send_email
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
@@ -108,11 +106,9 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
     reset_dispatcher_caches()
-    reset_tenant_mail_policy_cache_for_testing()
     yield
     get_settings.cache_clear()
     reset_dispatcher_caches()
-    reset_tenant_mail_policy_cache_for_testing()
 
 
 def _configure_mail_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
@@ -294,6 +290,7 @@ async def _registered_mail_op(stub_embedding_service: AsyncMock) -> AsyncIterato
 
 
 def _make_operator() -> Operator:
+    # A person in the web interface, so the ``caution`` send runs at once (#3980).
     return Operator(
         sub="test-operator",
         name=None,
@@ -301,6 +298,7 @@ def _make_operator() -> Operator:
         raw_jwt="fake.jwt.value",
         tenant_id=UUID(int=0),
         tenant_role=TenantRole.OPERATOR,
+        web_session=True,
     )
 
 
@@ -1243,6 +1241,46 @@ async def test_resolver_fails_closed_to_deny_on_read_error(
     )
     resolved = await resolve_tenant_recipient_allowlist(UUID(int=7))
     assert resolved == (frozenset(), frozenset())
+
+
+async def _narrow_tenant_mail_allowlist(value: str | None) -> None:
+    """Change the seeded tenant's column in a fresh session, as another process would."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        await session.execute(
+            update(Tenant).where(Tenant.id == _TENANT_ID).values(mail_recipient_allowlist=value)
+        )
+        await session.commit()
+
+
+async def test_resolver_sees_a_policy_change_on_the_next_read() -> None:
+    """A change committed after a read governs the very next read, with no eviction."""
+    await _seed_tenant_mail_allowlist(None)
+    assert await resolve_tenant_recipient_allowlist(_TENANT_ID) is None
+
+    await _narrow_tenant_mail_allowlist("")
+
+    assert await resolve_tenant_recipient_allowlist(_TENANT_ID) == (frozenset(), frozenset())
+
+
+async def test_narrowed_policy_refuses_the_next_dispatched_send(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_smtp: type,
+    _registered_mail_op: None,
+) -> None:
+    """A send that was allowed a moment ago is refused right after the policy narrows."""
+    _configure_mail_env(monkeypatch)
+    await _seed_tenant_mail_allowlist(None)
+    first = await _dispatch_send({"to": ["a@example.com"], "subject": "s", "body": "b"})
+    assert first.status == "ok", first.error
+    assert first.result["sent"] is True
+
+    await _narrow_tenant_mail_allowlist("")
+
+    second = await _dispatch_send({"to": ["a@example.com"], "subject": "s", "body": "b"})
+    assert second.status == "ok", second.error
+    assert second.result["sent"] is False
+    assert second.result["reason"] == "not_in_recipient_allowlist"
 
 
 async def test_tenant_denied_send_writes_audit_row(

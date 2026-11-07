@@ -147,6 +147,19 @@ The Kubernetes connector (G3.2, filed against #214) uses **`kubernetes_asyncio`*
 
 Goal G10 (Operator web UI, [#336](https://github.com/evoila/meho/issues/336)) ships as a server-rendered hypermedia application served by the existing FastAPI backplane. No SPA framework, no Node toolchain in CI, no separate frontend deploy artifact.
 
+> **Note (2026-11-05) — the SPA direction was taken and withdrawn.** In October 2026 an
+> internal decision proposed rebuilding the MEHO web interface as a single-page app,
+> the approvals page first. It would have superseded this decision and relaxed the
+> "no SPA bundle" clause of decision #10. **That direction was withdrawn on 2026-11-05**
+> and never reached the codebase: no SPA bundle, Node toolchain or second build step was
+> ever added. Decisions #9 and #10 stand exactly as written — the pages are server-built,
+> the approvals page included.
+>
+> What survives from that October decision is organisational rather than architectural,
+> and does not change #9: one UI team across the MEHO web interfaces, one shared component
+> library and style guide, one login, and one top bar with an app switcher. The approvals
+> page is still the first surface to improve; it is improved as a server-built page.
+
 - **HTMX 2** for partial-page swaps over the wire. GA Jun 2024; 2.x supported in perpetuity per [htmx.org/posts/2024-06-17-htmx-2-0-0-is-released](https://htmx.org/posts/2024-06-17-htmx-2-0-0-is-released/). Operator-driven actions (e.g., `meho vsphere vm.list`) render a Jinja2 template fragment that HTMX swaps into the page; no full-page reload.
 - **Jinja2** for HTML templates — already FastAPI's recommended templating. One template tree per surface (broadcast feed, topology, KB search, memory, audit, connectors).
 - **Tailwind CSS 4** for styling. [v4.0 GA 22 Jan 2025](https://tailwindcss.com/blog/tailwindcss-v4); CSS-first config via `@theme`; oklch palette; ~5× faster builds than v3 (Lightning CSS engine). Built once at backend-image build time via the standalone CLI binary — no `node_modules` enters CI or the image.
@@ -173,6 +186,10 @@ Also load-bearing: decision #11 below picks the Backend-for-Frontend auth patter
 ### 10. Frontend deploy shape — **server-rendered from the existing FastAPI backplane at `/ui/*`; tiny static CSS+JS bundle at `/ui/static/*`**
 
 The web UI is part of the backplane process. No separate deploy artifact, no separate ingress, no separate TLS cert, no SPA bundle.
+
+> **Note (2026-11-05).** The "no SPA bundle" clause above was briefly in question — an
+> October 2026 internal decision would have relaxed it. That direction was withdrawn;
+> see the note under decision #9. The clause stands.
 
 - **Routes** at `/ui/*` resolve to FastAPI handlers that render Jinja2 templates and return HTML. HTMX partial swaps target the same surface.
 - **Static assets** (one compiled `tailwind.css`, vendored `htmx.min.js`, `alpine.min.js`, `cytoscape.min.js`, logos) live under `backend/src/meho_backplane/ui/static/` and are served by FastAPI's `StaticFiles` mount at `/ui/static/*` ([FastAPI tutorial/static-files](https://fastapi.tiangolo.com/tutorial/static-files/)).

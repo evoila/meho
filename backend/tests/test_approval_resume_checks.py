@@ -12,6 +12,13 @@ This suite pins the checks every approved run makes before it starts:
   request saved by id, never the name the agent used when it parked.
 * A request with a preview hash builds the preview again. The run is
   refused when the hash differs, and runs when it matches.
+* A run refused because the target changed, or no longer resolves, is
+  recorded: one audit row, the refusal as the stored run result, the
+  one-resumer claim taken, and the stored run input deleted.
+* A waiting agent that loses the one-resumer claim gets the stored
+  outcome of the run the other caller made: the refusal, or the result
+  of the run. No stored result yet gives an answer that says the outcome
+  is not known.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
+from sqlalchemy import select
 
 import meho_backplane.operations._request_preview as preview_module
 import meho_backplane.operations.dispatcher as dispatcher_module
@@ -32,10 +40,12 @@ from meho_backplane.agent.approval_wait import _resume_approved_or_already_resum
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.operations.approval_queue import (
+    claim_resume,
     create_pending_request,
     resume_dispatch_after_approval,
 )
@@ -117,22 +127,28 @@ async def _update_target(target_id: uuid.UUID, **fields: Any) -> None:
 
 
 async def _park_approved(
-    target_id: uuid.UUID | None, *, preview_hash: str | None = None, fqdn: str | None = None
+    target_id: uuid.UUID | None,
+    *,
+    preview_hash: str | None = None,
+    fqdn: str | None = None,
+    op_id: str = _OP_ID,
+    params: dict[str, Any] | None = None,
 ) -> ApprovalRequest:
     """Park one request against *target_id* the way the dispatcher does, then approve it.
 
     The queue gets an in-memory target that may carry a per-call *fqdn*.
     """
     target = SimpleNamespace(id=target_id, fqdn=fqdn) if target_id is not None else None
+    params = dict(_PARAMS) if params is None else params
     async with get_sessionmaker()() as s:
         request = await create_pending_request(
             s,
             operator=_operator(),
             connector_id=_CONNECTOR_ID,
-            op_id=_OP_ID,
+            op_id=op_id,
             target=target,
-            params=dict(_PARAMS),
-            params_hash=compute_params_hash(_PARAMS),
+            params=params,
+            params_hash=compute_params_hash(params),
             run_id=uuid.uuid4(),
             preview_hash=preview_hash,
         )
@@ -148,6 +164,40 @@ async def _row(request_id: uuid.UUID) -> ApprovalRequest:
         row = await s.get(ApprovalRequest, request_id)
         assert row is not None
         return row
+
+
+async def _resume_audit_rows(request_id: uuid.UUID) -> list[AuditLog]:
+    """The ``approval.resume`` audit rows of one request."""
+    async with get_sessionmaker()() as s:
+        query = select(AuditLog).where(AuditLog.path == "approval.resume")
+        rows = (await s.execute(query)).scalars()
+        return [r for r in rows if r.payload.get("approval_request_id") == str(request_id)]
+
+
+async def _stored_input_count(request_id: uuid.UUID) -> int:
+    """How many stored run-input rows the request still has."""
+    async with get_sessionmaker()() as s:
+        query = select(ApprovalExecutionPayload).where(
+            ApprovalExecutionPayload.request_id == request_id
+        )
+        return len((await s.execute(query)).scalars().all())
+
+
+async def _assert_refusal_recorded(
+    request_id: uuid.UUID, error_code: str, target_id: uuid.UUID
+) -> AuditLog:
+    """The refusal is on the row, in one audit row, and the claim is taken."""
+    (audit,) = await _resume_audit_rows(request_id)
+    assert audit.status_code == 409
+    assert audit.payload["result_status"] == error_code
+    assert audit.payload["target_id"] == str(target_id)
+    stored = await _row(request_id)
+    assert stored.resumed_at is not None, "the request can never run later"
+    assert stored.resume_result is not None
+    assert stored.resume_result["status"] == "denied"
+    assert stored.resume_result["extras"]["error_code"] == error_code
+    assert stored.resume_result["audit_id"] == str(audit.id)
+    return audit
 
 
 def _spy_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -258,6 +308,87 @@ async def test_operator_resume_is_refused_when_the_target_host_changed(
     assert result.status == "denied"
     assert result.extras["error_code"] == "target_changed_since_approval"
     assert result.extras["target_id"] == str(target_id)
+    audit = await _assert_refusal_recorded(request.id, "target_changed_since_approval", target_id)
+    assert result.audit_id == audit.id
+    again = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+    assert again.status == "already_resumed"
+    assert calls == []
+    assert len(await _resume_audit_rows(request.id)) == 1
+
+
+async def test_operator_resume_is_refused_when_the_target_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A target deleted after the request was made: nothing runs, and it is recorded."""
+    target_id = await _persist_target("vc-gone")
+    request = await _park_approved(target_id)
+    calls = _spy_dispatch(monkeypatch)
+    await _update_target(target_id, deleted_at=datetime.now(UTC))
+
+    result = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+
+    assert calls == [], "the vendor must get no call"
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "target_gone_since_approval"
+    assert result.extras["target_id"] == str(target_id)
+    assert str(target_id) in (result.error or "")
+    audit = await _assert_refusal_recorded(request.id, "target_gone_since_approval", target_id)
+    assert result.audit_id == audit.id
+
+
+async def test_target_refusal_holds_when_the_audit_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed audit write is logged; the run is still refused and stored."""
+    import meho_backplane.operations.approval_queue as queue_module
+
+    target_id = await _persist_target("vc-audit")
+    request = await _park_approved(target_id)
+    calls = _spy_dispatch(monkeypatch)
+    await _update_target(target_id, host="second.invalid")
+
+    async def _broken_audit(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(queue_module, "_write_audit_row", _broken_audit)
+    result = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+
+    assert calls == []
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "target_changed_since_approval"
+    assert result.audit_id is None
+    assert await _resume_audit_rows(request.id) == []
+    stored = await _row(request.id)
+    assert stored.resumed_at is not None
+    assert stored.resume_result is not None
+    assert stored.resume_result["extras"]["error_code"] == "target_changed_since_approval"
+
+
+async def test_target_refusal_deletes_the_stored_run_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential write keeps its input in a stored row until it runs; a refusal deletes it."""
+    target_id = await _persist_target("vc-input")
+    params = {"path": "app/config", "value": "<test>"}
+    request = await _park_approved(target_id, op_id="vault.kv.put", params=params)
+    calls = _spy_dispatch(monkeypatch)
+    assert request.execution_handle is not None
+    assert await _stored_input_count(request.id) == 1
+    await _update_target(target_id, host="second.invalid")
+
+    result = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+
+    assert calls == []
+    assert result.extras["error_code"] == "target_changed_since_approval"
+    assert await _stored_input_count(request.id) == 0
 
 
 @pytest.mark.parametrize(
@@ -358,7 +489,87 @@ async def test_agent_direct_resume_is_refused_when_the_target_host_changed(
     assert seen == []
     assert resumed["status"] == "denied"
     assert resumed["extras"]["error_code"] == "target_changed_since_approval"
-    assert (await _row(request.id)).resumed_at is None, "a refused resume keeps the claim free"
+    await _assert_refusal_recorded(request.id, "target_changed_since_approval", target_id)
+
+
+async def test_agent_direct_resume_is_refused_when_the_target_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_id = await _persist_target("vc-agent-gone")
+    request = await _park_approved(target_id)
+    await _update_target(target_id, deleted_at=datetime.now(UTC))
+    seen = _spy_agent_dispatch(monkeypatch)
+
+    resumed = await _agent_resume(request, "vc-agent-gone")
+
+    assert seen == []
+    assert resumed["status"] == "denied"
+    assert resumed["extras"]["error_code"] == "target_gone_since_approval"
+    await _assert_refusal_recorded(request.id, "target_gone_since_approval", target_id)
+
+
+async def test_agent_resume_returns_the_refusal_the_operator_recorded_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator refused the run first: the agent gets that refusal, not "already run"."""
+    target_id = await _persist_target("vc-operator-first")
+    request = await _park_approved(target_id)
+    calls = _spy_dispatch(monkeypatch)
+    await _update_target(target_id, host="second.invalid")
+    refusal = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+    assert refusal.status == "denied"
+    seen = _spy_agent_dispatch(monkeypatch)
+
+    resumed = await _agent_resume(request, "vc-operator-first")
+
+    assert calls == [] and seen == [], "the vendor must get no call"
+    assert resumed["status"] == "denied"
+    assert resumed["extras"]["error_code"] == "target_changed_since_approval"
+    assert resumed["extras"]["target_id"] == str(target_id)
+    audit = await _assert_refusal_recorded(request.id, "target_changed_since_approval", target_id)
+    assert resumed["audit_id"] == str(audit.id)
+    assert len(await _resume_audit_rows(request.id)) == 1, "the refusal is recorded once"
+
+
+async def test_agent_resume_returns_the_result_of_the_run_the_operator_made_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator ran the op first: the agent gets that run's stored result."""
+    target_id = await _persist_target("vc-operator-ran")
+    request = await _park_approved(target_id)
+    calls = _spy_dispatch(monkeypatch)
+    ran = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+    assert ran.status == "ok" and len(calls) == 1
+    seen = _spy_agent_dispatch(monkeypatch)
+
+    resumed = await _agent_resume(request, "vc-operator-ran")
+
+    assert seen == [] and len(calls) == 1, "the op runs once"
+    assert resumed["status"] == "ok"
+    assert resumed["op_id"] == _OP_ID
+    assert resumed == (await _row(request.id)).resume_result
+
+
+async def test_agent_resume_says_the_outcome_is_not_known_without_a_stored_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another caller holds the claim and has stored nothing yet: the agent gets no "executed"."""
+    target_id = await _persist_target("vc-claimed")
+    request = await _park_approved(target_id)
+    assert await claim_resume(request.id) is True
+    seen = _spy_agent_dispatch(monkeypatch)
+
+    resumed = await _agent_resume(request, "vc-claimed")
+
+    assert seen == []
+    assert resumed["status"] == "already_resumed"
+    assert resumed["extras"]["error_code"] == "already_resumed"
+    assert "not known" in resumed["error"]
+    assert "executed" not in resumed["error"]
 
 
 async def test_agent_resume_of_tenant_wide_request_has_no_target(

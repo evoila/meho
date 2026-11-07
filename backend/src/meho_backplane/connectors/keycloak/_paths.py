@@ -47,9 +47,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "_AUTH_CONFIG_PATH",
+    "_AUTH_EXECUTION_CONFIG_PATH",
+    "_AUTH_EXECUTION_RAISE_PRIORITY_PATH",
     "_AUTH_FLOWS_PATH",
     "_AUTH_FLOW_ADD_STEP_PATH",
     "_AUTH_FLOW_ADD_SUBFLOW_PATH",
+    "_AUTH_FLOW_COPY_PATH",
     "_AUTH_FLOW_EXECUTIONS_PATH",
     "_IDENTITY_PROVIDERS_PATH",
     "fill_path",
@@ -98,6 +101,12 @@ _AUTH_FLOW_ADD_SUBFLOW_PATH = (
     "/admin/realms/{realm}/authentication/flows/{flowAlias}/executions/flow"
 )
 _AUTH_CONFIG_PATH = "/admin/realms/{realm}/authentication/config/{id}"
+# The passkey step op: copy a flow, give a step its config, move a step up.
+_AUTH_FLOW_COPY_PATH = "/admin/realms/{realm}/authentication/flows/{flowAlias}/copy"
+_AUTH_EXECUTION_CONFIG_PATH = "/admin/realms/{realm}/authentication/executions/{executionId}/config"
+_AUTH_EXECUTION_RAISE_PRIORITY_PATH = (
+    "/admin/realms/{realm}/authentication/executions/{executionId}/raise-priority"
+)
 _IDENTITY_PROVIDERS_PATH = "/admin/realms/{realm}/identity-provider/instances"
 
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----

@@ -81,6 +81,7 @@ All types are Pydantic v2 frozen models, defined in
 | `RedactionResult` | `engine.py` | Engine return value: `redacted` + `manifest` |
 | `SecretFinder` | `patterns.py` | A named pattern written as code: `secret_spans(text)` returns the spans to replace. `patterns.secret_spans(pattern, text)` gives the spans of any named pattern, regex or finder |
 | `BindKeySecretFinder` | `bind_secret.py` | The `bind_key_secret` finder: reads BIND comments and quoted strings the way BIND does |
+| `UrlSecretFinder` | `url_secret.py` | The `url_secret` finder: reports the user part and the secret query values of each URL in a text |
 
 `PATTERN_NAMES` (`patterns.py`) is the source of truth for the named
 catalogue; the policy schema validates `rule.pattern` against it at
@@ -136,6 +137,7 @@ production traffic cannot reach that branch.
 | `password_hash` | A crypt(3) password hash as in `/etc/shadow`: `$1$`, `$2a$`/`$2b$`/`$2x$`/`$2y$`, `$5$`, `$6$`, `$7$`, `$y$`, `$gy$`, `$sha1$`, `$argon2id$`/`$argon2i$`/`$argon2d$`. The match stops at `:`, so the other `/etc/shadow` columns stay readable |
 | `ceph_key` | A Ceph key with its label, as in a keyring file (`key = AQ...==`) and in `ceph auth ls` / `ceph auth get` output (`key: AQ...==`). The value starts with `AQ` (the fixed first bytes of a Ceph key in base64) and is at least 32 characters long, so `key = <path>` and short `key` settings do not match. The value shape decides, so the label may be quoted, as in the JSON output of `ceph auth get -f json` (`"key": "AQ...=="`), or be the end of a longer name (`CEPH_KEY=AQ...==`). The whole `key = value` pair is replaced, like `api_key` |
 | `bind_key_secret` | The value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys) and after `cookie-secret` in the `options` block, with or without quotes, also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. Not a regex: `bind_secret.py` first splits the text into comments, quoted strings and code the way BIND's lexer does, then reads the value only inside the same scope. So a `secret` word in a comment can never reach past that comment, a commented-out key block is still hidden, an old secret in a comment between the keyword and its value is hidden together with the value, a key *name* like `"transfer-secret"` or `"my secret"` is never the keyword, and a `#` or `//` inside a quoted string does not start a comment (#4617, #5342 review). A quoted value must be base64 or hex. A value without quotes must be followed by `;` or a comment |
+| `url_secret` | The secret parts of a URL in text, for example a signed download link. The user part before `@` (`user:password`) and the value of each query parameter whose last word is `sig`, `signature`, `credential(s)`, `token`, `secret`, `password`, `passwd`, `pwd` or `apikey`, or that ends in `api_key` (S3 `X-Amz-Signature` / `X-Amz-Credential` / `X-Amz-Security-Token`, Azure SAS `sig`, Google `X-Goog-Signature` / `X-Goog-Credential`). The name is read decoded, and `&amp;` counts as `&`. Only the values are replaced, so the host, the path and the other parameters (such as the expiry time) stay readable. A value that already is a complete `[REDACTED:...]` placeholder (a JWT hidden by the `jwt` rule) is left alone. In the default policy and in the flight recorder policy this rule runs before `api_key`: it reads a query value to its end (`&` or `#`), also past an apostrophe, where the `api_key` rule would stop and take the parameter name with it, so a `token=` value in a link gets the `url_secret` label. Not a regex: `url_secret.py` finds each URL and splits it once. A URL ends at white space, a double quote or an angle bracket. An apostrophe is part of the URL (`/it's/file`, `note=o'clock`); a link written in single quotes ends at its closing quote, the last apostrophe before the end of the URL or before the opening quote of the next link (`['https://a','https://b']` is two links). That apostrophe closes the link only when no `@ / ? & = #` follows it; otherwise it is inside the link (`'https://h/f?q=it's&sig=...` with no closing quote is one link). Each link is read once by its position in the text, so the scan time grows in step with the text length. A secret in the path of a link has no name and is not found |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
 | `ipv4` | Dotted-quad with 0-255 per-octet bounds |
 | `ipv6` | Full + compressed RFC 5952 forms |
@@ -206,6 +208,15 @@ an error body, where a quote sits between the name and the `:`.
 - `scrub_secret_fields(node)` walks a dict / list / str. An entry whose key
   is a secret name gets `[REDACTED:param_name]` in place of its value
   (a whole sub-tree, too). Each string goes through the text step.
+- A name/value pair counts as a secret field when its `name` is a secret
+  name (`broadcast.events.is_secret_name_value_pair`). Some vendors list
+  the fields of an object this way, `[{"name": "USER", "value": "root"},
+  {"name": "PASSWORD", "value": "..."}]`, so the secret sits under the key
+  `value`. The `value` of such a pair is replaced like the value of a
+  secret-named key; a pair without a `value` key stays. Every walk of the
+  name rule does this: this one, its text step (below), the default view of
+  an answer (`scrub_secret_named_values`) and the params echo of a waiting
+  approval.
 - `scrub_secret_fields_in_text(text)` replaces the value of each quoted
   name-value pair whose name is a secret name. The name and the value may
   each use `"` or `'` (JSON `"name": "value"`, Python `'name': 'value'`,
@@ -219,13 +230,25 @@ an error body, where a quote sits between the name and the `:`.
   does not count) and replaces the whole object or list with the quoted
   marker, as the walk does for data. A value with no closing quote or
   bracket (a diagnostic cut by a length cap) is replaced up to the end of
-  the text. `iter_quoted_secret_fields(text)` lists the same pairs; the
-  capture check uses it.
+  the text. The text step knows the name/value pair object too: when the
+  `name` member of an object is a secret name, the `value` member of the
+  same object is replaced (`{"name": "PASSWORD", "value": "..."}`, also as
+  Python text or escaped JSON). The two members may come in either order,
+  with other members between them; a nested object's members do not count.
+  A name is checked by what it says, not by how it is written: JSON may
+  write a character as an escape (`"\u0050ASSWORD"` is `"PASSWORD"`), so
+  the key of a field, the `name` string of a pair and the `name` and
+  `value` member keys are decoded before the check.
+  `iter_quoted_secret_fields(text)` lists the same pairs; the capture check
+  uses it.
 
 The name rule is the shared `broadcast.events.is_secret_param_name`
 (`password`, `encryptedPassword`, `sessionToken`, `client_secret`,
-`licenseKey`, ...), the one the broadcast scrub and the approval echo use.
-Numbers, booleans and `null` stay. A value an earlier step already masked
+`licenseKey`, `psk`, `sharedKey`, `secret_key`, ...), the one the
+broadcast scrub and the approval echo use. The full word list is in
+[connectors-shared-api-file-secrets.md](connectors-shared-api-file-secrets.md#what-counts-as-a-secret-name).
+Numbers, booleans and `null` stay, except in the trace scrub: there a number
+under a secret name is hidden too, as in the normal answer. A value an earlier step already masked
 (`[REDACTED:...]`, a trace marker, `***`) stays, so its label is kept.
 
 **Where it runs.**
@@ -235,7 +258,7 @@ Numbers, booleans and `null` stay. A value an earlier step already masked
 | Error free text (`operations/_errors.py::_sanitize_free_text`) | the text step, then Tier-1, then the length cap |
 | Every error result (`dispatcher._audit_error_and_return` → `operations/_vendor_text.py::redact_error_result`) | the walk, then Tier-1 (default policy, pinned), over every string and field of `error`, `extras` and `result`; this covers the fields copied straight from the vendor (`validation_errors` of an HTTP 422, `permission_headers` of an HTTP 403), any field a connector adds, and the vendor's answer in `result` of an error a handler returns or of a multi-step operation's error envelope. If redaction fails, the result keeps only `error_code` and a fixed text: `result` and the result handle are dropped and `delivery` is `unavailable`. The audit row and the stored approval result get the cleaned copy. |
 | Multi-step error envelope (`dispatcher._reduce_and_audit_composite_error` → `redact_error_payload`) | the walk, then Tier-1 (default policy, pinned), **before** the reducer stores the full envelope behind a result handle, so the stored rows, the handle's sample rows and the inline summary are all clean. The envelope went through the operator's own policy first, and a shadow-mode policy leaves every secret in place; the cleanup of the inline result runs later and cannot reach the stored copy. The audit row's `raw_payload` gets a fingerprint for every value this cleanup hid (`_protect_secret_values`). If this cleanup fails, the envelope is withheld like a reducer failure (`delivery` is `unavailable`), nothing is stored, and `raw_payload` is one fingerprint of the whole envelope. |
-| Trace bodies and header values (`flight_recorder/_content.py::scrub_content`) | the walk, then the trace's credential-shape policy, for every recorded request and answer body |
+| Trace bodies and header values (`flight_recorder/_content.py::scrub_content`) | the walk (numbers under a secret name hidden too), then the trace's credential-shape policy, for every recorded request and answer body. That policy has the same patterns, in the same order, as the default policy of the normal answer (PEM private keys, password hashes, Ceph keys and BIND key secrets included), so a trace hides at least what the answer hides; `test_flight_recorder_trace_scrub_matches_answer.py` keeps the two lists equal |
 | Params of a waiting approval request (`approval_queue.claim_resume` / `end_run_input`) | the name rule (`scrub_secret_named_values`) over `approval_request.params`, as soon as the run claim is won or the request ends without a run; the row keeps the secret fields only while MEHO still needs them to run the approved call. See [approvals.md](approvals.md#the-params-hash-on-requests-and-audit-rows). |
 
 **The normal result path.** A secret-named field in a normal answer is
@@ -296,12 +319,27 @@ capture.
 | --- | --- |
 | `redact` | `[REDACTED:<pattern>]` (fixed marker; default) |
 | `mask` | `*…*<last-4-chars>` (length-preserving; shape-correlatable) |
-| `hash` | `sha256:<first-12-hex-of-SHA-256(match)>` (stable; replay-correlatable) |
+| `hash` | `hmac-sha256:<first-12-hex-of-keyed-fingerprint(match)>` (stable inside one install; replay-correlatable) |
 
 Choose `redact` for raw secrets, `mask` when downstream consumers
 need to spot duplicates without seeing the value, and `hash` when an
 audit replay needs to confirm the same identifier appears across
 calls.
+
+The `hash` action writes a keyed fingerprint, not a plain digest:
+`engine.hash_replacement` calls `compute_value_fingerprint` in
+`operations/_validate.py` (HMAC-SHA256 under the server key, the key
+the audit params hash uses; see
+[approvals.md](approvals.md#the-params-hash-on-requests-and-audit-rows)).
+Equal values give equal strings inside one install. Without the server
+key the string cannot be computed again from a guess, so a `hash` rule
+on a credential pattern does not give away a short or common value.
+The second-stage (Presidio) `hash` action calls the same function
+through a Presidio `custom` operator, so both stages write the same
+shape. The packaged policies use only `redact`; `hash` runs only for a
+rule an operator writes. `test_redaction_hash_action.py` pins that the
+string depends on the server key and never equals a plain SHA-256
+prefix of the match.
 
 ## Connector-boundary middleware (#1071)
 
@@ -337,7 +375,7 @@ falls through to the packaged **default-safe** policy
 The default-safe policy is the load-bearing guarantee: a connector
 landing without a registered override **still gets credentials
 stripped** (`authorization_header`, `bearer_token`, `jwt`, `api_key`,
-`pem_private_key`, `kubeconfig`, `password_hash`, `ceph_key`, `bind_key_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
+`pem_private_key`, `kubeconfig`, `password_hash`, `ceph_key`, `bind_key_secret`, `url_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
 are deliberately not in the default — most connector responses are
 mostly identifiers, and a global default that redacts them would
 blank operator-facing summaries. Operators wanting them at the global
@@ -415,7 +453,9 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     names are replaced with `[REDACTED:param_name]`
     (`broadcast.events.scrub_secret_named_values(..., hide_numbers=True)`),
     numbers included; booleans and `None` stay. The name rule is
-    `is_secret_param_name` ("One name rule for secret fields" above). The
+    `is_secret_param_name` ("One name rule for secret fields" above); the
+    `value` of a name/value pair whose `name` is a secret name is hidden
+    too. The
     reducer runs on this view, so the rows stored behind a result handle
     and its sample rows are clean too.
 - **Plain fields** (`register_plain_fields(op_id, names)`, exported by
@@ -446,7 +486,11 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   redaction of the other fields stays). It works on every operation. An
   agent principal, or a person's hosted agent run (an RFC 8693 actor is
   bound), is refused before the policy gate: `status="denied"`, a
-  synchronous `POLICY_DECISION` audit row, and no value. The people's call
+  synchronous `POLICY_DECISION` audit row, and no value. A service
+  principal's call waits for a person's approval, also when the policy
+  gate would run it at once (`dispatcher._reveal_waits_for_approval` turns
+  the `auto-execute` verdict into `needs-approval`); a person's call keeps
+  the verdict of the gate. The people's call
   sites are the `/ui` Vault console (`ui/routes/vault/routes.py`,
   reveal-on-click) and CLI `meho secret read`
   (`cli/internal/cmd/secret/read.go`).
@@ -768,8 +812,12 @@ provisioned.
 - **PyYAML** (`yaml.safe_load`) — already a transitive dep; matches
   the precedent set by `operations/ingest/catalog.py`.
 - **Pydantic v2** — already pinned in `backend/pyproject.toml`.
-- **Python stdlib** — `re`, `hashlib`, `importlib.resources`,
-  `collections.abc`, `threading` (resolver lock).
+- **Python stdlib** — `re`, `hashlib` (flight recorder XML digest),
+  `importlib.resources`, `collections.abc`, `threading` (resolver lock).
+  The `hash` action's keyed fingerprint comes from
+  `operations/_validate.py` (`hmac`), imported inside the function
+  because the operations package reaches the engine through the
+  broadcast events.
 - **presidio-analyzer 2.2.362** + **presidio-anonymizer 2.2.362**
   (#1072) — the Tier-2 NER adapter. Imports are lazy so Tier-1-only
   deployments incur zero NER cost at runtime. The transitive
@@ -958,7 +1006,10 @@ signed-URL/client-identity header is absent by construction:
 | `strict-transport-security`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, `content-security-policy` | `forwarded`, `x-forwarded-*`, `x-real-ip` (client identity / PII) |
 
 **Query strings** (`query.py`, #3841). The vendor-call seam drops the
-query from a recorded URL. A transport that needs the query on the span
+query and the user part from a recorded URL (`_capture_util.py::safe_url`,
+for a parsed URL and for a plain string). A URL inside a recorded body
+keeps its query; the credential-shape net hides its user part and its
+secret query values (`url_secret`). A transport that needs the query on the span
 (Kubernetes: `dryRun`, `fieldManager`) passes it to `redact_query(params,
 safe_names)`. Every parameter name is kept. A value is kept only when its
 name is on the caller's safe list, and it still gets the credential-shape
@@ -994,12 +1045,18 @@ not identifier-shaped is dropped. The parse uses `defusedxml` and streams,
 so a body cut at the size cap still counts the faults before the cut. This
 lets an operator see, for example, that every property of a host came back
 in `missingSet` with `NoPermission`. One structural rule runs
-without any per-connector config: every property `value` inside an OVF
-`PropertyParams` block (`additional_parameters[] {type: "PropertyParams",
-properties: [{id, value}]}`) is redacted — those are OVF property inputs
-which commonly carry appliance credentials under a vendor-specific `id` no
-key-name heuristic or shape net can place — keeping the `id` and every
-non-secret field (network mappings, name, placement) intact.
+without any per-connector config: every OVF property `value` is redacted —
+those are OVF property inputs which commonly carry appliance credentials
+under a vendor-specific `id` no key-name heuristic or shape net can
+place — keeping the `id` / `key` and every non-secret field (network
+mappings, name, placement) intact. The rule covers the three shapes vSphere
+carries the values in: the `PropertyParams` block of the REST OVF deploy
+(`additional_parameters[] {type: "PropertyParams", properties: [{id,
+value}]}`), the `propertyMapping` list of the VI/JSON
+`OvfManager.CreateImportSpec` call (`[{_typeName: "KeyValue", key, value}]`),
+and every `VAppPropertyInfo` object (`value` and `defaultValue`) inside the
+import spec that call answers and `ResourcePool.ImportVApp` sends back. The
+trace stays certain, so an agent may read it.
 
 A connector can also mask a body itself before the span is recorded.
 `HttpConnector.trace_response_body(response)` returns the body the trace
@@ -1009,8 +1066,10 @@ vendor answer that carries a secret in a field the shape net cannot place
 and the op family does not exclude: the HCX connector masks every
 secret-named field (`password`, `vcPassword`, `token`, ...) of every
 answer this way, so a stored pairing password never reaches the trace
-(`docs/codebase/connectors-hcx.md`). The hook runs only while a trace is
-being captured.
+(`docs/codebase/connectors-hcx.md`, in the private connectors repository). The Keycloak connector runs its
+result scrubber (`redact_secret_fields`) on every recorded Admin REST
+answer the same way (`docs/codebase/connectors-keycloak.md`). The hook
+runs only while a trace is being captured.
 
 **F2.3 — hard-excluded op families** (`families.py`). Some op families
 carry secrets *as their body* — credential reads, session mints, token
@@ -1034,8 +1093,10 @@ bodies from ever being recorded (`net.show` is not pinned: it sends no
 in-guest login). On top of that, a **broadening net** covers generic
 (`METHOD:/path`) ops and hand-authored tags the typed classifier does not
 see: case-sensitive `fnmatchcase` globs (`SECRET_FAMILY_PATTERNS`, e.g.
-`*token*`, `*secret*`, `*login*`, `*.auth.*`, `*:*/key`) plus
-token-split descriptor tags (`SECRET_FAMILY_TAGS`, so hyphenated
+`*token*`, `*secret*`, `*login*`, `*.auth.*`, `*:*/key`), case-insensitive
+words (`SECRET_FAMILY_WORDS`: `licen`, the stem of license and licence,
+because a vendor path keeps the vendor's spelling such as `/License-Keys`)
+plus token-split descriptor tags (`SECRET_FAMILY_TAGS`, so hyphenated
 compounds like `secret-read` / `credential-mint` match). Over-exclusion
 is deliberate — declining to record a benign body only loses debugging
 exhaust; under-exclusion leaks.
@@ -1043,7 +1104,7 @@ exhaust; under-exclusion leaks.
 | Family | Source | Records body? |
 | --- | --- | --- |
 | secret-bearing (credential-read / -mint / -write) | **single-sourced** with `broadcast.events.classify_op` (`_CREDENTIAL_*_OPS`) | never |
-| secret-bearing (generic / tag-declared) | broadening `SECRET_FAMILY_PATTERNS` globs + token-split `SECRET_FAMILY_TAGS` | never |
+| secret-bearing (generic / tag-declared) | broadening `SECRET_FAMILY_PATTERNS` globs + case-insensitive `SECRET_FAMILY_WORDS` + token-split `SECRET_FAMILY_TAGS` | never |
 | destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag + a vendor delete action name (`Destroy`, `Delete`, `Remove`, `Unregister`, also after a vSAN prefix, or an `action=delete` query; the ingest parser's word list in `meho_backplane/delete_names.py`, #4632) | never |
 | everything else | — | yes (subject to F2.2) |
 

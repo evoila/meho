@@ -145,7 +145,7 @@ before returning. Seven verbs:
 | `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, stamps attribution and `direct` provenance, delegates to `index_document`. | `InvalidKbSlugError` on bad slug |
 | `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. | – |
 | `get_revision(tenant_id, entry_id, revision_id)` | Exact retained read. Returns `KbEntryRevision` only when the revision belongs to the entry and both belong to the tenant; otherwise `None`, without saying why. | – |
-| `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0)` | List entries; slug-sorted; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
+| `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0, order="slug")` | List entries; slug-sorted by default, `order="newest"` sorts by `updated_at`, newest first; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
 | `delete_entry(tenant_id, slug)` | Delete the head and all its revisions in one transaction; returns whether a row existed. | Database errors propagate; nothing is removed |
 | `search_entries(tenant_id, query, filters=None, limit=10)` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. | – |
 | `ingest_directory(directory, tenant_id, dry_run=False)` | Read every `.md` file in sorted order, report slug conflicts without writing them, ingest the rest; idempotent. Per-file failures counted, run continues. | `KbIngestRootError` outside `KB_INGEST_ROOT` |
@@ -181,18 +181,23 @@ the folder:
 ### Write path — `create_entry`
 
 1. `validate_slug(slug)` — fail closed on a bad slug before the
-   substrate is touched.
-2. One natural-key `get_entry` SELECT — yields the **created-vs-
-   overwrite** signal (no prior row ⇒ `created=True`) and the prior
-   `created_by_sub` to preserve.
-3. `merge_attribution(...)` (in `kb/attribution.py`) folds the
-   attribution keys into the metadata to persist. When the caller sent
-   no metadata and no actor, the existing metadata is kept.
-4. `stamp_provenance(..., source_kind="direct")` replaces any
-   caller-sent `provenance` key with the service's own block.
-5. `kb/revisions.py::write_entry` runs in three steps (#3761):
-   - **Read** the entry: head `body_hash`, latest revision, and the
-     revision and indexing generation of its passages.
+   substrate is touched. With `own_entries_only`, caller metadata
+   with a curation key is refused here too.
+2. `kb/revisions.py::write_entry` runs in three steps (#3761). It
+   takes a function (`service.py::_direct_write_metadata`) that builds
+   the metadata to store from the entry's current metadata, and calls
+   it on every try, after the read:
+   - **Read** the entry: head `body_hash` and metadata, latest
+     revision, and the revision and indexing generation of its
+     passages. No head row ⇒ `created=True`. Then the metadata
+     function runs: with `own_entries_only`, an existing entry that
+     `actor_sub` did not create raises `KbEntryNotOwnedError` and
+     nothing is written; `merge_attribution(...)` (in
+     `kb/attribution.py`) folds the attribution keys into the
+     metadata to persist (when the caller sent no metadata and no
+     actor, the existing metadata is kept); and
+     `stamp_provenance(..., source_kind="direct")` replaces any
+     caller-sent `provenance` key with the service's own block.
    - **Prepare** with no transaction open: when the passages do not
      belong to the current revision, chunker and model, split the body
      (`kb/passages.py`) and count tokens with the model's own tokenizer
@@ -209,14 +214,21 @@ the folder:
    older text adds a new revision; it does not reuse the old one. A
    failed prepare or publish keeps the old head, revision and passages.
    Two writes to the same entry at the same time do not mix. When the
-   entry moved between read and publish (another write committed; on
-   SQLite, which has no row lock, this is also caught by the read-back
-   after the writes), or the next `revision_number` is already taken,
-   the write rolls back and runs again from the start, up to three
-   times. The returned `revision_id` always names the body that was
-   written.
-6. Return `(_doc_to_entry(doc, revision_id), created)`. The REST route maps
-   `created` to **HTTP 201** (fresh slug) vs **200** (in-place
+   entry moved between read and publish (another write committed, or
+   its metadata changed; on SQLite, which has no row lock, this is
+   also caught by the read-back after the writes), or the next
+   `revision_number` is already taken, the write rolls back and runs
+   again from the start, up to three times. Each rerun reads the
+   entry again and runs the metadata function again, so the
+   ownership check always decides against the entry the publish step
+   then verifies. Two operators that both see a new slug as unused
+   cannot both create it: the one that loses the race reads the
+   other's entry on its rerun and is refused, and that entry keeps
+   its body and creator. The returned `revision_id` always names the
+   body that was written.
+3. Return `(_doc_to_entry(doc, revision_id), created)`. `created`
+   comes from the read of the try that went through. The REST route
+   maps it to **HTTP 201** (fresh slug) vs **200** (in-place
    overwrite) and records `audit_created`; the MCP / UI callers
    discard it.
 
@@ -227,14 +239,33 @@ rule (below): it never lets file order pick a winner.
 
 ### Cross-principal write & delete semantics (#1845)
 
-kb rows are **tenant-shared with no per-row ownership check**. Any
-`tenant_admin` in a tenant may overwrite or delete **any** other
-principal's slug in that tenant — this is **wiki-like and intended**,
-not a bug. Operators must not assume per-author ownership: there is no
-`403`/`409` on a same-slug cross-principal write, and `DELETE` is not
-principal-scoped (it removes whatever row matches the natural key).
-This is deliberately different from `memory` DELETE, which **is**
-principal-scoped (a cross-principal memory delete is a silent no-op).
+kb rows are **tenant-shared**. Any `tenant_admin` in a tenant may
+overwrite or delete **any** other principal's slug in that tenant —
+this is **wiki-like and intended**, not a bug. There is no `403`/`409`
+on a same-slug cross-principal write by a `tenant_admin`, and `DELETE`
+is not principal-scoped (it removes whatever row matches the natural
+key). This is deliberately different from `memory` DELETE, which
+**is** principal-scoped (a cross-principal memory delete is a silent
+no-op).
+
+An `operator` writes only through the MCP `add_to_knowledge` tool
+(REST `POST /api/v1/kb` needs `tenant_admin`). The tool calls
+`create_entry(..., own_entries_only=True)` for every caller below
+`tenant_admin`, and then the service:
+
+- refuses to overwrite an entry whose `created_by_sub` is missing or
+  is another principal (`KbEntryNotOwnedError`; the tool answers with
+  a permission refusal, `reason: entry_not_owned`, and nothing is
+  written). A row with no `created_by_sub` (directory ingest, or a row
+  from before attribution) belongs to nobody, so an operator cannot
+  change it either;
+- refuses caller `metadata` with a key from `CURATION_METADATA_KEYS`
+  (`source_kind`, the key the curated-slice search filter scopes to;
+  `KbReservedMetadataError`, `reason: reserved_metadata`). So an
+  operator's entry cannot look curated.
+
+An operator can still create new entries and change its own. A
+`tenant_admin` keeps the wiki-like rule on both surfaces.
 
 To make a row self-describing about authorship without an audit-log
 join, every kb write stamps two keys into `documents.doc_metadata`

@@ -57,13 +57,18 @@ The two sibling modules hold the parts: `api_file_values.py` has the
 ## What counts as a secret name
 
 MEHO's one rule for secret-named fields,
-`is_secret_param_name` in `broadcast/events.py`: `password`, `passwd`,
-`pwd`, `passphrase`, `apikey`, `kubeconfig` anywhere in the name;
-`secret`, `secrets`, `token`, `credential`, `credentials` at the end of
-the name; and the pairs `api_key`, `access_key`, `private_key`,
-`encryption_key`, `license_key`, `licence_key`, `product_key` (the
+`is_secret_param_name` in `broadcast/events.py`: `password`, `passwords`,
+`passwd`, `pwd`, `passphrase`, `passphrases`, `apikey`, `kubeconfig`
+anywhere in the name; `secret`, `secrets`, `token`, `credential`,
+`credentials`, `psk` (the pre-shared key of a VPN session) at the end of
+the name; the pairs `api_key`, `access_key`, `private_key`,
+`encryption_key`, `license_key`, `licence_key`, `license_keys`,
+`licence_keys` (a list of licence keys), `product_key` (the
 Windows key of a vSphere guest customization spec), `secret_id`,
-`secret_value`, `secret_data`. Names are read in snake, camel and kebab
+`secret_value`, `secret_data` anywhere in the name; and the pairs
+`secret_key`, `shared_key`, `preshared_key` only at the end of the name
+(`secret_key` is an authentication secret, `secret_key_ref` is the name
+of a Kubernetes Secret and stays plain). Names are read in snake, camel and kebab
 case. #4780 added the licence key.
 
 There is no exception for schema words. The value under a secret name
@@ -174,7 +179,10 @@ PyYAML (`yaml`, the C loader and dumper when libyaml is present);
 
 - Tests: `backend/tests/test_connectors_shared_api_file_secrets.py` (one
   test per trick from the code reviews), and the tests of the three reads.
-- The reads: `connectors-vcf-fleet.md`, `connectors-hcx.md`,
-  `connectors-vmware-rest.md` (the SSO Admin read), `connectors-srm.md`,
-  `connectors-vr.md`.
+- The reads:
+  - `connectors-vcf-fleet.md` (in the private connectors repository)
+  - `connectors-hcx.md` (in the private connectors repository)
+  - `connectors-vmware-rest.md` (in the private connectors repository), the SSO Admin read
+  - `connectors-srm.md` (in the private connectors repository)
+  - `connectors-vr.md` (in the private connectors repository)
 - The general redaction rules: `redaction.md`.

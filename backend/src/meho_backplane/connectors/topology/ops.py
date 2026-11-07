@@ -20,14 +20,28 @@ same ``path`` value.
 
 Approval posture — the load-bearing dial (#2537):
 
-* ``safety_level="caution"`` + ``requires_approval=False`` parks **agent
-  principals only**: the AGENT verdict floor
-  (``_SAFETY_DEFAULT["caution"]`` → ``needs-approval`` in
-  :mod:`meho_backplane.auth.permissions`) routes an agent write to the
-  durable :class:`~meho_backplane.db.models.ApprovalRequest` queue, while
-  a human / service principal rides the default-allow branch in
-  :func:`~meho_backplane.operations._validate.policy_gate` and executes
-  immediately — today's zero-friction tenant_admin UX, unchanged.
+* ``safety_level="caution"`` + ``requires_approval=False`` decides who
+  waits for approval in
+  :func:`~meho_backplane.operations._validate.policy_gate`. The write
+  goes to the durable :class:`~meho_backplane.db.models.ApprovalRequest`
+  queue for:
+
+  - an agent (the AGENT verdict floor, ``_SAFETY_DEFAULT["caution"]`` →
+    ``needs-approval`` in :mod:`meho_backplane.auth.permissions`);
+  - a service login without a standing grant that covers the write;
+  - a person's call made with a token (MCP, the CLI, the REST dispatch
+    route).
+
+  A person in the web interface runs the write at once.
+* The REST graph writes in :mod:`meho_backplane.api.v1.topology` do not
+  go through this gate. They are for people only: a machine login gets
+  403 there and uses these operations instead.
+* The role floor of all five writes is ``tenant_admin``, the same as
+  their REST routes and MCP tools. It is registered below with
+  :func:`~meho_backplane.operations.role_floors.register_role_floor`, so
+  the policy gate refuses a person with a lower role on every path
+  (``call_operation``, the REST dispatch route, the CLI), and the
+  approval queue refuses an approver with a lower role.
 * NOT ``requires_approval=True`` — that would park humans too (G11.7-T1
   #1401), which the task explicitly rejects.
 * NOT ``safety_level="dangerous"`` — that would DENY agents by default
@@ -61,6 +75,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.topology.schemas import (
     ANNOTATE_PARAMETER_SCHEMA,
     ANNOTATE_RESPONSE_SCHEMA,
@@ -75,6 +90,7 @@ from meho_backplane.connectors.topology.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphNode
+from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.topology.annotate import NodeRef, annotate_edge_with_plan, unannotate_edge
 from meho_backplane.topology.bulk_import import (
@@ -116,6 +132,17 @@ TOPOLOGY_CREATE_NODE_OP_ID = "topology.create_node"
 TOPOLOGY_DELETE_NODE_OP_ID = "topology.delete_node"
 TOPOLOGY_UNANNOTATE_OP_ID = "topology.unannotate"
 TOPOLOGY_BULK_IMPORT_OP_ID = "topology.bulk_import"
+
+# The policy gate checks the floor for a person on every path, and the
+# approval queue checks it for the approver.
+for _op_id in (
+    TOPOLOGY_ANNOTATE_OP_ID,
+    TOPOLOGY_CREATE_NODE_OP_ID,
+    TOPOLOGY_DELETE_NODE_OP_ID,
+    TOPOLOGY_UNANNOTATE_OP_ID,
+    TOPOLOGY_BULK_IMPORT_OP_ID,
+):
+    register_role_floor(_op_id, TenantRole.TENANT_ADMIN)
 
 _GROUP_KEY = "graph"
 _GROUP_WHEN_TO_USE = (
@@ -532,8 +559,9 @@ async def register_topology_graph_operations(
     ``embedding_service`` kwarg is the test seam every connector
     registrar carries.
 
-    ``safety_level="caution"`` + ``requires_approval=False`` is the
-    agents-park / humans-immediate combination — see the module
+    ``safety_level="caution"`` + ``requires_approval=False`` makes agents,
+    service logins without a grant and token calls wait, while a person
+    in the web interface runs the write at once — see the module
     docstring for why neither ``requires_approval=True`` nor
     ``safety_level="dangerous"`` fits.
     """

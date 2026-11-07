@@ -113,6 +113,7 @@ from meho_backplane.ui.auth.flow import (
     refresh_access_token,
 )
 from meho_backplane.ui.auth.routes import SESSION_TTL_MARGIN_SECONDS
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     DecryptedSession,
     RefreshReplayError,
@@ -281,7 +282,7 @@ async def refresh_session_tokens(
             # the same either way.
             log.info(
                 "ui_auth_token_refresh_skipped_session_gone",
-                session_id=str(session_id),
+                session_ref=session_ref(session_id),
             )
             _raise_session_expired()
         if locked.access_token != stale_access_token:
@@ -291,7 +292,7 @@ async def refresh_session_tokens(
             # defences for no reason.
             log.info(
                 "ui_auth_token_refresh_skipped_concurrent_winner",
-                session_id=str(session_id),
+                session_ref=session_ref(session_id),
             )
             return locked
         old_expires_at = locked.expires_at
@@ -304,7 +305,7 @@ async def refresh_session_tokens(
     elapsed_ms = (time.monotonic() - started) * 1000.0
     log.info(
         "ui_auth_token_refresh_succeeded",
-        session_id=str(session_id),
+        session_ref=session_ref(session_id),
         old_expires_at=old_expires_at.isoformat(),
         new_expires_at=rotated.expires_at.isoformat(),
         time_cost_ms=round(elapsed_ms, 2),
@@ -338,7 +339,7 @@ async def _refresh_via_idp(
         reason, extra = _classify_refresh_failure(exc)
         log.warning(
             "ui_auth_token_refresh_failed",
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             reason=reason,
             **extra,
         )
@@ -373,7 +374,7 @@ async def _rotate_or_fail(
         # round-trip.
         log.warning(
             "ui_auth_token_refresh_failed",
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             reason="session_expired_during_refresh",
         )
         _raise_session_expired()
@@ -398,7 +399,7 @@ async def _rotate_or_fail(
         # closed as a 401 instead of a 500.
         log.warning(
             "ui_auth_token_refresh_failed",
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             reason="rotation_replay",
             audit_id=str(exc.audit_id),
         )
@@ -459,7 +460,7 @@ def _assert_same_tenant(decrypted: DecryptedSession, request_tenant: uuid.UUID |
         return
     structlog.get_logger(__name__).info(
         "ui_session_tenant_changed_during_request",
-        session_id=str(decrypted.id),
+        session_ref=session_ref(decrypted.id),
         request_tenant_id=str(request_tenant),
         session_tenant_id=str(decrypted.tenant_id) if decrypted.tenant_chosen else None,
     )
@@ -485,7 +486,7 @@ async def _verify_session_token(
     _assert_same_tenant(decrypted, request_tenant)
     requested, allow_unchosen = session_tenant_request(decrypted)
     try:
-        return await verify_jwt_for_audience(
+        operator = await verify_jwt_for_audience(
             f"Bearer {access_token}",
             expected_audience=expected_audience,
             requested_tenant=requested,
@@ -499,6 +500,10 @@ async def _verify_session_token(
                 expected_audience=expected_audience,
             )
         raise
+    # #3980: this is the one place where a call counts as a person in the
+    # web interface. Every other way in (REST, MCP, in-process callers)
+    # leaves the field off, so the call follows the token rule.
+    return Operator(**operator.model_dump(exclude={"web_session"}), web_session=True)
 
 
 async def verify_access_token_with_refresh(
@@ -516,6 +521,11 @@ async def verify_access_token_with_refresh(
     Returns the (possibly rotated) session alongside the verified
     :class:`~meho_backplane.auth.operator.Operator` so the caller's
     role gate runs against claims that match the stored token.
+
+    The returned Operator has ``web_session=True`` (#3980): the call comes
+    from a person in the web interface, so the people rule applies to it
+    (``caution`` runs at once, ``dangerous`` waits for an approval click).
+    This function is the only place that sets the field.
 
     The check runs in the session's current tenant (#5240): the
     returned Operator carries that tenant's role. A session whose
@@ -574,7 +584,7 @@ async def verify_access_token_with_refresh(
         if exc.status_code == status.HTTP_401_UNAUTHORIZED and exc.detail == _TOKEN_EXPIRED_DETAIL:
             log.warning(
                 "ui_auth_token_refresh_stale_after_rotation",
-                session_id=str(refreshed.id),
+                session_ref=session_ref(refreshed.id),
             )
             _raise_session_expired(exc)
         raise

@@ -260,7 +260,8 @@ async def test_requester_cannot_approve_even_with_break_glass(
             await approve_request(session, request_id, operator=requester, params=None)
 
 
-async def test_agent_without_permission_is_refused() -> None:
+async def test_agent_without_permission_waits_for_a_person() -> None:
+    """An agent's request waits for a person's approval (#3980); it does not run."""
     target = await _setup(ADD_OP)
     result = await dispatch(
         operator=make_operator("robot-agent", principal_kind=PrincipalKind.AGENT),
@@ -269,8 +270,8 @@ async def test_agent_without_permission_is_refused() -> None:
         target=target,
         params=membership_params(321),
     )
-    assert result.status == "denied", result
-    assert await _approval_count() == 0
+    assert result.status == "awaiting_approval", result
+    assert await _approval_count() == 1
 
 
 async def test_service_login_waits_for_approval() -> None:
@@ -302,7 +303,8 @@ async def test_standing_grant_for_a_membership_op_is_refused(op_id: str) -> None
 async def test_a_parked_change_reaches_robot_exactly_once() -> None:
     target = await _setup(ADD_OP)
     request_id = await _park(target, make_operator("robot-requester"))
-    approver = make_operator("robot-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = make_operator("robot-approver").model_copy(update={"self_approver": True})
 
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=None)

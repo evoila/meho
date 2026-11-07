@@ -969,6 +969,9 @@ async def test_async_returns_handle_before_pipeline_completes(
     assert running["status"] == "running"
     assert running["ingestion"] is None
     assert running["product"] == "sddc-manager"
+    # The stub replaces the whole pipeline, so no step is reported past parse.
+    assert running["phase"] == "parse"
+    assert running["phase_started_at"] == running["started_at"]
 
     # Release the gate; the background task completes and the job flips
     # to ``succeeded`` carrying the final counts (AC #2).

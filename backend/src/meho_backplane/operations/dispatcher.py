@@ -20,7 +20,10 @@ phases the parent Initiative names:
    implementation that does must have the same op enabled; the dispatch
    then runs on that sibling
    (:mod:`meho_backplane.operations._catalog_guard`, #3600). Otherwise ->
-   structured ``unqualified_target_version`` error. Then validate
+   structured ``unqualified_target_version`` error. A composite op gets
+   the same error when its connector states a target version range for
+   composites and the target is outside it
+   (:mod:`meho_backplane.operations._composite_version_guard`). Then validate
    ``params`` against the chosen ``descriptor.parameter_schema`` via
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
@@ -30,9 +33,10 @@ phases the parent Initiative names:
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
    principals resolve a three-state
    :class:`~meho_backplane.db.models.PermissionVerdict` via the
-   per-(principal, op, target) permission model; **human / service**
-   principals keep the v0.2 contract (default-allow except
-   ``requires_approval=True`` -> ``deny``). Branches:
+   per-(principal, op, target) permission model. A **person** follows the
+   rule for how the call arrived (#3980): in the web interface ``safe``
+   and ``caution`` run at once; with a token only ``safe`` does. A
+   **service** principal keeps its standing-grant rule. Branches:
    ``auto-execute`` proceeds; ``needs-approval`` ->
    :func:`~meho_backplane.operations.approval_queue.create_pending_request`
    writes a durable :class:`~meho_backplane.db.models.ApprovalRequest`
@@ -295,7 +299,9 @@ from meho_backplane.operations._audit import (
     descriptor_op_class,
     parent_audit_id_var,
     policy_decision_var,
+    restore_audit_extras,
     reveal_secret_var,
+    snapshot_audit_extras,
     with_audit_receipt,
 )
 from meho_backplane.operations._branches import (
@@ -329,6 +335,7 @@ from meho_backplane.operations._errors import (
     result_idempotency_key_conflict,
     result_invalid_op_schema,
     result_invalid_params,
+    result_license_read_off,
     result_no_connector,
     result_preview_binding_required,
     result_preview_hash_mismatch,
@@ -346,11 +353,23 @@ from meho_backplane.operations._handler_resolve import (
     reset_connector_instance_cache,
     reset_handler_cache,
 )
+from meho_backplane.operations._ingested_owner import (
+    INGESTED_OPS_NOT_ACCEPTED,
+    accepts_ingested_operations,
+    ingested_ops_refusal_message,
+    result_ingested_ops_not_accepted,
+)
+from meho_backplane.operations._license_refusal import (
+    LICENSE_READ_OFF,
+    audit_license_read_off,
+    license_read_stand_in,
+)
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
 )
 from meho_backplane.operations._op_miss import op_miss_result
+from meho_backplane.operations._park_check import park_check_refusal
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
@@ -372,6 +391,7 @@ from meho_backplane.operations._secret_values import (
     split_reveal_secret,
 )
 from meho_backplane.operations._validate import (
+    TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
     compute_audit_params_hash,
     compute_params_hash,
@@ -379,6 +399,7 @@ from meho_backplane.operations._validate import (
     params_check_errors,
     policy_gate,
     validate_params,
+    waits_only_for_token_call,
 )
 from meho_backplane.operations._vendor_text import (
     redact_error_payload,
@@ -389,8 +410,14 @@ from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
     DispatchChild,
+    approved_run_var,
     composite_depth_var,
     get_dispatch_child,
+)
+from meho_backplane.operations.deny_reasons import (
+    AGENT_REVEAL_REFUSED,
+    POLICY_DENIED,
+    ROLE_INSUFFICIENT,
 )
 from meho_backplane.operations.dispatch_limits import (
     acquire_dispatch_slot,
@@ -399,6 +426,7 @@ from meho_backplane.operations.dispatch_limits import (
     resolve_dispatch_concurrency_cap,
     resolve_dispatch_rate_limit,
 )
+from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
@@ -406,6 +434,8 @@ from meho_backplane.operations.reducer import (
     handle_owner_sub_var,
 )
 from meho_backplane.operations.result_document import json_text_bytes
+from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.operations.shutdown_drain import (
     is_draining,
     shutting_down_result,
@@ -631,6 +661,10 @@ async def _resolve_connector_instance(
             return None, label, exc_message
         # cls is guaranteed non-None here (label is None ⇔ cls is set).
         assert cls is not None
+        # An ingested op runs none of the checks of a hand-written class,
+        # so it runs only on a class that accepts ingested operations.
+        if not accepts_ingested_operations(cls):
+            return None, INGESTED_OPS_NOT_ACCEPTED, ingested_ops_refusal_message(cls)
         return get_or_create_connector_instance(cls), None, None
     if descriptor.source_kind in ("typed", "composite") and target is not None:
         cls, label, exc_message = resolve_connector_or_label(target)
@@ -651,6 +685,27 @@ async def _resolve_connector_instance(
     ):
         return None, "target_required", None
     return None, None, None
+
+
+async def _ingested_ops_refusal(
+    descriptor: EndpointDescriptor,
+    target: Any,
+    op_id: str,
+    duration_ms: float,
+) -> OperationResult | None:
+    """The ``ingested_ops_not_accepted`` result, or ``None``.
+
+    Refuses an ingested op whose target resolves to a class that does not
+    accept ingested operations (:mod:`~meho_backplane.operations._ingested_owner`).
+    Runs before a call waits for approval, so no approval is spent on a call
+    that cannot run. Any other resolution outcome is left to Step 5.
+    """
+    if descriptor.source_kind != "ingested" or target is None:
+        return None
+    _instance, label, message = await _resolve_connector_instance(descriptor, target)
+    if label != INGESTED_OPS_NOT_ACCEPTED:
+        return None
+    return result_ingested_ops_not_accepted(op_id, message or "", duration_ms)
 
 
 def _maybe_bind_method(
@@ -1044,6 +1099,28 @@ def _agent_acts(operator: Operator) -> bool:
     return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
 
 
+def _reveal_waits_for_approval(operator: Operator, reveal_secret: bool) -> bool:
+    """True when a ``reveal_secret: true`` call must wait for a person's approval.
+
+    A person gets the hidden values of an answer at once when the policy
+    gate lets the call run. A machine login (a service principal) gets them
+    only after a person approved the call, also on a read that would run at
+    once. An agent is refused before this check (:func:`_refuse_agent_reveal`).
+    """
+    return reveal_secret and operator.principal_kind is not PrincipalKind.USER
+
+
+def _requester_runs_approved_call(operator: Operator) -> bool:
+    """True when the requester of an approved call runs it, not a reviewer.
+
+    The agent's own resume and a hosted agent run (:func:`_agent_acts`), and
+    the requester's re-run of a failed approved call, which binds the
+    requester of the row (:func:`approved_requester_sub`). A reviewer who
+    runs the call from an approvals surface is not the requester.
+    """
+    return _agent_acts(operator) or approved_requester_sub() == operator.sub
+
+
 async def _refuse_agent_reveal(
     *,
     op_id: str,
@@ -1056,11 +1133,18 @@ async def _refuse_agent_reveal(
     """Refuse ``reveal_secret: true`` for an agent, with a synchronous audit row.
 
     Only a person or a service principal may get the hidden values of an
-    answer back. The agent gets the names without the values by calling
+    answer back; a service principal's call waits for a person's approval
+    first (:func:`_reveal_waits_for_approval`). The agent gets the names
+    without the values by calling
     again without the flag, or uses an operation that moves the secret
     without showing it.
     """
     duration_ms = _elapsed_ms(started)
+    reason = (
+        "reveal_secret is for people only. Call again without reveal_secret to get "
+        "the names without the values, or ask a person to read the secret."
+    )
+    result = result_denied(op_id, reason, duration_ms, reason_code=AGENT_REVEAL_REFUSED)
     receipt = await audit_safe(
         audit_id=uuid.uuid4(),
         event_class=AuditEventClass.POLICY_DECISION,
@@ -1070,12 +1154,9 @@ async def _refuse_agent_reveal(
         params_hash=params_hash,
         result_status="denied",
         duration_ms=duration_ms,
+        error_extras=_error_extras_for_audit(result),
     )
-    reason = (
-        "reveal_secret is for people only. Call again without reveal_secret to get "
-        "the names without the values, or ask a person to read the secret."
-    )
-    return with_audit_receipt(result_denied(op_id, reason, duration_ms), receipt)
+    return with_audit_receipt(result, receipt)
 
 
 def _composite_terminal_error_code(descriptor: EndpointDescriptor, envelope: Any) -> str | None:
@@ -2979,6 +3060,11 @@ async def _build_proposed_effect(
         # ``op_class`` / ``preview`` / fail-soft-marker envelope built by
         # :func:`build_proposed_effect` itself unchanged.
         base["safety_level"] = descriptor.safety_level
+        # #3980: a person's ``caution`` call that waits only because it came
+        # with a token says so on the request. The same person may then
+        # approve it with a click in the web interface.
+        if waits_only_for_token_call(operator, descriptor):
+            base["waits_because"] = TOKEN_CALL_WAIT
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -3159,6 +3245,10 @@ async def _audit_denied_and_return(
     when the handler returns the refusal (#4275); this row records the step's
     decision, so the step keeps its own record (#3733).
 
+    The op's own check before the wait for approval
+    (:func:`~meho_backplane.operations._park_check.park_check_refusal`)
+    uses this path too.
+
     #4669: when the row commits, the returned result carries its ``audit_id``,
     like an error result does. The parent operation's own row replaces it on
     the caller's answer for a sub-op (:func:`_audit_returned_result`).
@@ -3197,6 +3287,11 @@ async def _handle_needs_approval(
     ``"needs_approval"``. Opens its own DB session (same pattern as
     :func:`audit_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
+
+    When the op's check before the wait for approval refuses the call
+    (:func:`~meho_backplane.operations._park_check.park_check_refusal`), the
+    park is refused with ``refused_before_approval`` before anything else
+    runs, and no approval row is written.
 
     When the op's park-time permission preflight says the write will be
     denied, the park is refused with ``write_capability_denied`` and no
@@ -3250,6 +3345,33 @@ async def _handle_needs_approval(
     )
 
     run_id = current_agent_run_id_var.get()
+
+    # An op can turn on a check that runs before its call waits for
+    # approval (``_park_check.register_park_check``). It refuses a param
+    # that must not be stored in an approval request, for example a secret
+    # given as a plain value. It runs first, so nothing of the call is
+    # stored when it says no. The refusal is audited like the ones below.
+    refusal = await park_check_refusal(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        duration_ms=duration_ms,
+    )
+    if refusal is None:
+        refusal = await _ingested_ops_refusal(descriptor, target, op_id, duration_ms)
+    if refusal is not None:
+        return await _audit_denied_and_return(
+            refusal,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
     # G11.7 follow-up (#1437): give an op that can compute a
     # side-effect-free preview (notably ``k8s.apply``'s server-dry-run) a
@@ -3480,7 +3602,6 @@ async def dispatch(
     execute. It is not part of the public agent/MCP/CLI surface; the
     gate is the only authorization path for an ordinary dispatch.
 
-
     While the pod stops (#5024, :mod:`.shutdown_drain`), a new top-level
     call is refused with ``meho_shutting_down`` before anything is sent.
     A step of a running multi-step operation and an approved run whose
@@ -3540,7 +3661,8 @@ async def _dispatch_now(
     # ``credential_read`` op, or an op of ``_secret_values._VALUE_HIDING_OPS``)
     # hides every value. Getting the values back needs this explicit opt-in
     # by a person or a service principal (stamped on the audit row; an agent
-    # is refused). Stripping keeps the flag off the op's
+    # is refused, and a service principal's call waits for a person's
+    # approval). Stripping keeps the flag off the op's
     # ``additionalProperties: false`` schema, out of the handler's params,
     # and out of ``params_hash`` -- so a hidden answer and its reveal share
     # one hash (the reveal choice is recorded separately on the audit row,
@@ -3564,13 +3686,38 @@ async def _dispatch_now(
         op_id=op_id,
     )
     if descriptor is None:
-        return await op_miss_result(
+        miss = await op_miss_result(
             tenant_id=operator.tenant_id,
             connector_id=connector_id,
             op_id=op_id,
             triple=(product, version, impl_id),
             started=started,
             target=target,
+        )
+        if miss.extras.get("error_code") != LICENSE_READ_OFF:
+            return miss
+        # #5791: the refused licence read gets its own audit row.
+        return await audit_license_read_off(
+            miss,
+            operator=operator,
+            descriptor=license_read_stand_in(
+                product=product, version=version, impl_id=impl_id, op_id=op_id
+            ),
+            target=target,
+            params_hash=params_hash,
+        )
+    # An ingested read of licence keys never runs: the ingest would give it
+    # the safe level of its HTTP method, and its answer carries the keys in
+    # full. Refused before the target check, the catalog guard, the policy
+    # gate and any vendor call, whatever the row's enable flag says. The
+    # refusal gets its own audit row (#5791).
+    if descriptor.source_kind == "ingested" and is_license_read(descriptor.method, descriptor.path):
+        return await audit_license_read_off(
+            result_license_read_off(op_id, _elapsed_ms(started)),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params_hash=params_hash,
         )
     # #4139: an op that needs a target (every ingested op, or a typed op
     # bound to a connector) and got none fails here with one clear line,
@@ -3591,7 +3738,9 @@ async def _dispatch_now(
     # switches: the approver saw and the gate checked the stored catalog,
     # and this path skips both. If the target's detected version moved
     # while the request waited, the resume is refused and the caller
-    # must make a new request.
+    # must make a new request. A composite op is checked here against the
+    # target version range its connector states for composites (one check
+    # for the whole composite; its steps are not checked again).
     selection = await select_catalog_for_target(
         operator=operator,
         descriptor=descriptor,
@@ -3701,6 +3850,14 @@ async def _dispatch_now(
     # as ``policy_decision_var`` so a composite parent's value is restored
     # after a child dispatch rebinds it.
     _reveal_token = reveal_secret_var.set(reveal_secret if (secret_read or reveal_secret) else None)
+    # #3980: a person approved this run, so the internal steps of a
+    # multi-step operation go ahead under that approval
+    # (``composite.enforce_subop_policy``). A child dispatch inherits it and
+    # reads it after its policy gate below.
+    _approved_run_token = approved_run_var.set(True) if _approved else None
+    # #5211: ``audit_*`` keys the handler binds belong to this dispatch's
+    # row only; the ``finally`` puts the caller's keys back.
+    _audit_extras = snapshot_audit_extras()
     try:
         if reveal_secret and _agent_acts(operator):
             return await _refuse_agent_reveal(
@@ -3726,9 +3883,31 @@ async def _dispatch_now(
                 preview_hash=preview_hash,
                 params=params,
             )
+            # #3980: a child step of an approved multi-step run goes ahead
+            # under that approval, the same as a step checked by
+            # ``composite.enforce_subop_policy``. Only a step that would wait:
+            # a ``deny`` stays a deny, and a ``destructive`` or
+            # ``requires_approval`` step keeps its own approval.
+            if (
+                verdict is PermissionVerdict.NEEDS_APPROVAL
+                and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+                and approved_run_var.get()
+                and descriptor.safety_level != "destructive"
+                and not descriptor.requires_approval
+            ):
+                _log.info("composite_child_covered_by_approved_run", op_id=op_id)
+                verdict = PermissionVerdict.AUTO_EXECUTE
+            if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
+                operator, reveal_secret
+            ):
+                _log.info("reveal_secret_waits_for_approval", op_id=op_id)
+                verdict = PermissionVerdict.NEEDS_APPROVAL
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
+                # The row keeps the reason and its code (#5773), so the audit
+                # log says which rule refused the call.
+                denied = result_denied(op_id, gate_reason or "policy denied", duration_ms)
                 receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
@@ -3738,10 +3917,9 @@ async def _dispatch_now(
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
+                    error_extras=_error_extras_for_audit(denied),
                 )
-                return with_audit_receipt(
-                    result_denied(op_id, gate_reason or "policy denied", duration_ms), receipt
-                )
+                return with_audit_receipt(denied, receipt)
             if verdict == PermissionVerdict.NEEDS_APPROVAL:
                 # G11.2-T4 (#817): write a durable ApprovalRequest row (+ its
                 # synchronous "request" audit row) and return an
@@ -3768,6 +3946,12 @@ async def _dispatch_now(
                 # to execution. Any unexpected verdict (a future enum member, a
                 # bug in the resolver) denies rather than silently executing.
                 duration_ms = _elapsed_ms(started)
+                denied = result_denied(
+                    op_id,
+                    gate_reason or f"unexpected policy verdict {verdict!r}; denied",
+                    duration_ms,
+                    reason_code=POLICY_DENIED,
+                )
                 receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,
@@ -3777,15 +3961,9 @@ async def _dispatch_now(
                     params_hash=params_hash,
                     result_status="denied",
                     duration_ms=duration_ms,
+                    error_extras=_error_extras_for_audit(denied),
                 )
-                return with_audit_receipt(
-                    result_denied(
-                        op_id,
-                        gate_reason or f"unexpected policy verdict {verdict!r}; denied",
-                        duration_ms,
-                    ),
-                    receipt,
-                )
+                return with_audit_receipt(denied, receipt)
 
             # --- Opt-in announce gate (#3133) --------------------------
             # Verdict is AUTO_EXECUTE. In a tenant that has enabled the
@@ -3824,23 +4002,60 @@ async def _dispatch_now(
             # executed row honestly records it was four-eyes-gated, not
             # auto-executed.
             policy_decision_var.set(PermissionVerdict.NEEDS_APPROVAL.value)
+            # The approval queue refuses an approver below the op's role
+            # floor at the decision, so an approved call was approved by a
+            # person with the role. From an approvals surface the call runs
+            # under that reviewer; check the role again here as a backstop.
+            # The requester's own run (an agent's resume, a hosted agent
+            # run, or a re-run of a failed call by the requester, also a
+            # service login) keeps the approval as the authorization.
+            role_denial = (
+                None
+                if _requester_runs_approved_call(operator)
+                else role_floor_denial(op_id, operator.tenant_role)
+            )
+            if role_denial is not None:
+                duration_ms = _elapsed_ms(started)
+                denied = result_denied(
+                    op_id, role_denial, duration_ms, reason_code=ROLE_INSUFFICIENT
+                )
+                receipt = await audit_safe(
+                    audit_id=uuid.uuid4(),
+                    event_class=AuditEventClass.POLICY_DECISION,
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params_hash=params_hash,
+                    result_status="denied",
+                    duration_ms=duration_ms,
+                    error_extras=_error_extras_for_audit(denied),
+                )
+                return with_audit_receipt(denied, receipt)
 
         # --- Step 5: connector resolution ---------------------------------
         connector_instance: Connector | None
         resolution_error: ResolutionLabel | None
         exception_message: str | None
-        if pre_resolved_connector_class is not None:
-            connector_instance, resolution_error, exception_message = (
-                get_or_create_connector_instance(pre_resolved_connector_class),
-                None,
-                None,
-            )
-        else:
+        if pre_resolved_connector_class is None:
             (
                 connector_instance,
                 resolution_error,
                 exception_message,
             ) = await _resolve_connector_instance(descriptor, target)
+        elif descriptor.source_kind == "ingested" and not accepts_ingested_operations(
+            pre_resolved_connector_class
+        ):
+            connector_instance, resolution_error, exception_message = (
+                None,
+                INGESTED_OPS_NOT_ACCEPTED,
+                ingested_ops_refusal_message(pre_resolved_connector_class),
+            )
+        else:
+            connector_instance, resolution_error, exception_message = (
+                get_or_create_connector_instance(pre_resolved_connector_class),
+                None,
+                None,
+            )
         if resolution_error == "target_required":
             # G0.20-T6 (#1506): a connector-bound (self-first) typed/composite
             # handler invoked with ``target=None``. Clean usage error before
@@ -3848,6 +4063,18 @@ async def _dispatch_now(
             # self-guard RuntimeError (preserved for genuine instance-cache
             # faults, which only arise when a target *was* supplied).
             return result_target_required(op_id, _elapsed_ms(started))
+        if resolution_error == INGESTED_OPS_NOT_ACCEPTED:
+            # Also an approved call: nothing reaches the vendor.
+            duration_ms = _elapsed_ms(started)
+            return await _audit_denied_and_return(
+                result_ingested_ops_not_accepted(op_id, exception_message or "", duration_ms),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=duration_ms,
+            )
         if resolution_error == "no_connector":
             # #2701: the resolver miss is on the TARGET's product/version,
             # not the ``connector_id`` the caller passed. That connector_id
@@ -3918,6 +4145,9 @@ async def _dispatch_now(
     finally:
         policy_decision_var.reset(_verdict_token)
         reveal_secret_var.reset(_reveal_token)
+        if _approved_run_token is not None:
+            approved_run_var.reset(_approved_run_token)
+        restore_audit_extras(_audit_extras)
         # #3500: release the concurrency slot (no-op when none was taken --
         # the disabled / non-top-level / approved paths). Best-effort: a
         # release hiccup must not turn a decided result into an exception,

@@ -89,9 +89,12 @@ When a `SERVICE` op would park, the gate consults a live standing grant
 matched — the dispatcher and the composite sub-op gate both pass it; the
 gateway path is safe-only and never needs it). A match auto-approves the
 op and records the use; absent a match, the op parks for a human decision.
-The one exception is the `destructive` tier: `consult_and_record_grant`
-refuses it **before** any grant lookup, so even a stale grant row cannot
-auto-approve a destructive op — the tier always parks for a human.
+Two ops are refused **before** any grant lookup, so even a stale grant
+row cannot auto-approve them: the `destructive` tier (the tier always
+parks for a human) and an op with a parameter marked
+`x-meho-caller-address: true` (it connects to an address the caller
+gives; a grant never covers the address, so a person approves each call,
+and grant create refuses such a grant — `caller_address_grant_reason`).
 Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).
@@ -135,6 +138,20 @@ explicit — no wildcards** on `principal_sub`, `op_id`, or `connector_id`
 (contrast `AgentPermission`, whose `op_pattern` is a glob for the *agent*
 model). Creating the grant IS the operator's upfront review, deny-by-default
 absent a match.
+
+**Role floor.** Some ops need a role from the person who runs them
+(`operations/role_floors.py`): `targets.register` and the `topology.*`
+writes need `tenant_admin`. A grant lets the service principal run the op
+with no approval, so the person who makes the grant needs the same role,
+like the person who approves a parked call. `_review` checks
+`role_floor_denial(op_id, creator_role)` and raises `GrantRoleFloorError`
+(a `GrantValidationError`) below the floor. Every path that makes a grant
+passes `_review`: `create` and the renewal of delete grants. Both take
+`creator_role`, the role of the person. Its default is `operator`, the
+lowest role that makes grants, so a caller that does not pass it is held to
+the floor. REST answers 403 `role_floor_required: <op> needs the
+tenant_admin role; your role is operator`. The console passes the
+session's role; its grant writes need `tenant_admin` anyway.
 
 The **target scope** is one of three shapes:
 
@@ -321,17 +338,21 @@ delete-shaped ops:
   `DELETE` verb, or a hand-authored `destructive` tag on a typed op.
 
 The first two signs need only the op id (`delete_shaped_refusal_reason`),
-so they also work for an op with no stored row. The action-name sign and
-`_delete_shaped_reason_by_descriptor` are consulted at **both** ends:
-create-time (above) and dispatch-time (`consult_and_record_grant`, so a
-stale grant predating an op's promotion into the `destructive` tier, or a
-grant row written for a VI-JSON delete, can never satisfy it). An inner
-step of a multi-step operation reaches the gate as an in-memory record with
-only its declared level — no method, no tags — so for it the op id is the
-only sign, and the action name is what catches `Destroy_Task`. That is what
-makes "a standing grant can never satisfy a destructive op" hold whether
-the grant is being created or consulted. A grant row that already exists
-for such an op stays in the list but never lets the op run; revoke it with
+so they also work for an op with no stored row. All three signs are one
+rule, `delete_grant_reason`, and it is consulted at **both** ends:
+create-time (above) and dispatch-time (`consult_and_record_grant`). So a
+grant row that is older than the sign can never satisfy the op: a grant
+made before a pattern joined the list (a release that adds one, or an
+operator who adds one to `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`), a grant
+predating an op's promotion into the `destructive` tier, or a grant row
+written for a VI-JSON delete. An inner step of a multi-step operation
+reaches the gate as an in-memory record with only its declared level — no
+method, no tags — so for it the op id is the only sign: the action name is
+what catches `Destroy_Task`, and the pattern list is what catches an inner
+`DELETE:` step or a typed `*.delete`. That is what makes "a standing grant
+can never satisfy a destructive op" hold whether the grant is being created
+or consulted. A grant row that already exists for such an op stays in the
+list but never lets the op run; revoke it with
 `meho service-principals grants revoke <id>`. The one exception is an
 instance in sandbox mode; see [Sandbox mode](#sandbox-mode-4622) below.
 
@@ -456,7 +477,7 @@ What the code does:
   on (a `Settings` field, read at boot only, default `false`; chart value
   `sandboxMode.deleteGrantsFromApi`), REST and the CLI may create a delete
   grant too: `POST /api/v1/service-principals/grants` passes
-  `by_tenant_admin`, and an `operator` without `tenant_admin` gets
+  the caller's role as `creator_role`, and an `operator` without `tenant_admin` gets
   `DeleteGrantNeedsTenantAdminError`, HTTP 403
   `grants_require_tenant_admin`. A machine token still gets 403 before the
   route runs. The checks are the console's (`_review`). The mode check
@@ -580,7 +601,9 @@ Create and revoke need a person. A token of an agent, a service principal
 or a runner gets 403 `human_principal_required` (the same check
 `require_human_principal` in `auth/rbac.py` that the approval decision
 routes and the agent-grant create / elevate routes use, #4616). List and
-show keep the role check alone.
+show keep the role check alone. Create also checks the op's role floor
+(see "Role floor" above): an `operator` gets 403 `role_floor_required` for
+`targets.register` and the `topology.*` writes.
 
 | Verb | Path | Purpose |
 |---|---|---|

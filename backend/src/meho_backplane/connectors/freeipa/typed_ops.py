@@ -4,10 +4,15 @@
 """Operation table, group texts and registrar of the FreeIPA connector.
 
 The connector has typed operations only: FreeIPA has no OpenAPI description.
-All seventeen operations read (``safe``). They are registered at start-up with
-``source_kind="typed"``, so they work on a fresh install with nothing to
-ingest. Their bodies live in :mod:`meho_backplane.connectors.freeipa.reads`,
-their metadata in :mod:`.ops_directory` and :mod:`.ops_access`.
+Seventeen operations read (``safe``). Seventeen change something: host
+groups, their members, automember rules and hosts; sudo commands, sudo rules
+and access rules; password policies. Each change waits until a second person
+approves. They are registered at start-up with ``source_kind="typed"``, so
+they work on a fresh install with nothing to ingest. The read bodies live in
+:mod:`meho_backplane.connectors.freeipa.reads`, the write bodies in
+:mod:`.writes` and :mod:`.access_writes`; their metadata in
+:mod:`.ops_directory`, :mod:`.ops_access`, :mod:`.ops_host_writes` and
+:mod:`.ops_access_writes`.
 """
 
 from __future__ import annotations
@@ -24,7 +29,9 @@ from meho_backplane.connectors.freeipa._op_common import (
     FreeipaTypedOp,
 )
 from meho_backplane.connectors.freeipa.ops_access import ACCESS_OPS
+from meho_backplane.connectors.freeipa.ops_access_writes import ACCESS_WRITE_OPS
 from meho_backplane.connectors.freeipa.ops_directory import DIRECTORY_OPS
+from meho_backplane.connectors.freeipa.ops_host_writes import HOST_WRITE_OPS
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -46,25 +53,37 @@ FREEIPA_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "the server version and the API version (freeipa.about). One read."
     ),
     GROUP_HOSTS: (
-        "Use to read the hosts and host groups of a FreeIPA domain: find hosts, list the hosts "
-        "of one host group (freeipa.host.list with hostgroup), and read one host or host group "
-        "with its members. Four reads."
+        "Use to read and change the hosts and host groups of a FreeIPA domain. Reads: find "
+        "hosts, list the hosts of one host group (freeipa.host.list with hostgroup), and read "
+        "one host or host group with its members. Changes: create a host group, add existing "
+        "hosts or host groups to it, create an automember rule that puts new hosts into a host "
+        "group by their name, and delete a host or a host group. Every change waits until a "
+        "second person approves."
     ),
     GROUP_IDENTITY: (
         "Use to read the users, user groups and roles of a FreeIPA domain, and its password "
         "policies: find users, read one user with its groups, read a group's or a role's "
-        "members, read a group's or the global password policy. Seven reads."
+        "members, read a group's or the global password policy. One change: set values of a "
+        "group's or the global password policy (freeipa.pwpolicy.set), which waits until a "
+        "second person approves."
     ),
     GROUP_ACCESS: (
-        "Use to read who may do what on which host in a FreeIPA domain: sudo rules, access "
-        "rules (HBAC, including the default rule allow_all), and freeipa.hbac.test, which "
-        "answers whether one user may use one service (for example sshd) on one host. "
-        "Five reads."
+        "Use to read and change who may do what on which host in a FreeIPA domain: sudo rules, "
+        "access rules (HBAC, including the default rule allow_all), and freeipa.hbac.test, "
+        "which answers whether one user may use one service (for example sshd) on one host. "
+        "Changes: create sudo commands and sudo rules and add their users, hosts and commands; "
+        "create access rules and add their users, hosts and services; disable an access rule, "
+        "allow_all too. Every change waits until a second person approves."
     ),
 }
 
-#: Every FreeIPA typed operation. All read; none needs approval.
-FREEIPA_TYPED_OPS: tuple[FreeipaTypedOp, ...] = (*DIRECTORY_OPS, *ACCESS_OPS)
+#: Every FreeIPA typed operation. The reads need no approval; every write does.
+FREEIPA_TYPED_OPS: tuple[FreeipaTypedOp, ...] = (
+    *DIRECTORY_OPS,
+    *ACCESS_OPS,
+    *HOST_WRITE_OPS,
+    *ACCESS_WRITE_OPS,
+)
 
 
 async def register_freeipa_typed_operations(

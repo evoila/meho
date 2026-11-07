@@ -30,7 +30,13 @@ which is why this is the first guide.
 |---|---|---|
 | **CLI — `meho targets import`** | Bulk-import from a `targets.yaml` file you keep in version control. | The canonical path. Your target registry becomes a reviewable, re-runnable file. |
 | **Operator console — `/ui/connectors`** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
-| **REST — `POST /api/v1/targets`** | The API the other two paths call. | Automation that already speaks REST. |
+| **REST — `POST /api/v1/targets`** | The API the other two paths call. | Scripts that a person runs with their own login. |
+
+Create, edit and delete on REST are for people only. A service login
+gets `403 human_principal_required`, also with the **tenant_admin**
+role. It registers a target with the `targets.register` operation and
+removes one with `targets.remove` (connector `targets-registry-1.x`).
+MEHO checks both against the approval rules.
 
 **There are no MCP tools for registering targets or staging secrets —
 deliberately.** Registration is an operator-trust decision, so it
@@ -195,6 +201,16 @@ the connector expects on Vault. A kubeconfig ref looks like
 On a GSM deploy, set `secret_ref` explicitly in the YAML (the
 server-derived default is the Vault layout).
 
+MEHO reads a `gsm:` secret only from a Google Cloud project listed in
+the setting `GSM_PARAM_ALLOWED_PROJECTS` (comma-separated project ids,
+set through the chart's `extraEnv`). The list is empty by default, so
+list your projects before you register targets. A target whose
+`secret_ref` names a project that is not listed is refused at
+registration (422 `secret_ref_project_not_allowed`), and a stored
+target in such a project fails every dispatch with
+`connector_error: GcpSecretManagerReadError` until the project is
+listed. The same list applies to `gsm:` refs in operation parameters.
+
 ### Targets that need no credential
 
 Some products need no login, for example a Prometheus that you reach
@@ -292,6 +308,8 @@ Real failure modes, with the errors they actually produce:
 | 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. |
 | 422 `unknown_product`, listing `valid_products` | The `product` token isn't one a registered connector advertises. Product tokens are exact — `k8s`, not `kubernetes`. | Pick a token from the error's `valid_products` list. |
 | 422 `secret_ref_outside_tenant_scope` | You supplied a Vault ref outside `tenants/<tenant-id>/…`. It would fail with "permission denied" at every dispatch. | Use the `expected_secret_ref` the error names — or omit `secret_ref` and take the server default. |
+| 422 `secret_ref_project_not_allowed` | You supplied a `gsm:` ref in a Google Cloud project that `GSM_PARAM_ALLOWED_PROJECTS` does not list. MEHO would refuse every read of it. | List the project in `GSM_PARAM_ALLOWED_PROJECTS` and upgrade the release — or point `secret_ref` at a secret in a listed project. |
+| Dispatch fails, `connector_error: GcpSecretManagerReadError` — *"…in the Google Cloud project '…', which GSM_PARAM_ALLOWED_PROJECTS does not list…"* | The target's `gsm:` login names a project that is not on the list (for example a target registered before the list was set). Nothing was read from Google. | List the project in `GSM_PARAM_ALLOWED_PROJECTS` and upgrade the release. |
 | Probe exits with 501 — *"no connector registered for product=…"* | The target row is fine; no connector serves that product on this backplane version. Any cached fingerprint is left untouched. | Check the [connector catalog](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-catalog.md) for your version; for spec-ingested (generic) connectors, ingest one first. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…has a KV-v2 API-path-shaped secret_ref…"* | Your ref embeds the mount or a `data/` segment (`secret/data/…`). | Store the logical path only: `tenants/<tenant-id>/<name>`. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…is missing required field '…'"* | The secret exists but doesn't carry the field the connector needs (`username`/`password`, or `kubeconfig` for Kubernetes). | Re-stage the secret with the connector's field names. |

@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.checks.dashboard_service import CheckDashboardAdminService
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.checks.views import project_dashboard_to_row
 from meho_backplane.ui.templating import get_templates
 
@@ -47,7 +47,7 @@ _LIST_LIMIT = 200
 
 #: Module-level ``Depends`` closure -- ruff B008 idiom (no function calls in
 #: default argument positions), matching the scheduler / connectors routes.
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 
 
 def _is_htmx_request(request: Request) -> bool:
@@ -88,7 +88,7 @@ def build_list_router() -> APIRouter:
 
     async def _handler(
         request: Request,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
     ) -> HTMLResponse:
         """Serve ``GET /ui/checks``. See module docstring for the contract."""
         return await _render(request, session_ctx=session_ctx)

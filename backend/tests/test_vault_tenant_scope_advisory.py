@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 from meho_backplane.main import _advise_vault_tenant_scope_unenforced, app
+from meho_backplane.metrics import VAULT_TENANT_SCOPE_ENFORCED
 from meho_backplane.settings import get_settings
 
 _ADVISORY_EVENT = "vault_tenant_scope_unenforced"
@@ -84,6 +85,30 @@ def test_advisory_fires_once_when_prefix_explicitly_emptied(
     assert event["log_level"] == "warning"
     assert event["enable_via"] == "VAULT_KV_TENANT_SCOPE_PREFIX"
     assert event["doc"] == "docs/codebase/connectors-vault-tenant-scope.md"
+
+
+def test_gauge_reads_zero_when_prefix_emptied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``vault_tenant_scope_enforced`` gauge mirrors the advisory."""
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
+    get_settings.cache_clear()
+    try:
+        _advise_vault_tenant_scope_unenforced()
+    finally:
+        get_settings.cache_clear()
+
+    assert VAULT_TENANT_SCOPE_ENFORCED._value.get() == 0
+
+
+def test_gauge_reads_one_on_default_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the default prefix the gauge reports the check as on."""
+    monkeypatch.delenv("VAULT_KV_TENANT_SCOPE_PREFIX", raising=False)
+    get_settings.cache_clear()
+    try:
+        _advise_vault_tenant_scope_unenforced()
+    finally:
+        get_settings.cache_clear()
+
+    assert VAULT_TENANT_SCOPE_ENFORCED._value.get() == 1
 
 
 def test_advisory_silent_when_prefix_set(monkeypatch: pytest.MonkeyPatch) -> None:

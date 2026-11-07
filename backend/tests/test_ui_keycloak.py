@@ -87,6 +87,7 @@ _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _TENANT_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
 _OP_OPERATOR = "op-operator"
+_OP_READ_ONLY = "op-read-only"
 _TARGET_NAME = "rdc-keycloak"
 
 #: A live client secret planted in the dispatch double's envelope. The
@@ -1043,3 +1044,37 @@ def test_keycloak_ui_user_routes_literal_before_param() -> None:
     assert param_paths, "expected at least one /ui/keycloak/users/{user_uuid} route"
     for p in param_paths:
         assert create_idx < paths.index(p)
+
+
+# ===========================================================================
+# Role floor: read_only gets 403 on the read pages, and nothing is dispatched
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/ui/keycloak",
+        "/ui/keycloak/clients/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "/ui/keycloak/users",
+    ],
+)
+def test_keycloak_ui_read_pages_read_only_forbidden_403_no_dispatch(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """A ``read_only`` session gets ``403 operator_required``; no operation runs.
+
+    The keycloak read pages sit on the same ``operator`` floor as the REST
+    ``/api/v1/operations/call`` route. The recording ``call_operation``
+    double sees no call.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    received = _patch_call_operation(monkeypatch, _index_envelopes())
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_READ_ONLY, role=TenantRole.READ_ONLY
+    )
+    with mock:
+        response = client.get(path, params={"target": "kc-a"})
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}
+    assert received == []

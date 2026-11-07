@@ -66,7 +66,7 @@ central-dial / on-site only).
 | `winsrv.storage.disk.list` | safe | no | `Get-Disk` |
 | `winsrv.storage.volume.list` | safe | no | `Get-Volume` |
 | `winsrv.storage.iscsi.list` | safe | no | `Get-IscsiTarget` |
-| `winsrv.storage.iscsi.connect` | caution | no | `Connect-IscsiTarget` |
+| `winsrv.storage.iscsi.connect` | caution | **yes** | `Connect-IscsiTarget` (the host connects to `target_portal_address`, a caller address: the field carries the caller-address marker) |
 | `winsrv.storage.disk.format` | caution | no | `Initialize-Disk` + `New-Partition` + `Format-Volume` |
 | `winsrv.time.get` | safe | no | W32Time registry (`NtpServer`, `Type`, `AnnounceFlags`) + `w32tm /query /source` |
 | `winsrv.time.set` | caution | **yes** | `w32tm /config /manualpeerlist:<peers> /syncfromflags:manual [/reliable:yes\|no] /update` |

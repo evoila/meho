@@ -26,6 +26,10 @@ op surface and so the mongodb sibling (#2237) can mirror the shape:
   independent on purpose — the keyword allowlist is a fast, transport-free
   filter; the session flag is the authoritative backstop.
 
+The free-form ``postgres.query`` op adds two more guards on top of these,
+in :mod:`meho_backplane.connectors.postgres.query_guard`: a deny list of
+server admin functions, and a refusal to run as a superuser role.
+
 Auth is optional. A target with ``secret_ref=None`` is a *trust-auth*
 instance (``pg_hba.conf`` ``trust`` / peer, or a port-forward to a
 dev instance) and connects with no password. A target with a
@@ -50,6 +54,7 @@ __all__ = [
     "DEFAULT_CONNECT_TIMEOUT_S",
     "DEFAULT_DATABASE",
     "DEFAULT_PORT",
+    "DEFAULT_STATEMENT_TIMEOUT_MS",
     "DEFAULT_TRUST_USER",
     "PostgresReadOnlyError",
     "assert_read_only_sql",
@@ -77,6 +82,11 @@ DEFAULT_TRUST_USER = "postgres"
 #: fails fast rather than hanging the dispatcher.
 DEFAULT_CONNECT_TIMEOUT_S = 10.0
 
+#: Server-side ``statement_timeout`` (milliseconds) set on every session, so
+#: one slow statement cannot hold a backend open for longer than this. Sent
+#: as a startup parameter like the read-only flag below.
+DEFAULT_STATEMENT_TIMEOUT_MS = 30_000
+
 #: The first-keyword allowlist for the free-form ``postgres.query`` op. Every
 #: entry begins a read-only statement in PostgreSQL:
 #:
@@ -93,11 +103,12 @@ ALLOWED_FIRST_KEYWORDS: frozenset[str] = frozenset(
 )
 
 #: The per-session server settings applied to every connection. asyncpg sends
-#: these as ``startup`` parameters, so ``default_transaction_read_only`` is in
-#: force for the connection's whole lifetime (every implicit
-#: single-statement transaction inherits it).
+#: these as ``startup`` parameters, so ``default_transaction_read_only`` and
+#: ``statement_timeout`` are in force for the connection's whole lifetime
+#: (every implicit single-statement transaction inherits them).
 _SERVER_SETTINGS: dict[str, str] = {
     "default_transaction_read_only": "on",
+    "statement_timeout": str(DEFAULT_STATEMENT_TIMEOUT_MS),
     "application_name": "meho-backplane",
 }
 
@@ -174,7 +185,8 @@ async def connect_read_only(
 
     ``default_transaction_read_only=on`` is set as a startup parameter so the
     session is read-only for its whole lifetime — the server-enforced half of
-    the double read-only guarantee.
+    the double read-only guarantee. ``statement_timeout`` is set the same way
+    (:data:`DEFAULT_STATEMENT_TIMEOUT_MS`), so no statement runs for longer.
 
     Auth is optional:
 

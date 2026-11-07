@@ -8,7 +8,9 @@ change ticket oldest first. Caution steps go on by themselves, a dangerous or
 destructive step waits for a per-step yes (``confirm_id``), and the run stops
 at the first step whose run fails or whose approval is refused. The steps
 after a stop stay pending. A second run skips only the steps that were
-approved and ran OK.
+approved and ran OK. The run approves only the steps the form listed
+(``step_id``): a pending request that joined the ticket later stops it
+before anything is approved.
 
 The harness (app, session, CSRF, the patched operator) is the one
 ``test_ui_approvals.py`` uses. The run of an approved op is replaced by a
@@ -30,10 +32,12 @@ from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
 
 import respx
-from sqlalchemy import update
+from sqlalchemy import select, update
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.operations.approval_rights import WEB_APPROVAL_HINT
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME
 from meho_backplane.ui.routes.approvals import in_order
 from meho_backplane.ui.routes.approvals.in_order import group_warnings
@@ -161,6 +165,8 @@ def _post(
     sid: str = "kc-sid-1",
     sign_in_age: int | None = 0,
     auth_time: int | None = None,
+    operator: Operator | None = None,
+    step_ids: list[str] | None = None,
     **form: str,
 ) -> Any:
     """POST a run as the reviewer.
@@ -168,9 +174,22 @@ def _post(
     *sid* and *auth_time* name the sign-in behind the session: two posts
     with the same pair come from one sign-in. *auth_time* pins the time;
     without it the sign-in is from now minus *sign_in_age* seconds.
+    *operator* replaces the default reviewer (an admin). *step_ids* are the
+    ids the form lists; by default every request of the ticket now, as if
+    the modal had just been rendered.
     """
+    if step_ids is None:
+        step_ids = _ticket_ids()
     csrf = _csrf_token(session_id)
-    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sid=sid, sign_in_age=sign_in_age)
+    # An admin, so the reviewer may approve the dangerous and destructive
+    # steps of another person too (#3328).
+    operator = operator or _operator(
+        tenant_id=_TENANT_A,
+        sub=_REVIEWER_SUB,
+        role=TenantRole.TENANT_ADMIN,
+        sid=sid,
+        sign_in_age=sign_in_age,
+    )
     if auth_time is not None:
         operator = operator.model_copy(update={"auth_time": auth_time})
     with respx.mock(assert_all_called=False):
@@ -182,15 +201,57 @@ def _post(
         ):
             return client.post(
                 "/ui/approvals/in-order",
-                data={"work_ref": _REF, "reason": "change window", **form},
+                data={"work_ref": _REF, "reason": "change window", "step_id": step_ids, **form},
                 headers={CSRF_HEADER_NAME: csrf},
             )
+
+
+def _ticket_ids() -> list[str]:
+    """The ids of every request of change ticket ``_REF``."""
+
+    async def _read() -> list[str]:
+        async with get_sessionmaker()() as session:
+            rows = await session.scalars(
+                select(ApprovalRequest.id).where(ApprovalRequest.work_ref == _REF)
+            )
+            return [str(rid) for rid in rows]
+
+    return asyncio.run(_read())
+
+
+def _form_step_ids(body: str) -> list[str]:
+    """The ``step_id`` values of the rendered form."""
+    marker = 'name="step_id" value="'
+    return [part.split('"', 1)[0] for part in body.split(marker)[1:]]
 
 
 def _get(session_id: uuid.UUID, path: str) -> Any:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         return client.get(path)
+
+
+def _plan(session_id: uuid.UUID, operator: Operator | None = None) -> Any:
+    """Open the in-order modal of ``_REF`` as *operator* (default: an admin)."""
+    operator = operator or _operator(
+        tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.TENANT_ADMIN
+    )
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            return client.get(f"/ui/approvals/in-order?work_ref={_REF_Q}")
+
+
+def _sa_operator() -> Operator:
+    """A person in the MEHO-SA-Operators group, with the operator role."""
+    return _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB).model_copy(
+        update={"self_approver": True}
+    )
+
+
+def _step_row(body: str, step: int) -> str:
+    """The rendered row of step *step*."""
+    return body.split(f'data-approval-in-order-step="{step}"')[1].split("</li>")[0]
 
 
 def _session() -> uuid.UUID:
@@ -219,7 +280,7 @@ def test_plan_lists_steps_oldest_first_with_a_start_form() -> None:
     second = _seed(2, "dangerous")
     first = _seed(1, "caution")
 
-    response = _get(session_id, f"/ui/approvals/in-order?work_ref={_REF_Q}")
+    response = _plan(session_id)
 
     assert response.status_code == 200, response.text
     text = response.text
@@ -229,6 +290,49 @@ def test_plan_lists_steps_oldest_first_with_a_start_form() -> None:
     # Nothing ran: both rows still wait.
     assert _request_status(first) == "pending"
     assert _request_status(second) == "pending"
+
+
+def test_plan_shows_for_each_pending_step_whether_the_person_may_approve_it() -> None:
+    """The sign of the request window, per step (#3329): yes, own change, no."""
+    session_id = _session()
+    _seed(1, "caution", principal_sub=_REVIEWER_SUB)
+    _seed(2, "caution")
+    _seed(3, "destructive")
+    _seed(4, "caution", status_value="approved", resume_result={"status": "ok"})
+
+    body = _plan(session_id, _sa_operator()).text
+
+    own = _step_row(body, 1)
+    assert 'data-approve-right="yes"' in own
+    assert 'data-approve-reason="own_change"' in own
+    assert "You may approve it as a MEHO-SA-Operator." in own
+    other = _step_row(body, 2)
+    assert 'data-approve-right="yes"' in other
+    assert 'data-approve-reason="ok"' in other
+    assert 'data-approve-right="yes"' in _step_row(body, 3)
+    # A decided step has no sign.
+    assert "data-approve-right" not in _step_row(body, 4)
+    assert "data-approval-in-order-refused" not in body
+    assert 'data-confirm="in-order-start"' in body
+
+
+def test_plan_says_where_the_run_will_stop_for_a_step_the_person_may_not_approve() -> None:
+    """An operator outside the groups may not approve another person's destructive step."""
+    session_id = _session()
+    _seed(1, "caution")
+    _seed(2, "destructive")
+
+    body = _plan(session_id, _operator(tenant_id=_TENANT_A)).text
+
+    assert 'data-approve-right="yes"' in _step_row(body, 1)
+    refused = _step_row(body, 2)
+    assert 'data-approve-right="no"' in refused
+    assert 'data-approve-reason="wrong_group"' in refused
+    assert "MEHO-SA-Operator or a MEHO-Admin" in refused
+    assert 'data-approval-in-order-refused="2"' in body
+    assert "You cannot approve step 2 of 2 (op.step2). The run will stop there." in body
+    # Step 1 can still go: the Start button stays.
+    assert 'data-confirm="in-order-start"' in body
 
 
 _SIGN_IN_URL = (
@@ -413,7 +517,7 @@ def test_group_larger_than_one_page_is_read_completely() -> None:
     asyncio.run(_seed_many())
     resume = _fake_resume(failing_ops=set())
 
-    plan = _get(session_id, f"/ui/approvals/in-order?work_ref={_REF_Q}")
+    plan = _plan(session_id)
     run = _post(session_id, resume)
 
     assert f'data-approval-in-order-step="{page + 1}"' in plan.text
@@ -463,9 +567,65 @@ def test_self_approval_refusal_stops_the_run() -> None:
 
     assert 'data-approval-in-order-stopped="1"' in response.text
     assert "The approval was refused" in response.text
+    assert "You cannot approve your own change." in response.text
+    # The refusal says where to approve (#3329), after the refusal text.
+    assert WEB_APPROVAL_HINT in response.text
     assert _request_status(s1) == "pending"
     assert _request_status(s2) == "pending"
     resume.assert_not_awaited()
+
+
+def test_a_self_approved_step_says_so_and_the_done_banner_counts_it() -> None:
+    """A MEHO-SA-Operator approves their own step: the row and the banner say so (#3329)."""
+    session_id = _session()
+    s1 = _seed(1, "caution", principal_sub=_REVIEWER_SUB)
+    s2 = _seed(2, "caution")
+    resume = _fake_resume(failing_ops=set())
+
+    response = _post(session_id, resume, operator=_sa_operator())
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "data-approval-in-order-done" in body
+    assert "Done. Approved 2 steps in order." in body
+    assert "1 of them was your own change. The audit log records it as a self-approval." in body
+    own = _step_row(body, 1)
+    assert 'data-testid="approval-self-approved"' in own
+    assert "You approved your own change as a MEHO-SA-Operator." in own
+    assert "data-approve-right" not in own
+    other = _step_row(body, 2)
+    assert 'data-testid="approval-self-approved"' not in other
+    assert [_request_status(r) for r in (s1, s2)] == ["approved", "approved"]
+
+
+def test_an_ordinary_run_shows_no_self_approval_line() -> None:
+    session_id = _session()
+    _seed(1, "caution")
+    resume = _fake_resume(failing_ops=set())
+
+    body = _post(session_id, resume).text
+
+    assert "Done. Approved 1 step in order." in body
+    assert "approval-self-approved" not in body
+
+
+def test_an_own_destructive_step_waits_with_the_self_approval_note_then_says_so() -> None:
+    """The per-step yes names the self-approval before the click, and the row after it."""
+    session_id = _session()
+    s1 = _seed(1, "destructive", principal_sub=_REVIEWER_SUB)
+    resume = _fake_resume(failing_ops=set())
+
+    waiting = _post(session_id, resume, operator=_sa_operator()).text
+    assert 'data-approval-in-order-waiting="1"' in waiting
+    assert 'data-approval-confirm="self-approval"' in waiting
+    assert "This is your own change: the audit log records a self-approval." in waiting
+    assert _request_status(s1) == "pending"
+
+    done = _post(session_id, resume, operator=_sa_operator(), confirm_id=str(s1)).text
+
+    assert _request_status(s1) == "approved"
+    assert "You approved your own change as a MEHO-SA-Operator." in _step_row(done, 1)
+    assert "1 of them was your own change." in done
 
 
 def test_rerun_skips_only_steps_that_ran_ok() -> None:
@@ -517,3 +677,77 @@ def test_group_warnings_name_mixed_requesters_and_equal_times() -> None:
     assert any("2 requesters (alice, bob)" in w for w in warnings)
     assert any("Steps 1 and 2 were created at the same time" in w for w in warnings)
     assert group_warnings(rows[:1]) == []
+
+
+def test_a_caution_step_added_after_the_plan_was_shown_is_not_approved() -> None:
+    """A request that joins the ticket after the plan was rendered stops the run.
+
+    MEHO approves nothing, marks the new step and offers a fresh Start that
+    lists it. Only that second Start approves both steps.
+    """
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    plan = _plan(session_id)
+    shown = _form_step_ids(plan.text)
+    assert shown == [str(s1)]
+    s2 = _seed(2, "caution")
+    resume = _fake_resume(failing_ops=set())
+
+    blocked = _post(session_id, resume, step_ids=shown)
+
+    assert blocked.status_code == 200, blocked.text
+    assert "data-approval-in-order-unseen" in blocked.text
+    assert "MEHO approved nothing" in blocked.text
+    assert "step 2 (op.step2)" in blocked.text
+    assert "data-approval-in-order-new" in _step_row(blocked.text, 2)
+    assert "data-approval-in-order-new" not in _step_row(blocked.text, 1)
+    assert 'data-confirm="in-order-start"' in blocked.text
+    assert "HX-Trigger" not in blocked.headers
+    assert [_request_status(r) for r in (s1, s2)] == ["pending", "pending"]
+    resume.assert_not_awaited()
+
+    again = _post(session_id, resume, step_ids=_form_step_ids(blocked.text))
+
+    assert "data-approval-in-order-done" in again.text
+    assert [_request_status(r) for r in (s1, s2)] == ["approved", "approved"]
+
+
+def test_a_step_added_while_the_run_waits_stops_the_yes() -> None:
+    """The yes for a risky step covers only the list it was shown with."""
+    session_id = _session()
+    s1 = _seed(1, "dangerous")
+    resume = _fake_resume(failing_ops=set())
+    first = _post(session_id, resume)
+    assert 'data-approval-in-order-waiting="1"' in first.text
+    shown = _form_step_ids(first.text)
+    s2 = _seed(2, "caution")
+
+    response = _post(session_id, resume, step_ids=shown, confirm_id=str(s1))
+
+    assert "data-approval-in-order-unseen" in response.text
+    assert [_request_status(r) for r in (s1, s2)] == ["pending", "pending"]
+    resume.assert_not_awaited()
+
+
+def test_a_post_without_step_ids_approves_nothing() -> None:
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    resume = _fake_resume(failing_ops=set())
+
+    response = _post(session_id, resume, step_ids=[])
+
+    assert "data-approval-in-order-unseen" in response.text
+    assert _request_status(s1) == "pending"
+    resume.assert_not_awaited()
+
+
+def test_a_step_id_that_is_not_a_request_id_is_refused() -> None:
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    resume = _fake_resume(failing_ops=set())
+
+    response = _post(session_id, resume, step_ids=["not-an-id"])
+
+    assert response.status_code == 422
+    assert _request_status(s1) == "pending"
+    resume.assert_not_awaited()

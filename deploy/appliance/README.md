@@ -12,7 +12,8 @@ first start `docs/codebase/appliance-firststart.md`.
 | `clean.sh` | Runs on the build VM: removes everything that must differ between appliances, checks itself, powers off. |
 | `rewrite-ovf.sh` | Puts our product section and the OVF transports into the exported `.ovf`. |
 | `product-section.xml` | The wizard fields of the import in vCenter. |
-| `firststart/` | Runs once at the appliance's first boot: reads the wizard fields, sets up the machine, installs the core from the disk. Also the console banner. |
+| `firststart/` | Runs once at the appliance's first boot: reads the wizard fields (or, without them, asks on the VM console), sets up the machine, installs the core from the disk. Also the console banner. |
+| `cis/` | The OS hardening to CIS Ubuntu 24.04 Level 1 - Server, which step 3 runs on the build VM, and its scan. The tailoring and the lists of rules that do not apply and of exceptions. |
 | `tests/` | Unit tests of `clean.sh`, `rewrite-ovf.sh`, `build.sh` (against a stub `govc`) and first start. No vCenter. |
 
 `.github/workflows/appliance-build.yml` runs the build on the lab runner.
@@ -20,7 +21,8 @@ first start `docs/codebase/appliance-firststart.md`.
 ## Run it by hand
 
 On a Linux machine that reaches the lab's vCenter and the build VM's
-address, with `govc`, `ssh`, `scp`, `curl`, `tar` and `sha256sum`:
+address, with `govc`, `ssh`, `scp`, `curl`, `tar`, `sha256sum` and
+`sha512sum`:
 
 ```bash
 export GOVC_URL=https://vcenter.example.lab GOVC_USERNAME=... GOVC_PASSWORD=... GOVC_INSECURE=1
@@ -41,6 +43,16 @@ CIS profile (#4636), the migration fix (#5248) and the OpenBao setup
 lab that points to `MEHO_BUILD_ADDRESS`, because the form-2 install checks
 it. Make a new SSH key for every build.
 
+Step 3 hardens the OS to CIS Ubuntu 24.04 Level 1 - Server
+(`cis/harden.sh`). The build VM must reach the Ubuntu archive then, and
+the machine that runs `build.sh` downloads the CIS content of
+ComplianceAsCode from GitHub once (about 180 MB, kept in the cache). The
+scan's result list is `meho-appliance-<version>-cis.txt` in the out-dir;
+`[WARN]` lines in the build output name failing rules that are in neither
+`cis/not-applicable.md` nor `cis/exceptions.md`, and the build stops at
+step 3. Fix each rule in `cis/harden.sh`, or add it to `cis/exceptions.md`
+with its reason, then go on with `--from-step 3`.
+
 When a step fails, the build VM stays in vCenter. Fix the cause and go on
 from that step with `--from-step N` (2 the form-2 install, 3 the appliance
 pieces, 4 the clean, 5 the export), or destroy the VM with
@@ -60,12 +72,13 @@ from step 1.
 
 ## Test it
 
-The unit tests need Linux bash 5 (macOS bash 3.2 cannot run the scripts):
+The unit tests need Linux bash 5 (macOS bash 3.2 cannot run the scripts).
+They also read the form-2 scripts in `deploy/linux-server/lib`:
 
 ```bash
-docker run --rm -v "$PWD/deploy/appliance:/work/deploy/appliance:ro" -w /work python:3.14-slim python -m unittest discover -s deploy/appliance/tests -v
+docker run --rm -v "$PWD/deploy:/work/deploy:ro" -w /work python:3.14-slim python -m unittest discover -s deploy/appliance/tests -v
 ```
 
 ```bash
-shellcheck deploy/appliance/*.sh deploy/appliance/firststart/*.sh
+shellcheck deploy/appliance/*.sh deploy/appliance/firststart/*.sh deploy/appliance/cis/*.sh
 ```

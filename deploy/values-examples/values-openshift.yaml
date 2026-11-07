@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Helm values for MEHO on OpenShift (install form 3), with the built-in
+# PostgreSQL, Keycloak and OpenBao (on by default). Tested on 2026-11-04 on
+# a single-node OpenShift 4.22: installed by an admin of one project, every
+# pod under the default security rule `restricted-v2`, no extra rights
+# (#4102).
+#
+# Pass it before your own values file, which sets at least `image.tag`,
+# `ingress.host`, `coreKeycloak.hostname` (the same name) and
+# `coreKeycloak.firstTenantId` (a UUID you pick once and keep):
+#
+#   helm install meho oci://ghcr.io/evoila/meho-chart --version <version> \
+#     -n <project> -f values-openshift.yaml -f values-site.yaml \
+#     --wait --wait-for-jobs --timeout 20m
+global:
+  # OpenShift picks the user ids from the project's range.
+  openshift: true
+ingress:
+  # The router turns the Ingress into one Route per path.
+  className: openshift-default
+  tls:
+    # The self-signed certificate the install makes for the host name. Name
+    # your own Secret here for a certificate your users already trust.
+    secretName: meho-core-tls
+networkPolicy:
+  # Off until the chart lets OpenShift's router in (#4050). In a data center
+  # the router runs on the host network, so its traffic does not come from
+  # the `openshift-ingress` namespace that the rule names.
+  enabled: false

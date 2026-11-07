@@ -41,6 +41,7 @@ from meho_backplane.connectors.pfsense.ops_delete import (
     pfsense_route_static_delete,
 )
 from meho_backplane.connectors.pfsense.ops_filter_rule import (
+    PfSenseFilterRuleRefusedError,
     _build_rule_add_playback,
     _build_rule_delete_playback,
     _filter_rule_delete_preview,
@@ -67,6 +68,8 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.operations.approval_queue import (
+    ApprovalResultState,
+    approval_result_state,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -458,15 +461,43 @@ async def test_add_same_rule_is_noop() -> None:
     assert mock_cmd.await_count == 1
 
 
+async def test_add_twice_second_call_is_already_present() -> None:
+    """The same add run twice: the first adds, the second is a no-op that stays ``ok``."""
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_BEFORE),
+            _proc(_SSH_FLOW),
+            _proc(""),
+            _proc(""),
+            _proc(""),
+            _proc(_AFTER_ADD),
+            _proc(_AFTER_ADD),  # second call: the rule is there
+        ]
+        first = await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+        second = await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+    assert first["status"] == "added"
+    assert second["status"] == "already_present"
+    assert second["applied"] is False
+    assert sum(c.startswith("pfSsh.php") for c in _cmds(mock_cmd)) == 1
+
+
+def _assert_refused(exc_info: Any, code: str) -> None:
+    """The refusal names its code, keeps the guidance, and says nothing changed."""
+    exc = exc_info.value
+    assert exc.code == code
+    assert f"refused ({code})" in str(exc)
+    assert exc.guidance and exc.guidance in str(exc)
+
+
 async def test_add_different_rule_same_id_is_conflict() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_AFTER_ADD)]
-        result = await connector.filter_rule_add(
-            None, {**_FENCE_PARAMS, "destination": "10.3.0.0/24"}
-        )
-    assert result["status"] == "conflict"
-    assert result["applied"] is False
+        with pytest.raises(PfSenseFilterRuleRefusedError) as exc_info:
+            await connector.filter_rule_add(None, {**_FENCE_PARAMS, "destination": "10.3.0.0/24"})
+    _assert_refused(exc_info, "conflict")
+    assert "destination" in exc_info.value.guidance
     assert mock_cmd.await_count == 1
 
 
@@ -491,10 +522,10 @@ async def test_add_stored_rule_with_other_behaviour_is_conflict(stored: str, fie
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_config(stored, _LAN_PASS))]
-        result = await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
-    assert result["status"] == "conflict"
-    assert result["applied"] is False
-    assert field in result["guidance"]
+        with pytest.raises(PfSenseFilterRuleRefusedError) as exc_info:
+            await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+    _assert_refused(exc_info, "conflict")
+    assert field in exc_info.value.guidance
     assert mock_cmd.await_count == 1
 
 
@@ -502,8 +533,9 @@ async def test_add_duplicate_id_is_ambiguous() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_config(_FENCE, _FENCE))]
-        result = await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
-    assert result["status"] == "ambiguous"
+        with pytest.raises(PfSenseFilterRuleRefusedError) as exc_info:
+            await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+    _assert_refused(exc_info, "ambiguous")
     assert mock_cmd.await_count == 1
 
 
@@ -511,9 +543,34 @@ async def test_add_unknown_interface_is_refused() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_BEFORE)]
-        result = await connector.filter_rule_add(None, {**_FENCE_PARAMS, "interface": "opt9"})
-    assert result["status"] == "unknown_interface"
+        with pytest.raises(PfSenseFilterRuleRefusedError) as exc_info:
+            await connector.filter_rule_add(None, {**_FENCE_PARAMS, "interface": "opt9"})
+    _assert_refused(exc_info, "unknown_interface")
+    assert "'opt9'" in exc_info.value.guidance
+    assert "nothing changed" in exc_info.value.guidance
     assert mock_cmd.await_count == 1
+
+
+@pytest.mark.parametrize("interface", ["openvpn", "enc0", "l2tp", "pppoe"])
+async def test_add_on_builtin_vpn_tab_is_accepted(interface: str) -> None:
+    """pfSense's OpenVPN / IPsec / L2TP / PPPoE tabs are not in ``<interfaces>`` (#5136)."""
+    assert f"<{interface}>" not in _BEFORE
+    landed = _FENCE.replace("<interface>opt1</interface>", f"<interface>{interface}</interface>")
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_BEFORE),
+            _proc(_SSH_FLOW),
+            _proc(""),
+            _proc(""),
+            _proc(""),
+            _proc(_config(landed, _LAN_PASS)),
+        ]
+        result = await connector.filter_rule_add(None, {**_FENCE_PARAMS, "interface": interface})
+    assert result["status"] == "added"
+    assert result["applied"] is True
+    assert result["verified"] is True
+    assert result["rule"]["interface"] == interface
 
 
 async def test_add_interface_group_is_accepted() -> None:
@@ -540,12 +597,12 @@ async def test_add_block_that_cuts_mgmt_path_is_refused() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_BEFORE), _proc(_SSH_FLOW)]
-        result = await connector.filter_rule_add(
-            None, {"ridentifier": _RID, "type": "block", "interface": "wan"}
-        )
-    assert result["status"] == "mgmt_path"
-    assert result["applied"] is False
-    assert "port 22" in result["guidance"]
+        with pytest.raises(PfSenseFilterRuleRefusedError) as exc_info:
+            await connector.filter_rule_add(
+                None, {"ridentifier": _RID, "type": "block", "interface": "wan"}
+            )
+    _assert_refused(exc_info, "mgmt_path")
+    assert "port 22" in exc_info.value.guidance
     assert not any(c.startswith("pfSsh.php") for c in _cmds(mock_cmd))
 
 
@@ -554,8 +611,9 @@ async def test_add_block_with_unreadable_mgmt_flow_is_refused(flow_proc: Any) ->
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_BEFORE), flow_proc]
-        result = await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
-    assert result["status"] == "mgmt_path_unknown"
+        with pytest.raises(PfSenseFilterRuleRefusedError) as exc_info:
+            await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+    _assert_refused(exc_info, "mgmt_path_unknown")
     assert mock_cmd.await_count == 2
 
 
@@ -849,14 +907,16 @@ async def test_delete_block_rule_happy_path() -> None:
     assert cmds[2] == f"pfSsh.php playback meho_filter_rule_delete_{_RID}"
 
 
-async def test_delete_not_found_and_ambiguous_stage_nothing() -> None:
+async def test_delete_not_found_is_ok_and_ambiguous_is_refused() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_BEFORE), _proc(_config(_FENCE, _FENCE))]
         missing = await connector.filter_rule_delete(None, {"ridentifier": _RID})
-        dup = await connector.filter_rule_delete(None, {"ridentifier": _RID})
+        with pytest.raises(PfSenseFilterRuleRefusedError) as exc_info:
+            await connector.filter_rule_delete(None, {"ridentifier": _RID})
+    # Safe to run twice: the rule is already gone, so the wanted state holds.
     assert missing["status"] == "not_found"
-    assert dup["status"] == "ambiguous"
+    _assert_refused(exc_info, "ambiguous")
     assert mock_cmd.await_count == 2
 
 
@@ -864,8 +924,9 @@ async def test_delete_nat_linked_rule_is_refused() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_config(_NAT_LINKED))]
-        result = await connector.filter_rule_delete(None, {"ridentifier": "100000003"})
-    assert result["status"] == "nat_associated"
+        with pytest.raises(PfSenseFilterRuleRefusedError) as exc_info:
+            await connector.filter_rule_delete(None, {"ridentifier": "100000003"})
+    _assert_refused(exc_info, "nat_associated")
     assert mock_cmd.await_count == 1
 
 
@@ -873,8 +934,9 @@ async def test_delete_pass_rule_carrying_mgmt_path_is_refused() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_config(_MEHO_PASS_SSH)), _proc(_SSH_FLOW)]
-        result = await connector.filter_rule_delete(None, {"ridentifier": "100000002"})
-    assert result["status"] == "mgmt_path"
+        with pytest.raises(PfSenseFilterRuleRefusedError) as exc_info:
+            await connector.filter_rule_delete(None, {"ridentifier": "100000002"})
+    _assert_refused(exc_info, "mgmt_path")
     assert not any(c.startswith("pfSsh.php") for c in _cmds(mock_cmd))
 
 
@@ -1146,7 +1208,9 @@ async def test_add_waits_for_approval_then_runs() -> None:
     assert not recorder.playback_ran
     request_id = UUID(call["extras"]["approval_request_id"])
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -1157,6 +1221,43 @@ async def test_add_waits_for_approval_then_runs() -> None:
     assert resume.status == "ok", resume.error
     assert resume.result["status"] == "added"
     assert recorder.playback_ran
+
+
+@pytest.mark.asyncio
+async def test_approved_add_that_is_refused_shows_as_failed() -> None:
+    """An approved add that changes nothing is a failed run, not "ran OK" (#5136)."""
+    recorder = _RecordingPfSense(config_before=_BEFORE)
+    await _bootstrap(recorder)
+    await _seed_target()
+    requester = _make_operator(sub="op-requester")
+    call = await call_operation(
+        requester,
+        {
+            "connector_id": _CONNECTOR_ID,
+            "op_id": _ADD_OP,
+            "target": "pf-perimeter",
+            "params": {**_FENCE_PARAMS, "interface": "opt9"},
+        },
+    )
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "error", resume
+    assert resume.extras["exception_class"] == "PfSenseFilterRuleRefusedError"
+    assert "refused (unknown_interface)" in resume.extras["exception_message"]
+    assert not recorder.playback_ran
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert approval_result_state(row) == ApprovalResultState.FAILED
 
 
 @pytest.mark.asyncio
@@ -1187,7 +1288,9 @@ async def test_delete_full_governed_flow() -> None:
         assert row is not None
         assert row.proposed_effect["blast_radius"]["object"]["ridentifier"] == _RID
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -1202,10 +1305,17 @@ async def test_delete_full_governed_flow() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("op_id", "params"),
-    [(_ADD_OP, _FENCE_PARAMS), (_DELETE_OP, {"ridentifier": _RID})],
+    ("op_id", "params", "expected_status", "expected_pending"),
+    [
+        (_ADD_OP, _FENCE_PARAMS, "awaiting_approval", 1),
+        # A destructive request needs the preview hash before it can wait.
+        (_DELETE_OP, {"ridentifier": _RID}, "denied", 0),
+    ],
 )
-async def test_agent_principal_cannot_run_either_op(op_id: str, params: dict[str, Any]) -> None:
+async def test_agent_principal_cannot_run_either_op(
+    op_id: str, params: dict[str, Any], expected_status: str, expected_pending: int
+) -> None:
+    """An agent never runs either op; its request waits for a person (#3980)."""
     recorder = _RecordingPfSense(config_before=_AFTER_ADD)
     await _bootstrap(recorder)
     result = await dispatch(
@@ -1225,6 +1335,6 @@ async def test_agent_principal_cannot_run_either_op(op_id: str, params: dict[str
         ),
         params=dict(params),
     )
-    assert result.status == "denied", result
+    assert result.status == expected_status, result
     assert not recorder.playback_ran
-    assert await _pending_count() == 0
+    assert await _pending_count() == expected_pending

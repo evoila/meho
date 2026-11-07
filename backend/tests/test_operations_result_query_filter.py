@@ -503,14 +503,19 @@ async def test_paging_wire_ceiling_names_paging_remediation(
 
 
 async def test_wire_ceiling_uses_the_real_encoded_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ceiling compares the measured wire size, not the rows' size."""
+    """The ceiling compares the measured wire size, not the rows' size.
+
+    The size is measured as the MCP tool delivers the page: with the
+    ``data_notice`` field the tool adds after this check.
+    """
     from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+    from meho_backplane.untrusted_text import with_data_notice
 
     rows = _sample_rows(10)
     handle = uuid.uuid4()
     _install(monkeypatch, _store(rows), _stub_settings())
     payload = await rq.read_result_window(_operator(), handle, offset=0, limit=10)
-    exact = measure_delivered_wire_bytes(payload)
+    exact = measure_delivered_wire_bytes(with_data_notice(dict(payload)))
 
     _install(monkeypatch, _store(rows), _stub_settings(wire_bytes=exact))
     assert await rq.read_result_window(_operator(), handle, offset=0, limit=10) == payload

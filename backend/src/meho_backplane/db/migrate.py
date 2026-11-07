@@ -31,7 +31,7 @@ The contract is intentionally minimal:
   audit-side secret-leak sweep does not run inside this entrypoint;
   Alembic itself is the only thing logging here).
 
-One run does four steps on one database connection:
+One run does five steps on one database connection:
 
 1. **Wait for the database.** The runner tries to connect every few
    seconds, for at most ``MIGRATION_DB_WAIT_SECONDS`` (default 300, the
@@ -57,6 +57,16 @@ One run does four steps on one database connection:
    ``Config.attributes["connection"]`` (the Alembic cookbook recipe
    "Programmatic API use (connection sharing) With Asyncio");
    ``alembic/env.py`` then uses it instead of opening its own.
+5. **Give the runtime role its rights.** When ``DATABASE_RUNTIME_ROLE``
+   names the login of the running backplane
+   (:mod:`meho_backplane.db.runtime_role`), the runner waits for that role
+   to exist (same time limit as step 1) and then grants it, as the owner,
+   the rights it needs: everything on the other tables, and on
+   ``audit_log`` only ``SELECT``, ``INSERT`` and ``UPDATE`` of
+   ``raw_payload``. This runs after every upgrade, also a skipped one, so
+   a table a later migration added gets its rights on the next run. Off
+   PostgreSQL the step prints ``migration_runtime_role_skipped``. Unset
+   or empty: one login for everything, nothing to grant.
 
 Status lines go straight to stderr, like the ``migration_failed`` line,
 because ``alembic/env.py`` calls :func:`logging.config.fileConfig`, which
@@ -88,6 +98,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from sqlalchemy.pool import NullPool
 
 from meho_backplane.db.migrations import alembic_config, revision_known
+from meho_backplane.db.runtime_role import (
+    apply_runtime_grants,
+    runtime_role_from_env,
+    wait_for_runtime_role,
+)
 
 __all__ = ["MIGRATION_LOCK_KEY", "DatabaseNotReadyError", "main"]
 
@@ -256,8 +271,20 @@ def _upgrade(connection: Connection, cfg: Config) -> None:
     command.upgrade(cfg, "head")
 
 
+async def _grant_runtime_role(conn: AsyncConnection, role: str | None, *, limit: float) -> None:
+    """Step 5: wait for *role* and give it its rights; nothing when *role* is ``None``."""
+    if role is None:
+        return
+    if conn.dialect.name != "postgresql":
+        _say(f"migration_runtime_role_skipped: {conn.dialect.name} has no roles; {role!r} ignored")
+        return
+    await wait_for_runtime_role(conn, role, limit_seconds=limit, say=_say)
+    await apply_runtime_grants(conn, role, say=_say)
+
+
 async def _run(cfg: Config) -> None:
     wait_seconds = _db_wait_seconds()
+    runtime_role = runtime_role_from_env()
     engine = _build_engine(_database_url(cfg))
     try:
         conn = await _connect(engine, limit_seconds=wait_seconds)
@@ -265,6 +292,7 @@ async def _run(cfg: Config) -> None:
             await _lock(conn)
             try:
                 await conn.run_sync(_upgrade, cfg)
+                await _grant_runtime_role(conn, runtime_role, limit=wait_seconds)
             finally:
                 await _unlock(conn)
         finally:
@@ -274,7 +302,7 @@ async def _run(cfg: Config) -> None:
 
 
 def main() -> int:
-    """Run the four steps above and return a process exit code.
+    """Run the five steps above and return a process exit code.
 
     Returns ``0`` on success (including a skipped run on a newer
     database), ``1`` on any exception: a database that stayed down, a

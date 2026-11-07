@@ -143,6 +143,10 @@ The service-layer exceptions map to HTTP status codes uniformly:
   mapped here onto the ``product_impl_id_mismatch`` envelope via the
   shared builder so the REST 422 body and the MCP -32602 ``data``
   member can't drift.
+* :class:`~meho_backplane.operations._ingested_owner.IngestedOperationsNotAccepted`
+  → 422 Unprocessable Entity. The name belongs to a connector class
+  that runs only its own hand-written operations, so MEHO ingests no
+  API file under it. Same shared-builder parity as above.
 * :class:`PermissionError` (raised by
   :meth:`IngestionPipelineService.authorize_scope` — eagerly at the
   route on both ingest branches (#2208), and again inside the
@@ -202,6 +206,10 @@ from meho_backplane.api.v1.operations import connector_not_ingested_404
 from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge, has_fresh_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.operations._ingested_owner import (
+    IngestedOperationsNotAccepted,
+    build_ingested_ops_not_accepted_detail,
+)
 from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
@@ -262,7 +270,7 @@ from meho_backplane.operations.ingest import (
     get_job_registry,
     list_ingested_connectors,
     load_catalog,
-    load_spec_resource,
+    load_entry_spec,
     run_ingest_job,
 )
 from meho_backplane.operations.ingest.api_schemas import (
@@ -843,6 +851,8 @@ def _job_to_response(job: IngestJob) -> IngestJobStatusResponse:
         spec_uris=list(job.spec_uris),
         started_at=job.started_at,
         ended_at=job.ended_at,
+        phase=job.phase,
+        phase_started_at=job.phase_started_at,
         ingestion=ingestion_model,
         grouping=grouping_model,
         error=job.error,
@@ -931,7 +941,8 @@ def _catalog_entry_specs(entry: ConnectorSpecEntry) -> list[SpecSource]:
     Two on-ramps (#1964 T1):
 
     * **Shipped spec** — ``entry.spec_resource`` is set: load the
-      MEHO-authored OpenAPI bytes from package data and carry them
+      shipped OpenAPI bytes from package data (MEHO's own, or the
+      connector package that brought the row) and carry them
       inline as :attr:`SpecSource.content` (the ``uri`` is the audit
       label ``spec:<resource>``). The ingest pipeline uses the content
       verbatim — no fetch, no SSRF guard — bypassing an ``upstream`` the
@@ -943,7 +954,7 @@ def _catalog_entry_specs(entry: ConnectorSpecEntry) -> list[SpecSource]:
       to fetch under the https guard.
     """
     if entry.spec_resource is not None:
-        content = load_spec_resource(entry.spec_resource)
+        content = load_entry_spec(entry)
         return [SpecSource(uri=f"spec:{entry.spec_resource}", content=content)]
     return [SpecSource(uri=uri) for uri in (entry.upstream or ())]
 
@@ -1167,6 +1178,11 @@ async def _run_ingest_with_http_mapping(
                 tuple(body.auth_secret_fields) if body.auth_secret_fields is not None else None
             ),
         )
+    except IngestedOperationsNotAccepted as exc:
+        raise HTTPException(
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            build_ingested_ops_not_accepted_detail(exc),
+        ) from exc
     except Exception as exc:
         _raise_ingest_http_error(exc, catalog_entry=catalog_entry)
 

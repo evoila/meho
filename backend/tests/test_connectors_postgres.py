@@ -59,6 +59,7 @@ from meho_backplane.connectors.postgres import session as session_module
 from meho_backplane.connectors.postgres.connector import _classify_fingerprint_error
 from meho_backplane.connectors.postgres.session import (
     ALLOWED_FIRST_KEYWORDS,
+    DEFAULT_STATEMENT_TIMEOUT_MS,
     DEFAULT_TRUST_USER,
     connect_read_only,
     first_significant_keyword,
@@ -406,6 +407,7 @@ async def test_connect_trust_auth_sends_no_password_and_read_only_session(
     assert kwargs["user"] == DEFAULT_TRUST_USER
     assert "password" not in kwargs
     assert kwargs["server_settings"]["default_transaction_read_only"] == "on"
+    assert kwargs["server_settings"]["statement_timeout"] == str(DEFAULT_STATEMENT_TIMEOUT_MS)
     assert kwargs["port"] == _PG_PORT
 
 
@@ -638,7 +640,7 @@ async def test_run_query_bounds_rows_and_flags_truncation(
 ) -> None:
     """postgres.query caps rows at max_rows and flags truncation."""
     records = [{"n": i} for i in range(5)]
-    conn = _FakeConn(cursor_records=records)
+    conn = _FakeConn(cursor_records=records, fetchval_result=False)
     _patch_connection(monkeypatch, conn)
 
     result = await PostgresConnector().run_query(

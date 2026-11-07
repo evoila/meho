@@ -108,7 +108,7 @@ func runMove(
 }
 
 // printMoveResult renders the value-free move confirmation: the op header
-// then, on success, only the move status / value SHA-256 / byte length.
+// then, on success, only the move status / value fingerprint / byte length.
 // It never renders a secret value because the response never carries one.
 func printMoveResult(w io.Writer, r *dispatch.CallResult) {
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opMove, r.Status, r.DurationMs)
@@ -119,7 +119,7 @@ func printMoveResult(w io.Writer, r *dispatch.CallResult) {
 	obj, err := decodeMoveResult(r.Result)
 	if err != nil || obj == nil {
 		// Fall back to the raw result envelope (still value-free — the op
-		// response schema carries only status / value_sha256 / length).
+		// response schema carries only status / value_fingerprint / length).
 		if len(r.Result) > 0 && string(r.Result) != "null" {
 			if pretty, perr := dispatch.PrettyJSON(r.Result); perr == nil {
 				fmt.Fprintln(w, pretty)
@@ -137,10 +137,10 @@ func printMoveResult(w io.Writer, r *dispatch.CallResult) {
 // moveResultKeyOrder pins a stable render order for the move
 // confirmation's scalar fields so the output is diff-stable. These are
 // the only fields secret.move returns; none carries the value.
-var moveResultKeyOrder = []string{"status", "value_sha256", "length"}
+var moveResultKeyOrder = []string{"status", "value_fingerprint", "length"}
 
 // decodeMoveResult decodes the move confirmation envelope — a flat JSON
-// object of scalar fields ({status, value_sha256, length}) — into a map.
+// object of scalar fields ({status, value_fingerprint, length}) — into a map.
 func decodeMoveResult(raw json.RawMessage) (map[string]any, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil

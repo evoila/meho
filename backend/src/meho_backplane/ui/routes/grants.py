@@ -76,7 +76,7 @@ async def _admin(session: UISessionContext = _session) -> Operator:
 
 
 async def _human_admin(session: UISessionContext = _session) -> Operator:
-    """A tenant admin who is a person: a machine login never makes a grant here.
+    """A tenant admin who is a person: a machine login never makes or revokes a grant here.
 
     The console session carries the access token of its login. An agent,
     service or runner token with the tenant-admin role still gets 403, as
@@ -324,7 +324,6 @@ async def _create(
     session: UISessionContext = _session,
     operator: Operator = Depends(_human_admin),
 ) -> HTMLResponse:
-    del operator
     try:
         if kind == "agent":
             agent_payload = AgentGrantCreate.model_validate(
@@ -360,7 +359,11 @@ async def _create(
             # here. The mark is set in server code; no form field sets it.
             # REST needs MEHO_SANDBOX_DELETE_GRANTS_FROM_API for it (#5251).
             await ServicePrincipalGrantService().create(
-                session.tenant_id, session.operator_sub, service_payload, from_console=True
+                session.tenant_id,
+                session.operator_sub,
+                service_payload,
+                from_console=True,
+                creator_role=operator.tenant_role,
             )
         else:
             raise ValueError("choose agent or service grant")
@@ -408,7 +411,6 @@ async def _renew_delete_grants(
     operator: Operator = Depends(_human_admin),
 ) -> HTMLResponse:
     """Renew the live delete grants of one service principal as one set (#4622)."""
-    del operator
     principal_sub = principal_sub.strip()
     structlog.contextvars.bind_contextvars(
         audit_op_id="service_grant.renew_delete_grants",
@@ -428,6 +430,7 @@ async def _renew_delete_grants(
             expires_at=expiry,
             reason=(reason or "").strip() or None,
             from_console=True,
+            creator_role=operator.tenant_role,
         )
     except (ValidationError, ServiceGrantValidationError, ValueError) as exc:
         response = get_templates().TemplateResponse(
@@ -456,7 +459,7 @@ async def _revoke(
     kind: str,
     grant_id: UUID,
     session: UISessionContext = _session,
-    operator: Operator = Depends(_admin),
+    operator: Operator = Depends(_human_admin),
 ) -> HTMLResponse:
     del operator
     if kind == "agent":

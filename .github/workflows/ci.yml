@@ -2897,6 +2897,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -2919,6 +2922,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \

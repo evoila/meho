@@ -50,6 +50,7 @@ BACKEND_DIR = TESTS_DIR.parent
 # Paths are relative to backend/, sorted.
 OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_api_v1_operations_preview_response.py",
+    "tests/test_api_v1_settings.py",
     "tests/test_chart_approval_handoff.py",
     "tests/test_chart_bring_your_own_render.py",
     "tests/test_chart_broadcast_hardening.py",
@@ -58,6 +59,8 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_core_openbao.py",
     "tests/test_chart_core_postgres.py",
     "tests/test_chart_core_secrets.py",
+    "tests/test_chart_core_wiring.py",
+    "tests/test_chart_dispatch_limits.py",
     "tests/test_chart_image_digest_pin.py",
     "tests/test_chart_image_registry.py",
     "tests/test_chart_mcp_resource_uri.py",
@@ -65,7 +68,9 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_migrate_job_no_sa.py",
     "tests/test_chart_network_policy_extra_egress.py",
     "tests/test_chart_observability_scrape.py",
+    "tests/test_chart_openai_endpoint.py",
     "tests/test_chart_result_cache.py",
+    "tests/test_chart_runtime_database_login.py",
     "tests/test_chart_safe_updates.py",
     "tests/test_chart_sandbox_mode.py",
     "tests/test_chart_vault_addr_optional.py",

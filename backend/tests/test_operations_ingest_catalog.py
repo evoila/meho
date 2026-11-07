@@ -508,7 +508,7 @@ def test_validate_shipped_artifacts_crashes_on_malformed_spec(
     monkeypatch.setattr(
         catalog_mod,
         "load_spec_resource",
-        lambda _name: "openapi: '3.1.0'\ninfo:\n  title: bad\n  version: '1.0'\n",
+        lambda _name, **_: "openapi: '3.1.0'\ninfo:\n  title: bad\n  version: '1.0'\n",
     )
     cat = ConnectorSpecCatalog(
         entries=(
@@ -545,7 +545,7 @@ def test_validate_shipped_artifacts_crashes_on_malformed_profile(
         "  strategy: none\n"
         "  items_key: items\n"
     )
-    monkeypatch.setattr(catalog_mod, "load_profile_resource", lambda _name: bad_profile)
+    monkeypatch.setattr(catalog_mod, "load_profile_resource", lambda _name, **_: bad_profile)
     cat = ConnectorSpecCatalog(
         entries=(
             _entry(

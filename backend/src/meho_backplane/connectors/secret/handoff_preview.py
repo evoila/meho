@@ -67,9 +67,9 @@ async def build_secret_handoff_import_preview(ctx: PreviewContext) -> dict[str, 
         "store_target": store,
         "sink": sink,
     }
-    expected = ctx.params.get("expect_sha256")
+    expected = ctx.params.get("expect_fingerprint")
     if isinstance(expected, str):
-        summary["expect_sha256"] = expected.lower()
+        summary["expect_fingerprint"] = expected.lower()
     return _add_reason(summary, ctx.params)
 
 

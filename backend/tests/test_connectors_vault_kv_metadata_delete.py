@@ -494,7 +494,8 @@ async def test_full_governed_flow_then_versions_read_is_not_found(
     assert _FAKE_SECRET_VALUE not in json.dumps(effect)
 
     # 4) A second person approves.
-    approver = _operator("op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _operator("op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

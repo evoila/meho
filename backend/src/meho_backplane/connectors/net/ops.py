@@ -42,8 +42,8 @@ Three foundations every later ``net.*`` op reuses land here:
   fails the dispatch instead (#2784).
 
 ``safety_level="safe"`` + ``requires_approval=False`` make the probe
-agent-auto-runnable and ungated, so the probe allowlist is the sole
-floor. The reviewed alternative (``"caution"`` — operators auto-run,
+agent-auto-runnable and ungated; the allow-list limits where checks can
+connect. The reviewed alternative (``"caution"`` — operators auto-run,
 agents do not) is a one-line change if the security review prefers it.
 """
 
@@ -619,8 +619,8 @@ async def register_net_typed_operations(
     :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
     after the connector eager-import pass. Idempotent: a re-run against
     unchanged text is a no-op for the embedding pipeline. Every ``net.*``
-    op is ``safe`` + ``requires_approval=False`` — the probe allowlist is
-    the only floor. Registers ``net.tcp_check`` (#2406) and
+    op is ``safe`` + ``requires_approval=False`` — the allow-list limits
+    where checks can connect. Registers ``net.tcp_check`` (#2406) and
     ``net.dns_lookup`` (#2409).
     """
     await register_typed_operation(

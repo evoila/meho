@@ -250,7 +250,8 @@ async def test_long_free_address_list_comes_back_as_a_handle(
 
 
 async def _approve_and_resume(request_id: UUID) -> Any:
-    approver = _operator("op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _operator("op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()

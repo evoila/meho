@@ -33,6 +33,13 @@ _RELEASE = "rel"
 _TENANT = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -62,6 +69,8 @@ _CORE_ON = [
     "config.keycloakIssuerUrl=",
     "--set",
     "corePostgres.enabled=true",
+    "--set",
+    "postgres.credentialsSecret=",
     "--set",
     "coreKeycloak.enabled=true",
     "--set",
@@ -113,7 +122,10 @@ def _env(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def test_core_keycloak_off_renders_no_bootstrap_job() -> None:
     assert _job(_render()) is None
-    assert _job(_render("--set", "corePostgres.enabled=true")) is None
+    assert (
+        _job(_render("--set", "corePostgres.enabled=true", "--set", "postgres.credentialsSecret="))
+        is None
+    )
 
 
 def test_bootstrap_job_is_a_post_install_hook_under_the_hook_account() -> None:

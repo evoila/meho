@@ -10,7 +10,9 @@ scripts, and an ingress-only NetworkPolicy. The tests pin what the design
 asks for:
 
 * the superuser Secret is mounted by the ``postgres`` container alone;
-* neither database role is a superuser, and the superuser creates ``vector``;
+* no database role is a superuser, and the superuser creates ``vector``;
+* the running backplane's role ``meho_app`` exists with its own password and
+  may connect to ``meho``; the owner role ``meho`` runs the migrations;
 * passwords reach SQL only as psql variables;
 * PGDATA is a sub-directory of the disk, with emptyDirs for the socket,
   ``/tmp`` and ``/dev/shm``;
@@ -39,6 +41,13 @@ _CHART_DIR = Path(__file__).resolve().parents[2] / "deploy" / "charts" / "meho"
 _DIGEST = "sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -92,7 +101,14 @@ def _is_postgres(doc: dict[str, Any]) -> bool:
 
 
 def _core(*extra: str, release: str = "test") -> dict[str, dict[str, Any]]:
-    docs = _render("--set", "corePostgres.enabled=true", *extra, release=release)
+    docs = _render(
+        "--set",
+        "corePostgres.enabled=true",
+        "--set",
+        "postgres.credentialsSecret=",
+        *extra,
+        release=release,
+    )
     return {d["kind"]: d for d in docs if _is_postgres(d)}
 
 
@@ -114,7 +130,7 @@ def _test_pod(docs: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
-def test_off_by_default() -> None:
+def test_off_renders_nothing() -> None:
     docs = _render()
     assert not [d for d in docs if _is_postgres(d)]
 
@@ -168,8 +184,9 @@ def test_superuser_secret_is_mounted_by_the_server_container_alone() -> None:
 
     assert volumes["superuser"]["secret"]["secretName"] == "test-core-postgres-superuser"
     assert volumes["meho"]["secret"]["secretName"] == "test-core-postgres-meho"
+    assert volumes["meho-app"]["secret"]["secretName"] == "test-core-postgres-meho-app"
     assert volumes["keycloak"]["secret"]["secretName"] == "test-core-postgres-keycloak"
-    for name in ("superuser", "meho", "keycloak"):
+    for name in ("superuser", "meho", "meho-app", "keycloak"):
         assert volumes[name]["secret"]["items"] == [{"key": "password", "path": "password"}]
 
     server = containers["postgres"]
@@ -181,7 +198,8 @@ def test_superuser_secret_is_mounted_by_the_server_container_alone() -> None:
     sidecar = containers["reconcile"]
     assert "superuser" not in _mounts(sidecar).values()
     assert "env" not in sidecar
-    assert {"meho", "keycloak", "run"} <= set(_mounts(sidecar).values())
+    assert {"meho", "meho-app", "keycloak", "run"} <= set(_mounts(sidecar).values())
+    assert _mounts(server)["/etc/core-postgres/secrets/meho-app"] == "meho-app"
 
 
 def test_existing_secrets_override_the_generated_names() -> None:
@@ -196,6 +214,7 @@ def test_existing_secrets_override_the_generated_names() -> None:
     assert volumes["superuser"]["secret"]["secretName"] == "my-su"
     assert volumes["keycloak"]["secret"]["secretName"] == "my-kc"
     assert volumes["meho"]["secret"]["secretName"] == "test-core-postgres-meho"
+    assert volumes["meho-app"]["secret"]["secretName"] == "test-core-postgres-meho-app"
 
 
 def test_pgdata_is_a_subdirectory_and_scratch_paths_are_emptydirs() -> None:
@@ -231,14 +250,23 @@ def test_probes_use_tcp_not_the_socket() -> None:
     assert startup["failureThreshold"] * startup["periodSeconds"] >= 300
 
 
-def test_sql_creates_two_owner_roles_without_superuser_and_the_extension() -> None:
+def test_sql_creates_the_three_roles_without_superuser_and_the_extension() -> None:
     sql = _core()["ConfigMap"]["data"]["core.sql"]
     assert "\\getenv meho_pw MEHO_DB_PASSWORD" in sql
+    assert "\\getenv meho_app_pw MEHO_APP_DB_PASSWORD" in sql
     assert "\\getenv keycloak_pw KEYCLOAK_DB_PASSWORD" in sql
     assert (
         "ALTER ROLE meho LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS "
         "CONNECTION LIMIT 60 PASSWORD :'meho_pw';"
     ) in sql
+    # The running backplane's role: its own password, no ownership, and
+    # the right to connect to `meho` (the migration grants the rest).
+    assert (
+        "ALTER ROLE meho_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS "
+        "CONNECTION LIMIT 60 PASSWORD :'meho_app_pw';"
+    ) in sql
+    assert "OWNER meho_app" not in sql
+    assert "GRANT CONNECT ON DATABASE meho TO meho_app;" in sql
     assert (
         "ALTER ROLE keycloak LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS "
         "CONNECTION LIMIT 25 PASSWORD :'keycloak_pw';"
@@ -260,6 +288,11 @@ def test_scripts_are_valid_shell_and_use_the_socket() -> None:
     for name in ("apply.sh", "reconcile.sh"):
         result = subprocess.run(["sh", "-n"], input=data[name], capture_output=True, text=True)
         assert result.returncode == 0, f"{name}: {result.stderr}"
+    # Both scripts read the three role passwords; the sidecar re-applies
+    # the SQL when any of them changes.
+    for name in ("meho", "meho-app", "keycloak"):
+        assert f'"$secrets/{name}/password"' in data["apply.sh"]
+        assert f'"$secrets/{name}/password"' in data["reconcile.sh"]
     assert "-h /var/run/postgresql -U postgres" in data["apply.sh"]
     assert "pg_isready -q -h 127.0.0.1 -p 5432 -U postgres" in data["reconcile.sh"]
     assert "trap 'exit 0' TERM INT" in data["reconcile.sh"]
@@ -276,7 +309,14 @@ def test_user_id_999_by_default() -> None:
 
 
 def test_openshift_leaves_out_the_user_ids() -> None:
-    docs = _render("--set", "corePostgres.enabled=true", "--set", "global.openshift=true")
+    docs = _render(
+        "--set",
+        "corePostgres.enabled=true",
+        "--set",
+        "postgres.credentialsSecret=",
+        "--set",
+        "global.openshift=true",
+    )
     sts = next(d for d in docs if d["kind"] == "StatefulSet" and _is_postgres(d))
     for ctx in (
         sts["spec"]["template"]["spec"]["securityContext"],
@@ -292,7 +332,7 @@ def test_openshift_leaves_out_the_user_ids() -> None:
 
 
 def test_network_policy_admits_backplane_and_keycloak_on_5432_only() -> None:
-    docs = _render("--set", "corePostgres.enabled=true")
+    docs = _render("--set", "corePostgres.enabled=true", "--set", "postgres.credentialsSecret=")
     policy = next(d for d in docs if d["kind"] == "NetworkPolicy" and _is_postgres(d))
     assert policy["spec"]["podSelector"]["matchLabels"] == {
         "app.kubernetes.io/name": "postgres",
@@ -348,7 +388,14 @@ def test_long_release_name_keeps_names_within_limits() -> None:
 
 def test_schema_accepts_openshift_and_rejects_unknown_core_postgres_keys() -> None:
     assert _run("--set", "global.openshift=true").returncode == 0
-    bad = _run("--set", "corePostgres.enabled=true", "--set", "corePostgres.bogus=1")
+    bad = _run(
+        "--set",
+        "corePostgres.enabled=true",
+        "--set",
+        "postgres.credentialsSecret=",
+        "--set",
+        "corePostgres.bogus=1",
+    )
     assert bad.returncode != 0
     assert "bogus" in bad.stderr
     bad_digest = _run("--set", "corePostgres.image.digest=latest")

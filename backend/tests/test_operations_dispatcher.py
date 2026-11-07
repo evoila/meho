@@ -151,6 +151,21 @@ def _make_operator(
     )
 
 
+async def _seed_agent_deny_row(op_pattern: str, *, sub: str = "op-test") -> None:
+    """Give the default test agent a ``deny`` row for *op_pattern*."""
+    async with get_sessionmaker()() as seed:
+        seed.add(
+            AgentPermission(
+                tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
+                principal_sub=sub,
+                op_pattern=op_pattern,
+                verdict="deny",
+                created_by_sub="admin",
+            )
+        )
+        await seed.commit()
+
+
 class _FakeFingerprint:
     """Duck-typed fingerprint for tests that don't care about full identity."""
 
@@ -1740,6 +1755,7 @@ class _FakeHttpConnector(HttpConnector):
     """Ingested-dispatch test fixture: records ``_request_json`` calls."""
 
     product = "demo"
+    accepts_ingested_operations = True
     version = "1.0"
     impl_id = "demo-rest"
     supported_version_range = ">=1.0,<2.0"
@@ -1893,6 +1909,7 @@ class _RoundTripHttpConnector(HttpConnector):
     """
 
     product = "gh"
+    accepts_ingested_operations = True
     version = "3.0"
     impl_id = "gh-rest"
     supported_version_range = ">=3.0,<4.0"
@@ -2014,6 +2031,9 @@ async def test_dispatch_ingested_post_sends_unwrapped_request_body(
             op_id="POST:/repos/{owner}/{repo}/issues",
             target=target,
             params={"owner": "octocat", "repo": "hello", "body": issue_body},
+            # A write sent with a token waits for approval (#3980); this test
+            # checks the wire request of the approved run.
+            _approved=True,
         )
 
     assert route.called
@@ -2126,6 +2146,9 @@ async def test_dispatch_ingested_honors_verb_and_forwards_header_param(
                 "X-Trace": "trace-123",
                 "body": {"state": "closed"},
             },
+            # A write sent with a token waits for approval (#3980); this test
+            # checks the wire request of the approved run.
+            _approved=True,
         )
 
     assert route.called
@@ -2243,6 +2266,9 @@ async def test_dispatch_ingested_post_forwards_query_param(
             op_id="POST:/things/{thing_id}/actions",
             target=target,
             params={"thing_id": "widget-1", "action": "start", "body": {"force": True}},
+            # A write sent with a token waits for approval (#3980); this test
+            # checks the wire request of the approved run.
+            _approved=True,
         )
 
     assert route.called
@@ -3176,16 +3202,16 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_denies_dangerous_op_by_safety_level(
+async def test_dispatch_denies_dangerous_op_by_agent_deny_row(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """``safety_level='dangerous'`` → ``denied`` for an **agent** principal.
+    """A ``deny`` row → ``denied`` for an **agent** principal on a ``dangerous`` op.
 
-    No AgentPermission rows exist for the agent, so the resolver uses the
-    ``safety_level`` default: ``dangerous`` → ``deny``. (Human/service
-    principals keep the v0.2 default-allow contract — see
-    ``test_dispatch_human_dangerous_op_auto_executes``.)
+    Without a row the agent's ``dangerous`` request waits for approval
+    (#3980); a ``deny`` row still makes the agent stricter, and the refusal
+    writes one ``denied`` audit row.
     """
+    await _seed_agent_deny_row("vault.kv.danger")
     register_connector_v2(
         product="vault",
         version="",
@@ -3400,7 +3426,7 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
 
     An ``auto-execute`` dispatch (safe op, human), a ``needs-approval`` park
     (caution op, agent → the ``approval.request`` row), and a ``deny`` (dangerous
-    op, agent, no grant) each land the matching :class:`PermissionVerdict` on the
+    op, agent, ``deny`` row) each land the matching :class:`PermissionVerdict` on the
     ``audit_log`` row — queryable without joining ``method``+``path`` + parsing
     ``payload``.
     """
@@ -3427,6 +3453,7 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
         )
 
     target = _FakeTarget(product="vault")
+    await _seed_agent_deny_row("vault.kv.deny")
 
     auto = await dispatch(
         operator=_make_operator(),
@@ -3479,72 +3506,144 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
     assert by_path["approval.request"].event_class == "policy_decision"
 
 
-@pytest.mark.asyncio
-async def test_dispatch_human_dangerous_op_auto_executes(
-    stub_embedding_service: AsyncMock,
+async def _register_human_op(
+    stub_embedding_service: AsyncMock, *, op_id: str, safety_level: str
 ) -> None:
-    """A **human** dispatching a ``dangerous`` op keeps the v0.2 contract.
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=op_id,
+        handler=_module_handler_returning_dict,
+        summary=f"{safety_level} op dispatched by a person.",
+        description=f"A {safety_level} op.",
+        parameter_schema={"type": "object"},
+        safety_level=safety_level,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
 
-    G11.2-T3 gates *agent* principals through the per-(principal, op,
-    target) resolver; human/service principals are default-allow except
-    ``requires_approval``. So a ``dangerous`` op with no
-    ``requires_approval`` flag auto-executes for a human — the resolver's
-    ``dangerous → deny`` default must not silently start denying human
-    operators (the pre-fix regression that broke vault/vmware suites).
+
+@pytest.mark.parametrize("safety_level", ["caution", "dangerous"])
+@pytest.mark.asyncio
+async def test_dispatch_human_token_non_safe_op_waits(
+    stub_embedding_service: AsyncMock, safety_level: str
+) -> None:
+    """A person's call made with a token runs only ``safe`` ops at once (#3980).
+
+    MCP, the command line and REST all build an Operator without a web
+    session. A ``caution`` or ``dangerous`` op then waits for an approval
+    click, like it does for an agent.
     """
-    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
-    await register_typed_operation(
-        product="vault",
-        version="1.x",
-        impl_id="vault",
-        op_id="vault.kv.human_danger",
-        handler=_module_handler_returning_dict,
-        summary="Dangerous op dispatched by a human.",
-        description="Destructive op; human path stays default-allow.",
-        parameter_schema={"type": "object"},
-        safety_level="dangerous",
-        when_to_use=None,
-        embedding_service=stub_embedding_service,
-    )
+    op_id = f"vault.kv.human_{safety_level}"
+    await _register_human_op(stub_embedding_service, op_id=op_id, safety_level=safety_level)
 
     result = await dispatch(
         operator=_make_operator(principal_kind=PrincipalKind.USER),
         connector_id="vault-1.x",
-        op_id="vault.kv.human_danger",
+        op_id=op_id,
         target=_FakeTarget(product="vault"),
         params={},
     )
-    assert result.status == "ok"
+    assert result.status == "awaiting_approval", result.error
+    assert result.extras["approval_request_id"]
 
 
 @pytest.mark.asyncio
-async def test_dispatch_human_caution_op_auto_executes(
+async def test_dispatch_human_token_caution_park_records_token_reason(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A **human** dispatching a ``caution`` op auto-executes (v0.2 contract)."""
-    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
-    await register_typed_operation(
-        product="vault",
-        version="1.x",
-        impl_id="vault",
-        op_id="vault.kv.human_caution",
-        handler=_module_handler_returning_dict,
-        summary="Caution op dispatched by a human.",
-        description="Caution op; human path stays default-allow.",
-        parameter_schema={"type": "object"},
-        safety_level="caution",
-        when_to_use=None,
-        embedding_service=stub_embedding_service,
-    )
+    """The park of a token ``caution`` call says it waits only for the token (#3980)."""
+    from meho_backplane.db.models import ApprovalRequest
 
+    await _register_human_op(
+        stub_embedding_service, op_id="vault.kv.token_caution", safety_level="caution"
+    )
     result = await dispatch(
         operator=_make_operator(principal_kind=PrincipalKind.USER),
         connector_id="vault-1.x",
-        op_id="vault.kv.human_caution",
+        op_id="vault.kv.token_caution",
         target=_FakeTarget(product="vault"),
         params={},
     )
-    assert result.status == "ok"
+    assert result.status == "awaiting_approval", result.error
+    async with get_sessionmaker()() as fresh:
+        request = await fresh.get(ApprovalRequest, UUID(result.extras["approval_request_id"]))
+    assert request is not None
+    assert request.proposed_effect is not None
+    assert request.proposed_effect["waits_because"] == "token_call"
+    assert request.proposed_effect["safety_level"] == "caution"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_human_token_dangerous_park_has_no_token_reason(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A ``dangerous`` park would wait in the web interface too: no token reason."""
+    from meho_backplane.db.models import ApprovalRequest
+
+    await _register_human_op(
+        stub_embedding_service, op_id="vault.kv.token_danger", safety_level="dangerous"
+    )
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.token_danger",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == "awaiting_approval", result.error
+    async with get_sessionmaker()() as fresh:
+        request = await fresh.get(ApprovalRequest, UUID(result.extras["approval_request_id"]))
+    assert request is not None
+    assert "waits_because" not in (request.proposed_effect or {})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_human_token_safe_op_auto_executes(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A ``safe`` op still runs at once for a person's token call."""
+    await _register_human_op(
+        stub_embedding_service, op_id="vault.kv.human_safe", safety_level="safe"
+    )
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.human_safe",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == "ok", result.error
+
+
+@pytest.mark.parametrize(
+    ("safety_level", "expected"),
+    [
+        ("safe", "ok"),
+        ("caution", "ok"),
+        ("dangerous", "awaiting_approval"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_human_web_session_rule(
+    stub_embedding_service: AsyncMock, safety_level: str, expected: str
+) -> None:
+    """In the web interface ``safe`` and ``caution`` run at once; ``dangerous`` waits."""
+    op_id = f"vault.kv.web_{safety_level}"
+    await _register_human_op(stub_embedding_service, op_id=op_id, safety_level=safety_level)
+    operator = _make_operator(principal_kind=PrincipalKind.USER).model_copy(
+        update={"web_session": True}
+    )
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == expected, result.error
 
 
 @pytest.mark.asyncio
@@ -4467,3 +4566,104 @@ async def test_reingest_repairs_pre_fix_row_through_dispatch_validation(
     assert (repaired.extras or {}).get("error_code") != "invalid_op_schema", (
         f"the repaired descriptor must pass dispatch-time schema validation; got {repaired.error!r}"
     )
+
+
+_TOKEN_RULE_SPEC = """
+openapi: 3.0.3
+info: {title: Widgets, version: "1.0"}
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {name: {type: string}}}
+      responses: {"201": {description: created}}
+  /widgets/{id}:
+    delete:
+      operationId: removeWidget
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses: {"204": {description: removed}}
+"""
+
+
+@pytest.mark.parametrize(
+    ("op_id", "expected_level", "expected_requires_approval", "params"),
+    [
+        ("POST:/widgets", "caution", False, {"body": {"name": "w1"}}),
+        ("DELETE:/widgets/{id}", "dangerous", True, {"id": "w1"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_ingested_write_with_person_token_waits(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    op_id: str,
+    expected_level: str,
+    expected_requires_approval: bool,
+    params: dict[str, Any],
+) -> None:
+    """An ingested ``POST`` / ``DELETE`` sent with a person's token waits (#3980).
+
+    The descriptors come from the real OpenAPI parser: ``POST`` is
+    ``caution`` and ``DELETE`` is ``dangerous`` (the parser also marks a
+    ``DELETE`` ``requires_approval``, #3827). Before #3980 the ``POST``
+    ran at once for a person on every path; a call made with a token now
+    waits for an approval click.
+    """
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+    from meho_backplane.operations.ingest import parse_openapi
+
+    register_connector_v2(
+        product="widgets", version="1.0", impl_id="widgets-rest", cls=_RoundTripHttpConnector
+    )
+    protos = {
+        p.op_id: p
+        for p in parse_openapi("file:///widgets.yaml", spec_source="test", content=_TOKEN_RULE_SPEC)
+    }
+    proto = protos[op_id]
+    assert proto.safety_level == expected_level
+    assert proto.requires_approval is expected_requires_approval
+    now = datetime.now(UTC)
+    session.add(
+        EndpointDescriptor(
+            id=uuid.uuid4(),
+            tenant_id=None,
+            product="widgets",
+            version="1.0",
+            impl_id="widgets-rest",
+            op_id=proto.op_id,
+            source_kind="ingested",
+            method=proto.method,
+            path=proto.path,
+            handler_ref=None,
+            summary=proto.summary,
+            description=proto.description,
+            tags=proto.tags,
+            parameter_schema=proto.parameter_schema,
+            response_schema=proto.response_schema,
+            llm_instructions=proto.llm_instructions,
+            safety_level=proto.safety_level,
+            requires_approval=proto.requires_approval,
+            is_enabled=True,
+            embedding=stub_embedding_service.encode_one.return_value,
+            custom_description=None,
+            custom_notes=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await session.commit()
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="widgets-rest-1.0",
+        op_id=op_id,
+        target=_FakeTarget(product="widgets", version="1.0", host="widgets.test", port=443),
+        params=params,
+    )
+    assert result.status == "awaiting_approval", result.error

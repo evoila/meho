@@ -31,6 +31,42 @@ shown to the people and agents that read the target (#5075). Every
 through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
+`targets.register` needs the `tenant_admin` role from a person, the same
+as `POST /api/v1/targets` and the MCP tool. The REST route and the tool
+check the role at the door. `call_operation`, the REST dispatch route and
+the CLI reach the operation through `dispatch`, where the policy gate
+checks the **per-op role floor** (`operations/role_floors.py`;
+`connectors/targets/ops.py` registers it at import): a person with a
+lower role gets `denied`, nothing is written, and the audit row says
+`denied`. `preview_operation` shows the same verdict. An agent's call
+still waits for approval; a service login's call still waits or runs
+under a grant. The approval queue checks the approver against the same
+floor at the decision: a person below it cannot approve the request, so
+the approved call, run by the agent itself or by the person from an
+approvals surface, was approved by a `tenant_admin`. The dispatcher
+checks the person who runs it from an approvals surface once more. The
+requester's own run is not checked again: the agent's resume, and the
+re-run of a failed approved call by the requester, also a service login.
+
+**REST writes are for people.** `POST`, `PATCH` and `DELETE
+/api/v1/targets` use one gate, `_require_admin_person` in
+`api/v1/targets.py`. It checks the `tenant_admin` role first, then that
+the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
+
+- A person with `tenant_admin` writes at once (the CLI, scripts).
+- A service login with `tenant_admin` gets 403 `human_principal_required`.
+  The text names `targets.register` and `targets.remove`, the operations
+  a machine login uses. Both go through the approval check above. No
+  operation changes a target, so a machine login cannot change one.
+- An agent login gets 403 `insufficient_role`: MEHO caps its role at
+  `operator`.
+- Reads (`GET`, `probe`) keep the `operator` role and stay open to
+  machine logins.
+
+The console and the operations call `create_target`, `update_target` and
+`soft_delete_target` as functions, not through the routes, so the gate
+does not apply to them. The console signs people in through the browser.
+
 This document covers the two **list** paths, how `list_targets`
 bounds its response (#3858), how the single-target REST routes find a
 target, the name and host rules for new targets (#5244), the per-target
@@ -187,7 +223,12 @@ context window, which the REST front does not feed.
 ### MCP: `list_targets`
 
 1. **Tenant scope.** No `tenant_id` → the caller's tenant. A slug or
-   UUID naming another tenant requires `platform_admin` (#1641).
+   UUID naming another tenant requires `platform_admin`, held by a
+   person. A caller without it may name only their own tenant;
+   every other value gets one fixed `-32602` error, whether that tenant
+   exists or not, and MEHO reads no tenant row but the caller's own. A
+   platform admin naming a tenant that does not exist gets
+   `no tenant matches`.
 2. **One query.** A single SELECT of the five projected columns —
    `id`, `name`, `aliases`, `product`, `host` — keyset on `name`,
    `limit` default 100 / max 500, optionally narrowed by the product
@@ -374,7 +415,7 @@ automation pack therefore works for SSH key login with no map at all. When
 both fields are present, `ssh_private_key` wins.
 ## Control flow — deleting a target
 
-`DELETE /api/v1/targets/{name}` (`tenant_admin`) and the CLI verb
+`DELETE /api/v1/targets/{name}` (a person with `tenant_admin`) and the CLI verb
 `meho targets delete <name> [--force] [--confirm]` (#3943) on top of it:
 
 1. The CLI asks y/N first unless `--confirm` is given. Closed stdin

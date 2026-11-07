@@ -92,7 +92,10 @@ Every one of these refs passes `check_param_secret_ref`
   `GSM_PARAM_ALLOWED_PROJECTS` (comma-separated project ids). The list is
   empty by default, so every such ref is refused until an operator lists
   the projects. MEHO reads these secrets with its own Google identity, so
-  there is no tenant boundary on the Google side.
+  there is no tenant boundary on the Google side. The same list limits a
+  target's own `gsm:` login: when the target is saved (the write-time
+  gate below) and on every read of its login (`check_gsm_target_ref` in
+  `connectors/_shared/gsm_creds.py`, called by the shared loader).
 - **Any other store kind** (for example `wrapped:`) is refused.
 
 A refused ref raises `SecretRefScopeError`, a `SecretRefReadError`. The
@@ -278,6 +281,16 @@ advisory is silent. The behaviour is covered by
 (silent on default, silent when set, fires when explicitly emptied, never
 blocks boot).
 
+The same state is visible after startup, so it is not lost in the log:
+
+- `GET /ready` and `meho_status` carry a `features.vault_tenant_scope`
+  entry: `configured: true` when the prefix is set, `configured: false`
+  with `missing_env: ["VAULT_KV_TENANT_SCOPE_PREFIX"]` when it is empty
+  (`features._vault_tenant_scope_block`).
+- The Prometheus gauge `vault_tenant_scope_enforced` reads `1` or `0`,
+  set once at startup by the same advisory function, so a dashboard can
+  alert on an instance that runs without the check.
+
 ## Choosing a layout
 
 The guard is default-on (`secret/tenants/{tenant_id}/`), matching the
@@ -367,13 +380,20 @@ off only the prefix match. Only an
 *explicit* ref is checked — the derived per-tenant default (#1723) and
 an explicit-null clear pass untouched.
 
-The gate only fires for refs that resolve through the **Vault** backend
-(#2585). Applicability is decided by `split_credential_ref` with the
-deploy default (`credential_backend`), the same resolver dispatch uses
-at read time — so a `gsm:<project>/<secret>` ref, or any ref on a
-`CREDENTIAL_BACKEND=gsm` deploy, has no Vault subtree to enforce and is
-stored verbatim. This is what lets a GSM install register `gsm:` refs
-without the `VAULT_KV_TENANT_SCOPE_PREFIX=""` `extraEnv` workaround
+The tenant-subtree rule only fires for refs that resolve through the
+**Vault** backend (#2585). Applicability is decided by
+`split_credential_ref` with the deploy default (`credential_backend`),
+the same resolver dispatch uses at read time — so a
+`gsm:<project>/<secret>` ref, or any ref on a `CREDENTIAL_BACKEND=gsm`
+deploy, has no Vault subtree to enforce. Such a ref must instead name a
+project listed in `GSM_PARAM_ALLOWED_PROJECTS`, or the write is refused
+with a structured 422 (`kind="secret_ref_project_not_allowed"`, with the
+`project` and the `setting`; `_enforce_gsm_project_allowed` in
+`api/v1/targets.py`). The dispatch-time read applies the same rule, so a
+target that could never log in is not stored. A GSM install still
+registers `gsm:` refs without the `VAULT_KV_TENANT_SCOPE_PREFIX=""`
+`extraEnv` workaround; it lists its projects in
+`GSM_PARAM_ALLOWED_PROJECTS` instead
 (`deploy/values-examples/values-gsm-example.yaml`).
 
 A target that predates the gate (or a genuine Vault-policy drift) still

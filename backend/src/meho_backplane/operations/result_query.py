@@ -101,6 +101,7 @@ from meho_backplane.operations.result_read_admission import (
     run_on_result_read_executor,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.untrusted_text import with_data_notice
 
 __all__ = [
     "DEFAULT_LIMIT",
@@ -394,12 +395,13 @@ def _check_wire_ceiling(payload: dict[str, Any], handle_id: UUID, remediation: s
 
     The terminal check, after the pre-encode row-bytes check: it measures
     the whole response as the MCP ``tools/call`` wire carries it (text block
-    plus ``structuredContent``) against ``result_query_response_wire_max_bytes``.
-    The REST twin shares the bound; it sends the payload once, so it is
-    always smaller than this measurement.
+    plus ``structuredContent``, with the ``data_notice`` field the MCP tool
+    adds after this check) against ``result_query_response_wire_max_bytes``.
+    The REST twin shares the bound; it sends the payload once and without
+    the notice, so it is always smaller than this measurement.
     """
     max_bytes = get_settings().result_query_response_wire_max_bytes
-    size = measure_delivered_wire_bytes(payload)
+    size = measure_delivered_wire_bytes(with_data_notice(dict(payload)))
     if size > max_bytes:
         raise ResultQueryOutputTooLargeError(
             handle_id, size, max_bytes, remediation=remediation, wire=True

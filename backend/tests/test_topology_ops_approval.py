@@ -8,9 +8,9 @@ The three curated-graph writes (``topology.annotate`` /
 targetless typed ops (the ``secret.move`` mold, #1577) with
 ``safety_level="caution"`` + ``requires_approval=False`` — the
 combination that parks AGENT principals (the needs-approval floor in
-:mod:`meho_backplane.auth.permissions`) while humans ride the
-default-allow branch. This module proves the full propose-then-approve
-loop on the real dispatcher + approval queue:
+:mod:`meho_backplane.auth.permissions`) and a person's token call, while a
+person in the web interface runs it at once (#3980). This module proves
+the full propose-then-approve loop on the real dispatcher + approval queue:
 
 * **Agent park, no write** — an AGENT-principal dispatch returns
   ``awaiting_approval``, creates exactly one PENDING
@@ -22,11 +22,12 @@ loop on the real dispatcher + approval queue:
   second write. The park→approve→execute cycle is proven for all three
   ops, ``create_node`` with a **novel open-vocabulary kind**
   (``dns-record`` — the #2534 + #2537 composition).
-* **Humans stay immediate** — a human tenant_admin dispatch (and the
-  MCP front handler) executes with no ApprovalRequest row created.
+* **The web interface stays immediate** — a human tenant_admin dispatch
+  in the web interface executes with no ApprovalRequest row created; the
+  same call with a token waits (#3980).
 * **MCP front translation** — the ``meho_topology_*`` handlers return
-  the executed domain shape for humans and the structured
-  ``awaiting_approval`` envelope for agents.
+  the structured ``awaiting_approval`` envelope for a person's token and
+  for an agent.
 * **Audit provenance** — topology write audit rows now stamp
   ``actor_sub`` from the RFC 8693 delegation contextvar (mirrors
   ``mcp/audit.py``).
@@ -74,7 +75,6 @@ from meho_backplane.db.models import (
 from meho_backplane.main import app
 from meho_backplane.mcp.tools.topology import _annotate_handler
 from meho_backplane.mcp.tools.topology_bulk_import import _bulk_import_handler
-from meho_backplane.mcp.tools.topology_create_node import _create_node_handler
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
@@ -144,6 +144,7 @@ def _make_operator(
     *,
     principal_kind: PrincipalKind = PrincipalKind.USER,
     tenant_role: TenantRole = TenantRole.TENANT_ADMIN,
+    web_session: bool = False,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -153,6 +154,7 @@ def _make_operator(
         tenant_id=_TENANT_ID,
         tenant_role=tenant_role,
         principal_kind=principal_kind,
+        web_session=web_session,
     )
 
 
@@ -214,8 +216,14 @@ async def _fetch_nodes(kind: str) -> list[GraphNode]:
         return list(result.scalars().all())
 
 
-def _decide(request_id: uuid.UUID, *, decider_sub: str) -> Any:
+def _decide(
+    request_id: uuid.UUID, *, decider_sub: str, role: TenantRole = TenantRole.TENANT_ADMIN
+) -> Any:
     """Drive the real ``/decide`` REST route as *decider_sub* (four-eyes).
+
+    The approved write runs under the decider, and the topology writes
+    need the ``tenant_admin`` role from the person who runs them, so the
+    decider is a ``tenant_admin`` unless a test says otherwise.
 
     Each call mints a fresh keypair under the same kid, so the JWKS
     cache from a prior call would fail signature verification — clear
@@ -229,7 +237,7 @@ def _decide(request_id: uuid.UUID, *, decider_sub: str) -> Any:
             key,
             fresh_sign_in=True,
             sub=decider_sub,
-            tenant_role=TenantRole.OPERATOR.value,
+            tenant_role=role.value,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:
@@ -316,6 +324,29 @@ async def test_decide_executes_parked_annotate_once_then_409(
 
 
 @pytest.mark.asyncio
+async def test_decide_by_an_operator_is_refused_and_writes_nothing(
+    _registered_topology_ops: None,
+    _seeded_tenant: None,
+) -> None:
+    """The topology writes need ``tenant_admin``, so the decider needs it too."""
+    await _seed_edge_endpoints()
+    agent = _make_operator("agent:proposer", principal_kind=PrincipalKind.AGENT)
+    parked = await _dispatch_topology(agent, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
+    assert parked.status == "awaiting_approval", parked.error
+    request_id = uuid.UUID(parked.extras["approval_request_id"])
+
+    response = _decide(request_id, decider_sub="operator:decider", role=TenantRole.OPERATOR)
+
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("role_floor_required: ")
+    assert "tenant_admin" in response.json()["detail"]
+    (row,) = await _fetch_approval_rows()
+    assert row.status == ApprovalRequestStatus.PENDING.value
+    assert row.reviewed_by is None
+    assert await _fetch_edges() == []
+
+
+@pytest.mark.asyncio
 async def test_create_node_park_approve_execute_with_novel_kind(
     _registered_topology_ops: None,
     _seeded_tenant: None,
@@ -352,12 +383,11 @@ async def test_unannotate_park_approve_execute(
 ) -> None:
     """park→approve→execute for ``topology.unannotate``.
 
-    A human tenant_admin asserts the curated edge immediately (the
-    default-allow dispatch), the agent's revocation parks, the approval
-    removes the edge.
+    A human tenant_admin asserts the curated edge immediately in the web
+    interface, the agent's revocation parks, the approval removes the edge.
     """
     await _seed_edge_endpoints()
-    human = _make_operator("operator:asserter")
+    human = _make_operator("operator:asserter", web_session=True)
     asserted = await _dispatch_topology(human, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
     assert asserted.status == "ok", asserted.error
     assert len(await _fetch_edges()) == 1
@@ -378,18 +408,52 @@ async def test_unannotate_park_approve_execute(
 
 
 # ---------------------------------------------------------------------------
-# Humans stay immediate — no ApprovalRequest row on any human path
+# The web interface stays immediate; a token call waits (#3980)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_human_dispatch_executes_immediately_no_approval_row(
+async def test_human_token_dispatch_waits_for_approval(
     _registered_topology_ops: None,
     _seeded_tenant: None,
 ) -> None:
-    """A human dispatch auto-executes: edge written, zero ApprovalRequest rows."""
+    """A person's call made with a token waits: no edge, one ApprovalRequest row."""
     await _seed_edge_endpoints()
     human = _make_operator("operator:human")
+
+    result = await _dispatch_topology(human, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
+
+    assert result.status == "awaiting_approval", result.error
+    assert await _fetch_edges() == []
+    assert len(await _fetch_approval_rows()) == 1
+
+
+@pytest.mark.asyncio
+async def test_service_login_annotate_without_grant_waits_for_approval(
+    _registered_topology_ops: None,
+    _seeded_tenant: None,
+) -> None:
+    """A service login with ``tenant_admin`` and no grant waits: no edge, one request."""
+    await _seed_edge_endpoints()
+    service = _make_operator("service:graph-bot", principal_kind=PrincipalKind.SERVICE)
+
+    result = await _dispatch_topology(service, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
+
+    assert result.status == "awaiting_approval", result.error
+    assert await _fetch_edges() == []
+    rows = await _fetch_approval_rows()
+    assert len(rows) == 1
+    assert rows[0].op_id == TOPOLOGY_ANNOTATE_OP_ID
+
+
+@pytest.mark.asyncio
+async def test_human_web_dispatch_executes_immediately_no_approval_row(
+    _registered_topology_ops: None,
+    _seeded_tenant: None,
+) -> None:
+    """In the web interface the dispatch auto-executes: edge written, no approval row."""
+    await _seed_edge_endpoints()
+    human = _make_operator("operator:human", web_session=True)
 
     result = await _dispatch_topology(human, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
 
@@ -402,49 +466,28 @@ async def test_human_dispatch_executes_immediately_no_approval_row(
 
 
 @pytest.mark.asyncio
-async def test_mcp_front_human_immediate_agent_parked(
+async def test_mcp_front_parks_a_person_token_call_and_an_agent(
     _registered_topology_ops: None,
     _seeded_tenant: None,
 ) -> None:
-    """The MCP handlers keep humans immediate and park agents.
+    """The MCP handlers park a person's token call and an agent's call (#3980).
 
-    * Human tenant_admin via ``_create_node_handler`` /
-      ``_annotate_handler`` → executed domain shape (same keys as
-      pre-#2537), no ApprovalRequest row.
-    * Agent via ``_annotate_handler`` → structured ``awaiting_approval``
-      envelope, edge not written.
+    An MCP call always comes with a token, so a human tenant_admin waits
+    for approval like an agent. Both get the structured
+    ``awaiting_approval`` envelope and nothing is written.
     """
+    await _seed_edge_endpoints()
     human = _make_operator("operator:human")
-    created = await _create_node_handler(human, {"kind": "service", "name": "svc-payments"})
-    assert created["was_created"] is True
-    assert created["kind"] == "service"
-    await _seed_node(kind="database", name="db-payments")
-
-    executed = await _annotate_handler(human, dict(_ANNOTATE_PARAMS))
-    assert set(executed) == {
-        "edge_id",
-        "from",
-        "to",
-        "kind",
-        "source",
-        "conflicts",
-        "superseded",
-    }
-    assert executed["source"] == "curated"
-    assert await _fetch_approval_rows() == []
-
     agent = _make_operator("agent:proposer", principal_kind=PrincipalKind.AGENT)
-    parked = await _annotate_handler(
-        agent,
-        {"from_name": "svc-payments", "kind": "backed-up-by", "to_name": "db-payments"},
-    )
-    assert parked["status"] == "awaiting_approval"
-    assert parked["op_id"] == TOPOLOGY_ANNOTATE_OP_ID
+
+    for who in (human, agent):
+        parked = await _annotate_handler(who, dict(_ANNOTATE_PARAMS))
+        assert parked["status"] == "awaiting_approval"
+        assert parked["op_id"] == TOPOLOGY_ANNOTATE_OP_ID
+
     rows = await _fetch_approval_rows()
-    assert len(rows) == 1
-    assert uuid.UUID(parked["approval_request_id"]) == rows[0].id
-    edges = await _fetch_edges()
-    assert [e.kind for e in edges] == ["depends-on"], "agent park must not write"
+    assert len(rows) == 2
+    assert await _fetch_edges() == []
 
 
 # ---------------------------------------------------------------------------
@@ -546,9 +589,9 @@ async def test_bulk_import_human_apply_immediate_no_approval_row(
     _registered_topology_ops: None,
     _seeded_tenant: None,
 ) -> None:
-    """A human ``dry_run=false`` applies immediately: edge written, zero approval rows."""
+    """A person in the web interface applies at once: edge written, zero approval rows."""
     await _seed_edge_endpoints()
-    human = _make_operator("operator:human")
+    human = _make_operator("operator:human", web_session=True)
 
     applied = await _bulk_import_handler(human, {"dry_run": False, "rows": list(_BULK_ROWS)})
 

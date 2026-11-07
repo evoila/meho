@@ -275,8 +275,9 @@ Every operation carries two independent markers, set per-op when the
 connector is registered or reviewed:
 
 - **`safety_level`** — `safe` (read-class, executes under
-  default-allow), `caution`, or `dangerous` (write/destructive class,
-  subject to policy).
+  default-allow), `caution`, `dangerous`, or `destructive` (a permanent
+  delete). Above `safe`, whether the call runs at once or waits for
+  approval depends on who calls (see below).
 - **`requires_approval`** — when `true`, calling the operation does
   **not** execute it. The dispatcher durably parks it and returns:
 
@@ -301,14 +302,19 @@ meho approvals approve <approval_request_id> --reason "verified blast radius"
 meho approvals reject  <approval_request_id> --reason "wrong target"
 ```
 
-By default you cannot approve your own request (the four-eyes rule),
-and parked requests expire on a TTL. The full story — including the
-audited single-operator break-glass — is the
+In general you cannot approve your own request. Members of the
+`MEHO-SA-Operators` group may, on purpose. Parked requests expire on a
+TTL. Approve
+in the web interface (the normal place), or on the command line after a
+fresh sign-in. The full story — who may approve, and how a single
+operator approves their own change — is the
 [approvals & break-glass guide](approvals-and-break-glass.md).
 
-`safety_level` works differently: what happens depends on who calls. For
-example, an agent's `caution` call waits for approval, but a person's
-`caution` call runs at once. The table in the
+`safety_level` works differently: what happens depends on who calls and
+how. A call made with a token (MCP, the `meho` command line, REST, also
+your own token) and every agent call run only `safe` operations at once;
+`caution`, `dangerous` and `destructive` wait for approval. In the web
+interface, `caution` runs at once and `dangerous` waits. The table in the
 [agent permission model](https://github.com/evoila/meho/blob/main/docs/codebase/agent-permission-model.md#safety-levels-at-a-glance)
 shows each safety level for agents, people and service accounts.
 

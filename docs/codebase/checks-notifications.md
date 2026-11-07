@@ -75,7 +75,7 @@ that should send ad-hoc mail does so through `call_operation` on the
   reason `NotifyMember` is one — importing `investigate` would be a
   cycle.
 
-## Configuration (per Dashboard, set at create only)
+## Configuration (per Dashboard)
 
 Two columns on `check_dashboards`, added by migration `0068`
 (`investigator_prompt`, migration `0069`, belongs to the briefing, not to
@@ -99,14 +99,17 @@ model, the wire `NotifyMinState` Literal, and the migration's frozen
 tuple are pinned against each other by drift guards in
 `tests/test_db_dashboard.py`.
 
-Both are set at Dashboard-create only — the same immutability posture as
-membership. There is no PATCH route; "edit" is delete + recreate.
+Both are set at Dashboard create and can be changed later with an edit.
 Surfaces: `POST /api/v1/checks/dashboards` (body fields; each
 comma-separated `notify_email` entry is `EmailStr`-validated → 422 naming
 a malformed one) and
 `meho dashboard create --notify-email --notify-min-state` (the CLI
 forwards the raw comma-separated string; the server splits and validates
-each entry).
+each entry). To change them: `PATCH /api/v1/checks/dashboards/{id}`
+(`checks/dashboard_edit.py`) or `meho dashboard edit --notify-email`,
+`--notify-off` (sends an empty `notify_email`, which turns mail off) and
+`--notify-min-state`. The edit checks the addresses the same way
+(`normalise_notify_email` in `checks/dashboard_schemas.py`).
 
 ## The notify rule
 

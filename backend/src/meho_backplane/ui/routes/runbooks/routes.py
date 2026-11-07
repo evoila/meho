@@ -75,7 +75,7 @@ RBAC
 ----
 
 Both routes require ``operator`` minimum, enforced by
-:func:`~meho_backplane.ui.auth.middleware.require_ui_session`. The
+:func:`~meho_backplane.ui.auth.middleware.require_ui_operator`. The
 admin-vs-operator distinction the opacity-floor branch needs is resolved
 by re-verifying the session's access token (see :func:`_resolve_role`),
 not carried on the session row.
@@ -111,12 +111,13 @@ from meho_backplane.runbooks.service import (
     TemplateNotFoundError,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.auth.refresh import (
     SESSION_EXPIRED_DETAIL,
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
@@ -150,7 +151,7 @@ _MAX_TARGET_KIND_LENGTH: Final[int] = 128
 
 #: Module-level ``Depends`` closure for the operator-session gate. Matches
 #: the B008 idiom the kb / dashboard routes use (no call in a default arg).
-_require_session = Depends(require_ui_session)
+_require_operator = Depends(require_ui_operator)
 
 
 @dataclass(frozen=True)
@@ -221,7 +222,7 @@ async def _resolve_role(session_ctx: UISessionContext) -> Operator | None:
             raise
         log.info(
             "ui_runbooks_role_lift_unavailable",
-            session_id=str(session_ctx.session_id),
+            session_ref=session_ref(session_ctx.session_id),
             reason=type(exc).__name__,
         )
         return None
@@ -452,7 +453,7 @@ def build_runbooks_router() -> APIRouter:
     @router.get("/ui/runbooks", response_class=HTMLResponse)
     async def runbooks_index(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         status: Annotated[_StatusFilter | None, EMPTY_STR_TO_NONE, Query()] = None,
         target_kind: Annotated[
             Annotated[str, StringConstraints(max_length=_MAX_TARGET_KIND_LENGTH)] | None,
@@ -465,7 +466,7 @@ def build_runbooks_router() -> APIRouter:
     @router.get("/ui/runbooks/list", response_class=HTMLResponse)
     async def runbooks_list(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         status: Annotated[_StatusFilter | None, EMPTY_STR_TO_NONE, Query()] = None,
         target_kind: Annotated[
             Annotated[str, StringConstraints(max_length=_MAX_TARGET_KIND_LENGTH)] | None,
@@ -510,7 +511,7 @@ def build_runbooks_router() -> APIRouter:
     async def runbooks_detail(
         slug: str,
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         version: int | None = Query(default=None, ge=1),
     ) -> HTMLResponse:
         return await _render_detail(request, session, slug, version)

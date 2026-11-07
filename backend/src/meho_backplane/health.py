@@ -50,7 +50,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import cast
 
 import structlog
@@ -222,8 +222,13 @@ async def run_probes_async() -> list[ProbeResult]:
 
 
 def clear_probes() -> None:
-    """Empty the registry. Test-only — never call from production code."""
+    """Empty the registry and drop the cached readiness snapshot.
+
+    Test-only — never call from production code. Dropping the snapshot too
+    keeps a test from reading the verdict of the previous probe set.
+    """
     _probes.clear()
+    clear_readiness_cache()
 
 
 #: Default freshness window for :func:`readiness_snapshot`. The UI
@@ -534,6 +539,13 @@ async def healthz() -> dict[str, str]:
 async def ready(request: Request) -> JSONResponse:
     """Readiness probe with deploy-time feature-gate visibility.
 
+    The verdict comes from :func:`readiness_snapshot` with the default
+    window (:data:`DEFAULT_READINESS_TTL_S`): the probes run at most once
+    per window, and every call inside it reads the cached verdict. The
+    probes do live network calls, and ``/ready`` needs no login, so a
+    caller must not be able to make them run on every call.
+    ``sandbox_mode`` and ``features`` are added per call, never cached.
+
     The body depends on the opt-in ``METRICS_AUTH_TOKEN`` guard (#3499,
     #3594). When the token is unset, every caller gets the full body. When
     it is set, only a caller with the matching bearer token gets the
@@ -585,11 +597,14 @@ async def ready(request: Request) -> JSONResponse:
             },
             status_code=503,
         )
-    results = await run_probes_async()
-    ready_ok = bool(results) and all(r.ok for r in results)
+    snapshot = await readiness_snapshot(max_age_s=DEFAULT_READINESS_TTL_S)
+    ready_ok = bool(snapshot["ready"])
+    checks = cast("list[dict[str, object]]", snapshot["checks"])
     payload: dict[str, object] = {
         "status": "ready" if ready_ok else "not_ready",
-        "checks": [asdict(r) for r in results],
+        # The snapshot stores an empty string for "no detail"; the wire
+        # shape of ``/ready`` has always been ``null`` there.
+        "checks": [{**check, "detail": check["detail"] or None} for check in checks],
         "sandbox_mode": sandbox_mode_label(),
     }
     if has_metrics_access(request):

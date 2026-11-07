@@ -39,6 +39,8 @@ from typing import TYPE_CHECKING, Any
 import asyncssh
 import structlog
 
+from meho_backplane.connectors.adapters.ssh import run_capped
+
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.adapters.ssh import SshConnector
@@ -124,7 +126,7 @@ async def run_remote_bash_with_sudo(
     # password line and cannot prefetch-and-swallow script bytes.
     stdin_payload = f"{script}{sudo_password}\n"
     result = await asyncio.wait_for(
-        conn.run(cmd, input=stdin_payload, check=False),
+        run_capped(conn, cmd, target_name=getattr(target, "name", "?"), stdin=stdin_payload),
         timeout=timeout,
     )
     # Logging discipline: only lengths + exit code. Neither the script nor

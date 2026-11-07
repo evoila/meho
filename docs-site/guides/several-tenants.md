@@ -16,14 +16,14 @@ one login. At the end:
     checks this against a real Keycloak, before and after the setup adds
     the tenant list. See [Upgrades](../install/upgrades.md#version-specific-notes).
 
-!!! warning "You need a second person"
+!!! warning "Each change waits for approval"
 
     Putting a person in a group, or taking them out, runs at the
-    **dangerous** risk level when you do it through MEHO. MEHO waits until
-    a **second person** approves each change. The self-approval switch
-    does not cover the dangerous risk level. This stays so until the rules
-    for people who may approve their own changes are done (decision
-    record:
+    **dangerous** risk level when you do it through MEHO, so each change
+    waits for approval. Only a **MEHO-SA-Operator** may approve their own
+    change; anyone else needs a second person (a MEHO-SA-Operator or an
+    admin). The self-approval switch does not cover the dangerous risk
+    level (decision record:
     [tenant groups stay at the dangerous risk level](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md)).
 
 ## How it works
@@ -55,8 +55,9 @@ The design is in the
   `tenant_not_chosen` to a person in several tenants. The tenant picker
   of the web interface comes in the release after v0.43.0. The CLI and
   MCP work from v0.40.0 on.
-- A second person who can approve, or the agent setup from
-  [Approvals and break-glass](approvals-and-break-glass.md#option-1-the-agent-requester-pattern-recommended).
+- A MEHO-SA-Operator who approves their own changes, a second person
+  who can approve, or the agent setup from
+  [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
 
 ## Step 1: Add the tenant in Keycloak
 
@@ -373,8 +374,10 @@ A platform admin **may**:
   the tenants of the person's own groups.
 - act there as `tenant_admin`. When the person has a role group in that
   tenant, the role of that group applies instead.
-- keep the cross-tenant actions of before, for example `--tenant` on the
-  commands that have it.
+- use the cross-tenant options, for example `--tenant` on the commands
+  that have it. For a tenant where the person has a role group, MEHO
+  answers `403 tenant_select_with_header`: pick that tenant with
+  `MEHO_TENANT` or `meho tenants use`, so the role of that group applies.
 
 A platform admin **may not**:
 
@@ -385,7 +388,8 @@ A platform admin **may not**:
 - pick a tenant that does not exist. MEHO answers
   `403 tenant_not_found` and never makes a tenant from a typo.
 - move a machine login. Agent, service and runner logins always stay in
-  their own tenant.
+  their own tenant, also with `--tenant` and also when their token
+  carries the platform admin claim.
 
 Every audit row of a request where the role came from the platform admin
 group carries `tenant_role_source: platform_admin`.

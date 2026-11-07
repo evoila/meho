@@ -52,7 +52,6 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,19 +59,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.mail.allowlist import parse_recipient_allowlist
-from meho_backplane.connectors.mail.tenant_policy import invalidate_tenant_mail_policy_cache
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Tenant
 from meho_backplane.flight_recorder.config import (
-    invalidate_tenant_policy_cache,
     resolve_retention_days,
     should_capture,
     should_expose_to_agent,
 )
+from meho_backplane.tenancy.policies import (
+    set_flight_recorder_policy,
+    set_mail_recipient_allowlist,
+)
 
 __all__ = ["router"]
-
-_log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["tenants"])
 
@@ -80,25 +79,6 @@ router = APIRouter(prefix="/api/v1/tenants", tags=["tenants"])
 #: satisfy ruff's B008 rule. Capture policy is governance config, gated at the
 #: admin tier (same as the target PATCH and tenant-convention writes).
 _require_tenant_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
-
-#: Audit-payload sentinel for the tri-state fields' ``inherit`` (NULL) state.
-#: :func:`~meho_backplane.audit._resolve_audit_payload` drops ``None``
-#: contextvars, so a ``True``/``False`` -> ``NULL`` transition would silently
-#: lose its "after" value; the sentinel keeps the transition legible in the
-#: ``audit_log`` payload. Mirrors the ``""`` unpinned marker the target CA-pin
-#: audit uses for the same reason.
-_INHERIT_SENTINEL = "inherit"
-
-
-def _audit_value(value: object) -> object:
-    """Render a policy field value for the audit payload (``None`` -> sentinel).
-
-    Booleans and ints pass through as-is (queryable); ``None`` -- the tri-state
-    ``inherit`` / retention-default state -- becomes :data:`_INHERIT_SENTINEL`
-    so the change does not vanish from the ``audit_log`` payload (which drops
-    ``None`` contextvars).
-    """
-    return _INHERIT_SENTINEL if value is None else value
 
 
 class TenantFlightRecorderPolicy(BaseModel):
@@ -240,42 +220,12 @@ async def update_flight_recorder_policy(
         # bypassed -- surface it structured rather than 500-ing on the setattr.
         raise HTTPException(status_code=404, detail="tenant_not_found")
 
-    updates = body.model_dump(exclude_unset=True)
-    changed_fields: list[str] = []
-    for field, new_value in updates.items():
-        old_value = getattr(tenant, field)
-        if old_value == new_value:
-            continue
-        setattr(tenant, field, new_value)
-        # Fold field / old / new into the audit payload (never-silent
-        # governance mutation). ``None`` -> sentinel so a clear-to-inherit
-        # transition is not dropped by the payload's None-stripping.
-        # The field name already carries the ``flight_recorder_`` prefix, so
-        # the payload keys read ``flight_recorder_enabled_before`` etc. after
-        # the middleware strips the ``audit_`` prefix.
-        structlog.contextvars.bind_contextvars(
-            **{
-                f"audit_{field}_before": _audit_value(old_value),
-                f"audit_{field}_after": _audit_value(new_value),
-            }
-        )
-        changed_fields.append(field)
-
-    if changed_fields:
-        structlog.contextvars.bind_contextvars(
-            audit_flight_recorder_policy_changed=True,
-            audit_tenant_id=str(operator.tenant_id),
-        )
-        # Evict the resolver's per-tenant cache so the flip takes effect on the
-        # next dispatch. The dependency commits after this handler returns; the
-        # next resolver read (a fresh session, post-request) misses the cache
-        # and reads the committed value -- proven by the without-restart test.
-        invalidate_tenant_policy_cache(operator.tenant_id)
-        _log.info(
-            "tenant_flight_recorder_policy_updated",
-            tenant_id=str(operator.tenant_id),
-            fields=changed_fields,
-        )
+    # Field / old / new audit binding and the resolver-cache eviction live in
+    # the shared service function (the settings import writes the same
+    # columns). The dependency commits after this handler returns; the next
+    # resolver read misses the cache and reads the committed value -- proven
+    # by the without-restart test.
+    set_flight_recorder_policy(tenant, body.model_dump(exclude_unset=True))
 
     return TenantFlightRecorderPolicy(
         tenant_id=tenant.id,
@@ -358,9 +308,9 @@ async def update_mail_recipient_policy(
     expressible -- no tenant id is accepted in the path or body).
     ``tenant_admin`` only. Applies the field only when present in the body; an
     applied change is folded into this request's ``audit_log`` row (field / old
-    / new, ``None`` -> ``inherit`` sentinel) and evicts the resolver's
-    per-tenant cache so the new value governs the next dispatched ``mail.send``
-    without a restart.
+    / new, ``None`` -> ``inherit`` sentinel). The resolver reads the committed
+    column on every send, so the new value governs the next dispatched
+    ``mail.send`` in every process as soon as this request commits.
     """
     tenant = await session.get(Tenant, operator.tenant_id)
     if tenant is None:
@@ -371,28 +321,8 @@ async def update_mail_recipient_policy(
         raise HTTPException(status_code=404, detail="tenant_not_found")
 
     updates = body.model_dump(exclude_unset=True)
-    changed = False
     if "mail_recipient_allowlist" in updates:
-        new_value = updates["mail_recipient_allowlist"]
-        old_value = tenant.mail_recipient_allowlist
-        if old_value != new_value:
-            tenant.mail_recipient_allowlist = new_value
-            structlog.contextvars.bind_contextvars(
-                audit_mail_recipient_allowlist_before=_audit_value(old_value),
-                audit_mail_recipient_allowlist_after=_audit_value(new_value),
-            )
-            changed = True
-
-    if changed:
-        structlog.contextvars.bind_contextvars(
-            audit_mail_recipient_policy_changed=True,
-            audit_tenant_id=str(operator.tenant_id),
-        )
-        invalidate_tenant_mail_policy_cache(operator.tenant_id)
-        _log.info(
-            "tenant_mail_recipient_policy_updated",
-            tenant_id=str(operator.tenant_id),
-        )
+        set_mail_recipient_allowlist(tenant, updates["mail_recipient_allowlist"])
 
     return TenantMailRecipientPolicy(
         tenant_id=tenant.id,

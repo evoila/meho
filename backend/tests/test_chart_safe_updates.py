@@ -37,6 +37,14 @@ _FORM_2_VALUES = [
 ]
 
 _BASE = [
+    # Bring-your-own: the built-in database, login server and secret store
+    # are off, as in the other chart tests (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",

@@ -62,6 +62,19 @@ connector-catalog.md`` is the operator-facing pointer.
   than the first ``POST /api/v1/operations/call``. The same call from
   the test suite exercises the synthetic-drift unit test and the
   shipped-catalog self-test.
+
+**Rows from connector packages.** A connector package (a wheel that adds
+a folder under ``meho_backplane/connectors/``) can bring catalog rows of
+its own: the ``__init__`` of its folder calls
+:func:`register_connector_catalog` (a connector kit name) with the name
+of a YAML file in that folder. The file has the same ``entries`` shape as
+``catalog.yaml``. :func:`load_catalog` reads it with the built-in file and
+checks the rows the same way, so a package row gets the same start-up
+guards, the same ``ingest --catalog`` path and the same safety overlay as
+a built-in row. The ``spec_resource`` and ``profile_resource`` of a
+package row name files in the package's own folder, not in MEHO's
+resource packages; :func:`load_entry_spec` and :func:`load_entry_profile`
+read from the right place for either kind of row.
 """
 
 from __future__ import annotations
@@ -73,12 +86,22 @@ from fnmatch import fnmatchcase
 from importlib import resources
 from typing import Literal
 
+import structlog
 import yaml
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_validator,
+)
 
 from meho_backplane.operations.ingest.schemas import SafetyLevel
+
+_log = structlog.get_logger(__name__)
 
 #: Declarative classifier for whether the catalog row's upstream URL(s)
 #: can drive a ``meho connector ingest --catalog <product>/<version>``
@@ -94,6 +117,16 @@ CatalogIngestSupport = Literal["supported", "spec-only"]
 #: Package + resource name of the catalog YAML shipped as package data.
 _CATALOG_PACKAGE = "meho_backplane.operations.ingest"
 _CATALOG_RESOURCE = "catalog.yaml"
+
+#: The catalog files that connector packages bring: the dotted name of the
+#: package's connector folder -> the file name in that folder. Filled by
+#: :func:`register_connector_catalog` when MEHO imports the folder, read by
+#: :func:`load_catalog`.
+_PACKAGE_CATALOGS: dict[str, str] = {}
+
+#: The dotted name of a connector folder: one package directly under
+#: ``meho_backplane.connectors``. A connector wheel may write only there.
+_CONNECTOR_FOLDER_RE = re.compile(r"^meho_backplane\.connectors\.[A-Za-z_][A-Za-z0-9_]*$")
 
 #: Package holding MEHO-authored OpenAPI specs shipped as package data
 #: (one ``.yaml`` / ``.json`` per :attr:`ConnectorSpecEntry.spec_resource`).
@@ -121,6 +154,24 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 #: ``"1.x.y"``, ``"1.2"`` do not. The translation to a PEP 440 specifier
 #: lives in :func:`_compatibility_pattern_to_specifier`.
 _COMPAT_GLOB_RE = re.compile(r"^\d+(?:\.\d+)*(?:\.x)+$")
+
+
+def _safe_resource_name(value: str, what: str) -> str:
+    """Return *value* stripped, or raise ``ValueError`` unless it is one safe path segment.
+
+    A resource name is joined onto a package root with
+    :func:`importlib.resources.files(...).joinpath`. A separator or a ``..``
+    segment could leave that root, so the name must be one plain segment.
+    """
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{what} must not be blank")
+    if "/" in normalized or "\\" in normalized or ".." in normalized:
+        raise ValueError(
+            f"{what} {normalized!r} must be a single resource name with no path "
+            "separators or '..' segments"
+        )
+    return normalized
 
 
 class CatalogError(RuntimeError):
@@ -312,6 +363,11 @@ class ConnectorSpecEntry(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    #: The connector folder (dotted name) whose catalog file brought this
+    #: row, or ``None`` for a row of MEHO's own ``catalog.yaml``. Set by
+    #: :func:`parse_catalog`, never from the YAML. Not on the wire.
+    _source_package: str | None = PrivateAttr(default=None)
+
     product: str = Field(min_length=1, max_length=64)
     version: str = Field(min_length=1, max_length=64)
     impl_id: str = Field(min_length=1, max_length=128)
@@ -474,6 +530,11 @@ class ConnectorSpecEntry(BaseModel):
             normalized.append(pattern)
         return tuple(normalized)
 
+    @property
+    def source_package(self) -> str | None:
+        """The connector folder whose catalog file brought this row; ``None`` when built in."""
+        return self._source_package
+
     @field_validator("spec_resource", "profile_resource")
     @classmethod
     def _resource_name_is_safe(cls, value: str | None) -> str | None:
@@ -489,15 +550,7 @@ class ConnectorSpecEntry(BaseModel):
         """
         if value is None:
             return value
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("spec_resource / profile_resource must not be blank")
-        if "/" in normalized or "\\" in normalized or ".." in normalized:
-            raise ValueError(
-                f"spec_resource / profile_resource {normalized!r} must be a single "
-                "resource name with no path separators or '..' segments"
-            )
-        return normalized
+        return _safe_resource_name(value, "spec_resource / profile_resource")
 
     @field_validator("upstream")
     @classmethod
@@ -643,8 +696,12 @@ def spec_info_version_matches_compatibility_specifier(
     return spec_v.release[: len(bare_v.release)] == bare_v.release
 
 
-def parse_catalog(raw: str) -> ConnectorSpecCatalog:
+def parse_catalog(raw: str, *, package: str | None = None) -> ConnectorSpecCatalog:
     """Parse + schema-validate raw catalog YAML.
+
+    *package* is the connector folder whose catalog file *raw* is; every
+    row then reports it as :attr:`ConnectorSpecEntry.source_package`.
+    ``None`` is MEHO's own catalog.
 
     Raises :class:`CatalogError` (never a bare ``yaml`` / ``pydantic``
     error) so callers get one remediation-bearing exception type.
@@ -656,9 +713,61 @@ def parse_catalog(raw: str) -> ConnectorSpecCatalog:
     if not isinstance(data, dict):
         raise CatalogError("connector-spec catalog must be a mapping with an 'entries' key")
     try:
-        return ConnectorSpecCatalog.model_validate(data)
+        catalog = ConnectorSpecCatalog.model_validate(data)
     except ValidationError as exc:
         raise CatalogError(f"connector-spec catalog failed schema validation: {exc}") from exc
+    if package is not None:
+        for entry in catalog.entries:
+            entry._source_package = package
+    return catalog
+
+
+def register_connector_catalog(package: str, resource: str = "catalog.yaml") -> None:
+    """Bring the catalog rows of a connector package.
+
+    A connector package calls this once, from the ``__init__`` of its
+    connector folder, with that folder's dotted name (its ``__name__``,
+    ``meho_backplane.connectors.<folder>``) and the name of a YAML file in
+    the folder. The file has the same ``entries`` shape as MEHO's own
+    ``catalog.yaml``: the ingest profile of a product and version, its
+    shipped spec, and its safety overlay. The ``spec_resource`` and
+    ``profile_resource`` of its rows name files in the same folder.
+
+    MEHO reads the file when it loads the catalog at start and checks the
+    rows like its own. So a package row has the same start-up guards, the
+    same ``ingest --catalog`` path and the same safety overlay as a
+    built-in row. The call itself reads nothing: a wrong file stops the
+    start with a :class:`CatalogError` that names the package.
+
+    Raises ``ValueError`` at once for a *package* that is not a connector
+    folder, or a *resource* that is not one plain file name.
+    """
+    if not _CONNECTOR_FOLDER_RE.match(package):
+        raise ValueError(
+            f"register_connector_catalog: {package!r} is not a connector folder. Pass the "
+            "__name__ of the folder's __init__, in the form meho_backplane.connectors.<folder>."
+        )
+    _PACKAGE_CATALOGS[package] = _safe_resource_name(resource, "the catalog file name")
+    load_catalog.cache_clear()
+
+
+def _load_package_catalog(package: str, resource: str) -> ConnectorSpecCatalog:
+    """Read and parse the catalog file of one connector package."""
+    try:
+        raw = resources.files(package).joinpath(resource).read_text(encoding="utf-8")
+    except (ModuleNotFoundError, FileNotFoundError, OSError) as exc:
+        raise CatalogError(
+            f"the connector package {package!r} names the catalog file {resource!r}, but MEHO "
+            f"cannot read it: {type(exc).__name__}: {exc}. Put the file in the package's "
+            "folder, or drop the register_connector_catalog call."
+        ) from exc
+    try:
+        return parse_catalog(raw, package=package)
+    except CatalogError as exc:
+        raise CatalogError(
+            f"the catalog file {resource!r} of the connector package {package!r} is not valid: "
+            f"{exc}"
+        ) from exc
 
 
 @functools.lru_cache(maxsize=1)
@@ -668,9 +777,38 @@ def load_catalog() -> ConnectorSpecCatalog:
     Called once at backplane startup (a malformed catalog crashes the
     lifespan -> CI app-boot smoke fails) and reused by
     ``GET /api/v1/connectors/catalog``.
+
+    The rows of every registered connector package
+    (:func:`register_connector_catalog`) come after MEHO's own rows. A
+    package row for a ``(product, version)`` that is already in the
+    catalog, from MEHO or from another package, stops the start: the
+    catalog has one row per product and version.
     """
     raw = resources.files(_CATALOG_PACKAGE).joinpath(_CATALOG_RESOURCE).read_text(encoding="utf-8")
-    return parse_catalog(raw)
+    catalog = parse_catalog(raw)
+    if not _PACKAGE_CATALOGS:
+        return catalog
+    entries = list(catalog.entries)
+    owners = {(e.product, e.version): _CATALOG_PACKAGE for e in entries}
+    for package, resource in sorted(_PACKAGE_CATALOGS.items()):
+        package_catalog = _load_package_catalog(package, resource)
+        for entry in package_catalog.entries:
+            key = (entry.product, entry.version)
+            if key in owners:
+                raise CatalogError(
+                    f"the catalog file {resource!r} of the connector package {package!r} has a "
+                    f"row for product/version {key}, but the catalog already has one from "
+                    f"{owners[key]!r}. The catalog has one row per product and version."
+                )
+            owners[key] = package
+            entries.append(entry)
+        _log.info(
+            "catalog_package_rows_loaded",
+            package=package,
+            resource=resource,
+            rows=[f"{e.product}/{e.version}" for e in package_catalog.entries],
+        )
+    return ConnectorSpecCatalog(entries=tuple(entries))
 
 
 def op_allowlist_for(product: str, version: str) -> frozenset[tuple[str, str]] | None:
@@ -701,68 +839,96 @@ def safety_overlay_for(product: str, version: str) -> tuple[SafetyOverlayEntry, 
     return entry.safety_overlay
 
 
-def load_spec_resource(spec_resource: str) -> str:
+def _where_to_put(package: str, builtin_package: str, builtin_dir: str) -> str:
+    """Say where a missing resource of *package* belongs, for an error message."""
+    if package == builtin_package:
+        return (
+            f"Add the file to {builtin_dir} (in-package, so the wheel collects it; listed in "
+            "pyproject.toml's [tool.hatch.build.targets.wheel].artifacts)"
+        )
+    return f"Add the file to the folder of the connector package {package!r}"
+
+
+def load_spec_resource(spec_resource: str, *, package: str = SPEC_RESOURCE_PACKAGE) -> str:
     """Read a shipped OpenAPI spec from package data, returning its text.
 
     Resolves *spec_resource* (a bare resource name, validated to carry no
-    path separators at catalog parse time) against
-    :data:`SPEC_RESOURCE_PACKAGE` via :func:`importlib.resources.files`,
-    the same wheel-and-source-portable shape :func:`load_catalog` uses.
-    The returned text is handed to
+    path separators at catalog parse time) against *package* via
+    :func:`importlib.resources.files`, the same wheel-and-source-portable
+    shape :func:`load_catalog` uses. *package* is
+    :data:`SPEC_RESOURCE_PACKAGE` for a row of MEHO's own catalog, and the
+    connector folder for a row a connector package brought
+    (:func:`load_entry_spec` picks the right one). The returned text is
+    handed to
     :class:`~meho_backplane.operations.ingest.api_schemas.SpecSource.content`
     so the ingest pipeline uses it verbatim (size-capped, no fetch, no
-    SSRF guard — the bytes are MEHO-authored package data, not a remote
-    URL).
+    address check — the bytes are package data, not a remote URL).
 
     Raises :class:`CatalogError` (never a bare ``FileNotFoundError``) so
     callers get one remediation-bearing exception type, naming the
     missing resource and the package it was looked up under.
     """
     try:
-        return (
-            resources.files(SPEC_RESOURCE_PACKAGE)
-            .joinpath(spec_resource)
-            .read_text(encoding="utf-8")
+        return resources.files(package).joinpath(spec_resource).read_text(encoding="utf-8")
+    except (ModuleNotFoundError, FileNotFoundError, OSError) as exc:
+        where = _where_to_put(
+            package, SPEC_RESOURCE_PACKAGE, "backend/src/meho_backplane/operations/ingest/specs/"
         )
-    except (FileNotFoundError, OSError) as exc:
         raise CatalogError(
-            f"shipped spec resource {spec_resource!r} not found under "
-            f"{SPEC_RESOURCE_PACKAGE!r}; the catalog row names a spec_resource "
-            "that is not packaged. Add the spec to "
-            "backend/src/meho_backplane/operations/ingest/specs/ (in-package, so "
-            "the wheel collects it; listed in pyproject.toml's "
-            "[tool.hatch.build.targets.wheel].artifacts) or drop spec_resource "
-            "from the row."
+            f"shipped spec resource {spec_resource!r} not found under {package!r}; the "
+            f"catalog row names a spec_resource that is not packaged. {where} or drop "
+            "spec_resource from the row."
         ) from exc
 
 
-def load_profile_resource(profile_resource: str) -> str:
+def load_profile_resource(profile_resource: str, *, package: str = PROFILE_RESOURCE_PACKAGE) -> str:
     """Read a shipped ExecutionProfile document from package data.
 
     Companion to :func:`load_spec_resource`; resolves *profile_resource*
-    against :data:`PROFILE_RESOURCE_PACKAGE`. Returns the raw YAML/JSON
-    text; the caller (the boot-time validator and, later, the profiled
-    subclass registrar) parses it into an
+    against *package* (:data:`PROFILE_RESOURCE_PACKAGE` for MEHO's own
+    rows, the connector folder for a package row; see
+    :func:`load_entry_profile`). Returns the raw YAML/JSON text; the caller
+    (the boot-time validator and, later, the profiled subclass registrar)
+    parses it into an
     :class:`~meho_backplane.connectors.profile.ExecutionProfile`.
 
     Raises :class:`CatalogError` on a missing resource.
     """
     try:
-        return (
-            resources.files(PROFILE_RESOURCE_PACKAGE)
-            .joinpath(profile_resource)
-            .read_text(encoding="utf-8")
+        return resources.files(package).joinpath(profile_resource).read_text(encoding="utf-8")
+    except (ModuleNotFoundError, FileNotFoundError, OSError) as exc:
+        where = _where_to_put(
+            package, PROFILE_RESOURCE_PACKAGE, "backend/src/meho_backplane/connectors/profiles/"
         )
-    except (FileNotFoundError, OSError) as exc:
         raise CatalogError(
-            f"shipped profile resource {profile_resource!r} not found under "
-            f"{PROFILE_RESOURCE_PACKAGE!r}; the catalog row names a "
-            "profile_resource that is not packaged. Add the profile to "
-            "backend/src/meho_backplane/connectors/profiles/ (in-package, so "
-            "the wheel collects it; listed in pyproject.toml's "
-            "[tool.hatch.build.targets.wheel].artifacts) or drop "
+            f"shipped profile resource {profile_resource!r} not found under {package!r}; the "
+            f"catalog row names a profile_resource that is not packaged. {where} or drop "
             "profile_resource from the row."
         ) from exc
+
+
+def load_entry_spec(entry: ConnectorSpecEntry) -> str:
+    """Read the shipped spec of *entry* from where its row came from.
+
+    A row of MEHO's own catalog keeps its spec under
+    :data:`SPEC_RESOURCE_PACKAGE`; a row a connector package brought keeps
+    it in the package's folder. The caller checks that
+    ``entry.spec_resource`` is set.
+    """
+    assert entry.spec_resource is not None  # caller-guaranteed
+    package = entry.source_package or SPEC_RESOURCE_PACKAGE
+    return load_spec_resource(entry.spec_resource, package=package)
+
+
+def load_entry_profile(entry: ConnectorSpecEntry) -> str:
+    """Read the shipped profile of *entry* from where its row came from.
+
+    Companion to :func:`load_entry_spec`: :data:`PROFILE_RESOURCE_PACKAGE`
+    for a built-in row, the connector folder for a package row.
+    """
+    assert entry.profile_resource is not None  # caller-guaranteed
+    package = entry.source_package or PROFILE_RESOURCE_PACKAGE
+    return load_profile_resource(entry.profile_resource, package=package)
 
 
 def _format_triple(product: str, version: str, impl_id: str) -> str:
@@ -965,8 +1131,11 @@ def validate_shipped_artifacts(catalog: ConnectorSpecCatalog | None = None) -> N
 
     cat = catalog if catalog is not None else load_catalog()
     for entry in cat.entries:
+        row = _format_triple(entry.product, entry.version, entry.impl_id)
+        if entry.source_package is not None:
+            row += f" from the connector package {entry.source_package!r}"
         if entry.spec_resource is not None:
-            content = load_spec_resource(entry.spec_resource)
+            content = load_entry_spec(entry)
             try:
                 parse_openapi(
                     f"spec:{entry.spec_resource}",
@@ -974,26 +1143,26 @@ def validate_shipped_artifacts(catalog: ConnectorSpecCatalog | None = None) -> N
                     content=content,
                 )
             except Exception as exc:
+                where = entry.source_package or (
+                    "backend/src/meho_backplane/operations/ingest/specs/"
+                )
                 raise CatalogError(
-                    f"shipped spec resource {entry.spec_resource!r} (catalog row "
-                    f"{_format_triple(entry.product, entry.version, entry.impl_id)}) "
+                    f"shipped spec resource {entry.spec_resource!r} (catalog row {row}) "
                     f"failed dry-run parse with the ingest parser: "
-                    f"{type(exc).__name__}: {exc}. Fix the spec under "
-                    "backend/src/meho_backplane/operations/ingest/specs/ or drop "
+                    f"{type(exc).__name__}: {exc}. Fix the spec under {where} or drop "
                     "spec_resource from the row."
                 ) from exc
         if entry.profile_resource is not None:
-            raw = load_profile_resource(entry.profile_resource)
+            raw = load_entry_profile(entry)
             try:
                 data = yaml.safe_load(raw)
                 profile = ExecutionProfile.model_validate(data)
                 validate_execution_profile(profile)
             except Exception as exc:
+                where = entry.source_package or "backend/src/meho_backplane/connectors/profiles/"
                 raise CatalogError(
-                    f"shipped profile resource {entry.profile_resource!r} (catalog "
-                    f"row {_format_triple(entry.product, entry.version, entry.impl_id)}) "
+                    f"shipped profile resource {entry.profile_resource!r} (catalog row {row}) "
                     f"failed dry-run parse / scheme validation: "
-                    f"{type(exc).__name__}: {exc}. Fix the profile under "
-                    "backend/src/meho_backplane/connectors/profiles/ or drop "
+                    f"{type(exc).__name__}: {exc}. Fix the profile under {where} or drop "
                     "profile_resource from the row."
                 ) from exc

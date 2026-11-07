@@ -16,6 +16,13 @@
   :mod:`meho_backplane.targets.vault_login_extras`.
 * ``DELETE /api/v1/targets/{name}``       — soft-delete. ``tenant_admin`` role.
 
+The three writes (``POST``, ``PATCH``, ``DELETE``) are for people only.
+A service or runner login with ``tenant_admin`` gets 403
+``human_principal_required``; an agent login, capped at ``operator``, gets
+403 ``insufficient_role``. A machine login registers and removes targets
+with the ``targets.register`` and ``targets.remove`` operations, which go
+through the approval check (:mod:`meho_backplane.connectors.targets.ops`).
+
 All routes are tenant-scoped via ``operator.tenant_id`` extracted from the
 JWT by :func:`~meho_backplane.middleware.verify_jwt_and_bind`. Cross-tenant
 reads are impossible — the WHERE clause always includes ``tenant_id``.
@@ -146,10 +153,16 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import object_session
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
+from meho_backplane.connectors._shared.gsm_creds import (
+    ALLOWED_PROJECTS_SETTING,
+    gsm_project_of,
+    is_gsm_project_allowed,
+)
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
@@ -160,6 +173,7 @@ from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
+from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
@@ -204,6 +218,30 @@ router = APIRouter(prefix="/api/v1/targets", tags=["targets"])
 #: :mod:`meho_backplane.api.v1.retrieve`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: The 403 text a machine login gets on a target write.
+MACHINE_TARGET_WRITE_REMEDIATION: Final[str] = (
+    "target writes on REST are for people. A machine login (agent, service "
+    "or runner) registers a target with call_operation(connector_id="
+    "'targets-registry-1.x', op_id='targets.register') and removes one with "
+    "op_id='targets.remove'; MEHO checks both against the approval rules. A "
+    "person changes a target in the operator console or with the meho CLI."
+)
+
+
+def _require_admin_person(operator: Operator = _require_admin) -> Operator:
+    """The gate of ``POST``, ``PATCH`` and ``DELETE``: ``tenant_admin``, then a person.
+
+    The role check runs first, so a login with a lower role (also an
+    agent, whose role MEHO caps at ``operator``) gets ``insufficient_role``.
+    A machine login with ``tenant_admin`` then gets 403
+    ``human_principal_required``.
+    """
+    ensure_human_principal(operator, remediation=MACHINE_TARGET_WRITE_REMEDIATION)
+    return operator
+
+
+_require_admin_person_dep = Depends(_require_admin_person)
 
 #: Canonical op id for the discover route's audit row + broadcast.
 #: ``.discover`` is not one of the broadcast classifier's read/write
@@ -682,8 +720,8 @@ def _audit_flight_recorder_capture_write(
     off *t* (``t.flight_recorder_capture``), folds the tri-state before/after
     into this request's ``audit_log`` payload (via ``audit_*`` contextvars the
     :class:`~meho_backplane.audit.AuditMiddleware` reads) + a WARN, and evicts
-    the resolver's per-target cache so the flip takes effect on the next
-    dispatch. Called by ``create_target`` (a non-inherit initial value) and
+    the resolver's per-target cache, now and after the commit, so the flip
+    takes effect on the next dispatch. Called by ``create_target`` (a non-inherit initial value) and
     ``update_target`` (the override sent AND changed).
     """
     after = t.flight_recorder_capture
@@ -702,9 +740,13 @@ def _audit_flight_recorder_capture_write(
         flight_recorder_capture_after=_fr_capture_audit_value(after),
     )
     # Evict the resolver's per-target override cache so the change is visible on
-    # the next dispatch instead of waiting out the 60s TTL. Harmless no-op on a
-    # freshly-created target id (not yet cached).
-    invalidate_target_override_cache(t.id)
+    # the next dispatch instead of waiting out the 60s TTL: now, and again after
+    # the request's session commits, so a read between the two cannot keep the
+    # old override. Harmless no-op on a freshly-created target id (not yet cached).
+    target_id = t.id
+    clear_now_and_after_commit(
+        object_session(t), lambda: invalidate_target_override_cache(target_id)
+    )
 
 
 def _registered_products() -> set[str]:
@@ -991,6 +1033,19 @@ def _tenant_prefix_or_empty(operator: Operator) -> str:
     return rendered_tenant_prefix(operator, template=template).strip().strip("/")
 
 
+def _resolve_store(secret_ref: str) -> tuple[str, str]:
+    """Split *secret_ref* into ``(kind, store_ref)`` as the dispatch-time read does.
+
+    Surrounding whitespace is cut before the scheme is read, as the
+    dispatch-time read cuts it, so a leading blank cannot hide the scheme.
+    A schemeless ref resolves through the deploy default
+    (``CREDENTIAL_BACKEND``).
+    """
+    return split_credential_ref(
+        secret_ref.strip(), default_backend=get_settings().credential_backend
+    )
+
+
 def _vault_kv_candidate(secret_ref: str) -> str | None:
     """Return the normalised ``<mount>/<path>`` the Vault read of *secret_ref* addresses.
 
@@ -999,16 +1054,58 @@ def _vault_kv_candidate(secret_ref: str) -> str | None:
     tenant-subtree convention does not apply there. The path is the
     scheme-stripped store ref, the same one the dispatch-time read sends
     to Vault, so a ``vault:`` scheme on the ref cannot hide a ``.`` or
-    ``..`` in the first segment. Surrounding whitespace is cut before the
-    scheme is read, as the dispatch-time read cuts it, so a leading blank
-    cannot hide the scheme either.
+    ``..`` in the first segment.
     """
-    kind, store_ref = split_credential_ref(
-        secret_ref.strip(), default_backend=get_settings().credential_backend
-    )
+    kind, store_ref = _resolve_store(secret_ref)
     if kind != "vault":
         return None
     return f"{DEFAULT_KV_MOUNT}/{store_ref.strip('/')}"
+
+
+def _build_secret_ref_project_not_allowed_detail(
+    *, secret_ref: str, project: str
+) -> dict[str, object]:
+    """Build the structured 422 detail for a ``gsm:`` ref in a project not allowed.
+
+    Same shape convention as :func:`_build_secret_ref_outside_tenant_scope_detail`:
+    a stable snake_case ``kind``, the offending value, the project it
+    names, the setting that lists the allowed projects, and a human
+    ``message`` with the remediation. Pure builder, no I/O.
+    """
+    return {
+        "kind": "secret_ref_project_not_allowed",
+        "secret_ref": secret_ref,
+        "project": project,
+        "setting": ALLOWED_PROJECTS_SETTING,
+        "message": (
+            f"secret_ref={secret_ref!r} names the Google Cloud project {project!r}, "
+            f"which {ALLOWED_PROJECTS_SETTING} does not list. MEHO reads a target's "
+            f"Google Secret Manager login only from a listed project, so this "
+            f"target could never dispatch. List the project in "
+            f"{ALLOWED_PROJECTS_SETTING} (comma-separated project ids) and restart "
+            f"the backplane, or point secret_ref at a secret in a listed project. "
+            f"See docs/codebase/connectors-vault-tenant-scope.md for the rule and "
+            f"docs/codebase/error-message-shape.md for the error convention."
+        ),
+    }
+
+
+def _enforce_gsm_project_allowed(secret_ref: str, store_ref: str) -> None:
+    """Reject a ``gsm:`` ``secret_ref`` whose project is not in the allowed list.
+
+    The dispatch-time read of a target's ``gsm:`` login runs the same check
+    (:func:`~meho_backplane.connectors._shared.gsm_creds.check_gsm_target_ref`),
+    so a target that would be refused at every read is refused when it is
+    saved instead. Raises a structured 422
+    (``kind="secret_ref_project_not_allowed"``) on violation.
+    """
+    project = gsm_project_of(store_ref)
+    if is_gsm_project_allowed(project):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=_build_secret_ref_project_not_allowed_detail(secret_ref=secret_ref, project=project),
+    )
 
 
 def _enforce_secret_ref_tenant_scope(
@@ -1060,21 +1157,24 @@ def _enforce_secret_ref_tenant_scope(
     unconfigured target fails dispatch with the existing actionable
     "no secret_ref configured" error, not a Vault denial.
 
-    The check only applies to refs that resolve through the **Vault**
-    credential backend. #2585 (Initiative #2592): the constraint is a
-    Vault KV path convention, so a ref bound to another store — a
-    ``gsm:<project>/<secret>`` ref, or any ref on a
-    ``CREDENTIAL_BACKEND=gsm`` deploy — has no Vault subtree to enforce
-    and is passed through untouched. Backend resolution reuses
-    :func:`~meho_backplane.connectors._shared.credential_backend.split_credential_ref`
-    with the deploy default (:func:`_vault_kv_candidate`), so the
-    write-time gate's *applicability* and the path it checks track the
-    same backend and path dispatch resolves at read time
-    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`).
+    The tenant-subtree rule only applies to refs that resolve through the
+    **Vault** backend (#2585: it is a Vault KV path convention). A ref
+    that resolves through **Google Secret Manager** (``gsm:`` scheme, or
+    any ref on a ``CREDENTIAL_BACKEND=gsm`` deploy) must instead name a
+    project listed in ``GSM_PARAM_ALLOWED_PROJECTS``
+    (:func:`_enforce_gsm_project_allowed`), as the dispatch-time read
+    requires. :func:`_resolve_store` splits the ref the way dispatch does
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`),
+    so the gate checks the same backend and path.
 
-    Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"``)
-    on violation; returns ``None`` otherwise.
+    Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"`` or
+    ``kind="secret_ref_project_not_allowed"``) on violation; returns
+    ``None`` otherwise.
     """
+    kind, store_ref = _resolve_store(secret_ref)
+    if kind == "gsm":
+        _enforce_gsm_project_allowed(secret_ref, store_ref)
+        return
     candidate = _vault_kv_candidate(secret_ref)
     if candidate is None:
         return
@@ -1459,7 +1559,7 @@ def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
 @router.post("", response_model=Target, status_code=201)
 async def create_target(
     body: TargetCreate,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
     """Create a new target in the requesting tenant.
@@ -1667,7 +1767,7 @@ def _validate_update_body_fields(
 async def update_target(
     name: str,
     body: TargetUpdate,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
     """Partially update a target.
@@ -1828,7 +1928,7 @@ async def update_target(
 async def delete_target(
     name: str,
     force: bool = Query(default=False),
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """Soft-delete a target.

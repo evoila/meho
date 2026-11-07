@@ -13,10 +13,14 @@ Design
 ------
 
 * **Read-only, doubly enforced.** Every connection is opened with
-  ``default_transaction_read_only=on`` (server-enforced), and the free-form
-  ``postgres.query`` op runs its statement through a first-keyword allowlist
+  ``default_transaction_read_only=on`` and a ``statement_timeout``
+  (server-enforced), and the free-form ``postgres.query`` op runs its
+  statement through a first-keyword allowlist
   (:func:`~meho_backplane.connectors.postgres.session.assert_read_only_sql`)
-  before it reaches the wire. No write op is registered.
+  and a deny list of server admin functions
+  (:mod:`~meho_backplane.connectors.postgres.query_guard`) before it reaches
+  the wire, and refuses to run as a superuser role unless the target allows
+  it. No write op is registered.
 
 * **Optional auth.** A target with ``secret_ref=None`` is a trust-auth
   instance and connects with no password; a target with a ``secret_ref``
@@ -55,6 +59,10 @@ from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.postgres import queries
 from meho_backplane.connectors.postgres.ops import PG_OPS, PG_WHEN_TO_USE_BY_GROUP
+from meho_backplane.connectors.postgres.query_guard import (
+    assert_no_admin_functions,
+    assert_not_superuser,
+)
 from meho_backplane.connectors.postgres.session import (
     assert_read_only_sql,
     connect_read_only,
@@ -222,14 +230,20 @@ class PostgresConnector(Connector):
     ) -> dict[str, Any]:
         """``postgres.query`` -- a guarded free-form read-only SELECT.
 
-        The statement is allowlisted by :func:`assert_read_only_sql` before a
-        connection is opened, then executed on a server-enforced read-only
-        session -- the double read-only guarantee.
+        Before a connection is opened, the statement must pass the
+        first-keyword allowlist (:func:`assert_read_only_sql`) and the admin
+        function deny list (:func:`assert_no_admin_functions`). After the
+        connection is open, the login role must not be a superuser
+        (:func:`assert_not_superuser`, unless the target allows it). Then the
+        statement runs on the server-enforced read-only session with its
+        statement timeout.
         """
         sql = params["sql"]
         assert_read_only_sql(sql)
+        assert_no_admin_functions(sql)
         max_rows = int(params.get("max_rows") or _DEFAULT_MAX_ROWS)
         async with self._connection(target, operator, database=params.get("database")) as conn:
+            await assert_not_superuser(conn, target)
             return await queries.run_select(conn, sql, max_rows)
 
     # ------------------------------------------------------------------

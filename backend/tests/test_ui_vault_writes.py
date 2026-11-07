@@ -21,7 +21,7 @@ connector). The acceptance criteria on issue #1957 are:
   the operator set it (the CLI ``Changed("cas")`` rule).
 * ``POST /ui/vault/move`` dispatches ``connector_id="secret-broker-1.x"`` op
   ``secret.move`` with ``from`` / ``to`` references and NO value field; the
-  rendered result contains only ``status`` / ``value_sha256`` / ``length``;
+  rendered result contains only ``status`` / ``value_fingerprint`` / ``length``;
   the move form has no value/secret input.
 * a valid **operator** session can run all three writes; no tenant_admin
   hard-403 on the write POST; tenant scoping derives from the session.
@@ -904,7 +904,7 @@ def test_vault_move_dispatches_secret_broker_refs_only_no_value(
 
     (Acceptance criterion #4.) The dispatched params carry ``from`` / ``to``
     (+ reason) and NO value field; the result renders only ``status`` /
-    ``value_sha256`` / ``length`` and no secret value text.
+    ``value_fingerprint`` / ``length`` and no secret value text.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_secret_broker_descriptor()
@@ -914,7 +914,7 @@ def test_vault_move_dispatches_secret_broker_refs_only_no_value(
         "op_id": "secret.move",
         "result": {
             "status": "moved",
-            "value_sha256": "a" * 64,
+            "value_fingerprint": "a" * 64,
             "length": 21,
         },
         "error": None,
@@ -951,7 +951,7 @@ def test_vault_move_dispatches_secret_broker_refs_only_no_value(
     # The render carries only the value-free triple.
     body = response.text
     assert "data-vault-move-result" in body
-    assert "data-move-value-sha256" in body
+    assert "data-move-value-fingerprint" in body
     assert "data-move-length" in body
     assert "a" * 64 in body
     assert _SECRET_VALUE not in body
@@ -1161,3 +1161,22 @@ def _make_stub() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
+
+
+@pytest.mark.parametrize(
+    "path", ["/ui/vault/put/confirm", "/ui/vault/delete/confirm", "/ui/vault/move/confirm"]
+)
+def test_vault_write_confirm_modals_read_only_forbidden_403(path: str) -> None:
+    """A ``read_only`` session gets ``403 operator_required`` on the confirm modals too.
+
+    The whole vault console is for operators: the modal that leads to a
+    write is refused on the same floor as the write itself.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_READ_ONLY, role=TenantRole.READ_ONLY
+    )
+    with mock:
+        response = client.get(path, params={"target": "vault-prod", "path": "app/db"})
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}

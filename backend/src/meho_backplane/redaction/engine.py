@@ -15,7 +15,10 @@ manifest verbatim.
 deterministic for identical inputs. The engine is therefore safely
 callable from CI fixtures (C1-d round-trip gate), unit tests, and the
 production hot path without any setup. Callers that need timing or
-logging wrap the call, not patch the engine.
+logging wrap the call, not patch the engine. The one input besides the
+payload and the policy is the server key the ``hash`` action reads
+from the settings (:func:`hash_replacement`); the other actions do not
+touch it.
 
 **Walking strategy.** Strings are matched directly. Mappings are walked
 key-by-key; the key itself is not redacted (operator-facing keys are
@@ -60,7 +63,6 @@ policy is responsible for ordering.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Final
 
@@ -72,15 +74,21 @@ from meho_backplane.redaction.policy import RedactionPolicy, RedactionRule
 __all__ = [
     "RedactionManifestEntry",
     "RedactionResult",
+    "hash_replacement",
     "redact",
 ]
 
 
 #: Length of the hex suffix the ``hash`` action exposes. 12 hex
-#: characters = 48 bits -- enough that two distinct secrets cannot
+#: characters = 48 bits -- enough that two distinct values cannot
 #: practically collide in one audit row, short enough that the
-#: hashed-view string stays compact.
+#: hashed-view string stays compact. The suffix is cut from a keyed
+#: fingerprint (see :func:`hash_replacement`), so its length says
+#: nothing about how hard the value is to guess.
 _HASH_SUFFIX_LEN: Final[int] = 12
+
+#: Start of the string the ``hash`` action writes.
+_HASH_PREFIX: Final[str] = "hmac-sha256:"
 
 #: Length of the value suffix the ``mask`` action preserves to aid
 #: correlation. 4 chars matches the credit-card convention; for hex
@@ -382,17 +390,34 @@ def _replacement_for(rule: RedactionRule, matched: str) -> str:
             return "*" * len(matched)
         return "*" * (len(matched) - _MASK_SUFFIX_LEN) + matched[-_MASK_SUFFIX_LEN:]
     if rule.action == "hash":
-        # SHA-256 is overkill cryptographically for what is really a
-        # stable correlator, but it costs ~microseconds on the leaf
-        # sizes the connector boundary sees and keeps the audit
-        # column type-stable across rule revisions. UTF-8 encoding is
-        # explicit so the hashed value is stable across platforms.
-        digest = hashlib.sha256(matched.encode("utf-8")).hexdigest()
-        return f"sha256:{digest[:_HASH_SUFFIX_LEN]}"
+        return hash_replacement(matched)
     # The Literal union on RedactionAction excludes any other value
     # at the schema layer; the catch-all is defensive against future
     # action additions that forget to extend this match.
     raise RuntimeError(f"unsupported redaction action {rule.action!r}")
+
+
+def hash_replacement(matched: str) -> str:
+    """Return the string the ``hash`` action writes in place of *matched*.
+
+    ``hmac-sha256:`` and the first 12 hex characters of the keyed
+    fingerprint of the UTF-8 bytes of *matched*
+    (:func:`~meho_backplane.operations._validate.compute_value_fingerprint`,
+    HMAC-SHA256 under the server key). Equal values give equal strings
+    inside one install, so an audit replay can still tell that two
+    answers carried the same value. Without the server key the string
+    cannot be computed again from a value, so a stored string tells
+    nothing about a short or common value, whatever the rule's pattern
+    matched. The second-stage (Presidio) ``hash`` action writes the
+    same shape.
+    """
+    # Imported here, not at the top: the operations package reaches
+    # this module through the broadcast events, so a top-level import
+    # would be a cycle.
+    from meho_backplane.operations._validate import compute_value_fingerprint
+
+    fingerprint = compute_value_fingerprint(matched.encode("utf-8"))
+    return f"{_HASH_PREFIX}{fingerprint[:_HASH_SUFFIX_LEN]}"
 
 
 def _join_path(parent: str, child: str) -> str:

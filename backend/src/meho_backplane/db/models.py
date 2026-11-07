@@ -436,9 +436,18 @@ class AuditEventClass(StrEnum):
     * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
       a policy deny, a rate-limit refusal, or a park for approval.
     * :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
-      rejected, or let an approval request expire.
+      rejected, or let an approval request expire, or its sender withdrew
+      it (#5717). The operation did not run on any of these rows.
     * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
       refresh-token replay or a broken satellite effect chain.
+    * :attr:`CONFIG_CHANGE` -- an operator changed the settings of
+      operations, and none of them ran. Two writers: an edit of one
+      operation with ``meho_connector_edit_op`` (turned it on or off, or
+      changed its risk level, approval rule, description or guidance,
+      #5791), and a tenant's own on or off switch with
+      ``meho_connector_tenant_setting``, for one operation or a whole
+      group (#5864). The row's ``payload["op_id"]`` names the edited
+      operation; a group switch names ``payload["group_key"]`` instead.
     * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
       row written before migration ``0106`` reads as this class; it is never
       guessed from ``method`` / ``path``. The REST and MCP request wrapper
@@ -451,10 +460,11 @@ class AuditEventClass(StrEnum):
     POLICY_DECISION = "policy_decision"
     APPROVAL_DECISION = "approval_decision"
     SECURITY_EVENT = "security_event"
+    CONFIG_CHANGE = "config_change"
     LEGACY_REQUEST = "legacy_request"
 
 
-#: Closed tuple mirrored in migration ``0106``'s CHECK constraint.
+#: Closed tuple mirrored in the CHECK constraint of migrations ``0106`` and ``0137``.
 AUDIT_EVENT_CLASSES: tuple[str, ...] = tuple(c.value for c in AuditEventClass)
 
 
@@ -9405,3 +9415,39 @@ class RequestUsageEvent(Base):
     route: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+
+
+class InstanceSettingsRevision(Base):
+    """One applied settings-file import (``POST /api/v1/settings/import``).
+
+    Append-only: the service only INSERTs, and on PostgreSQL migration
+    ``0136`` installs a ``BEFORE UPDATE OR DELETE`` trigger that refuses any
+    mutation (a copy of the ``audit_log`` trigger from ``0100``). An import
+    that changes nothing writes no row.
+
+    ``spec_before`` / ``spec_after`` hold the ``spec`` of the tenants the
+    import touched, in the export's shape; the diff is worked out on read
+    (see :mod:`meho_backplane.instance_settings.diff`). ``audit_id`` is the
+    import request's ``audit_log`` id; the ``tenant_convention_history``
+    rows the import wrote link to it by ``request_id``. ``actor_sub`` is
+    always the human operator (machine principals cannot import).
+    """
+
+    __tablename__ = "instance_settings_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    actor_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    audit_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    api_version: Mapped[str] = mapped_column(Text, nullable=False)
+    exported_from: Mapped[dict[str, object] | None] = mapped_column(_PORTABLE_JSON, nullable=True)
+    spec_before: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    spec_after: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    summary: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+
+    __table_args__ = (Index("instance_settings_revision_ts_idx", "ts"),)

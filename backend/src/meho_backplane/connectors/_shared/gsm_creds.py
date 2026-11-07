@@ -131,8 +131,12 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
+    "ALLOWED_PROJECTS_SETTING",
     "GcpSecretManagerBackend",
     "GcpSecretManagerReadError",
+    "check_gsm_target_ref",
+    "gsm_project_of",
+    "is_gsm_project_allowed",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -148,6 +152,11 @@ _IMPERSONATION_LIFETIME = 3600
 
 #: Default version alias when the ref pins no explicit version.
 _LATEST_VERSION = "latest"
+
+#: The setting that lists the Google Cloud projects MEHO may read secrets
+#: from: a target's own ``gsm:`` login and a ``gsm:`` ref named in an
+#: operation parameter are both read only when their project is on it.
+ALLOWED_PROJECTS_SETTING = "GSM_PARAM_ALLOWED_PROJECTS"
 
 #: The GCP Security Token Service endpoint the WIF path exchanges the
 #: operator JWT at (#2232). Pinned explicitly rather than deriving from
@@ -260,6 +269,46 @@ def _parse_gsm_ref(store_ref: str, *, target_name: str) -> tuple[str, str, str, 
             "project, secret name, or version segment"
         )
     return project, secret, version, field
+
+
+def gsm_project_of(store_ref: str) -> str:
+    """Return the project id a scheme-stripped ``gsm:`` ref names, or ``""``.
+
+    The project is the first path segment before any ``#<field>`` fragment,
+    split the way :func:`_parse_gsm_ref` splits it. A ref that names no
+    project (empty, or starting with ``/``) returns ``""``, which no
+    allowed list contains.
+    """
+    body, sep, _field = store_ref.rpartition("#")
+    path = body if sep else store_ref
+    return path.partition("/")[0].strip()
+
+
+def is_gsm_project_allowed(project: str) -> bool:
+    """Whether *project* is on the list in ``GSM_PARAM_ALLOWED_PROJECTS``.
+
+    An empty list (the default) allows no project, because MEHO reads these
+    secrets with its own Google identity on the SA-direct path.
+    """
+    return bool(project) and project in get_settings().gsm_param_allowed_project_set
+
+
+def check_gsm_target_ref(store_ref: str, *, target_name: str) -> None:
+    """Refuse a target's ``gsm:`` login whose project is not allowed.
+
+    Runs before any Google call, for every read of a target's own
+    ``secret_ref``. Raises :class:`GcpSecretManagerReadError` naming the
+    target, the project and the setting, never a secret value.
+    """
+    project = gsm_project_of(store_ref)
+    if is_gsm_project_allowed(project):
+        return
+    raise GcpSecretManagerReadError(
+        f"target {target_name!r} has a gsm secret_ref in the Google Cloud project "
+        f"{project!r}, which {ALLOWED_PROJECTS_SETTING} does not list; nothing was "
+        f"read. List the project in {ALLOWED_PROJECTS_SETTING} (comma-separated) "
+        "or move the target's secret to a listed project."
+    )
 
 
 def _decode_payload(

@@ -573,6 +573,8 @@ class PortListTests(FirewallTestCase):
                 2380/tcp closed
                 2381/tcp closed
                 9099/tcp closed
+                8081/tcp closed
+                9091/tcp closed
                 30000-32767/tcp closed
                 8472/udp closed
                 """),

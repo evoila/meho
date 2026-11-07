@@ -30,6 +30,7 @@ what it keeps.
 | `deploy/appliance/rewrite-ovf.sh` | Replaces the product section of an exported `.ovf` and declares the OVF transports. `awk` does the rewrite. |
 | `deploy/appliance/product-section.xml` | The wizard fields of the form-1 design, section 2, with `@VERSION@`. |
 | `deploy/appliance/firststart/` | The first-start service and the console banner that step 3 puts into the OVA ([appliance-firststart.md](appliance-firststart.md)). |
+| `deploy/appliance/cis/` | The OS hardening to CIS Ubuntu 24.04 Level 1 - Server that step 3 runs, its tailoring and its two lists ([appliance-cis.md](appliance-cis.md)). |
 | `deploy/appliance/tests/` | `test_clean.py` with `clean_harness.py` (a fake build VM), `test_rewrite_ovf.py`, `test_build.py` (`build.sh` against a stub `govc`), and the Ubuntu cloud image's own `.ovf` as the fixture. First start has its own tests; see [appliance-firststart.md](appliance-firststart.md). |
 | `.github/workflows/appliance-build.yml` | The build on the lab runner. |
 | `.github/workflows/linux-server-test.yml` | shellcheck and the unit tests, on every pull request that touches `deploy/appliance/`. |
@@ -70,9 +71,21 @@ the tests set it, as `install.sh` does.
    appliance; and the first-start service and the console banner
    (`firststart/`, [appliance-firststart.md](appliance-firststart.md)):
    the scripts under `/opt/meho/appliance/firststart/`, the two units
-   under `/etc/systemd/system/`, both enabled. They run at the customer's
-   first boot; the build VM does not boot again. The OS hardening (#4640)
-   is not built yet; `add_appliance_pieces` marks where its lines go.
+   under `/etc/systemd/system/`, both enabled. `banner.sh` gets the git
+   commit of this checkout as `DOCS_REF`, for its link to the boot-menu
+   steps (`main` when the checkout has no git). They run at the customer's
+   first boot; the build VM does not boot again. Then the OS hardening
+   (`harden_os`, [appliance-cis.md](appliance-cis.md)): `build.sh`
+   downloads the CIS content of ComplianceAsCode (pinned with its sha512,
+   kept in the cache next to the base image), copies `cis/` and the data
+   stream to the build VM and runs `cis/harden.sh` as root. It installs
+   packages from the Ubuntu archive, runs the CIS fixes, sets the design's
+   settings, sets the firewall to block by default, and scans. The scan's
+   result list comes back as `meho-appliance-<version>-cis.txt` in the
+   out-dir. It comes back also when `harden.sh` stops after its scan, for
+   example on a failing rule that is in neither list; then the build
+   stops. Before the run, `build.sh` deletes the list of an earlier run on
+   the build VM.
 4. **Clean for copying.** `clean.sh` goes to `/run/meho-clean.sh` (a RAM
    disk, so it is not in the OVA) and starts with
    `systemd-run --unit=meho-clean --collect -p TTYPath=/dev/tty1 -p StandardOutput=tty /bin/bash /run/meho-clean.sh`
@@ -223,8 +236,8 @@ this version runs as a single appliance.
 installs a pinned `govc`, fetches the tag's form-2 download from the
 GitHub release and checks it the way `docs/RELEASING.md` says (the cosign
 signature of `SHA256SUMS-linux`, then the checksum), makes a new ed25519
-key for the build, runs `build.sh` and keeps the OVA and `SHA256SUMS` as
-one artifact for 3 days. The job log of a public repository is public.
+key for the build, runs `build.sh` and keeps the OVA, `SHA256SUMS` and the
+CIS scan's result list as one artifact for 3 days. The job log of a public repository is public.
 The vCenter login is in the repository secrets `GOVC_URL`,
 `GOVC_USERNAME` and `GOVC_PASSWORD`. The place of the build VM and its
 network are repository secrets too: `MEHO_LAB_DATASTORE`,
@@ -256,8 +269,11 @@ test (#4816).
   OpenBao setup (#4044). With an older download, step 2 or the clean
   fails. `install.sh --hostname` and `--from-disk` are used.
 - On the runner: `ssh`, `scp`, `ssh-keygen`, `curl`, `tar`, `sha256sum`,
-  GNU `base64`. No `ovftool`: `govc export.ovf` plus our own manifest and
-  `tar` make the OVA.
+  `sha512sum`, GNU `base64`. No `ovftool`: `govc export.ovf` plus our own
+  manifest and `tar` make the OVA.
+- The CIS content of ComplianceAsCode 0.1.82, pinned with its sha512 in
+  `build.sh`; and in step 3 the Ubuntu archive, reached from the build VM
+  ([appliance-cis.md](appliance-cis.md)).
 
 ## Known issues
 
@@ -271,8 +287,8 @@ test (#4816).
   migration (#5145), and v0.39.0 has no OpenBao setup (#4044). That build
   had no first start in it, so two appliances from one OVA (different RKE2
   CAs and SSH host keys) wait for the next lab build and import.
-- **The hardening (#4640)** is not in the OVA yet. `add_appliance_pieces`
-  in `build.sh` is where its install lines go.
+- **The hardening (#4640)** has not run on a real build yet; see
+  [appliance-cis.md](appliance-cis.md).
 - **The cloud image's `ubuntu` user** is not made (no `default` in the
   user-data). If a later cloud-init version changes that rule, the check
   finds no such user; add it to `check_clean` if the first build shows one.
@@ -301,7 +317,8 @@ a stub `govc` that refuses `vm.info`, as vCenter does for a login without
 rights on the host: the export's power-state check and the check for an
 existing build VM. It also runs the export on what the stub's
 `export.ovf` writes, opens the OVA, and checks the order of its files,
-the manifest's hashes and `SHA256SUMS`.
+the manifest's hashes and `SHA256SUMS`. The hardening has its own tests;
+see [appliance-cis.md](appliance-cis.md).
 
 The tests need Linux bash 5; on macOS run them in Docker
 (`deploy/appliance/README.md`). CI runs them with shellcheck in

@@ -71,6 +71,8 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
     monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
     monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
+    # The targets below log in from gsm:my-project/..., which must be allowed.
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "my-project")
     monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
     monkeypatch.delenv("GSM_IMPERSONATE_SA", raising=False)
     get_settings.cache_clear()
@@ -568,6 +570,75 @@ async def test_dispatch_gsm_ref_end_to_end_via_load_basic_credentials(
     creds = await load_basic_credentials(target, _make_operator())
 
     assert creds == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+
+
+# ---------------------------------------------------------------------------
+# A target's gsm: login is read only from an allowed project
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("allowed", "secret_ref", "project"),
+    [
+        ("", "gsm:my-project/db-creds", "my-project"),
+        ("other-project", "gsm:my-project/db-creds", "my-project"),
+        ("my-project", "gsm:my-project-2/db-creds#password", "my-project-2"),
+        ("my-project", "gsm:/db-creds", ""),
+    ],
+)
+async def test_target_login_in_a_project_not_allowed_is_refused_before_any_google_call(
+    _gsm_backend_with_fakes: _FakeClient,
+    monkeypatch: pytest.MonkeyPatch,
+    allowed: str,
+    secret_ref: str,
+    project: str,
+) -> None:
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", allowed)
+    get_settings.cache_clear()
+    target = _Target(secret_ref=secret_ref)
+
+    with pytest.raises(GcpSecretManagerReadError) as exc_info:
+        await load_basic_credentials(target, _make_operator())
+
+    message = str(exc_info.value)
+    assert "GSM_PARAM_ALLOWED_PROJECTS" in message
+    assert repr(project) in message
+    assert target.name in message
+    assert _gsm_backend_with_fakes.accessed_name is None
+    assert _gsm_backend_with_fakes.credentials is None
+
+
+async def test_target_login_refusal_is_a_backend_neutral_read_error(
+    _gsm_backend_with_fakes: _FakeClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal is a ``CredentialsReadError``, so callers handle it like any failed read."""
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "")
+    get_settings.cache_clear()
+
+    with pytest.raises(cb.CredentialsReadError):
+        await load_vault_secret_data(
+            _Target(secret_ref="gsm:my-project/db-creds"), _make_operator()
+        )
+
+
+async def test_target_login_in_an_allowed_project_is_read(
+    _gsm_backend_with_fakes: _FakeClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listed project passes; whitespace and other entries on the list do not matter."""
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", " other-project , my-project ")
+    get_settings.cache_clear()
+
+    creds = await load_basic_credentials(
+        _Target(secret_ref="gsm:my-project/db-creds"), _make_operator()
+    )
+
+    assert creds == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    assert (
+        _gsm_backend_with_fakes.accessed_name
+        == "projects/my-project/secrets/db-creds/versions/latest"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ from meho_backplane.operations.delivery_budget import (
     RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES,
     bound_complete_response,
     handle_is_readable,
+    measure_call_operation_bytes,
     measure_delivered_wire_bytes,
     receipt_wire_bytes,
     refuse_undeliverable_receipt,
@@ -135,6 +136,21 @@ def test_over_budget_with_readable_handle_is_partial() -> None:
     assert bounded.extras["retry"] is False
     assert bounded.extras["delivered_bytes"] > 4096
     assert measure_delivered_wire_bytes(bounded.model_dump(mode="json")) <= 4096
+
+
+def test_bounding_counts_the_data_notice_the_tool_adds() -> None:
+    """The ceiling is measured with the ``data_notice`` field, so the delivered answer fits.
+
+    A response that fits without the notice but not with it is bounded,
+    and the bounded answer fits the ceiling with the notice counted.
+    """
+    result = _ok(size=2000, handle=_handle())
+    bare = measure_delivered_wire_bytes(result.model_dump(mode="json"))
+    assert measure_call_operation_bytes(result) > bare
+    bounded = bound_complete_response(result, bare)
+    assert bounded is not result
+    assert bounded.delivery == "partial"
+    assert measure_call_operation_bytes(bounded) <= bare
 
 
 def test_over_budget_without_room_for_handle_is_unavailable() -> None:

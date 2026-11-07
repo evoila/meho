@@ -283,7 +283,9 @@ func RenderError(stderrW io.Writer, err *StructuredError, jsonOut bool) error {
 	// rendering to stderr ourselves so we don't depend on cobra's
 	// default printer (status.go runs with SilenceErrors=true so
 	// the JSON envelope on the --json path stays uncontaminated).
-	fmt.Fprintln(stderrW, err.Error())
+	// The detail often carries text from the server; SafeLines shows its
+	// control characters as visible escapes and keeps the line breaks.
+	fmt.Fprintln(stderrW, SafeLines(err.Error()))
 	return &silentError{exit: err.Exit}
 }
 
@@ -382,7 +384,27 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 	if line := formatOperationCatalog(resp.OperationCatalog); line != "" {
 		fmt.Fprintln(stdoutW, line)
 	}
+
+	// Agent model spend (#5771): one line when MEHO has no price for the
+	// default agent model, nothing otherwise. Older backplanes send no
+	// field.
+	if line := formatAgentModelSpend(resp.AgentModelSpend); line != "" {
+		fmt.Fprintln(stdoutW, line)
+	}
 	return nil
+}
+
+// formatAgentModelSpend renders the one warning line for a default agent
+// model that has no price: runs on it cost 0, so the spend limits do not
+// count them. Empty when the spend is counted or the field is missing.
+func formatAgentModelSpend(s *api.AgentModelSpend) string {
+	if s == nil || s.SpendCounted {
+		return ""
+	}
+	return fmt.Sprintf(
+		"  Agent model: %s has no price in MEHO, so spend limits do not count its runs",
+		s.Model,
+	)
 }
 
 // tenantNotChosen reports a status answer for a login with several

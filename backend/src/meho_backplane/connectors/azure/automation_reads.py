@@ -24,9 +24,9 @@ limits.
 Only the fields of the rows below are copied from Azure's answers. Runbook
 content links, runbook and job schedule parameters, job output and the
 account's hybrid worker URL are never read, because they can hold secrets.
-Every list is read through
-:class:`~meho_backplane.connectors.azure.automation_trace.TraceMaskingCaller`,
-so the flight recorder's trace leaves those fields out too. Names and
+The connector's trace mask
+(:mod:`~meho_backplane.connectors.azure.trace_mask`) leaves those fields out
+of the flight recorder's trace too. Names and
 descriptions from Azure are copied as data; they never go into a path or a
 filter.
 """
@@ -36,7 +36,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
@@ -65,7 +65,6 @@ from meho_backplane.connectors.azure.automation_schemas import (
     MAX_JOB_DAYS,
     RESOURCE_GROUP_PATTERN,
 )
-from meho_backplane.connectors.azure.automation_trace import TraceMaskingCaller
 from meho_backplane.connectors.azure.session import AzureTargetLike, resolve_target_config
 
 if TYPE_CHECKING:
@@ -377,8 +376,7 @@ class _Reader:
     def __init__(
         self, connector: AzureConnector, operator: Operator, target: AzureTargetLike
     ) -> None:
-        # send() sees the connector through the caller, so the trace masks secrets.
-        self.caller = cast("AzureConnector", TraceMaskingCaller(connector))
+        self.caller = connector
         self.operator = operator
         self.target = target
         self.subscription_id = resolve_target_config(target).subscription_id

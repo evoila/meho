@@ -468,6 +468,10 @@ def test_pfsense_ops_safety_levels_and_approval() -> None:
             assert op.safety_level == "dangerous", f"{op.op_id} should be dangerous"
             assert op.requires_approval, f"{op.op_id} user write must require approval"
             continue
+        if op.op_id == "pfsense.diag.ping":
+            # The ping goes to an address the caller gives.
+            assert (op.safety_level, op.requires_approval) == ("caution", True)
+            continue
         expected = "caution" if op.op_id in _WRITE_OP_IDS else "safe"
         assert op.safety_level == expected, f"{op.op_id} should be safety_level={expected!r}"
         assert not op.requires_approval, f"{op.op_id} should not require approval"

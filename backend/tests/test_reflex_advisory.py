@@ -737,7 +737,8 @@ async def test_write_with_an_unknown_last_word_gets_both_write_warnings(
         _bound_session(_SESSION),
     ):
         result = await dispatch(
-            operator=_operator(),
+            # In the web interface the ``caution`` op runs at once (#3980).
+            operator=_operator().model_copy(update={"web_session": True}),
             connector_id="vault-1.x",
             op_id="vault.kv.purge",
             target=_FakeTarget(),

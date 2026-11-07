@@ -177,7 +177,7 @@ flowchart LR
     MEHO -->|"governed operation"| I
 ```
 
-MEHO ships as three operator-facing artefacts:
+MEHO ships as five operator-facing artefacts:
 
 - **Backplane** — Python / FastAPI service that brokers MCP operations
   against infrastructure. Receives short-lived Keycloak-issued OIDC
@@ -205,6 +205,12 @@ MEHO ships as three operator-facing artefacts:
   (`linux/macOS × amd64/arm64`) on every `v*` tag, each individually
   cosign-signed. Full command reference:
   [`docs/codebase/cli.md`](./docs/codebase/cli.md).
+- **Claude Desktop bundle** — `meho-claude-desktop-X.Y.Z.mcpb`, attached
+  to every release. It connects Claude Desktop to MEHO. Setup:
+  [`docs-site/clients/claude-desktop.md`](./docs-site/clients/claude-desktop.md).
+- **Linux server download** — `meho-linux-X.Y.Z-amd64.tar`, attached to
+  every release. It installs MEHO on a plain Linux server. This install
+  is available, in testing.
 
 The agent runtime (Claude Code, Cursor, …) lives outside the deploy
 contract — operators bring their own MCP client.
@@ -229,8 +235,9 @@ contract — operators bring their own MCP client.
   model. Bring your own MCP client.
 - You only need read-only chat over infrastructure with no write path,
   no per-action authorisation, and no audit requirement.
-- You're looking for a hosted SaaS — MEHO is self-hosted (you run the
-  backplane, Postgres, Keycloak, and Vault).
+- You're looking for a hosted SaaS — MEHO is self-hosted (you run
+  it in your own network; the chart brings PostgreSQL, Keycloak and
+  OpenBao, or connects to yours).
 
 ## Deploy
 
@@ -257,8 +264,8 @@ kind create cluster --name meho-dev
 #    Keycloak is deployed and no real auth flow runs. Federation probes
 #    register but `meho login` will not work end-to-end.
 #    For real federation (working Vault token-exchange + Keycloak OIDC
-#    flow), use the existing-k8s path below instead — you provision Vault
-#    and Keycloak yourself.
+#    flow), use the existing-Kubernetes path below instead — there the
+#    chart brings its own Keycloak and OpenBao.
 #    See deploy/values-examples/values-kind.yaml for the Postgres manifest.
 
 # 3. Install the chart from its OCI artefact.
@@ -285,15 +292,17 @@ step 2, and supplies *placeholder* Vault + Keycloak URIs (no in-cluster
 mock for those — the chart's URI-validated fields just need to resolve
 at install time). Operator identity is **faked**; the federation probes
 register but `meho login` will not complete. For real federation, use
-the existing-k8s path below.
+the existing-Kubernetes path below.
 
-### Existing k8s (~5 min, requires Vault + Keycloak + Postgres)
+### Existing Kubernetes (built-in PostgreSQL, Keycloak and OpenBao by default)
 
-The supported deploy shape: a Kubernetes cluster running an
-ingress-nginx controller, a HashiCorp Vault with the `meho-mcp` OIDC
-role bound to your Keycloak issuer, a Keycloak realm + client fronting
-the backplane, and a PostgreSQL database reachable from the cluster.
-This is the shape the RDC Hetzner dogfooding lab runs.
+The supported deploy shape today: a Kubernetes cluster (1.28 or newer)
+with an ingress controller. Since v0.45.0 the chart brings its own
+PostgreSQL, Keycloak and OpenBao and connects MEHO to them. To use your
+own, set `corePostgres.enabled`, `coreKeycloak.enabled` or
+`coreVault.enabled` to `false` and fill the matching values. A Linux
+server install is available, in testing. A VMware appliance is in
+progress.
 
 ```bash
 helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
@@ -302,12 +311,15 @@ helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
   -f your-values.yaml
 ```
 
-See [`deploy/values-examples/values-rdc-example.yaml`](./deploy/values-examples/values-rdc-example.yaml)
+With the built-in parts, `your-values.yaml` needs only the values listed
+under [Helm chart values reference](#helm-chart-values-reference).
+To bring your own parts, see
+[`deploy/values-examples/values-rdc-example.yaml`](./deploy/values-examples/values-rdc-example.yaml)
 for the shape `your-values.yaml` should follow and
 [`deploy/values-examples/README.md`](./deploy/values-examples/README.md)
 for the **External Secrets Operator (ESO) sync patterns** the chart
-expects. Required: Vault address + role, Keycloak issuer + audience,
-Postgres credentials Secret (synced from Vault by ESO).
+expects. Then you also need: Vault address + role, Keycloak issuer +
+audience, Postgres credentials Secret (synced from Vault by ESO).
 
 ### Verify image + chart + CLI signatures
 
@@ -355,7 +367,7 @@ docker pull ghcr.io/evoila/meho:sha-<40-char-git-sha>
 docker pull ghcr.io/evoila/meho:main
 
 # Tagged release:
-docker pull ghcr.io/evoila/meho:v0.9.0
+docker pull ghcr.io/evoila/meho:v<x.y.z>
 ```
 
 **No `:latest` tag is ever published.** `:main` is a moving alias for
@@ -375,11 +387,15 @@ Schema draft-07) rejects empty required values at `helm install` /
 `helm upgrade` / `helm template` time with a clear path. Unknown keys at
 any level fail with `additional properties '<name>' not allowed`.
 
-Install with the command shown under [Existing k8s](#existing-k8s-5-min-requires-vault--keycloak--postgres)
-above. **Required values** (must be set or the schema rejects the
-install): `image.tag`, `ingress.host`, `postgres.credentialsSecret`,
-`vault.address`, `keycloak.issuer`, the three `config.*` mirrors, and the
-three `networkPolicy.*CIDR` egress CIDRs — see the full
+Install with the command shown under [Existing Kubernetes](#existing-kubernetes-built-in-postgresql-keycloak-and-openbao-by-default)
+above. **Required values** (must be set or the install stops):
+`image.tag`, `ingress.host`, `coreKeycloak.hostname` and
+`coreKeycloak.firstTenantId` with the built-in parts. With your own
+parts, set instead `postgres.credentialsSecret`, `vault.address`,
+`keycloak.issuer`, the three `config.*` mirrors, and the three
+`networkPolicy.*CIDR` egress CIDRs (plus `image.tag`, `ingress.host`
+and, while TLS is on, `ingress.tls.secretName`, the Secret that holds
+the TLS certificate) — see the full
 [operator-required and common-override tables](./docs/codebase/devops.md#full-values-reference)
 in [`docs/codebase/devops.md`](./docs/codebase/devops.md), which also
 covers the chart contract, probe semantics, NetworkPolicy posture,
@@ -409,6 +425,8 @@ Codebase walkthroughs:
 - **Backend** — [`docs/codebase/backend.md`](./docs/codebase/backend.md)
 - **CLI** — [`docs/codebase/cli.md`](./docs/codebase/cli.md)
 - **Chart + deploy** — [`docs/codebase/devops.md`](./docs/codebase/devops.md)
+- **Operator console — conventions** — [`docs/codebase/ui-conventions.md`](./docs/codebase/ui-conventions.md)
+  (read before touching `/ui/*`; the chassis reference is [`docs/codebase/ui.md`](./docs/codebase/ui.md))
 
 Architecture references live under
 [`docs/architecture/`](./docs/architecture/) — topology, the operations
@@ -423,13 +441,11 @@ Read [Write a connector package](https://evoila.github.io/meho/latest/extend/con
 ## FAQ
 
 **Do I need Vault + Keycloak to try it?**
-Not to *look around*. The [local kind loop](#local-kind-5-min) runs the
-backplane against a Postgres mock with placeholder Vault + Keycloak URIs —
-enough to iterate on chart plumbing, the startup contract, and the CLI.
-But the federated-credential and OIDC-login features are MEHO's reason to
-exist, so any *real* use (working `meho login`, just-in-time backend
-credentials) needs a real Keycloak realm and a Vault with the `meho-mcp`
-OIDC role — the [existing-k8s path](#existing-k8s-5-min-requires-vault--keycloak--postgres).
+No. The chart brings its own Keycloak and OpenBao (an open-source fork
+of Vault). The [local kind loop](#local-kind-5-min) turns them off to
+stay small; for a working `meho login`, use the
+[existing-Kubernetes path](#existing-kubernetes-built-in-postgresql-keycloak-and-openbao-by-default)
+with the built-in parts.
 
 **Is the agent runtime included?**
 No — bring your own. MEHO governs what an agent is allowed to do; it does
@@ -448,8 +464,9 @@ ships the backplane and the connectors for common products. See
 [Why MEHO](#why-meho).
 
 **Is there a hosted SaaS?**
-No — MEHO is self-hosted. You run the backplane, Postgres, Keycloak, and
-Vault, and your audit trail stays in systems you control.
+No — MEHO is self-hosted. You run it in your own network; the chart
+brings PostgreSQL, Keycloak and OpenBao, or connects to yours. Your
+audit trail stays in systems you control.
 
 ## Community
 

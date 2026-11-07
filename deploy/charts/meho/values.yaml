@@ -18,10 +18,12 @@
 
 # Values Helm hands to the parent chart and every subchart.
 global:
-  # -- Set to true on OpenShift. The built-in core parts then leave out
+  # -- Set to true on OpenShift. Every pod of the chart then leaves out
   # `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user
   # id from the project's range (it refuses a fixed one outside it). On
   # other clusters keep false: the pods run with fixed, non-root user ids.
+  # `deploy/values-examples/values-openshift.yaml` has the other OpenShift
+  # settings.
   openshift: false
   # -- Your own image registry, for an install with no internet (#4100).
   # Every pod of the chart then pulls from it. It replaces the registry host
@@ -115,6 +117,8 @@ podLabels: {}
 # `runAsNonRoot: true` + a numeric `runAsUser` matches the backplane Dockerfile's
 # `USER 1001:0` directive — running with the wrong UID will fail-closed at
 # admission time on a cluster with the restricted PodSecurity profile.
+# The setup and migration Jobs use it too. `global.openshift: true` leaves
+# `runAsUser` out, so OpenShift picks the user id.
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1001
@@ -223,12 +227,14 @@ service:
 # install ships neither, so a cluster without the operator is unaffected.
 serviceMonitor:
   # -- Render a ServiceMonitor that scrapes the backplane `/metrics`
-  # endpoint (unauthenticated legacy-0.0.4 exposition — see
+  # endpoint (legacy-0.0.4 exposition — see
   # `backend/src/meho_backplane/metrics.py`). Default `false`: `/metrics`
   # stays dark until an operator running the Prometheus Operator flips
   # this on. The ServiceMonitor selects THIS release's Service via the
   # `app.kubernetes.io/name` + `app.kubernetes.io/instance` selector
-  # labels and scrapes the named `service.portName` port.
+  # labels and scrapes the named `service.portName` port. With
+  # `metricsAuth.enabled` (the default) it sends the metrics token from
+  # the Secret as a bearer token, so no scrape setting is needed.
   enabled: false
   # -- Extra labels applied to the ServiceMonitor metadata. REQUIRED in
   # most clusters: a Prometheus CR only discovers ServiceMonitors whose
@@ -245,6 +251,29 @@ serviceMonitor:
   # -- HTTP path scraped on the backplane Service port. `/metrics` matches
   # the backplane exposition route (main.py).
   path: /metrics
+
+# The metrics token. `/metrics` answers only a caller that sends it as a
+# bearer token (`Authorization: Bearer <token>`), and `/ready` shows its
+# `features` block only to such a caller. `/ready` still gives every caller
+# the verdict (200 or 503) and the checks, so the readiness probe needs no
+# header, and `/healthz` is always open. The backplane reads the token as
+# `METRICS_AUTH_TOKEN`.
+metricsAuth:
+  # -- Give the backplane a metrics token. `false` sets no token: `/metrics`
+  # and the whole `/ready` body then answer every caller.
+  enabled: true
+  # -- Name of a Secret you own that holds the token under `secretKey`.
+  # Empty: the chart makes `<release>-metrics-auth` with a random
+  # 32-character token on the first install, and keeps that value on every
+  # upgrade. Read it with
+  # `kubectl get secret <release>-metrics-auth -o jsonpath='{.data.token}' | base64 -d`
+  # when your own scrape config (not the chart's ServiceMonitor) needs it.
+  # A render with `helm template` has no cluster to look in, so every render
+  # makes a new token; the pod rolls with it, and the ServiceMonitor reads
+  # the Secret live.
+  existingSecret: ""
+  # -- Key in the Secret that holds the token.
+  secretKey: token
 
 # Optional starter alerting rules (Initiative #2884, #2885). Renders a
 # PrometheusRule with two conservative alerts so a fresh install has a
@@ -344,12 +373,20 @@ ingress:
   # -- Annotations applied to the Ingress. Defaults are empty; consumers add
   # cert-manager / ingress-controller-specific annotations as needed (e.g.
   # `cert-manager.io/cluster-issuer: letsencrypt-prod`).
+  #
+  # The backplane refuses a request body above 32 MiB with a 413
+  # (`HTTP_MAX_REQUEST_BODY_BYTES`). Set the matching cap on the ingress
+  # controller too, so an oversized body is dropped at the edge. The
+  # annotation name depends on the controller; for ingress-nginx it is
+  # `nginx.ingress.kubernetes.io/proxy-body-size: "32m"`.
   annotations: {}
   tls:
     enabled: true
     # -- Name of the Kubernetes Secret holding the TLS certificate. Required
-    # (non-empty) by the schema only when both `ingress.enabled` and
-    # `ingress.tls.enabled` are true. When cert-manager owns the certificate
+    # (non-empty) by the schema when both `ingress.enabled` and
+    # `ingress.tls.enabled` are true and no built-in core part is on. With
+    # one on, empty means `<release>-core-tls`: the install makes a
+    # self-signed certificate there (#4041). When cert-manager owns the certificate
     # lifecycle, this is the Secret cert-manager creates from the Certificate
     # resource (or from the Ingress annotations on first reconcile).
     secretName: ""
@@ -374,13 +411,16 @@ ingress:
 #
 # `startup` (Issue #2393) gates liveness/readiness until first boot
 # succeeds. First boot registers the full typed-op catalog and preloads the
-# fastembed embedding model before the app binds :8000 (~2-3 min, longer on
-# a cold install that downloads model weights into an empty cache PVC), so
-# the short-delay liveness probe would otherwise CrashLoopBackOff a
-# slow-but-healthy pod. The default budget is `failureThreshold` ×
-# `periodSeconds` = 30 × 10s = 300s (5 min); once it passes the kubelet
-# hands off to the liveness probe for fast hang detection. Clear
-# `probes.startup` to opt out on a fast cluster.
+# fastembed embedding model before the app binds :8000, so the short-delay
+# liveness probe would otherwise CrashLoopBackOff a slow-but-healthy pod. On
+# an empty database every operation also gets its embedding: about 5 min
+# for the 1,302 operations of v0.43.0 at the 1-CPU limit (measured on
+# OpenShift, #4102). Since #5019 a stopped start keeps none of that work, so
+# the whole first boot must fit in one budget; later boots take about 20s.
+# The default budget is `failureThreshold` × `periodSeconds` = 90 × 10s =
+# 900s (15 min); once it passes the kubelet hands off to the liveness probe
+# for fast hang detection. Clear `probes.startup` to opt out on a fast
+# cluster.
 probes:
   liveness:
     httpGet:
@@ -402,11 +442,10 @@ probes:
     httpGet:
       path: /healthz
       port: http
-    # 30 × 10s = 300s (5 min) first-boot budget; covers op-catalog
-    # registration + fastembed model preload/download on a cold install.
+    # 90 × 10s = 900s (15 min) first-boot budget; see `startup` above.
     periodSeconds: 10
     timeoutSeconds: 1
-    failureThreshold: 30
+    failureThreshold: 90
 
 # -- Container resources. Conservative production baselines for the v0.1
 # chassis backplane — sized for steady-state authn/authz traffic plus the
@@ -640,6 +679,19 @@ config:
   # nothing else. From 30 to 3600. Rendered into
   # `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`.
   perActionSignInMaxAgeSeconds: "300"
+  # -- Per-person request limits on the operation path. Every chart
+  # install has the Valkey store the limits count in (`broadcast.enabled`
+  # is on by default), so they are on here. `dispatchRateLimitPerMinute`
+  # caps how many operations one person or agent may start per minute;
+  # `dispatchMaxConcurrentOps` caps how many may run at the same time. A
+  # request over the cap gets a `rate_limited` answer with a retry hint.
+  # `mcpSessionStartLimitPerMinute` caps new MCP sessions per tenant and
+  # minute. `"0"` turns a limit off. Per-tenant overrides go through
+  # `extraEnv` (`DISPATCH_RATE_LIMIT_PER_MINUTE_OVERRIDES` and friends).
+  # See `docs/codebase/rate-limiting.md`.
+  dispatchRateLimitPerMinute: "600"
+  dispatchMaxConcurrentOps: "16"
+  mcpSessionStartLimitPerMinute: "60"
   # -- Comma-separated `acr` values that mean the person entered a one-time
   # code from their authenticator app (#3979). Rendered into
   # `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (the default) turns the
@@ -800,10 +852,11 @@ broadcastAnnouncement:
   # entirely (no audit-row noise, no log line).
   pruneEnabled: true
 
+# A PostgreSQL you bring yourself. Used only with `corePostgres.enabled:
+# false`; the built-in PostgreSQL (the default) needs nothing here.
 postgres:
-  # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
-  # explicitly excludes a bundled PG subchart); typically reached over the
-  # network at the cluster boundary. Empty in defaults — consumers override.
+  # -- PostgreSQL host. Typically an operator-managed PG cluster reached over
+  # the network at the cluster boundary. Empty in defaults — consumers override.
   host: ""
   # -- PostgreSQL port. 5432 is the upstream default; override only when the
   # operator's PG cluster listens on a non-standard port.
@@ -813,7 +866,9 @@ postgres:
   # logical databases.
   database: meho
   # -- Name of the Kubernetes Secret holding the DATABASE_URL value at key
-  # `url` — MUST be set. Synced from Vault by External Secrets Operator (ESO)
+  # `url` — MUST be set when `corePostgres.enabled` is false. With the
+  # built-in PostgreSQL leave it empty: the backplane then reads
+  # `<release>-core-postgres-meho`, which the install makes. Synced from Vault by External Secrets Operator (ESO)
   # in production; the consumer pre-provisions it before `helm install`.
   #
   # HARD PREREQUISITE (pgvector): the pre-install migration Job runs Alembic
@@ -834,10 +889,37 @@ postgres:
   # posture. See `deploy/values-examples/README.md` (§ pgvector extension
   # prerequisite) and `docs/decisions/pgvector-superuser-prerequisite.md`.
   credentialsSecret: ""
+  # The login of the running backplane, apart from the owner login above.
+  # The owner login (`credentialsSecret`) owns the tables and runs the
+  # migrations. The running backplane can use a second, narrower login
+  # instead: it may read and write every table, but on `audit_log` it may
+  # only add rows, read them, and empty the `raw_payload` column (the
+  # weekly age-off). It cannot change or delete audit rows, and it does
+  # not own the table. The migration gives the role these rights on every
+  # run (`DATABASE_RUNTIME_ROLE`, backend `db/runtime_role.py`).
+  #
+  # With the built-in PostgreSQL (`corePostgres.enabled`) the install makes
+  # the role `meho_app` and the Secret `<release>-core-postgres-meho-app`;
+  # leave both keys empty there. The PostgreSQL pod reads only that Secret,
+  # so another Secret name stops the install. With your own PostgreSQL,
+  # create the role yourself (LOGIN, no superuser, CONNECT on the
+  # database) and a Secret with its DSN at key `url`, then name both here:
+  # one key without the other stops the install. The migration waits for
+  # the role to exist, so create it before the upgrade. Both empty = one
+  # login for everything, as before.
+  runtime:
+    # -- Name of the runtime role (a lower-case PostgreSQL role name).
+    role: ""
+    # -- Kubernetes Secret with the runtime login's DSN at key `url`.
+    credentialsSecret: ""
 
+# A Vault you bring yourself. Used only with `coreVault.enabled: false`;
+# with the built-in OpenBao (the default) the chart sets the backplane's
+# address, login role and mount itself, and `vault.address` and
+# `config.vaultAddr` must stay empty.
 vault:
-  # -- Vault address (e.g. `https://vault.example.org`) — MUST be set; empty
-  # fails the schema. Goal #11 cross-repo dependency: the consumer's Vault
+  # -- Vault address (e.g. `https://vault.example.org`) — MUST be set with
+  # `coreVault.enabled: false`; empty fails the schema. Goal #11 cross-repo dependency: the consumer's Vault
   # must have the `meho-mcp` JWT/OIDC role bound to the Keycloak issuer
   # configured below.
   address: ""
@@ -1024,6 +1106,39 @@ agent:
   # 21000 the request is sent as a stream. The default 4096 keeps requests
   # as they were before this setting existed.
   maxOutputTokens: 4096
+  # -- Which model backend every agent run uses (`AGENT_MODEL_BACKEND`):
+  # `anthropic`, `openai` (the endpoint in `agent.openai` below), `bedrock`
+  # or `vcf-paif`. Empty: the chart does not set it, and the backplane uses
+  # its own default (`anthropic`). Plain value, not a secret.
+  modelBackend: ""
+  # An OpenAI-compatible model endpoint (#5851): a server that accepts the
+  # same requests as OpenAI's API, for example vLLM, Ollama or OpenAI itself.
+  # Separate from `agent.enabled`: you can turn on this block, the Anthropic
+  # key above, or both. Off by default; then the chart sets nothing here.
+  # The network policy blocks the endpoint until you open it in
+  # `networkPolicy.extraEgress` (examples there).
+  openai:
+    # -- Whether to set `OPENAI_API_KEY`, `OPENAI_BASE_URL` and
+    # `OPENAI_DEFAULT_MODEL` in the backplane Deployment. Turn on and give
+    # the key's Secret: either `secretName` below or
+    # `eso.agentOpenai.enabled: true`.
+    enabled: false
+    # -- Base URL of the endpoint (`OPENAI_BASE_URL`), for example
+    # `https://model.example.internal/v1`. Empty: the chart does not set it,
+    # and the backplane uses OpenAI's own service.
+    baseUrl: ""
+    # -- Model id the endpoint serves (`OPENAI_DEFAULT_MODEL`), for example
+    # `openai:meta-llama/Llama-3.1-8B-Instruct`. Empty: the chart does not
+    # set it, and the backplane uses its own default.
+    defaultModel: ""
+    # -- Name of the Kubernetes Secret that holds the endpoint's API key
+    # (`OPENAI_API_KEY`). The key comes only from a Secret, never from a
+    # plain value. Leave empty when `eso.agentOpenai.enabled: true`: the
+    # chart then uses the `<release>-agent-openai` Secret it makes.
+    # A model server without a key still needs some value in the Secret.
+    secretName: ""
+    # -- Key within the Secret whose value is the API key.
+    secretKey: api_key
 
 # Keycloak Admin API credentials (G11.2 #803). The
 # `KeycloakAdminClient` (`meho_backplane.auth.keycloak_admin`) is what
@@ -1144,16 +1259,47 @@ uiConsole:
 # must wait for approval. While this block is off, the pod gets no
 # APPROVAL_HANDOFF_ENCRYPTION_KEY and MEHO denies every such operation
 # instead of letting it wait for approval. `GET /ready` shows the state under
-# `features.approval_custody`. Create a Fernet key with
+# `features.approval_custody`.
+#
+# With a built-in core part on, it is on by default (#4047): the install
+# makes the key in `<release>-core-approval-handoff`. Without one, create a
+# Fernet key with
 # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`,
 # store it in a Kubernetes Secret, then set `enabled: true` and `secretName`.
 # Steps and key rotation: docs/codebase/approvals.md.
 approvalHandoff:
-  enabled: false
+  # -- Unset (the default) = on with a built-in core part, off without one.
+  # `false` turns it off in both cases.
+  enabled: null
+  # -- Your own Secret with the key. Empty = `<release>-core-approval-handoff`.
   secretName: ""
   secretKey: approval_handoff_encryption_key
 
-# Built-in core: the Secrets the install makes (#4041).
+# The key of the params hashes and value fingerprints that audit rows and
+# approval requests carry. It is wired only by secretKeyRef, as
+# PARAMS_HASH_KEY. It is a secret of its own, so a new database password
+# keeps every hash and fingerprint as it is.
+#
+# With a built-in core part on, the install makes the key in
+# `<release>-core-params-hash` and keeps it on every upgrade. Without one,
+# store at least 32 random characters in a Kubernetes Secret and set
+# `secretName`. With no Secret, MEHO makes the key from DATABASE_URL, and a
+# new database password changes it. Steps and key rotation:
+# docs/codebase/approvals.md.
+paramsHashKey:
+  # -- Your own Secret with the key. Empty = `<release>-core-params-hash`
+  # with a built-in core part, no key without one.
+  secretName: ""
+  secretKey: params_hash_key
+
+# Built-in core (#3974): PostgreSQL, Keycloak and OpenBao, each on by
+# default, and wired to the backplane by the chart (#4591, #4047). An install
+# that brings its own PostgreSQL, Keycloak or Vault sets the matching
+# `enabled: false` and fills `postgres:`, `keycloak:` / `config.keycloak*`
+# or `vault:` / `config.vaultAddr` as before; with all three off the chart
+# renders what it rendered before the built-in core.
+#
+# The Secrets the install makes (#4041):
 #
 # When a built-in part is on, a hook Job runs before every install and
 # upgrade (templates/core-secrets-job.yaml). It makes each password and key
@@ -1172,9 +1318,13 @@ approvalHandoff:
 # to the two blocks below.
 corePostgres:
   # -- Built-in PostgreSQL. When on, the install makes
-  # `<release>-core-postgres-superuser`, `-core-postgres-meho` and
-  # `-core-postgres-keycloak`.
-  enabled: false
+  # `<release>-core-postgres-superuser`, `-core-postgres-meho`,
+  # `-core-postgres-meho-app` and `-core-postgres-keycloak`. The migrations
+  # read DATABASE_URL from `<release>-core-postgres-meho` (key `url`), the
+  # running backplane from `<release>-core-postgres-meho-app`.
+  # `postgres.credentialsSecret` must then stay empty or name
+  # `<release>-core-postgres-meho`, and `eso.enabled` off.
+  enabled: true
   existingSecrets:
     # -- Your own Secret with the PostgreSQL superuser password (key
     # `password`). Empty = the install makes
@@ -1186,13 +1336,13 @@ corePostgres:
     keycloak: ""
   # The subchart settings below (#4039): one PostgreSQL 17 server with
   # pgvector and two databases, `meho` and `keycloak`, each owned by a role
-  # of the same name that is not a superuser. The chart creates the
+  # of the same name that is not a superuser. A third role, `meho_app`, is
+  # the login of the running backplane (see `postgres.runtime`); the owner
+  # role `meho` runs the migrations. The chart creates the
   # `vector` extension itself, so the pgvector step described at
   # `postgres.credentialsSecret` is not needed. A sidecar in the
   # PostgreSQL pod sets the role passwords again whenever the Secrets
   # change. The superuser Secret is mounted by the PostgreSQL pod alone.
-  # Off by default for now; it turns on by default once the existing
-  # bring-your-own installs set `corePostgres.enabled: false`.
   image:
     repository: pgvector/pgvector
     tag: "0.8.7-pg17-bookworm"
@@ -1274,7 +1424,7 @@ coreKeycloak:
   # `config.uiKeycloakClientId` and `keycloakAdmin.url` / `clientId` are
   # not used. Pods call Keycloak over plain HTTP inside the namespace (see
   # docs/codebase/devops.md, "How the backplane uses it").
-  enabled: false
+  enabled: true
   # -- MEHO's public DNS name. Set the same value as `ingress.host`.
   hostname: ""
   # -- The first tenant's id (a UUID). Pick one per install and keep it.
@@ -1385,7 +1535,15 @@ coreVault:
   # its own disk at `http://<release>-vault:8200` inside the namespace. The
   # `vault:` block above stays for a Vault you bring yourself. Every other
   # key is described in `charts/openbao/values.yaml`; set it here.
-  enabled: false
+  #
+  # When on, the chart points the backplane at it (#4047): VAULT_ADDR
+  # `http://<release>-vault:8200`, the login role `meho-mcp` on `jwt` (one
+  # role for every tenant: the token's tenant_id goes into the login, so
+  # each tenant reads only `secret/tenants/<its id>/`), and the scheduler's
+  # token from `<release>-core-vault-scheduler`. Leave `vault.address` and
+  # `config.vaultAddr` empty (the render stops otherwise). Needs
+  # `coreKeycloak.enabled: true`.
+  enabled: true
   # -- Bind OpenBao's service account to `system:auth-delegator` (a
   # ClusterRoleBinding, the chart's only cluster-wide object). Default false:
   # MEHO does not need it.
@@ -1679,6 +1837,19 @@ eso:
     # Must match `agent.secretKey` (default `api_key`) so the
     # Deployment's `secretKeyRef.key` resolves.
     remoteProperty: api_key
+  agentOpenai:
+    # -- Render an ExternalSecret for the API key of the OpenAI-compatible
+    # model endpoint (#5851). When `true`, the chart makes a
+    # `<release>-agent-openai` Secret keyed `agent.openai.secretKey` (default
+    # `api_key`) from `<eso.agentOpenai.remoteKey | default
+    # "<vault.paths.kv>/agent-openai">`. Also set `agent.openai.enabled:
+    # true` and leave `agent.openai.secretName` empty. Needs
+    # `eso.secretStore.name`; independent of `eso.enabled`.
+    enabled: false
+    # -- Vault KV path holding the API key. Empty: `<vault.paths.kv>/agent-openai`.
+    remoteKey: ""
+    # -- Property within the remote KV entry that holds the API key.
+    remoteProperty: api_key
   keycloakAdmin:
     # -- Render an ExternalSecret for the Keycloak admin client secret
     # (`KEYCLOAK_ADMIN_CLIENT_SECRET`). When `true`, the chart
@@ -1758,6 +1929,25 @@ networkPolicy:
   #               app.kubernetes.io/name: traefik
   #       ports:
   #         - port: 8443
+  #           protocol: TCP
+  # For the OpenAI-compatible model endpoint (`agent.openai`), open the
+  # endpoint's address range and port, or, for a model server in the same
+  # cluster, its Pods by namespace and label:
+  #     - to:
+  #         - ipBlock:
+  #             cidr: 198.51.100.0/28
+  #       ports:
+  #         - port: 443
+  #           protocol: TCP
+  #     - to:
+  #         - namespaceSelector:
+  #             matchLabels:
+  #               kubernetes.io/metadata.name: model-server
+  #           podSelector:
+  #             matchLabels:
+  #               app.kubernetes.io/name: vllm
+  #       ports:
+  #         - port: 8000
   #           protocol: TCP
   extraEgress: []
 

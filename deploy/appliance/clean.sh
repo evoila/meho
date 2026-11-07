@@ -33,8 +33,10 @@
 # What stays: server/manifests/, agent/images/, /etc/rancher/rke2/config.yaml,
 # the pod security file /etc/rancher/rke2/meho-pss.yaml and the appliance
 # pieces: /opt/meho/appliance and the two enabled units of first start and
-# the console banner. The preset file that keeps RKE2 off at the first boot
-# is written.
+# the console banner; of the OS hardening, the scanner files under
+# /opt/meho/appliance/cis and nftables.service with its include of the MEHO
+# firewall. The preset file that keeps RKE2 off at the first boot is
+# written.
 #
 # Usage:
 #   clean.sh --build-hostname <fqdn> [--build-user <name>]
@@ -100,6 +102,16 @@ readonly FIRSTSTART_LINKS=(
     /etc/systemd/system/multi-user.target.wants/meho-firststart.service
     /etc/systemd/system/multi-user.target.wants/meho-banner.service
 )
+# The OS hardening (cis/harden.sh): the scanner files that meho-host check
+# and the update use, and nftables.service, which loads the MEHO firewall
+# without flushing the other rules.
+readonly HARDENING_FILES=(
+    "$APPLIANCE_DIR/cis/ssg-ubuntu2404-ds.xml"
+    "$APPLIANCE_DIR/cis/tailoring.xml"
+    /etc/nftables.conf
+    /etc/systemd/system/nftables.service.d/meho-no-flush.conf
+)
+readonly NFTABLES_LINK=/etc/systemd/system/sysinit.target.wants/nftables.service
 readonly BUILD_NETPLAN=/etc/netplan/60-meho-build.yaml
 readonly SUDOERS_CLOUD_INIT=/etc/sudoers.d/90-cloud-init-users
 readonly MACHINE_ID=/etc/machine-id
@@ -344,12 +356,15 @@ check_clean() {
     for item in "${RKE2_KEEP[@]}"; do
         [[ -d ${HOST_ROOT}${RKE2_DIR}/$item ]] || left "$RKE2_DIR/$item is missing; it must stay"
     done
-    for item in "$RKE2_CONFIG" "$RKE2_POD_SECURITY" "$RKE2_PRESET" "$APPLIANCE_INSTALL" "$CLOUD_INIT_OFF" "${FIRSTSTART_FILES[@]}"; do
+    for item in "$RKE2_CONFIG" "$RKE2_POD_SECURITY" "$RKE2_PRESET" "$APPLIANCE_INSTALL" "$CLOUD_INIT_OFF" "${FIRSTSTART_FILES[@]}" \
+        "${HARDENING_FILES[@]}"; do
         [[ -f ${HOST_ROOT}${item} ]] || left "$item is missing; it must stay"
     done
     for item in "${FIRSTSTART_LINKS[@]}"; do
         [[ -L ${HOST_ROOT}${item} ]] || left "$item is missing, so first start would not run at the first boot"
     done
+    [[ -L ${HOST_ROOT}${NFTABLES_LINK} ]] ||
+        left "$NFTABLES_LINK is missing, so nftables.service would not load the MEHO firewall at boot"
     found=$(find "${HOST_ROOT}/etc/ssh" -maxdepth 1 -name 'ssh_host_*' 2>/dev/null | head -n 1)
     [[ -z $found ]] || left "SSH host keys under /etc/ssh"
     if getent passwd "$BUILD_USER" >/dev/null 2>&1; then

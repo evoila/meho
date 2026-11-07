@@ -358,8 +358,9 @@ async def _bulk_import(
     The flow:
 
     1. Resolve the rows text (upload precedence), parse it into
-       :class:`BulkImportRow` objects. A parse failure re-renders the panel
-       with a typed banner (422) before any service call.
+       :class:`BulkImportRow` objects. A parse failure, including an
+       upload above the size cap, re-renders the panel with a typed
+       banner (422) before any service call.
     2. Call :func:`bulk_import_edges` with the resolved ``dry_run`` flag.
        ``dry_run=True`` returns the per-row ``create`` / ``update`` /
        ``conflict`` plan and persists nothing; ``dry_run=False`` applies the
@@ -373,8 +374,9 @@ async def _bulk_import(
     ``async with sessionmaker() as db_session`` — no outer ``begin()`` — the
     same lifecycle the REST handler's ``get_raw_session`` dependency yields.
     """
-    text = await resolve_bulk_text(pasted, upload)
+    text = pasted or ""
     try:
+        text = await resolve_bulk_text(pasted, upload)
         rows = parse_bulk_rows(text)
     except BulkParseError as exc:
         return _render_bulk_panel(

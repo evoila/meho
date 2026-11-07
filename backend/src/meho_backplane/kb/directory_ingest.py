@@ -256,7 +256,7 @@ async def _ingest_one(
         tenant_id=tenant_id,
         slug=slug,
         body=record.body,
-        metadata=enriched_metadata,
+        metadata_for=lambda _existing: enriched_metadata,
     )
     return action
 

@@ -93,6 +93,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.profile import AuthSchemeName, ExecutionProfile
 from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations._ingested_owner import assert_ingest_target_accepts
 from meho_backplane.operations.ingest._internals import (
     OP_CROSS_TENANT_INGEST,
     write_audit_row,
@@ -127,6 +128,7 @@ from meho_backplane.operations.ingest.exceptions import (
 )
 from meho_backplane.operations.ingest.ingest_auth_store import save_ingest_auth_profile
 from meho_backplane.operations.ingest.ingest_profile import build_ingest_execution_profile
+from meho_backplane.operations.ingest.job_phase import report_ingest_phase
 from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
     run_llm_grouping,
@@ -740,7 +742,10 @@ class IngestionPipelineService:
         :class:`ProductImplIdMismatch` when the supplied ``product``
         does not round-trip its ``connector_id`` (checked here, at the
         single chokepoint every entry point traverses, before any DB
-        write or spec fetch — see :meth:`_assert_product_round_trips`).
+        write or spec fetch — see :meth:`_assert_product_round_trips`),
+        and :class:`~meho_backplane.operations._ingested_owner.IngestedOperationsNotAccepted`
+        when the name belongs to a connector class that does not accept
+        ingested operations (checked right after, also before any write).
         The parser, registrar, and grouping pass propagate their own
         domain exceptions verbatim — the router catches them at the HTTP
         boundary.
@@ -771,6 +776,9 @@ class IngestionPipelineService:
         # rejected before any spec I/O or DB write, on every entry point
         # that reaches this method (REST / MCP / CLI).
         self._assert_product_round_trips(product=product, version=version, impl_id=impl_id)
+        # The rows would run on the class that serves this name; refuse when
+        # that class runs only its own hand-written operations.
+        assert_ingest_target_accepts(product=product, version=version, impl_id=impl_id)
         connector_id = build_connector_id(product, version, impl_id)
         log = _log.bind(
             connector_id=connector_id,
@@ -967,6 +975,7 @@ class IngestionPipelineService:
         """
         log.info("ingestion_pipeline_start")
         sessionmaker = self._sessionmaker()
+        await report_ingest_phase("register")
         aggregated = await self._run_register_phase(
             product=product,
             version=version,
@@ -1008,6 +1017,7 @@ class IngestionPipelineService:
         # catch ``asyncio.CancelledError`` (a BaseException): the job
         # watchdog's timeout must still propagate to ``failed`` to keep the
         # job-terminality guarantee.
+        await report_ingest_phase("grouping")
         try:
             grouping_result = await self._run_grouping_phase(
                 product=product,

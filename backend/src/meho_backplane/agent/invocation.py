@@ -750,6 +750,7 @@ class AgentInvoker:
         error: str | None,
         usage: TokenUsage | None = None,
         turns: int | None = None,
+        request_usages: tuple[TokenUsage, ...] = (),
     ) -> None:
         """Record a run's terminal state on its durable row, committed.
 
@@ -776,7 +777,11 @@ class AgentInvoker:
            :data:`~meho_backplane.operations.identity_budget.MODEL_PRICING`
            lookup hits.
         2. Computes the run's USD cost via
-           :func:`~meho_backplane.operations.identity_budget.compute_cost`.
+           :func:`~meho_backplane.operations.identity_budget.compute_run_cost`,
+           one request of *request_usages* at a time, so a per-request
+           price (Haiku 5.5's long-prompt rate) lands on the right
+           request. A runtime that reports no per-request usage gets
+           *usage* priced as one request.
         3. Stamps that cost on ``agent_run.cost`` through the lifecycle
            ``succeed_run`` helper (which already accepts the parameter
            the v0.2 stub-out reserved for this slice).
@@ -803,7 +808,9 @@ class AgentInvoker:
                     cost: Decimal | None = None
                     if usage is not None:
                         model_id = _full_model_id(row.provider, row.model)
-                        cost = identity_budget.compute_cost(usage, model_id)
+                        cost = identity_budget.compute_run_cost(
+                            request_usages or (usage,), model_id
+                        )
                     await run_lifecycle.succeed_run(
                         session, row, output=output or {}, cost=cost, turns=turns
                     )
@@ -901,6 +908,7 @@ class AgentInvoker:
                 error=None,
                 usage=usage,
                 turns=result.request_count,
+                request_usages=result.request_usages,
             )
         finally:
             # Stop the heartbeat sidecar before resetting the contextvars:
@@ -1598,6 +1606,10 @@ class AgentInvoker:
 
         terminal_output: dict[str, object] | None = None
         terminal_error: str | None = None
+        # The FINAL event carries the run's usage; finalize charges it to the
+        # person's spend cap, the same as :meth:`_run_loop_to_completion`.
+        usage: TokenUsage | None = None
+        request_usages: tuple[TokenUsage, ...] = ()
         # Tally ``TURN`` events (one per model-request node, so == the
         # non-streamed ``request_count``) to persist at finalize (#2743).
         turns = 0
@@ -1630,6 +1642,8 @@ class AgentInvoker:
             ):
                 if event.kind is AgentRunEventKind.FINAL:
                     terminal_output = _project_output(event.data.get("output"))
+                    usage = event.usage
+                    request_usages = event.request_usages
                 elif event.kind is AgentRunEventKind.ERROR:
                     terminal_error = str(event.data.get("error"))
                 elif event.kind is AgentRunEventKind.TURN:
@@ -1643,7 +1657,12 @@ class AgentInvoker:
             agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
             await self._finalize_run(
-                run_id, output=terminal_output, error=terminal_error, turns=turns
+                run_id,
+                output=terminal_output,
+                error=terminal_error,
+                usage=usage,
+                turns=turns,
+                request_usages=request_usages,
             )
 
 

@@ -874,7 +874,9 @@ async def test_full_governed_flow_disable() -> None:
     assert preview["refusal"] is None
     assert _SECRET_HASH not in json.dumps(effect)
 
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -913,7 +915,8 @@ async def test_preview_names_the_refusal_for_the_admin_account() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_principal_without_grant_is_denied() -> None:
+async def test_agent_principal_without_grant_waits_for_a_person() -> None:
+    """An agent's request waits for a person's approval (#3980); it does not run."""
     recorder = _RecordingPfSense(config_before=_CONFIG_VPN_ON)
     await _bootstrap(recorder)
     await _seed_target()
@@ -927,6 +930,6 @@ async def test_agent_principal_without_grant_is_denied() -> None:
             "params": {"name": "vpn.guest-1"},
         },
     )
-    assert call["status"] == "denied", call
+    assert call["status"] == "awaiting_approval", call
     assert not recorder.playback_ran
-    assert await _pending_count() == 0
+    assert await _pending_count() == 1

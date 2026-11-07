@@ -7,7 +7,7 @@ creates a trigger row; a background loop scans for what is due and
 launches the bound agent definition when its time comes. This is what
 runs your nightly reconciliation, your scheduled remediation, and the
 autonomous writes behind the [agent-requester approval
-pattern](approvals-and-break-glass.md#option-1-the-agent-requester-pattern-recommended).
+pattern](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
 
 The hard part of unattended execution is not the timer — it is *credentials*:
 a scheduled run days later still needs a live identity to reach Vault.
@@ -62,10 +62,10 @@ event (`--event-filter`) rather than a clock. The knobs worth knowing:
 - `--inputs` — a JSON object rendered into the agent's prompt at fire
   time.
 - `--identity-sub` — the identity the scheduler impersonates at fire
-  time (default `__scheduler__`); an override you rarely set. What keeps
-  four-eyes intact for a scheduled write is the **bound agent
-  definition's own subject** on an autonomous run, not this flag — see
-  the [approvals guide](approvals-and-break-glass.md).
+  time (default `__scheduler__`); an override you rarely set. What makes
+  the agent, not you, the requester of a scheduled write is the **bound
+  agent definition's own subject** on an autonomous run, not this flag —
+  see the [approvals guide](approvals-and-break-glass.md).
 - `--in-flight-policy` — `fail_into_audit` (default) or `resume`: what
   happens to a run the scheduler was killed in the middle of.
   `fail_into_audit` records the interrupted run as failed on the audit
@@ -157,7 +157,7 @@ this page is its agent-run twin.
 | Startup logs `scheduler_vault_token_will_expire` (ERROR) | `VAULT_SCHEDULER_TOKEN` is non-renewable or has an `explicit_max_ttl` — it will die despite renewal. | Re-mint it as a periodic token: `vault token create -period=768h …`. |
 | `403 insufficient_role` on `scheduler create` / `cancel` | Creating and cancelling triggers need **tenant_admin**; listing is operator. | Use a tenant_admin session to author triggers. |
 | A cron trigger never fires | The `--cron-expr` didn't parse, or `--timezone` is wrong, so `next_fire_at` was never set to a reachable instant. | Check `meho scheduler list` for `next_fire_at`; fix the 5-field expression / IANA timezone and recreate. |
-| A scheduled write is stuck `awaiting_approval` | Working as designed — an autonomous run's `requires_approval` write parks under the agent's subject. | Approve it as yourself; because the requester is the agent, four-eyes is satisfied ([approvals](approvals-and-break-glass.md)). |
+| A scheduled write is stuck `awaiting_approval` | Working as designed — every agent write above `safe` waits for a person, under the agent's subject. | Approve it as yourself; because the requester is the agent, it is not your own change. A `dangerous` or `destructive` write needs a MEHO-SA-Operator or an admin ([approvals](approvals-and-break-glass.md)). |
 | A run interrupted mid-flight (scheduler restart) shows as failed | The default `--in-flight-policy=fail_into_audit` records a killed-mid-run trigger as a failure rather than silently resuming it. | Set `--in-flight-policy=resume` at create time if you want interrupted runs picked back up on restart. |
 
 **Next:** [Satellite gateway](satellite-gateway.md).

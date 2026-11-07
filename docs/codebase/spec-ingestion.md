@@ -193,6 +193,18 @@ catalog YAML. The field validator pins each value to a single path
 segment (no `/`, `\`, or `..`) so a resource name can't escape its
 package root.
 
+A connector package (a wheel that adds a folder under
+`meho_backplane/connectors/`) can bring catalog rows of its own: its
+folder's `__init__` calls the kit's `register_connector_catalog`, and
+`load_catalog()` reads the package's YAML file with the built-in one.
+The `spec_resource` and `profile_resource` of such a row name files in
+the package's folder, not in the two resource packages above. So code
+that reads a row's files uses `load_entry_spec(entry)` and
+`load_entry_profile(entry)`, which look in the right place for either
+kind of row (`entry.source_package` says which package brought it;
+`None` is a built-in row). See
+[connector-packages.md](connector-packages.md), "Bring catalog rows".
+
 **Why:** `vmware/9.0` and `sddc/9.0` have an `upstream` the backend
 can't dereference (HTML developer portal / fqdn-templated appliance
 URL) — the `catalog_entry_upstream_not_spec` /
@@ -529,8 +541,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE` (#3827), destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`), then the caller-address floor (an op with a parameter marked `x-meho-caller-address: true` is at least `caution`) |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, a `credential_read` op class, or a parameter marked `x-meho-caller-address: true` |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
@@ -607,7 +619,7 @@ VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`:
 - a VI-JSON operation whose summary another operation of the same spec shares
   gets its managed object type in front.
 
-See connectors-vmware-rest.md.
+See connectors-vmware-rest.md (in the private connectors repository).
 
 #### Catalog safety overlay (#3340)
 
@@ -641,6 +653,168 @@ Installer bring-up spec read `GET:/v1/sddcs/{id}/spec`; it has no catalog
 row, so a manual ingest of it gets the redaction guard only. Stored rows
 change at the next ingest (see "Applying corrected floors to existing
 rows" below).
+
+#### Op class floor for credential reads
+
+The op class is the third floor. An ingested operation that a
+connector declares as `credential_read` (`declare_op_classes` in its
+`op_classes.py`, read through `classify_op`) is at least `caution` and
+waits for a person's approval. `apply_safety_floor` applies it after the
+connector floor and the catalog overlay, and it only raises. So the same
+marker that makes the dispatcher hide the values of the answer also sets
+the lowest risk level of the read. A catalog row and its `safety_overlay`
+can raise such a read further, but a product without a row, or a row
+without a list, no longer leaves a credential read at `safe`. A declared
+credential read counts as governed in `has_safety_floor`, so a re-ingest
+never lowers a stricter stored row. Tests:
+`tests/test_credential_read_safety_floor.py`.
+
+#### Caller-address floor
+
+The caller-address floor is the fourth and last floor. It covers an
+operation that connects to an address the caller gives: a URL, a host
+name, or a host and port. The connection can come from MEHO or from the
+target for MEHO.
+
+- **The marker.** Such a parameter carries the schema keyword
+  `x-meho-caller-address: true`, next to `x-meho-param-loc`. The keyword
+  counts at any depth of the parameter schema, also inside nested
+  objects and lists. The name and the floor live in
+  `meho_backplane/operations/caller_address.py`; the connector kit
+  exports the name as `CALLER_ADDRESS_MARKER`.
+- **What it does.** A marked operation is at least `caution` and waits
+  for a person's approval. The floor only raises: a connector may set a
+  higher level, never a lower one.
+- **Where it runs.**
+  - Ingest: `apply_safety_floor` applies it after the op class floor. An
+    ingested operation gets the marker from the connector's spec
+    correction (`register_ingest_spec_correction`). A marked operation
+    counts as governed in `has_safety_floor`, so a new ingest never
+    lowers a stricter stored row.
+  - Typed and multi-step registration: `register_typed_operation` and
+    `register_composite_operation` apply it before they store the row.
+  - Dispatch: `effective_policy_map` in `op_policy.py` applies it last,
+    after the operator overrides. So an override that turns approval off
+    does not remove it, and a row stored before the floor is raised when
+    it is looked up. Dispatch, preview, search and the satellite runner
+    all read this value.
+  - Operator edits: `apply_policy_edit` refuses an edit that turns
+    approval off for a marked operation (`approval_off_caller_address`).
+    The override report (`list_overrides`) applies the floor too, so it
+    never lists approval as off for a marked operation, also not for an
+    override stored before the floor.
+  - Standing grants: a service principal's grant does not run a marked
+    operation. `consult_and_record_grant` in `service_grants.py` refuses
+    the operation before it looks a grant row up, so a grant stored
+    before the marker never auto-approves it, and grant create refuses a
+    new grant for it (`caller_address_grant_reason`). The call waits for
+    a person, and the park reason says so. A grant covers an operation,
+    a connector and a target, never the address in the call.
+- **Sensors.** A sensor runs only `safe` operations. So a sensor cannot
+  use a marked operation: a new one is refused, and the runner reports
+  an existing one as `unknown` with the reason `op_not_safe_at_dispatch`.
+  This holds for connector operations such as `pfsense.diag.ping`.
+- **Built-in network checks.** The nine `net.*` checks carry no marker.
+  The probe allowlist (`MEHO_NETDIAG_PROBE_ALLOWLIST`) bounds where they
+  connect. So they stay `safe` with no approval, and a sensor can use
+  them. See `docs/codebase/connectors-net-diagnostics.md`. A check row
+  stored earlier with the marker (`caution`, approval on) goes back to
+  `safe` with no approval at the next registration
+  (`operations/built_in_check_upgrade.py`). A disabled row, a stricter
+  level or other values set by hand stay as they are.
+- **The contract check.** Rule 13 (`caller_address`) of
+  `tests/test_operation_contracts.py` fails for a parameter that looks
+  like an address but has no marker. A field looks like an address by
+  its name (for example `url`, `host`, `fqdn`, `server`, `remote`,
+  `peer`, `endpoint`, or a name that ends in `_url`, `_host` or
+  `_address`) or by its schema `format` (for example `hostname`, `ipv4`
+  or `ipv6`). A field that only
+  looks like an address is listed with its reason in
+  `NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`): MEHO
+  and the target never connect to it, MEHO connects to it only on the
+  target's own host, or it is the address of a built-in network check.
+  Rule 14 (`stored_secret_address`) fails for an operation that takes a
+  reference to a stored secret (for example `secret_ref`) and an address
+  the caller gives, unless it is `caution` or higher with approval. The
+  gap list may not hold such an operation under either rule.
+
+Tests: `tests/test_caller_address_floor.py` (a fixture operation, no
+connector package), `tests/test_operation_contract_rules.py`, and
+`tests/test_built_in_checks_no_approval_floor.py` (the built-in checks
+need no approval; `pfsense.diag.ping` keeps the marker).
+
+#### Ingested licence reads stay off
+
+A vendor file can describe a read whose answer carries the product's
+licence keys unmasked (SDDC Manager `GET /v1/license-keys`, the vCenter
+licence manager's `licenses` property, an NSX `/licenses` list). The
+ingest would give it the `safe` level of its HTTP method. A licence key
+is a paid secret, so MEHO never runs such a read. The rule is one word:
+an ingested operation whose path names licences (`license-keys`,
+`licenses`, `licensing`, `licence`) is a licence read, whatever its HTTP
+method (`operations/license_reads.py`). The method does not count
+because a vendor file can read licences with `POST` (the vSphere API
+file's `QueryAssignedLicenses`, `QueryLicenseUsage`, `DecodeLicense`),
+and a licence change such as `AddLicense` answers with the licence key.
+It is broad by design, like the flight recorder's family rule, and needs
+no list of vendor paths. Three places apply it:
+
+- `enable-reads` (`bulk_enable_read_ops`) leaves such a row off and turns
+  the other reads on.
+- `call_operation` and `preview_operation` answer `license_read_off`
+  before the target check, the catalog guard, the policy gate and any
+  vendor call. The row that is off gets this answer too
+  (`op_miss_result`, when the caller can see the row), and so does a row
+  an operator turned on by hand. Nothing runs. A refused call writes one
+  `policy_decision` audit row: it names the op id, has `result_status`
+  `denied` and the code `license_read_off` under `payload["error"]`, and
+  has no result (#5791, `operations/_license_refusal.py`). A refused
+  preview writes no row. The message names the way to read licences: the connector's
+  hand-written licence read, which shows each key masked. A row another
+  tenant owns is not visible, so it stays `unknown_op`.
+- The flight recorder never records the body of an op whose id names
+  licences in any case (`licen` in `SECRET_FAMILY_WORDS`, matched
+  case-insensitively, because a vendor path keeps the vendor's spelling).
+
+Tests: `tests/test_operations_license_reads_stay_off.py`.
+
+#### Which connector class ingested operations run on
+
+An ingested operation runs on the connector class that the target
+resolves to. It sends the method and path of its API file with that
+class's login, and it runs none of the checks of the class's
+hand-written operations. So a
+class says whether ingested operations may run on it:
+`Connector.accepts_ingested_operations` (`connectors/base.py`), default
+`False`.
+
+- `True` on `GenericRestConnector` (the shim), on
+  `ProfiledRestConnector`, and on the hand-written classes that serve an
+  ingested catalog: `GitHubRestConnector`, `HetznerRobotConnector`,
+  `HarborConnector` and `ArgoCdConnector`. A connector package sets it
+  on its own classes that serve an ingested catalog
+  ([connector-packages.md](connector-packages.md)).
+- **At ingest.** `IngestionPipelineService.ingest` refuses an API file
+  under the name of a class that does not accept ingested operations
+  (`assert_ingest_target_accepts` in `operations/_ingested_owner.py`):
+  the class registered for the `(product, version, impl_id)`, or the
+  hand-written class that serves the `(version, impl_id)`. It runs right
+  after the product check, before any file is read or row written, also
+  on a dry run. REST answers 422 and MCP `-32602`, both with the detail
+  `kind=ingested_ops_not_accepted`, the triple and `connector_class`. An
+  async ingest job fails with this error.
+- **At run time.** The ingest check cannot see every case: a file under
+  a new impl id gets a shim, but a target of the product can still
+  resolve to the hand-written class. So the dispatcher checks the class
+  it resolved (`_resolve_connector_instance`, and the class the catalog
+  guard picked). When the class does not accept ingested operations, the
+  call answers `ingested_ops_not_accepted`: before it waits for approval
+  (`_handle_needs_approval`), when an approved call runs, and in
+  `preview_operation`. Nothing reaches the vendor. A refused call writes
+  one `policy_decision` audit row with `result_status` `denied` and the
+  code under `payload["error"]`; a refused preview writes none.
+
+Tests: `tests/test_operations_ingested_ops_owner.py`.
 
 #### Applying corrected floors to existing rows
 
@@ -1154,6 +1328,7 @@ review payload also carries `classified_safety_level` /
 | a level below the classification | anyone | - | refused, `risk_level_below_classification`: open a pull request |
 | `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
 | `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
+| `requires_approval=false` on an operation with a caller-address parameter | anyone | - | always refused, `approval_off_caller_address` |
 
 **Every edit that ends approval passes the same checks.** The rule looks
 at the result, not at the field in the request. When the effective
@@ -1305,7 +1480,8 @@ itself only. Other tenants keep the install default.
   install default stays the `edit-op` / `enable` / `disable` paths,
   which need `platform_admin` for a built-in row (#3616).
 - **Audit.** Every change writes one audit row with path
-  `meho_connector_tenant_setting` in the same transaction. The payload
+  `meho_connector_tenant_setting` and event class `config_change`
+  (#5864) in the same transaction. The payload
   names the connector, the target tenant, the op or group, and the new
   value. A write that changes nothing writes no row.
 - **Showing both values.** `GET /api/v1/connectors/{id}/tenant-settings`
@@ -2488,7 +2664,21 @@ activity:
 
 5. **Response size cap.** The response body is streamed and rejected if it
    exceeds 20 MiB (`_MAX_SPEC_BYTES`), preventing a redirect to a large
-   internal endpoint from exhausting pod memory.
+   internal endpoint from exhausting pod memory. A YAML spec is also
+   refused when it expands to more than two nodes per byte of input
+   (`_MAX_SPEC_NODES_PER_BYTE`, checked by `_assert_expanded_size`): YAML
+   anchors and aliases let a small file stand for a document with many
+   times more nodes, and the later full walks of the pipeline do not
+   share them. The check runs on the composed node graph, before the
+   nodes are turned into Python objects (`_load_yaml_spec`), because a
+   `<<` merge key copies every merged entry during that step, and the
+   duplicate keys then collapse in the result. The walk counts a node
+   when it enters it and keeps only the current path, so the check
+   itself never holds more than the cap. An alias that points back at
+   a node it sits inside (a recursive alias) is refused at once, since
+   such a document never finishes expanding. A document without
+   aliases has at most one node per byte, so a real spec never hits
+   this cap.
 
 6. **Oracle-free error messages that name the inline remedy.** Error
    messages never echo the operator-supplied URI, the resolved IP /
@@ -2820,6 +3010,28 @@ recomposed text (via `build_embedding_text`), so no `body_hash`
 column is needed in v0.2 — the cost is one recompose-and-hash per
 op, well under the ONNX inference budget.
 
+The first ingest of a large spec embeds one text per operation (about
+1,300 for vCenter). The embedding model runs in a worker thread, so the
+event loop is free. But the ONNX runtime starts one thread per **host**
+core by default, and it does not read the pod's CPU limit. With a limit
+of one CPU on a large node, those threads use up the limit in a few
+milliseconds of each scheduler period, and the kernel pauses the whole
+process, the event loop too. `/healthz` and `/ready` then time out, on
+and off, for minutes. So the model is built with one thread per CPU the
+container may use (`retrieval/cpu_limit.py`, `embedding_thread_count`).
+See `retrieval.md`.
+
+`backend/scripts/ingest_health_benchmark.py` checks this. It runs the
+real ingest pipeline (a dry run, then the store step with the real
+embedding model) in a server process, and probes `/healthz`, `/ready`
+and the job status from a second process with the chart's probe
+timeouts. `--cpu-limit 1` runs the server in a `systemd-run` scope with
+one CPU, like a pod with that limit; `--threads 32` forces the old thread
+count to show the failure; `--spec` ingests a vendor file under its own
+`info.version`. `tests/test_ingest_health_benchmark.py` pins
+the harness; its two slow tests (`MEHO_RUN_SLOW_TESTS=1`) run the whole
+benchmark with the real model, without a limit and under one CPU.
+
 `OpIdCollision` fires from two distinct sites: the up-front within-
 batch set scan (two ops in one call share `op_id`) and the per-row
 cross-call check (this call's `spec_source` differs from the
@@ -2918,6 +3130,26 @@ lifecycle timestamps, and -- on completion -- one of:
 `status="running"` leaves both clusters `None`. Clients branch on
 `status` rather than checking presence.
 
+**Which step runs now (#5786).** Every answer also carries `phase`
+and `phase_started_at` (epoch seconds), so an operator can tell a slow
+import from a stuck one. The steps, in order:
+
+| `phase` | What runs |
+|---|---|
+| `parse` | Read each API file and check its version. A new job starts here, at `started_at`. |
+| `register` | Parse each file and write its operations. |
+| `grouping` | The language model sorts the operations into groups. On a large file this is the longest step. |
+
+The pipeline reports each step when it starts
+(`report_ingest_phase` in `operations/ingest/job_phase.py`).
+`run_ingest_job` puts a reporter for its job in a context variable, so
+the pipeline needs no job id, and the sync path (no job) reports to
+nobody. A finished job keeps the step it ended in: a `failed` job
+shows the step that failed. The other fields of a finished answer do
+not change. `phase_started_at` is declared `format: double` in the
+OpenAPI document, so the generated Go client keeps it as a 64-bit
+float (a 32-bit float rounds an epoch time to about two minutes).
+
 **Why async by default.** The OpenAPI ingest path is the escape
 hatch per [api-shape-conventions.md §1](api-shape-conventions.md) --
 operators reach for it when the curated daily-driver doesn't cover
@@ -2993,10 +3225,12 @@ detached, or lost the waiting session, this verb re-reads the same
 `GET /api/v1/connectors/ingest/jobs/{job_id}` route. Without `--wait`
 it reads one snapshot -- a `running` job prints its identity +
 lifecycle echo (job_id, status, the originating request descriptors,
-`started_at`) and exits 0 (`--json` emits the raw
+`started_at`, and `phase: <step> (since <time>)`) and exits 0 (`--json` emits the raw
 `IngestJobStatusResponse`); a terminal job renders exactly what the
 waiting-ingest path renders. With `--wait` it re-attaches the same
-2s poll loop until terminal. Terminal rendering and the poll loop are
+2s poll loop until terminal. While the job runs, the shared poll loop
+prints one `ingest job phase: <step> (since <time>)` line to stderr
+each time the step changes (both verbs). Terminal rendering and the poll loop are
 **shared** with `ingest` (the extracted `renderIngestTerminal` switch
 + `pollIngestJob`), not duplicated, so succeeded / failed / degraded /
 undocumented-status / 401 / 403 / 404 all behave identically across

@@ -1,4 +1,4 @@
-# Appliance first start: `deploy/appliance/firststart/` (#4812)
+# Appliance first start: `deploy/appliance/firststart/` (#4812, #4813)
 
 ## Overview
 
@@ -10,10 +10,17 @@ the vCenter import wizard and makes the appliance its own: the network, the
 (`install.sh --from-disk`, [linux-server-install.md](linux-server-install.md)),
 which starts RKE2 with new keys and installs the core. It runs once.
 
+An OVA imported straight into an ESXi host has no wizard fields. Then
+first start asks for the same fields on the VM console. `ovftool` can also
+hand the fields to an ESXi host, and the boot menu, with each appliance's
+own password, is the way back in after a lost password. See "Ways in
+without the wizard" below.
+
 `banner.sh` writes the console banner at every boot: the console address,
 the appliance's address, the one-time files, and a warning before the
 `admin` password expires. While first start is not done, the banner shows
-the step that stopped and its fix.
+the step that stopped and its fix. It never tells the admin to log in when
+the `admin` account takes no login.
 
 The design is the internal design note `form-1-appliance.md`, section 2.
 
@@ -21,7 +28,7 @@ The design is the internal design note `form-1-appliance.md`, section 2.
 
 | File | What it holds |
 | --- | --- |
-| `firststart/firststart.sh` | The six steps, the done-markers, the [FAIL] line kept for the banner. |
+| `firststart/firststart.sh` | The seven steps, the done-markers, the [FAIL] line kept for the banner. |
 | `firststart/banner.sh` | Writes `/etc/issue`. |
 | `firststart/meho-firststart.service` | Runs `firststart.sh` once, before SSH and the console login. |
 | `firststart/meho-banner.service` | Runs `banner.sh` at every boot, after first start. |
@@ -42,6 +49,22 @@ needs the host keys of step 1, and the console login waits until the
 `admin` account exists. Ubuntu 24.04 starts SSH through `ssh.socket`, so a
 connection that comes early waits in the socket. If first start fails, SSH
 and the console login still start; ordering does not need success.
+
+The unit connects the script's standard input to `/dev/tty1`
+(`StandardInput=file:/dev/tty1`), for the console questions; the kernel's
+`/dev/console` is the serial port on this image. A `file:` input leaves the
+output in the journal (a `tty` input would send it to the terminal only).
+Before the script, `plymouth --wait quit` stops the boot splash, which
+would read the same keys; systemd's own `emergency.service` does the same.
+The `-` before it ignores a Plymouth that does not run.
+
+systemd opens the `file:` input with `O_NOCTTY`, but bash opens the
+terminal of its standard input again at its start (`check_dev_tty` in
+bash's `shell.c`). The service's process leads its own session, so tty1
+becomes its controlling terminal anyway, and a Ctrl+C typed on the console
+would stop first start in the middle of a step. So `firststart.sh` ignores
+`SIGINT`, `SIGQUIT` and `SIGTSTP` (`trap ''`), and the commands it starts
+inherit that. A Ctrl+C at a question only clears the line typed so far.
 
 `meho-banner.service` runs after it, also before the console login, at
 every boot.
@@ -69,7 +92,20 @@ cloud image's kernel line ends with `console=ttyS0`.
    the step with the fix "change the field in the VM's vApp options and
    power the VM on again". The join fields must be empty: this version runs
    as a single appliance, and `install.sh --from-disk` does not copy a join
-   token, so RKE2 could not join. Then:
+   token, so RKE2 could not join.
+
+   **Without an OVF environment** (no `vmtoolsd` value and no CD-ROM with
+   the file), the script asks on the console, in the wizard's order: host
+   name, time servers, network (`static` or `dhcp`; empty means static, as
+   in the wizard), for static the address, gateway and DNS servers, the
+   admin network, the password twice (not shown while typed), and the SSH
+   key. Each answer goes through the wizard's own check of that field
+   (`field_problem`), and a wrong answer is asked again, so a password that
+   breaks a password rule is asked again. The SSH key may stay empty,
+   because a key is hard to type on a VM console: then no `authorized_keys`
+   is written, and SSH stays closed until the admin adds a key. If the
+   input ends before the last answer, the step stops with "power the VM off
+   and on". The join fields are not asked. Then:
    - `hostnamectl hostname <name>`. The name does not go into `/etc/hosts`,
      so the first-start list asks the site's DNS.
    - `/etc/netplan/50-meho.yaml` (0600, as netplan wants), matching the
@@ -77,11 +113,37 @@ cloud image's kernel line ends with `console=ttyS0`.
      Then `netplan apply`.
    - `/etc/systemd/timesyncd.conf.d/50-meho.conf` with the time servers.
      The cloud image has systemd-timesyncd, not chrony.
-   - The `admin` account (groups `sudo`), the wizard password through
+   - The `admin` account (groups `sudo`; it joins the empty group `admin`
+     that the cloud image already has, because `useradd` refuses to make a
+     second one, exit code 9, #5739). `useradd` copies `.bashrc`,
+     `.profile` and `.bash_logout` from `/etc/skel` with 0644; they get
+     0640 (CIS 7.2.10 wants 0740 or less). Then the wizard password through
      `chpasswd` on stdin, `passwd --expire` so the first login must change
-     it, and the SSH key in `~admin/.ssh/authorized_keys` (0600). The script
-     checks the 14 characters itself, because `chpasswd` run by root skips
-     the quality checks.
+     it, and the SSH key in `~admin/.ssh/authorized_keys` (0600). Without a
+     key the file is removed, in case an earlier try wrote one.
+   - **The password rules** (#5749). The CIS settings
+     ([appliance-cis.md](appliance-cis.md)) make `chpasswd` check the
+     password with `pam_pwquality`, also for root (`enforce_for_root`).
+     Before anything changes, the script checks the password with
+     `pwscore admin` (package `libpwquality-tools`), which reads the same
+     settings, so a password `pwscore` takes, `chpasswd` takes too. The
+     password goes to `pwscore` on stdin, never as an argument. The rules:
+     at least 14 characters (`minlen`), an uppercase letter, a lowercase
+     letter, a digit and another character (`minclass = 4` and the four
+     credits of -1), no character more than 3 times in a row
+     (`maxrepeat = 3`), no run of more than 3 such as `abcd` or `4321`
+     (`maxsequence = 3`), not the user name anywhere in it, in any letter case
+     or reversed (`usercheck`, on by default),
+     and the dictionary check of cracklib (`dictcheck`), which also refuses
+     simple patterns such as `Abc#1Abc#1Abc#1`. A refused password stops
+     step 3 with the reason `pwscore` gives (its last line, such as "The
+     password contains less than 1 non-alphanumeric characters"), the list
+     of rules, and the vApp-options fix. On the console it is asked again.
+     The rules are one sentence, `PASSWORD_RULES` in `firststart.sh`; the
+     console prints it before the password question, and the wizard field's
+     description in `product-section.xml` holds the same sentence. A test
+     keeps the two in step. The wizard keeps `MinLen(14)`, the one rule
+     vCenter itself can check.
    - `meho-host admin-network <range>`: SSH answers only from the admin
      network.
 4. **The clock.** Waits up to 10 minutes until `timedatectl` says the clock
@@ -97,7 +159,22 @@ cloud image's kernel line ends with `console=ttyS0`.
    `superusers="root"` and its `password_pbkdf2` hash. Ubuntu's
    `/etc/grub.d/10_linux` gets `--unrestricted` on its `CLASS` line, so
    the normal boot needs no password; only editing an entry or the boot
-   menu's command line does. Then `update-grub`.
+   menu's command line does. The cloud image hides the boot menu and waits
+   0 seconds (`/etc/default/grub.d/50-cloudimg-settings.cfg`), so only
+   Shift held at the right moment would open it. So
+   `/etc/default/grub.d/90-meho-boot-menu.cfg`, read after that file, sets
+   `GRUB_TIMEOUT_STYLE=menu`, `GRUB_TIMEOUT=5` and
+   `GRUB_RECORDFAIL_TIMEOUT=5` (the wait after a boot that did not finish):
+   the menu shows for 5 seconds at every boot. Then `update-grub`.
+7. **The AIDE database.** `aideinit --yes --force` builds the database of
+   this appliance's files (CIS 6.3.1), after the core is installed. The
+   build hardened the appliance but left the database out, because it
+   must hold each appliance's own files. AIDE's daily check
+   (`dailyaidecheck.timer`) compares the files with it. Which folders AIDE
+   skips is in [appliance-cis.md](appliance-cis.md). Then the log files
+   under `/var/log/aide` (from `aideinit`) and `/var/log/apt` (from the
+   build) get at most 0640 (CIS 6.1.4.1). This is the last step, so it also
+   catches a log an earlier step wrote.
 
 Each step writes `/var/lib/meho/firststart/<n>-<name>.done`, and
 `/var/lib/meho/firststart.done` follows the last one. A failed step writes
@@ -121,41 +198,155 @@ and through `vmtoolsd` inside the guest; the OVF standard passes password
 fields in clear text. The forced change at the first login makes it a
 one-time value.
 
+A password typed on the console is read with `read -s`, so the console
+does not show it, and it is kept only in the script's memory. The
+questions go to the journal too, but the answers do not: the console
+itself shows what is typed. So in the journal the questions run together
+on one line.
+
 ### `banner.sh`
 
 Writes `/etc/issue` (0644) in one step:
 
 - the version from the download's `VERSION` file;
 - with `firststart/failed`: that line (backslashes doubled, because agetty
-  reads `\` as an escape) and where to read more. Before step 3 makes the
-  `admin` account nobody can log in, so the banner then says to follow the
-  fix from vCenter, and the fix of a failed step 1 or 2 says to power the VM
-  off and on there instead of `sudo reboot`;
+  reads `\` as an escape) and where to read more. Until step 3 gives the
+  `admin` account its password nobody can log in, so the banner then says
+  to follow the fix from vCenter, and the fix of a step that failed before
+  then says to power the VM off and on there instead of `sudo reboot`
+  (`how_to_restart` in `firststart.sh` looks for a password hash in
+  `getent shadow admin`). In the first lab import, `useradd` had made the
+  account and then `chpasswd` refused the password, and the banner said to
+  log in (#5749);
 - before `firststart.done`: that first start has not finished;
 - after it: `https://<hostname>/ui/`, `\4` (agetty prints the IPv4 address,
   so a DHCP address shows), each one-time file that still exists, and a
   `[WARN]` line when the `admin` password expires in less than 30 days or
   has expired. The days come from `getent shadow admin` (last change plus
   maximum age); a password that must be changed at the next login gives no
-  warning.
+  warning;
+- in both cases, the banner says "log in" only when the `admin` account
+  takes a login, as `pam_unix` decides it (`check_shadow_expiry`): the
+  password is not locked (it does not start with `!` or `*`), the account
+  has not passed its expiry date, and the password did not expire longer
+  ago than its inactive days (45 with the CIS settings). Otherwise a
+  finished appliance shows a `[WARN]` with the way back in through the boot
+  menu and a link to the section below, in place of the expiry warning. The
+  link points to this file at the git commit the appliance's scripts come
+  from: `build.sh` writes `git rev-parse HEAD` of its checkout into
+  `DOCS_REF` in `banner.sh` when it installs it. So the steps always match
+  the scripts, also when the build takes an older release download, whose
+  tag may not have this file, and a later change on `main` cannot break the
+  link. Without git, `DOCS_REF` stays `main`. It names the commands to run there: `passwd admin`, and also
+  `chage -E -1 admin` when the account has passed its expiry date, because
+  a new password does not change that date. A disabled account also
+  refuses SSH keys ("Your account has expired").
+
+## Ways in without the wizard
+
+The design decided three ways (internal design note `form-1-appliance.md`,
+section 2, "No wizard, and a lost password or a locked account"). The
+week-4 import by hand (#4815) tests all three; the customer chapter
+(#4817) takes the steps from here.
+
+### The console questions
+
+Import the OVA into the ESXi host (Host Client: Create / Register VM,
+Deploy a virtual machine from an OVF or OVA file) and power it on. Open the
+VM console and answer the questions (step 3 above). With an empty SSH key,
+log in as `admin` on the console afterwards and put the key into
+`~/.ssh/authorized_keys` (mode 0600). `meho-host ssh-key add <file>` will
+do this, but form 2 has not built it yet.
+
+### `ovftool`
+
+`ovftool` 4.0 or later hands the fields to an ESXi host without a person at
+the console. `--X:injectOvfEnv` passes the OVF environment to the VM, and
+works only together with `--powerOn`. The guest then reads it through
+VMware Tools, the same way as after a vCenter import, so first start needs
+no change. Give every field with `--prop:<key>=<value>`; the keys are the
+`ovf:key` names in `product-section.xml`:
+
+```bash
+ovftool --acceptAllEulas --name=meho --datastore=datastore1 \
+  --network='VM Network' --diskMode=thin \
+  --X:injectOvfEnv --powerOn \
+  --prop:hostname=meho.example.com \
+  --prop:net.ntp=10.0.0.4 \
+  --prop:net.mode=static \
+  --prop:net.ip=10.0.0.10/24 \
+  --prop:net.gateway=10.0.0.1 \
+  --prop:net.dns=10.0.0.2 \
+  --prop:net.admin_network=10.0.50.0/24 \
+  --prop:admin.password='<a password that follows the password rules>' \
+  --prop:admin.ssh_key='ssh-ed25519 AAAA... admin@example.com' \
+  meho-appliance-<version>.ova 'vi://root@esxi.example.com/'
+```
+
+The password is then in the shell history and the process list of the
+machine that runs `ovftool`, and in the VM's settings, as after a vCenter
+import. The forced change at the first login makes it a one-time value.
+
+### The boot menu, after a lost password or a locked `admin`
+
+`admin` is the only Linux login, and a disabled account also refuses SSH
+keys. The way back in is the boot menu, with the bootloader password from
+the customer's key store (the third one-time file of step 6):
+
+1. Restart the VM from the vSphere or ESXi console. The boot menu shows for
+   5 seconds; press an arrow key to stop the countdown.
+2. Select the first entry and press `e`. Log in as `root` with the
+   bootloader password.
+3. On the line that starts with `linux`, change `console=ttyS0` to
+   `console=tty1`, and add `init=/bin/bash` at the end of the line. Press
+   Ctrl+X to start it. Without the change, the root shell opens on the
+   serial port, the last `console=` of the line, and not on the VM screen.
+4. In the root shell:
+
+   ```bash
+   mount -o remount,rw /
+   passwd admin
+   sync
+   exec /sbin/init
+   ```
+
+   `passwd admin` sets a new password. That also ends a lock with
+   `passwd -l` and an expired password, so the 45-day disable after the
+   expiry no longer applies. `exec /sbin/init` goes on with the normal
+   boot.
+
+   If the banner says the account has expired, also run
+   `chage -E -1 admin` before `sync`. It removes the account's expiry date
+   (`chage -E`), which `passwd` does not change. Without it, the account
+   still refuses every login after the new password.
+
+A lock after failed logins (`pam_faillock`) needs no step: the count is
+kept under `/var/run/faillock`, which is empty after every boot. If the
+hardening (#4640) moves it to the disk, add
+`faillock --user admin --reset` before `sync`.
 
 ## Dependencies
 
 On the appliance, all in the Ubuntu 24.04 cloud image: `vmtoolsd`
 (open-vm-tools), `python3`, `netplan`, `systemd-timesyncd`,
 `cloud-guest-utils` (`growpart`), `e2fsprogs`, `openssh-server`,
-`grub2-common`. From the form-2 download: `install.sh --from-disk`,
+`grub2-common`, `plymouth`. From the hardening (`cis/harden.sh`):
+`libpwquality-tools` (`pwscore`), `libpam-pwquality` and `cracklib-runtime`.
+From the form-2 download: `install.sh --from-disk`,
 `lib/net.sh`, `lib/checks.sh`, and `meho-host admin-network`.
 
 ## Known issues
 
 - **Not run on a real appliance yet.** The tests use stub commands. The
   first import by hand (#4815) checks the real path: the OVF environment
-  from vCenter, the console output, the boot menu.
+  from vCenter, the console output and questions, `ovftool`, the boot menu.
 - **No first-start list yet.** `meho status --first-start` comes with
   #4042, inside `install.sh`. The banner shows no list until then.
-- **No wizard fields** stops step 3 with a message. The console setup that
-  asks for the fields instead is #4813.
+- **`meho-host ssh-key add` does not exist yet.** After a console setup
+  with an empty SSH key, the admin writes `~/.ssh/authorized_keys` by hand.
+- **An OVF environment with empty fields** gets the wizard's checks and
+  their vApp-options fix, not the console questions. If an ESXi host's own
+  import passes the properties empty, the week-4 import shows it.
 - **The join fields** are refused at step 3. `install.sh --from-disk` does
   not copy a join token, and joining is not part of the single-node form.
   The fields stay in the product section for the HA work.
@@ -169,16 +360,58 @@ On the appliance, all in the Ubuntu 24.04 cloud image: `vmtoolsd`
 with `MEHO_TEST_ROOT` pointing at a temporary root folder, and only stub
 commands and a few real tools on `PATH`. The harness writes the OVF
 environment the way vCenter does, with escaped values, and serves it
-through the `vmtoolsd` stub or the CD-ROM (`mount` stub). The tests cover
-every field and its check, static and DHCP, both transports, a missing
-environment, the order of the steps, the markers, a run after a failed
-step, the refused join fields, the bootloader password, and the banner.
+through the `vmtoolsd` stub or the CD-ROM (`mount` stub). The console
+answers come on the script's standard input. The tests cover every field
+and its check, static and DHCP, both transports, the order of the steps,
+the markers, a run after a failed step, the refused join fields, the
+bootloader password and the boot menu file, and the banner. Without an OVF
+environment they check that the console setup ends with the same files and
+commands as a wizard import, that each wrong answer and a 13-character or
+mistyped password are asked again, the empty SSH key, input that ends
+early, and that no password reaches the output or a command line.
+
+The `pwscore` stub refuses a password the way the appliance's settings do,
+with `pwquality`'s own messages, for two rules: fewer than 14 characters,
+and letters and digits only. So the tests cover a password of 22 letters
+and digits: the wizard path stops before `useradd`, the console asks again.
+That the real `pwscore` and `chpasswd` agree on every rule was checked by
+hand in an Ubuntu 24.04 container with the CIS values in
+`/etc/security/pwquality.conf` (#5749). A test checks that the console and
+the wizard name the same rules. The banner tests cover the `shadow` states:
+a password to change at the first login, expiring, expired, disabled after
+the inactive days, locked, and an expired account.
 
 On macOS run them in Docker, as `deploy/appliance/README.md` says.
 
 ## References
 
-- Task evoila/meho#4812, Initiative evoila/meho#3958.
+- Tasks evoila/meho#4812 and #4813, Initiative evoila/meho#3958.
+- systemd 255 `systemd.exec(5)` (`StandardInput=file:`, and the `inherit`
+  default of `StandardOutput=` that only `tty`, `socket` and `fd:` inputs
+  get); systemd v255 `src/core/exec-invoke.c` (`acquire_path` opens a
+  `file:` input with `O_NOCTTY`); `units/emergency.service.in`
+  (`plymouth --wait quit`).
+- Bash 5.2 manual, `read -s` and `trap`; bash 5.2 `shell.c`
+  (`check_dev_tty` opens `ttyname(0)` without `O_NOCTTY`; seen with
+  `strace` on a pseudo-terminal, and Ctrl+C then stopped the script).
+- OVF Tool 4.0 and later: `--X:injectOvfEnv` with `--powerOn`, and
+  `--prop:` (William Lam, "How to finally inject OVF properties into VCSA
+  when deploying directly onto ESXi", 2014; COT 1.4.1 `deploy_esxi`).
+- GRUB manual, "Simple configuration" (`GRUB_TIMEOUT_STYLE`,
+  `GRUB_TIMEOUT`).
+- `faillock(8)` on Ubuntu 24.04 (the default folder `/var/run/faillock`).
+- libpwquality 1.4.5 (Ubuntu 24.04): `src/pwscore.c` (password on stdin,
+  optional user name, exit code 1 and "Password quality check failed:" on
+  a refused password), `pwquality.conf(5)` (`usercheck` and `dictcheck`
+  default to 1).
+- ComplianceAsCode 0.1.82 `controls/cis_ubuntu2404.yml`, CIS 5.3.3.2.1 to
+  5.3.3.2.8 (`difok = 2`, `minlen = 14`, `minclass = 4`, the four credits
+  -1, `maxrepeat = 3`, `maxsequence = 3`, `dictcheck`, `enforcing`,
+  `enforce_for_root`).
+- Linux-PAM 1.5.3 `modules/pam_unix/passverify.c` (`check_shadow_expiry`).
+- shadow-utils 4.13 (Ubuntu 24.04 `passwd` package): `chage(1)` (`-E -1`
+  removes the account's expiry date; checked in a container that a new
+  password leaves the date in place).
 - OVF environment: DMTF DSP0243 2.1.1 (the `Environment` and
   `PropertySection` elements; password values in clear text); open-vm-tools
   13.0.10 `services/vmtoolsd/cmdLine.c` (`--cmd` exits 1 when no value is set).

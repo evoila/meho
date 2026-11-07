@@ -1,7 +1,15 @@
 # Deployment shapes
 
-MEHO ships as **one Helm chart**. The five shapes below are not five
-products and not five installs — they are the five ways real estates
+MEHO ships as **one Helm chart**. By default the chart also brings its
+own PostgreSQL, Keycloak and OpenBao (an open-source fork of Vault).
+This is the normal way. You can connect your own PostgreSQL or secret
+store instead; the
+[install trail](install/index.md#two-ways-to-install) says how. The
+Helm chart is the install form available today. A Linux-server install
+and a VMware appliance are in progress; every shape below applies to
+them too.
+
+The five shapes below are not five products and not five installs — they are the five ways real estates
 differ: network topology, credential backend, and tenancy. Every shape
 runs the same chart with the same components; what changes is which
 network the backplane can dial, where credentials live, and how many
@@ -33,10 +41,10 @@ cloud-native install rather than replacing it.
 | Component | Who provides it | Notes |
 |---|---|---|
 | MEHO backplane | MEHO — `ghcr.io/evoila/meho` | One Deployment from the chart at `oci://ghcr.io/evoila/meho-chart`. Agents reach it over MCP; operators reach it over the REST API with the `meho` CLI and the optional browser console. Both fronts share one governed dispatch path — policy, approvals, audit, result handling. |
-| Keycloak realm | You | The OIDC issuer. The backplane needs a confidential client plus the public `meho-cli` device-code client with audience mappers. |
-| PostgreSQL + pgvector | You | Operator-managed; the `vector` extension is pre-created once by a superuser, and the chart expects an `asyncpg` DSN. |
+| Keycloak realm | MEHO | The login server MEHO trusts. MEHO's built-in Keycloak makes the realm `meho`. Connect your [company login](install/login/index.md) in front of it (AD/LDAP, Entra ID, authentik, your own Keycloak). Replacing it with your own Keycloak is an expert path: it needs realm admin rights to make MEHO's realm, clients and groups — see [Keycloak realm setup](install/keycloak-realm.md). |
+| PostgreSQL + pgvector | MEHO by default, or you | The chart's built-in PostgreSQL, with pgvector on. With your own (`corePostgres.enabled: false`), the `vector` extension is pre-created once by a superuser, and the chart expects an `asyncpg` DSN. |
 | Valkey broadcast | MEHO — in-tree subchart | Installed by the same release. See the availability posture below. |
-| Credential backend | You | HashiCorp Vault KV-v2 (the default) **or** Google Secret Manager, selected with `config.credentialBackend`. |
+| Credential backend | MEHO by default, or you | The chart's built-in OpenBao (an open-source fork of Vault). With `coreVault.enabled: false`: your own HashiCorp Vault KV-v2 **or** Google Secret Manager, selected with `config.credentialBackend`. |
 | Targets | You | The governed systems. Each is registered with an address, a *reference* into the credential backend — never the secret itself — and its TLS trust settings. |
 
 Prerequisites, the worked install commands, and the per-row verification
@@ -103,10 +111,10 @@ control is load-bearing or where the setting differs.
 
 | Control | Baseline (secure default or must-set) | Where it lives |
 |---|---|---|
-| **Network isolation** | `networkPolicy.enabled: true` (default-deny ingress + egress) is the baseline for any multi-tenant or production install. Enabling it makes the schema *require* the three egress CIDRs, so it refuses to ship a wide subnet by accident. Staging it off is a first-install convenience only, and a documented downgrade for anything past bring-up. | [`install/index.md` § Step 6](install/index.md#step-6-write-your-values-file) `networkPolicy` block |
+| **Network isolation** | `networkPolicy.enabled: true` (default-deny ingress + egress) is the baseline for any multi-tenant or production install. Enabling it makes the schema *require* an egress CIDR for each part you bring yourself (PostgreSQL, Vault, Keycloak), so it refuses to ship a wide subnet by accident; the built-in parts need none. Staging it off is a first-install convenience only, and a documented downgrade for anything past bring-up. | [`install/index.md` § Step 6](install/index.md#step-6-write-your-values-file) `networkPolicy` block |
 | **Tenant credential scope** | `VAULT_KV_TENANT_SCOPE_PREFIX` defaults to `secret/tenants/{tenant_id}/` — on by default, so one tenant can never read another's Vault credentials. Keep it set on any multi-tenant deploy; emptying it (`VAULT_KV_TENANT_SCOPE_PREFIX=""`) removes the cross-tenant guard and is a documented downgrade, valid only mid-migration or on a genuinely single-tenant install. | [`install/credential-backends.md`](install/credential-backends.md#vault) |
 | **Reverse-proxy trust** | `config.forwardedAllowIps` names *only* the reverse proxy / ingress controller the backplane should trust `X-Forwarded-*` from — narrow it to the controller's source address, not the whole pod CIDR. Over-wide trust lets any in-cluster workload forge the client address. | [`install/tls-ingress.md` § Reverse-proxy trust](install/tls-ingress.md#reverse-proxy-trust-forwardedallowips) |
-| **Self-approval** | `config.approvalAllowSelfApproval` defaults to `"false"` — four-eyes is enforced and the requester of a gated write may not approve it. Leave it off; `"true"` is an audited emergency break-glass that never reaches a `dangerous`/`destructive` operation. | [`guides/approvals-and-break-glass.md`](guides/approvals-and-break-glass.md) |
+| **Self-approval** | Only members of `MEHO-SA-Operators` may approve their own changes; everyone else needs another person. `config.approvalAllowSelfApproval` defaults to `"false"`. Leave it off; `"true"` is an audited emergency break-glass that lets anyone approve their own `safe`/`caution` change and never reaches a `dangerous`/`destructive` operation. | [`guides/approvals-and-break-glass.md`](guides/approvals-and-break-glass.md) |
 | **Realm claim mappers** | On a shared, multi-user public client, take `tenant_id` and `tenant_role` from the person's login group (one of the five MEHO groups, read by the stock User Attribute mapper) — never install a hardcoded privileged `tenant_role` (e.g. `tenant_admin`) mapper that every user authenticating through that client inherits. A hardcoded claim is acceptable only on a single-identity lab client. | [`install/keycloak-realm.md`](install/keycloak-realm.md) |
 | **Outbound peer authentication** | No verification-disabled defaults on credential-bearing outbound paths. The SSH connector verifies the target host key fail-closed (an unpinned target is refused until its `known_hosts` line is provisioned on the secret); SMTP validates its TLS peer; bootstrap scripts trust a real CA rather than `curl -k`. Per-target opt-outs (`known_hosts_insecure`, `verify_tls: false`) are loud, audited, and never the default. | [`install/tls-ingress.md` § Outbound peer authentication](install/tls-ingress.md#outbound-peer-authentication-for-credential-bearing-connections) |
 | **CI / fork-PR isolation** | Untrusted pull-request code runs on disposable GitHub-hosted runners, never the internal `meho-runners-ci` pool, and the repository's fork-PR approval policy is `all_external_contributors` (a maintainer must approve any external fork run). Signing and deployment identities are separated from PR-triggered jobs. | [`docs/RELEASING.md` § Supply-chain and CI baseline](https://github.com/evoila/meho/blob/main/docs/RELEASING.md) |
@@ -159,16 +167,17 @@ flowchart TB
 
 - Your targets sit in one network segment that the cluster can already
   reach.
-- You already run a Keycloak realm and either a Vault or Google Secret
-  Manager.
+- You use the chart's built-in PostgreSQL, Keycloak and OpenBao, or you
+  already run your own.
 - One team, one tenant, a handful of targets, interactive operators
   only.
 
 **What it still costs you.** "Flat" is a network statement, not an
-install shortcut. Every cold-install prerequisite applies unchanged: the
-pgvector extension step, the `asyncpg` DSN, the Keycloak clients and
-mappers, an internal-CA trust bundle where your services use private
-certificates, and a pinned immutable image tag. A flat LAN is still
+install shortcut. Every cold-install prerequisite applies unchanged: a
+pinned immutable image tag, and with your own parts also the pgvector
+extension step, the `asyncpg` DSN, the Keycloak clients and mappers,
+and an internal-CA trust bundle where your services use private
+certificates. A flat LAN is still
 private address space, so the allowlist entry above is mandatory —
 there is no shape in which it is optional.
 
@@ -359,7 +368,9 @@ to "be on a particular network" — a managed secret store removes that
 coupling, since where the store lives becomes a cloud decision instead
 of a network one.
 
-**Setting it up.** `config.credentialBackend: gsm` selects the backend;
+**Setting it up.** Set `coreVault.enabled: false` first: the chart
+refuses Google Secret Manager while the built-in OpenBao is on. Then
+`config.credentialBackend: gsm` selects the backend;
 `vault.address` stays blank, because the chart schema requires it only
 for the Vault backend. The health check's federation proof then reads
 through Secret Manager instead of Vault. Worked example:

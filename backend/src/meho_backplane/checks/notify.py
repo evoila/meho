@@ -140,7 +140,9 @@ where an inline send would delay the *next* group's diagnosis by a whole
 SMTP session. And neither :func:`notify_dashboard_transition` nor
 :func:`notify_finding` raises: a refused, unconfigured, or failed
 :func:`~meho_backplane.connectors.mail.transport.send_email` is logged
-(``checks_notify_failed`` / ``checks_finding_email_failed``) and swallowed,
+(``checks_notify_failed`` / ``checks_finding_email_failed``) and swallowed --
+for a Dashboard mail the result is also kept on the Dashboard row and
+counted (:mod:`meho_backplane.checks.mail_result`) --
 contract parity with ``investigate_on_transition``'s never-raise posture. A
 broken MTA must not convert a committed transition claim into a persist-path
 failure, nor a persisted finding into a lost noise-suppression policy.
@@ -171,6 +173,7 @@ from typing import Final, cast
 import structlog
 
 from meho_backplane.broadcast.client import get_broadcast_client
+from meho_backplane.checks.mail_result import record_mail_result
 from meho_backplane.connectors.mail.allowlist import (
     RecipientNotAllowedError,
     assert_recipient_allowed,
@@ -666,6 +669,16 @@ def _allowed_recipients(raw: str, **log_fields: object) -> list[str]:
     return survivors
 
 
+async def _record(notice: DashboardNotice, *, sent: bool, reason: str | None) -> None:
+    """Store and count the result of this alert mail attempt (never raises)."""
+    await record_mail_result(
+        tenant_id=notice.tenant_id,
+        dashboard_id=notice.dashboard_id,
+        sent=sent,
+        reason=reason,
+    )
+
+
 async def _deliver(notice: DashboardNotice, recipients: list[str]) -> None:
     """Fan the identical mail out to *recipients*; swallow every failure.
 
@@ -691,6 +704,7 @@ async def _deliver(notice: DashboardNotice, recipients: list[str]) -> None:
             reason="unexpected_error",
             exc_info=True,
         )
+        await _record(notice, sent=False, reason="unexpected_error")
         return
 
     if not result.sent:
@@ -699,7 +713,9 @@ async def _deliver(notice: DashboardNotice, recipients: list[str]) -> None:
             dashboard_id=str(notice.dashboard_id),
             reason=result.reason,
         )
+        await _record(notice, sent=False, reason=result.reason)
         return
+    await _record(notice, sent=True, reason=None)
     _log().info(
         "checks_notify_sent",
         member_count=len(notice.members),
@@ -787,6 +803,7 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
             "checks_notify_no_allowed_recipients",
             dashboard_id=str(notice.dashboard_id),
         )
+        await _record(notice, sent=False, reason="no_allowed_recipients")
         return
     await _deliver(notice, recipients)
 

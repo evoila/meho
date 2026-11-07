@@ -61,6 +61,7 @@ from pydantic import (
 )
 
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.targets.extras_limits import check_extras_size
 from meho_backplane.targets.field_rules import check_target_host, check_target_name
 from meho_backplane.targets.ssrf_guard import assert_public_destination
 
@@ -413,6 +414,11 @@ class TargetCreate(BaseModel):
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
 
+    @field_validator("extras")
+    @classmethod
+    def _check_extras_size(cls, value: Any) -> Any:
+        return check_extras_size(value)
+
     @field_validator("name", "aliases")
     @classmethod
     def _check_names(cls, value: str | list[str], info: ValidationInfo) -> str | list[str]:
@@ -564,6 +570,11 @@ class TargetUpdate(BaseModel):
     @classmethod
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
+
+    @field_validator("extras")
+    @classmethod
+    def _check_extras_size(cls, value: Any) -> Any:
+        return check_extras_size(value)
 
     @field_validator("aliases")
     @classmethod

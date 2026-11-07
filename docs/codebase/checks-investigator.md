@@ -315,8 +315,9 @@ principal, so no execution path inherits the role.
     gate + kill switch (inside `run_scheduled`) before firing its agent run. That
     gate reads **already-recorded** consumption
     (`operations/budget_enforcement.py`): tokens/cost are charged against
-    committed state *after* a run finishes, and a reservation ("reserve this
-    run's cost before it starts") is explicitly deferred there. Awaiting each
+    committed state *after* a run finishes. Only the request count is reserved
+    (a run in progress counts as one request); the cost of a run is not
+    reserved before it starts. Awaiting each
     group to completion is what makes the cap correct — group *N*+1's gate
     observes group *N*'s spend already recorded. Fanning the groups out under a
     concurrency cap would open a check-then-fire race where several groups read
@@ -336,7 +337,7 @@ principal, so no execution path inherits the role.
     latency is an operational problem, the correct fix is **not** a naive
     concurrency cap but an **atomic budget reserve/decrement** seam so a group
     reserves budget before firing (replica-safe if the budget is shared across
-    processes) — i.e. the reservation protocol `budget_enforcement.py` defers.
+    processes) — i.e. a reservation of the cost as well as the request count.
     That is a separate, larger change; until it exists, serial-to-completion is
     the only fan-out shape that keeps the cap honest.
 - **Trigger seam.** The runner-persist hook is the v1 seam because the

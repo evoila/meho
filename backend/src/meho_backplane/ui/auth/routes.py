@@ -182,6 +182,10 @@ FRESH_SIGN_IN_QUERY: Final[str] = "fresh_sign_in"
 #: ``/ui/auth/login``. T5 (#866) lands the dashboard at ``/ui/``.
 _DEFAULT_RETURN_TO: Final[str] = "/ui/"
 
+#: Longest ``return_to`` path the login accepts; a longer one becomes the
+#: default landing path.
+_MAX_RETURN_TO_LENGTH: Final[int] = 2048
+
 #: Detail code for the *recoverable* callback-state failure class --
 #: an expired/mismatched ``state``, a verifier-store miss, or authlib's
 #: :class:`MismatchingStateError` on ``GET /ui/auth/callback`` (G0.29
@@ -304,6 +308,7 @@ def _safe_return_to(raw: str | None) -> str:
       ``/ui/`` default. Open-redirect guard -- a crafted phishing
       link could otherwise bounce the operator to an attacker URL
       after auth.
+    * Longer than 2,048 characters → ``/ui/`` default.
     * Anything outside the ``/ui/`` subtree → ``/ui/`` default.
       Keeps the post-login redirect inside the operator-console
       surface; deep links into ``/api/*`` are not the BFF's job.
@@ -316,7 +321,7 @@ def _safe_return_to(raw: str | None) -> str:
     # Strip whitespace -- a stray newline from a misconstructed URL
     # would otherwise smuggle past the prefix check.
     candidate = raw.strip()
-    if not candidate:
+    if not candidate or len(candidate) > _MAX_RETURN_TO_LENGTH:
         return _DEFAULT_RETURN_TO
     if candidate.startswith("//") or "://" in candidate:
         return _DEFAULT_RETURN_TO
@@ -499,9 +504,7 @@ async def _handle_login(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="upstream_auth_provider_unreachable",
         ) from exc
-    log.info(
-        "ui_auth_login_redirect", state=state, return_to=return_to, fresh_sign_in=force_sign_in
-    )
+    log.info("ui_auth_login_redirect", state=state, fresh_sign_in=force_sign_in)
     response = RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
     # Hand the initiating browser its login-binding cookie so the
     # callback can prove this same browser completes the flow (F10 #272).

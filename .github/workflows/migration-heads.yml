@@ -65,13 +65,11 @@ concurrency:
 jobs:
   check:
     name: Migration chain (single head)
-    # A pull request from a fork runs on a disposable GitHub-hosted
-    # runner, not on the internal pool. The job runs the check script as
-    # it is on the pull request branch, so a fork controls that code. It
-    # needs no internal route or credential, so the hosted runner is
-    # enough. Same shape as migration-compat.yml; see docs/codebase/
-    # devops.md "Untrusted pull-request isolation".
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+    # Runs on a GitHub-hosted runner for every event. The job runs the
+    # check script as it is on the pull request branch and needs no
+    # internal route or credential. See docs/codebase/devops.md
+    # "Untrusted pull-request isolation".
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout

@@ -112,6 +112,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_shared_lists_only_shrink.py",
     "tests/test_soak_harness_driver.py",
     "tests/test_soak_harness_host_detach_from_vds.py",
+    "tests/test_targets_file_schema.py",
     "tests/test_vault_tenant_admin_policy_doc.py",
     "tests/test_vcf_api_contract_manifest.py",
 )

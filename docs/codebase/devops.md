@@ -2111,10 +2111,14 @@ Every unit test gets its own copy of the migrated SQLite template database
 (about 1 MB) in its `tmp_path`. The suite has about 18,000 tests, so the
 copies of one full run would add up to about 20 GB. The autouse fixture
 `_default_database_url` in `backend/tests/conftest.py` now deletes the copy
-when the test ends. A full run that passes leaves well under 1 GB: the
-template, one live copy per worker, and the logs. Pass
-`-o tmp_path_retention_policy=failed` as well, so the other temporary folders
-of passing tests are removed too.
+when the test ends. So the size during a run depends on the number of
+workers, not on the number of tests: one template and one live copy per
+worker, plus the other files of the tests that are running. A sample of
+1,052 tests with 4 workers peaked at 75 MB. Pass
+`-o tmp_path_retention_policy=failed` as well: when every test passes,
+pytest then removes the whole temporary folder at the end, so nothing is
+left. The full suite was not measured this way; its peak is an estimate
+from the sample.
 
 The autouse fixture `_reset_structlog_logger_cache` clears the cached bound
 logger of every module-level structlog logger in `meho_backplane` before and

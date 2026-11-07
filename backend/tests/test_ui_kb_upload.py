@@ -859,3 +859,79 @@ def _fake_embedding_service() -> AsyncMock:
     svc = fake_embedding_service()
     svc.dimension = 384
     return svc
+
+
+def test_upload_with_similar_entries_saves_nothing_and_names_them() -> None:
+    """An upload of a new slug next to a similar entry is not saved; the row names the entry."""
+    from meho_backplane.kb.similar import KbSimilarCheck, KbSimilarEntry
+
+    check = KbSimilarCheck(
+        slug="my-entry",
+        reason="similar_entries",
+        would_write=False,
+        slug_exists=False,
+        similar=[
+            KbSimilarEntry(
+                slug="old-entry",
+                entry_id=uuid.uuid4(),
+                revision_id=uuid.uuid4(),
+                summary=None,
+                product=None,
+                version=None,
+                status=None,
+                snippet="old text",
+                score=0.93,
+                match="close_meaning",
+                may_change=True,
+            )
+        ],
+        min_score=0.85,
+        next_step="n",
+    )
+    _seed_tenant(_TENANT_A, "tenant-a")
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_discovery_and_jwks(mock_router, _JWKS)
+        token = _mint_admin_token(_TENANT_A)
+        session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        csrf = mint_csrf_token(str(session_id))
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=check,
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
+                new_callable=AsyncMock,
+            ) as fake_create,
+        ):
+            refused = _upload_single(client, filename="my-entry.md", csrf=csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as fake_check,
+            patch(
+                "meho_backplane.retrieval.indexer.get_embedding_service",
+                return_value=_fake_embedding_service(),
+            ),
+        ):
+            accepted = client.post(
+                "/ui/kb/upload",
+                files={"file": ("my-entry.md", io.BytesIO(_SMALL_MD), "text/markdown")},
+                data={"slug": "", "create_anyway": "true"},
+                headers={CSRF_HEADER_NAME: csrf, "X-CSRF-Token": csrf},
+                cookies={CSRF_COOKIE_NAME: csrf},
+            )
+
+    assert refused.status_code == 200, refused.text
+    assert "alert-error" in refused.text
+    assert "old-entry" in refused.text
+    assert "Create anyway" in refused.text
+    fake_create.assert_not_awaited()
+    assert accepted.status_code == 200, accepted.text
+    assert "alert-success" in accepted.text
+    assert fake_check.await_args.kwargs["create_anyway"] is True

@@ -5785,7 +5785,7 @@
           "knowledge"
         ],
         "summary": "Create Kb",
-        "description": "Create / re-index one kb entry under the operator's tenant.\n\n``tenant_admin`` only -- ``operator`` role gets 403 via\n:func:`require_role`. Invalid slug shape (regex miss) surfaces as\n422 ``invalid_slug``; same status code Pydantic uses for shape\nfailures so callers can branch on 4xx uniformly. The substrate's\nbody-hash short-circuit means re-creating an entry with an\nunchanged body pays only an ``updated_at`` bump.\n\nStatus code (#1845 ask 1): the service reports whether the slug\nwas genuinely new. This handler returns **201 Created** only for a\nfresh slug and **200 OK** when an existing row was overwritten in\nplace -- ``201`` for an in-place mutation is REST-incorrect, and\nthe response body already differentiates the two cases (preserved\n``id`` + ``created_at`` on overwrite). The decorator declares\n``201`` as the default so OpenAPI advertises the create path;\n``response.status_code`` is reset to ``200`` on the overwrite path\n(FastAPI lets an injected :class:`Response` override the declared\ncode while still applying ``response_model``).\n\nCross-principal overwrite is wiki-like and intentional (any\n``tenant_admin`` may replace any other's row in-tenant); this\nhandler adds no ownership gate. It does pass ``operator.sub`` as\n``actor_sub`` so the service stamps ``created_by_sub`` /\n``last_updated_by_sub`` into the entry's ``metadata`` -- the entry\nis then self-describing about authorship on every read surface.\n\nBinds ``audit_op_id=\"kb.create\"`` + ``audit_op_class=\"write\"``\nbefore the substrate call. ``audit_slug`` is bound so the audit\nlog payload (and the broadcast ``params``) carries the slug\nthat was created. The body content is NOT bound -- the audit\nrow is for the operation, not the document content (which lives\nin the ``documents`` table and is recoverable via ``kb.show``).",
+        "description": "Create / re-index one kb entry under the operator's tenant.\n\n``tenant_admin`` only -- ``operator`` role gets 403 via\n:func:`require_role`. Invalid slug shape (regex miss) surfaces as\n422 ``invalid_slug``; same status code Pydantic uses for shape\nfailures so callers can branch on 4xx uniformly. The substrate's\nbody-hash short-circuit means re-creating an entry with an\nunchanged body pays only an ``updated_at`` bump.\n\nStatus code (#1845 ask 1): the service reports whether the slug\nwas genuinely new. This handler returns **201 Created** only for a\nfresh slug and **200 OK** when an existing row was overwritten in\nplace -- ``201`` for an in-place mutation is REST-incorrect, and\nthe response body already differentiates the two cases (preserved\n``id`` + ``created_at`` on overwrite). The decorator declares\n``201`` as the default so OpenAPI advertises the create path;\n``response.status_code`` is reset to ``200`` on the overwrite path\n(FastAPI lets an injected :class:`Response` override the declared\ncode while still applying ``response_model``).\n\nCross-principal overwrite is wiki-like and intentional (any\n``tenant_admin`` may replace any other's row in-tenant); this\nhandler adds no ownership gate. It does pass ``operator.sub`` as\n``actor_sub`` so the service stamps ``created_by_sub`` /\n``last_updated_by_sub`` into the entry's ``metadata`` -- the entry\nis then self-describing about authorship on every read surface.\n\nBinds ``audit_op_id=\"kb.create\"`` + ``audit_op_class=\"write\"``\nbefore the substrate call. ``audit_slug`` is bound so the audit\nlog payload (and the broadcast ``params``) carries the slug\nthat was created. The body content is NOT bound -- the audit\nrow is for the operation, not the document content (which lives\nin the ``documents`` table and is recoverable via ``kb.show``).\n\nA new slug is first checked for similar entries\n(:func:`~meho_backplane.kb.similar.check_new_entry`). When some exist\nand ``create_anyway`` is not set, nothing is written and the answer\nis **409** with a :class:`KbSimilarCheck`. ``dry_run`` writes nothing\nand answers **200** with a :class:`KbSimilarCheck`.",
         "operationId": "create_kb_api_v1_kb_post",
         "parameters": [
           {
@@ -5821,11 +5821,29 @@
             }
           },
           "200": {
-            "description": "An existing entry with this slug was overwritten in place (id + created_at preserved, updated_at bumped). 201 is returned only for a genuinely-new slug.",
+            "description": "An existing entry with this slug was overwritten in place (id + created_at preserved, updated_at bumped). 201 is returned only for a genuinely-new slug. With `dry_run`, the answer is a KbSimilarCheck and nothing is written.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/KbEntry"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/KbEntry"
+                    },
+                    {
+                      "$ref": "#/components/schemas/KbSimilarCheck"
+                    }
+                  ],
+                  "title": "Response 200 Create Kb Api V1 Kb Post"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The slug is new and similar entries exist. Nothing was written. Update one of the listed entries, or send the create again with `create_anyway`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbSimilarCheck"
                 }
               }
             }
@@ -18935,7 +18953,7 @@
           "ui-kb"
         ],
         "summary": "Kb Editor Save",
-        "description": "Save a new KB entry from the editor modal.\n\nRequires ``tenant_admin`` role \u2014 enforced by re-verifying the\nsession's access token through\n:func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`. Plain\n``operator`` role receives 403. The CSRF middleware gate runs\nbefore this handler (``POST /ui/*`` passes through\n:class:`~meho_backplane.ui.csrf.CSRFMiddleware`).\n\nOn success, returns ``HX-Redirect`` to the new entry's detail\npage so HTMX swaps the page without a full navigation. On\nvalidation failure (invalid slug, empty body) re-renders the\neditor modal with an inline error message as a **200** fragment\nso HTMX swaps it back in place -- a non-2xx re-render is silently\ndropped by HTMX 2 (#2384; the mold established in #2346).\n\nTag parsing: the ``tags`` field is a comma-separated string\n(``\"tag-a, tag-b\"``); individual values are stripped of\nwhitespace and empty strings are dropped. Tags are stored as\n``metadata[\"tags\"]`` on the entry.",
+        "description": "Save a new KB entry from the editor modal.\n\nRequires ``tenant_admin`` role \u2014 enforced by re-verifying the\nsession's access token through\n:func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`. Plain\n``operator`` role receives 403. The CSRF middleware gate runs\nbefore this handler (``POST /ui/*`` passes through\n:class:`~meho_backplane.ui.csrf.CSRFMiddleware`).\n\nOn success, returns ``HX-Redirect`` to the new entry's detail\npage so HTMX swaps the page without a full navigation. On\nvalidation failure (invalid slug, empty body) re-renders the\neditor modal with an inline error message as a **200** fragment\nso HTMX swaps it back in place -- a non-2xx re-render is silently\ndropped by HTMX 2 (#2384; the mold established in #2346).\n\nTag parsing: the ``tags`` field is a comma-separated string\n(``\"tag-a, tag-b\"``); individual values are stripped of\nwhitespace and empty strings are dropped. Tags are stored as\n``metadata[\"tags\"]`` on the entry.\n\nA new slug with similar entries is not saved: the modal comes back\nwith the list and a \"Create anyway\" box (``create_anyway``).",
         "operationId": "kb_editor_save_ui_kb_new_post",
         "requestBody": {
           "content": {
@@ -26129,6 +26147,11 @@
             "maxLength": 500,
             "title": "Tags",
             "default": ""
+          },
+          "create_anyway": {
+            "type": "boolean",
+            "title": "Create Anyway",
+            "default": false
           }
         },
         "type": "object",
@@ -26159,6 +26182,11 @@
             },
             "type": "array",
             "title": "File"
+          },
+          "create_anyway": {
+            "type": "boolean",
+            "title": "Create Anyway",
+            "default": false
           }
         },
         "type": "object",
@@ -26178,6 +26206,11 @@
             "type": "string",
             "title": "Slug",
             "default": ""
+          },
+          "create_anyway": {
+            "type": "boolean",
+            "title": "Create Anyway",
+            "default": false
           }
         },
         "type": "object",
@@ -32409,6 +32442,18 @@
             "type": "object",
             "nullable": true,
             "title": "Metadata"
+          },
+          "create_anyway": {
+            "type": "boolean",
+            "title": "Create Anyway",
+            "description": "Create a new slug even when similar entries exist.",
+            "default": false
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "description": "Write nothing. Answer 200 with the similar entries and whether the write would go through.",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -32581,6 +32626,138 @@
         ],
         "title": "KbProvenance",
         "description": "Where a kb entry came from, as read back from its metadata.\n\n``state=\"recorded\"`` means the service stored provenance when it\nwrote the entry; the other fields are then set (``relative_path``\nstays ``None`` for direct writes). ``state=\"legacy\"`` means the\nentry was written before provenance was stored, or the stored value\nis not in the expected shape; every other field is ``None``. Legacy\nrows are not rewritten -- the next write records real provenance."
+      },
+      "KbSimilarCheck": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "written": {
+            "type": "boolean",
+            "const": false,
+            "title": "Written",
+            "default": false
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "similar_entries",
+              "dry_run"
+            ],
+            "title": "Reason"
+          },
+          "would_write": {
+            "type": "boolean",
+            "title": "Would Write"
+          },
+          "slug_exists": {
+            "type": "boolean",
+            "title": "Slug Exists"
+          },
+          "similar": {
+            "items": {
+              "$ref": "#/components/schemas/KbSimilarEntry"
+            },
+            "type": "array",
+            "title": "Similar"
+          },
+          "min_score": {
+            "type": "number",
+            "title": "Min Score"
+          },
+          "next_step": {
+            "type": "string",
+            "title": "Next Step"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "reason",
+          "would_write",
+          "slug_exists",
+          "similar",
+          "min_score",
+          "next_step"
+        ],
+        "title": "KbSimilarCheck",
+        "description": "The answer of a create that wrote nothing.\n\nGiven when similar entries were found (``reason=\"similar_entries\"``)\nor the caller asked for a dry run (``reason=\"dry_run\"``)."
+      },
+      "KbSimilarEntry": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "entry_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Entry Id"
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Revision Id"
+          },
+          "summary": {
+            "type": "string",
+            "nullable": true,
+            "title": "Summary"
+          },
+          "product": {
+            "type": "string",
+            "nullable": true,
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Version"
+          },
+          "status": {
+            "type": "string",
+            "nullable": true,
+            "title": "Status"
+          },
+          "snippet": {
+            "type": "string",
+            "title": "Snippet"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "match": {
+            "type": "string",
+            "enum": [
+              "same_product_version",
+              "close_meaning"
+            ],
+            "title": "Match"
+          },
+          "may_change": {
+            "type": "boolean",
+            "title": "May Change"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "entry_id",
+          "revision_id",
+          "summary",
+          "product",
+          "version",
+          "status",
+          "snippet",
+          "score",
+          "match",
+          "may_change"
+        ],
+        "title": "KbSimilarEntry",
+        "description": "One existing entry that is similar to the entry about to be created."
       },
       "KindFilterValue": {
         "type": "string",

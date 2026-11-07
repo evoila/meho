@@ -1364,3 +1364,31 @@ def person_token_writes_run_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
     from meho_backplane.operations import _validate
 
     monkeypatch.setattr(_validate, "_person_park_reason", lambda _operator, _descriptor: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_similar_kb_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Let a new kb slug find no similar entries, unless a test asks for the real search.
+
+    Every kb create on MCP, REST and the console first searches for
+    similar entries (``kb/similar.py``). That search needs PostgreSQL,
+    and the default test database is SQLite. So most tests get an empty
+    result; the other parts of the check (slug, header, existing slug)
+    still run. A test of the search itself requests
+    :func:`real_similar_check` and mocks ``retrieve`` there.
+    """
+    if "real_similar_check" in request.fixturenames:
+        return
+
+    async def _none(*_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr("meho_backplane.kb.similar.find_similar_entries", _none)
+
+
+@pytest.fixture
+def real_similar_check() -> None:
+    """Opt out of :func:`_no_similar_kb_entries`: run the real similar-entries search."""

@@ -22,6 +22,9 @@ Route inventory
   :class:`KbEntryCreate`. Returns :class:`KbEntry` with HTTP **201**
   for a genuinely-new slug and **200** for an in-place overwrite of an
   existing slug (#1845 -- ``201`` on overwrite is REST-incorrect).
+  A new slug with similar entries answers **409** and writes nothing,
+  unless ``create_anyway`` is set; ``dry_run`` answers **200** and
+  writes nothing (both with :class:`KbSimilarCheck`).
   Role: ``tenant_admin``.
 * ``DELETE /api/v1/kb/{slug}`` -- delete an entry. Returns 204 on
   success **and** when the row was already absent (idempotent
@@ -122,7 +125,7 @@ from typing import Any, Final
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from meho_backplane.api.v1._freetext_filter import (
@@ -143,6 +146,7 @@ from meho_backplane.kb.schemas import (
     KbSharedSlugError,
 )
 from meho_backplane.kb.service import KbListOrder
+from meho_backplane.kb.similar import KbSimilarCheck, check_new_entry
 from meho_backplane.lesson_header import LessonHeaderError
 
 __all__ = ["router"]
@@ -209,6 +213,17 @@ class KbEntryCreate(BaseModel):
     )
     body: str = Field(min_length=1)
     metadata: dict[str, Any] | None = None
+    create_anyway: bool = Field(
+        default=False,
+        description="Create a new slug even when similar entries exist.",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "Write nothing. Answer 200 with the similar entries and whether the write would go "
+            "through."
+        ),
+    )
 
 
 class KbEntryPreview(BaseModel):
@@ -422,11 +437,21 @@ async def show_kb(
     status_code=http_status.HTTP_201_CREATED,
     responses={
         http_status.HTTP_200_OK: {
-            "model": KbEntry,
+            "model": KbEntry | KbSimilarCheck,
             "description": (
                 "An existing entry with this slug was overwritten in "
                 "place (id + created_at preserved, updated_at bumped). "
-                "201 is returned only for a genuinely-new slug."
+                "201 is returned only for a genuinely-new slug. With "
+                "`dry_run`, the answer is a KbSimilarCheck and nothing "
+                "is written."
+            ),
+        },
+        http_status.HTTP_409_CONFLICT: {
+            "model": KbSimilarCheck,
+            "description": (
+                "The slug is new and similar entries exist. Nothing was "
+                "written. Update one of the listed entries, or send the "
+                "create again with `create_anyway`."
             ),
         },
     },
@@ -435,7 +460,7 @@ async def create_kb(
     body: KbEntryCreate,
     response: Response,
     operator: Operator = _require_admin,
-) -> KbEntry:
+) -> KbEntry | JSONResponse:
     """Create / re-index one kb entry under the operator's tenant.
 
     ``tenant_admin`` only -- ``operator`` role gets 403 via
@@ -469,6 +494,12 @@ async def create_kb(
     that was created. The body content is NOT bound -- the audit
     row is for the operation, not the document content (which lives
     in the ``documents`` table and is recoverable via ``kb.show``).
+
+    A new slug is first checked for similar entries
+    (:func:`~meho_backplane.kb.similar.check_new_entry`). When some exist
+    and ``create_anyway`` is not set, nothing is written and the answer
+    is **409** with a :class:`KbSimilarCheck`. ``dry_run`` writes nothing
+    and answers **200** with a :class:`KbSimilarCheck`.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_KB_OP_IDS["create"],
@@ -477,6 +508,26 @@ async def create_kb(
     )
     service = KbService()
     try:
+        check = await check_new_entry(
+            operator.tenant_id,
+            body.slug,
+            body.body,
+            body.metadata,
+            actor_sub=operator.sub,
+            may_change_any=True,
+            create_anyway=body.create_anyway,
+            dry_run=body.dry_run,
+        )
+        if check is not None:
+            structlog.contextvars.bind_contextvars(
+                audit_created=False, audit_similar_count=len(check.similar)
+            )
+            return JSONResponse(
+                status_code=http_status.HTTP_200_OK
+                if body.dry_run
+                else http_status.HTTP_409_CONFLICT,
+                content=check.model_dump(mode="json"),
+            )
         entry, created = await service.create_entry(
             tenant_id=operator.tenant_id,
             slug=body.slug,

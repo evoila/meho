@@ -47,6 +47,8 @@
     slug           -- str: pre-populated slug (empty on first open)
     body           -- str: pre-populated body (empty on first open)
     tags           -- str: pre-populated tags (empty on first open)
+    similar        -- list[KbSimilarEntry]: similar entries that stopped
+                      the save of a new slug (empty otherwise)
     csrf_token     -- str: CSRF token for HTMX headers
 -#}
 
@@ -86,6 +88,33 @@
       aria-live="assertive"
     >
       <span>{{ _error }}</span>
+    </div>
+    {% endif %}
+
+    {# ----- Similar entries (shown when they stopped the save) ----- #}
+    {% set _similar = similar | default([]) %}
+    {% if _similar %}
+    <div class="px-6 pt-3 text-sm" id="kb-editor-similar">
+      <p class="font-medium">Similar entries</p>
+      <ul class="list-disc pl-5" aria-label="Similar entries">
+        {% for item in _similar %}
+        <li>
+          <a href="/ui/kb/{{ item.slug }}" class="link link-primary font-mono" target="_blank" rel="noopener">{{ item.slug }}</a>
+          {% if item.summary %}<span class="opacity-70">: {{ item.summary }}</span>{% endif %}
+          <span class="opacity-50 text-xs">(score {{ "%.2f" | format(item.score) }}{% if item.match == "same_product_version" %}, same product and version{% endif %})</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <label class="label cursor-pointer justify-start gap-2">
+        <input
+          type="checkbox"
+          name="create_anyway"
+          value="true"
+          form="kb-editor-form"
+          class="checkbox checkbox-sm"
+        />
+        <span class="label-text">Create anyway</span>
+      </label>
     </div>
     {% endif %}
 

@@ -1554,6 +1554,13 @@ class Settings(BaseModel):
     # Only the owner tenant can write them. Read through
     # :attr:`kb_shared_tenant_set`. Set via ``KB_SHARED_TENANT_IDS``.
     kb_shared_tenant_ids: str = Field(default="")
+    # Lowest cosine score (0 to 1) at which an existing knowledge entry
+    # counts as similar to a new one. A create of a new slug that finds
+    # such an entry writes nothing and lists it (kb/similar.py). With the
+    # default embedding model a reworded copy scores about 0.9 and a
+    # different note on the same product about 0.8. Set via
+    # ``KB_SIMILAR_MIN_SCORE``.
+    kb_similar_min_score: float = Field(default=0.85, ge=0.0, le=1.0)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -2828,6 +2835,7 @@ def get_settings() -> Settings:
         ),
         gsm_param_allowed_projects=os.environ.get("GSM_PARAM_ALLOWED_PROJECTS", "").strip(),
         kb_shared_tenant_ids=os.environ.get("KB_SHARED_TENANT_IDS", "").strip(),
+        kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

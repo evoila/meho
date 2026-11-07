@@ -256,6 +256,70 @@ expected-revision check. A compare-and-set API waits until a real
 multi-writer workflow needs it. Directory ingest uses a different
 rule (below): it never lets file order pick a winner.
 
+### Similar entries at write time (`kb/similar.py`)
+
+A create of a **new slug** first looks for entries that already say
+something similar. This keeps duplicates out of the store. The surfaces
+call `check_new_entry(...)` before `create_entry`: MCP
+`add_to_knowledge`, REST `POST /api/v1/kb`, CLI `meho kb add`, and the
+console editor and uploads. `create_entry` itself does not change.
+Directory ingest (`meho kb ingest`) and the import job do not run the
+check; they keep their own dry run.
+
+How it decides:
+
+1. The slug, the lesson header and the shared scope are checked first,
+   with the same errors as the create.
+2. When the tenant already has the slug, the write is an update. The
+   check does not run, and the write goes on as before.
+3. Otherwise it searches the kb passages of the tenant and of the shared
+   scope (`retrieve` plus `add_shared_hits`) with the summary and the
+   start of the body. When the header names `product` and `version`, a
+   first search is narrowed to those values. Those entries are listed
+   first (`match: same_product_version`), then the others
+   (`match: close_meaning`), best score first, at most five
+   (`SIMILAR_LIMIT`).
+4. An entry counts only when its best passage has a cosine score of at
+   least `KB_SIMILAR_MIN_SCORE` (setting `kb_similar_min_score`,
+   default `0.85`). With the default embedding model a reworded copy
+   scores about 0.9 and a different note on the same product about 0.8.
+
+When similar entries exist, **nothing is written**. The answer
+(`KbSimilarCheck`) lists each entry with its slug, entry id, current
+`revision_id`, summary, product, version, status, a 200-character
+snippet, the score, and `may_change`. `may_change` follows the owner
+rule: the entry is in the caller's own tenant, and the caller may
+change any entry (tenant admin, reviewer) or created it. A shared entry
+of another tenant is listed with `may_change: false`. The writer then
+updates one of the entries (the `revision_id` names the revision it
+read), or sends the create again with `create_anyway: true`.
+
+`dry_run: true` gives the same answer and writes nothing. `would_write`
+says whether the same call without `dry_run` would write; for an
+existing slug `slug_exists` is true and the list is empty.
+
+Per surface:
+
+| Surface | Similar entries found | Dry run |
+|---|---|---|
+| MCP `add_to_knowledge` | normal result with `written: false`, `reason: similar_entries`; summary, snippet, product, version and status are wrapped as untrusted text | same, `reason: dry_run` |
+| REST `POST /api/v1/kb` | HTTP `409` with `KbSimilarCheck` | HTTP `200` with `KbSimilarCheck` |
+| CLI `meho kb add` | lists the entries, exit code 1 (`similar_entries`) | lists them, exit code 0 |
+| Console editor and uploads | the editor modal lists the entries with a "Create anyway" box; an upload row names them | — |
+
+The answer stays small: at most five entries, each text cut at 200
+characters, so it is far inside the MCP size limit.
+
+The check is advice at write time, not a lock. Two writers that create
+similar entries at the same moment both get through. The weekly upkeep
+merges such duplicates later.
+
+Tests: the default test database is SQLite, which cannot run the
+search. `tests/conftest.py::_no_similar_kb_entries` makes the search
+find nothing in every test, unless the test requests the
+`real_similar_check` fixture and mocks `retrieve` itself
+(`tests/test_kb_similar.py`).
+
 ### Cross-principal write & delete semantics (#1845)
 
 kb rows are **tenant-shared**. Any `tenant_admin` in a tenant may

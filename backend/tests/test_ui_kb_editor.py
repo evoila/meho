@@ -761,3 +761,106 @@ def test_editor_save_error_rerenders_modal_with_editor_anchor_and_csrf() -> None
     assert new_csrf_cookie in html, (
         "Fresh CSRF token must appear inside the re-rendered modal fragment"
     )
+
+
+def _similar_check() -> object:
+    from meho_backplane.kb.similar import KbSimilarCheck, KbSimilarEntry
+
+    return KbSimilarCheck(
+        slug="new-entry-slug",
+        reason="similar_entries",
+        would_write=False,
+        slug_exists=False,
+        similar=[
+            KbSimilarEntry(
+                slug="old-entry",
+                entry_id=uuid.uuid4(),
+                revision_id=uuid.uuid4(),
+                summary="The old summary",
+                product=None,
+                version=None,
+                status=None,
+                snippet="old text",
+                score=0.93,
+                match="close_meaning",
+                may_change=True,
+            )
+        ],
+        min_score=0.85,
+        next_step="n",
+    )
+
+
+def test_editor_save_with_similar_entries_saves_nothing_and_lists_them() -> None:
+    """A new slug next to a similar entry is not saved; the modal lists it with "Create anyway"."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    fake_create = AsyncMock()
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
+                new_callable=AsyncMock,
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=_similar_check(),
+            ) as fake_check,
+            patch("meho_backplane.ui.routes.kb.routes.KbService.create_entry", fake_create),
+        ):
+            response = client.post(
+                "/ui/kb/new",
+                data={"slug": "new-entry-slug", "body": "# Hello", "tags": ""},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "Similar entries exist" in response.text
+    assert "/ui/kb/old-entry" in response.text
+    assert "The old summary" in response.text
+    assert 'name="create_anyway"' in response.text
+    fake_create.assert_not_awaited()
+    assert fake_check.await_args.kwargs["create_anyway"] is False
+
+
+def test_editor_save_create_anyway_is_passed_on() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    fake_entry = MagicMock(spec=KbEntry)
+    fake_entry.slug = "new-entry-slug"
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
+                new_callable=AsyncMock,
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as fake_check,
+            patch(
+                "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
+                new_callable=AsyncMock,
+                return_value=(fake_entry, True),
+            ),
+        ):
+            response = client.post(
+                "/ui/kb/new",
+                data={"slug": "new-entry-slug", "body": "# Hello", "create_anyway": "true"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 204, response.text
+    assert fake_check.await_args.kwargs["create_anyway"] is True

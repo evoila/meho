@@ -176,6 +176,25 @@ exists, extend it (read it, merge, re-add with the same slug) instead of
 creating a near-duplicate. The mirror habit on the read side: `search_*`
 **before asking the operator** a question the corpus may already answer.
 
+For knowledge, MEHO also checks this itself. Before it writes a **new**
+slug, it looks for entries that say something similar: first entries
+with the same `product` and `version` in the metadata, then entries
+close in meaning. When it finds some, it writes nothing and lists them
+(slug, summary, product, version, status, current revision, a short
+snippet, the score, and whether you may change the entry). Then you
+either update one of them, or create the new entry on purpose:
+
+```bash
+meho kb add vcenter-session-auth-2 --body @./note.md --dry-run        # write nothing, show similar entries
+meho kb add vcenter-session-auth-2 --body @./note.md --create-anyway  # create it anyway
+```
+
+On MCP the same inputs are `dry_run: true` and `create_anyway: true`;
+REST `POST /api/v1/kb` answers `409` when similar entries stop the
+create. The console editor and uploads have a "Create anyway" box.
+Directory ingest does not run this check. The score that counts as
+similar is the setting `KB_SIMILAR_MIN_SCORE` (default `0.85`).
+
 This is also how the checks **investigator** closes its loop — when it
 diagnoses a red dashboard it writes its structured finding into tenant
 memory under `checks-noise-<group-key>`, retrievable later via

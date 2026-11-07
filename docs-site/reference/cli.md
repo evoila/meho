@@ -2866,6 +2866,8 @@ meho kb add <slug> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--body` — entry body: inline text, @<path> to read a file, or @- to read from stdin
+- `--create-anyway` — create the new entry even when similar entries exist
+- `--dry-run` — write nothing; list the similar entries and say whether the write would go through
 - `--json` — emit raw KbEntry JSON instead of the human summary
 - `--metadata` — comma-separated key=value pairs to attach as entry metadata (e.g. owner=ops,source=runbook)
 

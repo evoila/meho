@@ -442,6 +442,18 @@ const (
 	KbProvenanceStateRecorded KbProvenanceState = "recorded"
 )
 
+// Defines values for KbSimilarCheckReason.
+const (
+	KbSimilarCheckReasonDryRun         KbSimilarCheckReason = "dry_run"
+	KbSimilarCheckReasonSimilarEntries KbSimilarCheckReason = "similar_entries"
+)
+
+// Defines values for KbSimilarEntryMatch.
+const (
+	KbSimilarEntryMatchCloseMeaning       KbSimilarEntryMatch = "close_meaning"
+	KbSimilarEntryMatchSameProductVersion KbSimilarEntryMatch = "same_product_version"
+)
+
 // Defines values for KindFilterValue.
 const (
 	KindFilterValueCron   KindFilterValue = "cron"
@@ -2404,9 +2416,10 @@ type BodyKbEditorPreviewUiKbEditorPreviewPost struct {
 
 // BodyKbEditorSaveUiKbNewPost defines model for Body_kb_editor_save_ui_kb_new_post.
 type BodyKbEditorSaveUiKbNewPost struct {
-	Body string  `json:"body"`
-	Slug string  `json:"slug"`
-	Tags *string `json:"tags,omitempty"`
+	Body         string  `json:"body"`
+	CreateAnyway *bool   `json:"create_anyway,omitempty"`
+	Slug         string  `json:"slug"`
+	Tags         *string `json:"tags,omitempty"`
 }
 
 // BodyKbSearchUiKbSearchPost defines model for Body_kb_search_ui_kb_search_post.
@@ -2416,13 +2429,15 @@ type BodyKbSearchUiKbSearchPost struct {
 
 // BodyKbUploadBulkUiKbUploadBulkPost defines model for Body_kb_upload_bulk_ui_kb_upload_bulk_post.
 type BodyKbUploadBulkUiKbUploadBulkPost struct {
-	File []string `json:"file"`
+	CreateAnyway *bool    `json:"create_anyway,omitempty"`
+	File         []string `json:"file"`
 }
 
 // BodyKbUploadSingleUiKbUploadPost defines model for Body_kb_upload_single_ui_kb_upload_post.
 type BodyKbUploadSingleUiKbUploadPost struct {
-	File string  `json:"file"`
-	Slug *string `json:"slug,omitempty"`
+	CreateAnyway *bool   `json:"create_anyway,omitempty"`
+	File         string  `json:"file"`
+	Slug         *string `json:"slug,omitempty"`
 }
 
 // BodyKeycloakClientScopeCreateUiKeycloakClientScopesCreatePost defines model for Body_keycloak_client_scope_create_ui_keycloak_client_scopes_create_post.
@@ -6730,7 +6745,13 @@ type KbEntry struct {
 // “extra="forbid"“ rejects unknown fields at 422 so a typo
 // ("body_text") doesn't silently become a no-op.
 type KbEntryCreate struct {
-	Body     string                  `json:"body"`
+	Body string `json:"body"`
+
+	// CreateAnyway Create a new slug even when similar entries exist.
+	CreateAnyway *bool `json:"create_anyway,omitempty"`
+
+	// DryRun Write nothing. Answer 200 with the similar entries and whether the write would go through.
+	DryRun   *bool                   `json:"dry_run,omitempty"`
 	Metadata *map[string]interface{} `json:"metadata"`
 
 	// Slug Operator-facing identifier in kebab-case. Must start with a lowercase letter, end with a lowercase letter or digit, and contain only lowercase letters, digits, hyphens, or dots. The leading-letter rule (G0.9.1-T8, Signal #15) is the most common surprise: '657-recovery' is rejected; rewrite as 'ticket-657-recovery'.
@@ -6843,6 +6864,42 @@ type KbProvenanceSourceKind string
 
 // KbProvenanceState defines model for KbProvenance.State.
 type KbProvenanceState string
+
+// KbSimilarCheck The answer of a create that wrote nothing.
+//
+// Given when similar entries were found (“reason="similar_entries"“)
+// or the caller asked for a dry run (“reason="dry_run"“).
+type KbSimilarCheck struct {
+	MinScore   float32              `json:"min_score"`
+	NextStep   string               `json:"next_step"`
+	Reason     KbSimilarCheckReason `json:"reason"`
+	Similar    []KbSimilarEntry     `json:"similar"`
+	Slug       string               `json:"slug"`
+	SlugExists bool                 `json:"slug_exists"`
+	WouldWrite bool                 `json:"would_write"`
+	Written    *bool                `json:"written,omitempty"`
+}
+
+// KbSimilarCheckReason defines model for KbSimilarCheck.Reason.
+type KbSimilarCheckReason string
+
+// KbSimilarEntry One existing entry that is similar to the entry about to be created.
+type KbSimilarEntry struct {
+	EntryId    openapi_types.UUID  `json:"entry_id"`
+	Match      KbSimilarEntryMatch `json:"match"`
+	MayChange  bool                `json:"may_change"`
+	Product    *string             `json:"product"`
+	RevisionId *openapi_types.UUID `json:"revision_id"`
+	Score      float32             `json:"score"`
+	Slug       string              `json:"slug"`
+	Snippet    string              `json:"snippet"`
+	Status     *string             `json:"status"`
+	Summary    *string             `json:"summary"`
+	Version    *string             `json:"version"`
+}
+
+// KbSimilarEntryMatch defines model for KbSimilarEntry.Match.
+type KbSimilarEntryMatch string
 
 // KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
 //
@@ -52489,9 +52546,12 @@ func (r ListKbApiV1KbGetResponse) StatusCode() int {
 type CreateKbApiV1KbPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *KbEntry
-	JSON201      *KbEntry
-	JSON422      *HTTPValidationError
+	JSON200      *struct {
+		union json.RawMessage
+	}
+	JSON201 *KbEntry
+	JSON409 *KbSimilarCheck
+	JSON422 *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -68082,7 +68142,9 @@ func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostR
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest KbEntry
+		var dest struct {
+			union json.RawMessage
+		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -68094,6 +68156,13 @@ func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostR
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest KbSimilarCheck
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

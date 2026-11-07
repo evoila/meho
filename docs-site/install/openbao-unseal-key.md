@@ -14,6 +14,19 @@ The commands below are for an install on your own Kubernetes. Replace
 Where MEHO's installer runs the cluster for you, the installer has its own
 commands for the same steps.
 
+## Which image, and which CPU
+
+The chart uses the plain OpenBao image (`quay.io/openbao/openbao`). It runs
+on any x86-64 CPU, also on a VM that shows only x86-64-v2, for example with
+a vSphere CPU compatibility mode (EVC).
+
+The UBI image (`quay.io/openbao/openbao-ubi`) needs x86-64-v3: the CPU must
+have the `avx2` and `bmi2` flags. On an older CPU it stops at once with
+`Fatal glibc error: CPU does not support x86-64-v3`. Use it only on newer
+CPUs. On OpenShift, where the pod gets any user id in group 0, set the UBI
+image in `coreVault.image` (the repository, the tag and the digest), and
+set `global.openshift: true`.
+
 ## Two modes
 
 | Mode | When | What happens after a restart |

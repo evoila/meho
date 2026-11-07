@@ -175,10 +175,10 @@ def test_on_renders_server_services_and_config() -> None:
 
 def test_official_image_pinned_by_digest() -> None:
     assert _container(_openbao_docs())["image"] == (
-        "quay.io/openbao/openbao-ubi@sha256:33c4c3a7aeb8b812d570939bd7275f829901031e0a6b3e655207d8f0945bd248"
+        "quay.io/openbao/openbao@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf"
     )
     by_tag = _container(_openbao_docs("--set", "coreVault.image.digest="))
-    assert by_tag["image"] == "quay.io/openbao/openbao-ubi:2.7.1"
+    assert by_tag["image"] == "quay.io/openbao/openbao:2.7.1"
 
 
 def test_config_file_for_openbao() -> None:

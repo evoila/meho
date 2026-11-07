@@ -25,14 +25,17 @@
 enabled: false
 
 image:
-  # -- Official OpenBao image, UBI variant: it runs as user 100 and also
-  # with any user id in group 0 (OpenShift).
-  repository: quay.io/openbao/openbao-ubi
+  # -- Official OpenBao image, plain (Alpine) variant. It runs on any
+  # x86-64 CPU. The UBI variant (`quay.io/openbao/openbao-ubi`) needs
+  # x86-64-v3 (AVX2 and BMI2) and stops at once on an x86-64-v2 VM. On
+  # OpenShift, where the pod gets any user id in group 0, set the UBI
+  # image here (with its own tag and digest).
+  repository: quay.io/openbao/openbao
   # -- Human-readable tag of the pinned image.
   tag: "2.7.1"
   # -- Manifest digest. When set it wins over `tag` in the rendered image
   # reference (`repository@digest`): quay tags can be moved, digests cannot.
-  digest: "sha256:33c4c3a7aeb8b812d570939bd7275f829901031e0a6b3e655207d8f0945bd248"
+  digest: "sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf"
   pullPolicy: IfNotPresent
 
 # -- The program in the image: `bao` for OpenBao, `vault` for a HashiCorp

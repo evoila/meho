@@ -12,9 +12,11 @@ SQL filters by `tenant_id` in both candidate statements.
 
 This is the shared read path for:
 
-- **G4 `meho kb search`** — `retrieve(source="kb")`, which ranks kb
-  passage rows (see "What search indexes for kb" below), surfaced via
-  `KbService.search_entries` and the `search_knowledge` MCP tool.
+- **G4 knowledge search** — `retrieve(source="kb")`, which ranks kb
+  passage rows (see "What search indexes for kb" below).
+  `KbService.search_entries` (used by the `search_knowledge` MCP tool and
+  the console) calls it. The `meho kb search` CLI calls
+  `POST /api/v1/retrieve` with `source="kb"`, so it reaches it too.
 - **G5 `meho recall --query`** — `retrieve(source="memory",
   memory_eligibility=...)` through `MemoryService.search_memories`
   (REST `POST /api/v1/memory/search` and the `search_memory` MCP tool).
@@ -67,15 +69,15 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   consumer — is protected without trusting client `metadata_filters`,
   and a client-supplied `metadata_filters={"user_sub": "<other>"}` can
   only narrow, never widen, the visible set. Tenant-broadcast kinds
-  (`memory-tenant` / `memory-target`) and every non-memory source
-  (`kb` / `operations` / `docs`) are unaffected — they carry no
-  per-principal `user_sub`. `None` (default) is allowed only for a call
-  where no Memory row can be a candidate (a `source` other than
-  `"memory"`), a call that passes `memory_eligibility`, or a call that
-  sets `all_principals=True` (see below). This is the
-  #1797 cross-principal-leak fix: before it, `POST /api/v1/retrieve
-  {source:"memory"}` and the MCP retrieve resource returned other
-  principals' user-scoped memories within the same tenant.
+  (`memory-tenant` / `memory-target`) and the kb sources (`kb` /
+  `kb-passage`) are unaffected — they carry no per-principal `user_sub`.
+  `None` (default) is allowed only for a call where no Memory row can be
+  a candidate (a `source` other than `"memory"`), a call that passes
+  `memory_eligibility`, or a call that sets `all_principals=True` (see
+  below). `MemoryService.search_memories` passes `memory_eligibility`,
+  and its principal turns on the same check. So `POST /api/v1/retrieve
+  {source:"memory"}` and the MCP retrieve resource return only the
+  caller's own user-scoped memories.
 - `memory_eligibility` — a frozen `MemoryEligibility` (tenant,
   principal, visible Memory kinds) built by
   `MemoryRbacResolver.eligibility()` (#3741). When set, `source='memory'`
@@ -119,10 +121,11 @@ Runs one `SELECT DISTINCT source, kind FROM documents` scoped to
 `retrieve` enforces: when `principal_sub` is set, a user-scoped
 `source='memory'` row (`memory-user` / `memory-user-tenant` /
 `memory-user-target`) contributes its value only to the principal that
-wrote it. The result is therefore exactly the set of values a diagnostics
-`retrieve` call could actually match — a docs-corpus collection name (a
-different substrate `retrieve` never queries) can never appear, and no
-cross-tenant or cross-principal value leaks into the suggestions.
+wrote it. A docs-corpus collection name (a different substrate `retrieve`
+never queries) can never appear, and the suggestions show no value from
+another tenant or another principal. The query does not apply the memory
+expiry check, the memory-kind eligibility or the kb head/passage mapping,
+so it can list a value that no search returns.
 
 Returns a frozen `RetrievalFacets` with sorted, de-duplicated `sources`
 and `kinds` tuples. Unlike the candidate queries, the DISTINCT query is
@@ -163,7 +166,7 @@ retrieve()
         ├── embedding compute (encode_one — one fastembed forward-pass)
         ├── _vector_literal (Python list[float] → pgvector text literal)
         ├── metadata_filters JSON serialisation (sort_keys=True)
-        ├── parallel-style: _bm25_candidates + _cosine_candidates
+        ├── _bm25_candidates, then _cosine_candidates (one after the other, same session)
         │     (raw SQL — pgvector / PG-FTS operators have no SQLAlchemy ORM)
         ├── _rrf_fuse (pure function, in-process)
         └── _hydrate_hits (single IN-fetch for the top-limit ids)
@@ -193,7 +196,7 @@ payload deliberately omits the raw query (only `query_hash` is
 stored — SHA-256 hex of UTF-8) and the metadata filter values (only
 the sorted key list is stored as `metadata_filters_keys`). Values
 may carry tenant-shaped identifiers; storing keys-only preserves
-auditability without leaking content.
+auditability without storing the content.
 
 ### MCP `search_knowledge` tool surface
 
@@ -271,7 +274,10 @@ changes (a new **indexing generation**, so new passage ids).
   admits `kb-passage` rows. `meho kb search`, `search_knowledge` and
   `POST /api/v1/retrieve` with `source="kb"` therefore rank passages.
 - A kb head row (`source="kb"`) is not a candidate once its entry has
-  passage rows. An entry never appears twice.
+  passage rows. A head row and its passages never both appear.
+  `POST /api/v1/retrieve` and `meho kb search` return one row per
+  matching passage, so one entry can show on several rows. Only
+  `KbService.search_entries` folds them into one hit per entry.
 - Memory and every other source are not affected.
 
 **What search returns.** `KbService.search_entries` ranks up to 50

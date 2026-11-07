@@ -243,7 +243,12 @@ func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
 	}
 	// The next step a failed multi-step operation names (#5377), for
 	// example the VM question that holds the change.
-	if o.Guidance != nil && *o.Guidance != "" {
+	// MEHO does not know if the change happened (#5025). Say what to do. The
+	// summary's guidance of such a run is this same advice, so the one
+	// warning line stands for both.
+	if d.ResultState != nil && *d.ResultState == api.ApprovalResultStateUncertain {
+		fmt.Fprintln(w, "Warning:      "+uncertainAdvice)
+	} else if o.Guidance != nil && *o.Guidance != "" {
 		fmt.Fprintf(w, "Next step:    %s\n", output.SafeText(*o.Guidance))
 	}
 	if o.AuditId != nil {
@@ -258,10 +263,17 @@ func printResultHint(w io.Writer, d *api.ApprovalRequestView) {
 		return
 	}
 	switch *d.ResultState {
-	case api.ApprovalResultStateExecuted, api.ApprovalResultStateFailed:
+	case api.ApprovalResultStateExecuted, api.ApprovalResultStateFailed, api.ApprovalResultStateUncertain:
 		fmt.Fprintf(w, "Run output:   meho approvals result %s (only the sender can read it)\n", d.Id.String())
 	}
 }
+
+// uncertainOutcome is the execution_outcome the backplane answers when it
+// does not know if an approved change happened (#5025).
+const uncertainOutcome = "uncertain"
+
+// uncertainAdvice is the one piece of advice for such a run.
+const uncertainAdvice = "MEHO does not know if the change happened. Do not run it again. Check the target first."
 
 // runStateLabel turns the run state of an approved request into one short
 // word (one word, so the list table still splits on spaces). "-" when there
@@ -280,6 +292,8 @@ func runStateLabel(s *api.ApprovalResultState) string {
 		return "ok"
 	case api.ApprovalResultStateFailed:
 		return "FAILED"
+	case api.ApprovalResultStateUncertain:
+		return "UNCERTAIN"
 	default:
 		return string(*s)
 	}

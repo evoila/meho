@@ -194,6 +194,7 @@ from meho_backplane.operations.approval_expiry import (
     start_approval_expiry_sweeper,
     stop_approval_expiry_sweeper,
 )
+from meho_backplane.operations.approval_restart_recovery import recover_interrupted_approvals
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
@@ -376,6 +377,19 @@ async def _expire_approvals_from_older_release() -> None:
         structlog.get_logger().exception("approval_release_expiry_failed")
 
 
+async def _recover_interrupted_approvals() -> None:
+    """Mark approved runs that a restart cut short as uncertain (#5025).
+
+    Fail-open: a failure here is logged and the start goes on. Nothing is
+    run again either way, so the only cost of a miss is a request that stays
+    ``started`` until the next start.
+    """
+    try:
+        await recover_interrupted_approvals()
+    except Exception:
+        structlog.get_logger().exception("approval_restart_recovery_failed")
+
+
 async def _run_lifespan_shutdown() -> None:
     """Dispose every long-lived resource the lifespan opened.
 
@@ -540,6 +554,9 @@ async def _run_lifespan_startup() -> None:
     # #5030: an approval covers one exact release. End every waiting
     # approval made under another release before MEHO serves a request.
     await _expire_approvals_from_older_release()
+    # #5025: an approved run that a restart cut short has no result. MEHO
+    # does not know if the change happened, so mark it uncertain.
+    await _recover_interrupted_approvals()
     # The typed-op registration (G0.6-T-Refactor-Vault #390) does not run
     # here. The lifespan runs it after this function, around the start of
     # the background loops, so the operation rows commit only when the

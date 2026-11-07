@@ -401,7 +401,18 @@ until the entry is deleted.
 1. Translate optional `filters['kind']` into the substrate's `kind`
    argument; every other key becomes a `metadata_filters` term. Passage
    rows carry the entry's metadata, so these filters match passages
-   the same way they matched entries.
+   the same way they matched entries. The rules for these metadata
+   keys:
+   - **All keys must match.** A hit must have every key in its
+     metadata, with the same value. A key the entry does not have
+     drops the entry. The retriever checks this with PostgreSQL
+     `metadata @> filters`.
+   - **Values are simple values:** text, a number, `true` / `false`,
+     or `null`. The check compares top-level keys only.
+   - Example: `{"kind": "kb-entry", "source_kind": "evoila-distilled"}`
+     keeps only curated kb entries. `{"product": "vsphere",
+     "version": 8}` keeps only entries whose metadata has both
+     `product: "vsphere"` and `version: 8`.
 2. Call `meho_backplane.retrieval.retriever.retrieve` with
    `source=KB_SOURCE`, the query, the `kind` filter and
    `limit=CANDIDATE_LIMIT` (50). The retriever maps `source="kb"` (and

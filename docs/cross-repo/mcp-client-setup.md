@@ -17,7 +17,7 @@ MEHO speaks MCP 2025-06-18 over Streamable HTTP at the `/mcp` route. The wire pr
 
 > **Pre-flight (load-bearing).** Before any MCP client can authenticate against MEHO **via the pre-registration path**, the deployer MUST pre-create a **public** OAuth client in the Keycloak realm — MEHO doesn't implement RFC 7591 Dynamic Client Registration, and Keycloak's default Trusted Hosts policy returns 403 for anonymous DCR on any prod realm. **CIMD-capable realms (Keycloak ≥ 26.6.0) running CIMD-capable MCP clients (Claude Code on MCP `2025-11-25+`) can skip this pre-creation step entirely — see [§ `.mcp.json` `client_id` limitation](#claude-code-http-mcp-and-cursor--mcpjson-client_id-limitation) workaround #3 and the linked [CIMD onramp recipe](../../deploy/values-examples/README.md#cimd-onramp--no-pre-registered-client-keycloak--2660-experimental).** The full pre-registration deployer recipe (5-step realm walk + 4-wall symptom→cause→fix matrix covering both the CLI and the MCP onramp) lives in [`deploy/values-examples/README.md` § Auth onramp recipe (CLI + MCP)](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp). The steps below are the **MCP-client-side wire-up** that runs *after* the public client + mappers + scopes exist in the realm (or, on the CIMD path, after the realm's CIMD policy + profile are enabled); Step 2 here is the minimum-shape recap of the pre-registration client, with the full recipe as the authoritative source. If `tools/list` returns an empty list or every call 401s with `invalid_token`, the recipe's 4-wall matrix is the right place to start.
 
-If you're operating MEHO via the dogfood consumer (`evoila-bosnia/claude-rdc-hetzner-dc`), the realm-side change ships in Goal #11's cross-repo deps; follow the client-side steps below.
+If a consumer's infrastructure repo sets up your realm, that repo ships the realm-side change; follow the client-side steps below.
 
 ## Step 1 — Register the MCP resource URI as an audience in Keycloak
 
@@ -101,7 +101,7 @@ Every MEHO release attaches a **`meho-claude-desktop-<version>.mcpb`** file to i
 1. **MEHO MCP endpoint** (required) — your backplane's `/mcp` URL, e.g. `https://meho.internal.example/mcp`, reachable over your VPN.
 2. **Internal CA bundle** (optional) — a PEM bundle for the internal CA that signs the backplane's TLS certificate. Leave it empty for public-CA deploys, or when you trust the root CA in the OS trust store instead (see below).
 
-The bundle runs the same `mcp-remote` shim as the fallback below, vendored (`mcp-remote@0.1.38`) and run under Claude Desktop's own Node, so it needs no system Node.js or `npx` on `PATH`. Distribution is the GitHub Release asset channel only — there is no public marketplace or registry, and the internal-only posture is unchanged because the shim still runs on your own VPN-connected machine.
+The bundle runs the same `mcp-remote` shim as the fallback below, vendored (`mcp-remote@0.1.39`) and run under Claude Desktop's own Node, so it needs no system Node.js or `npx` on `PATH`. Distribution is the GitHub Release asset channel only — there is no public marketplace or registry, and the internal-only posture is unchanged because the shim still runs on your own VPN-connected machine.
 
 **Internal-CA trust — two routes.** On an internal-CA deploy use either one:
 
@@ -183,7 +183,7 @@ Pre-registering `meho-mcp` on the realm side (Step 2 above + the [auth onramp re
 
 Three workarounds today:
 
-1. **Use a wire-format-compatible MCP client.** Claude.ai Custom Connector, MCP Inspector, Cline, and Continue all expose a place for the operator to provide the OAuth client_id (Custom Connector picks it up from the realm's discovery once the operator approves the consent screen; the rest take it from `mcp.json` / per-client config). For everyday operator workflows, this is the first-class path.
+1. **Use a wire-format-compatible MCP client.** MCP Inspector, Cline, and Continue all expose a place for the operator to provide the OAuth client_id (they take it from `mcp.json` / per-client config). For everyday operator workflows, this is the first-class path.
 
 2. **Shim Claude Code / Cursor through `mcp-remote` (or an equivalent stdio→HTTP proxy).** The proxy holds a Bearer token (acquired out-of-band via `meho login --print-token` or any other path), translates the stdio MCP transport these clients spawn against an `npx mcp-remote ...` command-line into Streamable-HTTP calls to MEHO, and injects the `Authorization` header. The trade-off is operational: the proxy needs the token rotated when it expires; the Claude Code / Cursor process never sees the OAuth flow at all. This is the path for realms on Keycloak < 26.6.0 and for clients that don't yet support CIMD.
 
@@ -216,7 +216,7 @@ From v0.3.2 the 401 body carries a *specific* `detail` code naming the failed ch
 
 | `detail` code | What it means | Where to look |
 |---|---|---|
-| `invalid_audience` | The token's `aud` claim doesn't match `MCP_RESOURCE_URI`. | Confirm Step 1 wired the audience mapper on the *correct* client (the one that issues the operator's token). Confirm the OAuth `resource` parameter the client sends matches `MCP_RESOURCE_URI` — Claude.ai's Custom Connector flow derives `resource` automatically from the URL the operator pasted, but a forwarder / reverse proxy that rewrites the path can leave the audience claim pointing at the wrong URI. Capture the issued token via the realm's token-introspection endpoint and read `aud` to confirm. |
+| `invalid_audience` | The token's `aud` claim doesn't match `MCP_RESOURCE_URI`. | Confirm Step 1 wired the audience mapper on the *correct* client (the one that issues the operator's token). Confirm the OAuth `resource` parameter the client sends matches `MCP_RESOURCE_URI` — An MCP client derives `resource` from the URL the operator pasted, but a forwarder / reverse proxy that rewrites the path can leave the audience claim pointing at the wrong URI. Capture the issued token via the realm's token-introspection endpoint and read `aud` to confirm. |
 | `invalid_issuer` | The token's `iss` doesn't match `KEYCLOAK_ISSUER_URL`. A trailing slash on either side is fine: the backplane accepts the configured issuer with or without one, so authentik's `https://<host>/application/o/<slug>/` form works. | Confirm the client is authenticating against the same login server (Keycloak realm or authentik provider) `KEYCLOAK_ISSUER_URL` names; a stale OAuth state from a previous realm survives in some clients across config changes. |
 | `missing_sub` | The token lacks the `sub` claim — the silent killer (Wall #3 in the [consolidated matrix](../../deploy/values-examples/README.md#four-wall-symptom--cause--fix-matrix)). Keycloak 25+ moved `sub` into the `basic` client scope, and clients created via the admin REST API don't auto-inherit realm default-default scopes. | Add the `basic` default scope to the client (see [`deploy/values-examples/README.md` § Auth onramp recipe (CLI + MCP)](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp) Step 2 / Wall #3). |
 | `missing_exp` | The token lacks the `exp` claim entirely. RFC 9068 §2.2.1 makes `exp` REQUIRED on access tokens; the backplane rejects a token with no `exp` rather than treating it as non-expiring. | Configure the issuing client to emit `exp` (Keycloak does by default — a missing `exp` usually means a hand-minted or misconfigured token). |
@@ -240,7 +240,7 @@ The client attempted dynamic client registration (RFC 7591) and Keycloak rejecte
 
 ### `tools/list` returns an empty list
 
-The operator's token carries a `tenant_role` claim below the role rank any registered tool requires (`read_only < operator < tenant_admin`). v0.2 ships only `meho_status` (`read_only` minimum), so an empty list means the JWT lacks the `tenant_role` claim entirely or carries a role below `read_only`. Walk back through the realm's `tenant_role` mapper.
+The operator's token carries a `tenant_role` claim below the role rank any registered tool requires (`read_only < operator < tenant_admin`). `meho_status` needs only `read_only`, and a session with no chosen tenant still lists it, so an empty list means the JWT lacks the `tenant_role` claim entirely or carries a role below `read_only`. Walk back through the realm's `tenant_role` mapper.
 
 ### Newly-shipped tools don't appear after a backplane upgrade
 

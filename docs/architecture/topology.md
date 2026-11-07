@@ -23,8 +23,9 @@ operator (or an agent, before recommending a destructive op) can ask
 - **`Connector.discover_topology(target) -> TopologyHints`** — the
   per-connector probe hook on the connector ABC
   (`backend/src/meho_backplane/connectors/base.py`). The base class
-  returns an empty `TopologyHints`; vSphere / Kubernetes / Vault
-  override it. `TopologyHints` / `NodeHint` / `EdgeHint` are frozen
+  returns an empty `TopologyHints`; in this repository only the
+  Kubernetes connector overrides it (see
+  [Curated-until-populator-covers policy](#curated-until-populator-covers-policy)). `TopologyHints` / `NodeHint` / `EdgeHint` are frozen
   Pydantic v2 models in
   `backend/src/meho_backplane/connectors/schemas.py`.
 - **On-demand + scheduled refresh** — `refresh_target_topology(target,
@@ -49,11 +50,11 @@ operator (or an agent, before recommending a destructive op) can ask
   in GCP Secret Manager reads with its own service identity, so its
   scheduled refreshes work.
 - **Three read verbs via recursive CTE** — in `topology/query.py`:
-  - `find_dependents(operator, name, *, kind=None, depth=16, kind_filter=None)`
+  - `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, relation_class=None, include_stale=True)`
     — reverse closure, "what depends on me".
-  - `find_dependencies(operator, name, *, kind=None, depth=16, kind_filter=None)`
+  - `find_dependencies(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, relation_class=None, include_stale=True)`
     — forward closure, "what I depend on".
-  - `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8)`
+  - `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8, include_stale=True, direction="undirected", relation_class=None, missing_endpoint_raises=False)`
     — shortest unweighted path (bidirectional BFS), or `None` if
     unreachable.
 
@@ -77,8 +78,12 @@ operator (or an agent, before recommending a destructive op) can ask
 - **Curated-edge MCP tools** (`meho_topology_annotate` /
   `meho_topology_unannotate`, both `tenant_admin` only) — admin
   meta-tools in the `meho.*` namespace exposing the write half of
-  the G9.2 surface. Not on the daily ~17 meta-tool agent surface;
-  an `operator`-role session never sees them in `tools/list`.
+  the G9.2 surface. They are operator-plane tools, not on the
+  26-tool working surface: they are listed only for a `tenant_admin`
+  session that asked for the `mcp:admin` scope. Both run through the
+  dispatcher (`topology.annotate` / `topology.unannotate` on the
+  synthetic `topology-graph-1.x` connector), so the policy gate runs
+  on each call.
 
 CLI, REST (`/api/v1/topology*`, `/api/v1/targets/discover`), and the
 MCP meta-tools are **sibling fronts on one backplane** — each calls the
@@ -102,11 +107,10 @@ separators. A novel kind (`dns-record`, `database`, `certificate`,
 normal write — no migration, no registry, no per-tenant governance
 table ("dumb substrate, smart agent"). Human `tenant_admin` writes
 stay zero-friction on every front; for AGENT principals the write
-itself becomes approval-gated when T3
-[#2537](https://github.com/evoila/meho/issues/2537) lands (until
-then agent writes are immediate, like human writes), at which point
-a human sees a novel agent-invented kind at the moment it is
-proposed.
+itself waits for a person to approve it (T3
+[#2537](https://github.com/evoila/meho/issues/2537): the MCP write
+tools run through the dispatcher's policy gate), so a human sees a
+novel agent-invented kind at the moment it is proposed.
 
 Enforcement layers:
 
@@ -218,12 +222,12 @@ vocabulary. Such a write inserts clean (`source: curated, conflicts:
 []`) **only when no other edge already sits on that ordered pair**,
 because §6 detection keys off *existing* edges. The supersede pass
 (rule 1) only marks `source='auto'` rows
-([`annotate.py:314`](../../backend/src/meho_backplane/topology/annotate.py)),
+([`annotate.py`](../../backend/src/meho_backplane/topology/annotate.py)),
 so it is genuinely dormant on an uncovered pair — there is no auto row to
 supersede. The incompatible-kind pass (rule 2), however, carries **no
 `source` filter**: it selects every different-kind edge on the same
 `(from, to)` pair regardless of origin
-([`annotate.py:366-371`](../../backend/src/meho_backplane/topology/annotate.py)).
+([`annotate.py`](../../backend/src/meho_backplane/topology/annotate.py)).
 So the clean-insert guarantee holds only where the pair is otherwise
 empty. If a *pre-existing curated* different-kind edge already sits on it
 — an operator curated `depends-on(A→B)`, then later curates
@@ -278,7 +282,8 @@ Each is a sibling of the others; none is a thin wrapper.
   1000 mirroring the substrate cap.
 - **MCP** — `meho_topology_annotate` and
   `meho_topology_unannotate` live in the `meho.*` admin namespace
-  (tenant_admin only, not on the daily ~17 meta-tool surface). The
+  (tenant_admin only, operator-plane tools that need the `mcp:admin`
+  scope; not on the 26-tool working surface). The
   read facet is `query_topology { kind: "edges", ... }` on the
   existing operator-role parametric tool — same primitive, the
   fourth `kind` value alongside `dependents` / `dependencies` /
@@ -443,7 +448,7 @@ Every node, edge, query, and refresh is scoped to
 `operator.tenant_id`, lifted from the validated JWT — never from a
 request argument. `query_topology` has no `tenant_id` argument at all,
 so a cross-tenant probe is structurally impossible. Two tenants can own
-same-named targets and nodes (e.g. both have a `rdc-vcenter`); each
+same-named targets and nodes (e.g. both have a `prod-vcenter`); each
 tenant's queries resolve only their own rows, and a refresh in one
 tenant never touches another's. Cross-tenant refresh is impossible
 because a refresh resolves its target by `(tenant_id, name)` — a

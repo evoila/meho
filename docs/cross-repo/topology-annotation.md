@@ -71,7 +71,8 @@ for callers wiring their own tooling.
   `meho topology refresh <target>` sweep). An annotation cannot create
   the endpoints — it asserts a relationship between two already-known
   nodes. If either endpoint is missing, the call returns HTTP 404
-  `node_not_found` with the unmatched `(kind, name)` pair so you know
+  `node_not_found` with the unmatched name (and kind, when you gave
+  one) so you know
   which side to backfill (refresh the owning target or fix the name).
 
 ## When to annotate, when not to
@@ -108,7 +109,7 @@ Neither relationship appears in any probe's output:
   namespaces — never the upstream Postgres.
 - The Vault connector sees roles, mounts, policies — never which
   Kubernetes namespace consumes them.
-- The Postgres / vSphere / RDC connectors see their own local view.
+- The Postgres and vSphere connectors see their own local view.
 
 Once both edges are annotated, a single
 `query_topology { kind: dependents, target: prod-db-1 }` surfaces the
@@ -149,13 +150,13 @@ vocabulary.
 **Why it inserts clean today.** §6 conflict detection keys off
 *existing* edges. The supersede pass only marks `source='auto'` rows
 (`_mark_same_kind_different_endpoint_superseded`,
-[`annotate.py:314`](../../backend/src/meho_backplane/topology/annotate.py)),
+[`annotate.py:295`](../../backend/src/meho_backplane/topology/annotate.py)),
 so it is dormant on an uncovered pair — there is no auto row to
 supersede. The incompatible-kind pass, however, carries **no `source`
 filter**: it selects every edge of a *different* kind on the same
 `(from, to)` pair, whatever its origin
 (`_mark_incompatible_kinds_conflict`,
-[`annotate.py:366-371`](../../backend/src/meho_backplane/topology/annotate.py)).
+[`annotate.py:378-383`](../../backend/src/meho_backplane/topology/annotate.py)).
 So the curated row inserts with `source: curated, conflicts: []` **only
 when the pair is otherwise empty**. If a pre-existing curated
 different-kind edge already sits on it — an operator curated
@@ -242,9 +243,9 @@ probes — annotate it when the relationship exists.
 A kind that isn't in the table is **not** refused — any valid slug
 (lowercase alphanumeric runs joined by single `.` / `_` / `-`, 2-63
 chars) passes straight through. Only a *malformed* slug is rejected
-at the HTTP boundary with **422**; the error detail carries the slug
-`pattern` plus the well-known kinds under `well_known_kinds` as
-suggestions — no need to grep the source to find a spelling.
+at the HTTP boundary with **422**. The answer is the standard FastAPI
+validation error, and it names the slug `pattern`. The well-known
+kinds are in the table above and in `meho topology annotate --help`.
 
 ## CLI walkthrough
 
@@ -260,7 +261,7 @@ The argument order is `meho topology annotate <from> <kind> <to>`:
 ```bash
 meho topology annotate customer-a-prod depends-on prod-db-1 \
     --note "consumer-a moved to its own database on 2026-04-17" \
-    --evidence-url "https://internal.evoila/runbooks/cust-a-db-migration"
+    --evidence-url "https://wiki.example.com/runbooks/cust-a-db-migration"
 ```
 
 Server-side this is **idempotent on `(from, kind, to)`** — a repeat
@@ -356,8 +357,12 @@ envelope so consumers can pipe `id` values into `unannotate`.
 `--conflicts` filters to edges carrying a non-empty
 `properties.conflicts_with` marker. That is the **canonical
 recoverability query** when something looks wrong: it surfaces every
-auto edge that a curated row has superseded *and* every pair of
-incompatible-kind edges that coexist over the same endpoint pair.
+pair of incompatible-kind edges that coexist over the same endpoint
+pair (§6 rule 2). It does not show the auto edges a curated row has
+superseded (§6 rule 1). Those carry `properties.superseded_by`, not
+`conflicts_with`. To find them, run
+`meho topology list-edges --source auto --json` and look for
+`superseded_by`.
 Pair with `--source curated` to narrow to "annotations I wrote that
 the probe disagrees with"; pair with `--source auto` to narrow to
 "probes that the curated overrides contradict".
@@ -471,8 +476,9 @@ Two invariants worth pinning down for the operator running into a
   unannotated or the auto edge is no longer rediscovered.
 
 If a blast-radius query "missing" an edge surprises you, the first
-diagnostic is `meho topology list-edges --conflicts` — odds are a
-curated row is intentionally hiding it.
+diagnostic is `meho topology list-edges --source auto --json`. Look
+for a `superseded_by` marker: a curated row hides that auto edge on
+purpose.
 
 ## Surfaces — REST, MCP, and CLI side-by-side
 
@@ -526,17 +532,18 @@ the G9.1 `GET /path` route uses.
 
 ### MCP
 
-Three of the four topology MCP tools land for tenant-admin sessions;
-the fourth is the read facet on the operator surface.
+The two write tools need `tenant_admin`. The listing is a facet of
+`query_topology` and needs `operator`.
 
 - `meho_topology_annotate` (tenant_admin) — arguments
   `{from_name, kind, to_name, from_node_kind?, to_node_kind?, note?,
   evidence_url?}`. Returns
   `{edge_id, from: {id, kind, name}, to: {id, kind, name}, kind,
-  source, conflicts: [<edge-id>...]}`. The `conflicts` array is the
-  §6 rule-2 surfacing on the response shape; superseded auto edges
-  are *not* listed on the return shape (inspect them with
-  `query_topology { kind: edges, conflicts: true }` if you need to).
+  source, conflicts: [<edge-id>...], superseded: [<edge-id>...]}`.
+  `conflicts` lists the edges of a different kind on the same pair
+  (§6 rule 2). `superseded` lists the auto edges this annotation
+  displaced (§6 rule 1). Both lists match the audit and broadcast
+  payload.
 - `meho_topology_unannotate` (tenant_admin) — arguments
   `{edge_id}` **or** `{from_name, kind, to_name, from_node_kind?,
   to_node_kind?}`. The two selector forms are mutually exclusive at
@@ -552,11 +559,13 @@ the fourth is the read facet on the operator surface.
   per [CLAUDE.md](../../CLAUDE.md) postulate 5's narrow-waist
   guidance.
 
-The admin meta-tools live in the `meho.*` admin namespace
-(Initiative #364 §9) — not on the daily ~17 meta-tool agent surface.
-An `operator`-role MCP session never sees them in `tools/list`; a
-direct `tools/call` is refused at the dispatcher's call-time RBAC
-re-check with JSON-RPC `-32602 forbidden`.
+The two write tools are on the operator surface, not on the default
+working surface. A session lists them only when it asked for the
+`mcp:admin` scope and its user has `tenant_admin`. Any other session
+does not see them in `tools/list`, and a direct `tools/call` is
+refused with JSON-RPC `-32602 forbidden`. An agent login writes the
+graph with `call_operation` on connector `topology-graph-1.x`. That
+write waits until a person approves it.
 
 The MCP write tools accept `from_node_kind` / `to_node_kind`
 disambiguation arguments only when bare names are ambiguous — same
@@ -635,15 +644,15 @@ would let a probing operator distinguish "row never existed" from
   candidate kinds and exits non-zero; pass `--from-kind` /
   `--to-kind` (or `from_node_kind` / `to_node_kind` on MCP) to pin
   the resolution.
-- **Self-edges.** Asserting `nodeX kind nodeX` returns **422
-  `self_edge`** — every curated kind expresses a relationship
-  between two distinct nodes.
+- **Self-edges.** MEHO does not check for them: `nodeX kind nodeX`
+  is stored like any other edge. Do not assert one — every
+  well-known kind expresses a relationship between two distinct
+  nodes.
 - **Malformed kind.** A kind that violates the slug grammar
   (uppercase, spaces, punctuation, length outside 2-63) is rejected
   at the Pydantic / `inputSchema` boundary with HTTP 422 (REST) or
-  JSON-RPC `-32602` (MCP); the response names the pattern and echoes
-  the well-known kinds as suggestions. A well-formed novel kind is
-  accepted — the vocabulary is open.
+  JSON-RPC `-32602` (MCP); the response names the pattern. A
+  well-formed novel kind is accepted — the vocabulary is open.
 - **Role gating on writes.** `annotate` / `unannotate` require
   `tenant_admin`. An `operator`-role caller never sees the
   `meho_topology_*` tools in `tools/list` and a direct `tools/call`

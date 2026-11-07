@@ -9,11 +9,12 @@
 > - **[spec-ingestion.md](spec-ingestion.md)** — canonical reference for the G0.7 spec-ingestion pipeline as-shipped: OpenAPI 3.0/3.1 parser, `register_ingested_operations()` upsert + multi-spec merge + body-hash skip, two-pass LLM-summarised operation groups (`1 + ceil(N/50)` call budget), operator review-queue state machine (`staged → enabled → disabled`), the seven `meho connector ...` CLI verbs, `/api/v1/connectors*` REST routes, and the `meho.connector.*` admin MCP tools. Companion operator runbook: [`docs/cross-repo/connector-ingestion.md`](../cross-repo/connector-ingestion.md).
 >
 > Connector kinds (three, all first-class, all versioned, multi-impl per product):
-> - **Generic (ingested) connectors** — operations auto-derived from a vendor OpenAPI spec by G0.7 into `endpoint_descriptor` rows (`source_kind='ingested'`). Examples planned: `vmware-rest-9.0`, `nsx-4.2`, `harbor-2.x`, `hetzner-robot-2026-04`.
-> - **Typed connectors** — operations hand-coded against a vendor SDK; register into `endpoint_descriptor` via `register_typed_operation()` driven by `register_typed_op_registrar()` + the lifespan-run registrar list (`source_kind='typed'`). Shipped: `vault-1.x`, `k8s-1.x` (kubernetes_asyncio per decision #8). Planned: `bind9-9.x`, `pfsense-2.7`, `holodeck-9.0`.
+> - **Generic (ingested) connectors** — operations auto-derived from a vendor OpenAPI spec by G0.7 into `endpoint_descriptor` rows (`source_kind='ingested'`). Example: `harbor-rest-2.x`.
+> - **Typed connectors** — operations hand-coded against a vendor SDK; register into `endpoint_descriptor` via `register_typed_operation()` driven by `register_typed_op_registrar()` + the lifespan-run registrar list (`source_kind='typed'`). Examples: `vault-1.x`, `k8s-1.x` (kubernetes_asyncio per decision #8), `bind9-ssh-9.x`.
+> - The full list of connectors in this repository, with kind and version range, is the generated [connector reference](../../docs-site/reference/connectors.md). The VMware connectors ship in evoila's enterprise pack, not in this repository ([decision record](../decisions/2026-10-28-own-connectors-leave-the-public-tree.md)).
 > - **Composite operations** — hand-authored handlers that orchestrate other operations via the dispatcher's recursive sub-call (`source_kind='composite'`), with bounded recursion and audit-tree linkage.
 >
-> **No per-op MCP tools.** The agent surface is ~17 meta-tools per CLAUDE.md. Vendor operations reach the agent via `search_operations(connector_id, query, group?)` + `call_operation(connector_id, op_id, target?, params)`. CLI alias verbs (`meho vmware vm list / cluster list / ...`) remain as operator-friendly conveniences that internally resolve to `call_operation` against the dispatcher.
+> **No per-op MCP tools.** The default agent surface is 26 meta-tools (22 without the docs add-on), pinned in [`docs/codebase/mcp.md`](../codebase/mcp.md) by `backend/tests/test_mcp_surface_conformance.py`. Vendor operations reach the agent via `search_operations(connector_id, query, group?)` + `call_operation(connector_id, op_id, target?, params)`. CLI alias verbs (`meho vmware vm list / cluster list / ...`) remain as operator-friendly conveniences that internally resolve to `call_operation` against the dispatcher.
 >
 > The `_op_map` pattern and `<product>.<resource>.<verb>` op-id namespace described below are **v0.2 transitional**. Operations now live in `endpoint_descriptor` rows; op_ids for ingested ops are `<METHOD>:<path>` (e.g. `GET:/api/vcenter/cluster`); op_ids for typed ops keep their dotted-namespace shape (`vault.kv.read`) but are stored as table rows, not in-code dicts. The shipped Vault + K8s connectors were refactored under [#390](https://github.com/evoila/meho/issues/390) + [#391](https://github.com/evoila/meho/issues/391).
 >
@@ -105,15 +106,18 @@ Lightweight reachability + auth-challenge. Reused as a readiness probe in the [c
 
 ```python
 class OperationResult(BaseModel):
-    status: str            # "ok" | "error" | "denied"
+    status: str            # "ok" | "pending" | "error" | "denied"
     op_id: str
     result: dict | list | None
     error: str | None
     duration_ms: float
+    handle: ResultHandle | None       # JSONFlux result handle for large sets
+    audit_id: UUID | None             # set once the dispatch audit row commits
+    delivery: Literal["complete", "partial", "unavailable"] | None
     extras: Mapping[str, Any]
 ```
 
-Raw response in `result`. JSONFlux result-handle wrapping for large sets is an external concern (set-shaped ops > 20 rows return a handle reference; full set fetched via a follow-up op).
+Raw response in `result`. A large set-shaped response comes back as a `handle` instead; the agent reads it with `result_query`. The thresholds are in [jsonflux.md](jsonflux.md).
 
 ### `AuthModel` (per-target identity model per v0.1-spec L447–454)
 
@@ -191,7 +195,7 @@ Connector (ABC)                                      ← G0.2-T1 (shipped)
 
 **HTTP adapter** (T3, shipped): shared `httpx.AsyncClient` per target with retry on idempotent verbs only. TLS trust is per-target (#1774), resolving in precedence order: **(1)** a `tls_ca_pin` target (#1784, the secure supersession) is built with a context from `ssl.create_default_context()` + `load_verify_locations(cadata=<pem>)`, which keeps `CERT_REQUIRED` + `check_hostname` **on** while trusting the pinned CA (the govc-thumbprint pattern) — takes precedence over `verify_tls=false`, and the two are mutually exclusive at the API; **(2)** a `verify_tls=False` target is built with a module-cached insecure `SSLContext` (`check_hostname` off, `CERT_NONE`) so it can reach a self-signed / internal-CA appliance with no pin (the audited last resort); **(3)** a `verify_tls=True` target with no pin (the default) is built with **no** `verify=` argument so `SSL_CERT_FILE` is honored natively for the trust-bundle wiring from PR #212 — byte-identical to a connector with no TLS config. Insecure opt-out is off by default and loud (WARN at construction + audit row from the create/update path); a CA-pin is logged at INFO (it stays secure) and likewise audited. The client pool key is the tenant-unique `(tenant_id, id)` (`target_cache_key`) plus the `(verify_tls, ca_pin_digest, base_url)` dimensions (`extra_cache_dimensions`) → `(tenant_id, id, verify_tls, ca_pin_digest, base_url)`, so a PATCH that flips the flag, rotates the pin, or changes what `_base_url` resolves (`extras.scheme` / `host` / `port` — `base_url` is fixed at client construction) is not served the stale client and the `(tenant_id, id)` tenant-isolation prefix (#1682/#1642) is unchanged (#2873). The `_base_url` read is **polymorphic** through the subclass override (the Prometheus/Loki plain-HTTP variants), so keying on the resolved URL — not the raw `extras.scheme` — captures Loki's default-`http` flip (where `scheme`-absent and `scheme=https` share a base scheme yet resolve to different URLs) and makes an invalid `extras.scheme` fail loud at key derivation instead of silently serving a stale client. For the operator-facing side of this — the secure trust-bundle path, the per-target CA-pin, and the `verify_tls=false` last resort — see the guidance in [`deploy/values-examples/README.md` § Connector dispatch against self-signed / internal-CA targets](../../deploy/values-examples/README.md#connector-dispatch-against-self-signed--internal-ca-targets). **SNI / cert-verify host decoupling** (`tls_server_name`, #2002): orthogonal to the three trust states above. httpx derives the TCP connect address, the wire `Host:` header, **and** the TLS SNI + cert-CN/SAN verification name all from the client's `base_url` host (httpcore: `server_hostname = request.extensions["sni_hostname"] or origin.host`). An appliance that pins its cert to an FQDN-CN but only accepts `Host: <IP>` (the FQDN is NXDOMAIN off-cluster) is therefore unreachable with `verify_tls=true` — until `tls_server_name` is set. When set, dispatch keeps `base_url=https://<host>` (connect + `Host:` = the IP) and threads `extensions={"sni_hostname": <tls_server_name>}` into every shared-helper request (`_request_json` / `_post_json`, plus the vRLI unauthenticated fingerprint `client.get`), so the cert is verified against the cert-CN override while the wire `Host:` stays the IP — keeping `verify_tls=true` (and optionally `tls_ca_pin`) instead of dropping to the insecure downgrade. It does **not** join the pool key (`extensions` are per-request, not per-client, so the pooled `base_url`-bound client is shared across SNI overrides safely). Nullable column added by migration `0050`; `None` (the default) derives the SNI / verify name from `host` byte-identically to before.
 
-**SSH adapter** (T4, shipped): asyncssh (async-native, no thread offload — beats paramiko for the event loop). Per-target connection cached in `SshConnector._connections`; `known_hosts=None` for v0.2 (host-key pinning deferred to v0.2.next). Auth reads `target.secret_ref`: `ssh_private_key` → key auth, `password` → password auth fallback. Closed on lifespan teardown via `aclose()`.
+**SSH adapter** (T4, shipped): asyncssh (async-native, no thread offload — beats paramiko for the event loop). Connections are pooled in `SshConnector._connections`, one per target and caller (see [connector-auth.md](connector-auth.md#cache-scoping-under-shared_service_account)). Auth reads `target.secret_ref`: `ssh_private_key` → key auth, `password` → password auth fallback. The host key is checked against the `known_hosts` lines in the target's secret; with neither a `known_hosts` pin nor a truthy `known_hosts_insecure`, the connect fails closed ([`adapters/ssh.py`](../../backend/src/meho_backplane/connectors/adapters/ssh.py)). Closed on lifespan teardown via `aclose()`.
 
 ## Library choices
 
@@ -206,7 +210,7 @@ Connector (ABC)                                      ← G0.2-T1 (shipped)
 
 ## The registry
 
-Module-level dict in `connectors/registry.py` (G0.2-T2, PR #295 open). Mirrors the chassis [`register_probe`](../../backend/src/meho_backplane/health.py) pattern:
+Module-level dict in `connectors/registry.py` (G0.2-T2). Mirrors the chassis [`register_probe`](../../backend/src/meho_backplane/health.py) pattern:
 
 ```python
 register_connector("vsphere", VSphereConnector)
@@ -219,23 +223,23 @@ Eager-imported at app startup via the FastAPI `lifespan` so module-side `registe
 
 > **Status:** the G0.6 operation substrate (Initiative #388) is the canonical dispatch surface. The earlier v1 chassis route `POST /api/v1/connectors/{product}/{op_id}` from G0.2-T6 was deprecated and removed by G0.6-T11 (#412); see [operations-substrate.md](operations-substrate.md) for the full dispatcher path.
 
-For an operator call like `meho operation call vmware-rest-9.0 vm.list --target rdc-vcenter` (CLI verb is the upcoming follow-up to G0.6-T8; the API route is live today):
+For an operator call like `meho operation call vmware-rest-9.0 vm.list --target my-vcenter`:
 
-1. CLI / MCP / direct HTTP → `POST /api/v1/operations/call` body `{connector_id: "vmware-rest-9.0", op_id: "vm.list", target: {"name": "rdc-vcenter"}, params: {...}}`.
+1. CLI / MCP / direct HTTP → `POST /api/v1/operations/call` body `{connector_id: "vmware-rest-9.0", op_id: "vm.list", target: {"name": "my-vcenter"}, params: {...}}`.
 2. FastAPI handler → `operations.dispatch(operator, connector_id, op_id, target, params)`.
-3. → `resolve_target(operator.tenant_id, "rdc-vcenter")` (G0.3) → `Target` row.
+3. → `resolve_target(operator.tenant_id, "my-vcenter")` (G0.3) → `Target` row.
 4. → `resolve_connector(target)` against the v2 registry (`(product, version, impl_id)` keyed) → `VSphereConnector` class instance.
 5. → `endpoint_descriptor` lookup by `(connector_id, op_id)`, `parameter_schema` validation, policy gate.
 6. → Branch on `source_kind`: `ingested` builds the HTTP request from `method` + `path`, `typed` resolves `handler_ref` to a callable, `composite` runs the handler with a recursive `dispatch` callable.
 7. → JSONFlux reducer wraps the response (pass-through default in v0.2).
 8. Returns `OperationResult(status="ok", result=[...], duration_ms=42.3)`.
 9. `AuditMiddleware` writes one row with `tenant_id`, `target_id`, `op_id`, `params_hash`, plus any `parent_audit_id` for composite-child dispatches.
-10. G6 broadcast publishes an event (aggregate-only for `credential_read` op-class per decision #3 in [locked-decisions.md](../decisions/locked-decisions.md)).
+10. No broadcast event is posted: the broadcast feed carries only agent announcements, and the audit row is the record.
 11. MCP path mirrors this: `tools/call name="call_operation"` dispatches through the same substrate. Vendor-specific identifiers (`vmware-rest-9.0`, `vm.list`) live in arguments, never in the MCP tool surface — see [CLAUDE.md](../../CLAUDE.md) postulate 5.
 
 ## Adding a new connector
 
-Once G0.2 fully lands:
+> This section is the v0.2 plan and is kept as history. Step 4 (one MCP tool per operation) is not how MEHO works: operations reach the agent through `search_operations` and `call_operation` only. For how to add a connector today, see the connector kit decision ([`2026-11-01-connector-kit.md`](../decisions/2026-11-01-connector-kit.md)) and [operations-substrate.md](operations-substrate.md).
 
 1. **Create the package** at `backend/src/meho_backplane/connectors/<product>/`.
 2. **Implement the subclass** in `connector.py`:
@@ -273,7 +277,7 @@ Once G0.2 fully lands:
    ```
 5. **Restart.** Lifespan eager-import picks up both the connector and the MCP tools.
 6. **Operator side:** register the target by importing a `targets.yaml` entry — `meho targets import targets.yaml` (see the cross-repo onboarding docs for the descriptor shape).
-7. **Verify:** `meho targets probe harbor-evba` → fingerprint. `meho harbor project.list` → ops.
+7. **Verify:** `meho targets probe my-harbor` → fingerprint. `meho harbor project.list` → ops.
 
 ### As an Initiative
 

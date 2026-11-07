@@ -13,10 +13,12 @@
 #                      — a patch tag republishes its minor in place)
 #                      and moves the `latest` alias, onto the gh-pages
 #                      branch that GitHub Pages serves. A pre-release
-#                      tag (v1.0.0-rc.1) publishes its minor too, but
-#                      leaves `latest` and the site root where they
-#                      are, so the public site keeps showing the last
-#                      final release until GA. The docs join
+#                      tag (v1.0.0-rc.1) never moves `latest` or the
+#                      site root, so the public site keeps showing the
+#                      last final release. It publishes under its
+#                      minor until that minor has a final tag, then
+#                      under its own name (1.0.1-rc.1); see
+#                      scripts/ci/docs_deploy.sh. The docs join
 #                      the image / chart / CLI as the fourth artefact a
 #                      `v*` tag publishes (docs/RELEASING.md).
 #
@@ -65,8 +67,7 @@ on:
     # Tag-driven deploy only. Docs versions are cut per release, like
     # the image / chart / CLI artefacts — a main push without a tag has
     # no version to publish under. Pre-release tags (v1.0.0-rc.1)
-    # deploy under their minor (1.0): the rc docs *are* that minor's
-    # docs in progress. They do not move `latest` (see the deploy step).
+    # publish too, but never move `latest` (see the deploy step).
     tags: ['v*']
   workflow_dispatch:
 
@@ -160,42 +161,15 @@ jobs:
       - name: Deploy versioned docs
         id: deploy
         # One docs version per minor: v0.26.3 publishes as "0.26" and
-        # re-points `latest`. `--update-aliases` lets `latest` move
-        # off the previous minor; `set-default latest` (idempotent)
-        # makes the site root redirect to the newest docs.
-        # A pre-release tag (it has a `-`, like v1.0.0-rc.1) deploys
-        # its minor without the `latest` alias and skips set-default,
-        # so `latest` and the site root stay on the last final
-        # release until the final tag moves them (#3860).
-        # workflow_dispatch on a non-tag ref has no version to derive,
-        # so it only rebuilds the default: guard on the ref shape.
-        run: |
-          set -euo pipefail
-          # Require a full vMAJOR.MINOR prefix — a malformed tag (e.g.
-          # `v1-hotfix`) must fail loudly here, not publish a garbage
-          # entry in the public version selector.
-          case "${GITHUB_REF_NAME}" in
-            v[0-9]*.[0-9]*)
-              VERSION=$(printf '%s' "${GITHUB_REF_NAME#v}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-              case "${GITHUB_REF_NAME}" in
-                *-*)
-                  uv run --project backend --no-sync mike deploy --push "${VERSION}"
-                  ;;
-                *)
-                  uv run --project backend --no-sync mike deploy --push --update-aliases "${VERSION}" latest
-                  uv run --project backend --no-sync mike set-default --push latest
-                  ;;
-              esac
-              # Hand the just-published MAJOR.MINOR to the reachability
-              # gate below so it polls THIS run's version path, not the
-              # site root.
-              printf 'version=%s\n' "${VERSION}" >> "${GITHUB_OUTPUT}"
-              ;;
-            *)
-              echo "Ref '${GITHUB_REF_NAME}' is not a vMAJOR.MINOR[.PATCH] tag — nothing to deploy." >&2
-              exit 1
-              ;;
-          esac
+        # re-points `latest`; the site root redirects to `latest`.
+        # A pre-release tag (it has a `-`, like v1.0.0-rc.1) never moves
+        # `latest` or the site root. It publishes under its minor while
+        # that minor has no final tag yet, else under its own name
+        # (1.0.1-rc.1), because `latest` serves the minor's folder
+        # (#3860). The script header lists the cases; it fails on a ref
+        # that is not a vMAJOR.MINOR tag, and hands the published
+        # version to the reachability check below.
+        run: bash scripts/ci/docs_deploy.sh "${GITHUB_REF_NAME}"
 
       - name: Verify published docs are reachable
         # A green `mike deploy` only means the built site was committed

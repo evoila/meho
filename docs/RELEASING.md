@@ -810,13 +810,14 @@ pre-release identifier, read from the YAML:
 | Form-2 download | `meho-linux-1.0.0-rc.N-amd64.tar`, `SHA256SUMS-linux` and `SHA256SUMS-linux.cosign.bundle` on the pre-release. The build waits for the rc's chart `1.0.0-rc.N` and image `:v1.0.0-rc.N`. The cosign identity is `linux-download.yml@refs/tags/v1.0.0-rc.N`, so the step-5 recipe works with `TAG=v1.0.0-rc.N`. | [`linux-download.yml`](../.github/workflows/linux-download.yml); `cli-release.yml` job `linux-download` |
 | Backplane image | Alias `ghcr.io/evoila/meho:v1.0.0-rc.N` — `type=semver,pattern={{raw}}` is the only tag-push pattern, and `{{raw}}` keeps the pre-release part; `:main` is not emitted on a tag (`enable={{is_default_branch}}`). The step "Check the release tag is in the image tags" fails the run before the build when the tags do not include `:<tag name>`. Quarantine build → trivy gate → promote → cosign sign → SBOM attest run unchanged, so the rc's promoted **digest** is what the lab deploy pins (R5). | [`image.yml`](../.github/workflows/image.yml) L190–193, L200–307, L342–466 |
 | Helm chart | Version `1.0.0-rc.N` (`VERSION="${REF#refs/tags/v}"`), `appVersion` = the git SHA; pushed to `oci://ghcr.io/evoila/meho-chart:1.0.0-rc.N` and anonymously pulled back by exact version. Hyphenated chart versions are already the norm for `main` pushes (`0.1.<date>-<sha>`), so the push path is proven. Always pass the exact `--version 1.0.0-rc.N` when installing. | [`chart.yml`](../.github/workflows/chart.yml) L1805–1823, L1867, L1998 |
-| Docs site | Publishes under **`1.0`** and **leaves `latest` and the site default where they are**: the `v[0-9]*.[0-9]*` case matches, `sed` truncates to MAJOR.MINOR, and because the tag has a `-` only `mike deploy --push 1.0` runs (no `latest` alias, no `set-default`). The rc docs are that minor's docs in progress; the public site root keeps showing the last final release until GA. | [`docs-site.yml`](../.github/workflows/docs-site.yml) step "Deploy versioned docs" |
+| Docs site | **Never moves `latest` or the site default**, so the public site keeps showing the last final release. While the minor has no final tag (`v1.0.0-rc.N` before `v1.0.0`), the rc publishes under **`1.0`**: the rc docs are that minor's docs in progress. Once the minor has a final tag (`v1.0.1-rc.1` after `v1.0.0`), the rc publishes under its own name (`1.0.1-rc.1`), because `latest` serves the `1.0` folder. A maintainer can remove an old rc entry with `mike delete --push <name>`. | [`docs-site.yml`](../.github/workflows/docs-site.yml) step "Deploy versioned docs"; [`scripts/ci/docs_deploy.sh`](../scripts/ci/docs_deploy.sh) |
 
 Verify per step 5, with these substitutions: the Release **is** marked
 pre-release; `meho version` → `v1.0.0-rc.N`; image alias
 `:v1.0.0-rc.N`; chart `1.0.0-rc.N`; bundle
 `meho-claude-desktop-1.0.0-rc.N.mcpb`; docs at
-`https://evoila.github.io/meho/1.0/`. Do **not** add a `whats-new.md`
+`https://evoila.github.io/meho/1.0/` (the deploy step prints the
+version it published). Do **not** add a `whats-new.md`
 section for an rc — the single `[v1.0.0]` section at promotion covers
 the series (the rc docs publish whatever `whats-new.md` holds at the
 tagged commit, which is fine).

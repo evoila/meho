@@ -24,6 +24,7 @@ force nav curation of files that were never written for outsiders.
 | `mkdocs.yml` | repo root | Site config: Material theme (light/dark toggle), strict mode, nav skeleton, mike version provider |
 | `docs-site/` | repo root | Page sources; one directory per top-level nav section, `index.md` each |
 | `.github/workflows/docs-site.yml` | workflows | PR check (`mkdocs build --strict`) + tag-push deploy (mike → gh-pages) |
+| `scripts/ci/docs_deploy.sh` | scripts/ci | The deploy step: which version a tag publishes under, and whether it moves `latest` |
 | `backend/pyproject.toml` `[dependency-groups].docs` | backend | Locked toolchain pins (mkdocs-material, mike) riding `uv.lock` + Dependabot |
 | `gh-pages` branch | remote only | mike-managed publish target; never edited by hand |
 
@@ -39,11 +40,20 @@ One docs version **per minor**, with a `latest` alias:
   the newest docs.
 - Material's version selector is enabled via `extra.version.provider:
   mike` in `mkdocs.yml`; it reads mike's `versions.json` on gh-pages.
-- Pre-release tags (`v1.0.0-rc.1`) deploy under their minor (`1.0`) —
-  the rc docs are that minor's docs in progress. A tag with a `-` runs
-  only `mike deploy --push 1.0`: no `latest` alias and no
+- A pre-release tag (it has a `-`, like `v1.0.0-rc.1`) runs only
+  `mike deploy --push <version>`: no `latest` alias and no
   `set-default`. So `latest` and the site root stay on the last final
-  release until the final tag (`v1.0.0`) moves them.
+  release.
+  - While its minor has no final tag, the rc deploys under the minor
+    (`1.0`): the rc docs are that minor's docs in progress.
+  - Once the minor has a final tag (`v1.0.1-rc.1` after `v1.0.0`), the
+    rc deploys under its own name (`1.0.1-rc.1`). `latest` is a symlink
+    to the `1.0` folder, so writing the rc into `1.0` would show rc
+    pages to every reader of `latest`. The script finds final tags with
+    `git ls-remote --tags origin`.
+- `scripts/ci/docs_deploy.sh` holds these rules.
+  `backend/tests/test_ci_docs_deploy.py` runs it with the real mike
+  against a local `origin` and checks the pages behind `latest`.
 
 ## Control flow (deploy)
 
@@ -59,7 +69,7 @@ One docs version **per minor**, with a `latest` alias:
    (`docs-site-gh-pages`, no cancel) serialises publishes so two tags
    can't race the branch update.
 5. A final **reachability gate** polls the freshly-published
-   `https://evoila.github.io/meho/<MAJOR.MINOR>/` (the version path
+   `https://evoila.github.io/meho/<version>/` (the version path
    this run wrote, passed from the deploy step via a `version` output —
    *not* the site root, whose redirect to `latest` would return 200 and
    mask a failed version publish) until it returns HTTP 200, up to a

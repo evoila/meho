@@ -64,7 +64,7 @@ SBOM_FILE = "meho-sbom-{tag}.spdx.json"
 _PLACEHOLDER = re.compile(r"\{\{ ([a-z0-9_]+) \}\}")
 _TAG = re.compile(r"^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-_IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+_IPV4 = re.compile(r"(?<!\d)(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?!\.?\d)")
 
 
 class InputError(Exception):

@@ -35,11 +35,15 @@ CIS benchmarks are common hardening standards.
 ### The built-in Kubernetes (RKE2, CIS Kubernetes Benchmark)
 
 The install turns on RKE2's CIS profile. Kubernetes' "restricted" pod
-security standard applies in every namespace: it refuses pods that run
-as root, ask for extra rights or use folders of the host. There is one
-exception: the namespace of the storage helper (Rancher's local-path
-provisioner) may use host folders for the volumes. No MEHO namespace has
-an exception.
+security standard refuses pods that run as root, ask for extra rights or
+use folders of the host. It applies in every namespace except four:
+
+- `kube-system`, `compliance-operator-system` and `tigera-operator`:
+  RKE2's own namespaces. RKE2's CIS profile exempts them.
+- `local-path-storage`: the namespace of the storage helper (Rancher's
+  local-path provisioner). It uses host folders for the volumes.
+
+No MEHO namespace is exempt.
 
 **Result on a test install of this release:**
 

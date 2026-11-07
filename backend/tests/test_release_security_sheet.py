@@ -206,6 +206,28 @@ def test_lab_results_are_included_without_addresses(tmp_path: Path) -> None:
     assert "Not measured for this release yet." not in sheet
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Scanned 192.0.2.10.",
+        "host 192.0.2.10:6443",
+        "end.192.0.2.10 next",
+        "(192.0.2.10)",
+    ],
+)
+def test_an_address_is_hidden_wherever_it_stands(tmp_path: Path, line: str) -> None:
+    lab = tmp_path / "lab"
+    lab.mkdir()
+    (lab / "ports.txt").write_text(line + "\nversion 1.2.3.4.5\n", encoding="utf-8")
+    proc, sheet = _run(_data(tmp_path), "--lab", str(lab))
+    assert proc.returncode == 0, proc.stderr
+    assert sheet is not None
+    assert "192.0.2.10" not in sheet
+    assert "<address>" in sheet
+    # Five numbers in a row are not an address; the text stays as it is.
+    assert "version 1.2.3.4.5" in sheet
+
+
 def test_empty_lab_files_count_as_not_measured(tmp_path: Path) -> None:
     lab = tmp_path / "lab"
     lab.mkdir()

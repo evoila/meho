@@ -505,7 +505,15 @@ your account" mails. Set it with `keycloak.realm.update`:
   keeps no request or answer body of its calls, and the activity feed
   gets only an aggregate. A failed secret read shows the error class, not
   its text. The approval card shows the realm, the requested fields with
-  secret values hidden, and `smtp_password_secret_ref`.
+  secret values hidden, and `smtp_password_secret_ref`. The card hides a
+  value when its key is in the Keycloak list of secret fields or matches
+  the name rule of the generic params echo (`is_secret_param_name`), so
+  `clientSecret`, `authTokenClientSecret` or `someApiKey` show as hidden
+  at any depth.
+- As a credential write, the op needs the approval handoff encryption key
+  (`APPROVAL_HANDOFF_ENCRYPTION_KEY`) to wait for approval, like the user
+  password ops. Without a valid key, MEHO denies the call instead of
+  letting it wait (see `approvals.md`).
 
 Example params:
 

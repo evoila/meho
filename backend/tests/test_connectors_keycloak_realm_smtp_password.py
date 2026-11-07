@@ -34,9 +34,8 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak import KeycloakConnector  # also loads the registry
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     has_inline_smtp_password,
     with_smtp_password,
@@ -475,6 +474,76 @@ async def test_approval_card_hides_a_password_value() -> None:
     assert card["representation"]["smtpServer"]["host"] == "mail.example.test"
     assert _SMTP_PASSWORD not in json.dumps(card)
     assert "smtp_password_source" not in card
+
+
+#: Made-up values under secret-shaped names that are not in the Keycloak
+#: list of secret fields. The card must hide each of them.
+_NAMED_SECRETS: dict[str, str] = {
+    "authTokenClientSecret": "made-up-token-client-secret-4711",
+    "clientSecret": "made-up-idp-client-secret-4712",
+    "someApiKey": "made-up-api-key-4713",
+}
+
+
+def _named_secret_params() -> dict[str, Any]:
+    params = _ref_params()
+    params["representation"] = {
+        "smtpServer": {
+            **_SMTP_SETTINGS,
+            "authTokenClientSecret": _NAMED_SECRETS["authTokenClientSecret"],
+        },
+        "identityProviders": [
+            {"alias": "corp-idp", "config": {"clientSecret": _NAMED_SECRETS["clientSecret"]}},
+        ],
+        "attributes": {"someApiKey": _NAMED_SECRETS["someApiKey"], "frontendUrl": "x"},
+    }
+    return params
+
+
+@pytest.mark.asyncio
+async def test_approval_card_hides_every_secret_named_value() -> None:
+    from meho_backplane.connectors.keycloak.ops_write_realm_smtp import _realm_update_preview
+    from meho_backplane.operations._preview import PreviewContext
+
+    ctx = PreviewContext(
+        descriptor=None,  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=None,  # type: ignore[arg-type]
+        target=None,
+        params=_named_secret_params(),
+    )
+    card = await _realm_update_preview(ctx)
+
+    assert card is not None
+    shown = card["representation"]
+    assert shown["smtpServer"]["authTokenClientSecret"] == "***REDACTED***"
+    assert shown["identityProviders"][0]["config"]["clientSecret"] == "***REDACTED***"
+    assert shown["attributes"]["someApiKey"] == "***REDACTED***"
+    # Plain settings stay readable for the approver.
+    assert shown["smtpServer"]["host"] == "mail.example.test"
+    assert shown["identityProviders"][0]["alias"] == "corp-idp"
+    assert shown["attributes"]["frontendUrl"] == "x"
+    text = json.dumps(card)
+    for value in _NAMED_SECRETS.values():
+        assert value not in text
+
+
+@pytest.mark.asyncio
+async def test_waiting_request_card_holds_no_secret_named_value(operator: Operator) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _, put_route = _mount_keycloak(mock, _REALM_BEFORE)
+        result = await _dispatch(operator, _named_secret_params(), approved=False)
+
+    assert result.status == "awaiting_approval", result.error
+    assert put_route.call_count == 0
+    requests = await _rows(ApprovalRequest)
+    assert len(requests) == 1
+    effect = json.dumps(requests[0].proposed_effect)
+    assert "mail.example.test" in effect
+    row_text = _row_text(requests[0])
+    for value in _NAMED_SECRETS.values():
+        assert value not in effect
+        assert value not in row_text
 
 
 def test_with_smtp_password_keeps_the_other_settings() -> None:

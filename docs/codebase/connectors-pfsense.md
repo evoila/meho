@@ -946,17 +946,24 @@ the connector already has. Code: `connectors/pfsense/_topology.py`.
   as `expired`. So when a lease expires, the next refresh leaves it out, and
   the refresh service marks its `host` node as no longer seen
   (`last_seen` empty).
-- **A failed read changes nothing.** When either read fails (the command
-  exits with an error and prints nothing), `discover_topology` raises
-  `PfSenseTopologyReadError`, and SSH errors pass through. The refresh then
-  stops before it writes anything. It never treats a failed read as an empty
-  list, which would mark every entry as no longer seen.
+- **A failed read changes nothing.** `discover_topology` runs the same
+  commands as the two read operations and checks their exit status. When a
+  command exits with any status other than 0, it raises
+  `PfSenseTopologyReadError`, also when the command printed part of its
+  output. SSH errors pass through. The refresh then stops before it writes
+  anything. It never treats a failed read as an empty or full list, which
+  would mark the entries it leaves out as no longer seen. (The read
+  operations themselves still return the rows of partial output.)
 - **No lease file.** When the lease read fails, `discover_topology` checks
-  with `test -e` whether `/var/dhcpd/var/db/dhcpd.leases` exists. The file
-  is missing when the DHCP server is off or the firewall uses the Kea DHCP
-  server. Then there are no leases: the subnets still go on the map, with no
-  `host` nodes. If the file is there, or the check gives any answer other
-  than "missing", the read counts as failed and the refresh changes nothing.
+  whether `/var/dhcpd/var/db/dhcpd.leases` surely does not exist
+  (`LEASE_FILE_MISSING_CHECK`). `test -e` alone is not enough: it also
+  fails when MEHO cannot search a folder on the path. So the check finds
+  the deepest folder on the path that exists and makes sure MEHO can search
+  it. The file is missing when the DHCP server is off or the firewall uses
+  the Kea DHCP server. Then there are no leases: the subnets still go on the
+  map, with no `host` nodes. If the file is there, a folder cannot be
+  searched, or the check gives any other answer, the read counts as failed
+  and the refresh changes nothing.
 - **Left out:** loopback addresses, single-address (`/32`) entries such as
   virtual IPs, interfaces without an IPv4 address, and IPv6 (`ifconfig`
   gives no IPv6 prefix length in the parsed rows, and the lease file holds

@@ -27,12 +27,14 @@ came from. The time MEHO saw it is the row's ``last_seen``, which the
 refresh service sets; the lease's own times are in ``lease_starts`` and
 ``lease_ends``.
 
-A failed read raises :class:`PfSenseTopologyReadError`. It never returns
-an empty map, because the refresh service would read an empty map as
-"everything is gone" and mark every node as no longer seen. One
-exception: when the lease file (:data:`LEASE_FILE`) does not exist, the
-DHCP server is off or the firewall uses the Kea DHCP server. Then there
-are no leases, and the subnets still go on the map.
+A failed read raises :class:`PfSenseTopologyReadError`. A read counts as
+failed when its command exits with any status other than 0, also when it
+printed some output: a partial list must not reach the map as the full
+list. The refresh service would read missing entries as "gone" and mark
+them as no longer seen. One exception: when the lease file
+(:data:`LEASE_FILE`) surely does not exist (:data:`LEASE_FILE_MISSING_CHECK`),
+the DHCP server is off or the firewall uses the Kea DHCP server. Then
+there are no leases, and the subnets still go on the map.
 
 Left out on purpose: loopback addresses, single-address (``/32``)
 entries such as virtual IPs, interfaces without an IPv4 address, and
@@ -51,12 +53,15 @@ from meho_backplane.connectors.pfsense.ops_read import _lease_datetime
 from meho_backplane.connectors.schemas import EdgeHint, NodeHint, TopologyHints
 
 __all__ = [
+    "INTERFACE_COMMAND",
     "INTERFACE_SOURCE",
+    "LEASE_COMMAND",
     "LEASE_FILE",
+    "LEASE_FILE_MISSING_CHECK",
     "LEASE_SOURCE",
     "PfSenseTopologyReadError",
     "build_topology_hints",
-    "rows_or_raise",
+    "output_or_raise",
 ]
 
 #: ``source`` value on entries that come from the interface list.
@@ -65,6 +70,25 @@ INTERFACE_SOURCE = "pfsense.interface.list"
 LEASE_SOURCE = "pfsense.dhcp.leases"
 #: The ISC dhcpd lease file that ``pfsense.dhcp.leases`` reads.
 LEASE_FILE = "/var/dhcpd/var/db/dhcpd.leases"
+#: The command of ``pfsense.interface.list``.
+INTERFACE_COMMAND = "ifconfig -a"
+#: The command of ``pfsense.dhcp.leases``.
+LEASE_COMMAND = f"cat {LEASE_FILE}"
+#: Exits 0 only when :data:`LEASE_FILE` surely does not exist.
+#:
+#: ``test -e`` alone also fails when a folder on the path cannot be
+#: searched, so it cannot tell "missing" from "no access". This finds the
+#: deepest folder on the path that exists and checks that it can be
+#: searched. Then the next part of the path is really missing. Any other
+#: case exits 2: MEHO does not know, and the read counts as failed.
+LEASE_FILE_MISSING_CHECK = (
+    f"f={LEASE_FILE}; "
+    '[ -e "$f" ] && exit 2; '
+    'd="${f%/*}"; '
+    'while [ -n "$d" ] && [ ! -d "$d" ]; do d="${d%/*}"; done; '
+    '[ -x "${d:-/}" ] && exit 0; '
+    "exit 2"
+)
 
 _Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -73,22 +97,20 @@ class PfSenseTopologyReadError(RuntimeError):
     """A read that the topology map needs failed, so the refresh stops."""
 
 
-def rows_or_raise(op_id: str, target_name: str, answer: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return the ``rows`` of an op answer, or raise when the read failed.
+def output_or_raise(op_id: str, target_name: str, command: str, proc: Any) -> str:
+    """Return the output of *command*, or raise when it did not exit with 0.
 
-    The pfSense read handlers answer a failed command with
-    ``{"rows": [], "total": 0, "error": ...}``. That must not reach the
-    map as "no rows".
+    The read handlers parse the output of a failed command when it printed
+    something. For the map, that partial list must not count as the full
+    list, so any exit status other than 0 stops the refresh.
     """
-    error = answer.get("error")
-    rows = answer.get("rows")
-    if error or not isinstance(rows, list):
-        reason = error or "the answer had no row list"
+    stdout = getattr(proc, "stdout", None)
+    if proc.exit_status != 0 or not isinstance(stdout, str):
         raise PfSenseTopologyReadError(
-            f"pfSense target {target_name!r}: {op_id} failed ({reason}); "
-            "the topology map was not changed"
+            f"pfSense target {target_name!r}: {op_id} failed "
+            f"({command} exit {proc.exit_status}); the topology map was not changed"
         )
-    return rows
+    return stdout
 
 
 def _iso_lease_time(value: str | None) -> str | None:

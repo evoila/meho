@@ -8,8 +8,10 @@
   per active lease, with ``source`` on every entry.
 * Leases that are not active (expired, free, backup) are left out.
 * :meth:`PfSenseConnector.discover_topology` runs the two reads and
-  raises when one of them fails, so the map never reads "nothing there".
-  A missing lease file (DHCP server off, or Kea) means no leases.
+  raises when one of them fails, also with partial output, so the map
+  never reads "nothing there" or a partial list. A lease file that surely
+  does not exist (DHCP server off, or Kea) means no leases; a lease folder
+  MEHO cannot search does not.
 * Through the refresh service: a refresh adds the entries, and a lease
   that expired later is marked as no longer seen.
 
@@ -35,10 +37,11 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.pfsense import PfSenseConnector
 from meho_backplane.connectors.pfsense._topology import (
     INTERFACE_SOURCE,
+    LEASE_FILE_MISSING_CHECK,
     LEASE_SOURCE,
     PfSenseTopologyReadError,
     build_topology_hints,
-    rows_or_raise,
+    output_or_raise,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdge, GraphNode, Target, Tenant
@@ -245,26 +248,24 @@ def test_hints_are_json_serialisable() -> None:
 
 
 # ---------------------------------------------------------------------------
-# rows_or_raise
+# output_or_raise
 # ---------------------------------------------------------------------------
 
 
-def test_rows_or_raise_returns_rows() -> None:
-    assert rows_or_raise("op", "fw", {"rows": [{"a": 1}], "total": 1}) == [{"a": 1}]
-    assert rows_or_raise("op", "fw", {"rows": [], "total": 0}) == []
+def test_output_or_raise_returns_the_output_of_a_command_that_exited_0() -> None:
+    assert output_or_raise("op", "fw", "ifconfig -a", _proc("em0: up\n")) == "em0: up\n"
+    assert output_or_raise("op", "fw", "ifconfig -a", _proc("")) == ""
 
 
 @pytest.mark.parametrize(
-    "answer",
-    [
-        {"rows": [], "total": 0, "error": "ifconfig exit 1"},
-        {"total": 0},
-        {"rows": None},
-    ],
+    ("stdout", "exit_status"),
+    [("", 1), ("em0: partial\n", 1), ("em0: partial\n", 255), (None, 0)],
 )
-def test_rows_or_raise_raises_on_a_failed_read(answer: dict[str, Any]) -> None:
+def test_output_or_raise_raises_on_a_failed_command(stdout: Any, exit_status: int) -> None:
     with pytest.raises(PfSenseTopologyReadError, match="topology map was not changed"):
-        rows_or_raise("pfsense.interface.list", "fw-test", answer)
+        output_or_raise(
+            "pfsense.interface.list", "fw-test", "ifconfig -a", _proc(stdout, exit_status)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +298,7 @@ def _lease_block(ip: str, starts: datetime, ends: datetime, state: str = "active
     )
 
 
-def _proc(stdout: str = "", exit_status: int = 0) -> Any:
+def _proc(stdout: Any = "", exit_status: int = 0) -> Any:
     proc = MagicMock()
     proc.stdout = stdout
     proc.exit_status = exit_status
@@ -305,16 +306,16 @@ def _proc(stdout: str = "", exit_status: int = 0) -> Any:
 
 
 def _ssh_answers(ifconfig: Any, leases: Any, lease_file_check: Any = None) -> Any:
-    """Answer the SSH commands. ``lease_file_check`` answers ``test -e``
-    (default: the lease file exists)."""
-    check = _proc() if lease_file_check is None else lease_file_check
+    """Answer the SSH commands. ``lease_file_check`` answers
+    :data:`LEASE_FILE_MISSING_CHECK` (default: exit 2, the file is there)."""
+    check = _proc(exit_status=2) if lease_file_check is None else lease_file_check
 
     async def _run(target: Any, command: str, operator: Any = None) -> Any:
         if command == "ifconfig -a":
             answer = ifconfig
         elif command == "cat /var/dhcpd/var/db/dhcpd.leases":
             answer = leases
-        elif command == "test -e /var/dhcpd/var/db/dhcpd.leases":
+        elif command == LEASE_FILE_MISSING_CHECK:
             answer = check
         else:  # pragma: no cover - a wrong command is a test failure
             raise AssertionError(f"unexpected command {command!r}")
@@ -374,13 +375,33 @@ async def test_discover_topology_raises_when_a_read_fails(failing: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["ifconfig", "leases"])
+async def test_discover_topology_raises_on_a_failed_read_with_partial_output(
+    failing: str,
+) -> None:
+    """A command that fails after printing part of its output is still a failed read."""
+    connector = PfSenseConnector()
+    leases = _active_and_expired_leases()
+    answers = (
+        (_proc(_IFCONFIG, exit_status=1), _proc(leases))
+        if failing == "ifconfig"
+        else (_proc(_IFCONFIG), _proc(leases, exit_status=1))
+    )
+    with (
+        patch.object(connector, "_run_command", AsyncMock(side_effect=_ssh_answers(*answers))),
+        pytest.raises(PfSenseTopologyReadError, match="exit 1"),
+    ):
+        await connector.discover_topology(_TARGET)
+
+
+@pytest.mark.asyncio
 async def test_discover_topology_without_a_lease_file_still_maps_the_subnets() -> None:
     """DHCP server off or Kea: no lease file, so no hosts, but the subnets land."""
     connector = PfSenseConnector()
     operator = MagicMock(name="operator")
     run = AsyncMock(
         side_effect=_ssh_answers(
-            _proc(_IFCONFIG), _proc("", exit_status=1), lease_file_check=_proc(exit_status=1)
+            _proc(_IFCONFIG), _proc("", exit_status=1), lease_file_check=_proc(exit_status=0)
         )
     )
     with patch.object(connector, "_run_command", run):
@@ -390,18 +411,16 @@ async def test_discover_topology_without_a_lease_file_still_maps_the_subnets() -
         ("target", "fw-test"),
         ("network", "192.0.2.0/24"),
     }
-    assert [c.args[1] for c in run.await_args_list][-1] == (
-        "test -e /var/dhcpd/var/db/dhcpd.leases"
-    )
+    assert [c.args[1] for c in run.await_args_list][-1] == LEASE_FILE_MISSING_CHECK
     assert all(c.kwargs["operator"] is operator for c in run.await_args_list)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("check_exit", [0, 2, 255])
+@pytest.mark.parametrize("check_exit", [1, 2, 255])
 async def test_discover_topology_raises_when_the_lease_file_is_there_but_unread(
     check_exit: int,
 ) -> None:
-    """The file exists (or the check itself failed): the failed read still raises."""
+    """The file exists, a folder cannot be searched, or the check failed: still raises."""
     connector = PfSenseConnector()
     answers = _ssh_answers(
         _proc(_IFCONFIG), _proc("", exit_status=1), lease_file_check=_proc(exit_status=check_exit)
@@ -514,15 +533,35 @@ async def test_refresh_adds_entries_and_an_expired_lease_is_no_longer_live() -> 
 
 
 @pytest.mark.asyncio
-async def test_refresh_with_a_failed_lease_read_changes_nothing() -> None:
+@pytest.mark.parametrize(
+    ("lease_answer", "check_exit"),
+    [
+        pytest.param(("", 1), 2, id="empty-failed-read-no-access-to-lease-folder"),
+        pytest.param(("partial", 1), 2, id="partial-failed-read"),
+    ],
+)
+async def test_refresh_with_a_failed_lease_read_changes_nothing(
+    lease_answer: tuple[str, int], check_exit: int
+) -> None:
     tenant_id, target = await _seed_pfsense_target()
     operator = _operator(tenant_id)
     now = datetime.now(UTC)
     leases = _lease_block("192.0.2.50", now - timedelta(hours=1), now + timedelta(hours=11))
-    await _refresh_with(target, operator, leases)
+    both = leases + _lease_block("192.0.2.70", now - timedelta(hours=1), now + timedelta(hours=11))
+    await _refresh_with(target, operator, both)
     before = {k: n.last_seen for k, n in (await _live_nodes(tenant_id)).items()}
+    assert before[("host", "192.0.2.70")] is not None
 
-    run = AsyncMock(side_effect=_ssh_answers(_proc(_IFCONFIG), _proc("", exit_status=1)))
+    # The partial read holds .50 but not .70. Taken as the full list, it
+    # would mark .70 as no longer seen.
+    stdout = leases if lease_answer[0] == "partial" else ""
+    run = AsyncMock(
+        side_effect=_ssh_answers(
+            _proc(_IFCONFIG),
+            _proc(stdout, exit_status=lease_answer[1]),
+            lease_file_check=_proc(exit_status=check_exit),
+        )
+    )
     with (
         patch("meho_backplane.topology.refresh.resolve_connector", return_value=PfSenseConnector),
         patch.object(PfSenseConnector, "_run_command", run),

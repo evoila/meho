@@ -31,7 +31,7 @@ The `evoila/meho` repo is public. Migration `0018` originally upserted `rdc-inte
 - The `default` tenant + 2 illustrative conventions demonstrate the feature without baking in a specific consumer's identity.
 - The 2 conventions read as documentation about the convention surface itself (slug naming convention, the operator-facing nature of the surface) -- they explain what the feature does rather than carrying any specific operator's operational rules.
 - Operators replace the illustrative seed with their own content via the T2 API (`PATCH /api/v1/conventions/{slug}`) or T3 CLI (`meho conventions ...`).
-- The MCP `initialize.instructions` field still flows from `assemble_preamble(operator.tenant_id, operator.sub)` -- but for operators whose `tenant_id` is not `default` (the common case for any deploy), the conventions band is empty until the operator authors their own conventions (the runbook-priming band G12.4-T2 #1316 added is independently bounded and surfaces only when the calling operator has in-progress runs).
+- The MCP `initialize.instructions` field still flows from the tenant preamble (`assemble_preamble_detailed(operator.tenant_id, operator.sub)` in `conventions/preamble.py`, called by `_session_instructions` in `mcp/server.py`) -- but for operators whose `tenant_id` is not `default` (the common case for any deploy), the conventions band is empty until the operator authors their own conventions (the runbook-priming band G12.4-T2 #1316 added is independently bounded and surfaces only when the calling operator has in-progress runs).
 
 The two seeded conventions:
 
@@ -132,7 +132,7 @@ Both downgrades leave operator-authored content (under seeded or unrelated slugs
 
 This guidance is unchanged from before #1137: amending an existing seed migration is the wrong shape (operator-edited content would survive the amendment while the new seed body would not land). A follow-up migration that needs to add a seeded convention should:
 
-1. Land its own new revision (e.g. `0029_seed_<convention>.py`) following the upsert-or-skip discipline both existing seed migrations establish.
+1. Land its own new revision under the next free migration number (e.g. `NNNN_seed_<convention>.py`) following the upsert-or-skip discipline both existing seed migrations establish.
 2. Read the existing tenant id via `SELECT id FROM tenant WHERE slug = 'default'` rather than inserting a duplicate tenant.
 3. Use a fresh seed marker (e.g. `migration:seed-<short-name>`) so the downgrade predicate can narrow on the new migration's authored rows alone.
 4. Update the tables in this doc.

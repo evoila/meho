@@ -115,7 +115,7 @@ State machine (`pending → running → succeeded | failed | uncertain`, plus
   not the run status.
 - `failed` is reserved for a run that never produced an envelope (worker
   died / reaped, or the dispatch raised).
-- `uncertain` (#5025, migration `0138`) is the reaper's end for a dead run of
+- `uncertain` (#5025, migration `0139`) is the reaper's end for a dead run of
   an operation that may change the target: MEHO does not know if the change
   happened, so it is not `failed`, and it never runs again. The advice is the
   same as in the approval views: do not run it again, check the target first.

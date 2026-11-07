@@ -3,8 +3,8 @@
 
 """Add the ``uncertain`` operation run status (#5025).
 
-Revision ID: 0138
-Revises: 0137
+Revision ID: 0139
+Revises: 0138
 Create Date: 2026-11-07
 
 When the worker of an async run that changes something dies, MEHO does not
@@ -33,8 +33,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0138"
-down_revision: str | None = "0137"
+revision: str = "0139"
+down_revision: str | None = "0138"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

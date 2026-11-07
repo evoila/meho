@@ -471,7 +471,9 @@ register_mcp_tool(
                         "preserves any existing row's metadata on "
                         "re-index; pass an empty object {} to clear. "
                         "Free-form keys, except `source_kind`: it marks "
-                        "curated content and only a tenant admin may set it."
+                        "curated content and only a tenant admin may set it. "
+                        "`search_knowledge` can filter on these keys with "
+                        "`filters`."
                     ),
                     "additionalProperties": True,
                 },

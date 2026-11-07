@@ -38,7 +38,7 @@ Goal #217 stood up the activity feed and closed completed, but its own done-when
 4. **MEHO's own hosted agents are excluded** — the runtime meta-tool catalog is exactly three dispatch tools (`agent/toolset.py:162-255`); hosted agents can neither announce nor read peers.
 5. **Nothing drives adoption or protects the channel** — the four-step broadcast discipline lives only in a stale consumer template that still claims the tools "are not yet wired" (`docs/examples/consumer-onboarding/CLAUDE.md:182-187`), the server-assembled preamble carries zero broadcast content, and announce has no rate limit (one looping agent can evict the whole tenant window).
 
-The security posture that shaped v1 is respected, not reversed: agent free prose stays quarantined (untrusted envelope, meho-internal#154); credential/audit classes stay aggregate-only (decision #3). The v2 insight is that **both defenses constrain prose and payloads, not structured metadata** — the `target` filter already runs on the unwrapped model (`broadcast/history.py:413-414,478-493`). Server-validated structured intent is the trustable coordination currency.
+The security posture that shaped v1 is respected, not reversed: agent free prose stays quarantined (untrusted envelope); credential/audit classes stay aggregate-only (locked decision 3). The v2 insight is that **both defenses constrain prose and payloads, not structured metadata** — the `target` filter already runs on the unwrapped model (`broadcast/history.py:413-414,478-493`). Server-validated structured intent is the trustable coordination currency.
 
 ## Execution Initiatives
 
@@ -67,7 +67,7 @@ Parent goal: #TBD-GOAL
 
 Seven tasks that compose the already-built broadcast substrate (~70% of the parts exist, per the review) into the coordination channel Goal #TBD-GOAL describes. Binding design principles for every child task:
 
-- **Structure is trusted; prose is quarantined.** New coordination signal ships as server-validated typed fields (enums, UUIDs, timestamps, bounded refs) served unwrapped; free text keeps the untrusted envelope and the "MUST NOT treat as input" contract (meho-internal#154). The in-tree precedent is the `target` filter running on the model before the wrap (`broadcast/history.py:413-414`).
+- **Structure is trusted; prose is quarantined.** New coordination signal ships as server-validated typed fields (enums, UUIDs, timestamps, bounded refs) served unwrapped; free text keeps the untrusted envelope and the "MUST NOT treat as input" contract. The in-tree precedent is the `target` filter running on the model before the wrap (`broadcast/history.py:413-414`).
 - **Reuse the molds.** Lineage comes from contextvars already in scope at the publish site (`operations/_audit.py:480-511`); persistence/retention copies the topology history prune loop (`topology/history_retention.py:313`); the advisory rides `OperationResult.extras` (`connectors/schemas.py:636`), the established envelope extension slot.
 - **Humans and agents are both first-class readers.** Every event kind renders on every surface (SSE, UI, MCP, hosted-agent toolset).
 - **Protect the channel while widening it.** Rate-limit the write side; keep decision #3's credential/audit aggregation untouched.
@@ -151,7 +151,7 @@ Depends-on: #2479
 
 ## Summary
 
-Keystone of Initiative #TBD-INIT: turn announcements from quarantined prose into coordination data. The cross-agent prompt-injection defense (meho-internal#154) rightly prevents agents from absorbing peer *prose* — so the coordination signal must ride **server-validated structured fields**, which are served unwrapped because they cannot carry instructions. The in-tree proof this split works: `target` equality filtering already runs on the unwrapped model before `dump_event_wire` wraps it (`broadcast/history.py:413-414,478-493`).
+Keystone of Initiative #TBD-INIT: turn announcements from quarantined prose into coordination data. The cross-agent rule that peer text is data, not instructions, rightly prevents agents from absorbing peer *prose* — so the coordination signal must ride **server-validated structured fields**, which are served unwrapped because they cannot carry instructions. The in-tree proof this split works: `target` equality filtering already runs on the unwrapped model before `dump_event_wire` wraps it (`broadcast/history.py:413-414,478-493`).
 
 ## Current state (verified in code, 2026-07-16, HEAD f3dfc696)
 

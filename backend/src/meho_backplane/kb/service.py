@@ -473,11 +473,9 @@ class KbService:
             if isinstance(kind, str):
                 kind_filter = kind
             # Everything other than ``kind`` flows to the substrate's
-            # ``metadata_filters`` -- the v0.2 "currently ignored"
-            # disclaimer in the MCP tool description goes away once
-            # this path lights up the substrate primitive (G4.4-T1 /
-            # #1177). An empty residual dict normalises to ``None``
-            # so the substrate skips the predicate.
+            # ``metadata_filters`` (G4.4-T1 / #1177). An empty residual
+            # dict normalises to ``None`` so the substrate skips the
+            # predicate.
             residual = {k: v for k, v in filters.items() if k != "kind"}
             metadata_filters = residual or None
 

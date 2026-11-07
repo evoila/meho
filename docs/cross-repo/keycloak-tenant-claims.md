@@ -17,6 +17,15 @@ Copyright (c) 2026 evoila Group
 > is the recipe the operator follows and the verification commands
 > either side can run to prove the contract holds.
 
+**Built-in Keycloak.** With the built-in Keycloak
+(`coreKeycloak.enabled: true`, the chart default since 0.45.0), the realm
+file already has the five groups, the `MEHO-Platform-Admins` group and
+every mapper on this page, on the clients `meho-cli`, `meho-cli-approve`,
+`meho-mcp` and `meho-web`. The groups carry `coreKeycloak.firstTenantId`.
+You only do [Step 3](#step-3--put-each-person-in-one-group): put each
+person in one group. The rest of the recipe is for a Keycloak you bring
+yourself.
+
 ## Why this doc exists
 
 The v0.2 backplane (Initiative
@@ -68,7 +77,8 @@ In short:
 - The realm has five top-level groups. Each group carries `tenant_id`
   and `tenant_role` as **group attributes** (key-value settings on the
   group). `MEHO-Approvers` also carries `approver` = `true`.
-- Each human login client (`meho-cli`, `meho-mcp`) has three stock
+- Each human login client (`meho-cli`, `meho-cli-approve`, `meho-mcp`,
+  and `meho-web` when you use the web console) has three stock
   **User Attribute** mappers. They copy `tenant_id`, `tenant_role` and
   `approver` into the access token.
 - Each person is in **exactly one** of the five groups.
@@ -163,8 +173,9 @@ the old UUID becomes unreachable.
 
 ### Step 2 — Add the three User Attribute mappers
 
-Add three mappers to **each** human login client (`meho-cli` and
-`meho-mcp`). In the Admin Console: **Clients** → the client →
+Add three mappers to **each** human login client (`meho-cli`,
+`meho-cli-approve`, `meho-mcp`, and `meho-web` when you use the web
+console). In the Admin Console: **Clients** → the client →
 **Client scopes** → its **dedicated** scope → **Mappers** →
 **Add mapper** → **By configuration** → **User Attribute**.
 
@@ -259,8 +270,8 @@ The rules:
 
 A company directory (Active Directory, LDAP) or a login system in front
 of Keycloak (Entra ID) can fill the groups for you: map the directory
-group to one of the five Keycloak groups. The recipes for that come
-with [#3959](https://github.com/evoila/meho/issues/3959).
+group to one of the five Keycloak groups. The recipes for that are in
+the [company login recipes](../../docs-site/install/login/index.md).
 
 ### Several tenants: the `meho_tenants` list
 
@@ -621,7 +632,11 @@ print(json.loads(base64.urlsafe_b64decode(p)).get("approver"))
 **Check B — the decouple #3243 promises (operator execution step).**
 Requires a deployed backplane and a parked `requires_approval` request.
 With a `read_only` **+** `approver=true` token, the approvals decide route
-clears the gate while dispatch stays refused:
+clears the gate while dispatch stays refused. An approval on the command
+line or REST needs a token from a fresh approval sign-in (the
+`meho-cli-approve` client, as `meho approvals approve` gets it). With a
+normal login token, the decide route answers 401
+`insufficient_user_authentication` and the request stays pending:
 
 ```bash
 # Clears require_approvals_access (200, decision applied):
@@ -700,11 +715,11 @@ minutes). Same in-flight-token caveat as the `tenant_role`
 | Item | Side | State |
 | --- | --- | --- |
 | Recipe (this doc) | producer | landed in this PR ([`./keycloak-tenant-claims.md`](./keycloak-tenant-claims.md)) |
-| Backplane reads `tenant_id` from JWT | producer | tracked at [#222](https://github.com/evoila/meho/issues/222) (T2 / T3) |
-| `require_role(min_role)` enforces `tenant_role` | producer | tracked at [#222](https://github.com/evoila/meho/issues/222) (T4) |
-| Per-tenant audit-row isolation test | producer | tracked at [#222](https://github.com/evoila/meho/issues/222) (T6) |
+| Backplane reads `tenant_id` from JWT | producer | landed ([#222](https://github.com/evoila/meho/issues/222), T2 / T3) |
+| `require_role(min_role)` enforces `tenant_role` | producer | landed ([#222](https://github.com/evoila/meho/issues/222), T4) |
+| Per-tenant audit-row isolation test | producer | landed ([#222](https://github.com/evoila/meho/issues/222), T6) |
 | Five role groups + User Attribute mappers | producer | `meho admin keycloak bootstrap-clients` creates them ([#4590](https://github.com/evoila/meho/issues/4590)); decision in [`../decisions/login-role-groups.md`](../decisions/login-role-groups.md) |
-| End-to-end `meho status` against v0.2 returns 200 | consumer | pending — the closing-comment artefact on the parent Initiative |
+| End-to-end `meho status` returns 200 | consumer | [Check 3](#check-3--meho-status-succeeds-against-the-v02-backplane), per install |
 | Backplane reads `approver` from JWT + `require_approvals_access` decouple | producer | landed — [#3270](https://github.com/evoila/meho/issues/3270) (`auth/jwt._extract_approver`, `auth/rbac.require_approvals_access`); console parity [#3282](https://github.com/evoila/meho/issues/3282) |
 | `MEHO-Approvers` group + `approver` mapper | producer | `meho admin keycloak bootstrap-clients` creates them ([#4590](https://github.com/evoila/meho/issues/4590)); a realm admin puts each approver in the group |
 
@@ -713,10 +728,8 @@ minutes). Same in-flight-token caveat as the `tenant_role`
 - Parent Initiative: [#222 — G0.1 Tenant model](https://github.com/evoila/meho/issues/222) — JWT `tenant_id` claim extraction, tenant table, audit_log scoping, role-enum RBAC primitive
 - Parent Goal: [#221 — G0 Foundational substrate](https://github.com/evoila/meho/issues/221)
 - Decision: [`../decisions/login-role-groups.md`](../decisions/login-role-groups.md) — the five login groups ([#4590](https://github.com/evoila/meho/issues/4590))
-- Sibling handshake: [`./targets-yaml.md`](./targets-yaml.md) — `targets.yaml` `rdc-meho` entry; the per-tenant UUID minted in Step 1 lands here in v0.2.next
-- Sibling handshake: [`./rke2-infra-coordination.md`](./rke2-infra-coordination.md) — per-PR ephemeral smoke + `repository_dispatch`
+- Sibling handshake: [`./targets-yaml.md`](./targets-yaml.md) — the `targets.yaml` entry for the MEHO backplane itself
 - Backend codebase walkthrough: [`../codebase/backend.md`](../codebase/backend.md) — `Settings`, `verify_jwt`, `Operator` model
 - Approve-only capability: [#3243](https://github.com/evoila/meho/issues/3243) / [#3270](https://github.com/evoila/meho/issues/3270) — `auth/jwt._extract_approver`, `auth/rbac.require_approvals_access`; approvals surface in [`../codebase/approvals.md`](../codebase/approvals.md)
 - Keycloak Server Admin Guide — [Protocol Mappers](https://www.keycloak.org/docs/latest/server_admin/index.html#protocol-mappers)
 - Keycloak OIDC layers — [UserInfo endpoint](https://www.keycloak.org/securing-apps/oidc-layers)
-- Consumer's Keycloak realm: see `evoila-bosnia/claude-rdc-hetzner-dc/rdc-hetzner-dc/INVENTORY.md` Keycloak section

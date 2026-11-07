@@ -61,9 +61,13 @@ wall-clock. Re-running it is idempotent — unchanged rows just refresh
 their `last_seen`.
 
 > A connector only contributes topology if it implements
-> `discover_topology`. vSphere, Kubernetes, and Vault do; a connector
-> that doesn't yields an empty snapshot (the refresh succeeds with all
-> counts zero). To find connectors that can reach more of your estate,
+> `discover_topology`. In this repository only the Kubernetes connector
+> does: it reports the cluster, its namespaces and its nodes, linked by
+> `belongs-to` edges. A connector that doesn't yields an empty snapshot:
+> the refresh succeeds with all counts zero and prints a `note:` line
+> that names the product and lists the products that do discover
+> topology. For other systems, add edges by hand with
+> `meho topology annotate` (see below). To find connectors that can reach more of your estate,
 > `meho targets discover <product>` lists candidate targets a connector
 > sees but you haven't registered yet (it does **not** auto-create
 > them — review, then `meho targets import`).
@@ -74,14 +78,15 @@ Pick a target you registered and refreshed, then walk its reverse
 closure:
 
 ```
-meho topology refresh rdc-vcenter
-meho topology dependents rdc-vcenter
+meho topology refresh kube-prod
+meho topology dependents kube-prod
 ```
 
 You should get a depth-ordered table: the anchor at row 0 (depth 0),
-its direct dependents at depth 1, transitive ones deeper. For a vCenter
-target, expect its cluster / hosts / VMs to appear, connected by
-`belongs-to` / `runs-on` / `mounts` / `routes-through` edges.
+its direct dependents at depth 1, transitive ones deeper. For a
+Kubernetes target, expect its namespaces and nodes to appear, connected
+by `belongs-to` edges. Edges added by hand (`runs-on`, `depends-on`, …)
+show up in the same walk.
 
 Useful checks:
 
@@ -94,13 +99,17 @@ Useful checks:
 - **Scope a walk.** `--kind <edge_kind>` restricts the traversal to one
   edge kind (e.g. `--kind runs-on`); `--depth N` caps the walk
   (`1..64`, default 16). `meho topology path <from> <to> [--max-hops N]`
-  returns the shortest route or nothing if unreachable.
+  (`1..32`, default 8) returns the shortest route or nothing if
+  unreachable.
+- **Live rows only.** The walks include soft-deleted (stale) rows by
+  default. Add `--include-stale=false` to see only rows the last
+  refresh still found.
 - **Machine output.** Add `--json` to any verb for stable structured
   output to pipe into other tooling.
 
-A "node does not exist in this tenant" query returns an empty result
-(not an error) — distinguishable from "exists but has no dependents",
-which returns just the anchor row.
+For `dependents` and `dependencies`, a name that is not in this
+tenant's graph returns HTTP 404 `node_untracked` — distinguishable from
+"exists but has no dependents", which returns just the anchor row.
 
 ## 3. Performance expectations
 
@@ -133,13 +142,13 @@ than this, the likely cause is a missing/disabled traversal index on
   [topology-annotation.md](./topology-annotation.md).
 - **History (G9.3, [#365](https://github.com/evoila/meho/issues/365)).**
   A refresh that no longer sees a node soft-deletes it (`last_seen`
-  cleared, the row is retained — never SQL-deleted). A soft-deleted
-  node is still reachable by the traversal query verbs
-  (`find_dependents` / `find_dependencies` / `find_path` do not filter
-  `last_seen`); soft-delete is purely a retention mechanism. Treat the
-  graph as last-refresh-wins: a stale edge persists until the next
+  cleared, the row is retained — never SQL-deleted). By default a
+  soft-deleted node is still reachable by the traversal verbs
+  (`dependents` / `dependencies` / `path`); pass `--include-stale=false`
+  (REST `include_stale=false`) to drop stale rows from the walk. Treat
+  the graph as last-refresh-wins: a stale edge persists until the next
   successful refresh of its owning target re-derives the snapshot. G9.3
-  (now shipped) adds the *separate* `meho topology history|diff|timeline`
+  (shipped) adds the *separate* `meho topology history|diff|timeline`
   point-in-time verbs over the retained rows to query when a resource
-  appeared or disappeared — it does not add `last_seen` filtering to the
-  traversal verbs.
+  appeared or disappeared. A weekly clean-up deletes topology history
+  older than 90 days (chart value `topology.historyRetentionDays`).

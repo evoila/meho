@@ -564,6 +564,79 @@ def test_secret_names_keycloak_reads_must_be_the_core_ones(key: str, core_kind: 
     assert _run(*_ON, "--set", f"{key}=test-core-{core_kind}").returncode == 0
 
 
+# --- One switch each for the console, check runner and admin (#4766) -------
+
+
+def test_console_turns_on_with_one_switch() -> None:
+    data, env, _ = _backplane(*_ON, "--set", "uiConsole.enabled=true")
+    assert data["UI_KEYCLOAK_CLIENT_ID"] == "meho-web"
+    for name, key in (
+        ("UI_KEYCLOAK_CLIENT_SECRET", "client_secret"),
+        ("UI_SESSION_ENCRYPTION_KEY", "session_encryption_key"),
+    ):
+        assert env[name]["valueFrom"]["secretKeyRef"] == {"name": "test-core-ui-auth", "key": key}
+
+
+def test_check_runner_turns_on_with_one_switch() -> None:
+    _, env, _ = _backplane(*_ON, "--set", "checkRunner.enabled=true")
+    assert env["CHECK_RUNNER_CLIENT_ID"]["value"] == "meho-check-runner"
+    assert env["CHECK_RUNNER_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"] == {
+        "name": "test-core-check-runner",
+        "key": "client_secret",
+    }
+
+
+def test_admin_needs_no_url_or_client_id_with_the_built_in_keycloak() -> None:
+    _, env, _ = _backplane(*_ON, "--set", "keycloakAdmin.enabled=true")
+    assert env["KEYCLOAK_ADMIN_URL"]["value"] == "http://test-keycloak:8080/auth/admin/realms/meho"
+    assert env["KEYCLOAK_ADMIN_CLIENT_ID"]["value"] == "meho-admin"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("config.uiKeycloakClientId", "meho-web"),
+        ("checkRunner.clientId", "meho-check-runner"),
+        ("keycloakAdmin.url", "http://test-keycloak:8080/auth/admin/realms/meho"),
+        ("keycloakAdmin.clientId", "meho-admin"),
+    ],
+)
+def test_other_client_values_must_be_the_chart_ones(key: str, value: str) -> None:
+    other = "https://other.test/admin" if key == "keycloakAdmin.url" else "other"
+    result = _run(*_ON, "--set", f"{key}={other}")
+    assert result.returncode != 0
+    assert f'{key} must be empty or "{value}" while coreKeycloak.enabled is on' in result.stderr
+    assert _run(*_ON, "--set", f"{key}={value}").returncode == 0
+
+
+def test_console_check_runner_and_admin_values_stay_required_for_bring_your_own() -> None:
+    cases = (
+        ("uiConsole.enabled", ["uiConsole.secretName", "config.uiKeycloakClientId"]),
+        ("checkRunner.enabled", ["checkRunner.clientId", "checkRunner.clientSecret.secretName"]),
+        ("keycloakAdmin.enabled", ["keycloakAdmin.url", "keycloakAdmin.clientId"]),
+    )
+    full = {
+        "uiConsole.secretName": "ui",
+        "config.uiKeycloakClientId": "web",
+        "checkRunner.clientId": "runner",
+        "checkRunner.clientSecret.secretName": "runner-secret",
+        "keycloakAdmin.url": "https://keycloak.test/admin/realms/meho",
+        "keycloakAdmin.clientId": "admin",
+        "keycloakAdmin.clientSecret.secretName": "admin-secret",
+    }
+    for switch, needed in cases:
+        given = [a for k, v in full.items() for a in ("--set", f"{k}={v}")]
+        assert _run("--set", f"{switch}=true", *given).returncode == 0, switch
+        for key in needed:
+            blank = [a for k, v in full.items() for a in ("--set", f"{k}={'' if k == key else v}")]
+            assert _run("--set", f"{switch}=true", *blank).returncode != 0, key
+
+
+def test_agent_runtime_helm_test_runs_with_the_built_in_keycloak() -> None:
+    docs = _render(*_ON, "--set", "agent.enabled=true", "--set", "agent.secretName=agent-key")
+    assert any(d["metadata"]["name"].endswith("-test-agent-runtime-config") for d in docs)
+
+
 @pytest.mark.parametrize("key", ["config.keycloakIssuerUrl", "keycloak.issuer"])
 def test_hand_set_issuer_fails_with_the_built_in_keycloak(key: str) -> None:
     result = _run(*_ON, "--set", f"{key}=https://keycloak.test/realms/meho")

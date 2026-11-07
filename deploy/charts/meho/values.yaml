@@ -1042,14 +1042,18 @@ checkRunner:
   # ship this block).
   enabled: false
   # -- `client_id` of the confidential Keycloak client the check-runner
-  # authenticates as. Required (non-empty) when `checkRunner.enabled: true`.
+  # authenticates as. Required (non-empty) when `checkRunner.enabled: true`,
+  # unless `coreKeycloak.enabled` is on: then leave it empty (the chart uses
+  # `meho-check-runner`) or set exactly that.
   clientId: ""
   # -- Confidential client secret, wired via `secretKeyRef` only.
   clientSecret:
     # -- Name of the Kubernetes Secret holding the client secret. Referenced
     # by name only — provisioning is the consumer's responsibility (a
     # GSM-synced ExternalSecret, a sealed-secret, or a directly-applied
-    # Secret). Required (non-empty) when `checkRunner.enabled: true`.
+    # Secret). Required (non-empty) when `checkRunner.enabled: true`,
+    # unless `coreKeycloak.enabled` is on: then leave it empty (the chart uses
+    # `<release>-core-check-runner`, which the install makes).
     secretName: ""
     # -- Key within `secretName` whose value is the client secret.
     secretKey: client_secret
@@ -1160,18 +1164,22 @@ keycloakAdmin:
   # -- Whether to wire the three `KEYCLOAK_ADMIN_*` env vars into the
   # backplane Deployment. Default `false`: agent-principal endpoints
   # return `503 keycloak_admin_not_configured` (no behaviour change vs.
-  # a chart that doesn't ship this block).
+  # a chart that doesn't ship this block). With the built-in Keycloak
+  # (`coreKeycloak.enabled`) the chart always wires them: this switch and
+  # `url` / `clientId` are not needed.
   enabled: false
   # -- Admin REST API base URL for the Keycloak realm managing MEHO
   # principals, e.g. `https://keycloak.example.com/admin/realms/meho`.
   # Plain env (`KEYCLOAK_ADMIN_URL`) — not a secret. Required and
-  # non-empty when `keycloakAdmin.enabled: true`.
+  # non-empty when `keycloakAdmin.enabled: true`, unless
+  # `coreKeycloak.enabled` is on: then leave it empty.
   url: ""
   # -- `client_id` of the confidential Keycloak client backing the Admin
   # REST API (suggested `meho-admin`; see
   # `docs/cross-repo/keycloak-agent-client.md` § Step 1). Plain env
   # (`KEYCLOAK_ADMIN_CLIENT_ID`) — not a secret. Required and non-empty
-  # when `keycloakAdmin.enabled: true`.
+  # when `keycloakAdmin.enabled: true`, unless `coreKeycloak.enabled` is on:
+  # then leave it empty (the chart uses `meho-admin`) or set exactly that.
   clientId: ""
   clientSecret:
     # -- Name of the Kubernetes Secret holding the admin client secret.
@@ -1230,17 +1238,21 @@ uiConsole:
   # -- Whether to wire `UI_KEYCLOAK_CLIENT_SECRET` +
   # `UI_SESSION_ENCRYPTION_KEY` into the backplane Deployment. Default
   # `false`: the operator console stays disabled and the two env vars are
-  # not rendered. Flip to `true` and provide `secretName` (+ set
-  # `config.uiKeycloakClientId`) to enable the browser console — the
-  # schema requires both under `enabled: true`, so a half-configured
-  # console fails at `helm install` rather than 503-ing at first login.
+  # not rendered. Flip to `true` to enable the browser console. With the
+  # built-in Keycloak (`coreKeycloak.enabled`) that is all: the chart fills
+  # in `secretName` and `config.uiKeycloakClientId`. With your own Keycloak
+  # also provide both; the schema requires them under `enabled: true`, so a
+  # half-configured console fails at `helm install` rather than 503-ing at
+  # first login.
   enabled: false
   # -- Name of the Kubernetes Secret holding BOTH the confidential web
   # client secret and the session encryption key. Referenced by name only
   # (like `postgres.credentialsSecret`) — provisioning is the consumer's
   # responsibility (GSM-synced ExternalSecret, a sealed-secret, or a
   # directly-applied Secret). Required and non-empty when
-  # `uiConsole.enabled: true`.
+  # `uiConsole.enabled: true`, unless `coreKeycloak.enabled` is on: then
+  # leave it empty (the chart uses `<release>-core-ui-auth`, which the
+  # install makes).
   secretName: ""
   # -- Key within `secretName` whose value is the confidential web
   # client's `client_secret` (rendered into `UI_KEYCLOAK_CLIENT_SECRET`).
@@ -1412,7 +1424,10 @@ coreKeycloak:
   # `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
   # `checkRunner.clientSecret.secretName` must stay empty or name the
   # `<release>-core-…` Secret, because Keycloak reads only that name; the
-  # render stops otherwise.
+  # render stops otherwise. `config.uiKeycloakClientId`, `checkRunner.clientId`,
+  # `keycloakAdmin.url` and `keycloakAdmin.clientId` must stay empty or equal
+  # the value the chart uses, for the same reason. So `uiConsole.enabled`,
+  # `checkRunner.enabled` and `keycloakAdmin.enabled` each need no other value.
   #
   # When on, the chart also sets the backplane's Keycloak settings itself:
   # the issuer `https://<hostname>/auth/realms/meho`, the Service address
@@ -1420,9 +1435,8 @@ coreKeycloak:
   # `meho-backplane`, the client ids `meho-cli` and `meho-web`, and
   # `KEYCLOAK_ADMIN_*` for the `meho-admin` client. Leave
   # `config.keycloakIssuerUrl` and `keycloak.issuer` empty (the render
-  # stops otherwise); `config.keycloakAudience`, `config.keycloakCliClientId`,
-  # `config.uiKeycloakClientId` and `keycloakAdmin.url` / `clientId` are
-  # not used. Pods call Keycloak over plain HTTP inside the namespace (see
+  # stops otherwise); `config.keycloakAudience` and
+  # `config.keycloakCliClientId` are not used. Pods call Keycloak over plain HTTP inside the namespace (see
   # docs/codebase/devops.md, "How the backplane uses it").
   enabled: true
   # -- MEHO's public DNS name. Set the same value as `ingress.host`.

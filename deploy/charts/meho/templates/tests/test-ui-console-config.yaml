@@ -64,12 +64,12 @@ spec:
         - name: UI_KEYCLOAK_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.uiConsole.secretName | quote }}
+              name: {{ (include "meho.keycloakSettings" . | fromYaml).uiSecretName | quote }}
               key: {{ .Values.uiConsole.clientSecretKey | quote }}
         - name: UI_SESSION_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.uiConsole.secretName | quote }}
+              name: {{ (include "meho.keycloakSettings" . | fromYaml).uiSecretName | quote }}
               key: {{ .Values.uiConsole.sessionEncryptionKey | quote }}
       command:
         - sh

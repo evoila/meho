@@ -1036,7 +1036,14 @@ newer.
 With `coreKeycloak.enabled` on, the chart sets every Keycloak setting of the
 backplane itself (helper `meho.keycloakSettings` in
 `templates/_core-keycloak.tpl`). The values come from the subchart and the
-realm file, not from `config.*` or `keycloakAdmin.*`:
+realm file, not from `config.*` or `keycloakAdmin.*`. The chart also
+fills in the Secret names and the check runner client id, so the web
+console, the check runner and the Keycloak admin each turn on with one
+switch (#4766): `uiConsole.enabled` (with `UI_KEYCLOAK_CLIENT_ID` and the
+Secret `<release>-core-ui-auth`), `checkRunner.enabled` (with
+`CHECK_RUNNER_CLIENT_ID=meho-check-runner` and the Secret
+`<release>-core-check-runner`). `keycloakAdmin.enabled` is not needed:
+
 
 | Setting | Value |
 | --- | --- |
@@ -1072,13 +1079,24 @@ Keycloak:
 - `corePostgres.existingSecrets.keycloak`,
   `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` or
   `checkRunner.clientSecret.secretName` names a Secret other than the
-  matching `<release>-core-…` one, for example
+  matching `<release>-core-…` one;
+- `config.uiKeycloakClientId`, `checkRunner.clientId`, `keycloakAdmin.url`
+  or `keycloakAdmin.clientId` is set to anything but the value in the table
+  above (or `meho-check-runner` for the check runner). For example
   `uiConsole.secretName must be empty or "meho-core-ui-auth" while
-  coreKeycloak.enabled is on: the built-in Keycloak reads only that
-  Secret.`
+  coreKeycloak.enabled is on: the chart sets it itself.`
+
+Each of these keys is empty by default, so the operator sets none of them.
 
 The schema needs `keycloak.issuer`, `config.keycloakIssuerUrl` and
-`config.keycloakAudience` only while the built-in Keycloak is off.
+`config.keycloakAudience` only while the built-in Keycloak is off. It needs
+`uiConsole.secretName` and `config.uiKeycloakClientId` (with
+`uiConsole.enabled`), `checkRunner.clientId` and
+`checkRunner.clientSecret.secretName` (with `checkRunner.enabled`), and
+`keycloakAdmin.url` and `keycloakAdmin.clientId` (with
+`keycloakAdmin.enabled`) only while it is off. The helm test pod
+`test-agent-runtime-config` also runs with the built-in Keycloak and
+`agent.enabled`.
 
 **HTTPS inside the cluster.** The realm keeps `sslRequired: external`, and
 pods still call the Service over plain HTTP. That works for every pod

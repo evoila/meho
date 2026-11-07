@@ -137,7 +137,7 @@ state, honestly:
 
 | Deployment shape | Interactive operations | Background (sensors / scheduler) on credentialed targets |
 |---|---|---|
-| **Vault** | ✅ Works | ⚠️ Requires the check-runner principal (below). Works once configured — but read the privilege caveat. A durable machine-credential identity (including the Vault token-lifecycle root cause) is the open hardening item, [#2668](https://github.com/evoila/meho/issues/2668). |
+| **Vault** | ✅ Works | ⚠️ Requires the check-runner principal (below). Works once configured — but read the warning below first. The scheduler renews its own Vault token on a timer. When that token dies, the scheduler logs in again as the check-runner principal and makes a new one. |
 | **GSM, service-account reads** (no per-operator WIF) | ✅ Works | ✅ Works — background reads fall back to the Pod's own Google identity; no extra configuration. |
 | **GSM, per-operator WIF, on GKE** | ✅ Works | ⚠️ Background *dispatch* falls back to the Pod identity and works. But connector *probes* of credentialed targets take the per-operator path with a placeholder token, fail the exchange harmlessly, and report `reachable=false` / `auth_failed` — a documented current limitation. |
 | **GSM, per-operator WIF, no Pod identity** (non-GKE) | ✅ Works | ❌ Fails closed **unless** the check-runner principal is configured — there is no identity to read with. Credentialed sensors read `unknown` forever. |

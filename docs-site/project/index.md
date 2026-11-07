@@ -38,8 +38,9 @@ Report vulnerabilities per
 [`SECURITY.md`](https://github.com/evoila/meho/blob/main/SECURITY.md)
 — coordinated disclosure, no public issue for an unpatched finding.
 Release artefacts (image, chart, CLI tarballs) are cosign-signed
-keyless under a common identity-claim format; verification commands
-ship in the release notes.
+keyless under a common identity-claim format; the verification
+commands are in the
+[repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures).
 
 ## Roadmap
 

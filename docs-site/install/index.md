@@ -1,4 +1,10 @@
-# The install trail
+# Your own parts: the install trail
+
+!!! note "Most people do not need this page"
+
+    The normal way is [form 3, your Kubernetes](form-3-your-kubernetes.md):
+    the chart brings its own PostgreSQL, Keycloak and OpenBao. Use this
+    page only to connect your own PostgreSQL, Keycloak or Vault.
 
 This page is one continuous path from a bare Kubernetes cluster to a
 running MEHO backplane and a successful `meho login`. Follow it top to

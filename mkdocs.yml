@@ -59,8 +59,19 @@ nav:
       - Approvals: can-do/approvals.md
       - Secret values stay hidden: can-do/hidden-secrets.md
   - Install & operate:
+      - Which install form is right for you?: install/which-form.md
+      - "Form 1: VMware appliance": install/form-1-vmware-appliance.md
+      - "Form 2: Linux server": install/form-2-linux-server.md
+      - "Form 3: Your Kubernetes": install/form-3-your-kubernetes.md
+      - The setup page and the settings file: install/setup-page.md
+      - The first-start checks: install/first-start-checks.md
+      - Your first day: install/first-day.md
+      - Set up login: install/login-setup.md
+      - Tools for your laptop: install/laptop-tools.md
+      - Back up, restore and update: install/backup-restore-update.md
+      - Common problems: install/common-problems.md
       - Ways to install MEHO: install/ways-to-install.md
-      - The install trail: install/index.md
+      - "Your own parts: the install trail": install/index.md
       - Credential backends: install/credential-backends.md
       - Keycloak realm setup: install/keycloak-realm.md
       - Company login with authentik: install/company-login-authentik.md

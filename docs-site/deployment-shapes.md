@@ -1,5 +1,9 @@
 # Deployment shapes
 
+An install form is how MEHO gets onto a machine. A deployment shape is
+how the network and the password store look. To pick an install form,
+see [Which install form is right for you?](install/which-form.md).
+
 MEHO ships as **one Helm chart**. By default the chart also brings its
 own PostgreSQL, Keycloak and OpenBao (an open-source fork of Vault).
 This is the normal way. You can connect your own PostgreSQL or secret

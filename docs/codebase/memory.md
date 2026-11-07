@@ -183,10 +183,18 @@ The three semantic branches are:
 
 | Caller shape | `expires_at_was_set` | `explicit_expires_at` | Resolver returns |
 |---|---|---|---|
+| Field omitted, `metadata.expires_at` is a date (REST; lesson header) | `False` | (n/a) | the header date |
 | Field omitted, `scope=user` | `False` | (n/a) | `now + memory_user_default_ttl_days` |
 | Field omitted, non-`user` scope | `False` | (n/a) | `None` |
 | Field present, value `null` (CLI `--persist`) | `True` | `None` | `None` |
 | Field present, value `<ISO-8601>` | `True` | the parsed datetime | the parsed datetime |
+
+The header row comes first: a note that carries `expires_at` in its
+lesson header keeps that date when it moves from knowledge to memory.
+An explicit `expires_at` (or `ttl`), also an explicit `null`, still
+wins over the header. A header value that is not a date is left to the
+header check, which refuses the write. The MCP `add_to_memory` tool has
+no `metadata` argument, so only REST passes a header.
 
 Why this matters: before G0.9.1-T3 (#775) the MCP path always passed
 `expires_at` explicitly to `MemoryService.remember` — including
@@ -217,15 +225,23 @@ operator console persisted `expires_at = null` and the expiry sweeper
    overwritten with the real scope. Then build merged `doc_metadata`
    (caller keys + service-owned `scope` / `user_sub` / `target_name` /
    `expires_at`).
-5. Call `meho_backplane.retrieval.indexer.index_document`, which
-   upserts the row (insert-or-update on the
+5. Write the row and its revision in one transaction
+   (`memory/revisions.py::write_entry`). It locks the head row on
+   PostgreSQL (`SELECT ... FOR UPDATE`), so writes to the same entry run
+   one after the other; then it calls
+   `meho_backplane.retrieval.indexer.index_document` with that session,
+   which upserts the row (insert-or-update on the
    `(tenant_id, source, source_id)` unique index) and computes the
    384-dim embedding inline.
-6. Store a revision (`memory/revisions.py::record_revision`): one
+6. In the same transaction, add a revision (`add_revision`): one
    `memory_revision` row with the body and metadata, unless the newest
-   revision already has the same body and metadata. `promote` stores
-   one for the new target row too; `forget`, the expiry sweeper and a
-   moving promote delete the revisions of the entries they delete.
+   revision already has the same body and metadata. When anything fails,
+   neither the row nor the revision is saved. A write that clashes with
+   another one (a first write of the same entry, or a taken revision
+   number) runs again, at most three times. `promote` adds the revision
+   of the new target row in its own transaction too; `forget`, the
+   expiry sweeper and a moving promote delete the revisions of the
+   entries they delete.
 7. Project the row to `MemoryEntry` via `document_to_entry`, which pulls
    `created_at` / `updated_at` straight from the ORM row, and lifts
    `source` out of the metadata (`MemoryEntry.source`, `None` when the

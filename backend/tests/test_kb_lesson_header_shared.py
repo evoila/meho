@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from meho_backplane.api.v1.retrieve import RetrieveRequest, retrieve_endpoint
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import KbSharedNotAllowedError, KbSharedSlugError
 from meho_backplane.kb.service import KbService
 from meho_backplane.lesson_header import LessonHeaderError
@@ -289,6 +291,66 @@ async def test_search_adds_the_shared_hits_and_asks_only_for_shared_rows() -> No
     shared_call = next(c for c in calls if c["tenant_id"] == OWNER)
     assert own_call["metadata_filters"] == {"team": "x"}
     assert shared_call["metadata_filters"] == {"team": "x", "shared": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("shared_filter", "searched"), [(False, [OTHER]), (True, [OTHER, OWNER])])
+async def test_a_shared_filter_of_the_caller_is_kept(
+    shared_filter: bool, searched: list[uuid.UUID]
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_retrieve(**kwargs: Any) -> list[RetrievalHit]:
+        calls.append(kwargs)
+        return [_hit(kwargs["tenant_id"], f"note-{kwargs['tenant_id']}", 0.5)]
+
+    with patch("meho_backplane.kb.service.retrieve", side_effect=fake_retrieve):
+        hits = await KbService().search_entries(
+            OTHER, "snapshot", filters={"shared": shared_filter}
+        )
+
+    assert [c["tenant_id"] for c in calls] == searched
+    assert all(c["metadata_filters"] == {"shared": shared_filter} for c in calls)
+    assert len(hits) == len(searched)
+
+
+@pytest.mark.asyncio
+async def test_cli_search_route_adds_the_shared_hits_for_a_second_tenant() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_retrieve(**kwargs: Any) -> list[RetrievalHit]:
+        calls.append(kwargs)
+        if kwargs["tenant_id"] == OWNER:
+            return [_hit(OWNER, "lab-note", 0.9)]
+        return [_hit(OTHER, "mine", 0.4)]
+
+    operator = Operator(
+        sub="op-2",
+        name=None,
+        email=None,
+        raw_jwt="not-a-real-jwt",
+        tenant_id=OTHER,
+        tenant_role=TenantRole.OPERATOR,
+    )
+    with (
+        patch("meho_backplane.api.v1.retrieve.retrieve", side_effect=fake_retrieve),
+        patch("meho_backplane.kb.service.retrieve", side_effect=fake_retrieve),
+    ):
+        kb_hits = await retrieve_endpoint(
+            RetrieveRequest(query="snapshot", source="kb", limit=5), operator
+        )
+        memory_hits = await retrieve_endpoint(
+            RetrieveRequest(query="snapshot", source="memory", limit=5), operator
+        )
+
+    assert [(h.tenant_id, h.source_id) for h in kb_hits.hits] == [
+        (OWNER, "lab-note"),
+        (OTHER, "mine"),
+    ]
+    shared_call = next(c for c in calls if c["tenant_id"] == OWNER)
+    assert shared_call["metadata_filters"] == {"shared": True}
+    # Only a knowledge search reads the shared scope.
+    assert [(h.tenant_id, h.source_id) for h in memory_hits.hits] == [(OTHER, "mine")]
 
 
 @pytest.mark.asyncio

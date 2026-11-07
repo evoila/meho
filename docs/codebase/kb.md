@@ -262,7 +262,12 @@ is a person who can decide approvals in the tenant: a human principal
 that is `operator` or higher, or has the `approver` capability (the
 same rule as `_check_reviewer_role` in the approvals queue, one list
 for approvals and reviews). Agent, service and runner principals are
-never reviewers. Only a `tenant_admin` may set the curation keys
+never reviewers. A `read_only` reviewer passes the tool's role gate
+too: the tool is registered with `approver_may_call=True`, so
+`mcp/registry.py::tool_role_gate_met` lets a human with the `approver`
+capability list and call it. Other `read_only` callers stay blocked.
+REST `POST /api/v1/kb` and the console editor stay `tenant_admin` only.
+Only a `tenant_admin` may set the curation keys
 (`may_set_curation_keys`). For every other caller the service:
 
 - refuses to overwrite an entry whose `created_by_sub` is missing or
@@ -385,7 +390,9 @@ stored one, else now) and, when it names no `expires_at`, an
 `expires_at` six months after `learned_at`. A re-write or re-import of
 the same note keeps these dates. A confirmed entry gets no expiry.
 Nothing deletes or hides an expired entry yet: the date is recorded and
-returned on every read surface.
+returned on every read surface. The console entry page shows every
+header field the entry has in a "Lesson header" list
+(`lesson_header.py::header_rows`).
 
 **Owner.** The owner is `created_by_sub` (see above).
 
@@ -398,7 +405,13 @@ default, so nothing is shared). Only reading is shared:
   owner's id);
 - `get_entry`, `list_entries`, `search_entries` and `get_revision` of
   another tenant include it (`kb/shared.py::visible_to`; search asks
-  each owner tenant for its `shared` rows and merges by score);
+  each owner tenant for its `shared` rows and merges by score, in
+  `kb/service.py::add_shared_hits`);
+- `POST /api/v1/retrieve` with `source="kb"` (what `meho kb search`
+  calls) adds the same shared hits through `add_shared_hits`;
+- a caller filter `shared` other than `true` (for example
+  `filters={"shared": false}`) leaves out every shared entry of another
+  tenant;
 - when a tenant has the same slug itself, its own entry wins;
 - a tenant that is not listed cannot set `shared: true`
   (`KbSharedNotAllowedError`, REST `403`);

@@ -61,7 +61,12 @@ from meho_backplane.memory.rbac import (
     PermissionDeniedError,
     assert_can_promote,
 )
-from meho_backplane.memory.revisions import MemoryEntryRevision, list_revisions, record_revision
+from meho_backplane.memory.revisions import (
+    MemoryEntryRevision,
+    add_revision,
+    list_revisions,
+    write_entry,
+)
 from meho_backplane.memory.schemas import (
     TARGET_SCOPED,
     USER_SCOPED,
@@ -157,15 +162,14 @@ class MemoryService:
             expires_at=expires_at,
         )
 
-        doc = await index_document(
+        doc = await write_entry(
             tenant_id=operator.tenant_id,
-            source=MEMORY_SOURCE,
             source_id=source_id,
             kind=kind_for_scope(scope),
             body=body,
             metadata=merged_metadata,
+            written_by_sub=operator.sub,
         )
-        await record_revision(doc, operator.sub)
         self._log.info(
             "memory_remember",
             tenant_id=str(operator.tenant_id),
@@ -400,9 +404,8 @@ class MemoryService:
                 )
                 await session.delete(source_doc)
 
+            await add_revision(session, target_doc, operator.sub)
             await session.commit()
-
-        await record_revision(target_doc, operator.sub)
 
         self._log.info(
             "memory_promote",

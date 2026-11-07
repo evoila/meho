@@ -151,6 +151,7 @@ from fastapi.responses import HTMLResponse, Response
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.kb import KbEntry, KbEntrySearchHit, KbService
 from meho_backplane.kb.schemas import InvalidKbSlugError, KbSharedSlugError
+from meho_backplane.lesson_header import header_rows
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
@@ -533,6 +534,7 @@ def build_kb_router() -> APIRouter:
             "code_css": code_css,
             "source_path": source_path,
             "body_hash": body_hash,
+            "header_rows": header_rows(entry.metadata),
             "operator_sub": session.operator_sub,
             "csrf_token": csrf_token,
             "active_surface": "knowledge",

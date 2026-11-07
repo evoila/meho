@@ -134,7 +134,7 @@ from meho_backplane.kb.shared import (
 from meho_backplane.lesson_header import add_candidate_expiry, normalise_lesson_header
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
 
-__all__ = ["KbIngestRootError", "KbListOrder", "KbService"]
+__all__ = ["KbIngestRootError", "KbListOrder", "KbService", "add_shared_hits"]
 
 #: Row order of :meth:`KbService.list_entries`. ``"slug"`` (the default)
 #: sorts A to Z by slug; ``"newest"`` puts the most recently updated
@@ -508,42 +508,54 @@ class KbService:
             limit=CANDIDATE_LIMIT,
             metadata_filters=metadata_filters,
         )
-        ranked = await self._add_shared_hits(
-            ranked, tenant_id, query, kind_filter, metadata_filters
+        ranked = await add_shared_hits(
+            ranked,
+            tenant_id=tenant_id,
+            query=query,
+            kind=kind_filter,
+            limit=CANDIDATE_LIMIT,
+            metadata_filters=metadata_filters,
         )
         return _group_by_entry(ranked, limit)
 
-    async def _add_shared_hits(
-        self,
-        own: list[RetrievalHit],
-        tenant_id: uuid.UUID,
-        query: str,
-        kind_filter: str | None,
-        metadata_filters: dict[str, Any] | None,
-    ) -> list[RetrievalHit]:
-        """Add the hits of the shared scope to *own*, best first.
 
-        Each owner tenant is searched on its own, narrowed to its
-        ``shared`` entries. A shared hit whose slug the tenant has itself
-        is dropped, so the tenant's own entry wins.
-        """
-        owners = shared_owner_tenants() - {tenant_id}
-        if not owners:
-            return own
-        own_slugs = {_hit_slug(hit) for hit in own}
-        merged = list(own)
-        for owner in sorted(owners):
-            shared_hits = await retrieve(
-                tenant_id=owner,
-                query=query,
-                source=KB_SOURCE,
-                kind=kind_filter,
-                limit=CANDIDATE_LIMIT,
-                metadata_filters={**(metadata_filters or {}), META_SHARED: True},
-            )
-            merged.extend(hit for hit in shared_hits if _hit_slug(hit) not in own_slugs)
-        merged.sort(key=lambda hit: hit.fused_score, reverse=True)
-        return merged[:CANDIDATE_LIMIT]
+async def add_shared_hits(
+    own: list[RetrievalHit],
+    *,
+    tenant_id: uuid.UUID,
+    query: str,
+    kind: str | None,
+    limit: int,
+    metadata_filters: dict[str, Any] | None,
+) -> list[RetrievalHit]:
+    """Add the kb hits of the shared scope to *own*, best first, at most *limit*.
+
+    Each owner tenant is searched on its own, narrowed to its ``shared``
+    entries. A shared hit whose slug the tenant has itself is dropped, so
+    the tenant's own entry wins. A ``shared`` filter of the caller other
+    than ``true`` excludes every shared entry, so then *own* is returned
+    unchanged. Used by :meth:`KbService.search_entries` and by
+    ``POST /api/v1/retrieve`` with ``source="kb"`` (``meho kb search``).
+    """
+    owners = shared_owner_tenants() - {tenant_id}
+    filters = dict(metadata_filters or {})
+    if not owners or filters.get(META_SHARED, True) is not True:
+        return own
+    filters[META_SHARED] = True
+    own_slugs = {_hit_slug(hit) for hit in own}
+    merged = list(own)
+    for owner in sorted(owners):
+        shared_hits = await retrieve(
+            tenant_id=owner,
+            query=query,
+            source=KB_SOURCE,
+            kind=kind,
+            limit=limit,
+            metadata_filters=filters,
+        )
+        merged.extend(hit for hit in shared_hits if _hit_slug(hit) not in own_slugs)
+    merged.sort(key=lambda hit: hit.fused_score, reverse=True)
+    return merged[:limit]
 
 
 async def _checked_direct_metadata(

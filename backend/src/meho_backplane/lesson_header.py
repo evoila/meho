@@ -44,6 +44,8 @@ __all__ = [
     "RESERVED_NAMES",
     "LessonHeaderError",
     "add_candidate_expiry",
+    "header_expires_at",
+    "header_rows",
     "normalise_lesson_header",
 ]
 
@@ -71,6 +73,17 @@ _ENUM_FIELDS: Final[dict[str, frozenset[str]]] = {
 }
 _TEXT_FIELDS: Final[tuple[str, ...]] = ("product", "version", "source", "author", "summary")
 _DATE_FIELDS: Final[tuple[str, ...]] = ("learned_at", "confirmed_at", "expires_at")
+#: The header fields in the order a read surface shows them.
+_SHOWN_FIELDS: Final[tuple[str, ...]] = (
+    *_ENUM_FIELDS,
+    "summary",
+    "product",
+    "version",
+    "source",
+    "author",
+    *_DATE_FIELDS,
+    "tags",
+)
 
 
 class LessonHeaderError(ValueError):
@@ -133,6 +146,37 @@ def add_candidate_expiry(
         learned = _parse_iso(result["learned_at"])
         result["expires_at"] = _add_months(learned, CANDIDATE_EXPIRY_MONTHS).isoformat()
     return result
+
+
+def header_expires_at(metadata: Mapping[str, Any] | None) -> datetime | None:
+    """Return the header's ``expires_at`` as a datetime.
+
+    ``None`` when *metadata* has no ``expires_at``, or a value that is
+    not a date: :func:`normalise_lesson_header` reports a wrong value.
+    """
+    if metadata is None:
+        return None
+    try:
+        text = _as_iso_date("expires_at", metadata.get("expires_at"))
+    except LessonHeaderError:
+        return None
+    return None if text is None else _parse_iso(text)
+
+
+def header_rows(metadata: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Return ``(field, value as text)`` for each header field *metadata* has.
+
+    For a page that shows the header. An empty value is left out; tags
+    are joined with commas.
+    """
+    rows: list[tuple[str, str]] = []
+    for name in _SHOWN_FIELDS:
+        value = metadata.get(name)
+        if value is None or value == "" or value == []:
+            continue
+        text = ", ".join(str(tag) for tag in value) if isinstance(value, list) else str(value)
+        rows.append((name, text))
+    return rows
 
 
 def _check_enum(name: str, value: object, allowed: frozenset[str]) -> None:

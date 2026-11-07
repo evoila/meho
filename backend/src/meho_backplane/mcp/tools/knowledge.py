@@ -459,7 +459,8 @@ register_mcp_tool(
             "in `add_to_memory`. The kb is durable team knowledge. "
             "You can change only entries you created; an entry another "
             "principal created is refused (`reason: entry_not_owned`) "
-            "unless you are a tenant admin, who can change any entry. "
+            "unless you are a tenant admin or a reviewer (a person who "
+            "can decide approvals), who can change any entry. "
             "Surface-name note: every non-MCP MEHO surface calls this "
             "substrate `kb`, not `knowledge` — REST is `/api/v1/kb` "
             "(`GET`/`POST /api/v1/kb`, `GET`/`DELETE /api/v1/kb/{slug}`), "
@@ -505,6 +506,8 @@ register_mcp_tool(
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
+        # A reviewer with the read_only role may still correct entries.
+        approver_may_call=True,
         op_class=_OP_CLASS_WRITE,
     ),
     handler=_add_to_knowledge_handler,

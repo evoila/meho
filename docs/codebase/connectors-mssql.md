@@ -4,9 +4,8 @@
 
 `mssql` is MEHO's typed **Microsoft SQL Server** connector: governed
 instance / database / high-availability / backup reads plus governed
-backup / restore and database create / drop, for the Hyper-V→VMware
-migration service line and the c1sql1 lab FCI
-(evoila-bosnia/claude-rdc-hetzner-dc#2794). It is a **direct wire-protocol**
+backup / restore and database create / drop, for example for a SQL Server
+failover cluster instance or a migration source. It is a **direct wire-protocol**
 connector — it subclasses the generic
 `meho_backplane.connectors.base.Connector` ABC (not the SSH / HTTP adapters)
 and drives a direct **TDS** connection on port 1433, exactly like the
@@ -59,8 +58,11 @@ pure-Python driver avoids. python-tds is actively maintained (1.17.1,
 Apache-2.0), and its DBAPI `pyformat` paramstyle gives clean parameter
 binding for injection safety.
 
-It is a **synchronous** driver, so every connect + execute + fetch round-trip
-runs off the event loop in one `asyncio.to_thread` hop
+It is a **synchronous** driver, so the connect and the statement run off the
+event loop in `asyncio.to_thread`: the connect runs once per checked address
+(`connect_checked` in `connectors/_shared/dial_guard.py`, which checks the
+target address with the same rules as when the target was saved), then
+execute + fetch run in a second hop
 (`meho_backplane.connectors.mssql.session`) — the same sync-driver-in-async
 pattern the hvac Vault reads, the mail transport, and the rke2 write ops
 already use.
@@ -91,20 +93,19 @@ store its SSH credentials (`username` / `ssh_private_key` / `password` — the
 shadowing the TDS pair. So one target's secret can carry both credential sets.
 
 Vault KV-v2 secret (path is the target's `secret_ref`, under the default
-`secret` mount — the vault-store convention
-`secret/rdc-hetzner-dc/<area>/<item>`):
+`secret` mount; the path below is an example):
 
 ```
-secret/rdc-hetzner-dc/mssql/c1sql1
+secret/<area>/mssql/<instance>
   sql_username = "meho_svc"
   sql_password = "<password>"
   # (future dbatools-over-SSH increment, same secret):
   # username        = "Administrator"
-  # ssh_private_key = "-----BEGIN OPENSSH PRIVATE KEY----- ..."
+  # ssh_private_key = "<OpenSSH private key>"
 ```
 
-Store it with the `/vault-store` skill (`scripts/vault-store.sh put`); never
-pass a credential on argv. An operator-less dispatch (the readiness probe, the
+Store the secret in Vault with your usual tool; never pass a credential on
+the command line. An operator-less dispatch (the readiness probe, the
 legacy `execute` shim) fails closed before any connect — there is no
 trust-auth TDS path.
 
@@ -146,7 +147,7 @@ is `dangerous`+approval** because it overwrites the target database, while
 Every list op returns the `{rows, total}` envelope the JSONFlux reducer keys
 on (it detects the single `rows` collection and materialises it into a result
 handle past the 50-row / 4 KB threshold). Every group carries a
-`_WHEN_TO_USE_BY_GROUP` entry (registration fails closed without one).
+`MSSQL_WHEN_TO_USE_BY_GROUP` entry (registration fails closed without one).
 
 ## Non-goal: no freeform `query` op
 
@@ -178,6 +179,9 @@ The connector builds SQL, not PowerShell, so the discipline is
   `x]; DROP DATABASE loot --` becomes the single delimited token
   `[x]]; DROP DATABASE loot --]` — a database that does not exist, never a
   second statement.
+- `BACKUP` / `RESTORE` also bind a path, so their database name uses
+  `quote_identifier_for_bound_statement`, which also doubles `%` (`pytds`
+  runs `%` formatting over the whole statement when params are passed).
 
 ## `fingerprint(target)` / `probe(target)`
 
@@ -212,15 +216,15 @@ default (non-force-encryption) SQL Server 2022 the connection succeeds and the
 channel is unencrypted after pre-login; against a **force-encryption** server
 `pytds` raises a clear error and the connector reports `connect_failed`
 (`tds_session.py` negotiation, line 1298). This mirrors the postgres
-connector's posture (no explicit TLS config; connects against the lab target).
+connector's posture (no explicit TLS config).
 
 Cert-validated TLS for a force-encryption / strict-mode instance is a **named
 future extension**, not built speculatively here: add an optional `sql_ca`
 field to the Vault secret, write it to a mode-0600 temp file, and pass it as
 `pytds.connect(cafile=...)` (which sets `enc_flag=ENCRYPT_ON` and validates the
-server cert via `validate_host`). The lab c1sql1 FCI is a default-config
-instance, so the current posture connects; production instances that force
-encryption need the `sql_ca` follow-up.
+server cert via `validate_host`). A default-config instance connects with the
+current posture; instances that force encryption need the `sql_ca`
+follow-up.
 
 ## Tests
 
@@ -237,19 +241,17 @@ convention).
 
 ## CLI
 
-Every op is reachable as `meho mssql ...` through the generated CLI. The CLI
-is generated from the backend OpenAPI, so adding the `mssql` product token
-grows the CLI snapshot (`cli/api/openapi.json` + the generated Go client);
-regenerate with `cd cli && make snapshot-openapi && make generate`.
+The CLI has no `mssql` command group. Every op is reachable through the
+generic verb `meho operation call mssql-tds-2022.x <op_id> --target <name>
+--params '{...}'`. The `mssql` product shows up in the CLI only as a target
+product value in the CLI snapshot (`cli/api/openapi.json` + the generated Go
+client); regenerate with `cd cli && make snapshot-openapi && make generate`.
 
 ## Known issues / scope
 
-- **Consumer proof (live c1sql1 FCI probe) is OPEN** — the acceptance criterion
-  that requires probing the live c1sql1 FCI (fingerprint version/edition,
-  governed backup against a test database, AG/FCI state reads) is **not
-  satisfiable in the sandbox** (no reachable lab instance + no Vault-provisioned
-  secret). It is declared OPEN honestly (the estate-connector precedent), to be
-  closed against the deployed lab.
+- **No live proof against a SQL Server instance yet** — the fingerprint, a
+  backup of a test database and the AG/FCI state reads are checked by the
+  unit tests only.
 - **dbatools-over-PowerShell increment is deferred** — migration-grade verbs
   (`Start-DbaMigration`, login/agent-job copy) that are prohibitively complex
   over raw T-SQL are a possible second increment, not this connector.
@@ -259,7 +261,9 @@ regenerate with `cd cli && make snapshot-openapi && make generate`.
 
 - `backend/src/meho_backplane/connectors/mssql/` — `session.py` (transport +
   creds + injection helpers), `queries.py` (T-SQL + `{rows, total}` shaping),
-  `ops.py` (op metadata), `connector.py` (op surface + fingerprint / probe),
+  `ops.py` (op table and `MSSQL_WHEN_TO_USE_BY_GROUP`), `ops_instance.py`,
+  `ops_databases.py`, `ops_ha.py`, `ops_backup.py` (per-group op metadata),
+  `connector.py` (op surface + fingerprint / probe),
   `__init__.py` (self-registration).
 - `connectors-winsrv.md` / `connectors-bind9.md` — sibling connector docs.
 - `connectors/postgres/` + `connectors/mongodb/` — the direct-protocol mold.

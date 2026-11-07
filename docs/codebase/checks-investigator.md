@@ -88,12 +88,14 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
    `topology.query.find_dependencies` returns the forward closure. Members
    whose closures intersect are unioned into one cause group. The group key is
    the deepest shared closure node (maximal minimum depth, ties broken by
-   `(kind, name)`), slugified — the deterministic key that is both the
+   `(kind, name)`), slugified, plus a short hash of the node's kind and
+   name — the deterministic key that is both the
    `work_ref` group segment and the memory-slug suffix. A member whose anchor
    is unresolvable — no `name` in the target dict, or an untracked / ambiguous
    node (`NodeNotFoundError` / `AmbiguousNodeError`, the expected state for
    every non-k8s target today, since only the Kubernetes connector overrides
-   `discover_topology`) — forms a singleton keyed on its own Sensor slug. So
+   `discover_topology`) — forms a singleton keyed on its own Sensor slug
+   plus the first 8 hex characters of the Sensor id. So
    correlation degrades gracefully to per-Sensor investigations when topology
    has no data.
 3. **Suppression** (`_is_suppressed`). Read the `checks-noise-<group-key>`
@@ -141,7 +143,7 @@ clearly delimited section **between the transition snapshot and the
 ## Correlated sensors                           <- server-built: name / state / op
 ## Observed sensor evidence (target-returned)
 <<UNTRUSTED_AGENT_TEXT
-…last_value / evidence / offender sample…       <- target-returned, untrusted (S14)
+…last_value / evidence / offender sample…       <- target-returned, untrusted
 END_UNTRUSTED_AGENT_TEXT>>
 ## Operator instructions for this dashboard
 <<<OPERATOR-PROMPT
@@ -172,7 +174,7 @@ The threat model is *careless*, not adversarial: the column is writable only
 by a `tenant_admin` through the create path, which is why a fixed fence is
 sufficient and a per-briefing nonce is not warranted.
 
-## Target-returned sensor evidence (S14, #302)
+## Target-returned sensor evidence
 
 Each correlated Sensor's `last_value`, `last_evidence` and offender `sample`
 rows are **target-returned**, not operator-authored: the assertion evaluator
@@ -356,9 +358,8 @@ principal, so no execution path inherits the role.
   for LLM Applications, LLM01 Prompt Injection —
   <https://genai.owasp.org/llmrisk/llm01-prompt-injection/> ("separate and
   clearly denote untrusted content to limit its influence on user prompts").
-- Target-returned sensor evidence fence: Task #302 (security review S14, parent
-  Initiative #262). Reuses the `wrap_untrusted_text` envelope
-  (`untrusted-text-envelope.md`, Task #154) the event-matcher path already
+- Target-returned sensor evidence fence: reuses the `wrap_untrusted_text`
+  envelope (`untrusted-text-envelope.md`) the event-matcher path already
   applies to inbound event bodies.
 - Mould: `examples/r1-tiered-triage/workflow.py` (harness-persists rationale,
   briefing builder, render/persist shape), `agent.deep-tier-investigator.json`

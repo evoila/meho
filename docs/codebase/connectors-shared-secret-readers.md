@@ -109,21 +109,19 @@ login, and the target update route calls it after a target change
 
 | Connector | Cache | Key |
 | --- | --- | --- |
-| Shared VCF helper `CredentialsCache` (VCF Fleet, VCF Operations, VCF Operations for Logs, Fleet LCM) | `_cache` | target |
-| VCF Operations, VCF Operations for Logs, Fleet LCM | `_session_tokens` | credential (+ login inputs) |
-| VCF Automation | `_provider_tokens`, `_tenant_tokens` (one readers list per plane: the planes may read different secrets) | credential per plane |
-| vSphere (`vmware_rest`) | `_session_tokens`, and the SOAP sessions `_vsan_sessions`, `_pbm_cookies` / `_pbm_profile_managers`, `_file_access_cookies` | target |
-| NSX | `_session_tokens` | target |
-| Harbor, Argo CD, Hetzner Robot, RabbitMQ, Cloud Builder | `_creds_cache` | target |
-| VCF Installer, SDDC Manager (VCF 5 is `sddc_vcf5`) | `_creds_cache` and `_session_tokens` | target / credential |
+| Shared helper `CredentialsCache` (`_shared/vcf_auth.py`; no connector in this repo uses it, a connector package can) | `_cache` | target |
+| Harbor, Argo CD, Hetzner Robot, RabbitMQ | `_creds_cache` | target |
 | Proxmox | `_creds_cache` (the ticket cache follows it) | target / credential |
 | Kubernetes | `_api_clients`, `_ws_api_clients` | target |
 | GitHub | `_installation_tokens`, `_pat_tokens` | target |
 | Keycloak | `_admin_tokens` | target |
-| Cloud Director, vRA 8, HCX, Salt, SRM and vSphere Replication (`vmware_shared/dr_rest.py`), vRO | the session or login cache | credential (+ login inputs) |
 | Profiled (ingested) connectors | `_session_tokens` | credential |
 | Azure, Entra ID | `_credentials`, `_tokens` | target + secret / login + scope |
-| Identity Broker (`idb`), phpIPAM | `_credentials`, `_tokens` | credential / target + secret |
+| phpIPAM | `_credentials`, `_tokens` | credential / target + secret |
+
+The VMware connectors are not in this repo
+([decision](../decisions/2026-10-28-own-connectors-leave-the-public-tree.md)),
+so their caches are not listed here.
 
 Not in the list, on purpose:
 

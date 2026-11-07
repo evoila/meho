@@ -73,8 +73,10 @@ backplane's fail-closed posture is not the diagnostic.
   endpoints (Infinity) and llama.cpp CPU-fallback endpoints are not
   used by the agent runtime today.
 - The appliance host is reachable from the backplane pod's network
-  namespace — verified by `kubectl exec -n meho deploy/backplane --
-  curl -sk https://<paif-host>/api/v1/compatibility/openai/v1/models`
+  namespace — verified by running
+  `curl -sk https://<paif-host>/api/v1/compatibility/openai/v1/models`
+  from a pod with `curl` in the backplane's namespace. The backplane
+  image has no `curl`.
   (a 401 here is the **expected** outcome before this doc's IdP
   client lands; a connection refused / DNS failure means the
   prerequisite is not met).
@@ -216,24 +218,23 @@ fixes by switching to the PAIF env vars above.
 
 ```yaml
 # values.airgap.yaml — air-gapped tenant overlay
-backplane:
-  env:
-    - name: VCF_PAIF_BASE_URL
-      value: "https://pais.airgap.local/api/v1/compatibility/openai/v1/"
-    - name: VCF_PAIF_OIDC_TOKEN_URL
-      value: "https://kc.airgap.local/realms/meho/protocol/openid-connect/token"
-    - name: VCF_PAIF_OIDC_CLIENT_ID
-      value: "meho-backplane-paif"
-    - name: VCF_PAIF_OIDC_CLIENT_SECRET
-      valueFrom:
-        secretKeyRef:
-          name: meho-backplane-paif-secret
-          key: client_secret
-    # Optional:
-    # - name: VCF_PAIF_OIDC_SCOPE
-    #   value: "paif"
-    # - name: VCF_PAIF_MODEL
-    #   value: "openai:meta-llama/Llama-3.1-8B-Instruct"
+extraEnv:
+  - name: VCF_PAIF_BASE_URL
+    value: "https://pais.airgap.local/api/v1/compatibility/openai/v1/"
+  - name: VCF_PAIF_OIDC_TOKEN_URL
+    value: "https://kc.airgap.local/realms/meho/protocol/openid-connect/token"
+  - name: VCF_PAIF_OIDC_CLIENT_ID
+    value: "meho-backplane-paif"
+  - name: VCF_PAIF_OIDC_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: meho-backplane-paif-secret
+        key: client_secret
+  # Optional:
+  # - name: VCF_PAIF_OIDC_SCOPE
+  #   value: "paif"
+  # - name: VCF_PAIF_MODEL
+  #   value: "openai:meta-llama/Llama-3.1-8B-Instruct"
 ```
 
 The `meho-backplane-paif-secret` Kubernetes Secret is the contract
@@ -274,20 +275,23 @@ tenant policy resolves a tier to PAIF by:
 
 The persistence wiring for tenant policies (loading from the
 database, hot-reloading on policy changes) is deferred to a
-follow-up task — see the `TODO(G11.5-T2)` markers in
-[`backend/src/meho_backplane/agent/models.py`](../../backend/src/meho_backplane/agent/models.py)
-and
-[`backend/src/meho_backplane/agent/run.py`](../../backend/src/meho_backplane/agent/run.py).
-For now, the resolver is constructed at app boot from in-process
-defaults; tenant operators wanting PAIF routing today extend the
-`build_resolver(...)` call site directly.
+follow-up task — see the `TODO(G11.5-T2)` marker in
+[`backend/src/meho_backplane/agent/invocation.py`](../../backend/src/meho_backplane/agent/invocation.py).
+Today the backplane builds no resolver at app boot. Every stored
+agent definition runs through `default_model_factory` in
+[`backend/src/meho_backplane/agent/run.py`](../../backend/src/meho_backplane/agent/run.py),
+and that factory uses Anthropic only. PAIF routing works only in code
+that builds `PydanticAgentRun` with a resolver from `build_resolver(...)`.
+The chart value `agent.modelBackend` sets `AGENT_MODEL_BACKEND`
+(`vcf-paif` is one of its choices), but the backplane does not read
+that setting yet.
 
 ## Step 5 — Verify end-to-end
 
 ### 5.1 — IdP token acquisition
 
-From inside the backplane pod (or any pod with `curl` and a route
-to the IdP):
+From any pod with `curl` and a route to the IdP (the backplane
+image has no `curl`):
 
 ```bash
 curl -sk -X POST "${VCF_PAIF_OIDC_TOKEN_URL}" \
@@ -337,8 +341,8 @@ real PAIF appliance, the operator runs the same scenario from a
 short-lived in-cluster job or `kubectl exec`:
 
 ```bash
-# Inside the backplane pod
-uv run python - <<'PY'
+# Inside the backplane pod (the image has no uv; use its python)
+python - <<'PY'
 import asyncio
 from meho_backplane.agent import default_vcf_paif_backend_builder
 model = default_vcf_paif_backend_builder()
@@ -369,7 +373,7 @@ metadata:
   name: meho-backplane-airgap
 spec:
   podSelector:
-    matchLabels: { app.kubernetes.io/name: meho-backplane }
+    matchLabels: { app.kubernetes.io/name: meho }
   policyTypes: ["Egress"]
   egress:
     - to:

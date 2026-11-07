@@ -102,6 +102,20 @@ PostgreSQL) around that count and the insert of the new run row. So
 with a cap of one request, a second start while the first run is still
 going is refused.
 
+A cancelled run also counts as one request until its charge is saved.
+Its loop may still be making a call on another worker, which stops at
+its next heartbeat. The charge writes a cost on the row (zero when the
+run made no model call), and then the run stops counting. A cancelled
+row with no cost stops counting after the lease time
+(`AGENT_RUN_LEASE_TTL_SECONDS`), so a worker that died does not block
+the person.
+
+The final charge runs in its own task (`_finish_despite_cancel`). A
+cancel of the loop task while the charge is being saved does not stop
+it, so the charge commits once. A caller that waits on a run (the REST
+call and the scheduler) gets the stored `cancelled` outcome when the
+run is cancelled during the wait.
+
 ## The pricing table
 
 `MODEL_PRICING` is a `Final[dict[str, PerMillionPricing]]` pinned at

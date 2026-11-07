@@ -112,13 +112,14 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agent.models import AgentTier
@@ -260,6 +261,10 @@ class EnforcementContext:
     degrade_threshold: float
     global_kill_switch: bool
     disabled_tenants: frozenset[UUID]
+    #: How long a cancelled run that is not charged yet still counts as a run
+    #: in progress. The worker that runs it charges it within one heartbeat,
+    #: so the lease time is enough; a worker that died never charges it.
+    cancel_charge_window_seconds: int = 60
 
     @classmethod
     def from_settings(cls, settings: Settings) -> EnforcementContext:
@@ -274,6 +279,7 @@ class EnforcementContext:
             degrade_threshold=settings.agent_budget_degrade_threshold,
             global_kill_switch=settings.agent_runs_disabled_global,
             disabled_tenants=parse_disabled_tenants(settings.agent_runs_disabled_tenants),
+            cancel_charge_window_seconds=settings.agent_run_lease_ttl_seconds,
         )
 
 
@@ -320,11 +326,17 @@ async def count_in_flight_runs(
     *,
     tenant_id: UUID,
     principal_sub: str,
+    cancel_charge_window_seconds: int = 60,
 ) -> int:
-    """Count the person's top-level runs that have started and not yet ended.
+    """Count the person's top-level runs that have started and are not charged yet.
 
-    Child runs are left out: their usage is part of the parent's charge.
+    That is a run that has not ended, and a run that was cancelled in the
+    last *cancel_charge_window_seconds* and has no cost yet: its loop may
+    still be making a call on another worker, and its charge is saved once
+    the loop has stopped. Child runs are left out: their usage is part of
+    the parent's charge.
     """
+    cancelled_since = datetime.now(UTC) - timedelta(seconds=cancel_charge_window_seconds)
     result = await session.execute(
         select(func.count())
         .select_from(AgentRun)
@@ -332,7 +344,14 @@ async def count_in_flight_runs(
             AgentRun.tenant_id == tenant_id,
             AgentRun.identity_sub == principal_sub,
             AgentRun.parent_run_id.is_(None),
-            AgentRun.status.in_(_IN_FLIGHT_STATUSES),
+            or_(
+                AgentRun.status.in_(_IN_FLIGHT_STATUSES),
+                and_(
+                    AgentRun.status == AgentRunStatus.CANCELLED.value,
+                    AgentRun.cost.is_(None),
+                    AgentRun.ended_at > cancelled_since,
+                ),
+            ),
         )
     )
     return int(result.scalar_one())
@@ -414,7 +433,10 @@ async def evaluate_pre_run_budget(
     if reserve_slot:
         await _lock_run_slot(session, tenant_id, principal_sub)
     in_flight = await count_in_flight_runs(
-        session, tenant_id=tenant_id, principal_sub=principal_sub
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        cancel_charge_window_seconds=context.cancel_charge_window_seconds,
     )
     readings = await _read_all_windows(session, tenant_id, principal_sub)
     snapshots = tuple(_snapshot_for(kind, reading) for kind, reading in readings)

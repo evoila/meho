@@ -12,17 +12,28 @@
   a cap of one request, a second start before the first one ends is
   refused, and a start is allowed again once the first one ended.
 * ``test_runs_of_another_person_do_not_count`` -- the count is per person.
+* ``test_cancel_during_the_sync_wait_returns_the_cancelled_outcome`` -- a
+  caller that waits on the run (REST and the scheduler) gets the cancelled
+  outcome, not an error.
+* ``test_second_start_right_after_a_remote_cancel_is_refused`` -- a run
+  cancelled on another worker counts until its charge is saved.
+* ``test_cancelled_run_counts_only_until_charged_or_the_window_ends`` -- the
+  count of a cancelled run ends with its charge, or after the lease time.
+* ``test_cancel_during_finalization_still_charges_once`` -- the final
+  charge is saved once, also when the loop task is cancelled meanwhile.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from datetime import timedelta
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic import SecretStr
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 from sqlalchemy import select
@@ -42,7 +53,8 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.operations import agent_run as run_lifecycle
-from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations import identity_budget, reset_dispatcher_caches
+from meho_backplane.operations.budget_enforcement import count_in_flight_runs
 from meho_backplane.operations.identity_budget import BudgetWindowKind, set_limits
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
@@ -285,3 +297,157 @@ async def test_runs_of_another_person_do_not_count(
         task = invoker._store[outcome.run_id].task
         await invoker.cancel(op, outcome.run_id)
         await _wait_for_end(task)
+
+
+async def _set_request_cap(sub: str, limit: int) -> None:
+    async with get_sessionmaker()() as session:
+        await set_limits(
+            session,
+            tenant_id=_TENANT,
+            principal_sub=sub,
+            window_kind=BudgetWindowKind.DAILY,
+            request_limit=limit,
+        )
+        await session.commit()
+
+
+async def _in_flight(sub: str) -> int:
+    async with get_sessionmaker()() as session:
+        return await count_in_flight_runs(session, tenant_id=_TENANT, principal_sub=sub)
+
+
+@pytest.mark.parametrize("scheduled", [False, True], ids=["rest", "scheduler"])
+async def test_cancel_during_the_sync_wait_returns_the_cancelled_outcome(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch, scheduled: bool
+) -> None:
+    await _seed()
+    model = _SlowSecondCall()
+    invoker = _invoker(model)
+    op = _operator(f"cap-sync-wait-{scheduled}")
+
+    async def _authenticate(name: str, **_kwargs: object) -> tuple[Operator, object]:
+        return op, await invoker._load_definition(op, name)
+
+    monkeypatch.setattr(invoker, "_authenticate_scheduled_agent", _authenticate)
+    if scheduled:
+        caller = asyncio.create_task(
+            invoker.run_scheduled(
+                _AGENT,
+                "go",
+                agent_client_id=f"agent:{_AGENT}",
+                agent_client_secret=SecretStr("unused"),
+            )
+        )
+    else:
+        caller = asyncio.create_task(invoker.run(op, _AGENT, "go"))
+    await asyncio.wait_for(model.second_call_started.wait(), timeout=10)
+    (run_id,) = invoker._store
+
+    await invoker.cancel(op, run_id)
+    outcome = await asyncio.wait_for(caller, timeout=10)
+
+    assert not caller.cancelled()
+    assert outcome.run_id == run_id
+    assert outcome.status == AgentRunStatus.CANCELLED
+    assert not outcome.converted_to_async
+
+
+async def test_second_start_right_after_a_remote_cancel_is_refused(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed()
+    monkeypatch.setenv("AGENT_RUN_LEASE_TTL_SECONDS", "10")
+    get_settings.cache_clear()
+    op = _operator("cap-remote-cancel-start")
+    await _set_request_cap(op.sub, 1)
+    model = _SlowSecondCall()
+    invoker = _invoker(model)
+    first = await invoker.run(op, _AGENT, "go", async_mode=True)
+    task = invoker._store[first.run_id].task
+    await asyncio.wait_for(model.second_call_started.wait(), timeout=10)
+
+    # Another worker cancels the row; this worker's loop is still running.
+    async with get_sessionmaker()() as session:
+        await run_lifecycle.cancel_run(session, first.run_id, operator=op)
+        await session.commit()
+
+    assert not task.done()
+    with pytest.raises(BudgetExceededError):
+        await invoker.run(op, _AGENT, "go", async_mode=True)
+
+    await _wait_for_end(task, timeout=15)
+    row = await _row(first.run_id)
+    assert row.cost is not None
+    assert row.cost > 0
+    assert await _in_flight(op.sub) == 0
+
+
+async def test_cancelled_run_counts_only_until_charged_or_the_window_ends(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _seed()
+    op = _operator("cap-cancel-window")
+    model = _SlowSecondCall()
+    invoker = _invoker(model)
+    outcome = await invoker.run(op, _AGENT, "go", async_mode=True)
+    task = invoker._store[outcome.run_id].task
+    await asyncio.wait_for(model.second_call_started.wait(), timeout=10)
+    await invoker.cancel(op, outcome.run_id)
+    await _wait_for_end(task)
+    assert await _in_flight(op.sub) == 0
+
+    # Not charged yet: counts while the cancel is recent, not after.
+    async with get_sessionmaker()() as session:
+        row = await session.get(AgentRunRow, outcome.run_id)
+        assert row is not None
+        row.cost = None
+        await session.commit()
+    assert await _in_flight(op.sub) == 1
+    async with get_sessionmaker()() as session:
+        row = await session.get(AgentRunRow, outcome.run_id)
+        assert row is not None and row.ended_at is not None
+        row.ended_at = row.ended_at - timedelta(minutes=5)
+        await session.commit()
+    assert await _in_flight(op.sub) == 0
+
+
+async def test_cancel_during_finalization_still_charges_once(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed()
+    finalizing = asyncio.Event()
+    release = asyncio.Event()
+    real_apply = identity_budget.apply_consumption
+
+    async def _slow_apply(*args: object, **kwargs: object) -> None:
+        finalizing.set()
+        await release.wait()
+        await real_apply(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(identity_budget, "apply_consumption", _slow_apply)
+
+    async def _answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart("done")],
+            usage=RequestUsage(input_tokens=50, output_tokens=5),
+        )
+
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: FunctionModel(_answer)))
+    op = _operator("cap-cancel-finalize")
+    outcome = await invoker.run(op, _AGENT, "go", async_mode=True)
+    task = invoker._store[outcome.run_id].task
+    await asyncio.wait_for(finalizing.wait(), timeout=10)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    await _wait_for_end(task)
+
+    assert task.cancelled()
+    row = await _row(outcome.run_id)
+    assert row.status == AgentRunStatus.SUCCEEDED.value
+    assert row.cost is not None
+    assert row.cost > 0
+    rows = await _budget_rows(op.sub)
+    assert [r.requests_consumed for r in rows] == [1, 1, 1]
+    assert [r.tokens_consumed for r in rows] == [55, 55, 55]

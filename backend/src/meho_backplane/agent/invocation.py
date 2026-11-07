@@ -76,7 +76,7 @@ import contextlib
 import os
 import socket
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -94,6 +94,7 @@ from meho_backplane.agent.run import (
     AgentRunEvent,
     AgentRunEventKind,
     AgentRunHandle,
+    AgentRunResult,
     BudgetExceededError,
     PydanticAgentRun,
     ScheduledRunNoInputError,
@@ -504,6 +505,41 @@ def _handle_usages(handle: AgentRunHandle | None) -> tuple[TokenUsage, ...]:
     return tuple(handle.request_usages) if handle is not None else ()
 
 
+def _record_cost(row: AgentRunRow, cost: Decimal | None) -> None:
+    """Record *cost* on a row that has none; a cancelled run with no model calls gets zero.
+
+    The spend cap counts a cancelled row with no cost as a run in progress
+    (see :func:`~meho_backplane.operations.budget_enforcement.count_in_flight_runs`),
+    so every cancelled row gets a cost once its charge is saved.
+    """
+    if row.cost is not None:
+        return
+    if cost is not None:
+        row.cost = cost
+    elif row.status == AgentRunStatus.CANCELLED:
+        row.cost = Decimal(0)
+
+
+async def _finish_despite_cancel(work: Awaitable[None]) -> None:
+    """Run the final accounting of a run to its end, also when the caller is cancelled.
+
+    The accounting runs in its own task and commits once. A cancel of the
+    caller (an operator cancel on this worker, a shutdown) does not stop it:
+    the caller waits until it has ended and then raises
+    :class:`asyncio.CancelledError`.
+    """
+    task = asyncio.ensure_future(work)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 def _split_model_id(model_id: str) -> tuple[str, str]:
     """Split ``"anthropic:claude-..."`` into ``(provider, model)``.
 
@@ -875,7 +911,11 @@ class AgentInvoker:
                         session, row, output=output or {}, cost=cost, turns=turns
                     )
             except run_lifecycle.IllegalTransitionError:
+                # An operator cancelled the run: keep its status, record the cost.
                 await session.rollback()
+                row = await run_lifecycle.get_run(session, run_id)
+                if row is not None:
+                    _record_cost(row, cost)
             if cost is not None:
                 await identity_budget.apply_consumption(
                     session,
@@ -899,26 +939,43 @@ class AgentInvoker:
         The cancel already wrote the terminal row. A run that is cancelled
         by a worker shutdown is not terminal; its row is left to the reaper.
         """
-        if not request_usages:
-            return
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await run_lifecycle.get_run(session, run_id)
             if row is None:  # pragma: no cover - row created moments earlier
                 return
-            cost = identity_budget.compute_run_cost(
-                request_usages, _full_model_id(row.provider, row.model)
-            )
-            if row.cost is None:
-                row.cost = cost
-            await identity_budget.apply_consumption(
-                session,
-                tenant_id=row.tenant_id,
-                principal_sub=row.identity_sub,
-                tokens=sum(u.total_tokens for u in request_usages),
-                cost=cost,
-            )
+            cost: Decimal | None = None
+            if request_usages:
+                cost = identity_budget.compute_run_cost(
+                    request_usages, _full_model_id(row.provider, row.model)
+                )
+            _record_cost(row, cost)
+            if cost is not None:
+                await identity_budget.apply_consumption(
+                    session,
+                    tenant_id=row.tenant_id,
+                    principal_sub=row.identity_sub,
+                    tokens=sum(u.total_tokens for u in request_usages),
+                    cost=cost,
+                )
             await session.commit()
+
+    async def _finalize_success(self, run_id: uuid.UUID, result: AgentRunResult) -> None:
+        """Record the output of a run that succeeded and charge its calls."""
+        usage = TokenUsage(
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cache_read_tokens=result.cache_read_tokens,
+            cache_write_tokens=result.cache_write_tokens,
+        )
+        await self._finalize_run(
+            run_id,
+            output=_project_output(result.output),
+            error=None,
+            usage=usage,
+            turns=result.request_count,
+            request_usages=result.request_usages,
+        )
 
     async def _run_loop_to_completion(
         self,
@@ -980,7 +1037,9 @@ class AgentInvoker:
             except asyncio.CancelledError:
                 # cancel_run wrote the terminal row; only charge the finished calls.
                 heartbeat.settle()
-                await self._charge_cancelled_run(run_id, request_usages=_handle_usages(handle))
+                await _finish_despite_cancel(
+                    self._charge_cancelled_run(run_id, request_usages=_handle_usages(handle))
+                )
                 raise
             except Exception as exc:
                 if not isinstance(exc, AgentRunError):
@@ -988,28 +1047,17 @@ class AgentInvoker:
                         "agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc)
                     )
                 heartbeat.settle()
-                await self._finalize_run(
-                    run_id,
-                    output=None,
-                    error=str(exc),
-                    request_usages=_handle_usages(handle),
+                await _finish_despite_cancel(
+                    self._finalize_run(
+                        run_id,
+                        output=None,
+                        error=str(exc),
+                        request_usages=_handle_usages(handle),
+                    )
                 )
                 return
             heartbeat.settle()
-            usage = TokenUsage(
-                input_tokens=result.input_tokens,
-                output_tokens=result.output_tokens,
-                cache_read_tokens=result.cache_read_tokens,
-                cache_write_tokens=result.cache_write_tokens,
-            )
-            await self._finalize_run(
-                run_id,
-                output=_project_output(result.output),
-                error=None,
-                usage=usage,
-                turns=result.request_count,
-                request_usages=result.request_usages,
-            )
+            await _finish_despite_cancel(self._finalize_success(run_id, result))
         finally:
             # Stop the heartbeat sidecar before resetting the contextvars:
             # the run has reached its terminal state (or is being cancelled),
@@ -1126,7 +1174,7 @@ class AgentInvoker:
         """Await *task* up to *timeout_seconds*; convert to async on timeout.
 
         The shared sync-wait tail of :meth:`run` and
-        :meth:`_launch_scheduled_run`. The shield means the timeout abandons
+        :meth:`_launch_scheduled_run`. The timeout abandons
         the *wait*, not the run — the loop keeps going in the background and
         stays pollable / reapable. On completion the durable row (the source
         of truth) is polled for the terminal outcome; on timeout the
@@ -1134,9 +1182,11 @@ class AgentInvoker:
         (logged under *timeout_log_event* so the two call sites stay
         distinguishable in logs).
         """
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
-        except TimeoutError:
+        # asyncio.wait neither cancels the task on timeout nor raises when the
+        # task itself was cancelled (an operator cancel): then the stored
+        # cancelled outcome is returned. A cancel of this caller still raises.
+        done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
+        if not done:
             _log.info(
                 timeout_log_event,
                 run_id=str(run_id),
@@ -1758,13 +1808,15 @@ class AgentInvoker:
             agent_run_audit_meta_var.reset(meta_token)
             agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
-            await self._finalize_run(
-                run_id,
-                output=terminal_output,
-                error=terminal_error,
-                usage=usage,
-                turns=turns,
-                request_usages=request_usages or tuple(usage_sink),
+            await _finish_despite_cancel(
+                self._finalize_run(
+                    run_id,
+                    output=terminal_output,
+                    error=terminal_error,
+                    usage=usage,
+                    turns=turns,
+                    request_usages=request_usages or tuple(usage_sink),
+                )
             )
 
 

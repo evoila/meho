@@ -1354,17 +1354,29 @@ type AgentRunStatus string
 type AgentRunStatusResponse struct {
 	AgentDefinitionId *openapi_types.UUID `json:"agent_definition_id"`
 	AgentName         *string             `json:"agent_name"`
-	Error             *string             `json:"error"`
+
+	// CacheReadTokens Input tokens read from the model's prompt cache; 0 when the provider reports no cache. Null until the run has succeeded.
+	CacheReadTokens *int `json:"cache_read_tokens"`
+
+	// CacheWriteTokens Input tokens written to the model's prompt cache; 0 when the provider reports no cache. Null until the run has succeeded.
+	CacheWriteTokens *int    `json:"cache_write_tokens"`
+	Error            *string `json:"error"`
 
 	// IdentityAct The agent that acts for identity_sub on a direct run. Null when the agent is itself the subject.
 	IdentityAct *string `json:"identity_act"`
 
 	// IdentitySub Who the run acts for: the person who started a direct run, or the agent itself on a scheduled run.
-	IdentitySub *string                 `json:"identity_sub"`
+	IdentitySub *string `json:"identity_sub"`
+
+	// InputTokens Input tokens the model read and did not take from its prompt cache. Null until the run has succeeded.
+	InputTokens *int                    `json:"input_tokens"`
 	Model       *string                 `json:"model"`
 	Output      *map[string]interface{} `json:"output"`
-	Provider    *string                 `json:"provider"`
-	RunId       openapi_types.UUID      `json:"run_id"`
+
+	// OutputTokens Tokens the model wrote. Null until the run has succeeded.
+	OutputTokens *int               `json:"output_tokens"`
+	Provider     *string            `json:"provider"`
+	RunId        openapi_types.UUID `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`AgentRun`.
 	//
@@ -7105,6 +7117,41 @@ type MemorySearchResponse struct {
 	Hits []MemoryEntrySearchHit `json:"hits"`
 }
 
+// ModelPrice Price of one model, in USD per million tokens.
+type ModelPrice struct {
+	InputPerMillion  ModelPrice_InputPerMillion  `json:"input_per_million"`
+	OutputPerMillion ModelPrice_OutputPerMillion `json:"output_per_million"`
+}
+
+// ModelPriceInputPerMillion0 defines model for .
+type ModelPriceInputPerMillion0 = float32
+
+// ModelPriceInputPerMillion1 defines model for .
+type ModelPriceInputPerMillion1 = string
+
+// ModelPrice_InputPerMillion defines model for ModelPrice.InputPerMillion.
+type ModelPrice_InputPerMillion struct {
+	union json.RawMessage
+}
+
+// ModelPriceOutputPerMillion0 defines model for .
+type ModelPriceOutputPerMillion0 = float32
+
+// ModelPriceOutputPerMillion1 defines model for .
+type ModelPriceOutputPerMillion1 = string
+
+// ModelPrice_OutputPerMillion defines model for ModelPrice.OutputPerMillion.
+type ModelPrice_OutputPerMillion struct {
+	union json.RawMessage
+}
+
+// ModelPriceEntry One row of the tenant's model prices.
+type ModelPriceEntry struct {
+	InputPerMillion  string `json:"input_per_million"`
+	Model            string `json:"model"`
+	OutputPerMillion string `json:"output_per_million"`
+}
+
 // MyRecentPage Unified list envelope for “GET /api/v1/audit/my-recent“.
 //
 // The `{items, next_cursor}` shape codified in
@@ -10470,6 +10517,24 @@ type TenantMailRecipientPolicyUpdate struct {
 	MailRecipientAllowlist *string `json:"mail_recipient_allowlist"`
 }
 
+// TenantModelPriceUpdate “PATCH /api/v1/tenants/model-prices“ body: set or remove one price.
+//
+// “model“ is the model id as an agent run shows it: “provider:model“
+// (“openai:qwen3“) or the model name alone (“qwen3“). “price“ sets the
+// price; “null“ removes it. Both keys are required.
+type TenantModelPriceUpdate struct {
+	Model string `json:"model"`
+
+	// Price Price of one model, in USD per million tokens.
+	Price ModelPrice `json:"price"`
+}
+
+// TenantModelPrices The tenant's prices for agent models MEHO does not know (#5853).
+type TenantModelPrices struct {
+	Prices   []ModelPriceEntry  `json:"prices"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+}
+
 // TenantOperationSettingItem One built-in operation with its install default and the tenant's own setting.
 type TenantOperationSettingItem struct {
 	DefaultEnabled bool    `json:"default_enabled"`
@@ -12405,6 +12470,16 @@ type UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams struct 
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// GetModelPricesApiV1TenantsModelPricesGetParams defines parameters for GetModelPricesApiV1TenantsModelPricesGet.
+type GetModelPricesApiV1TenantsModelPricesGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// UpdateModelPriceApiV1TenantsModelPricesPatchParams defines parameters for UpdateModelPriceApiV1TenantsModelPricesPatch.
+type UpdateModelPriceApiV1TenantsModelPricesPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DependenciesApiV1TopologyDependenciesNameGetParams defines parameters for DependenciesApiV1TopologyDependenciesNameGet.
 type DependenciesApiV1TopologyDependenciesNameGetParams struct {
 	Depth      *int    `form:"depth,omitempty" json:"depth,omitempty"`
@@ -13104,6 +13179,9 @@ type UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestB
 
 // UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody defines body for UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch for application/json ContentType.
 type UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody = TenantMailRecipientPolicyUpdate
+
+// UpdateModelPriceApiV1TenantsModelPricesPatchJSONRequestBody defines body for UpdateModelPriceApiV1TenantsModelPricesPatch for application/json ContentType.
+type UpdateModelPriceApiV1TenantsModelPricesPatchJSONRequestBody = TenantModelPriceUpdate
 
 // AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody defines body for AnnotateEdgeRouteApiV1TopologyEdgesPost for application/json ContentType.
 type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotateEdgeRequest
@@ -14508,6 +14586,130 @@ func (t *ManualStep_Verify) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsModelPriceInputPerMillion0 returns the union data inside the ModelPrice_InputPerMillion as a ModelPriceInputPerMillion0
+func (t ModelPrice_InputPerMillion) AsModelPriceInputPerMillion0() (ModelPriceInputPerMillion0, error) {
+	var body ModelPriceInputPerMillion0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromModelPriceInputPerMillion0 overwrites any union data inside the ModelPrice_InputPerMillion as the provided ModelPriceInputPerMillion0
+func (t *ModelPrice_InputPerMillion) FromModelPriceInputPerMillion0(v ModelPriceInputPerMillion0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeModelPriceInputPerMillion0 performs a merge with any union data inside the ModelPrice_InputPerMillion, using the provided ModelPriceInputPerMillion0
+func (t *ModelPrice_InputPerMillion) MergeModelPriceInputPerMillion0(v ModelPriceInputPerMillion0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsModelPriceInputPerMillion1 returns the union data inside the ModelPrice_InputPerMillion as a ModelPriceInputPerMillion1
+func (t ModelPrice_InputPerMillion) AsModelPriceInputPerMillion1() (ModelPriceInputPerMillion1, error) {
+	var body ModelPriceInputPerMillion1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromModelPriceInputPerMillion1 overwrites any union data inside the ModelPrice_InputPerMillion as the provided ModelPriceInputPerMillion1
+func (t *ModelPrice_InputPerMillion) FromModelPriceInputPerMillion1(v ModelPriceInputPerMillion1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeModelPriceInputPerMillion1 performs a merge with any union data inside the ModelPrice_InputPerMillion, using the provided ModelPriceInputPerMillion1
+func (t *ModelPrice_InputPerMillion) MergeModelPriceInputPerMillion1(v ModelPriceInputPerMillion1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t ModelPrice_InputPerMillion) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *ModelPrice_InputPerMillion) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsModelPriceOutputPerMillion0 returns the union data inside the ModelPrice_OutputPerMillion as a ModelPriceOutputPerMillion0
+func (t ModelPrice_OutputPerMillion) AsModelPriceOutputPerMillion0() (ModelPriceOutputPerMillion0, error) {
+	var body ModelPriceOutputPerMillion0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromModelPriceOutputPerMillion0 overwrites any union data inside the ModelPrice_OutputPerMillion as the provided ModelPriceOutputPerMillion0
+func (t *ModelPrice_OutputPerMillion) FromModelPriceOutputPerMillion0(v ModelPriceOutputPerMillion0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeModelPriceOutputPerMillion0 performs a merge with any union data inside the ModelPrice_OutputPerMillion, using the provided ModelPriceOutputPerMillion0
+func (t *ModelPrice_OutputPerMillion) MergeModelPriceOutputPerMillion0(v ModelPriceOutputPerMillion0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsModelPriceOutputPerMillion1 returns the union data inside the ModelPrice_OutputPerMillion as a ModelPriceOutputPerMillion1
+func (t ModelPrice_OutputPerMillion) AsModelPriceOutputPerMillion1() (ModelPriceOutputPerMillion1, error) {
+	var body ModelPriceOutputPerMillion1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromModelPriceOutputPerMillion1 overwrites any union data inside the ModelPrice_OutputPerMillion as the provided ModelPriceOutputPerMillion1
+func (t *ModelPrice_OutputPerMillion) FromModelPriceOutputPerMillion1(v ModelPriceOutputPerMillion1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeModelPriceOutputPerMillion1 performs a merge with any union data inside the ModelPrice_OutputPerMillion, using the provided ModelPriceOutputPerMillion1
+func (t *ModelPrice_OutputPerMillion) MergeModelPriceOutputPerMillion1(v ModelPriceOutputPerMillion1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t ModelPrice_OutputPerMillion) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *ModelPrice_OutputPerMillion) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // AsConfirmVerifyResponse returns the union data inside the NextStepRequest_VerifyResponse as a ConfirmVerifyResponse
 func (t NextStepRequest_VerifyResponse) AsConfirmVerifyResponse() (ConfirmVerifyResponse, error) {
 	var body ConfirmVerifyResponse
@@ -15783,6 +15985,14 @@ type ClientInterface interface {
 	UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithBody(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, body UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetModelPricesApiV1TenantsModelPricesGet request
+	GetModelPricesApiV1TenantsModelPricesGet(ctx context.Context, params *GetModelPricesApiV1TenantsModelPricesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateModelPriceApiV1TenantsModelPricesPatchWithBody request with any body
+	UpdateModelPriceApiV1TenantsModelPricesPatchWithBody(ctx context.Context, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UpdateModelPriceApiV1TenantsModelPricesPatch(ctx context.Context, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, body UpdateModelPriceApiV1TenantsModelPricesPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DependenciesApiV1TopologyDependenciesNameGet request
 	DependenciesApiV1TopologyDependenciesNameGet(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19660,6 +19870,42 @@ func (c *Client) UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWi
 
 func (c *Client) UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, body UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetModelPricesApiV1TenantsModelPricesGet(ctx context.Context, params *GetModelPricesApiV1TenantsModelPricesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetModelPricesApiV1TenantsModelPricesGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateModelPriceApiV1TenantsModelPricesPatchWithBody(ctx context.Context, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateModelPriceApiV1TenantsModelPricesPatchRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateModelPriceApiV1TenantsModelPricesPatch(ctx context.Context, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, body UpdateModelPriceApiV1TenantsModelPricesPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateModelPriceApiV1TenantsModelPricesPatchRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -35748,6 +35994,103 @@ func NewUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchRequestWith
 	return req, nil
 }
 
+// NewGetModelPricesApiV1TenantsModelPricesGetRequest generates requests for GetModelPricesApiV1TenantsModelPricesGet
+func NewGetModelPricesApiV1TenantsModelPricesGetRequest(server string, params *GetModelPricesApiV1TenantsModelPricesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/tenants/model-prices")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUpdateModelPriceApiV1TenantsModelPricesPatchRequest calls the generic UpdateModelPriceApiV1TenantsModelPricesPatch builder with application/json body
+func NewUpdateModelPriceApiV1TenantsModelPricesPatchRequest(server string, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, body UpdateModelPriceApiV1TenantsModelPricesPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateModelPriceApiV1TenantsModelPricesPatchRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUpdateModelPriceApiV1TenantsModelPricesPatchRequestWithBody generates requests for UpdateModelPriceApiV1TenantsModelPricesPatch with any type of body
+func NewUpdateModelPriceApiV1TenantsModelPricesPatchRequestWithBody(server string, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/tenants/model-prices")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDependenciesApiV1TopologyDependenciesNameGetRequest generates requests for DependenciesApiV1TopologyDependenciesNameGet
 func NewDependenciesApiV1TopologyDependenciesNameGetRequest(server string, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams) (*http.Request, error) {
 	var err error
@@ -48777,6 +49120,14 @@ type ClientWithResponsesInterface interface {
 
 	UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithResponse(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, body UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse, error)
 
+	// GetModelPricesApiV1TenantsModelPricesGetWithResponse request
+	GetModelPricesApiV1TenantsModelPricesGetWithResponse(ctx context.Context, params *GetModelPricesApiV1TenantsModelPricesGetParams, reqEditors ...RequestEditorFn) (*GetModelPricesApiV1TenantsModelPricesGetResponse, error)
+
+	// UpdateModelPriceApiV1TenantsModelPricesPatchWithBodyWithResponse request with any body
+	UpdateModelPriceApiV1TenantsModelPricesPatchWithBodyWithResponse(ctx context.Context, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateModelPriceApiV1TenantsModelPricesPatchResponse, error)
+
+	UpdateModelPriceApiV1TenantsModelPricesPatchWithResponse(ctx context.Context, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, body UpdateModelPriceApiV1TenantsModelPricesPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateModelPriceApiV1TenantsModelPricesPatchResponse, error)
+
 	// DependenciesApiV1TopologyDependenciesNameGetWithResponse request
 	DependenciesApiV1TopologyDependenciesNameGetWithResponse(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*DependenciesApiV1TopologyDependenciesNameGetResponse, error)
 
@@ -53766,6 +54117,52 @@ func (r UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse) S
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetModelPricesApiV1TenantsModelPricesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantModelPrices
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetModelPricesApiV1TenantsModelPricesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetModelPricesApiV1TenantsModelPricesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UpdateModelPriceApiV1TenantsModelPricesPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantModelPrices
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateModelPriceApiV1TenantsModelPricesPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateModelPriceApiV1TenantsModelPricesPatchResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -61173,6 +61570,32 @@ func (c *ClientWithResponses) UpdateMailRecipientPolicyApiV1TenantsMailRecipient
 		return nil, err
 	}
 	return ParseUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse(rsp)
+}
+
+// GetModelPricesApiV1TenantsModelPricesGetWithResponse request returning *GetModelPricesApiV1TenantsModelPricesGetResponse
+func (c *ClientWithResponses) GetModelPricesApiV1TenantsModelPricesGetWithResponse(ctx context.Context, params *GetModelPricesApiV1TenantsModelPricesGetParams, reqEditors ...RequestEditorFn) (*GetModelPricesApiV1TenantsModelPricesGetResponse, error) {
+	rsp, err := c.GetModelPricesApiV1TenantsModelPricesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetModelPricesApiV1TenantsModelPricesGetResponse(rsp)
+}
+
+// UpdateModelPriceApiV1TenantsModelPricesPatchWithBodyWithResponse request with arbitrary body returning *UpdateModelPriceApiV1TenantsModelPricesPatchResponse
+func (c *ClientWithResponses) UpdateModelPriceApiV1TenantsModelPricesPatchWithBodyWithResponse(ctx context.Context, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateModelPriceApiV1TenantsModelPricesPatchResponse, error) {
+	rsp, err := c.UpdateModelPriceApiV1TenantsModelPricesPatchWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateModelPriceApiV1TenantsModelPricesPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UpdateModelPriceApiV1TenantsModelPricesPatchWithResponse(ctx context.Context, params *UpdateModelPriceApiV1TenantsModelPricesPatchParams, body UpdateModelPriceApiV1TenantsModelPricesPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateModelPriceApiV1TenantsModelPricesPatchResponse, error) {
+	rsp, err := c.UpdateModelPriceApiV1TenantsModelPricesPatch(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateModelPriceApiV1TenantsModelPricesPatchResponse(rsp)
 }
 
 // DependenciesApiV1TopologyDependenciesNameGetWithResponse request returning *DependenciesApiV1TopologyDependenciesNameGetResponse
@@ -69940,6 +70363,72 @@ func ParseUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse(
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest TenantMailRecipientPolicy
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetModelPricesApiV1TenantsModelPricesGetResponse parses an HTTP response from a GetModelPricesApiV1TenantsModelPricesGetWithResponse call
+func ParseGetModelPricesApiV1TenantsModelPricesGetResponse(rsp *http.Response) (*GetModelPricesApiV1TenantsModelPricesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetModelPricesApiV1TenantsModelPricesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantModelPrices
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUpdateModelPriceApiV1TenantsModelPricesPatchResponse parses an HTTP response from a UpdateModelPriceApiV1TenantsModelPricesPatchWithResponse call
+func ParseUpdateModelPriceApiV1TenantsModelPricesPatchResponse(rsp *http.Response) (*UpdateModelPriceApiV1TenantsModelPricesPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateModelPriceApiV1TenantsModelPricesPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantModelPrices
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

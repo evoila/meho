@@ -1640,6 +1640,102 @@
         }
       }
     },
+    "/api/v1/tenants/model-prices": {
+      "get": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Get Model Prices",
+        "description": "Read the caller's tenant prices for agent models MEHO does not know (#5853).",
+        "operationId": "get_model_prices_api_v1_tenants_model_prices_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantModelPrices"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Update Model Price",
+        "description": "Set or remove the caller's tenant price for one agent model (#5853).\n\nA run on a model that is not in MEHO's own price table uses this price\nfor its cost, and the cost counts against the spend limits like any\nother run. A model MEHO already has a price for is refused (422): MEHO's\nprice always wins. Tenant-scoped and ``tenant_admin`` only, like the other\npolicies here. The tenant row is locked for the change, so two changes at\nonce do not lose one of them.",
+        "operationId": "update_model_price_api_v1_tenants_model_prices_patch",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantModelPriceUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantModelPrices"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/settings/export": {
       "get": {
         "tags": [
@@ -24276,6 +24372,30 @@
             "nullable": true,
             "title": "Identity Act",
             "description": "The agent that acts for identity_sub on a direct run. Null when the agent is itself the subject."
+          },
+          "input_tokens": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Input Tokens",
+            "description": "Input tokens the model read and did not take from its prompt cache. Null until the run has succeeded."
+          },
+          "output_tokens": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Output Tokens",
+            "description": "Tokens the model wrote. Null until the run has succeeded."
+          },
+          "cache_read_tokens": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Cache Read Tokens",
+            "description": "Input tokens read from the model's prompt cache; 0 when the provider reports no cache. Null until the run has succeeded."
+          },
+          "cache_write_tokens": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Cache Write Tokens",
+            "description": "Input tokens written to the model's prompt cache; 0 when the provider reports no cache. Null until the run has succeeded."
           }
         },
         "type": "object",
@@ -32752,6 +32872,73 @@
         "title": "MemorySearchResponse",
         "description": "Response for ``/api/v1/memory/search`` -- the same hits ``search_memory`` returns.\n\n``hits`` is the only field. Each hit is bounded evidence (#3751): a\nshort snippet, provenance, and the selected-read ``locator``, never the\nfull body. The MCP tool also wraps each snippet in the untrusted-text\nenvelope and adds its ``delivery`` fields; this REST face serves the\nplain snippet for the CLI table. There is deliberately no total or\ncount: \"no match\" and \"only rows you may not see\" both return\n``{\"hits\": []}``."
       },
+      "ModelPrice": {
+        "properties": {
+          "input_per_million": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 100000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,6}0*$"
+              }
+            ],
+            "title": "Input Per Million"
+          },
+          "output_per_million": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 100000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,6}0*$"
+              }
+            ],
+            "title": "Output Per Million"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "input_per_million",
+          "output_per_million"
+        ],
+        "title": "ModelPrice",
+        "description": "Price of one model, in USD per million tokens."
+      },
+      "ModelPriceEntry": {
+        "properties": {
+          "input_per_million": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,6}0*$",
+            "title": "Input Per Million"
+          },
+          "output_per_million": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,6}0*$",
+            "title": "Output Per Million"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "input_per_million",
+          "output_per_million",
+          "model"
+        ],
+        "title": "ModelPriceEntry",
+        "description": "One row of the tenant's model prices."
+      },
       "MyRecentPage": {
         "properties": {
           "items": {
@@ -38518,6 +38705,52 @@
         "type": "object",
         "title": "TenantMailRecipientPolicyUpdate",
         "description": "``PATCH /api/v1/tenants/mail-recipient-policy`` body (#3499).\n\nThe single field is optional-partial (``model_dump(exclude_unset=True)`` in\nthe handler keys off ``model_fields_set``, so a JSON ``null`` is\ndistinguished from an absent key). ``extra='forbid'`` rejects unknown keys\nwith a 422.\n\n* absent = leave the column unchanged.\n* ``null`` = clear back to **inherit** (the instance floor alone governs the\n  tenant's ``mail.send``).\n* ``\"\"`` = **deny** (an empty tenant allowlist refuses every dispatched\n  send) -- the shared-instance containment lever.\n* a comma-separated address/domain string = the tenant's own recipient\n  space. Validated with the same grammar as the instance floor\n  (:func:`~meho_backplane.connectors.mail.allowlist.parse_recipient_allowlist`),\n  so a malformed entry (whitespace, ``foo@``, bare ``@``, ...) is a 422 at\n  write time rather than a silent inert allowlist at dispatch time."
+      },
+      "TenantModelPriceUpdate": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[\\w.:/@+-]+$",
+            "title": "Model"
+          },
+          "price": {
+            "$ref": "#/components/schemas/ModelPrice",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "model",
+          "price"
+        ],
+        "title": "TenantModelPriceUpdate",
+        "description": "``PATCH /api/v1/tenants/model-prices`` body: set or remove one price.\n\n``model`` is the model id as an agent run shows it: ``provider:model``\n(``openai:qwen3``) or the model name alone (``qwen3``). ``price`` sets the\nprice; ``null`` removes it. Both keys are required."
+      },
+      "TenantModelPrices": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "prices": {
+            "items": {
+              "$ref": "#/components/schemas/ModelPriceEntry"
+            },
+            "type": "array",
+            "title": "Prices"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "prices"
+        ],
+        "title": "TenantModelPrices",
+        "description": "The tenant's prices for agent models MEHO does not know (#5853)."
       },
       "TenantOperationSettingItem": {
         "properties": {

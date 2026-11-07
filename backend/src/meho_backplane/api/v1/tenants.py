@@ -3,10 +3,11 @@
 
 """Operator policy surface for per-tenant configuration (#3272, #3447, #3499).
 
-Two policy families live here: the flight-recorder capture policy (#3272,
-#3447) and the mail-recipient allowlist (#3499,
-:func:`update_mail_recipient_policy`). Both share the surface posture and scope
-rules documented next.
+Three policy families live here: the flight-recorder capture policy (#3272,
+#3447), the mail-recipient allowlist (#3499,
+:func:`update_mail_recipient_policy`) and the prices of agent models MEHO does
+not know (#5853, :func:`update_model_price`). All share the surface posture
+and scope rules documented next.
 
 Flight-recorder policy (#3272, #3447).
 
@@ -49,6 +50,7 @@ TTL or a restart.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
@@ -66,6 +68,8 @@ from meho_backplane.flight_recorder.config import (
     should_capture,
     should_expose_to_agent,
 )
+from meho_backplane.operations.tenant_model_prices import parse_model_prices, set_model_price
+from meho_backplane.operations.unpriced_model import is_model_priced
 from meho_backplane.tenancy.policies import (
     set_flight_recorder_policy,
     set_mail_recipient_allowlist,
@@ -328,3 +332,115 @@ async def update_mail_recipient_policy(
         tenant_id=tenant.id,
         mail_recipient_allowlist=tenant.mail_recipient_allowlist,
     )
+
+
+#: Most models one tenant can price. A tenant runs a handful of models; the
+#: cap keeps the stored map small, since every run on an unknown model reads it.
+MAX_MODEL_PRICES = 200
+
+#: USD per million tokens. Far above any published price; refuses a typo.
+_MAX_PRICE = Decimal(100_000)
+
+_PriceValue = Annotated[Decimal, Field(ge=0, le=_MAX_PRICE, decimal_places=6, allow_inf_nan=False)]
+_ModelId = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[\w.:/@+-]+$")]
+
+
+class ModelPrice(BaseModel):
+    """Price of one model, in USD per million tokens."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    input_per_million: _PriceValue
+    output_per_million: _PriceValue
+
+
+class ModelPriceEntry(ModelPrice):
+    """One row of the tenant's model prices."""
+
+    model: str
+
+
+class TenantModelPrices(BaseModel):
+    """The tenant's prices for agent models MEHO does not know (#5853)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: UUID
+    prices: list[ModelPriceEntry]
+
+
+class TenantModelPriceUpdate(BaseModel):
+    """``PATCH /api/v1/tenants/model-prices`` body: set or remove one price.
+
+    ``model`` is the model id as an agent run shows it: ``provider:model``
+    (``openai:qwen3``) or the model name alone (``qwen3``). ``price`` sets the
+    price; ``null`` removes it. Both keys are required.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: _ModelId
+    price: ModelPrice | None
+
+
+def _prices_response(tenant: Tenant) -> TenantModelPrices:
+    prices = parse_model_prices(tenant.agent_model_prices)
+    return TenantModelPrices(
+        tenant_id=tenant.id,
+        prices=[
+            ModelPriceEntry(model=model, input_per_million=p_in, output_per_million=p_out)
+            for model, (p_in, p_out) in sorted(prices.items())
+        ],
+    )
+
+
+@router.get("/model-prices", response_model=TenantModelPrices)
+async def get_model_prices(
+    operator: Operator = _require_tenant_admin,
+    session: AsyncSession = Depends(get_session),
+) -> TenantModelPrices:
+    """Read the caller's tenant prices for agent models MEHO does not know (#5853)."""
+    tenant = await session.get(Tenant, operator.tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+    return _prices_response(tenant)
+
+
+@router.patch("/model-prices", response_model=TenantModelPrices)
+async def update_model_price(
+    body: TenantModelPriceUpdate,
+    operator: Operator = _require_tenant_admin,
+    session: AsyncSession = Depends(get_session),
+) -> TenantModelPrices:
+    """Set or remove the caller's tenant price for one agent model (#5853).
+
+    A run on a model that is not in MEHO's own price table uses this price
+    for its cost, and the cost counts against the spend limits like any
+    other run. A model MEHO already has a price for is refused (422): MEHO's
+    price always wins. Tenant-scoped and ``tenant_admin`` only, like the other
+    policies here. The tenant row is locked for the change, so two changes at
+    once do not lose one of them.
+    """
+    if body.price is not None and is_model_priced(body.model):
+        raise HTTPException(
+            status_code=422,
+            detail="MEHO already has a price for this model; it cannot be changed here.",
+        )
+    tenant = await session.get(
+        Tenant, operator.tenant_id, with_for_update=True, populate_existing=True
+    )
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+    stored = parse_model_prices(tenant.agent_model_prices)
+    if body.price is not None and body.model not in stored and len(stored) >= MAX_MODEL_PRICES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"A tenant can price at most {MAX_MODEL_PRICES} models; remove one first.",
+        )
+    price = (
+        None
+        if body.price is None
+        else (body.price.input_per_million, body.price.output_per_million)
+    )
+    set_model_price(tenant, body.model, price)
+    return _prices_response(tenant)

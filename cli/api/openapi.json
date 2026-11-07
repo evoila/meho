@@ -29669,6 +29669,22 @@
             "nullable": true,
             "title": "Investigator Prompt"
           },
+          "last_mail_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Mail At"
+          },
+          "last_mail_sent": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Last Mail Sent"
+          },
+          "last_mail_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Last Mail Reason"
+          },
           "created_by_sub": {
             "type": "string",
             "title": "Created By Sub"
@@ -29902,6 +29918,22 @@
             "type": "string",
             "nullable": true,
             "title": "Investigator Prompt"
+          },
+          "last_mail_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Mail At"
+          },
+          "last_mail_sent": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Last Mail Sent"
+          },
+          "last_mail_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Last Mail Reason"
           },
           "created_by_sub": {
             "type": "string",

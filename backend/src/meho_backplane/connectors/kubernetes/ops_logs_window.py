@@ -55,6 +55,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 __all__ = [
     "RFC3339_PATTERN",
     "WINDOW_CHUNK_BYTES",
+    "WINDOW_HEADERS",
     "LogLineTooLargeError",
     "LogWindow",
     "LogWindowError",
@@ -78,6 +79,13 @@ _RFC3339_RE = re.compile(RFC3339_PATTERN)
 #: time. Small enough to stop soon after a page is full, large enough
 #: to keep the number of reads low.
 WINDOW_CHUNK_BYTES = 64 * 1024
+
+#: Headers of the window read: the ``Accept`` header the generated
+#: ``read_namespaced_pod_log`` sends. The API server checks ``Accept``
+#: against the media types of its serializers (JSON, YAML, protobuf,
+#: CBOR) before it streams the log, and answers ``406 Not Acceptable``
+#: to ``text/plain``. The log body itself is plain text either way.
+WINDOW_HEADERS = {"Accept": "application/json"}
 
 #: Exact time key: ``(epoch_seconds, nanoseconds)``.
 TimeKey = tuple[int, int]
@@ -203,8 +211,9 @@ async def read_pod_log_window(
     """``GET /api/v1/namespaces/{ns}/pods/{name}/log`` with extra query params.
 
     Builds the same request the generated ``read_namespaced_pod_log``
-    does, but with the query params given here, so ``sinceTime`` can be
-    sent. The body is not loaded at once: it is read in chunks of
+    does, with the same ``Accept`` header (:data:`WINDOW_HEADERS`), but
+    with the query params given here, so ``sinceTime`` can be sent.
+    The body is not loaded at once: it is read in chunks of
     :data:`WINDOW_CHUNK_BYTES` and handed to :func:`collect_window`,
     which stops reading once the page is full. ``aiohttp`` closes a
     connection whose body was not read to the end instead of reusing
@@ -215,7 +224,7 @@ async def read_pod_log_window(
         "GET",
         path_params={"name": name, "namespace": namespace},
         query_params=list(query.items()),
-        header_params={"Accept": "text/plain"},
+        header_params=dict(WINDOW_HEADERS),
         response_types_map={200: "str"},
         auth_settings=["BearerToken"],
         _return_http_data_only=True,

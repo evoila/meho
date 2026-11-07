@@ -206,7 +206,7 @@ func newImportCmd() *cobra.Command {
 			"tls_server_name, flight_recorder_capture, secret_field_map. Any " +
 			"other field is stored in the `extras` JSONB column, with a warning " +
 			"for each one (put it under an explicit `extras:` block to silence " +
-			"the warning). `version` must be a quoted string. `fingerprint` is " +
+			"the warning). `version` must be a quoted string or null. `fingerprint` is " +
 			"server-managed and skipped with a warning if present in the YAML " +
 			"(the probe verb is the only legitimate writer).\n\n" +
 			"Idempotency. Default mode aborts the whole import if any entry's " +
@@ -400,8 +400,10 @@ func parseTargetsYAML(data []byte) ([]map[string]any, error) {
 		}
 		// YAML reads an unquoted `version: 8.0` as the number 8, which
 		// the API rejects (and which has already lost the ".0"). Fail
-		// here with a hint instead of guessing the string.
-		if v, ok := e["version"]; ok {
+		// here with a hint instead of guessing the string. `null` is
+		// allowed: the API, the console import and the published
+		// schema all take it as "no version".
+		if v, ok := e["version"]; ok && v != nil {
 			if _, isStr := v.(string); !isStr {
 				return nil, fmt.Errorf("entry %q: `version` must be a string; quote it (for example version: \"8.0\")", name)
 			}

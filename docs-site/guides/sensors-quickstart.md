@@ -283,6 +283,44 @@ Both edits need the `tenant_admin` role. The audit log records the old
 and the new value of each changed field. The REST routes are
 `PATCH /api/v1/sensors/{id}` and `PATCH /api/v1/checks/dashboards/{id}`.
 
+## Copy a dashboard to another site
+
+Write a dashboard and its sensors to one file:
+
+```bash
+meho dashboard export <name> --output health-check.json
+```
+
+The file holds the operation, params, rule, cadence and severity of each
+sensor. It holds no ids, no state and no mail address. Each target name
+in it is a placeholder.
+
+At the other site, map each placeholder to a target there, and look
+first with `--dry-run`:
+
+```bash
+meho dashboard import health-check.json \
+  --map-target <placeholder>=<target> --dry-run
+meho dashboard import health-check.json \
+  --map-target <placeholder>=<target>
+```
+
+- MEHO checks the whole file first. When a placeholder is not mapped, a
+  target is not found, an operation is unknown or not `safe`, or a
+  connector does not fit its target, it changes nothing and lists every
+  problem. `--force` imports a sensor whose connector does not fit.
+- Sensors and the dashboard are matched by name. A missing one is
+  created, a different one is updated, an equal one stays. Importing the
+  same file twice changes nothing the second time.
+- The dashboard's members become the sensors of the file. A member that
+  is not in the file leaves the dashboard, but MEHO does not delete it.
+  The mail address of the dashboard stays as it is.
+
+Export needs the `operator` role, import `tenant_admin`. Each import
+writes an audit row. The REST routes are
+`GET /api/v1/checks/dashboard-files/export?name=<name>` and
+`POST /api/v1/checks/dashboard-files/import`.
+
 ## The investigator (optional deep tier)
 
 When a dashboard's rollup crosses from green into a non-green state,

@@ -1486,7 +1486,7 @@ meho conventions show <slug> [flags]
 
 ## `meho dashboard`
 
-Manage deterministic-check dashboards (list / show / create / edit / delete)
+Manage deterministic-check dashboards (list / show / create / edit / delete / export / import)
 
 ```
 meho dashboard
@@ -1539,6 +1539,34 @@ meho dashboard edit <dashboard_id> [flags]
 - `--notify-off` — turn transition mail off
 - `--remove-sensor` — sensor UUID to remove (repeatable)
 - `--tenant` — target tenant UUID (platform_admin cross-tenant edit)
+
+### `meho dashboard export`
+
+Write one dashboard and its sensors to a file
+
+```
+meho dashboard export <name> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit errors as structured JSON
+- `--output`, `-o` — write the file here instead of stdout
+- `--tenant` — target tenant UUID (platform_admin cross-tenant export)
+
+### `meho dashboard import`
+
+Create or update a dashboard and its sensors from a file (tenant_admin)
+
+```
+meho dashboard import <file> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--dry-run` — show what would change and write nothing
+- `--force` — import a sensor even when its connector does not fit the mapped target
+- `--json` — emit the raw import result JSON instead of the summary
+- `--map-target` — map a placeholder to a target of this site: <placeholder>=<target> (repeatable)
+- `--tenant` — target tenant UUID (platform_admin cross-tenant import)
 
 ### `meho dashboard list`
 

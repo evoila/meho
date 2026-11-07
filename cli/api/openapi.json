@@ -10907,6 +10907,126 @@
         }
       }
     },
+    "/api/v1/checks/dashboard-files/export": {
+      "get": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Export Dashboard File",
+        "description": "Return the file of the Dashboard *name*: its settings and its Sensors.\n\nTarget names become placeholders. The file has no ids, no state and no\nmail address.",
+        "operationId": "export_dashboard_file_api_v1_checks_dashboard_files_export_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardFile"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/dashboard-files/import": {
+      "post": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Import Dashboard File",
+        "description": "Create or update a Dashboard and its Sensors from a file.\n\nEvery target placeholder needs an entry in ``target_map``. The file is\nchecked as a whole first; a problem anywhere refuses the whole file with\n422 and a list of every problem. Sensors and the Dashboard are matched by\nname, so the same file imported twice changes nothing the second time.",
+        "operationId": "import_dashboard_file_api_v1_checks_dashboard_files_import_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DashboardImportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardImportResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals": {
       "get": {
         "tags": [
@@ -29571,6 +29691,280 @@
         "title": "DashboardDetail",
         "description": "Response shape for ``GET /api/v1/checks/dashboards/{id}``.\n\nExtends :class:`DashboardRead` with the per-member breakdown the console\ndetail page + the REST detail expose."
       },
+      "DashboardFile": {
+        "properties": {
+          "format": {
+            "type": "string",
+            "const": "meho-dashboard/1",
+            "title": "Format",
+            "default": "meho-dashboard/1"
+          },
+          "dashboard": {
+            "$ref": "#/components/schemas/DashboardFileSettings"
+          },
+          "sensors": {
+            "items": {
+              "$ref": "#/components/schemas/DashboardFileSensor"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "title": "Sensors"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "dashboard"
+        ],
+        "title": "DashboardFile",
+        "description": "One Dashboard and its member Sensors, as ``meho dashboard export`` writes it."
+      },
+      "DashboardFileSensor": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "connector_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Op Id"
+          },
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "assertion": {
+            "$ref": "#/components/schemas/AssertionSpec"
+          },
+          "cadence_kind": {
+            "$ref": "#/components/schemas/SensorCadenceKind"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "maximum": 86400.0,
+            "minimum": 5.0,
+            "nullable": true,
+            "title": "Interval Seconds"
+          },
+          "cron_expr": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Timezone",
+            "default": "UTC"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SensorSeverity",
+            "default": "critical"
+          },
+          "for_seconds": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "For Seconds",
+            "default": 0
+          },
+          "retry_times": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Retry Times",
+            "default": 0
+          },
+          "retry_backoff_seconds": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 5.0,
+            "title": "Retry Backoff Seconds",
+            "default": 15
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "connector_id",
+          "op_id",
+          "assertion",
+          "cadence_kind"
+        ],
+        "title": "DashboardFileSensor",
+        "description": "One Sensor in the file: the fields of a create, with a target placeholder."
+      },
+      "DashboardFileSettings": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Description"
+          },
+          "notify_min_state": {
+            "type": "string",
+            "enum": [
+              "degraded",
+              "critical"
+            ],
+            "title": "Notify Min State",
+            "default": "critical"
+          },
+          "investigator_prompt": {
+            "type": "string",
+            "maxLength": 4096,
+            "nullable": true,
+            "title": "Investigator Prompt"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "DashboardFileSettings",
+        "description": "The Dashboard part of the file. The mail address stays at each site."
+      },
+      "DashboardImportRequest": {
+        "properties": {
+          "file": {
+            "$ref": "#/components/schemas/DashboardFile"
+          },
+          "target_map": {
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "propertyNames": {
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "type": "object",
+            "maxProperties": 200,
+            "title": "Target Map"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          },
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "default": false
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "DashboardImportRequest",
+        "description": "Request body for ``POST /api/v1/checks/dashboard-files/import``.\n\n* ``target_map`` -- placeholder -> target name at this site. Every\n  placeholder in the file needs an entry.\n* ``dry_run`` -- say what would change, and change nothing.\n* ``force`` -- import a Sensor even when its connector does not fit the\n  mapped target's product and version (as ``force`` on a Sensor create).\n* ``tenant_id`` -- a platform admin may import into another tenant."
+      },
+      "DashboardImportResult": {
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run"
+          },
+          "changed": {
+            "type": "boolean",
+            "title": "Changed"
+          },
+          "dashboard_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Dashboard Id"
+          },
+          "dashboard_name": {
+            "type": "string",
+            "title": "Dashboard Name"
+          },
+          "dashboard_action": {
+            "type": "string",
+            "enum": [
+              "create",
+              "update",
+              "unchanged"
+            ],
+            "title": "Dashboard Action"
+          },
+          "dashboard_changed_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Dashboard Changed Fields"
+          },
+          "sensors": {
+            "items": {
+              "$ref": "#/components/schemas/ImportedSensor"
+            },
+            "type": "array",
+            "title": "Sensors"
+          },
+          "members_added": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Members Added"
+          },
+          "members_removed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Members Removed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dry_run",
+          "changed",
+          "dashboard_id",
+          "dashboard_name",
+          "dashboard_action",
+          "sensors"
+        ],
+        "title": "DashboardImportResult",
+        "description": "The answer of an import. With ``dry_run`` nothing was written."
+      },
       "DashboardListResponse": {
         "properties": {
           "items": {
@@ -31957,6 +32351,37 @@
         ],
         "title": "HealthResponse",
         "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them.\n\n``connector_packages`` (#5036) lists the connector packages this image\ncarries, the same list ``GET /version`` shows. It is empty for the\nplain public image.\n\n``operation_catalog`` (#5019) names the release that wrote the shared\noperation rows and says whether it is this pod's release\n(:class:`OperationCatalogStatus`). The ``None`` default keeps older\nresponse decoders working; the handler always fills it.\n\n``agent_model_spend`` (#5771) says whether the spend limits count the\ncost of runs on the default agent model (:class:`AgentModelSpend`).\nThe ``None`` default keeps older response decoders working; the\nhandler always fills it."
+      },
+      "ImportedSensor": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "create",
+              "update",
+              "unchanged"
+            ],
+            "title": "Action"
+          },
+          "changed_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Changed Fields"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "action"
+        ],
+        "title": "ImportedSensor",
+        "description": "What the import did, or would do, to one Sensor."
       },
       "InCompare": {
         "properties": {

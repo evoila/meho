@@ -235,6 +235,19 @@ const (
 	DashboardDetailStateUnknown  DashboardDetailState = "unknown"
 )
 
+// Defines values for DashboardFileSettingsNotifyMinState.
+const (
+	DashboardFileSettingsNotifyMinStateCritical DashboardFileSettingsNotifyMinState = "critical"
+	DashboardFileSettingsNotifyMinStateDegraded DashboardFileSettingsNotifyMinState = "degraded"
+)
+
+// Defines values for DashboardImportResultDashboardAction.
+const (
+	DashboardImportResultDashboardActionCreate    DashboardImportResultDashboardAction = "create"
+	DashboardImportResultDashboardActionUnchanged DashboardImportResultDashboardAction = "unchanged"
+	DashboardImportResultDashboardActionUpdate    DashboardImportResultDashboardAction = "update"
+)
+
 // Defines values for DashboardMemberViewEffectiveState.
 const (
 	DashboardMemberViewEffectiveStateCritical DashboardMemberViewEffectiveState = "critical"
@@ -395,6 +408,13 @@ const (
 const (
 	GrantPrincipalKindAgent     GrantPrincipalKind = "agent"
 	GrantPrincipalKindUserAgent GrantPrincipalKind = "user-agent"
+)
+
+// Defines values for ImportedSensorAction.
+const (
+	ImportedSensorActionCreate    ImportedSensorAction = "create"
+	ImportedSensorActionUnchanged ImportedSensorAction = "unchanged"
+	ImportedSensorActionUpdate    ImportedSensorAction = "update"
 )
 
 // Defines values for IngestJobHandleStatus.
@@ -4796,6 +4816,109 @@ type DashboardDetailNotifyMinState string
 // DashboardDetailState defines model for DashboardDetail.State.
 type DashboardDetailState string
 
+// DashboardFile One Dashboard and its member Sensors, as “meho dashboard export“ writes it.
+type DashboardFile struct {
+	// Dashboard The Dashboard part of the file. The mail address stays at each site.
+	Dashboard DashboardFileSettings  `json:"dashboard"`
+	Format    *string                `json:"format,omitempty"`
+	Sensors   *[]DashboardFileSensor `json:"sensors,omitempty"`
+}
+
+// DashboardFileSensor One Sensor in the file: the fields of a create, with a target placeholder.
+type DashboardFileSensor struct {
+	// Assertion A full assertion: one select stage feeding one typed comparator.
+	//
+	// #2503 imports this model to validate a Sensor's ``assertion`` payload at
+	// the wire (a bad path or comparator is a 422 at create); #2505 feeds it the
+	// op-result payload; #2506 rolls the outcomes up into a Dashboard.
+	Assertion AssertionSpec `json:"assertion"`
+
+	// CadenceKind Closed enum of the two cadence shapes a :class:`Sensor` may carry.
+	//
+	// Initiative #2416 (parent goal #221), Task #2503. One ``sensor`` row
+	// carries exactly one cadence, selected by this discriminator; the
+	// invariant is enforced by the DB-side ``ck_sensor_cadence_fields``
+	// CHECK that pairs each kind with its mandatory column (mirroring
+	// :class:`ScheduledTriggerKind`).
+	//
+	// Members:
+	//
+	// * :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The
+	//   sub-minute path #2505's interval-tick loop drives.
+	// * :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The
+	//   >=1-minute path #2505 rides on #804's durable scheduler discipline.
+	//
+	// Closed enum: widening it is a coordinated DB + model change so the
+	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
+	// ``0064``'s frozen tuple cannot drift.
+	CadenceKind         SensorCadenceKind       `json:"cadence_kind"`
+	ConnectorId         string                  `json:"connector_id"`
+	CronExpr            *string                 `json:"cron_expr"`
+	ForSeconds          *int                    `json:"for_seconds,omitempty"`
+	IntervalSeconds     *int                    `json:"interval_seconds"`
+	Name                string                  `json:"name"`
+	OpId                string                  `json:"op_id"`
+	Params              *map[string]interface{} `json:"params,omitempty"`
+	RetryBackoffSeconds *int                    `json:"retry_backoff_seconds,omitempty"`
+	RetryTimes          *int                    `json:"retry_times,omitempty"`
+
+	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+	//
+	// The per-sensor cap #2506 applies to the rollup: a ``degraded``-severity
+	// sensor whose assertion fails contributes at most ``degraded``, a
+	// ``critical`` one contributes ``critical``. The five-state vocabulary
+	// itself is declared once in #2504's :data:`CheckState`; this is only
+	// the two operator-selectable severities.
+	Severity *SensorSeverity `json:"severity,omitempty"`
+	Target   *string         `json:"target"`
+	Timezone *string         `json:"timezone,omitempty"`
+}
+
+// DashboardFileSettings The Dashboard part of the file. The mail address stays at each site.
+type DashboardFileSettings struct {
+	Description        *string                              `json:"description"`
+	InvestigatorPrompt *string                              `json:"investigator_prompt"`
+	Name               string                               `json:"name"`
+	NotifyMinState     *DashboardFileSettingsNotifyMinState `json:"notify_min_state,omitempty"`
+}
+
+// DashboardFileSettingsNotifyMinState defines model for DashboardFileSettings.NotifyMinState.
+type DashboardFileSettingsNotifyMinState string
+
+// DashboardImportRequest Request body for “POST /api/v1/checks/dashboard-files/import“.
+//
+//   - “target_map“ -- placeholder -> target name at this site. Every
+//     placeholder in the file needs an entry.
+//   - “dry_run“ -- say what would change, and change nothing.
+//   - “force“ -- import a Sensor even when its connector does not fit the
+//     mapped target's product and version (as “force“ on a Sensor create).
+//   - “tenant_id“ -- a platform admin may import into another tenant.
+type DashboardImportRequest struct {
+	DryRun *bool `json:"dry_run,omitempty"`
+
+	// File One Dashboard and its member Sensors, as ``meho dashboard export`` writes it.
+	File      DashboardFile       `json:"file"`
+	Force     *bool               `json:"force,omitempty"`
+	TargetMap *map[string]string  `json:"target_map,omitempty"`
+	TenantId  *openapi_types.UUID `json:"tenant_id"`
+}
+
+// DashboardImportResult The answer of an import. With “dry_run“ nothing was written.
+type DashboardImportResult struct {
+	Changed                bool                                 `json:"changed"`
+	DashboardAction        DashboardImportResultDashboardAction `json:"dashboard_action"`
+	DashboardChangedFields *[]string                            `json:"dashboard_changed_fields,omitempty"`
+	DashboardId            *openapi_types.UUID                  `json:"dashboard_id"`
+	DashboardName          string                               `json:"dashboard_name"`
+	DryRun                 bool                                 `json:"dry_run"`
+	MembersAdded           *[]string                            `json:"members_added,omitempty"`
+	MembersRemoved         *[]string                            `json:"members_removed,omitempty"`
+	Sensors                []ImportedSensor                     `json:"sensors"`
+}
+
+// DashboardImportResultDashboardAction defines model for DashboardImportResult.DashboardAction.
+type DashboardImportResultDashboardAction string
+
 // DashboardListResponse Unified list envelope for “GET /api/v1/checks/dashboards“.
 //
 // The `{items, next_cursor}` shape codified in
@@ -6380,6 +6503,16 @@ type HealthResponse struct {
 	// or error code, never an unbounded exception message or a secret value.
 	Vault VaultStatus `json:"vault"`
 }
+
+// ImportedSensor What the import did, or would do, to one Sensor.
+type ImportedSensor struct {
+	Action        ImportedSensorAction `json:"action"`
+	ChangedFields *[]string            `json:"changed_fields,omitempty"`
+	Name          string               `json:"name"`
+}
+
+// ImportedSensorAction defines model for ImportedSensor.Action.
+type ImportedSensorAction string
 
 // InCompare Membership comparator: “ok“ if the value strict-equals a member.
 //
@@ -11716,6 +11849,18 @@ type PutAssignmentApiV1ChecksAssignmentRunnerPutParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams defines parameters for ExportDashboardFileApiV1ChecksDashboardFilesExportGet.
+type ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams struct {
+	Name          string              `form:"name" json:"name"`
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams defines parameters for ImportDashboardFileApiV1ChecksDashboardFilesImportPost.
+type ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListDashboardsApiV1ChecksDashboardsGetParams defines parameters for ListDashboardsApiV1ChecksDashboardsGet.
 type ListDashboardsApiV1ChecksDashboardsGetParams struct {
 	Limit         *int                `form:"limit,omitempty" json:"limit,omitempty"`
@@ -13070,6 +13215,9 @@ type CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody = BroadcastOverrid
 
 // PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody defines body for PutAssignmentApiV1ChecksAssignmentRunnerPut for application/json ContentType.
 type PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody = AssignmentDocument
+
+// ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody defines body for ImportDashboardFileApiV1ChecksDashboardFilesImportPost for application/json ContentType.
+type ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody = DashboardImportRequest
 
 // CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody defines body for CreateDashboardApiV1ChecksDashboardsPost for application/json ContentType.
 type CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody = DashboardCreate
@@ -15568,6 +15716,14 @@ type ClientInterface interface {
 
 	PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ExportDashboardFileApiV1ChecksDashboardFilesExportGet request
+	ExportDashboardFileApiV1ChecksDashboardFilesExportGet(ctx context.Context, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBody request with any body
+	ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBody(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ImportDashboardFileApiV1ChecksDashboardFilesImportPost(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListDashboardsApiV1ChecksDashboardsGet request
 	ListDashboardsApiV1ChecksDashboardsGet(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17901,6 +18057,42 @@ func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context
 
 func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest(c.Server, runner, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExportDashboardFileApiV1ChecksDashboardFilesExportGet(ctx context.Context, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExportDashboardFileApiV1ChecksDashboardFilesExportGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBody(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportDashboardFileApiV1ChecksDashboardFilesImportPost(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -27877,6 +28069,137 @@ func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server string
 	}
 
 	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewExportDashboardFileApiV1ChecksDashboardFilesExportGetRequest generates requests for ExportDashboardFileApiV1ChecksDashboardFilesExportGet
+func NewExportDashboardFileApiV1ChecksDashboardFilesExportGetRequest(server string, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboard-files/export")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "name", runtime.ParamLocationQuery, params.Name); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequest calls the generic ImportDashboardFileApiV1ChecksDashboardFilesImportPost builder with application/json body
+func NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequest(server string, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequestWithBody generates requests for ImportDashboardFileApiV1ChecksDashboardFilesImportPost with any type of body
+func NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequestWithBody(server string, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboard-files/import")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -48702,6 +49025,14 @@ type ClientWithResponsesInterface interface {
 
 	PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
 
+	// ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse request
+	ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse(ctx context.Context, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams, reqEditors ...RequestEditorFn) (*ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse, error)
+
+	// ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBodyWithResponse request with any body
+	ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBodyWithResponse(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error)
+
+	ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithResponse(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error)
+
 	// ListDashboardsApiV1ChecksDashboardsGetWithResponse request
 	ListDashboardsApiV1ChecksDashboardsGetWithResponse(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*ListDashboardsApiV1ChecksDashboardsGetResponse, error)
 
@@ -51407,6 +51738,52 @@ func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DashboardFile
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DashboardImportResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -60152,6 +60529,32 @@ func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithRes
 	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
 }
 
+// ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse request returning *ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse
+func (c *ClientWithResponses) ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse(ctx context.Context, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams, reqEditors ...RequestEditorFn) (*ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse, error) {
+	rsp, err := c.ExportDashboardFileApiV1ChecksDashboardFilesExportGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse(rsp)
+}
+
+// ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBodyWithResponse request with arbitrary body returning *ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse
+func (c *ClientWithResponses) ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBodyWithResponse(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error) {
+	rsp, err := c.ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithResponse(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error) {
+	rsp, err := c.ImportDashboardFileApiV1ChecksDashboardFilesImportPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse(rsp)
+}
+
 // ListDashboardsApiV1ChecksDashboardsGetWithResponse request returning *ListDashboardsApiV1ChecksDashboardsGetResponse
 func (c *ClientWithResponses) ListDashboardsApiV1ChecksDashboardsGetWithResponse(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*ListDashboardsApiV1ChecksDashboardsGetResponse, error) {
 	rsp, err := c.ListDashboardsApiV1ChecksDashboardsGet(ctx, params, reqEditors...)
@@ -66573,6 +66976,72 @@ func ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp *http.Response
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AssignmentDocumentResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse parses an HTTP response from a ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse call
+func ParseExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse(rsp *http.Response) (*ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DashboardFile
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse parses an HTTP response from a ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithResponse call
+func ParseImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse(rsp *http.Response) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DashboardImportResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

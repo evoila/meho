@@ -121,6 +121,7 @@ from meho_backplane.operations.approval_rights import (
     approve_right,
     self_approval_confirmation,
 )
+from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.routes import login_location
 from meho_backplane.ui.csrf import mint_csrf_token
@@ -383,19 +384,26 @@ async def _run_steps(
             run.sign_in_needed = step.sign_in_needed
 
 
+def _settle_approved_step(step: _Step) -> None:
+    """Say what an earlier approval of *step* means for this run."""
+    state = approval_result_state(step.row)
+    if state == ApprovalResultState.EXECUTED:
+        step.outcome, step.detail = "skipped", "Approved earlier and ran OK."
+    elif state == ApprovalResultState.STARTED:
+        step.outcome, step.detail = "stopped", f"Approved earlier. {_NOT_ENDED}"
+    elif state == ApprovalResultState.UNCERTAIN:
+        step.outcome, step.detail = "stopped", f"Approved earlier. {UNCERTAIN_ADVICE}"
+    else:
+        step.outcome = "stopped"
+        step.detail = f"Approved earlier, but its run did not end OK. {_ONE_USE}"
+
+
 async def _run_step(
     operator: Operator, step: _Step, *, reason: str, confirmed: uuid.UUID | None
 ) -> None:
     row = step.row
     if row.status == ApprovalRequestStatus.APPROVED.value:
-        state = approval_result_state(row)
-        if state == ApprovalResultState.EXECUTED:
-            step.outcome, step.detail = "skipped", "Approved earlier and ran OK."
-        elif state == ApprovalResultState.STARTED:
-            step.outcome, step.detail = "stopped", f"Approved earlier. {_NOT_ENDED}"
-        else:
-            step.outcome = "stopped"
-            step.detail = f"Approved earlier, but its run did not end OK. {_ONE_USE}"
+        _settle_approved_step(step)
         return
     if row.status != ApprovalRequestStatus.PENDING.value:
         step.outcome = "stopped"
@@ -437,6 +445,11 @@ async def _run_step(
         step.outcome, step.detail = "approved", "Ran OK."
     elif status == "already_resumed":
         await _wait_for_stored_result(step)
+    elif (getattr(result, "extras", None) or {}).get("execution_outcome") == UNCERTAIN_OUTCOME:
+        step.outcome, step.detail = (
+            "stopped",
+            f"Approved, but the outcome is unknown. {UNCERTAIN_ADVICE}",
+        )
     else:
         _stop_on_run_status(step, status, getattr(result, "error", None))
 
@@ -466,6 +479,10 @@ async def _wait_for_stored_result(step: _Step) -> None:
         state = approval_result_state(fresh)
         if state == ApprovalResultState.EXECUTED:
             step.outcome, step.detail = "approved", "The waiting requester ran it. Ran OK."
+            return
+        if state == ApprovalResultState.UNCERTAIN:
+            step.outcome = "stopped"
+            step.detail = f"The waiting requester ran it. {UNCERTAIN_ADVICE}"
             return
         if state == ApprovalResultState.FAILED:
             stored = fresh.resume_result or {}

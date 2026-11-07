@@ -169,6 +169,8 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # ``kb_revision.entry_id`` references ``documents(id)`` (migration
     # ``0110``, #3753), so it must be truncated in the same statement.
     "kb_revision",
+    # ``memory_revision`` (migration ``0141``) has the same two FKs.
+    "memory_revision",
     "endpoint_descriptor",
     # ``operation_policy_override`` (migration ``0120``, #4711) holds the
     # operator's stricter risk levels; reset it with the descriptors.
@@ -298,7 +300,7 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # shape as ``service_principal_grant`` above.
     "service_principal_read_scope",
     # ``run_approval.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
-    # migration ``0141`` (#4126 run approvals), the same shape as above.
+    # migration ``0142`` (#4126 run approvals), the same shape as above.
     "run_approval",
     # ``addon_pairing.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0079`` (#3025 add-on pairing handshake). PG rejects

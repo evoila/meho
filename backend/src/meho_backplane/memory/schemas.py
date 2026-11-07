@@ -189,6 +189,9 @@ class MemoryEntry(BaseModel):
     expires_at: datetime | None
     user_sub: str | None
     target_name: str | None
+    #: Where the note came from, lifted from the ``source`` header field
+    #: in ``metadata``. ``None`` when the writer gave none.
+    source: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -440,7 +440,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   table referenced in a foreign key constraint``.
         # * ``sandbox_delete_grant`` — migration 0115 (#4622 sandbox mode delete
         #   grants) carries the same real ``REFERENCES tenant(id)`` FK.
-        # * ``run_approval`` — migration 0141 (#4126 run approvals) carries the
+        # * ``run_approval`` — migration 0142 (#4126 run approvals) carries the
         #   same real ``REFERENCES tenant(id)`` FK.
         # * ``service_principal_read_scope`` — migration 0117 (#4992 read scope)
         #   carries the same real ``REFERENCES tenant(id)`` FK.
@@ -497,7 +497,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
                 "addon_capability, addon_orchestration_run, "
                 "service_principal_grant, sandbox_delete_grant, addon_pairing, addon_step_event, "
                 "agent_run, audit_log, identity_budget, "
-                "documents, kb_revision, graph_edge, "
+                "documents, kb_revision, memory_revision, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, "
                 "dispatch_trace_span, dispatch_trace, tenant",
@@ -574,7 +574,7 @@ async def pg_engine_empty_tenant(
                 "addon_capability, addon_orchestration_run, "
                 "service_principal_grant, sandbox_delete_grant, addon_pairing, addon_step_event, "
                 "agent_run, audit_log, identity_budget, "
-                "documents, kb_revision, graph_edge, "
+                "documents, kb_revision, memory_revision, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, "
                 "dispatch_trace_span, dispatch_trace, tenant",

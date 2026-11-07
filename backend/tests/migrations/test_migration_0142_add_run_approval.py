@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0141_add_run_approval`` (#4126).
+"""Behavioural tests for ``0142_add_run_approval`` (#4126).
 
 The migration adds the ``run_approval`` table and the ``tenant`` setting
 ``run_approval_target_kinds_enabled``. These tests pin: a tenant written
 before the upgrade reads ``false`` (target kinds stay off), the table
 exists, and ``downgrade()`` drops both.
 
-Every step targets this migration's own revision (``0141``) and its
-``down_revision`` (``0140``), never ``head``.
+Every step targets this migration's own revision (``0142``) and its
+``down_revision`` (``0141``), never ``head``.
 """
 
 from __future__ import annotations
@@ -27,14 +27,14 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0141"
-_DOWN_REVISION = "0140"
+_REVISION = "0142"
+_DOWN_REVISION = "0141"
 _TENANT_ID = "a" * 32
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0141.db"
+    db_path = tmp_path / "migration_0142.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

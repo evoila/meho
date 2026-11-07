@@ -31,11 +31,11 @@ status. MEHO records the decision; there is no second-person step.
 
 ## Key types
 
-- `RunApproval` (`db/models.py`, table `run_approval`, migration `0141`):
+- `RunApproval` (`db/models.py`, table `run_approval`, migration `0142`):
   `principal_sub`, `work_ref`, `entries` (JSON), `reason`, `requested_at`,
   `expires_at`, `approved_at` / `approved_by_sub`, `revoked_at` /
   `revoked_by_sub` / `revoked_reason`, `ended_at`. Rows are never deleted.
-- `Tenant.run_approval_target_kinds_enabled` (migration `0141`, default
+- `Tenant.run_approval_target_kinds_enabled` (migration `0142`, default
   `false`): the tenant setting for target kinds. It is set with the
   settings file (`policies.run_approval_target_kinds`).
 - `operations/run_approval_schemas.py`: `RunApprovalEntry`,
@@ -116,5 +116,5 @@ There is no MCP tool. Approving is a person's decision (v0.1-spec §7).
 
 `tests/test_run_approvals.py` (call time, dispatch, revoke, end, expiry,
 destructive, tenants, target kinds), `tests/test_api_v1_run_approvals.py`
-(REST rules), `tests/migrations/test_migration_0141_add_run_approval.py`,
+(REST rules), `tests/migrations/test_migration_0142_add_run_approval.py`,
 `cli/internal/cmd/approvals/runs_test.go`.

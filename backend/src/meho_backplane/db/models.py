@@ -926,7 +926,7 @@ class Tenant(Base):
     # approval list a target kind (a product, for example ``vcenter``) in
     # place of one target, so targets the run registers itself are covered.
     # ``False`` (default): every entry names one target or no target.
-    # ``server_default=false`` in migration ``0141`` backfills existing rows.
+    # ``server_default=false`` in migration ``0142`` backfills existing rows.
     run_approval_target_kinds_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -1196,6 +1196,57 @@ class KbRevision(Base):
         sa.CheckConstraint(
             "origin IN ('write', 'backfill-current')",
             name="ck_kb_revision_origin",
+        ),
+    )
+
+
+class MemoryRevision(Base):
+    """One retained version of a memory entry (body and metadata).
+
+    The :class:`Document` row with ``source="memory"`` stays the latest
+    head. Each time a memory write changes the body or the metadata, the
+    service adds one row here. A row is never updated. Rows go with the
+    entry: ``ON DELETE CASCADE``, and the memory delete paths remove them
+    explicitly (SQLite does not enforce the foreign key).
+
+    ``revision_number`` counts 1, 2, 3, ... per entry and is unique per
+    entry. ``written_by_sub`` is the OIDC ``sub`` of the writer, or
+    ``None`` when the write had no principal.
+    """
+
+    __tablename__ = "memory_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    doc_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
+    written_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "memory_revision_entry_number_idx",
+            "entry_id",
+            "revision_number",
+            unique=True,
         ),
     )
 

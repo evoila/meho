@@ -3,8 +3,8 @@
 
 """Add the run approval table and its tenant setting (#4126).
 
-Revision ID: 0141
-Revises: 0140
+Revision ID: 0142
+Revises: 0141
 Create Date: 2026-11-07
 
 A run approval lets a person approve the operation list of one automation
@@ -30,8 +30,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0141"
-down_revision: str | None = "0140"
+revision: str = "0142"
+down_revision: str | None = "0141"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

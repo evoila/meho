@@ -76,7 +76,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -151,6 +151,7 @@ from meho_backplane.operations.approval_resume_checks import (
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
+from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -206,6 +207,7 @@ __all__ = [
     "rehydrate_resume_target",
     "reject_request",
     "request_waits_only_for_token_call",
+    "result_state_of_envelope",
     "resume_dispatch_after_approval",
     "withdraw_request",
 ]
@@ -885,12 +887,33 @@ class ApprovalResultState(StrEnum):
       agent waiter) store the envelope they get back.
     * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
     * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
+    * :attr:`UNCERTAIN` -- a result is stored, its ``status`` is not ``ok``,
+      and it says MEHO does not know if the change happened
+      (``extras.execution_outcome == "uncertain"``). This covers a lost
+      vendor answer after the request was sent, a failed audit write, and an
+      approved run that MEHO lost in a restart. MEHO never runs it again, and
+      every view says: do not run it again, check the target first.
     """
 
     NOT_STARTED = "not_started"
     STARTED = "started"
     EXECUTED = "executed"
     FAILED = "failed"
+    UNCERTAIN = "uncertain"
+
+
+def result_state_of_envelope(envelope: Mapping[str, Any]) -> ApprovalResultState:
+    """The run state a stored result envelope stands for (#5025).
+
+    The one rule every approval view uses: ``ok`` is ``executed``, an error
+    that says the outcome is unknown is ``uncertain``, any other result is
+    ``failed``.
+    """
+    if envelope.get("status") == "ok":
+        return ApprovalResultState.EXECUTED
+    if envelope_is_uncertain(envelope):
+        return ApprovalResultState.UNCERTAIN
+    return ApprovalResultState.FAILED
 
 
 def approval_result_state(request: ApprovalRequest) -> ApprovalResultState | None:
@@ -898,9 +921,7 @@ def approval_result_state(request: ApprovalRequest) -> ApprovalResultState | Non
     if request.status != ApprovalRequestStatus.APPROVED.value:
         return None
     if request.resume_result is not None:
-        if request.resume_result.get("status") == "ok":
-            return ApprovalResultState.EXECUTED
-        return ApprovalResultState.FAILED
+        return result_state_of_envelope(request.resume_result)
     if request.resumed_at is not None:
         return ApprovalResultState.STARTED
     return ApprovalResultState.NOT_STARTED

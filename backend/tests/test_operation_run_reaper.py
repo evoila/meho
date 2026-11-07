@@ -5,8 +5,8 @@
 
 Covers :mod:`meho_backplane.operations.operation_run_reaper` -- the sweep
 that reclaims a governed dispatch whose worker died mid-flight. The single
-policy is fail-into-audit: an orphaned run is driven to ``failed`` (an
-audited terminal state) and **never** re-dispatched (a governed op can wrap
+policy is fail-into-audit: an orphaned run is driven to ``uncertain`` (a run that
+may change something) or ``failed`` (a read), and **never** re-dispatched (a governed op can wrap
 a non-idempotent vendor write). This is the "never silently lost" half of
 the #3079 lease/reaper acceptance criterion.
 
@@ -22,6 +22,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -37,6 +38,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.operations.operation_run_reaper import (
     OPERATION_RUN_REAPER_INTERRUPTION_REASON,
+    OPERATION_RUN_REAPER_UNCERTAIN_REASON,
     _run_one_tick,
 )
 from meho_backplane.settings import get_settings
@@ -90,34 +92,128 @@ async def _seed_running_run(
     return run.id
 
 
+def _descriptor_with(monkeypatch: pytest.MonkeyPatch, safety_level: str | None) -> None:
+    """Make the reaper find an operation with *safety_level* (``None``: not found)."""
+
+    async def _lookup(**_: object) -> object | None:
+        return None if safety_level is None else SimpleNamespace(safety_level=safety_level)
+
+    monkeypatch.setattr("meho_backplane.operations.operation_run_reaper.lookup_descriptor", _lookup)
+
+
+async def _reap_and_load(run_id: uuid.UUID) -> tuple[OperationRun, list[AuditLog]]:
+    await _run_one_tick()
+    async with get_sessionmaker()() as session:
+        run = await session.get(OperationRun, run_id)
+        assert run is not None
+        audit_rows = list(
+            (await session.execute(select(AuditLog).where(AuditLog.run_id == run_id)))
+            .scalars()
+            .all()
+        )
+    return run, audit_rows
+
+
 @pytest.mark.asyncio
-async def test_expired_lease_running_run_is_failed_and_audited() -> None:
-    """An expired-lease ``running`` run is driven to ``failed`` + audited."""
+async def test_expired_lease_change_run_is_uncertain_and_audited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead run of an operation that changes something is ``uncertain`` + audited (#5025)."""
+    _descriptor_with(monkeypatch, "caution")
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         tenant_id = await _seed_tenant(session)
         run_id = await _seed_running_run(session, tenant_id=tenant_id)
 
-    await _run_one_tick()
+    run, audit_rows = await _reap_and_load(run_id)
 
+    assert run.status == OperationRunStatus.UNCERTAIN.value
+    assert run.error == OPERATION_RUN_REAPER_UNCERTAIN_REASON
+    assert "Do not run it again" in (run.error or "")
+    assert run.ended_at is not None
+    assert run.lease_owner is None and run.lease_expires_at is None
+    # Result is never populated -- the op is not re-dispatched.
+    assert run.result is None
+    assert len(audit_rows) == 1
+    assert audit_rows[0].operator_sub == "system:operation-run-reaper"
+    assert audit_rows[0].path == "internal/operation-run/reaper/fail-into-audit"
+    assert audit_rows[0].payload["outcome"] == "uncertain"
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_read_run_is_failed_and_audited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead run of a read operation stays ``failed`` + audited."""
+    _descriptor_with(monkeypatch, "safe")
+    sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        run_id = await _seed_running_run(session, tenant_id=tenant_id)
+
+    run, audit_rows = await _reap_and_load(run_id)
+
+    assert run.status == OperationRunStatus.FAILED.value
+    assert run.error == OPERATION_RUN_REAPER_INTERRUPTION_REASON
+    assert run.result is None
+    assert len(audit_rows) == 1
+    assert audit_rows[0].payload["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_run_of_unknown_operation_is_uncertain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the operation cannot be found, a doubt ends as ``uncertain``, not ``failed``."""
+    _descriptor_with(monkeypatch, None)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        run_id = await _seed_running_run(session, tenant_id=tenant_id)
+
+    run, _ = await _reap_and_load(run_id)
+
+    assert run.status == OperationRunStatus.UNCERTAIN.value
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_approval_resume_run_is_uncertain_even_for_a_read_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that resumes an approved request is always ``uncertain`` when it dies."""
+    _descriptor_with(monkeypatch, "safe")
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        run_id = await _seed_running_run(session, tenant_id=tenant_id)
         run = await session.get(OperationRun, run_id)
         assert run is not None
-        assert run.status == OperationRunStatus.FAILED.value
-        assert run.error == OPERATION_RUN_REAPER_INTERRUPTION_REASON
-        assert run.ended_at is not None
-        assert run.lease_owner is None and run.lease_expires_at is None
-        # Result is never populated -- the op is not re-dispatched.
-        assert run.result is None
+        run.origin = OperationRunOrigin.APPROVAL_RESUME.value
+        await session.commit()
 
-        audit_rows = (
-            (await session.execute(select(AuditLog).where(AuditLog.run_id == run_id)))
-            .scalars()
-            .all()
-        )
-        assert len(audit_rows) == 1
-        assert audit_rows[0].operator_sub == "system:operation-run-reaper"
-        assert audit_rows[0].path == "internal/operation-run/reaper/fail-into-audit"
+    run, _ = await _reap_and_load(run_id)
+
+    assert run.status == OperationRunStatus.UNCERTAIN.value
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_run_with_failing_lookup_is_uncertain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed operation lookup also ends as ``uncertain``."""
+
+    async def _boom(**_: object) -> object:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr("meho_backplane.operations.operation_run_reaper.lookup_descriptor", _boom)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        run_id = await _seed_running_run(session, tenant_id=tenant_id)
+
+    run, _ = await _reap_and_load(run_id)
+
+    assert run.status == OperationRunStatus.UNCERTAIN.value
 
 
 @pytest.mark.asyncio

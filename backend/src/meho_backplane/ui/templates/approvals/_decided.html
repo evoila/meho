@@ -68,6 +68,28 @@
             <dd><a class="link font-mono text-xs" href="{{ run.outcome.audit_href }}">{{ run.outcome.audit_id }}</a></dd>
           {% endif %}
         </dl>
+      {% elif decision == "approved" and run and run.result_state == "uncertain" %}
+        {#- Approved, but MEHO does not know if the change happened (#5025):
+            not "failed". The advice is to not run it again. -#}
+        <span class="grid size-12 place-items-center rounded-full bg-warning/15 text-warning">
+          {{ icon("ban", class="size-6") }}
+        </span>
+        <h3 class="text-lg font-semibold">Approved, but the outcome is unknown</h3>
+        <p class="text-sm text-base-content/60" data-testid="approval-run-uncertain">
+          The operation for <span class="font-mono">{{ request.op_id }}</span> was approved.
+          MEHO does not know if the change happened. Do not run it again.
+          Check the target first.
+        </p>
+        <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
+          {% if run.outcome.error_code %}
+            <dt class="opacity-70">Error code</dt>
+            <dd class="font-mono [overflow-wrap:anywhere]">{{ run.outcome.error_code }}</dd>
+          {% endif %}
+          {% if run.outcome.audit_href %}
+            <dt class="opacity-70">Audit</dt>
+            <dd><a class="link font-mono text-xs" href="{{ run.outcome.audit_href }}">{{ run.outcome.audit_id }}</a></dd>
+          {% endif %}
+        </dl>
       {% elif decision == "approved" and run and run.result_state == "started" %}
         {#- Another resumer won the run claim and no result is stored yet.
             Do not say the operation ran: say the run is still going and

@@ -31,7 +31,8 @@ load-bearing:
 - **No `resume` in-flight policy.** A governed op can wrap a non-idempotent
   vendor write. Re-dispatching a half-executed write on pod death would
   double-execute it, so an orphaned run is **never** re-dispatched — the
-  reaper drives it to `failed` (an audited terminal state). This is the safe
+  reaper drives it to `uncertain` (an operation that may change something) or
+  `failed` (a read), an audited terminal state. This is the safe
   half of the acceptance criterion "survives pod restart via lease/reaper
   semantics **or** terminates into an audited terminal state — never
   silently lost."
@@ -105,7 +106,7 @@ background substrate and the route returns 202 + the handle. The
 exactly-one-resumer claim (#2293) still guards the single execution, now won
 inside the background task.
 
-State machine (`pending → running → succeeded | failed`, plus
+State machine (`pending → running → succeeded | failed | uncertain`, plus
 `→ cancelled` from any non-terminal state):
 
 - `succeeded` means the **run** completed and its envelope is durable —
@@ -114,6 +115,13 @@ State machine (`pending → running → succeeded | failed`, plus
   not the run status.
 - `failed` is reserved for a run that never produced an envelope (worker
   died / reaped, or the dispatch raised).
+- `uncertain` (#5025, migration `0139`) is the reaper's end for a dead run of
+  an operation that may change the target: MEHO does not know if the change
+  happened, so it is not `failed`, and it never runs again. The advice is the
+  same as in the approval views: do not run it again, check the target first.
+  A dead run that resumes an approved request is always `uncertain`. Any
+  other run is `uncertain` unless its operation has `safety_level` `safe`;
+  an operation that cannot be found counts as a change.
 - `cancelled` is best-effort: the durable intent is recorded; an in-flight
   task loses its lease on the next heartbeat and its result is discarded
   when it finalises against the now-terminal row (the dispatch's own
@@ -124,8 +132,8 @@ State machine (`pending → running → succeeded | failed`, plus
 `operation_run_reaper` scans `status='running' AND lease_expires_at < now()`
 on a fixed cadence (advisory-lock leader election per tick, `FOR UPDATE SKIP
 LOCKED` claim, per-row savepoint isolation, one commit per tick — the same
-discipline as the agent-run reaper) and drives each orphaned run to `failed`
-with a stable interruption reason, writing an internal audit row
+discipline as the agent-run reaper) and drives each orphaned run to
+`uncertain` (a change) or `failed` (a read) with a stable interruption reason, writing an internal audit row
 (`operator_sub='system:operation-run-reaper'`, `run_id` = the operation-run
 id, migration-`0034` audit correlation) in the same transaction. It never
 re-dispatches. Gated on `OPERATION_RUN_REAPER_ENABLED`; started/stopped in
@@ -203,7 +211,7 @@ does not need this: its outcome is stored on the run row.
 - **In-process task store is per-replica.** The durable row is the source of
   truth, so `poll` works from any replica, but the launching replica holds
   the live task. If that replica dies, the reaper (any replica) reclaims the
-  row into `failed`.
+  row into `uncertain` or `failed`.
 
 ## References
 

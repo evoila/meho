@@ -33,6 +33,7 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.main import app
 from meho_backplane.mcp.tools.approvals import _row_to_dict
 from meho_backplane.operations._errors import (
+    result_audit_commit_failed,
     result_composite_terminal_error,
     result_connector_error,
 )
@@ -48,6 +49,7 @@ from meho_backplane.operations.approval_queue import (
     get_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -219,7 +221,14 @@ async def test_failed_resume_shows_on_show_and_list(monkeypatch: pytest.MonkeyPa
     assert outcome["audit_id"] == str(_AUDIT_ID)
     assert outcome["resumed_at"] is not None
     # Only the summary leaves the envelope: no result body, no free-text error.
-    assert set(outcome) == {"resumed_at", "result_status", "error_code", "audit_id", "guidance"}
+    assert set(outcome) == {
+        "resumed_at",
+        "result_status",
+        "error_code",
+        "audit_id",
+        "guidance",
+        "execution_outcome",
+    }
     assert outcome["guidance"] is None
     assert "permission denied" not in str(shown)
 
@@ -234,6 +243,108 @@ async def test_failed_resume_shows_on_show_and_list(monkeypatch: pytest.MonkeyPa
     mcp_row = _row_to_dict(stored)
     assert mcp_row["result_state"] == "failed"
     assert mcp_row["resume_outcome"] == outcome
+
+
+@pytest.mark.asyncio
+async def test_uncertain_resume_shows_uncertain_on_rest_list_and_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run whose audit write failed reads ``uncertain`` in every view, not ``failed`` (#5025)."""
+    request_id = await _park_approved()
+
+    async def _fake_dispatch(**_kwargs: object) -> OperationResult:
+        return result_audit_commit_failed(_OP_ID, 7.0)
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _fake_dispatch)
+    async with get_sessionmaker()() as s:
+        row = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+    await resume_dispatch_after_approval(operator=_operator(_APPROVER_SUB), request=row)
+
+    shown = await _get_json(f"/api/v1/approvals/{request_id}")
+    assert shown["result_state"] == "uncertain"
+    assert shown["resume_outcome"]["error_code"] == "audit_commit_failed"
+    assert shown["resume_outcome"]["execution_outcome"] == "uncertain"
+    # The summary says what to do, although such a run stores no guidance stamp.
+    assert shown["resume_outcome"]["guidance"] == UNCERTAIN_ADVICE
+
+    listed = await _get_json("/api/v1/approvals?status=approved")
+    (row_view,) = [v for v in listed if v["id"] == str(request_id)]
+    assert row_view["result_state"] == "uncertain"
+    assert row_view["resume_outcome"]["guidance"] == UNCERTAIN_ADVICE
+
+    async with get_sessionmaker()() as s:
+        stored = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+    assert "approval_guidance" not in stored.resume_result["extras"]
+    mcp_row = _row_to_dict(stored)
+    assert mcp_row["result_state"] == "uncertain"
+    assert mcp_row["resume_outcome"]["execution_outcome"] == "uncertain"
+    assert mcp_row["resume_outcome"]["guidance"] == UNCERTAIN_ADVICE
+
+
+async def _park_pending() -> uuid.UUID:
+    params = {"path": "ssh/known_hosts", "value": "<pin>"}
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=_operator(_OWNER_SUB),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+        await s.commit()
+        return request.id
+
+
+async def _decide_json(request_id: uuid.UUID) -> Any:
+    """Approve *request_id* over ``/decide`` as a person with a fresh sign-in."""
+    key = _KEY
+    token = mint_token(
+        key,
+        fresh_sign_in=True,
+        sub=_APPROVER_SUB,
+        tenant_role=TenantRole.OPERATOR.value,
+        tenant_id=str(_TENANT_ID),
+    )
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="https://testserver"
+        ) as ac:
+            response = await ac.post(
+                f"/api/v1/approvals/{request_id}/decide",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"decision": "approved"},
+            )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected_outcome"),
+    [
+        pytest.param(result_audit_commit_failed(_OP_ID, 7.0), "uncertain", id="uncertain"),
+        pytest.param(_failed_run(), None, id="plain-failure"),
+    ],
+)
+async def test_decide_tells_an_uncertain_run_from_a_plain_failure(
+    monkeypatch: pytest.MonkeyPatch, result: OperationResult, expected_outcome: str | None
+) -> None:
+    """The decide answer names an uncertain run (#5025): no client says "send it again"."""
+    request_id = await _park_pending()
+
+    async def _fake_dispatch(**_kwargs: object) -> OperationResult:
+        return result
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _fake_dispatch)
+    body = await _decide_json(request_id)
+    assert body["dispatch_status"] == "error"
+    assert body["dispatch_execution_outcome"] == expected_outcome
+
+    shown = await _get_json(f"/api/v1/approvals/{request_id}")
+    assert shown["result_state"] == (expected_outcome or "failed")
 
 
 @pytest.mark.asyncio

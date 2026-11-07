@@ -21,7 +21,10 @@ What waits depends on how the call arrives:
 - **Service principals** (fixed automation, for example a build
   pipeline) keep a rule of their own. A standing grant, which a person
   makes in advance, lets their `caution` and `dangerous` changes run. A
-  `destructive` change always waits for a person.
+  `destructive` change waits for a person. The one exception is an
+  instance in sandbox mode, which holds only disposable test systems.
+  There a tenant admin may give a service principal a standing grant
+  that also covers deletes.
 
 More rules:
 
@@ -32,12 +35,25 @@ More rules:
 - An approved request runs only on the target and the preview that the
   person approved. If either changed, MEHO sends nothing and the
   requester asks again.
-- Only a member of the `MEHO-SA-Operators` group approves their own
-  change. For everyone else, a second person must approve. For another
-  person's `dangerous` or `destructive` change, the approver must be an
-  SA-Operator or an admin.
-- A request that waits keeps secret values out of its stored
-  parameters, and the approver sees them hidden.
+- As a rule, a second person must approve. For another person's
+  `dangerous` or `destructive` change, the approver must be a member of
+  the `MEHO-SA-Operators` group or an admin. A person may approve their
+  own change in three cases only:
+    - A member of the `MEHO-SA-Operators` group may approve their own
+      change at every risk level.
+    - An operator or an admin may approve their own `caution` change
+      when it waited only because they sent it with a token. This works
+      only with a click in the web interface.
+    - When an admin turns on the audited emergency switch for the whole
+      deploy, a person may approve their own `safe` or `caution` change.
+      The switch never covers a `dangerous` or `destructive` change.
+- The approver does not see the stored parameters of a request. The
+  approver sees the preview, and the preview hides secret values.
+- A request that waits stores the parameters of the call, because MEHO
+  runs the approved call with them. A secret value in those parameters,
+  for example a password in a deployment spec, stays stored until the
+  run starts, or until the request is rejected, withdrawn or expires.
+  Then MEHO replaces it with a marker.
 - The web interface and the command line show for each request whether
   you may approve it, and why not.
 

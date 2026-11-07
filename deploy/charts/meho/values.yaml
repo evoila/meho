@@ -52,6 +52,14 @@ replicaCount: 1
 updateStrategy:
   type: Recreate
 
+# -- Seconds Kubernetes waits for a new backplane pod to get Ready before it
+# marks the rollout as failed (`ProgressDeadlineExceeded`). `kubectl rollout
+# status` and Argo CD then report a failure, even though the pod may still be
+# starting. Keep this higher than `probes.startup.failureThreshold` ×
+# `probes.startup.periodSeconds` (900s by default), plus time to pull the
+# image. The default is 1200s (20 min).
+progressDeadlineSeconds: 1200
+
 # -- How the backplane pod stops (#5024, docs/codebase/shutdown-drain.md).
 # The pod's grace period is preStopSleepSeconds + drainSeconds + 30 seconds.
 shutdown:

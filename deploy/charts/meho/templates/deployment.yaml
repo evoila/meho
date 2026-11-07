@@ -17,6 +17,9 @@ metadata:
     {{- include "meho.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # Kubernetes marks a rollout failed when the new pod is not Ready after
+  # this many seconds. Keep it above the startup probe budget (#5812).
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds }}
   # Recreate by default (#5024): the old pod has stopped before the new one
   # starts, so old and new code never share the database.
   strategy:

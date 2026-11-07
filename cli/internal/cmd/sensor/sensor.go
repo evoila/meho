@@ -144,7 +144,7 @@ func loadJSONObjectFlag(cmd *cobra.Command, raw, flagName string) (map[string]an
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sensor",
-		Short: "Manage deterministic-check sensors (list / create / edit / delete)",
+		Short: "Manage deterministic-check sensors (list / create / edit / delete / results)",
 		Long: "Manage tenant-scoped sensors wired by the deterministic " +
 			"check layer (Initiative #2416). A sensor pins an (op + args + " +
 			"assertion + cadence + severity) tuple the check runner " +

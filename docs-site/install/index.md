@@ -15,12 +15,10 @@ PostgreSQL or Vault, you can connect them instead.
 [Two ways to install](#two-ways-to-install) below says which steps each
 way needs.
 
-!!! tip "Just exploring?"
+!!! tip "Not sure this is the right way for you?"
 
-    If you only want to see the backplane come up on your workstation —
-    without a real Keycloak, Vault, or login — take the
-    [local kind quickstart](kind-quickstart.md) instead. It is faster,
-    and it is honest about what it fakes.
+    [Ways to install MEHO](ways-to-install.md) lists every way to
+    install MEHO and helps you pick one.
 
 ## What you need
 

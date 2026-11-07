@@ -73,7 +73,6 @@ nav:
           - Your own Keycloak: install/login/customer-keycloak.md
       - TLS and ingress: install/tls-ingress.md
       - Upgrades: install/upgrades.md
-      - Local kind quickstart: install/kind-quickstart.md
   - Connect clients:
       - clients/index.md
       - MCP surface and scopes: clients/mcp-surface-and-scopes.md

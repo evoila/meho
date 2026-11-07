@@ -258,6 +258,8 @@ func renderRequestError(
 //   - 422 → unexpected wrapping the FastAPI validation envelope
 //     (invalid slug, missing required body field, both-or-neither
 //     directory/tarball_url).
+//   - 409 → unexpected with the current revision and what changed
+//     (`meho kb add` without the revision it read).
 //   - 501 → unexpected with the backend's detail (tarball_url ingest
 //     unsupported in v0.2).
 //   - Other non-2xx → unexpected with the raw body.
@@ -310,6 +312,19 @@ func renderHTTPStatus(
 		// backend emits the FastAPI validation envelope.
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("invalid request: %s", bodyStr)),
+			jsonOut,
+		)
+	case http.StatusConflict:
+		// 409 stale_revision from `meho kb add`: the entry changed
+		// after the revision the writer read, or the slug exists and no
+		// revision was named. The answer holds the current revision
+		// and what changed.
+		if text, ok := describeStale(body); ok {
+			return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(text), jsonOut)
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
+				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotImplemented:

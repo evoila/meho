@@ -340,7 +340,9 @@ async def test_only_current_revision_passages_exist(fake_embed: AsyncMock) -> No
     assert len(old) > 3
     assert {p.doc_metadata[META_KB_PASSAGE]["revision_id"] for p in old} == {str(first.revision_id)}
 
-    second, _ = await service.create_entry(tenant, "runbook", "# New\n\nShort new body.")
+    second, _ = await service.create_entry(
+        tenant, "runbook", "# New\n\nShort new body.", expected_revision=first.revision_id
+    )
     new = await _passages(tenant)
     assert [p.body for p in new] == ["# New\n\nShort new body."]
     assert new[0].doc_metadata[META_KB_PASSAGE]["revision_id"] == str(second.revision_id)
@@ -355,12 +357,17 @@ async def test_unchanged_write_reuses_passages_and_refreshes_metadata(
 ) -> None:
     service = KbService()
     tenant = uuid.uuid4()
-    await service.create_entry(tenant, "runbook", _long_body(), {"team": "a"})
+    first, _ = await service.create_entry(tenant, "runbook", _long_body(), {"team": "a"})
     before = await _passages(tenant)
     calls = fake_embed.encode.await_count
 
-    await service.create_entry(tenant, "runbook", _long_body(), {"team": "b"})
+    second, _ = await service.create_entry(
+        tenant, "runbook", _long_body(), {"team": "b"}, expected_revision=first.revision_id
+    )
     after = await _passages(tenant)
+    # A change to the metadata alone adds a revision but embeds nothing again.
+    assert second.revision_id != first.revision_id
+    assert await _revisions(first.id) == 2
     assert fake_embed.encode.await_count == calls
     assert [p.source_id for p in after] == [p.source_id for p in before]
     assert {p.doc_metadata["team"] for p in after} == {"b"}
@@ -375,7 +382,9 @@ async def test_new_chunker_version_rechunks_the_same_revision(
     before = {p.source_id for p in await _passages(tenant)}
 
     monkeypatch.setattr(passages_module, "CHUNKER_VERSION", "kb-md-heading-test")
-    again, _ = await service.create_entry(tenant, "runbook", _long_body())
+    again, _ = await service.create_entry(
+        tenant, "runbook", _long_body(), expected_revision=entry.revision_id
+    )
     after = await _passages(tenant)
     assert again.revision_id == entry.revision_id
     assert await _revisions(entry.id) == 1
@@ -393,7 +402,9 @@ async def test_failed_prepare_keeps_old_head_and_passages(fake_embed: AsyncMock)
 
     fake_embed.encode.side_effect = RuntimeError("model down")
     with pytest.raises(RuntimeError, match="model down"):
-        await service.create_entry(tenant, "runbook", "A different body.")
+        await service.create_entry(
+            tenant, "runbook", "A different body.", expected_revision=entry.revision_id
+        )
 
     head = await service.get_entry(tenant, "runbook")
     assert head is not None and head.body == _long_body()
@@ -412,7 +423,9 @@ async def test_failed_publish_keeps_old_head_and_passages(fake_embed: AsyncMock)
         patch("meho_backplane.kb.revisions._add_revision", side_effect=RuntimeError("db down")),
         pytest.raises(RuntimeError, match="db down"),
     ):
-        await service.create_entry(tenant, "runbook", "A different body.")
+        await service.create_entry(
+            tenant, "runbook", "A different body.", expected_revision=entry.revision_id
+        )
 
     head = await service.get_entry(tenant, "runbook")
     assert head is not None and head.body == _long_body()

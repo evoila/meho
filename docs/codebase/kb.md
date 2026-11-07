@@ -32,8 +32,10 @@ Each kb entry has three parts:
 - The **head**: one `documents` row. `meho://kb/{slug}` reads it. A new
   body overwrites it.
 - The **retained revisions**: `kb_revision` rows. Every write that
-  changes the body adds one, in the same transaction as the head. A
-  revision is never changed, so an earlier body stays readable by its
+  changes the body or the metadata (the header) adds one, in the same
+  transaction as the head. A revision keeps the body and the metadata
+  it was written with, so one revision id names one exact state of the
+  entry. A revision is never changed, so an earlier body stays readable by its
   id through `meho://kb/id/{entry}/revision/{revision}` until the entry
   is deleted (#3753).
 - The **passages** (#3761): `documents` rows with `source='kb-passage'`,
@@ -68,13 +70,15 @@ keys surface on every read surface that already returns `metadata`.
 
 ### `KbRevision` (`db/models.py`) and `KbEntryRevision` (`kb/schemas.py`)
 
-`KbRevision` is the ORM row in `kb_revision` (migration `0110`):
+`KbRevision` is the ORM row in `kb_revision` (migration `0110`; migration
+`0138` adds `entry_metadata`):
 `id` (revision UUID), `tenant_id`, `entry_id` (the `documents.id`,
 `ON DELETE CASCADE`), `revision_number` (1, 2, 3, ... per entry; unique
 per entry; the highest is current), `body`, `body_hash`, `provenance`
 (the write's provenance block, or `NULL`), `origin`, `embedding_model`,
 `chunker_version` (`kb-md-heading-v1` for revisions written since
-#3761) and `created_at`.
+#3761), `entry_metadata` (the entry's metadata as of this revision;
+`NULL` on a row stored before `0138`) and `created_at`.
 
 `origin` is `write` for a row stored by a kb write, or
 `backfill-current` for the one row migration `0110` copied from each
@@ -210,11 +214,16 @@ the folder:
    - **Publish** in one short transaction: lock the head (PostgreSQL,
      `SELECT ... FOR UPDATE`), check the entry still matches what was
      read, write the head, add a `KbRevision` when the body differs
-     from the latest revision (next number, provenance, embedding
-     model, chunker version), delete the old passage rows and insert
+     from the latest revision or the metadata differs from the head's
+     (next number, provenance, metadata, embedding model, chunker
+     version), delete the old passage rows and insert
      the new ones, read the entry back, commit.
    An unchanged body reuses the latest revision and embeds nothing; its
-   passages only get the new metadata. Changing a body back to an
+   passages only get the new metadata. A change to the metadata alone
+   (not counting the provenance block and `last_updated_by_sub`, which
+   change on every write) adds a revision too, but embeds nothing
+   again: the passages stay, and still point at the earlier revision
+   that holds the same body. Changing a body back to an
    older text adds a new revision; it does not reuse the old one. A
    failed prepare or publish keeps the old head, revision and passages.
    Two writes to the same entry at the same time do not mix. When the
@@ -225,9 +234,10 @@ the folder:
    again. It tries at most three times in total. Each rerun reads the
    entry again and runs the metadata function again, so the
    ownership check always decides against the entry the publish step
-   then verifies. Two operators that both see a new slug as unused
+   then verifies. Two writers that both see a new slug as unused
    cannot both create it: the one that loses the race reads the
-   other's entry on its rerun and is refused, and that entry keeps
+   other's entry on its rerun and is refused (the owner rule, or a
+   stale revision because it named none), and that entry keeps
    its body and creator. The returned `revision_id` always names the
    body that was written.
 3. Return `(_doc_to_entry(doc, revision_id), created)`. `created`
@@ -236,17 +246,54 @@ the folder:
    overwrite) and records `audit_created`; the MCP / UI callers
    discard it.
 
-This is an **explicit replace**: the newest write wins, with no
-expected-revision check. A compare-and-set API waits until a real
-multi-writer workflow needs it. Directory ingest uses a different
-rule (below): it never lets file order pick a winner.
+### Every update names the revision it read (#4947)
+
+`create_entry` takes `expected_revision`: the `revision_id` that a read
+of the entry returned. It is an input, not a new tool. The check runs
+in `write_entry` (`ExpectedRevision`), on every try, against the
+entry as that try read it. The publish step verifies that state under
+the head lock, so two writers that read the same revision cannot both
+win.
+
+- A write without `expected_revision` only creates. If the slug exists,
+  it is refused like a stale write. So two writers that both think a
+  slug is free cannot overwrite each other either.
+- A write that names a revision other than the current one is refused.
+  A write that names a revision for a deleted entry is refused too
+  (`cause: gone`).
+- The refusal is `KbStaleRevisionError` (`kb/stale_revision.py`). Its
+  detail holds the current revision id and number, who changed it
+  (`last_updated_by_sub`) and when (the revision's `created_at`), the
+  metadata keys that differ from the revision the writer read, and a
+  short line-by-line difference of the body. The difference is cut at
+  40 lines and 2000 characters, the key list at 20 keys. `cause` is
+  `stale`, `exists` or `gone`.
+- The owner rule runs first: an operator who may not change the entry
+  gets the ownership refusal, not the stale one.
+- Stored text in the detail (the body difference, key names, the
+  writer) is wrapped as untrusted text in `to_payload()`, like a read.
+- REST: `409` with `detail` = that payload and `error: stale_revision`.
+  MCP: `-32602` with the payload in `error.data`. CLI: `meho kb add
+  --expected-revision <id>` sends it; the `409` is shown as text with
+  the current revision and what changed. Console: the editor save and
+  the uploads only create; a slug that exists is refused with the
+  current revision number and a link to the entry. Editing in the
+  console comes with the history work (#4950).
+- Directory ingest (`write_entry` with no expectation) keeps its own
+  conflict report and dry run, and updates by slug from files. The
+  import job does the same.
+
+Directory ingest uses a different rule (below): it never lets file
+order pick a winner.
 
 ### Cross-principal write & delete semantics (#1845)
 
 kb rows are **tenant-shared**. Any `tenant_admin` in a tenant may
 overwrite or delete **any** other principal's slug in that tenant —
-this is **wiki-like and intended**, not a bug. There is no `403`/`409`
-on a same-slug cross-principal write by a `tenant_admin`, and `DELETE`
+this is **wiki-like and intended**, not a bug. There is no `403` on a
+same-slug cross-principal write by a `tenant_admin` (a `409
+stale_revision` only shows that the writer did not read the latest
+revision), and `DELETE`
 is not principal-scoped (it removes whatever row matches the natural
 key). This is deliberately different from `memory` DELETE, which
 **is** principal-scoped (a cross-principal memory delete is a silent

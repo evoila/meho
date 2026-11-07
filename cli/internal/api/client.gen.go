@@ -6689,8 +6689,11 @@ type KbEntry struct {
 // “extra="forbid"“ rejects unknown fields at 422 so a typo
 // ("body_text") doesn't silently become a no-op.
 type KbEntryCreate struct {
-	Body     string                  `json:"body"`
-	Metadata *map[string]interface{} `json:"metadata"`
+	Body string `json:"body"`
+
+	// ExpectedRevision The `revision_id` a read of this entry returned. Required to update an existing slug. Leave it out to create a new slug; if the slug exists, the write is refused with 409 stale_revision.
+	ExpectedRevision *openapi_types.UUID     `json:"expected_revision"`
+	Metadata         *map[string]interface{} `json:"metadata"`
 
 	// Slug Operator-facing identifier in kebab-case. Must start with a lowercase letter, end with a lowercase letter or digit, and contain only lowercase letters, digits, hyphens, or dots. The leading-letter rule (G0.9.1-T8, Signal #15) is the most common surprise: '657-recovery' is rejected; rewrite as 'ticket-657-recovery'.
 	Slug string `json:"slug"`

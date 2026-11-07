@@ -686,6 +686,125 @@ def test_create_overwrite_returns_200(client: TestClient) -> None:
     assert body["body"] == "B body"
 
 
+def _post_kb(client: TestClient, token: str, payload: dict[str, Any]) -> httpx.Response:
+    """POST to the real service, with the embedding model replaced by a stub."""
+    from tests._kb_embedding_stub import fake_embedding_service
+
+    with patch(
+        "meho_backplane.retrieval.indexer.get_embedding_service",
+        return_value=fake_embedding_service(),
+    ):
+        return client.post("/api/v1/kb", json=payload, headers=_authed(token))
+
+
+def test_create_refuses_a_stale_revision_with_the_current_one(client: TestClient) -> None:
+    """Two writers read the same revision: one wins, the other gets 409 stale_revision."""
+    tenant = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        created = _post_kb(
+            client, token, {"slug": "race-note", "body": "one\n", "metadata": {"k": "a"}}
+        )
+        assert created.status_code == 201
+        read = created.json()["revision_id"]
+
+        winner = _post_kb(
+            client,
+            token,
+            {
+                "slug": "race-note",
+                "body": "two\n",
+                "metadata": {"k": "b"},
+                "expected_revision": read,
+            },
+        )
+        assert winner.status_code == 200
+        current = winner.json()["revision_id"]
+
+        loser = _post_kb(
+            client, token, {"slug": "race-note", "body": "three\n", "expected_revision": read}
+        )
+
+    assert loser.status_code == 409
+    detail = loser.json()["detail"]
+    assert detail["error"] == "stale_revision"
+    assert detail["cause"] == "stale"
+    assert detail["current_revision_id"] == current
+    assert detail["current_revision_number"] == 2
+    assert detail["changed_by"] is not None
+    assert detail["changed_at"] is not None
+    assert "k" in "".join(detail["changed_metadata_keys"])
+    assert "UNTRUSTED_AGENT_TEXT" in detail["body_diff"]
+    assert "+two" in detail["body_diff"]
+
+
+def test_create_without_a_revision_refuses_an_existing_slug(client: TestClient) -> None:
+    """A write that names no revision only creates; the current revision is shown."""
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        first = _post_kb(client, token, {"slug": "once-only", "body": "v1"})
+        assert first.status_code == 201
+        again = _post_kb(client, token, {"slug": "once-only", "body": "v2"})
+        shown = client.get("/api/v1/kb/once-only", headers=_authed(token))
+
+    assert again.status_code == 409
+    detail = again.json()["detail"]
+    assert detail["cause"] == "exists"
+    assert detail["current_revision_id"] == first.json()["revision_id"]
+    assert detail["body_diff"] is None
+    assert shown.json()["body"] == "v1"
+
+
+def test_create_catches_a_change_to_the_metadata_alone(client: TestClient) -> None:
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        first = _post_kb(client, token, {"slug": "header", "body": "same", "metadata": {"s": "a"}})
+        read = first.json()["revision_id"]
+        changed = _post_kb(
+            client,
+            token,
+            {"slug": "header", "body": "same", "metadata": {"s": "b"}, "expected_revision": read},
+        )
+        assert changed.status_code == 200
+        assert changed.json()["revision_id"] != read
+        stale = _post_kb(
+            client,
+            token,
+            {"slug": "header", "body": "same", "metadata": {"s": "c"}, "expected_revision": read},
+        )
+
+    assert stale.status_code == 409
+    assert "s" in "".join(stale.json()["detail"]["changed_metadata_keys"])
+
+
+def test_create_with_a_revision_for_a_missing_slug_is_refused(client: TestClient) -> None:
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = _post_kb(
+            client,
+            token,
+            {"slug": "never-there", "body": "x", "expected_revision": str(uuid.uuid4())},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["cause"] == "gone"
+
+
+def test_create_rejects_a_revision_that_is_not_a_uuid(client: TestClient) -> None:
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = _post_kb(
+            client, token, {"slug": "bad-rev", "body": "x", "expected_revision": "nope"}
+        )
+
+    assert response.status_code == 422
+
+
 def test_create_invalid_slug_returns_422(client: TestClient) -> None:
     """Slug failing :data:`SLUG_PATTERN` surfaces as 422 from the route."""
     tenant_a = uuid.uuid4()

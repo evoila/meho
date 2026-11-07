@@ -18,11 +18,15 @@ Route inventory
   ``offset``. Returns :class:`KbListResponse`. Role: ``operator``.
 * ``GET /api/v1/kb/{slug}`` -- fetch one entry by slug. Returns
   :class:`KbEntry`. 404 when absent. Role: ``operator``.
-* ``POST /api/v1/kb`` -- create / re-index one entry. Body:
+* ``POST /api/v1/kb`` -- create or update one entry. Body:
   :class:`KbEntryCreate`. Returns :class:`KbEntry` with HTTP **201**
-  for a genuinely-new slug and **200** for an in-place overwrite of an
-  existing slug (#1845 -- ``201`` on overwrite is REST-incorrect).
-  Role: ``tenant_admin``.
+  for a genuinely-new slug and **200** for an update of an existing
+  slug (#1845 -- ``201`` on update is REST-incorrect). An update names
+  the revision it read in ``expected_revision``. A write without it
+  only creates: for an existing slug it answers **409**
+  ``stale_revision``, like a write that names an older revision. The
+  answer holds the current revision, who changed it and when, and what
+  changed since the revision the writer read. Role: ``tenant_admin``.
 * ``DELETE /api/v1/kb/{slug}`` -- delete an entry. Returns 204 on
   success **and** when the row was already absent (idempotent
   semantics per the acceptance criteria; T6 documents the
@@ -34,8 +38,9 @@ Cross-principal write & delete model (#1845)
 kb rows are tenant-shared with **no per-row ownership check**: any
 ``tenant_admin`` may overwrite or delete **any** other principal's slug
 in the same tenant. This is **wiki-like and intentional** -- there is
-no ``403``/``409`` on a same-slug cross-principal write, and ``DELETE``
-is not principal-scoped. Operators must not assume per-author
+no ``403`` on a same-slug cross-principal write (a ``409``
+``stale_revision`` shows only that the writer did not read the latest
+revision), and ``DELETE`` is not principal-scoped. Operators must not assume per-author
 ownership. (This differs from ``memory`` DELETE, which *is*
 principal-scoped.) Writes stamp ``created_by_sub`` /
 ``last_updated_by_sub`` into the entry's ``metadata`` so a row is
@@ -116,6 +121,7 @@ Out of scope
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any, Final
 
@@ -139,6 +145,7 @@ from meho_backplane.kb import (
 )
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.kb.service import KbListOrder
+from meho_backplane.kb.stale_revision import KbStaleRevisionError
 
 __all__ = ["router"]
 
@@ -204,6 +211,14 @@ class KbEntryCreate(BaseModel):
     )
     body: str = Field(min_length=1)
     metadata: dict[str, Any] | None = None
+    expected_revision: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "The `revision_id` a read of this entry returned. Required to "
+            "update an existing slug. Leave it out to create a new slug; if "
+            "the slug exists, the write is refused with 409 stale_revision."
+        ),
+    )
 
 
 class KbEntryPreview(BaseModel):
@@ -419,9 +434,17 @@ async def show_kb(
         http_status.HTTP_200_OK: {
             "model": KbEntry,
             "description": (
-                "An existing entry with this slug was overwritten in "
+                "An existing entry with this slug was updated in "
                 "place (id + created_at preserved, updated_at bumped). "
                 "201 is returned only for a genuinely-new slug."
+            ),
+        },
+        http_status.HTTP_409_CONFLICT: {
+            "description": (
+                "`stale_revision`: the entry changed after the revision "
+                "named in `expected_revision`, or the slug exists and no "
+                "revision was named. The detail holds the current revision, "
+                "who changed it and when, and what changed."
             ),
         },
     },
@@ -431,14 +454,19 @@ async def create_kb(
     response: Response,
     operator: Operator = _require_admin,
 ) -> KbEntry:
-    """Create / re-index one kb entry under the operator's tenant.
+    """Create or update one kb entry under the operator's tenant.
+
+    An update names the revision it read in ``expected_revision``;
+    a write that does not name the current revision answers 409
+    ``stale_revision`` and changes nothing.
 
     ``tenant_admin`` only -- ``operator`` role gets 403 via
     :func:`require_role`. Invalid slug shape (regex miss) surfaces as
     422 ``invalid_slug``; same status code Pydantic uses for shape
-    failures so callers can branch on 4xx uniformly. The substrate's
-    body-hash short-circuit means re-creating an entry with an
-    unchanged body pays only an ``updated_at`` bump.
+    failures so callers can branch on 4xx uniformly. A write that
+    changes neither body nor metadata pays only an ``updated_at``
+    bump; a change to the metadata alone adds a revision but embeds
+    nothing again.
 
     Status code (#1845 ask 1): the service reports whether the slug
     was genuinely new. This handler returns **201 Created** only for a
@@ -478,11 +506,17 @@ async def create_kb(
             body=body.body,
             metadata=body.metadata,
             actor_sub=operator.sub,
+            expected_revision=body.expected_revision,
         )
     except InvalidKbSlugError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
+        ) from exc
+    except KbStaleRevisionError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=exc.detail.to_payload(),
         ) from exc
     if not created:
         response.status_code = http_status.HTTP_200_OK

@@ -67,7 +67,8 @@ asks the person to set up an authenticator app. The realm's user profile
 also wants a first name, a last name and an email, so the first browser
 login asks for those too. After the code app, the login shows twelve
 recovery codes once (see "Recovery codes" below). A later login asks for
-the code, or for one recovery code instead. Until both are done, a login without a browser (for
+the code, or for one recovery code instead. Until both are done, a login
+without a browser (for
 example the password grant) is refused with "Account is not fully set up".
 
 **Recovery codes.** Keycloak reads the realm file only at its first start,

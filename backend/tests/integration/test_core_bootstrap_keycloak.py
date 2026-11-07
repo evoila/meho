@@ -303,10 +303,11 @@ async def test_first_run_makes_the_people_and_removes_the_first_start_account(
 
     admin = _user(keycloak, "admin")
     assert admin["enabled"] is True
-    assert admin["requiredActions"] == ["UPDATE_PASSWORD"]
+    assert sorted(admin["requiredActions"]) == ["CONFIGURE_TOTP", "UPDATE_PASSWORD"]
     assert set(admin["groups"]) == {"MEHO-Admins", "MEHO-Platform-Admins"}
     approver = _user(keycloak, "approver")
     assert approver["groups"] == ["MEHO-SA-Operators"]
+    assert sorted(approver["requiredActions"]) == ["CONFIGURE_TOTP", "UPDATE_PASSWORD"]
 
 
 def _allow_password_grant_on_cli(kc: _Keycloak) -> None:

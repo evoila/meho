@@ -121,6 +121,7 @@ async def _insert_run(
         return run.id
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 async def test_async_call_returns_pending_then_the_stored_result(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
@@ -314,6 +315,7 @@ def test_async_controls_are_declared_on_the_input_schema() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 def test_one_waiting_check_gets_the_result_of_a_run_that_ends_during_the_wait(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811

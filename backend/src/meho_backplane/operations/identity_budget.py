@@ -7,10 +7,12 @@ Initiative #806 (G11.5 Portability + cost), Task #1079. The module is the
 behaviour pair of the :class:`~meho_backplane.db.models.IdentityBudget`
 ORM row added by migration ``0031``:
 
-* **Per-op cost source.** :func:`compute_cost` turns a finished agent
-  run's :class:`pydantic_ai.usage.RunUsage` plus a resolved model id
-  into a :class:`~decimal.Decimal` USD cost using a pinned per-model
-  pricing table.
+* **Per-op cost source.** :func:`compute_cost` turns the token usage of
+  one model request plus a resolved model id into a
+  :class:`~decimal.Decimal` USD cost using a pinned per-model pricing
+  table. :func:`compute_run_cost` adds up the requests of one run, so a
+  model whose price depends on the length of each request's prompt
+  (Haiku 5.5) is charged the right rate per request.
 * **Per-principal budget bucketing.** :func:`apply_consumption` upserts
   one :class:`IdentityBudget` row per active window-kind (daily /
   weekly / monthly) for the principal and increments the consumption
@@ -55,6 +57,7 @@ without spinning up the DB.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -68,7 +71,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.models import BudgetWindowKind, IdentityBudget
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type-checking
-    from pydantic_ai.usage import RunUsage
+    from pydantic_ai.usage import RequestUsage, RunUsage, UsageBase
 
 __all__ = [
     "MODEL_PRICING",
@@ -77,6 +80,7 @@ __all__ = [
     "TokenUsage",
     "apply_consumption",
     "compute_cost",
+    "compute_run_cost",
     "get_remaining",
     "set_limits",
     "window_start_for",
@@ -98,19 +102,37 @@ class PerMillionPricing:
 
     Decimal-typed -- pricing arithmetic must not introduce float
     rounding error when summed across the rate-times-tokens products.
+
+    Some models charge more for one request whose prompt is long.
+    ``long_prompt`` holds the rates for such a request, and
+    ``long_prompt_over`` the prompt length (in tokens) above which they
+    apply. Both are ``None`` for a model with one price.
     """
 
     input: Decimal
     output: Decimal
     cache_read: Decimal = Decimal(0)
     cache_write: Decimal = Decimal(0)
+    long_prompt_over: int | None = None
+    long_prompt: PerMillionPricing | None = None
+
+    def for_request(self, usage: TokenUsage) -> PerMillionPricing:
+        """Return the rates that apply to one request with *usage*."""
+        if (
+            self.long_prompt is not None
+            and self.long_prompt_over is not None
+            and usage.prompt_tokens > self.long_prompt_over
+        ):
+            return self.long_prompt
+        return self
 
 
-#: Per-model published pricing as of 2026-05-27 (Anthropic).
+#: Per-model published pricing (Anthropic; 5.5 rows as of 2026-11-05).
+#: ``cache_write`` is the 5-minute cache write price.
 #:
 #: The keys are the resolved provider-prefixed model ids the runtime
 #: emits via :attr:`AgentRunAuditMeta.model` (e.g. the
-#: ``anthropic:claude-sonnet-4-6`` shape ``settings.agent_default_model``
+#: ``anthropic:claude-sonnet-5-5`` shape ``settings.agent_default_model``
 #: defaults to). The runtime calls
 #: :func:`compute_cost` with the *resolved* id, not the operator-
 #: facing logical tier, so this map keys directly on what the
@@ -120,8 +142,36 @@ class PerMillionPricing:
 #: =0 / :attr:`output` =0, i.e. cost reported as 0 (a *known-unknown*
 #: rather than an error). The runtime logs a single ``warning`` on the
 #: first lookup miss per process so an operator notices the gap
-#: without breaking the run.
+#: without breaking the run (``unpriced_model`` also warns at start).
 MODEL_PRICING: Final[dict[str, PerMillionPricing]] = {
+    # Anthropic Claude 5.5 family, the current models.
+    "anthropic:claude-opus-5-5": PerMillionPricing(
+        input=Decimal("4.00"),
+        output=Decimal("20.00"),
+        cache_read=Decimal("0.20"),
+        cache_write=Decimal("5.00"),
+    ),
+    "anthropic:claude-sonnet-5-5": PerMillionPricing(
+        input=Decimal("2.00"),
+        output=Decimal("10.00"),
+        cache_read=Decimal("0.10"),
+        cache_write=Decimal("2.50"),
+    ),
+    # Haiku 5.5 has two prices: one for a request whose prompt is up to
+    # 100,000 tokens, and a higher one for a longer prompt.
+    "anthropic:claude-haiku-5-5": PerMillionPricing(
+        input=Decimal("0.10"),
+        output=Decimal("0.50"),
+        cache_read=Decimal("0.01"),
+        cache_write=Decimal("0.125"),
+        long_prompt_over=100_000,
+        long_prompt=PerMillionPricing(
+            input=Decimal("0.50"),
+            output=Decimal("2.50"),
+            cache_read=Decimal("0.05"),
+            cache_write=Decimal("0.625"),
+        ),
+    ),
     # Anthropic Claude Sonnet 4.x family.
     "anthropic:claude-sonnet-4-6": PerMillionPricing(
         input=Decimal("3.00"),
@@ -168,13 +218,21 @@ _ALL_WINDOW_KINDS: Final[tuple[BudgetWindowKind, ...]] = (
 
 @dataclass(frozen=True, slots=True)
 class TokenUsage:
-    """The four token-stream totals one finished run produced.
+    """The four token-stream totals of one model request, or of one run.
 
-    Lifted from :class:`pydantic_ai.usage.RunUsage` at the runtime
+    Lifted from :class:`pydantic_ai.usage.RequestUsage` (one request) or
+    :class:`pydantic_ai.usage.RunUsage` (a whole run) at the runtime
     boundary so the consumption service does not import the framework
     type. ``cache_read_tokens`` and ``cache_write_tokens`` are the
     Anthropic prompt-cache shapes; providers that do not separate
     them simply pass ``0``.
+
+    The four streams do not overlap. ``input_tokens`` holds only the
+    uncached input tokens, which the provider charges at the input
+    rate. The framework's ``input_tokens`` is different: it is the whole
+    prompt, cached tokens included (pydantic_ai 2.x). The ``from_*``
+    constructors take the cached streams out of it, so a cached token
+    is counted once, at its cache rate.
     """
 
     input_tokens: int
@@ -191,12 +249,38 @@ class TokenUsage:
         cost. Audio token streams (which the framework also tracks)
         are out of scope for the text-only agent runtime in v1.
         """
+        return cls._from_framework_usage(usage)
+
+    @classmethod
+    def from_request_usage(cls, usage: RequestUsage) -> TokenUsage:
+        """Build a :class:`TokenUsage` from one request's ``RequestUsage``."""
+        return cls._from_framework_usage(usage)
+
+    @classmethod
+    def _from_framework_usage(cls, usage: UsageBase) -> TokenUsage:
+        """Split the framework's inclusive input total into the uncached part.
+
+        The framework counts the cached streams inside ``input_tokens``.
+        A usage that does not follow that convention (a hand-made test
+        value with more cached than input tokens) cannot go below zero
+        uncached tokens.
+        """
+        cached = usage.cache_read_tokens + usage.cache_write_tokens
         return cls(
-            input_tokens=usage.input_tokens,
+            input_tokens=max(usage.input_tokens - cached, 0),
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
             cache_write_tokens=usage.cache_write_tokens,
         )
+
+    @property
+    def prompt_tokens(self) -> int:
+        """The length of the request's prompt: every input stream, cached or not.
+
+        This is the number a provider compares with its long-prompt
+        threshold (:attr:`PerMillionPricing.long_prompt_over`).
+        """
+        return self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
 
     @property
     def total_tokens(self) -> int:
@@ -294,8 +378,21 @@ def _window_end_for(kind: BudgetWindowKind, start: datetime) -> datetime:
 _PRICING_MISS_LOGGED: set[str] = set()
 
 
-def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
-    """Convert a run's :class:`TokenUsage` into a USD cost.
+def compute_cost(
+    usage: TokenUsage,
+    model_id: str | None,
+    *,
+    fallback: PerMillionPricing | None = None,
+) -> Decimal:
+    """Convert one model request's :class:`TokenUsage` into a USD cost.
+
+    The rate is picked per request: a model with a long-prompt price
+    (:attr:`PerMillionPricing.long_prompt`) charges it when this
+    request's :attr:`TokenUsage.prompt_tokens` is over the threshold.
+    So pass one request's usage, not a run's total: a run of several
+    short requests must not be charged the long-prompt rate because
+    its prompts add up to more than the threshold. For a whole run use
+    :func:`compute_run_cost`.
 
     Looks *model_id* up in :data:`MODEL_PRICING`; on miss the function
     returns ``Decimal(0)`` (cost reported as 0) and emits a single
@@ -306,21 +403,27 @@ def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
     G11.5-C4.
 
     Args:
-        usage: Token totals lifted from the run's ``RunUsage``.
+        usage: Token totals of one request.
         model_id: The resolved provider-prefixed id the runtime
             stamped on the agent run row's ``model`` column. ``None``
             falls through to the unknown-model path.
+        fallback: The price to use when *model_id* is not in
+            :data:`MODEL_PRICING`: the tenant's own price for the model
+            (:mod:`meho_backplane.operations.tenant_model_prices`, #5853).
+            A model in :data:`MODEL_PRICING` always keeps that price.
 
     Returns:
-        The total USD cost as a :class:`~decimal.Decimal`,
+        The USD cost as a :class:`~decimal.Decimal`,
         quantized to six fractional places by the caller's
         ``Numeric(14, 6)`` storage; arithmetic precision is
         preserved here.
     """
-    if model_id is None:
-        return Decimal(0)
-    pricing = MODEL_PRICING.get(model_id)
-    if pricing is None:
+    model_pricing = MODEL_PRICING.get(model_id) if model_id is not None else None
+    if model_pricing is None:
+        model_pricing = fallback
+    if model_pricing is None:
+        if model_id is None:
+            return Decimal(0)
         if model_id not in _PRICING_MISS_LOGGED:
             _PRICING_MISS_LOGGED.add(model_id)
             _log.warning(
@@ -329,12 +432,34 @@ def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
                 reason="no entry in MODEL_PRICING; cost recorded as 0",
             )
         return Decimal(0)
+    pricing = model_pricing.for_request(usage)
     return (
         pricing.input * Decimal(usage.input_tokens)
         + pricing.output * Decimal(usage.output_tokens)
         + pricing.cache_read * Decimal(usage.cache_read_tokens)
         + pricing.cache_write * Decimal(usage.cache_write_tokens)
     ) / _PER_MILLION
+
+
+def compute_run_cost(
+    requests: Iterable[TokenUsage],
+    model_id: str | None,
+    *,
+    fallback: PerMillionPricing | None = None,
+) -> Decimal:
+    """Add up the cost of a run's model requests, each at its own rate.
+
+    Args:
+        requests: The token usage of each model request of the run, in
+            any order.
+        model_id: As for :func:`compute_cost`.
+        fallback: As for :func:`compute_cost`.
+
+    Returns:
+        The sum of :func:`compute_cost` over *requests*; ``Decimal(0)``
+        for a run without requests.
+    """
+    return sum((compute_cost(usage, model_id, fallback=fallback) for usage in requests), Decimal(0))
 
 
 async def _get_or_create_bucket(

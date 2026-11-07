@@ -56,6 +56,7 @@ from meho_backplane.topology.schemas import (
     TopologyNode,
     TopologyPath,
 )
+from meho_backplane.untrusted_text import DATA_NOTICE
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -341,6 +342,8 @@ def test_query_topology_dependents_returns_node_list(
         "customer-a-prod-foo",
         "svc-a",
     ]
+    # Node names and properties are free text; the answer says they are data.
+    assert payload["data_notice"] == DATA_NOTICE
     mock_dep.assert_awaited_once()
     # Tenant scope comes from the operator, not the arguments dict.
     assert mock_dep.await_args.args[0] is op
@@ -1267,11 +1270,11 @@ async def test_list_targets_own_tenant_slug_is_allowed(
     assert [t["name"] for t in payload["targets"]] == ["rdc-vcenter"]
 
 
-@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.parametrize("client_with_operator", [(TenantRole.TENANT_ADMIN, True)], indirect=True)
 async def test_list_targets_unknown_tenant_is_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """An unknown `tenant` surfaces as -32602, not an empty list."""
+    """A platform admin naming an unknown `tenant` gets -32602, not an empty list."""
     client, _op = client_with_operator
     await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
 

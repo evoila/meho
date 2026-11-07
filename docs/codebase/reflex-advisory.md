@@ -27,25 +27,25 @@ dedupe where a dedupe applies.
 
 ## Key types
 
-- `meho_backplane.broadcast.reflex.build_reflex_advisory(operator, *, op_id, target_name)`
+- `meho_backplane.broadcast.reflex.build_reflex_advisory(operator, *, op_class, target_name)`
   — the advisory builder; returns `{"reflex_advisory": "<line>"}` or `{}`.
 - `REFLEX_ADVISORY_EXTRAS_KEY = "reflex_advisory"` — the extras key,
   sibling of `ADVISORY_EXTRAS_KEY` (`target_activity_advisory`) and
   `CHECKS_ADVISORY_EXTRAS_KEY` (`checks_alert_advisory`).
 - `settings.reflex_advisory_window_minutes` — dedupe window, default
   `30`, `ge=0`; `0` disables the advisory before any I/O.
-- `meho_backplane.broadcast.announce_gate.announce_gate_blocks(operator, *, op_id, safety_level, target_name)`
+- `meho_backplane.broadcast.announce_gate.announce_gate_blocks(operator, *, op_class, safety_level, target_name)`
   — the gate decision; returns a remediation string (block) or `None`.
 - `announce_gate_enabled(tenant_id) -> bool` — the cache-aware, fail-open
   per-tenant enablement resolver.
 - `tenant.announce_gate_enabled` — the structured per-tenant policy flag
   (Boolean, default `False`), migration `0077`.
-- `announce_claim_gap(operator, *, op_id, target_name)`
-  (`broadcast/history.py`) — the shared active-claim lookup. Returns
+- `announce_claim_gap(operator, *, op_class, target_name)`
+  (`broadcast/announce_claim_lookup.py`) — the shared active-claim lookup. Returns
   `None` when an active claim of the caller covers the op, else the
   reason (`ClaimGap`): `no_claim`, `expired`, `other_target` or
   `other_op_class`. The advisory uses the reason in its message.
-- `caller_has_active_announce_claim(operator, *, op_id, target_name)` —
+- `caller_has_active_announce_claim(operator, *, op_class, target_name)` —
   the yes/no form of the same lookup, used by the gate.
 - `result_announce_required(op_id, remediation, duration_ms)`
   (`operations/_errors.py`) — the `denied` envelope the gate returns,
@@ -56,7 +56,7 @@ dedupe where a dedupe applies.
 ### Advisory (success path, after the audit commit)
 
 ```text
-dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
+dispatcher._reduce_and_audit_success(...)   # after the audit commit
   → build_target_activity_advisory(...)     # #2550 fragment (write-gated)
   → build_checks_alert_advisory(...)        # #2718 fragment (all classes)
   → build_reflex_advisory(operator, op_class, target_name)   # this fragment
@@ -129,7 +129,11 @@ dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
   `audit_log` (the `audit_log_agent_session_id_idx` b-tree). The announce
   heuristic and the gate share one archive query (`announce_claim_gap`):
   the caller's own `agent_announcement` rows of the last 1440 minutes,
-  newest first, at most 500 rows. The enablement flag is read through a
+  newest first, at most 500 rows. The index
+  `agent_announcement_tenant_principal_created_at_idx` on `(tenant_id,
+  principal_sub, created_at DESC)` (migration `0135`, #5005) matches this
+  query, so it reads only the caller's rows, already in order. The
+  enablement flag is read through a
   60s per-tenant TTL cache. A read-class dispatch or a disabled tenant
   pays nothing on the gate.
 - **`0` disables the advisory.** `REFLEX_ADVISORY_WINDOW_MINUTES` (default
@@ -178,8 +182,11 @@ cache-aware fail-open resolver that mirrors the `broadcast_override`
 resolver pattern (`broadcast/overrides.py`: 60s per-tenant TTL cache,
 fail-open-to-default). A dedicated rules table + CRUD/REST/MCP/UI surface
 (the full `broadcast_override` shape) is more than a one-flag policy
-warrants; opt-in tenants set the flag through seeding / tenant
-administration, and a management verb is a clean follow-up.
+warrants. The flag has no REST route of its own. A tenant opts in through
+the settings file: `spec.tenants[].policies.announce_gate_enabled`, applied
+by `POST /api/v1/settings/import` (see [settings.md](settings.md)). The
+write goes through `tenancy/policies.set_announce_gate_enabled`, which is
+audited and clears the 60s cache for that tenant.
 
 ## Known issues / limitations
 
@@ -216,33 +223,19 @@ administration, and a management verb is a clean follow-up.
 The fragment is present on a response only when **all** of these hold.
 Any one absent is a silent, correct `{}` — never a defect:
 
-1. **The feature is deployed.** `build_reflex_advisory` and the
-   `reflex_advisory_window_minutes` setting ship in **PR #3141**
-   (merge `6367f7`), which landed **after** the `v0.30.0` tag
-   (`d33419f`). A backplane running `v0.30.0` or earlier has no
-   `meho_backplane.broadcast.reflex` module and no
-   `reflex_advisory_window_minutes` setting, so **`extras` never carries
-   `reflex_advisory`** — the merge seam calls a builder that isn't there.
-   This is the root cause of the F5 field observation (#3149): the lab
-   ran `v0.30.0`, one release behind the feature. The advisory first
-   fires on the release *after* `v0.30.0`. Confirm the deployment is on
-   that release before treating an absent fragment as a bug — a live
-   read of the running image settles it:
-   `python -c "import meho_backplane.broadcast.reflex"` succeeds only
-   where the feature is deployed.
-2. **The window is non-zero.** `REFLEX_ADVISORY_WINDOW_MINUTES=0`
+1. **The window is non-zero.** `REFLEX_ADVISORY_WINDOW_MINUTES=0`
    short-circuits to `{}` before any session resolution or I/O.
-3. **The dispatch has an agent session.** `resolve_agent_session_id()`
+2. **The dispatch has an agent session.** `resolve_agent_session_id()`
    is non-`None` — an agent-run id (`agent_session_id_var`) *or* a
    direct MCP session's `Mcp-Session-Id` header. An operator CLI / REST
    call, a system sweep, **and a header-less MCP client that POSTed
    `tools/call` without completing `initialize`** all resolve to `None`
    and get no nudge (`audit_log.agent_session_id` lands NULL for that
    same header-less call — see `mcp_session_id_capture_mode`).
-4. **The dispatch succeeded.** The fragment rides an already-ok
+3. **The dispatch succeeded.** The fragment rides an already-ok
    response, built after the audit commit — never a denied / error /
    awaiting-approval envelope.
-5. **A heuristic both qualifies and wins its dedupe claim.** Read: no
+4. **A heuristic both qualifies and wins its dedupe claim.** Read: no
    prior `meho_broadcast_recent` row for the session. Announce:
    write-class op with no covering active claim. And the
    `(session, heuristic)` key must be unclaimed this window — a second
@@ -268,8 +261,10 @@ surface on the human render.
   correlation, migration `0014`). Boundary: #2546 (announce rate limit).
 - Code: `backend/src/meho_backplane/broadcast/reflex.py`,
   `backend/src/meho_backplane/broadcast/announce_gate.py`,
-  `caller_has_active_announce_claim` in
-  `backend/src/meho_backplane/broadcast/history.py`,
+  `announce_claim_gap` and `caller_has_active_announce_claim` in
+  `backend/src/meho_backplane/broadcast/announce_claim_lookup.py`
+  (moved out of `broadcast/history.py` in #5005),
+  the claim lookup's index (migration `0135`),
   the merge seam + gate in
   `backend/src/meho_backplane/operations/dispatcher.py`,
   `result_announce_required` in
@@ -278,4 +273,6 @@ surface on the human render.
 - Tests: `backend/tests/test_reflex_advisory.py`,
   `backend/tests/test_announce_gate.py`,
   `backend/tests/test_announce_claim_lookup.py` (the archive claim lookup,
-  #4091).
+  #4091),
+  `backend/tests/integration/test_announce_claim_lookup_pg.py` (on a real
+  PostgreSQL, `EXPLAIN` shows the lookup uses its index, #5005).

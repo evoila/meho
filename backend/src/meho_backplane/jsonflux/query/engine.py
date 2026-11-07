@@ -17,6 +17,15 @@ from ..utils.sampling import ReservoirSampler
 
 SQL_CODE_FENCE = "```sql"
 
+# One worker thread per connection. duckdb 2.0 also starts its own pool of
+# I/O threads ("async_threads") for each connection, sized by the CPU count;
+# ``SET threads`` does not limit that pool, so it must be set when the
+# connection opens. duckdb 1.5 does not know the "async_threads" option and
+# rejects it, so we only pass it on duckdb 2.0 or newer.
+_CONNECT_CONFIG: dict[str, Any] = {"threads": 1}
+if int(duckdb.__version__.split(".", 1)[0]) >= 2:
+    _CONNECT_CONFIG["async_threads"] = 1
+
 # --------------------------
 # Query result models
 # --------------------------
@@ -163,7 +172,7 @@ class QueryEngine:
     __slots__ = ("_closed", "conn", "tables")
 
     def __init__(self) -> None:
-        self.conn = duckdb.connect(":memory:")
+        self.conn = duckdb.connect(":memory:", config=dict(_CONNECT_CONFIG))
         self._harden_connection()
         self.tables: dict[str, dict[str, Any]] = {}
         self._closed = False
@@ -184,7 +193,7 @@ class QueryEngine:
         ``SELECT`` — is bounded in memory and single-threaded and can neither
         auto-install nor auto-load an extension. These are ``SET`` statements,
         so they MUST precede ``lock_configuration=true`` (a post-lock ``SET``
-        raises ``InvalidInputException`` on the pinned duckdb 1.5.5).
+        raises ``InvalidInputException``).
         ``lock_configuration`` is therefore applied **last** — it freezes all
         further configuration changes.
         """
@@ -203,7 +212,6 @@ class QueryEngine:
         path: str | None = None,
         description: str | None = None,
         unwrap: bool | str = "auto",
-        append: bool = False,
     ) -> QueryEngine:
         """
         Register a JSON source as a queryable table using Arrow for type safety.
@@ -229,10 +237,6 @@ class QueryEngine:
                 - ``'auto'`` (default): heuristic shape detection
                 - ``True``: force unwrap (find first list-of-dicts value)
                 - ``False``: force 1-row table
-            append: When ``True`` and a table with the same name already
-                exists, concatenate new rows with existing data instead of
-                replacing.  Metadata companion tables are always *replaced*
-                (latest page wins).
 
         Returns:
             self (for chaining)
@@ -260,15 +264,10 @@ class QueryEngine:
             if unwrap == "auto":
                 tables = self._detect_and_split(name, data, description)
                 for tname, tdata, tdesc, tier_hint in tables:
-                    # Only the main table (same name as requested) gets
-                    # appended; companion tables (_meta, _tags, etc.) are
-                    # always replaced so the latest metadata wins.
-                    should_append = append and tname == name
                     self._register_table(
                         tname,
                         tdata,
                         tdesc,
-                        append=should_append,
                         tier_hint=tier_hint,
                         source_desc=source_desc,
                         path=path,
@@ -292,7 +291,6 @@ class QueryEngine:
             name,
             data,
             description,
-            append=append,
             tier_hint=None,
             source_desc=source_desc,
             path=path,
@@ -419,7 +417,6 @@ class QueryEngine:
         data: list,
         description: str | None,
         *,
-        append: bool = False,
         tier_hint: str | None = None,
         source_desc: str = "memory",
         path: str | None = None,
@@ -427,9 +424,8 @@ class QueryEngine:
         """Register a list of dicts as a DuckDB table via Arrow.
 
         Handles schema analysis, normalization, Arrow table creation,
-        DuckDB registration, and sample collection.  When *append* is
-        ``True`` and the table already exists, new rows are concatenated
-        with the existing table.
+        DuckDB registration, and sample collection.  A table that is
+        already registered under *name* is replaced.
         """
         from ..core.models import Summary as SummaryModel
 
@@ -460,25 +456,10 @@ class QueryEngine:
             # placeholder so the table is queryable (0 rows).
             new_table = pa.table({"_empty": pa.array([], type=pa.int8())})
 
-        if append and name in self.tables:
-            # Append mode: concatenate with existing table
-            # Safe (sqlalchemy-execute-raw-query): DuckDB in-memory query, table name from server-generated operation ID (not user input)
-            result = self.conn.execute(f'SELECT * FROM "{name}"').arrow()
-            # DuckDB may return RecordBatchReader; ensure we have a Table
-            existing = result.read_all() if hasattr(result, "read_all") else result
+        if name in self.tables:
             self.conn.unregister(name)
-            combined = pa.concat_tables(
-                [existing, new_table],
-                promote_options="default",
-            )
-            self.conn.register(name, combined)
-            row_count = len(combined)
-        else:
-            # Replace mode (default)
-            if name in self.tables:
-                self.conn.unregister(name)
-            self.conn.register(name, new_table)
-            row_count = len(new_table)
+        self.conn.register(name, new_table)
+        row_count = len(new_table)
 
         # Eagerly collect samples so we can discard raw data
         sample_store: dict[tuple[str, ...], ReservoirSampler] = {}
@@ -556,10 +537,6 @@ class QueryEngine:
         result = self.conn.execute(sql)
         columns = [desc[0] for desc in result.description]
         return [dict(zip(columns, row, strict=False)) for row in result.fetchall()]
-
-    def query_arrow(self, sql: str) -> Any:
-        """Execute SQL and return as PyArrow Table."""
-        return self.conn.execute(sql).arrow()
 
     def execute(self, sql: str) -> Any:
         """Execute SQL and return raw DuckDB result."""

@@ -86,8 +86,9 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
-from meho_backplane.auth.operator import Operator, TenantRole, group_grant
+from meho_backplane.auth.operator import Operator, TenantMembership, TenantRole, group_grant
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
@@ -105,6 +106,7 @@ from meho_backplane.mcp.registry import (
     get_tool,
     has_addon_gated_tools,
     registered_tool_names,
+    role_at_least,
     surface_visible,
 )
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
@@ -114,6 +116,7 @@ from meho_backplane.operations import dispatch
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import is_contract_compatible
 from meho_backplane.operations.catalog_release import catalog_release_status
+from meho_backplane.operations.unpriced_model import is_model_priced
 from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import get_settings
 from meho_backplane.version import build_git_sha
@@ -187,6 +190,11 @@ class OperatorIdentity(BaseModel):
     login with several tenants that chose none gets ``tenant_id`` and
     ``tenant_role`` as ``None``: the status answer then only lists the
     tenants.
+
+    Inside an agent run that a person started (an agent is bound as the
+    actor), no role in ``tenants`` is higher than ``tenant_role``, the
+    role of the run that every check uses (#5773). The person's own
+    login groups may give a higher role, but the agent never gets it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -200,8 +208,20 @@ class OperatorIdentity(BaseModel):
 
 
 def _operator_identity(operator: Operator) -> OperatorIdentity:
-    """Build the identity block, with the person's tenants (#5239)."""
+    """Build the identity block, with the person's tenants (#5239).
+
+    In an agent run (an actor is bound), each tenant's role is capped at
+    the run's own role (#5773).
+    """
     chosen = operator.tenant_chosen
+    in_agent_run = resolve_actor_sub() is not None
+
+    def _entry_role(entry: TenantMembership) -> TenantRole:
+        role = group_grant(entry.group).role
+        if in_agent_run and not role_at_least(operator.tenant_role, role):
+            return operator.tenant_role
+        return role
+
     return OperatorIdentity(
         sub=operator.sub,
         name=operator.name,
@@ -212,7 +232,7 @@ def _operator_identity(operator: Operator) -> OperatorIdentity:
             TenantEntry(
                 tenant_id=entry.tenant_id,
                 name=entry.name,
-                tenant_role=group_grant(entry.group).role,
+                tenant_role=_entry_role(entry),
                 current=chosen and entry.tenant_id == operator.tenant_id,
             )
             for entry in operator.tenants
@@ -423,6 +443,20 @@ class PairingHealth(BaseModel):
     last_seen: datetime | None
 
 
+class AgentModelSpend(BaseModel):
+    """Whether the spend limits count the cost of the default agent model (#5771).
+
+    ``model`` is ``AGENT_DEFAULT_MODEL``. ``spend_counted`` is ``False``
+    when MEHO has no price for that model: a run on it then costs 0, so
+    the spend limit per login does not limit it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    model: str
+    spend_counted: bool
+
+
 class SurfaceSummary(BaseModel):
     """Which working-surface MCP tools this session should see, and which it does.
 
@@ -529,6 +563,11 @@ class HealthResponse(BaseModel):
     operation rows and says whether it is this pod's release
     (:class:`OperationCatalogStatus`). The ``None`` default keeps older
     response decoders working; the handler always fills it.
+
+    ``agent_model_spend`` (#5771) says whether the spend limits count the
+    cost of runs on the default agent model (:class:`AgentModelSpend`).
+    The ``None`` default keeps older response decoders working; the
+    handler always fills it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -548,6 +587,7 @@ class HealthResponse(BaseModel):
     features: list[FeatureStatus] = []
     connector_packages: list[ConnectorPackage] = []
     operation_catalog: OperationCatalogStatus | None = None
+    agent_model_spend: AgentModelSpend | None = None
 
 
 class LivenessResponse(BaseModel):
@@ -949,7 +989,14 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         features=features,
         connector_packages=list(installed_connector_packages()),
         operation_catalog=await _operation_catalog_status(),
+        agent_model_spend=_agent_model_spend(),
     )
+
+
+def _agent_model_spend() -> AgentModelSpend:
+    """Whether the spend limits count the default agent model (#5771)."""
+    model = get_settings().agent_default_model
+    return AgentModelSpend(model=model, spend_counted=is_model_priced(model))
 
 
 async def _tenant_not_chosen_response(operator: Operator) -> HealthResponse:

@@ -113,12 +113,19 @@ from meho_backplane.ui.auth.flow import (
     refresh_access_token,
 )
 from meho_backplane.ui.auth.routes import SESSION_TTL_MARGIN_SECONDS
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     DecryptedSession,
     RefreshReplayError,
     load_session,
     load_session_for_update,
     rotate_refresh,
+)
+from meho_backplane.ui.auth.tenant import (
+    TenantChangedError,
+    fall_back_after_removal,
+    lost_tenant,
+    session_tenant_request,
 )
 
 __all__ = [
@@ -275,7 +282,7 @@ async def refresh_session_tokens(
             # the same either way.
             log.info(
                 "ui_auth_token_refresh_skipped_session_gone",
-                session_id=str(session_id),
+                session_ref=session_ref(session_id),
             )
             _raise_session_expired()
         if locked.access_token != stale_access_token:
@@ -285,7 +292,7 @@ async def refresh_session_tokens(
             # defences for no reason.
             log.info(
                 "ui_auth_token_refresh_skipped_concurrent_winner",
-                session_id=str(session_id),
+                session_ref=session_ref(session_id),
             )
             return locked
         old_expires_at = locked.expires_at
@@ -298,7 +305,7 @@ async def refresh_session_tokens(
     elapsed_ms = (time.monotonic() - started) * 1000.0
     log.info(
         "ui_auth_token_refresh_succeeded",
-        session_id=str(session_id),
+        session_ref=session_ref(session_id),
         old_expires_at=old_expires_at.isoformat(),
         new_expires_at=rotated.expires_at.isoformat(),
         time_cost_ms=round(elapsed_ms, 2),
@@ -332,7 +339,7 @@ async def _refresh_via_idp(
         reason, extra = _classify_refresh_failure(exc)
         log.warning(
             "ui_auth_token_refresh_failed",
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             reason=reason,
             **extra,
         )
@@ -367,7 +374,7 @@ async def _rotate_or_fail(
         # round-trip.
         log.warning(
             "ui_auth_token_refresh_failed",
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             reason="session_expired_during_refresh",
         )
         _raise_session_expired()
@@ -392,7 +399,7 @@ async def _rotate_or_fail(
         # closed as a 401 instead of a 500.
         log.warning(
             "ui_auth_token_refresh_failed",
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             reason="rotation_replay",
             audit_id=str(exc.audit_id),
         )
@@ -437,10 +444,73 @@ async def load_fresh_session(session_id: uuid.UUID) -> DecryptedSession | None:
     return decrypted
 
 
+def _assert_same_tenant(decrypted: DecryptedSession, request_tenant: uuid.UUID | None) -> None:
+    """Refuse the request when the row's tenant is not the request's tenant (#5240).
+
+    *request_tenant* is the tenant the session middleware loaded the
+    request with (and the old-tab check compared the page against). A
+    switch in another browser tab, or a removal fall-back, between that
+    load and this one would hand the caller the new tenant's role for a
+    handler that still works in the old tenant. ``None`` skips the check
+    (the picker and the switch route do not work in one tenant).
+    """
+    if request_tenant is None:
+        return
+    if decrypted.tenant_chosen and decrypted.tenant_id == request_tenant:
+        return
+    structlog.get_logger(__name__).info(
+        "ui_session_tenant_changed_during_request",
+        session_ref=session_ref(decrypted.id),
+        request_tenant_id=str(request_tenant),
+        session_tenant_id=str(decrypted.tenant_id) if decrypted.tenant_chosen else None,
+    )
+    raise TenantChangedError()
+
+
+async def _verify_session_token(
+    decrypted: DecryptedSession,
+    *,
+    access_token: str,
+    expected_audience: str,
+    request_tenant: uuid.UUID | None,
+) -> Operator:
+    """Check *access_token* for the session's current tenant (#5240).
+
+    The session's tenant goes to the shared tenant choice like a
+    ``Meho-Tenant`` header. When the token no longer allows it, the
+    session is reset and :class:`~meho_backplane.ui.auth.tenant.TenantRemovedError`
+    is raised (:func:`~meho_backplane.ui.auth.tenant.fall_back_after_removal`).
+    Before that, :func:`_assert_same_tenant` refuses a row whose tenant is
+    no longer *request_tenant*.
+    """
+    _assert_same_tenant(decrypted, request_tenant)
+    requested, allow_unchosen = session_tenant_request(decrypted)
+    try:
+        operator = await verify_jwt_for_audience(
+            f"Bearer {access_token}",
+            expected_audience=expected_audience,
+            requested_tenant=requested,
+            allow_unchosen=allow_unchosen,
+        )
+    except HTTPException as exc:
+        if requested is not None and lost_tenant(exc):
+            await fall_back_after_removal(
+                decrypted,
+                access_token=access_token,
+                expected_audience=expected_audience,
+            )
+        raise
+    # #3980: this is the one place where a call counts as a person in the
+    # web interface. Every other way in (REST, MCP, in-process callers)
+    # leaves the field off, so the call follows the token rule.
+    return Operator(**operator.model_dump(exclude={"web_session"}), web_session=True)
+
+
 async def verify_access_token_with_refresh(
     decrypted: DecryptedSession,
     *,
     expected_audience: str,
+    request_tenant: uuid.UUID | None = None,
 ) -> tuple[DecryptedSession, Operator]:
     """Verify the stored access token, silently refreshing on expiry.
 
@@ -451,6 +521,30 @@ async def verify_access_token_with_refresh(
     Returns the (possibly rotated) session alongside the verified
     :class:`~meho_backplane.auth.operator.Operator` so the caller's
     role gate runs against claims that match the stored token.
+
+    The returned Operator has ``web_session=True`` (#3980): the call comes
+    from a person in the web interface, so the people rule applies to it
+    (``caution`` runs at once, ``dangerous`` waits for an approval click).
+    This function is the only place that sets the field.
+
+    The check runs in the session's current tenant (#5240): the
+    returned Operator carries that tenant's role. A session whose
+    person has several tenants and has not picked one yet gets an
+    Operator with ``tenant_chosen=False``; the session middleware lets
+    such a session reach only the tenant picker. When the token no
+    longer allows the session's tenant, the session is reset and
+    :class:`~meho_backplane.ui.auth.tenant.TenantRemovedError` (409)
+    is raised.
+
+    *request_tenant* binds the check to the request: it is the tenant
+    the session middleware loaded the request with
+    (``UISessionContext.tenant_id``). Every gate that works in a tenant
+    passes it. When the row (before or after the refresh) names another
+    tenant, or no chosen tenant, the session changed under the request --
+    a switch in another browser tab -- and
+    :class:`~meho_backplane.ui.auth.tenant.TenantChangedError` (409,
+    "The tenant changed. Reload the page.") is raised before any role is
+    returned. Only the tenant picker and the switch route pass ``None``.
 
     Every other verification failure (bad signature, wrong audience,
     structural break) propagates untouched: those are not expiry
@@ -463,11 +557,12 @@ async def verify_access_token_with_refresh(
     rather than leaking raw JSON at an HTML browser; the JWT chain
     has already logged the precise classifier event by then.
     """
-    bearer = f"Bearer {decrypted.access_token}"
     try:
-        operator = await verify_jwt_for_audience(
-            bearer,
+        operator = await _verify_session_token(
+            decrypted,
+            access_token=decrypted.access_token,
             expected_audience=expected_audience,
+            request_tenant=request_tenant,
         )
         return decrypted, operator
     except HTTPException as exc:
@@ -479,15 +574,17 @@ async def verify_access_token_with_refresh(
     )
     log = structlog.get_logger(__name__)
     try:
-        operator = await verify_jwt_for_audience(
-            f"Bearer {refreshed.access_token}",
+        operator = await _verify_session_token(
+            refreshed,
+            access_token=refreshed.access_token,
             expected_audience=expected_audience,
+            request_tenant=request_tenant,
         )
     except HTTPException as exc:
         if exc.status_code == status.HTTP_401_UNAUTHORIZED and exc.detail == _TOKEN_EXPIRED_DETAIL:
             log.warning(
                 "ui_auth_token_refresh_stale_after_rotation",
-                session_id=str(refreshed.id),
+                session_ref=session_ref(refreshed.id),
             )
             _raise_session_expired(exc)
         raise

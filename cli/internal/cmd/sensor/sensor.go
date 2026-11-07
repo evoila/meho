@@ -20,6 +20,10 @@
 //   - `meho sensor delete <sensor_id> [--tenant <id>] [--json]` —
 //     hard-delete one sensor via DELETE /api/v1/sensors/{id}.
 //     Role: tenant_admin.
+//   - `meho sensor edit <sensor_id> [--name ...] [--connector-id ...] ...` —
+//     change some fields in place via PATCH /api/v1/sensors/{id}; the id,
+//     the result history and the dashboard memberships stay.
+//     Role: tenant_admin.
 //   - `meho sensor results <sensor_id> [--from T] [--to T] [--state S]
 //     [--limit N] [--cursor C] [--json]` — the per-tick evidence trend
 //     query (#2756) via GET /api/v1/sensors/{id}/results: raw rows in
@@ -140,14 +144,14 @@ func loadJSONObjectFlag(cmd *cobra.Command, raw, flagName string) (map[string]an
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sensor",
-		Short: "Manage deterministic-check sensors (list / create / delete)",
+		Short: "Manage deterministic-check sensors (list / create / edit / delete / results)",
 		Long: "Manage tenant-scoped sensors wired by the deterministic " +
 			"check layer (Initiative #2416). A sensor pins an (op + args + " +
 			"assertion + cadence + severity) tuple the check runner " +
 			"evaluates on a schedule (kind=interval for sub-minute cadence, " +
 			"kind=cron for >=1-minute cadence). The op must be safe (a " +
-			"caution/dangerous op is refused at create). Write verbs " +
-			"(create / delete) require tenant_admin; the read verb (list) is " +
+			"caution/dangerous op is refused at create and edit). Write verbs " +
+			"(create / edit / delete) require tenant_admin; the read verb (list) is " +
 			"operator-level. Tenant scoping is enforced server-side via the " +
 			"JWT; platform_admin callers may use --tenant to act on another " +
 			"tenant's sensors.",
@@ -156,6 +160,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newEditCmd())
 	cmd.AddCommand(newResultsCmd())
 	return cmd
 }
@@ -344,6 +349,8 @@ func renderRequestError(
 //   - 422 — FastAPI validation envelope (safe-only op guard
 //     `sensor_requires_safe_operation` / `sensor_operation_not_found`,
 //     malformed assertion / cadence); the verb surfaces the backend detail.
+//     `sensor_connector_mismatch` is one validation-error entry whose
+//     plain `msg` is shown as is.
 //   - 401 — backplane rejected the stored token after a refresh attempt.
 func renderHTTPStatus(
 	cmd *cobra.Command,
@@ -378,6 +385,12 @@ func renderHTTPStatus(
 			jsonOut,
 		)
 	case http.StatusUnprocessableEntity:
+		if message := decodeDetailMessage(bodyStr); message != "" {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf("invalid request: %s", message)),
+				jsonOut,
+			)
+		}
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("invalid request: %s", bodyStr)),
 			jsonOut,
@@ -408,6 +421,22 @@ func decodeDetailString(body string) string {
 	return strings.TrimSpace(body)
 }
 
+// decodeDetailMessage returns the `msg` of a FastAPI validation-error body
+// with a single entry (for example `sensor_connector_mismatch`), or "".
+func decodeDetailMessage(body string) string {
+	var env detailEnvelope
+	if err := json.Unmarshal([]byte(body), &env); err != nil {
+		return ""
+	}
+	var entries []struct {
+		Msg string `json:"msg"`
+	}
+	if err := json.Unmarshal(env.Detail, &entries); err != nil || len(entries) != 1 {
+		return ""
+	}
+	return entries[0].Msg
+}
+
 // sanitizeCell renders an untrusted persisted string safe for terminal
 // output: control characters (including ESC, which drives ANSI/CSI escape
 // sequences, and CR/LF, which could rewrite a table row) are replaced with
@@ -436,6 +465,12 @@ func printSensorSummary(w io.Writer, s *api.SensorRead) {
 	fmt.Fprintf(w, "%-22s %s\n", "name:", sanitizeCell(s.Name))
 	fmt.Fprintf(w, "%-22s %s\n", "connector_id:", sanitizeCell(s.ConnectorId))
 	fmt.Fprintf(w, "%-22s %s\n", "op_id:", sanitizeCell(s.OpId))
+	if s.ConnectorFit != nil {
+		fmt.Fprintf(w, "%-22s %s\n", "target_version:", sanitizeCell(targetLabel(s.ConnectorFit)))
+		if warning := fitWarning(s.ConnectorFit); warning != "" {
+			fmt.Fprintf(w, "%-22s %s\n", "warning:", sanitizeCell(warning))
+		}
+	}
 	fmt.Fprintf(w, "%-22s %s\n", "status:", string(s.Status))
 	if s.StatusReason != nil && *s.StatusReason != "" {
 		fmt.Fprintf(w, "%-22s %s\n", "status_reason:", sanitizeCell(*s.StatusReason))
@@ -470,6 +505,33 @@ func printSensorSummary(w io.Writer, s *api.SensorRead) {
 	fmt.Fprintf(w, "%-22s %s\n", "identity_sub:", s.IdentitySub)
 	fmt.Fprintf(w, "%-22s %s\n", "created_by:", s.CreatedBySub)
 	fmt.Fprintf(w, "%-22s %s\n", "created_at:", formatTime(&s.CreatedAt))
+}
+
+// targetLabel renders the target's detected product and version from the
+// connector fit, or "-" when the sensor has no target MEHO could read.
+func targetLabel(fit *api.SensorConnectorFit) string {
+	if fit == nil {
+		return "-"
+	}
+	parts := make([]string, 0, 2)
+	for _, p := range []*string{fit.TargetProduct, fit.TargetVersion} {
+		if p != nil && *p != "" {
+			parts = append(parts, *p)
+		}
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, " ")
+}
+
+// fitWarning returns the plain warning when the sensor's connector does not
+// fit its target's product and version, or "" when there is none.
+func fitWarning(fit *api.SensorConnectorFit) string {
+	if fit == nil || fit.Warning == nil {
+		return ""
+	}
+	return *fit.Warning
 }
 
 // formatTime renders a *time.Time the way the backend ships it on the wire:

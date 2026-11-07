@@ -14,8 +14,10 @@ Most rungs exist twice: as an MCP tool (for agents) and as a CLI verb
 rather than two implementations. The rung that *dispatches* — `call` —
 runs the full path: policy gate, credential resolution, result
 reduction, audit. Preview deliberately stops short of it: it resolves
-the request and hands it back, skipping the policy gate, sending
-nothing, and writing no audit row.
+the request and hands it back, sending nothing and writing no audit row.
+It also tells you the risk level and what MEHO would do with the call
+for you — run it at once, wait for approval, or refuse it
+(`policy_verdict`, `policy_reason`).
 
 !!! note "Prerequisites"
 
@@ -44,7 +46,7 @@ nothing, and writing no audit row.
 
 Operations are addressed by **`connector_id`**, which has the form
 `<impl_id>-<version>` — for example `k8s-1.x`, `vault-1.x`,
-`vmware-rest-9.0`. It is *not* the bare product name; a product can
+`harbor-rest-2.x`. It is *not* the bare product name; a product can
 have several connector implementations, and the resolver picks one
 per target.
 
@@ -58,13 +60,13 @@ per target.
     fingerprint to one implementation, with tenant or operator
     preference breaking a tie. You address the operation by its
     `connector_id`, but you never hand-pick which implementation runs
-    against a given target. Real pairs today: `fleet-rest-9.0` /
-    `fleet-lcm-9.0`, `sddc-rest-9.0` / `sddc-vcf5-5.0`, `vcfa-rest-9.0`
-    / `vcfa-vra8-8.0`, `vrli-rest-9.0` / `vrli-vrli8-8.0`, and
-    `vrops-rest-9.0` / `vrops-vrops8-8.0`. So one estate that spans old
-    and new appliances resolves each system to the right implementation
-    on its own — useful when you read and inventory an existing estate
-    during onboarding.
+    against a given target. The public connectors ship one
+    implementation per product today; connector packages (for example
+    evoila's enterprise pack for the VMware estate) add a second one for
+    older appliances where needed. So one estate that spans old and new
+    appliances resolves each system to the right implementation on its
+    own — useful when you read and inventory an existing estate during
+    onboarding.
 
 ```bash
 meho connector list
@@ -83,9 +85,12 @@ before searching.
 meho operation groups k8s-1.x
 ```
 
-Typical output shape: `inventory` (nodes, namespaces, versions),
-`workload` (pods, deployments, services), `logs`, `events`, `write`
-(mutating ops), each with an operation count.
+Typical output shape: `cluster`, `inventory` (nodes, namespaces),
+`workload` (pods, deployments, services), `network`, `config`,
+`storage`, `events`, `logs`, `exec`, `custom_resources` and `access`,
+each with an operation count. There is no separate write group: a write
+sits in the group of what it changes (for example `k8s.delete` in
+`workload`).
 
 A group flagged `partial: true` is only partly enabled — an operator
 enabled specific operations rather than the whole group. Only the
@@ -162,7 +167,7 @@ plus a `total`:
     "rows": [
       {"name": "web-6f7d4b", "namespace": "demo", "status": "CrashLoopBackOff",
        "ready": "0/1", "restarts": 17, "age_seconds": 5520,
-       "node": "rke2-w1", "ip": "10.42.0.31"}
+       "node": "rke2-w1", "ip": "192.0.2.31"}
     ],
     "total": 1
   }
@@ -275,8 +280,9 @@ Every operation carries two independent markers, set per-op when the
 connector is registered or reviewed:
 
 - **`safety_level`** — `safe` (read-class, executes under
-  default-allow), `caution`, or `dangerous` (write/destructive class,
-  subject to policy).
+  default-allow), `caution`, `dangerous`, or `destructive` (a permanent
+  delete). Above `safe`, whether the call runs at once or waits for
+  approval depends on who calls (see below).
 - **`requires_approval`** — when `true`, calling the operation does
   **not** execute it. The dispatcher durably parks it and returns:
 
@@ -301,14 +307,19 @@ meho approvals approve <approval_request_id> --reason "verified blast radius"
 meho approvals reject  <approval_request_id> --reason "wrong target"
 ```
 
-By default you cannot approve your own request (the four-eyes rule),
-and parked requests expire on a TTL. The full story — including the
-audited single-operator break-glass — is the
+In general you cannot approve your own request. Members of the
+`MEHO-SA-Operators` group may, on purpose. Parked requests expire on a
+TTL. Approve
+in the web interface (the normal place), or on the command line after a
+fresh sign-in. The full story — who may approve, and how a single
+operator approves their own change — is the
 [approvals & break-glass guide](approvals-and-break-glass.md).
 
-`safety_level` works differently: what happens depends on who calls. For
-example, an agent's `caution` call waits for approval, but a person's
-`caution` call runs at once. The table in the
+`safety_level` works differently: what happens depends on who calls and
+how. A call made with a token (MCP, the `meho` command line, REST, also
+your own token) and every agent call run only `safe` operations at once;
+`caution`, `dangerous` and `destructive` wait for approval. In the web
+interface, `caution` runs at once and `dangerous` waits. The table in the
 [agent permission model](https://github.com/evoila/meho/blob/main/docs/codebase/agent-permission-model.md#safety-levels-at-a-glance)
 shows each safety level for agents, people and service accounts.
 
@@ -323,7 +334,7 @@ a one-VM drill becomes a cluster-wide incident.
 | `-32602` with `data.reason: unknown_connector` | The `connector_id` names nothing registered — usually a bare product name (`k8s`) where `<impl_id>-<version>` (`k8s-1.x`) belongs. | Use an id from `data.did_you_mean` (close ids). If it is empty, run `meho connector list` and copy the id verbatim. |
 | `-32602` with `data.reason: connector_not_ingested` | The connector is registered but its spec has not been ingested, so it has no operations yet. Recoverable: the error's `data.next_step.verb` carries the exact `meho connector ingest …` command to run. | Run the named command, then retry. |
 | `meho operation groups` returns an empty list | The connector exists but nothing is enabled yet — operations ship default-deny until reviewed/enabled. | `meho connector review <id>`, then enable groups or single ops (`meho connector enable-reads <id>` bulk-enables the read class). |
-| Search cannot find an operation you know exists | Search only indexes **enabled** operations; a disabled op is invisible by design. An unknown `--group` also silently narrows to zero hits (that is not an error). | Check enablement via `meho connector review`; drop the group filter. |
+| Search cannot find an operation you know exists | Search only indexes **enabled** operations; a disabled op is invisible by design. An unknown `--group` is not an error: the answer has `outcome: unknown_group`, and `narrowing` lists the valid group keys. | Check enablement via `meho connector review`; drop the group filter. |
 | An operation works for another tenant but not for yours | Your tenant turned this built-in operation off for itself. A tenant setting changes only that tenant; the `en` column of `meho connector review` is the install default, the `ten` column is your tenant's own setting. | `meho connector tenant-setting show <id>`; a tenant admin turns it back with `meho connector tenant-setting set <id> <op_id> --on` (or `--default`). |
 | `status: "error"` with `invalid_params` | The params failed the operation's schema. **Do not retry the same arguments verbatim.** | Read `extras.validation_errors`, fix the shape (e.g. `k8s.pod.list` requires exactly one of `namespace` / `all_namespaces: true`), re-call. |
 | `status: "error"` with a `connector_error` / credential message | Dispatch reached the connector but the target's credential failed to resolve or was rejected. | Work the [targets & secrets failure table](targets-and-secrets.md#what-can-go-wrong-here) — the error strings there map one-to-one. |

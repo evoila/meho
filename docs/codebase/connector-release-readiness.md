@@ -96,13 +96,9 @@ What's NOT shipped:
 loads credentials inline in the connector — no separate `session.py`
 stub; the credential read for `shared_service_account` is live). The
 consumer correctly noted this as the "closest to parity" connector.
-`vmware-rest-9.0` joined this state via G3.9-T3
-[#942](https://github.com/evoila/meho/issues/942): its default loader
-[`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L116)
-now performs the live operator-context KV-v2 read via the shared
-[`load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)
-helper; `shared_service_account` executes against a real vCenter.
-Operator recipe: [`vmware-rest-onboarding.md`](../cross-repo/vmware-rest-onboarding.md).
+`vmware-rest-9.0` is not in this repository. It ships in evoila's VMware
+connector package for the overlay image. See
+[the decision](../decisions/2026-10-28-own-connectors-leave-the-public-tree.md).
 `k8s-1.x` joined this state via G3.10-T4
 [#948](https://github.com/evoila/meho/issues/948): its default loader
 [`load_kubeconfig_from_vault`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py)
@@ -136,7 +132,7 @@ What's shipped (on top of State 2):
 
 **v0.3.0 examples at this state:** `vault-1.x` (the JWT-federated auth
 flow is the only auth_model; loader is live; consumer confirmed
-`operations/call vault.kv.read target={"name":"rdc-vault"} ...` returns
+`operations/call vault.kv.read target={"name":"<vault-target>"} ...` returns
 `status: ok` in 66–80 ms via both REST and MCP).
 
 **Honest release-notes language:**
@@ -151,16 +147,12 @@ flow is the only auth_model; loader is live; consumer confirmed
 | `vault-1.x` | 3 | JWT-federated, live | ✅ |
 | `bind9-ssh-9.x` | 2-3 | `shared_service_account` inline | ✅ |
 | `k8s-1.x` | 2 | [`load_kubeconfig_from_vault`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py) — live operator-context Vault read (G3.10-T4 [#948](https://github.com/evoila/meho/issues/948)) | ✅ (`shared_service_account`) |
-| `vmware-rest-9.0` | 2 | [`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L116) — live operator-context Vault read (G3.9-T3 [#942](https://github.com/evoila/meho/issues/942)) | ✅ (`shared_service_account`) |
-| `vcf-automation-9.0` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vcf_automation/session.py) — live operator-context Vault read via the shared [`load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py) helper; `operator` threaded through the bespoke dual-plane auth (G3.10-T3 [#947](https://github.com/evoila/meho/issues/947)) | ✅ (`shared_service_account`) |
-| `vcf-operations-9.0` (vROps) | 2 | Shared [`_shared/vcf_auth.load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py) — live operator-context Vault read (G3.10-T2 [#946](https://github.com/evoila/meho/issues/946)) | ✅ (`shared_service_account`) |
-| `vcf-logs-9.0` (vRLI) | 2 | Shared [`_shared/vcf_auth.load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py) — live operator-context Vault read (G3.10-T2 [#946](https://github.com/evoila/meho/issues/946)) | ✅ (`shared_service_account`) |
-| `vcf-fleet-9.0` | 2 | Shared [`_shared/vcf_auth.load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py) — live operator-context Vault read (G3.10-T2 [#946](https://github.com/evoila/meho/issues/946)) | ✅ (`shared_service_account`) |
-| `nsx-4.2` | 2 | [`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/nsx/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
-| `sddc-manager-9.0` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/sddc_manager/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
-| `installer-rest-9.1` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vcf_installer/session.py) — live operator-context Vault read (delegates to shared [`_shared/vcf_auth.load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py)) | ✅ (`shared_service_account`) |
-| `harbor-2.x` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/harbor/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
-| `kubernetes-asyncio-1.x` | 2 (shadow) | Same as `k8s-1.x` | ✅ (`shared_service_account`) |
+| `harbor-rest-2.x` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/harbor/session.py) — live operator-context Vault read | ✅ (`shared_service_account`) |
+
+The VMware and VCF connectors of v0.3.0 (`vmware-rest-9.0`, `nsx-4.2`,
+`sddc-manager-9.0`, the `vcf-*` connectors and `installer-rest-9.1`) ship in
+a separate connector package (see the decision above). They are not in
+this table.
 
 State 0.5 = `register_connector_v2` called but no ops registered yet.
 Since [T5 #733](https://github.com/evoila/meho/issues/733), these
@@ -221,24 +213,21 @@ added" by [T7 #735](https://github.com/evoila/meho/issues/735).
 
 ## How the consumer-feedback triage caught the gap (2026-05-20)
 
-The RDC operator team:
+An operator team:
 
-1. Deployed `meho:v0.3.0` to their `rke2-infra/meho` lab the day it
-   shipped (REV 22→23, chart digest `sha256:08c934d6…`, git_sha
-   `602ab880…`).
+1. Deployed `meho:v0.3.0` on the day it shipped.
 2. Ran a full read-only smoke; all 6 of 6 checks green.
 3. Read the v0.3.0 release notes. The framing *"G3.2 Kubernetes typed
    connector (13 ops, k3d CI)"* + the apparent +31/-23 line delta on
    `connectors/kubernetes/kubeconfig.py` between the v0.2.1 and v0.3.0
    tags led to the natural conclusion *"the loader is wired upstream
-   now; the v0.2.1 'binary by auth model' framing is no longer true."*
-4. Shipped a kb supersede on that conclusion (consumer PR #637 at
-   12:50 UTC).
-5. Around 14:30 UTC, source-read the actual loader. Found it was still
+   now; the v0.2.1 'binary by auth model' framing is out of date."*
+4. Wrote that conclusion into its knowledge base.
+5. A few hours later, read the actual loader code. Found it was still
    a `NotImplementedError` stub; the line delta was a docstring +
    error-message refactor, not a wire-up.
-6. Corrected the kb supersede the same afternoon (consumer PR #643).
-7. Filed the consolidated v0.3.0 feedback report to the meho team.
+6. Corrected its knowledge base the same afternoon.
+7. Sent the consolidated v0.3.0 feedback report to the MEHO team.
 
 The recursion (their own kb caught their own assumption-from-release-notes
 within hours) is the discipline working — *"the hook finds the error
@@ -259,7 +248,7 @@ connector. It reads what MEHO registers at start-up and calls no vendor
 system. It runs in the normal unit test sweep. A new connector is covered
 as soon as its registrar runs; nothing needs to be added to the test.
 
-The ten rules (the rule name is in brackets):
+The fourteen rules (the rule name is in brackets):
 
 1. A one-line summary of at most 120 characters, and a description of at
    most 300 characters. Longer guidance goes into `llm_instructions`.
@@ -291,11 +280,66 @@ The ten rules (the rule name is in brackets):
     `-`, so "set" inside "settings" does not count. A real read whose id
     holds a write word (for example `mssql.ha.sync-health`) goes into
     `READS_WITH_A_WRITE_WORD` at the top of the test, with a one-line
-    reason. (`write_name`)
+    reason. A write that is `safe` on purpose goes into
+    `SAFE_WRITES_ON_PURPOSE`, with its decision record. (`write_name`)
+11. No example value looks real, because agents copy example values into
+    real calls. A value fails when it holds an IPv4 or IPv6 address outside
+    the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
+    203.0.113.0/24, 2001:db8::/32), a host name with a real top-level
+    domain, a vendor-shaped id (`vm-42`, `host-12`, `domain-c8`,
+    `datastore-15`, `resgroup-8`, `group-v3`, ...) or a UUID other than
+    the all-zero one. A real top-level domain is any public one (the
+    official list, kept in `backend/tests/data/top_level_domains.txt`) or
+    a private-network ending such as `.local` or `.lan`. Nested values
+    count too. A placeholder in angle brackets, such as `<vm-id>`, always
+    passes. `example.com`, `example.org`, `example.net`, `.test`,
+    `.example` and `.invalid` names are fine. Fixed vendor names that are
+    the same on every system and end like a domain (for example
+    `vsphere.local`, `cluster.local` or the Azure provider
+    `Microsoft.Storage`) are in `VENDOR_NAMES`, each with a reason. A
+    field whose name holds `version` may hold a value such as `9.0.2.0`.
+    A field whose name holds `path` or `file` may hold a file name such as
+    `release-notes.md`; there only the host parts are checked: the host of
+    a URL, of a network share (`\\host\share`) or of an NFS export
+    (`host:/export`). The checks are in
+    `backend/tests/_operation_contract_placeholders.py`.
+    (`example_placeholders`)
+12. Every operation id that `llm_instructions` names in backticks is a
+    registered operation, of any connector. A backticked word counts as an
+    operation id when it has the shape of one (lowercase parts with dots,
+    such as `k8s.pod.list`), whatever its first part. So a wrong first
+    part (`kubernetes.node.list` for `k8s.node.list`) is caught. A word
+    that only looks like an operation id (a file name such as
+    `config.yaml`, a field path, an API group, or the Linux setting
+    `net.ipv4.ip_forward`) goes into `NOT_OPERATION_IDS` at the top of the
+    test, with a reason. The live check fails on an entry that no guidance
+    names any more. This rule needs the list of all registered
+    operations. So a test that checks one operation alone
+    (`check_operation(op)`) skips it; the live check runs it.
+    (`named_operations_exist`)
+13. A parameter field that looks like an address carries
+    `x-meho-caller-address: true`. A field looks like an address by its
+    name (`url`, `uri`, `host`, `hostname`, `fqdn`, `address`, `server`,
+    `remote`, `peer`, `endpoint`, `resolver`, or a name that ends in
+    `_url`, `_host` or `_address`) or by its schema `format` (`uri`,
+    `url`, `hostname`, `ipv4`, `ipv6`). A field that only looks like an
+    address goes into `NOT_CALLER_ADDRESSES` in
+    `backend/tests/_operation_contract_addresses.py`, with a reason.
+    (`caller_address`)
+14. An operation that takes a reference to a stored secret (a field named
+    `secret_ref`, or one that ends in `_secret_ref`, `password_ref` or
+    `credential_ref`) and an address the caller gives is `caution` or
+    higher and has `requires_approval: true`. MEHO reads the secret, and
+    the call sends it to that address. The secret field counts at any
+    depth, also inside a schema definition (`$defs`, `definitions`). A
+    field in `NOT_CALLER_ADDRESSES` does not count as an address here.
+    (`stored_secret_address`)
 
 Ingested (generic) operations are not checked here. Their safety level
-comes from the HTTP method and the connector's safety floor, for example
-`connectors/vmware_rest/ingest_safety.py`.
+comes from the HTTP method and the safety floors in
+`operations/ingest/safety_floors.py`: a connector's own floor (for
+example `connectors/hetzner_robot/ingest_safety.py`), the catalog row's
+safety overlay, the op class and the caller-address marker.
 
 The gaps that exist today are listed in
 [`backend/tests/data/operation_contract_gaps.yaml`](../../backend/tests/data/operation_contract_gaps.yaml),
@@ -307,6 +351,10 @@ The list may only get shorter:
 - A listed gap that is gone also fails the test. The message names the
   entry. Delete that rule line (and the operation, or the connector, when
   nothing is left under it).
+- The list never holds a `stored_secret_address` entry, and never a
+  `caller_address` entry for an operation that takes a stored secret and
+  an address the caller gives. The test refuses such an entry: fix the
+  operation instead.
 - A `requires_approval` or `write_name` entry is a safety gap. Each one
   has a comment with the reason it is still open. Fixing one changes who
   must approve the operation, so the pull request that fixes it names the
@@ -316,7 +364,7 @@ To shrink the list: fix the operation's texts or schemas, run
 `cd backend && uv run pytest tests/test_operation_contracts.py`,
 and delete the entries the test reports as fixed.
 
-A new connector should meet all ten rules from the start, so it adds
+A new connector should meet all fourteen rules from the start, so it adds
 nothing to the gap list. Every operation states `safety_level` and
 `requires_approval` in its own spec; no connector keeps a default for
 them in its spec class or registrar.
@@ -370,8 +418,7 @@ data migration is needed. A test for this is in
 
 ## References
 
-- Consumer feedback report dated 2026-05-20 from
-  `evoila-bosnia/claude-rdc-hetzner-dc`
+- Consumer feedback report dated 2026-05-20
 - [CHANGELOG.md](../../CHANGELOG.md) — the v0.3.0 section + the
   convention codified by [T7 #735](https://github.com/evoila/meho/issues/735)
 - [Goal #214 (Connector parity)](https://github.com/evoila/meho/issues/214)

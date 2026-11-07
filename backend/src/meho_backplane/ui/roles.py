@@ -28,6 +28,8 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
+from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 
 __all__ = ["is_ui_operator", "is_ui_tenant_admin", "resolve_ui_operator"]
 
@@ -57,11 +59,14 @@ async def resolve_ui_operator(session_ctx: UISessionContext) -> Operator | None:
         _refreshed, operator = await verify_access_token_with_refresh(
             decrypted,
             expected_audience=settings.keycloak_audience,
+            request_tenant=session_ctx.tenant_id,
         )
+    except (TenantChangedError, TenantRemovedError):
+        raise
     except Exception as exc:
         log.info(
             "ui_role_lift_unavailable",
-            session_id=str(session_ctx.session_id),
+            session_ref=session_ref(session_ctx.session_id),
             reason=type(exc).__name__,
         )
         return None

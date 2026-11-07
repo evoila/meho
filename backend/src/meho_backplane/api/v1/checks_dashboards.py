@@ -28,6 +28,10 @@ Route inventory
   ``for_seconds``, last value / evidence). Role: ``operator``.
 * ``DELETE /api/v1/checks/dashboards/{dashboard_id}`` -- hard-delete a
   Dashboard (memberships go with it). Returns 204. Role: ``tenant_admin``.
+* ``PATCH /api/v1/checks/dashboards/{dashboard_id}`` -- edit a Dashboard in
+  place: add or remove members, change the name and the mail settings. The
+  id stays. Role: ``tenant_admin``. The audit row carries ``before`` /
+  ``after`` with the changed fields.
 
 Tenant scoping + cross-tenant admin
 -----------------------------------
@@ -63,6 +67,11 @@ from fastapi.responses import Response
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope, require_role
+from meho_backplane.checks.dashboard_edit import (
+    DashboardEditInvalidError,
+    DashboardUpdate,
+)
+from meho_backplane.checks.dashboard_edit import edit_dashboard as apply_dashboard_edit
 from meho_backplane.checks.dashboard_schemas import (
     DashboardCreate,
     DashboardDetail,
@@ -90,6 +99,7 @@ _DASHBOARD_OP_IDS: Final[dict[str, str]] = {
     "create": "dashboard.create",
     "get": "dashboard.get",
     "delete": "dashboard.delete",
+    "edit": "dashboard.edit",
 }
 
 
@@ -254,3 +264,58 @@ async def delete_dashboard(
             detail="dashboard_not_found",
         )
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+
+
+@router.patch("/{dashboard_id}", response_model=DashboardDetail)
+async def edit_dashboard(
+    dashboard_id: Annotated[uuid.UUID, Path()],
+    body: DashboardUpdate,
+    operator: Annotated[Operator, _require_admin],
+    tenant_filter: UUID | None = Query(default=None),
+) -> DashboardDetail:
+    """Change members, name or mail settings of one Dashboard; keep its id.
+
+    ``tenant_admin`` only. Only the fields in the body change. An added
+    sensor that is not in the tenant is 422 ``sensor_not_found``; more than
+    the member limit is 422 ``dashboard_edit_invalid``; a name that is taken
+    is 409. A cross-tenant / absent id is 404 ``dashboard_not_found``. The
+    audit row of the request carries ``before`` and ``after`` with the
+    changed fields.
+    """
+    target_tenant = authorize_tenant_scope(operator, tenant_filter)
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_DASHBOARD_OP_IDS["edit"],
+        audit_op_class="write",
+        audit_dashboard_id=str(dashboard_id),
+    )
+    _bind_tenant_scope_contextvar(
+        operator_tenant_id=operator.tenant_id,
+        target_tenant_id=target_tenant,
+    )
+    try:
+        result = await apply_dashboard_edit(target_tenant, dashboard_id, body)
+    except SensorNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.error_code,
+        ) from exc
+    except DashboardEditInvalidError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"{exc.error_code}: {exc}",
+        ) from exc
+    except DashboardNameConflictError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=exc.error_code,
+        ) from exc
+    if result is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="dashboard_not_found",
+        )
+    structlog.contextvars.bind_contextvars(
+        audit_before=result.before,
+        audit_after=result.after,
+    )
+    return result.dashboard

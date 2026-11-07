@@ -72,29 +72,15 @@ The pipeline is broken into work items per Initiative #389:
     write verbs, operator for `list` / `review`. Enable/disable
     routes return HTTP 204 No Content — the CLI skips JSON decode
     on 204 and prints a success line.
-  * **T7 (#407)** — admin MCP tools (`meho.connector.*`) that wrap
+  * **T7** — admin MCP tools (`meho_connector_*`) that wrap
     the same canonical service layer — no parallel service class, no
-    parallel Pydantic models. The agent's daily tool list stays
-    unchanged; the seven admin tools live under the
-    `meho.connector.*` namespace and only `tenant_admin` operators
-    (plus the two read tools at `operator` role) see them in
-    `tools/list`.
-* **T8 — vSphere canary** (`tests/acceptance/test_g07_vsphere_canary.py`).
-  Acceptance test that drives the full pipeline against the consumer's
-  vCenter REST spec (~1,275 ops): parse → register → group → review →
-  enable → 10-query govc-parity benchmark over `search_operations`.
-  Ships with `vcenter.yaml` only; `vi-json.yaml` parses end-to-end
-  after T11 (#501) extended the parser to resolve
-  `$ref: "#/components/parameters/*"` (the load-bearing rejection
-  in `refs.py` is gone), and the parser smoke test at
-  `tests/integration/test_operations_ingest_vi_json.py` proves it.
-  Full vi-json ingestion (~2,195 rows persisted + LLM grouping +
-  operator review + benchmark expansion) is tracked under #227 G3.1
-  T3 — out of scope for the canary itself. Three of 10 queries
-  currently `xfail` pending a T3 per-op `llm_instructions`
-  enhancement. See the [vSphere canary
-  runbook](../cross-repo/g07-vsphere-canary.md) for the operator
-  procedure.
+    parallel Pydantic models. `meho_connector_list` is on the default
+    agent surface. The other connector tools are operator tools. A
+    session lists them only when it asked for the `mcp:admin` scope
+    and its role meets the tool's `required_role`.
+* **T8 — vSphere canary.** This acceptance test ran the full pipeline
+  against the vCenter REST spec. It left this repository with the VMware
+  connectors in v0.44.0, and it ships with the VMware connector package.
 * **T9 — Docs** (#409). Two new docs:
   [docs/architecture/spec-ingestion.md](../architecture/spec-ingestion.md)
   (canonical architecture reference) and
@@ -130,46 +116,36 @@ catalog-driven body shape directly — one canonical resolution
 path, no client-side catalog cache to drift against the server's
 package data.
 
-The four pre-fetch catalog-side validation outcomes
+There are four pre-fetch catalog-side validation outcomes
 (`catalog_entry_malformed`, `catalog_entry_not_found`,
-`catalog_entry_typed_connector`, `catalog_entry_templated_upstream`)
-ship through `build_catalog_entry_*_detail` helpers in
-`error_envelopes.py` so the REST 422 envelope can't drift from any
-future MCP equivalent (same shared-builder pattern G0.9.1-T5 / #777
-used for `VersionMismatchError`).
+`catalog_entry_typed_connector`, `catalog_entry_templated_upstream`).
+Three of them use `build_catalog_entry_*_detail` helpers in
+`error_envelopes.py`, so the REST 422 envelope can't drift from a
+future MCP equivalent. The fourth, `catalog_entry_templated_upstream`,
+builds its detail inline in `_reject_unusable_entry`
+(`api/v1/connectors_ingest.py`).
 
 The fifth catalog-side outcome surfaces at fetch time:
-`catalog_entry_upstream_not_spec` (G0.15-T2 / #1211). The catalog's
-`vmware/9.0` and `sddc-manager/9.0` upstream URLs point at Broadcom
-Developer Portal landing pages -- HTML, not raw OpenAPI YAML/JSON --
-so the route's `httpx.get` succeeds with a 2xx response whose
-`Content-Type` is `text/html`. Before #1211 the bytes fell through to
-the YAML decoder and surfaced as `could not decode spec: while
-scanning for the next token found character that cannot start any
-token in '<file>', line 33, column 1` (HTML doctype at line 1,
-opening tags around line 33) -- a true statement about the bytes but
-a useless one for the operator. `_load_spec_bytes` in `openapi.py`
-now inspects `Content-Type` against an allow-list
+`catalog_entry_upstream_not_spec`. A catalog upstream URL can serve an
+HTML page instead of a spec: the fetch succeeds with a 2xx response whose
+`Content-Type` is `text/html`. `_load_spec_bytes` in `openapi.py`
+checks `Content-Type` against an allow-list
 (`application/json`, `application/yaml`,
 `application/x-yaml`, `text/yaml`, `text/x-yaml`, `text/plain` for
 `raw.githubusercontent.com` mirrors) and raises
-`UpstreamNotSpecError` -- caught in the route and mapped to HTTP 422
-with the `build_catalog_entry_upstream_not_spec_detail` envelope
+`UpstreamNotSpecError`. The route maps it to HTTP 422 with the
+`build_catalog_entry_upstream_not_spec_detail` envelope
 (catalog reference, upstream URL, Content-Type, remediation: fetch
 the spec manually, pass via the explicit-quadruple shape).
 Explicit-quadruple requests that hit the same trap get the bare
 `build_upstream_not_spec_detail` envelope without the
 `catalog_entry` field.
 
-The catalog's `notes` on the two affected entries carry the
-"HTML-portal upstream; manual ingest required" warning, mirroring
-the `harbor/2.x` Swagger-2.0 precedent. The only other
-`spec_info_version: null` catalog entries (`nsx/4.2`, `vault/1.x`,
-`k8s/1.x`, `bind9/9.x`) refuse the catalog-driven shape earlier --
-NSX via `catalog_entry_templated_upstream` (the URL is FQDN-templated),
-the three typed connectors via `catalog_entry_typed_connector`
-(`upstream: null`) -- so they never reach the fetch path that
-`UpstreamNotSpecError` guards.
+In the public catalog, the typed rows (`vault/1.x`, `k8s/1.x`,
+`bind9/9.x`) have no upstream. They are refused earlier with
+`catalog_entry_typed_connector`, so they never reach the fetch path
+that `UpstreamNotSpecError` guards. A connector package can bring its
+own catalog rows (see below).
 
 T1 produces the proto shape every other stage consumes; T2 is the
 single write path into `endpoint_descriptor` for ingested rows; T3
@@ -193,9 +169,21 @@ catalog YAML. The field validator pins each value to a single path
 segment (no `/`, `\`, or `..`) so a resource name can't escape its
 package root.
 
-**Why:** `vmware/9.0` and `sddc/9.0` have an `upstream` the backend
-can't dereference (HTML developer portal / fqdn-templated appliance
-URL) — the `catalog_entry_upstream_not_spec` /
+A connector package (a wheel that adds a folder under
+`meho_backplane/connectors/`) can bring catalog rows of its own: its
+folder's `__init__` calls the kit's `register_connector_catalog`, and
+`load_catalog()` reads the package's YAML file with the built-in one.
+The `spec_resource` and `profile_resource` of such a row name files in
+the package's folder, not in the two resource packages above. So code
+that reads a row's files uses `load_entry_spec(entry)` and
+`load_entry_profile(entry)`, which look in the right place for either
+kind of row (`entry.source_package` says which package brought it;
+`None` is a built-in row). See
+[connector-packages.md](connector-packages.md), "Bring catalog rows".
+
+**Why:** some products have an `upstream` the backend can't
+dereference (an HTML developer portal, or an appliance URL with the
+host name in a template) — the `catalog_entry_upstream_not_spec` /
 `catalog_entry_templated_upstream` 422s above. The on-ramp ships a
 MEHO-authored spec as package data so catalog-driven ingest works
 end to end without an operator hand-fetch.
@@ -205,7 +193,7 @@ when a row carries `spec_resource`, the route reads the bytes via
 `load_spec_resource()` and builds a single
 `SpecSource(uri="spec:<resource>", content=<bytes>)`. Because
 `content` is set, the ingest pipeline uses the bytes verbatim
-(size-capped) and skips the fetch + https/SSRF guard entirely — the
+(size-capped) and skips the fetch and its https and address checks — the
 bytes are trusted MEHO package data, not a remote URL. A
 `spec_resource` row is exempt from `_reject_unusable_entry`'s
 typed-/templated-upstream 422s for the same reason (the whole point is
@@ -247,45 +235,12 @@ row pointing at `_fixture_minimal.yaml` in each resource package, so
 the boot validator and the catalog-driven ingest path are exercised
 end to end.
 
-T2 (#1976) authored the real artifacts:
-
-* `vmware/9.0` → `specs/vmware_rest_minimal.yaml` (9 vCenter inventory
-  read ops under `/api`) + `profiles/vmware_rest_minimal.yaml`
-  (`session_login` auth, `/api/about` fingerprint).
-* `vmware/8.0` → `specs/vmware_rest_8_0_minimal.yaml` +
-  `profiles/vmware_rest_8_0_minimal.yaml` (#3569). The 8.0 U3 sibling of
-  the 9.0 row: the same 9 inventory read ops (the 8.0 U3 and 9.0 REST read
-  shapes match) with `info.version: "8.0.3"`, dispatched by
-  `VmwareRest80Connector` — a second versioned catalog registered beside
-  `vmware/9.0` (dual-impl) so fingerprinted 8.0.x targets keep a governed
-  generic path after the 9.0 catalog's target guard. Same
-  `session_login` auth and `/api/about` fingerprint as 9.0.
-* `sddc/9.0` → `specs/sddc_manager_minimal.yaml` (9 SDDC Manager
-  inventory + lifecycle read ops under `/v1`) +
-  `profiles/sddc_manager_minimal.yaml` (`basic` auth,
-  `/v1/releases/system` fingerprint).
-
-Both are minimal, self-contained, `$ref`-local OpenAPI 3.0 documents
-carrying the SPDX `Apache-2.0` header — only the read ops MEHO surfaces,
-vendor-neutral descriptions, the vendor's verbatim path/param/field
-names (which the dispatcher must use). The rows flip from
-`catalog_ingest: spec-only` to `supported` and drop their `upstream`
-(now provenance pointers in `notes`), so `meho connector ingest
---catalog vmware/9.0` / `sddc/9.0` works without a forced `--spec`
-upload. The named auth schemes match `docs/codebase/
-connector-auth-coverage.md`; the typed `VmwareRestConnector` /
-`SddcManagerConnector` still own runtime dispatch. The full vendor
-specs stay the `upstream` provenance pointers for a full-surface
-re-ingest off the appliance.
-
-Known limitation: the `session_login` named extractor (#1970) is
-currently hardcoded to the vRLI login shape (`POST /api/v2/sessions`,
-JSON body, `sessionId` → Bearer), which differs from vCenter's
-`POST /api/session` (Basic, `vmware-api-session-id` header). The
-vmware profile ingests and passes the boot validator, but full profiled
-*dispatch* parity for vCenter needs the session extractor to grow a
-vCenter variant — owned by the profiled-dispatch wiring
-(#1971/#1972), not this data task.
+The public tree ships one spec-and-profile row: `_fixture/1.0`. It
+exists to test the path end to end. The `mehoauto/0.1.0` row ships a
+profile only (`meho_automation_minimal.yaml`) and is
+`catalog_ingest: spec-only`. The VMware rows, specs and profiles ship
+in the VMware connector package. They use the same on-ramp through
+`register_connector_catalog`.
 
 ### T3 (LLM grouping) at a glance
 
@@ -393,8 +348,8 @@ budget:
 
 * `backend/src/meho_backplane/mcp/tools/connector_ingest.py` — the
   two ingest-pipeline tools (`ingest` + `ingest_status`).
-* `backend/src/meho_backplane/mcp/tools/connector_admin.py` — the six
-  review / edit / state-machine tools.
+* `backend/src/meho_backplane/mcp/tools/connector_admin.py` — the list
+  tool and the seven review / edit / enable / disable / delete tools.
 * `backend/src/meho_backplane/mcp/tools/_connector_shared.py` — the
   `connector_id` / `tenant_id` schema snippets, op-class strings, and
   the JSON-safe serialiser both tool modules import.
@@ -410,20 +365,23 @@ budget:
 | `meho_connector_enable` | `tenant_admin` | `ReviewService.enable_connector()` |
 | `meho_connector_enable_reads` | `tenant_admin` | `ReviewService.enable_reads()` |
 | `meho_connector_disable` | `tenant_admin` | `ReviewService.disable_connector()` |
+| `meho_connector_delete` | `tenant_admin` | `ReviewService.delete_connector()` |
 
 These are administrative tools per CLAUDE.md's "What MEHO is NOT"
-note — distinct from the agent-surface meta-tools (`search_connectors`,
-`call_operation`, etc.). The registry's
-`all_tools_for(operator)` filter hides them from `tools/list` for
-operators whose role doesn't meet the `required_role` rank, and the
-`handle_tools_call` dispatcher re-checks the rank at invocation time
-so a client that guesses a hidden name is still rejected.
+note — distinct from the agent-surface meta-tools (`meho_connector_list`,
+`call_operation`, and so on). `meho_connector_list` is on the default
+agent surface. The other connector tools are operator tools: a session
+lists them only when it asked for the `mcp:admin` scope and its role
+meets the tool's `required_role`. `handle_tools_call` checks both again
+when the tool is called, so a client that guesses a hidden name is still
+refused. Built-in-scope writes (ingest, edit, enable, disable, delete
+with no `tenant_id`) also need `platform_admin`.
 
 Each tool's handler is a thin shim that wraps the canonical service
 layer the REST routes (T6) and CLI verbs (T5) also consume:
 `IngestionPipelineService` for `ingest`, `list_ingested_connectors`
-for `list`, and `ReviewService` for the five review / edit / enable /
-disable verbs. There is **no parallel admin service class**; the
+for `list`, and `ReviewService` for the seven review / edit / enable /
+disable / delete tools. There is **no parallel admin service class**; the
 handler converts the JSON-Schema-validated `arguments` dict into the
 canonical `IngestRequest` Pydantic model (from `api_schemas`) and
 calls the service directly. Responses are `model_dump(mode="json")`-
@@ -465,14 +423,9 @@ passes it straight to `SpecSource(uri=…, content=…)`, so the pipeline
 uses the inline bytes verbatim and skips the fetch — the same
 `SpecSource.content` on-ramp the CLI upload uses (`meho connector ingest
 --spec file://… / docs:…` reads the file client-side and posts the bytes
-here, #1535). Before this, the MCP tool schema required a `uri`-only
-entry and a `file://` / `docs:` scheme was rejected by the fetch-path
-https guard, forcing agent-driven flows to publish private lab specs to
-a public gist purely to satisfy the fetcher. Inline content bypasses the
-fetcher entirely, so it adds no SSRF surface (strictly safer than the
-gist workaround it retires) and lets an appliance-served or
-hand-authored spec with no public https URL (NSX, VCFA) be ingested over
-a fully MCP-drivable flow. The `uri` stays the audit label the origin
+here). Inline content skips the fetcher, so it adds no new network
+fetch. It lets an appliance-served or hand-authored spec with no public
+https URL be ingested over a fully MCP-drivable flow. The `uri` stays the audit label the origin
 classification reads (a non-`spec:` label with inline content →
 `inline`), so the resulting L1/L2 rows match what the CLI upload of the
 same file produces. A `file://` on a **content-less** `uri` is still
@@ -529,8 +482,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE` (#3827), destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`), then the caller-address floor (an op with a parameter marked `x-meho-caller-address: true` is at least `caution`) |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, a `credential_read` op class, or a parameter marked `x-meho-caller-address: true` |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
@@ -541,14 +494,10 @@ second person approves, on every seat. The parser does not use the
 from a preview builder before the op can wait for approval, and a generic
 ingested delete has no builder, so a `destructive` default would make every
 ingested delete un-runnable. A connector floor raises an op to
-`destructive` when it ships the builder: the VMware floor does this for the
-vCenter tagging removals and the content-library item delete (see the floor
-tables below, `connectors/vmware_rest/tagging_delete_preview.py`, and
-`connectors/vmware_rest/library_item_delete_preview.py`).
+`destructive` when the connector ships the builder. The VMware connector
+package does this for some vCenter deletes.
 `test_operations_ingest_delete_approval.py` checks that no `DELETE` in a
-shipped spec, or in the pinned vCenter and NSX specs, lands without
-approval, and that the pinned vCenter tagging removals and the library item
-delete land `destructive`.
+shipped spec, or in the pinned Keycloak spec, lands without approval.
 
 The parser treats a VIM-style operation whose `operationId` or final path
 method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
@@ -570,11 +519,14 @@ counts as a delete everywhere MEHO makes that decision (#4632).
 
 The parser is vendor-neutral and assigns only its HTTP-verb baseline. Before
 registration, `ingest/safety_floors.py` applies the matching connector
-advertisement registered during connector startup. VMware's rules live in
-`connectors/vmware_rest/ingest_safety.py`, not in the generic parser.
-Hetzner Robot's floor (`connectors/hetzner_robot/ingest_safety.py`, #3973)
-makes every vSwitch write wait for approval and marks the vSwitch cancel
-`destructive`. Floors
+advertisement registered during connector startup
+(`register_ingest_safety_floor`). Vendor rules live in the connector, not
+in the generic parser. Hetzner Robot's floor
+(`connectors/hetzner_robot/ingest_safety.py`) makes every vSwitch write
+wait for approval and marks the vSwitch cancel `destructive`. The
+meho-automation floor (`connectors/meho_automation/ingest_safety.py`)
+pins its four write POSTs at `caution`. Connector packages register
+their own floors the same way. Floors
 are monotonic: they only raise the parsed tier and set approval; re-ingest keeps
 an already stricter safety tier and an existing approval requirement. Existing
 enablement, review state, and other operator metadata are unchanged by this
@@ -598,16 +550,8 @@ A correction may also set `llm_instructions`. Registration stores it on a new
 row. On re-ingest it fills `llm_instructions` only when the row has none, so
 an operator's own edit is never replaced.
 
-VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`:
-
-- on the 8.0 catalog, `POST /cis/tasks?action=list` gets the
-  `{filter_spec, result_spec}` body;
-- an operation with no summary gets the first sentence of its description
-  (at most 120 characters);
-- a VI-JSON operation whose summary another operation of the same spec shares
-  gets its managed object type in front.
-
-See [connectors-vmware-rest.md](connectors-vmware-rest.md).
+No connector in the public tree registers a correction. The VMware
+connector package uses this hook.
 
 #### Catalog safety overlay (#3340)
 
@@ -624,23 +568,178 @@ catalog `(product, version)`, like `op_allowlist`. Operator guide:
 An ingested read whose answer holds credentials gets two guards, the same
 as its hand-written twin (#4617): a `safety_overlay` rule on its catalog
 row (`caution`, with approval) and a `credential_read` declaration in the
-connector's `op_classes.py` (`sddc_manager/op_classes.py`), so the dispatcher replaces every secret field in
+connector's `op_classes.py`, so the dispatcher replaces every secret field in
 the answer with `[REDACTED:param_name]`. That list stays the only list of
-secret reads. The SDDC Manager row `sddc` / `9.0` carries the first set:
-the `/v1/credentials` reads, the depot, backup and proxy settings, host
-prechecks, VASA providers, the management-component task spec, users and
-identity providers. The vCenter rows `vmware` / `9.0` and `vmware` / `8.0`
-share one set (a YAML anchor): proxy settings, content libraries, report
-download tokens, deployment and migration specs, guest customization specs,
-identity providers and broker clients, Supervisor image registries, and the
-older-API host config and precheck remediation result. Each REST path is on
-both guards twice: as the vendor file writes it and under the `/api` base,
+secret reads. A REST path must be on both guards in every spelling the
+parser makes: as the vendor file writes it and under the API base,
 because the parser folds a relative `servers.url` into every path
-(`_server_base_path` in `ingest/openapi.py`). The list also holds the VCF
-Installer bring-up spec read `GET:/v1/sddcs/{id}/spec`; it has no catalog
-row, so a manual ingest of it gets the redaction guard only. Stored rows
+(`_server_base_path` in `ingest/openapi.py`). No row in the public
+catalog carries an overlay today; connector packages bring their own
+rows and op classes (the VMware connector package does). Stored rows
 change at the next ingest (see "Applying corrected floors to existing
 rows" below).
+
+#### Op class floor for credential reads
+
+The op class is the third floor. An ingested operation that a
+connector declares as `credential_read` (`declare_op_classes` in its
+`op_classes.py`, read through `classify_op`) is at least `caution` and
+waits for a person's approval. `apply_safety_floor` applies it after the
+connector floor and the catalog overlay, and it only raises. So the same
+marker that makes the dispatcher hide the values of the answer also sets
+the lowest risk level of the read. A catalog row and its `safety_overlay`
+can raise such a read further, but a product without a row, or a row
+without a list, does not leave a credential read at `safe`. A declared
+credential read counts as governed in `has_safety_floor`, so a re-ingest
+never lowers a stricter stored row. Tests:
+`tests/test_credential_read_safety_floor.py`.
+
+#### Caller-address floor
+
+The caller-address floor is the fourth and last floor. It covers an
+operation that connects to an address the caller gives: a URL, a host
+name, or a host and port. The connection can come from MEHO or from the
+target for MEHO.
+
+- **The marker.** Such a parameter carries the schema keyword
+  `x-meho-caller-address: true`, next to `x-meho-param-loc`. The keyword
+  counts at any depth of the parameter schema, also inside nested
+  objects and lists. The name and the floor live in
+  `meho_backplane/operations/caller_address.py`; the connector kit
+  exports the name as `CALLER_ADDRESS_MARKER`.
+- **What it does.** A marked operation is at least `caution` and waits
+  for a person's approval. The floor only raises: a connector may set a
+  higher level, never a lower one.
+- **Where it runs.**
+  - Ingest: `apply_safety_floor` applies it after the op class floor. An
+    ingested operation gets the marker from the connector's spec
+    correction (`register_ingest_spec_correction`). A marked operation
+    counts as governed in `has_safety_floor`, so a new ingest never
+    lowers a stricter stored row.
+  - Typed and multi-step registration: `register_typed_operation` and
+    `register_composite_operation` apply it before they store the row.
+  - Dispatch: `effective_policy_map` in `op_policy.py` applies it last,
+    after the operator overrides. So an override that turns approval off
+    does not remove it, and a row stored before the floor is raised when
+    it is looked up. Dispatch, preview, search and the satellite runner
+    all read this value.
+  - Operator edits: `apply_policy_edit` refuses an edit that turns
+    approval off for a marked operation (`approval_off_caller_address`).
+    The override report (`list_overrides`) applies the floor too, so it
+    never lists approval as off for a marked operation, also not for an
+    override stored before the floor.
+  - Standing grants: a service principal's grant does not run a marked
+    operation. `consult_and_record_grant` in `service_grants.py` refuses
+    the operation before it looks a grant row up, so a grant stored
+    before the marker never auto-approves it, and grant create refuses a
+    new grant for it (`caller_address_grant_reason`). The call waits for
+    a person, and the park reason says so. A grant covers an operation,
+    a connector and a target, never the address in the call.
+- **Sensors.** A sensor runs only `safe` operations. So a sensor cannot
+  use a marked operation: a new one is refused, and the runner reports
+  an existing one as `unknown` with the reason `op_not_safe_at_dispatch`.
+  This holds for connector operations such as `pfsense.diag.ping`.
+- **Built-in network checks.** The nine `net.*` checks carry no marker.
+  The probe allowlist (`MEHO_NETDIAG_PROBE_ALLOWLIST`) bounds where they
+  connect. So they stay `safe` with no approval, and a sensor can use
+  them. See `docs/codebase/connectors-net-diagnostics.md`. A check row
+  stored earlier with the marker (`caution`, approval on) goes back to
+  `safe` with no approval at the next registration
+  (`operations/built_in_check_upgrade.py`). A disabled row, a stricter
+  level or other values set by hand stay as they are.
+- **The contract check.** Rule 13 (`caller_address`) of
+  `tests/test_operation_contracts.py` fails for a parameter that looks
+  like an address but has no marker. A field looks like an address by
+  its name (for example `url`, `host`, `fqdn`, `server`, `remote`,
+  `peer`, `endpoint`, or a name that ends in `_url`, `_host` or
+  `_address`) or by its schema `format` (for example `hostname`, `ipv4`
+  or `ipv6`). A field that only
+  looks like an address is listed with its reason in
+  `NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`): MEHO
+  and the target never connect to it, MEHO connects to it only on the
+  target's own host, or it is the address of a built-in network check.
+  Rule 14 (`stored_secret_address`) fails for an operation that takes a
+  reference to a stored secret (for example `secret_ref`) and an address
+  the caller gives, unless it is `caution` or higher with approval. The
+  gap list may not hold such an operation under either rule.
+
+Tests: `tests/test_caller_address_floor.py` (a fixture operation, no
+connector package), `tests/test_operation_contract_rules.py`, and
+`tests/test_built_in_checks_no_approval_floor.py` (the built-in checks
+need no approval; `pfsense.diag.ping` keeps the marker).
+
+#### Ingested licence reads stay off
+
+A vendor file can describe a read whose answer carries the product's
+licence keys unmasked (SDDC Manager `GET /v1/license-keys`, the vCenter
+licence manager's `licenses` property, an NSX `/licenses` list). The
+ingest would give it the `safe` level of its HTTP method. A licence key
+is a paid secret, so MEHO never runs such a read. The rule is one word:
+an ingested operation whose path names licences (`license-keys`,
+`licenses`, `licensing`, `licence`) is a licence read, whatever its HTTP
+method (`operations/license_reads.py`). The method does not count
+because a vendor file can read licences with `POST` (the vSphere API
+file's `QueryAssignedLicenses`, `QueryLicenseUsage`, `DecodeLicense`),
+and a licence change such as `AddLicense` answers with the licence key.
+It is broad by design, like the flight recorder's family rule, and needs
+no list of vendor paths. Three places apply it:
+
+- `enable-reads` (`bulk_enable_read_ops`) leaves such a row off and turns
+  the other reads on.
+- `call_operation` and `preview_operation` answer `license_read_off`
+  before the target check, the catalog guard, the policy gate and any
+  vendor call. The row that is off gets this answer too
+  (`op_miss_result`, when the caller can see the row), and so does a row
+  an operator turned on by hand. Nothing runs. A refused call writes one
+  `policy_decision` audit row: it names the op id, has `result_status`
+  `denied` and the code `license_read_off` under `payload["error"]`, and
+  has no result (#5791, `operations/_license_refusal.py`). A refused
+  preview writes no row. The message names the way to read licences: the connector's
+  hand-written licence read, which shows each key masked. A row another
+  tenant owns is not visible, so it stays `unknown_op`.
+- The flight recorder never records the body of an op whose id names
+  licences in any case (`licen` in `SECRET_FAMILY_WORDS`, matched
+  case-insensitively, because a vendor path keeps the vendor's spelling).
+
+Tests: `tests/test_operations_license_reads_stay_off.py`.
+
+#### Which connector class ingested operations run on
+
+An ingested operation runs on the connector class that the target
+resolves to. It sends the method and path of its API file with that
+class's login, and it runs none of the checks of the class's
+hand-written operations. So a
+class says whether ingested operations may run on it:
+`Connector.accepts_ingested_operations` (`connectors/base.py`), default
+`False`.
+
+- `True` on `GenericRestConnector` (the shim), on
+  `ProfiledRestConnector`, and on the hand-written classes that serve an
+  ingested catalog: `GitHubRestConnector`, `HetznerRobotConnector`,
+  `HarborConnector` and `ArgoCdConnector`. A connector package sets it
+  on its own classes that serve an ingested catalog
+  ([connector-packages.md](connector-packages.md)).
+- **At ingest.** `IngestionPipelineService.ingest` refuses an API file
+  under the name of a class that does not accept ingested operations
+  (`assert_ingest_target_accepts` in `operations/_ingested_owner.py`):
+  the class registered for the `(product, version, impl_id)`, or the
+  hand-written class that serves the `(version, impl_id)`. It runs right
+  after the product check, before any file is read or row written, also
+  on a dry run. REST answers 422 and MCP `-32602`, both with the detail
+  `kind=ingested_ops_not_accepted`, the triple and `connector_class`. An
+  async ingest job fails with this error.
+- **At run time.** The ingest check cannot see every case: a file under
+  a new impl id gets a shim, but a target of the product can still
+  resolve to the hand-written class. So the dispatcher checks the class
+  it resolved (`_resolve_connector_instance`, and the class the catalog
+  guard picked). When the class does not accept ingested operations, the
+  call answers `ingested_ops_not_accepted`: before it waits for approval
+  (`_handle_needs_approval`), when an approved call runs, and in
+  `preview_operation`. Nothing reaches the vendor. A refused call writes
+  one `policy_decision` audit row with `result_status` `denied` and the
+  code under `payload["error"]`; a refused preview writes none.
+
+Tests: `tests/test_operations_ingested_ops_owner.py`.
 
 #### Applying corrected floors to existing rows
 
@@ -651,91 +750,9 @@ posture to existing `endpoint_descriptor` rows. That re-ingest is the
 operator action that performs the monotonic existing-row update; it does not
 change the floor mechanism or lower an already stricter row.
 
-`vmware-rest-9.0` has the following `dangerous` +
-`requires_approval=True` floor. It accepts every mutating HTTP verb so a future
-vendor spelling cannot bypass the contract; its current vCenter routes use the
-listed methods.
-
-| Family | Disposition |
-|---|---|
-| `POST` / `PUT` / `PATCH` / `DELETE` `/vcenter/vm/{vm}/hardware/**` | Promoted: device, boot, CPU, memory, and adapter changes alter a VM's hardware or L2 attachment. |
-| `POST` `/vcenter/vm` | Promoted: matches the governed `vmware.composite.vm.create` posture. |
-| `DELETE` `/vcenter/vm/{vm}` | Promoted: matches the governed VM-destroy posture. |
-| mutating `/vcenter/vm/{vm}/power` and `/power/**` | Promoted: matches the governed VM-power posture. |
-| VM reads and non-VMware connectors | Unchanged: no connector floor applies. |
-
-The same floor puts the vCenter **tagging removals** in the `destructive`
-tier with `requires_approval=True` (#3827), on the 8.0 and 9.0 catalogs and
-with or without the `/api` mount in the path:
-
-| Op | Why destructive | Preview lists |
-|---|---|---|
-| `DELETE` `/cis/tagging/category/{id}` | Removes every tag in the category and detaches them from every object. | The category, its tags, and the objects each tag is attached to. |
-| `DELETE` `/cis/tagging/tag/{id}` | Detaches the tag from every object. | The tag and its attached objects. |
-| `POST` `/cis/tagging/tag-association[/{id}]?action=detach*` (three actions) | Drops the association that governance (for example storage policy tags) relies on. | The tag and the objects named in the request; marked as reversible by attaching the tag again. |
-
-`destructive` means: every seat waits for a second person; a standing
-service-account grant can never satisfy the op (refused at grant creation
-and again at dispatch); and the caller must present a `preview_hash` from
-`preview_operation` so the park carries the blast radius above. The
-builders in `connectors/vmware_rest/tagging_delete_preview.py` are
-registered under every op_id spelling (`{categoryId}` / `{category_id}`,
-`{tagId}` / `{tag_id}`, with and without `/api`), because the vendor spec
-and an appliance-served spec spell the path parameter differently.
-A stored row can also spell a tag detach without the path parameter
-(`POST /api/cis/tagging/tag-association?action=detach`, the op_id the
-issue observed on a live connector); that spelling is registered too, and
-the builder takes the tag id from the request body.
-
-The builders follow three rules, because a detach request names tag ids
-in its body and the preview reads run before anyone approves:
-
-- Every id that enters a read path is escaped as one path segment, the
-  same way the dispatcher renders the write itself. A `..` traversal
-  segment, plain or percent-encoded, makes the builder raise, so the
-  removal is refused before it waits for approval and the refusal names
-  the reason.
-- Child lists are complete. The block carries `children_count`, the
-  exact number. Only the per-child detail reads (tag name, attached
-  objects) stop at 50 children; a child past that cap is listed by id
-  with `detail_omitted: true`.
-- A tag's attached-object list stops at 50 entries, next to the exact
-  `attached_object_count`; a cut list carries `attached_objects_omitted`.
-  When that list is the children of a tag delete, the block also carries
-  `children_omitted` and `children_full_list_op`, the read-only op that
-  lists every attached object.
-
-`test_connectors_vmware_rest_tagging_delete_dispatch.py` proves the
-dispatch contract: refusal without a bound preview, the park with the
-blast radius, a second operator's approval running the delete once, a
-service account's live grant never running a detach, the escaping and
-traversal refusal for body-supplied ids, and the complete lists above the
-detail cap.
-
-The same floor puts the **content-library item delete**
-(`DELETE /content/library/item/{id}`) in the `destructive` tier with
-`requires_approval=True` (#4058), on the 8.0 and 9.0 catalogs and with or
-without the `/api` mount. The item and its files cannot be brought back,
-like a deleted VM.
-
-The preview builder in `connectors/vmware_rest/library_item_delete_preview.py`
-is registered under every op_id spelling (`{libraryItemId}` /
-`{library_item_id}`, with and without `/api`). It reuses the read-only
-planner of the governed `vmware.composite.content_library.item.delete`, so
-the approver sees the item, its library, its files, and any VM that mounts
-it. Two rules:
-
-- The id must be a content-library id (a UUID). Any other id makes the
-  builder raise, so the delete is refused before it waits for approval.
-- The plain delete does not apply the composite's refusals (an item in a
-  subscribed library, an item a VM still mounts). When the composite would
-  refuse, the block carries a `warning` that names the composite, so the
-  approver can reject the plain delete and use the composite instead.
-
-`test_connectors_vmware_rest_composites_library_delete.py` covers the
-builder; `test_operations_ingest_delete_approval.py` covers the floor. Rows
-stored by an earlier ingest keep their old posture until the next ingest;
-`meho connector review` lists them as needing correction.
+The VMware connector floors (VM hardware, power, tagging removals, the
+content-library item delete) and their preview builders ship with the
+VMware connector package.
 
 T2 owns the rest of the ORM columns: `tenant_id`, `source_kind`
 (always `'ingested'`), `product`, `version`, `impl_id`, `embedding`,
@@ -824,7 +841,7 @@ overwrote only that tenant's descriptor rows, so it filters
 `Sensor.tenant_id` to match — other tenants' sensors resolve their
 own or the built-in rows (the tenant row is authoritative, see
 [Tenant connector row is authoritative](#tenant-connector-row-is-authoritative-3870)) and
-listing them would leak foreign sensor identities. Only a built-in /
+listing them would show other tenants' sensor identities. Only a built-in /
 global ingest (`tenant_id IS NULL`) is deliberately unfiltered,
 since the built-in rows serve every tenant's Sensors. One structlog
 warning `ingest_safety_class_changed` fires per change (keyed with
@@ -883,9 +900,12 @@ Two operator-facing surfaces flag an unreplaced shim:
 `GenericRestConnector` subclass — that a reviewed declarative
 `ExecutionProfile` plugs into to make an ingested REST connector
 dispatchable (Initiative #1965; the profile schema/machinery land in
-T3–T7). T1 ships the class + the classification only; its `auth_headers`
-/ `fingerprint` / `probe` / `execute` raise `NotImplementedError` until
-the profile machinery is wired.
+T3–T7). `ProfiledRestConnector` runs calls from its attached profile. Its login
+and request code raises `NotImplementedError` only when no profile is
+attached, or when the target asks for an auth model other than a shared
+service account. Its `execute` always raises `NotImplementedError`: like
+every typed connector's `execute`, it is an unused shim, because an
+ingested operation runs through the dispatcher from its stored row.
 
 The gate that makes this possible is the **tri-state dispatchability
 classifier** that replaces the binary `issubclass(GenericRestConnector)`
@@ -976,8 +996,7 @@ resolvable for every profile-backed row, with dispatch still behind the
 per-op review gate above (stamping never enables an op).
 
 The path is idempotent and gated by construction: a `(product, version,
-impl_id)` triple already served by a hand-coded class (vmware's
-`VmwareRestConnector`, sddc's `SddcManagerConnector`) — or an already-
+impl_id)` triple already served by a hand-coded class — or an already-
 stamped profiled class — no-ops (logged at debug, not an error), because
 `record_profile_stamp` refuses to overwrite an occupied triple. The
 synthesised class's triple is derived from the connector_id
@@ -1154,6 +1173,7 @@ review payload also carries `classified_safety_level` /
 | a level below the classification | anyone | - | refused, `risk_level_below_classification`: open a pull request |
 | `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
 | `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
+| `requires_approval=false` on an operation with a caller-address parameter | anyone | - | always refused, `approval_off_caller_address` |
 
 **Every edit that ends approval passes the same checks.** The rule looks
 at the result, not at the field in the request. When the effective
@@ -1258,8 +1278,8 @@ is really off, so an exception that a later raise to `destructive` made
 void drops out. A later edit that does not touch approval keeps the
 reason, author and time of an approval exception.
 
-**Upgrade.** Before this change an edit wrote the descriptor row, so it
-was lost at the next start (typed) or re-ingest (ingested). Existing
+**Upgrade.** An edit made with an older release wrote the descriptor row,
+so it is lost at the next start (typed) or re-ingest (ingested). Existing
 stricter edits on rows stay until then; re-apply them once with
 `edit-op` to make them stick.
 ### Each tenant turns built-in operations on or off (#5029)
@@ -1305,7 +1325,8 @@ itself only. Other tenants keep the install default.
   install default stays the `edit-op` / `enable` / `disable` paths,
   which need `platform_admin` for a built-in row (#3616).
 - **Audit.** Every change writes one audit row with path
-  `meho_connector_tenant_setting` in the same transaction. The payload
+  `meho_connector_tenant_setting` and event class `config_change`
+  (#5864) in the same transaction. The payload
   names the connector, the target tenant, the op or group, and the new
   value. A write that changes nothing writes no row.
 - **Showing both values.** `GET /api/v1/connectors/{id}/tenant-settings`
@@ -1388,7 +1409,7 @@ failed with `no_connector` and the list showed `ingested-shim`. Now:
   `build_ingest_execution_profile` and stamps it through the same
   `record_profile_stamp` step (audit sub `system:ingested-profile-restore`).
   A key that already has a class is skipped, so a shipped profile or a
-  hand-written class keeps its key. A row that no longer builds a valid
+  hand-written class keeps its key. A row that does not build a valid
   profile is logged (`ingested_profile_restore_skipped`) and skipped.
 * A replica that was already running when another replica took the ingest
   catches up on the first call: before the dispatcher resolves the connector
@@ -1406,7 +1427,7 @@ failed with `no_connector` and the list showed `ingested-shim`. Now:
 * Restoring never enables an op, lowers a risk level, or removes an
   approval; the review gate stays the interlock.
 
-A connector ingested before this change has no saved row. Ingest it once
+A connector ingested with an older release has no saved row. Ingest it once
 more with the same `--auth-scheme` to save it.
 
 ### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
@@ -1543,10 +1564,14 @@ op came from vi-json.yaml" during review.
 
 **Spec-vs-label cross-check (G0.9-T8).** Before parse/register/group
 runs, `_validate_spec_versions` reads each spec's `info.version` via
-the lightweight `read_spec_info_version` helper and compares it
+the `read_spec_info_version` helper and compares it
 against the operator-supplied `IngestRequest.version` label using the
 same `packaging.version.Version` semantics the resolver uses at
-dispatch time. Three outcomes:
+dispatch time. The helper downloads and parses the whole spec, so
+`ingest()` runs the check in a worker thread (`asyncio.to_thread`).
+The event loop keeps serving other requests (health checks included)
+on every path: background, blocking (`async=false`) and dry run. Three
+outcomes:
 
 * **Exact** (`spec=9.0.3`, `label=9.0.3` / `9.0` / `9`) — proceed.
 * **Compatible** (same major, different minor, e.g. `spec=9.0.3`,
@@ -1574,7 +1599,7 @@ these rows the catalog declares a compatibility range
 resolver in `api/v1/connectors_ingest.py` passes it through to
 `IngestionPipelineService.ingest(spec_info_versions_compatible=...)`,
 which forwards it to `_validate_spec_versions`. Per-spec
-classification then bypasses the verbatim/major-band check for any
+classification then skips the verbatim/major-band check for any
 spec whose `info.version` matches a pattern in the range, emitting
 `connector_ingest_version_label_decoupled` so the audit trail still
 records the decision. See
@@ -1586,9 +1611,8 @@ for the field definition and pattern syntax.
 an optional body field (`meho connector ingest
 --spec-info-versions-compatible <band>`, repeatable or comma-separated)
 so a self-versioning vendor spec ingests on the manual path too — no
-catalog row required. The motivating case
-(claude-rdc-hetzner-dc#1136): the version-stable vRLI `/api/v2`
-surface reports `info.version="v2"` while the seeded `VcfLogsConnector`
+catalog row required. The motivating case: a version-stable vendor
+`/api/v2` surface reports `info.version="v2"` while the connector
 label is `9.0`; ingesting under `--version 9.0
 --spec-info-versions-compatible 2.x` decouples the cross-check (`v2`
 normalizes to `2`, inside the `2.x` → `>=2,<3` band) while the
@@ -1631,7 +1655,7 @@ through `_spec_error_http_exception` (in
 `HTTPException(400, detail=<builder dict>)` — the same envelopes on
 the `detail` key; the 422-mapped siblings (`VersionMismatchError`,
 `UncoveredVersionLabel`, `UpstreamNotSpecError`) keep their earlier
-per-class `except` arms. The eight siblings and their builders:
+per-class `except` arms. The nine siblings and their builders:
 
 * `build_version_mismatch_detail(exc)` — `VersionMismatchError`.
   REST embeds the returned dict in the
@@ -1660,8 +1684,10 @@ per-class `except` arms. The eight siblings and their builders:
   Surfaces `pass_name` (`propose_groups` / `assign_ops`) and
   deliberately omits the verbatim `raw_output` (debug-log material,
   not operator-facing).
+* `build_product_impl_id_mismatch_detail(exc)` — `ProductImplIdMismatch`
+  (the `product` does not match the first part of `impl_id`).
 
-The first two are the G0.9.1-T5 (#777) originals; the remaining six
+The first two are the G0.9.1-T5 (#777) originals; the remaining seven
 complete the pattern in #1534. Pre-#1534 the MCP path caught only
 `VersionMismatchError` / `UncoveredVersionLabel` — the other six
 fell through to the dispatcher's generic `except Exception` arm in
@@ -1691,7 +1717,7 @@ The op-count rollup counts every `source_kind` (`ingested`,
 `typed`, `composite`) — the visibility driver is the paired groups
 query, which has never filtered on `source_kind`. The earlier
 filter that excluded typed/composite rows from the count (G0.7-era
-artefact) was the cause of Signal #4 in the 2026-05-20 RDC dogfood:
+artefact) was the cause of the fourth finding of the 2026-05-20 dogfood run:
 typed connectors surfaced with `group_count > 0` but
 `operation_count: 0`, the asymmetry between the two paired queries.
 The renamer "list_*ingested*_connectors" is now misleading and is a
@@ -1752,13 +1778,10 @@ two shapes:
   registered with `product != impl_id.split("-")[0]` whose
   `connector_id` parses to a different `(version, impl_id)` than
   the registry advertises is dropped (impossible to recover from
-  inside the listing). The SDDC case — registry
-  `product="sddc-manager"`, parser derives `product="sddc"` — is
-  *not* dropped because `(version, impl_id)` survives the round-
-  trip and `SDDC_PRODUCT="sddc"` already writes DB rows the
-  dispatcher reaches via the parsed product; the listing emits
-  `product="sddc"` (parser-derived) so the wire shape is
-  consistent with what the dispatcher will derive.
+  inside the listing). An entry whose `(version, impl_id)` survives
+  the round trip is *not* dropped; the listing emits the
+  parser-derived product, so the wire shape matches what the
+  dispatcher will derive.
 
 Regression test:
 `tests/test_api_v1_connectors_ingest.py::test_list_every_connector_id_round_trips_through_dispatcher`
@@ -1768,9 +1791,9 @@ row and a class-side-only opless connector.
 #### `next_step` workflow-completion hint (G0.13-T3 / #1133, G0.18-T8 / #1361)
 
 `state="registered"` rows carry a `next_step: NextStep` object that
-points at the verb that closes the workflow gap surfaced by the
-v0.6.0 RDC dogfood (signal 11: half-registered connectors fail
-lookup with no in-product hint about what verb closes the workflow).
+points at the verb that finishes the workflow. Without it, a
+half-registered connector fails lookup with no hint about what to run
+next.
 `state="ingested"` rows set `next_step` to `null` because the
 dispatcher already resolves operations against them — there is no
 operator action remaining.
@@ -1779,8 +1802,8 @@ The hint comes from `_next_step_for_registered` in `list_connectors.py`.
 It consults the connector-spec catalog (`ingest/catalog.py`, #743) and
 branches on the catalog entry's declarative
 `catalog_ingest: "supported" | "spec-only"` field (default
-`"supported"`; the VCF-family rows opt into `"spec-only"` —
-G0.18-T8 / #1361, RDC #789 N8). Three branches:
+`"supported"`; a row whose spec MEHO cannot fetch opts into
+`"spec-only"`). Three branches:
 
 * **Catalog hit, `catalog_ingest="supported"`** — verb points at
   `meho connector ingest --catalog <product>/<version>`. Rationale
@@ -1795,17 +1818,18 @@ G0.18-T8 / #1361, RDC #789 N8). Three branches:
   is HTML-portal or fqdn-templated, so a `--catalog` POST would
   422 on the route's `catalog_entry_upstream_not_spec` /
   `catalog_entry_templated_upstream` branches — the operator must
-  fetch the raw OpenAPI spec from the appliance themselves. The
-  three VCF-family rows (`vmware/9.0`, `sddc-manager/9.0`, `nsx/4.2`)
-  ride this branch; the previous "spec available in catalog; run
-  ingest" hint over-promised for all three. The triple matches what
+  fetch the raw OpenAPI spec from the appliance themselves. In this
+  repository the meho-automation add-on row (`mehoauto/0.1.0`) rides
+  this branch: MEHO ships no spec for it, so the operator gives the
+  spec file with `--spec`. Rows that a connector package brings can
+  use it too. The triple matches what
   the operator would have used after a successful `--catalog`
   resolve, so the verb still copies-and-runs once the operator
   sources the spec URI.
 * **Catalog miss** — verb points at `meho connector ingest --product
   <p> --version <v> --impl <i> --spec <upstream-openapi-uri>` where
   `<p>` is the **registry** product (the spelling the connector class
-  registers under, e.g. `sddc`). Rationale calls out the missing catalog
+  registers under). Rationale calls out the missing catalog
   entry so the operator knows they need to source the OpenAPI spec
   themselves. Manual mode is the same path G0.7-T5 already supports for
   one-off / not-yet-curated specs (see `ingest.go`'s mode dispatch). The
@@ -1813,23 +1837,19 @@ G0.18-T8 / #1361, RDC #789 N8). Three branches:
   keys two safety steps on the supplied `--product` —
   `check_version_covered_by_registered_class` (the version-coverage
   pre-flight) and `ensure_connector_class_registered` — so it must find
-  the real `SddcManagerConnector`. Post-#1814 the registry product
-  *equals* the parser-derived product (the family was realigned to short,
-  dispatch-canonical tokens), so the emitted `--product` round-trips its
-  connector_id and the ingest is dispatchable directly — no register-time
-  reconciliation. (Before #1814 the registry product was a long token
-  like `sddc-manager` while rows reconciled down to `sddc`; #1817 retired
-  that bridge once the family realigned. A divergent `--product` is now
-  rejected at the ingest boundary with a `422`; see "Product identity at
-  the ingest boundary" below.)
+  the registered connector class. The registry product *equals* the
+  parser-derived product, so the emitted `--product` round-trips its
+  connector_id and the ingest is dispatchable directly. A divergent
+  `--product` is refused with a `422`; see "Product identity at the
+  ingest boundary" below.
 
 The **catalog lookup** uses the **registry's** `(product, version)`.
-Post-#1814 that equals the parser-derived product for every connector
-(the catalog stores `product="sddc"` and the listing emits `"sddc"`),
-so `--catalog sddc/9.0` resolves cleanly and the operator's ingest
-matches the registered class and dispatches without any reconciliation.
+That equals the parser-derived product for every connector, so
+`--catalog <product>/<version>` resolves cleanly and the operator's
+ingest matches the registered class and dispatches without any
+reconciliation.
 
-#### Product identity at the ingest boundary (claude-rdc-hetzner-dc#1136, Initiative #1810)
+#### Product identity at the ingest boundary
 
 The dispatch/query surface derives the product from the connector_id
 (`parse_connector_id("sddc-rest-9.0") -> "sddc"`), so the only product
@@ -1848,14 +1868,15 @@ That divergence is now **closed at the source**, not bridged:
 - #1798 realigned vRLI and #1814 (Initiative #1810) realigned the other
   five so every connector registers under its short, dispatch-canonical
   product directly.
-- #1816 promoted `register_connector_v2`'s product↔impl_id round-trip
-  check to a hard-fail, so a connector can no longer register under a
-  divergent product at all.
-- #1817 added a round-trip guard at the ingest route boundary
-  (`_assert_product_round_trips` in `api/v1/connectors_ingest.py`) that
-  rejects a supplied product not equal to the connector_id's
-  parser-derived product with a `422 product_impl_id_mismatch`, before
-  any spec is fetched or row written. With divergent ingests rejected
+- `register_connector_v2`'s product↔impl_id round-trip check is a
+  hard-fail, so a connector cannot register under a divergent product.
+- A round-trip check in the service layer,
+  `IngestionPipelineService._assert_product_round_trips` in
+  `operations/ingest/pipeline.py`, refuses a product that is not the
+  product the connector_id parses to, before any spec is fetched or any
+  row is written. Every ingest goes through it: REST, MCP and CLI. A
+  sync ingest gets `422 product_impl_id_mismatch`; an async ingest ends
+  as a failed job with this error. With divergent ingests rejected
   up front, the old register-time row reconciliation
   (`_reconciled_row_product` / `dispatch_product`) became dead and was
   retired: `register_ingested_operations` now persists rows under the
@@ -1902,7 +1923,7 @@ divergence above took:
 
 - **Cleanup, one-time.** Migration
   `0075_reap_epoch_versioned_connector_registrations` deletes the
-  epoch-versioned rows that leaked in before the guard, from
+  epoch-versioned rows that landed before the guard, from
   `endpoint_descriptor` (guarded on `source_kind = 'ingested'`) and
   `operation_group`. Unlike the `0049` / `0052` twin-retire migrations it
   is **tenant-scope-inclusive** — the epoch debris is a consumer-side
@@ -1910,16 +1931,15 @@ divergence above took:
   PG POSIX regex, SQLite `length` + `NOT GLOB`), not a product/impl_id
   allowlist. `downgrade()` is a documented no-op.
 
-The epoch can ride either coordinate — the #3061 follow-up
-----------------------------------------------------------
+##### The epoch can also sit in the impl_id
 
 `0075` and `_reject_epoch_version` both key on the **`version`** column,
-but the rows actually accreting on the lab carried the epoch in the
+but the rows that kept growing on a test install carried the epoch in the
 **`impl_id`** tail with a *legitimate* `version="9.0"`:
 `impl_id="fleet-rest-probe-<epoch>"`, rendering
 `connector_id="fleet-rest-probe-<epoch>-9.0"`. `"9.0"` is not an epoch, so
-the version-keyed reap matched nothing and a v0.29.0 lab deploy still
-returned 9 such rows post-`0075`. #3061 closes the sibling shape with the
+the version-keyed reap matched nothing and a v0.29.0 test install still
+returned 9 such rows after `0075`. A second pair closes the sibling shape with the
 same prevention-plus-cleanup pair, keyed on `impl_id` instead:
 
 - **Prevention.** `IngestRequest._reject_probe_epoch_impl_id` rejects an
@@ -1930,17 +1950,16 @@ same prevention-plus-cleanup pair, keyed on `impl_id` instead:
   (`net-probe` / `nsx-rest-probe` / `fleet-rest-probe` — bare `-probe`, no
   epoch) and every real impl_id (`fleet-rest` / `vmware-rest` / `vcd`).
 - **Cleanup.** Migration `0088_reap_probe_epoch_impl_id_registrations`
-  reaps the leaked rows keyed on the `impl_id` tail (PG `impl_id ~
-  '-probe-[0-9]{9,}$'`, SQLite `GLOB` + `NOT GLOB '*[^0-9]'`), same
+  removes those rows, keyed on the `impl_id` tail (PG `impl_id ~
+  '-probe-[0-9]{9,}$'`, SQLite `GLOB '*-probe-'` + nine digits + `'*'`
+  and `NOT GLOB '*-probe-*[^0-9]*'`), same
   `source_kind='ingested'` guard, tenant-inclusive, no-op `downgrade()`.
   It complements `0075` — the two predicates target disjoint row sets.
 
-The producer that mints the per-run epoch is the fingerprint/probe glue on
-the **consumer** side (a different repo, `claude-rdc-hetzner-dc`), not this
-backplane — the fleet connector's `fingerprint`/`probe` path returns a
-`FingerprintResult` and registers no epoch impl_id — so the ingest-boundary
-guard is the backplane's durable defence; the consumer separately switches
-to a stable impl_id (as `net-probe` does).
+The per-run epoch comes from probe code on the consumer side, not from
+this backplane. The check at the ingest boundary is the backplane's
+lasting guard. The consumer moves to a stable impl_id, as `net-probe`
+does.
 
 Regression coverage:
 `tests/test_api_v1_connectors_ingest.py::test_ingest_request_epoch_version_boundary`
@@ -1956,7 +1975,7 @@ symptom was mistaken for (documented semantics — `total` counts only
 rendered-group ops) in
 `tests/test_operations_ingest_review.py::test_review_counts_do_not_bleed_across_duplicate_scope_registrations`.
 
-#### Dispatchability postcondition on async jobs (claude-rdc-hetzner-dc#1136)
+#### Dispatchability postcondition on async jobs
 
 A background pipeline coroutine that returns without raising is **not**
 sufficient evidence the ingest succeeded: it can persist rows under a
@@ -2073,12 +2092,11 @@ path.
 
 Regression tests:
 `tests/test_api_v1_connectors_ingest.py::test_list_registered_row_carries_catalog_next_step_hint`
-(catalog-hit / `supported` branch incl. SDDC's registry-vs-parsed
-asymmetry),
+(catalog-hit / `supported` branch, tested with the Harbor row),
 `::test_list_registered_row_spec_only_catalog_entry_points_at_spec`
-(catalog-hit / `spec-only` branch — pins the explicit-quadruple
-`--spec` verb + the upstream-shape rationale for VCF-family rows;
-G0.18-T8 / #1361),
+(catalog-hit / `spec-only` branch, tested with the meho-automation
+add-on row: pins the explicit-quadruple `--spec` verb and its
+rationale),
 `::test_list_registered_row_without_catalog_entry_points_at_manual_mode`
 (catalog-miss branch), and
 `::test_list_ingested_row_omits_next_step_hint`
@@ -2130,25 +2148,27 @@ consume so the wire contract is defined once:
 ### REST routes (`api/v1/connectors_ingest.py`)
 
 The `/api/v1/connectors*` routes that wire the service layer to the
-operator-facing HTTP surface. RBAC: read paths (GET /, GET
-/{id}/review) require `operator` role minimum; write paths
-(`POST /ingest`, `PATCH /groups`, `PATCH /operations`, `POST
-/enable`, `POST /enable-reads`, `POST /disable`, `DELETE /{id}`)
-require `tenant_admin`. Tenant scoping derives from the JWT — there
-is no body / query parameter that can override the operator's tenant
-— with one deliberate exception: `POST /ingest` accepts an optional
-body `tenant_id` that selects the *write* scope (#2085; omitted /
-null = built-in / global, own tenant UUID = tenant-curated, any
-other UUID → 403 from the service-layer guard), so cross-tenant
-writes remain impossible.
+operator-facing HTTP surface. RBAC: read paths (`GET /`, `GET
+/catalog`, `GET /{id}/review`) require `operator` role minimum. All
+other routes require `tenant_admin`: `POST /ingest`, `GET
+/ingest/jobs/{job_id}`, `PATCH /groups`, `PATCH /operations`,
+`DELETE /{id}/operation-overrides/{op_id}`, `POST /enable`, `POST
+/enable-reads`, `POST /disable` and `DELETE /{id}`. Tenant scoping
+derives from the JWT — there is no body / query parameter that can
+override the operator's tenant — with one deliberate exception:
+`POST /ingest` accepts an optional body `tenant_id` that selects the
+*write* scope. Omitted or null means the built-in scope, which needs
+`platform_admin`. The operator's own tenant UUID means their tenant
+scope. Any other UUID gets a 403 from the service-layer guard, unless
+the caller has `platform_admin` (see "Platform-admin ingest into
+another tenant" below).
 
 Mutating an *existing* built-in (global, `tenant_id IS NULL`) row is
 a stricter case: `PATCH /groups`, `PATCH /operations`, `POST
 /enable`, `POST /enable-reads`, and `POST /disable` resolve the
 connector tenant-preferring (the operator's own tenant row wins;
-otherwise the built-in row — the #1135 global fall-back these write
-paths previously lacked, which made a built-in-only connector return
-404 on `/enable` to every tenant-scoped principal). Because a
+otherwise the built-in row, so a built-in-only connector is found
+instead of a 404). Because a
 built-in row is shared by every tenant, mutating it requires
 `platform_admin`, mirroring the doc-collection global-row seat
 (#3616): a `tenant_admin` without it gets a structured 403
@@ -2164,9 +2184,11 @@ operation whose HTTP `method` is `GET` or `HEAD`
 (`READ_HTTP_METHODS`), leaving every write-shaped verb
 (POST / PUT / PATCH / DELETE) and every typed / composite op
 (`method` NULL) default-deny — writes keep their per-op / composite
-curation by design (the governance boundary). The point is broad
-governed *read* coverage on big ingested surfaces (`vmware-rest-9.0`
-is 3000+ ops, mostly staged GETs) without a per-op death-march.
+curation by design (the governance boundary). A read whose path names
+licences stays off too: its answer carries licence keys (see "Ingested
+licence reads stay off" above). The point is broad governed *read*
+coverage on big ingested surfaces (thousands of ops, mostly GETs)
+without a per-op death-march.
 `EndpointDescriptor` carries no `op_class` column — the read/write
 taxonomy the MCP tool registry uses lives on `ToolDefinition`, not
 the descriptor row — so HTTP method *is* the per-row read-class
@@ -2196,8 +2218,13 @@ way: `POST /ingest` (and the `meho connector ingest` CLI verb that
 drives it) accepts an optional body `tenant_id` with the same
 semantics as the MCP tool `meho_connector_ingest`'s argument —
 omitted or `null` targets the built-in / global scope (`tenant_id IS
-NULL`, tenant_admin only), the operator's own tenant UUID targets
-their tenant-curated namespace, and any other UUID is rejected with
+NULL`, platform_admin only: the rows are shared by every tenant, and a
+second ingest of an existing built-in connector updates those rows in
+place, so the write is a platform action like enable, disable, edit
+and delete; a tenant_admin without `platform_admin` gets a 403 with
+the message "built-in connector ingest requires platform_admin"), the
+operator's own tenant UUID targets their tenant-curated namespace, and
+any other UUID is rejected with
 a synchronous 403 by `IngestionPipelineService.authorize_scope` —
 run eagerly at the REST route on both the sync and async branches
 (before the async job row is created, #2208), eagerly in the MCP
@@ -2287,7 +2314,7 @@ so they can never diverge on *which row* they act on. The resolver:
   - neither → 404 `ConnectorNotFoundError`.
 
 G0.13-T5 (#1135) first landed the fallback on the *read* route after
-the v0.6.0 RDC dogfood flagged that every global connector returned
+the v0.6.0 dogfood flagged that every global connector returned
 404 on review even though the listing surfaced them. G0.26-T1 (#1801)
 extended it to the write path and added the disambiguation after the
 v0.16.0 dogfood hit `POST /{id}/enable-reads` 404'ing on a label
@@ -2319,10 +2346,11 @@ the active factory via the `get_llm_client_factory` dependency — see
 [LLM-client wiring](#llm-client-wiring)
 for the operator-facing framing.
 
-### `parse_openapi(spec_path_or_uri, *, spec_source=None)` (`ingest/openapi.py`)
+### `parse_openapi(spec_path_or_uri, *, spec_source=None, content=None)` (`ingest/openapi.py`)
 
-The only public entry point for the full walk. Resolves the input
-(file path or `http(s)://` URL via `httpx`), sniffs YAML vs JSON via
+The only public entry point for the full walk. Gets the bytes from
+uploaded `content` (the CLI uploads `file://` and `docs:` sources), or
+fetches an `https://` URL with `httpx`. Sniffs YAML vs JSON via
 `detect_spec_format`, decodes, validates the OpenAPI version
 (3.0.x / 3.1.x), validates the document against the official OpenAPI
 metaschema (`_validate_openapi_structure`), and walks `paths`. Returns a
@@ -2435,10 +2463,10 @@ fabricating a record. This is a spec-level table by design: a single
 spec fans out to hundreds of descriptor rows, so per-descriptor
 provenance columns would be the wrong shape.
 
-## Security: SSRF and local-file guard (G0.16-T8, #95)
+## Security: fetch address and local-file guard
 
 `_load_spec_bytes` (the fetch sink shared by `parse_openapi` and
-`read_spec_info_version`) enforces two invariants before any network
+`read_spec_info_version`) applies these rules before any network
 activity:
 
 1. **Scheme allowlist.** Only `https://` is accepted on the
@@ -2449,11 +2477,12 @@ activity:
 
 2. **Pre-connect destination guard (`_assert_fetchable_remote_url`).** Before
    opening any socket, the hostname is resolved with `socket.getaddrinfo`
-   and every returned address is checked against the private / loopback /
-   link-local / ULA / reserved ranges using `ipaddress`. Any candidate IP in
-   `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
-   `169.254.0.0/16` (cloud metadata), `::1`, `fc00::/7`, or `fe80::/10` is
-   rejected before the transport opens a connection.
+   and every returned address must be public. MEHO refuses the fetch when
+   any address is not globally routable (`_screen_fetch_host`). Examples
+   are private, loopback, link-local (`169.254.0.0/16`, cloud metadata),
+   ULA, carrier-grade NAT, multicast, reserved and unspecified addresses.
+   A name that does not resolve is refused too. All of this happens
+   before the transport opens a connection.
 
 3. **Per-hop redirect re-validation.** `_fetch_spec_bytes` (invoked by
    `_load_spec_bytes` when no content is uploaded) uses
@@ -2463,11 +2492,10 @@ activity:
    next request. A redirect from a public host to a private IP is rejected
    at the hop — the private-target socket is never opened.
 
-4. **Socket-boundary address pinning (`_pin_fetch_addresses`,
-   evoila-bosnia/meho-internal#275).** The pre-connect guard (#2) and the
-   per-hop guard (#3) screen the *name*, but httpx would re-resolve it at
-   connect time — a check/use gap a resolver flip (DNS rebinding) could
-   exploit. `_fetch_spec_bytes` runs its fetch over
+4. **Socket-boundary address pinning (`_pin_fetch_addresses`).** Items 2
+   and 3 check the *name*. httpx would resolve the name again when it
+   connects, and the answer can change in between. So `_fetch_spec_bytes`
+   runs its fetch over
    `build_pinned_sync_transport(_pin_fetch_addresses)`, so the socket
    `connect_tcp` re-screens the host via `_screen_fetch_host` (shared with
    the pre-fetch guard) and dials **only** a validated address from that
@@ -2479,7 +2507,21 @@ activity:
 
 5. **Response size cap.** The response body is streamed and rejected if it
    exceeds 20 MiB (`_MAX_SPEC_BYTES`), preventing a redirect to a large
-   internal endpoint from exhausting pod memory.
+   internal endpoint from exhausting pod memory. A YAML spec is also
+   refused when it expands to more than two nodes per byte of input
+   (`_MAX_SPEC_NODES_PER_BYTE`, checked by `_assert_expanded_size`): YAML
+   anchors and aliases let a small file stand for a document with many
+   times more nodes, and the later full walks of the pipeline do not
+   share them. The check runs on the composed node graph, before the
+   nodes are turned into Python objects (`_load_yaml_spec`), because a
+   `<<` merge key copies every merged entry during that step, and the
+   duplicate keys then collapse in the result. The walk counts a node
+   when it enters it and keeps only the current path, so the check
+   itself never holds more than the cap. An alias that points back at
+   a node it sits inside (a recursive alias) is refused at once, since
+   such a document never finishes expanding. A document without
+   aliases has at most one node per byte, so a real spec never hits
+   this cap.
 
 6. **Oracle-free error messages that name the inline remedy.** Error
    messages never echo the operator-supplied URI, the resolved IP /
@@ -2488,8 +2530,8 @@ activity:
    additionally name the inline on-ramp generically
    (`_INLINE_SPEC_ONRAMP_REMEDIATION`): a spec inside the operator's own
    network is ingestable by passing it as a `file:///` / `docs:` source,
-   whose bytes the CLI uploads inline (bypassing this fetch guard — see
-   the shipped-spec on-ramp section and #1535) rather than publishing the
+   whose bytes the CLI uploads inline (no fetch, so this guard does not
+   apply — see the shipped-spec on-ramp section) rather than publishing the
    spec to the public internet to satisfy the `https`-public-fetch
    constraint.
 
@@ -2505,7 +2547,7 @@ parse_openapi
 ├─ _load_spec_bytes        # CLI-uploaded content (capped) OR https:// fetch
 │  ├─ content present       # docs:/file:// bytes uploaded by CLI; no fetch, no guard (#102)
 │  ├─ docs:<...> + no content rejected with UnsupportedSpecError (#1535)
-│  └─ _assert_fetchable_remote_url  # https-only SSRF guard; DNS resolve, IP allowlist
+│  └─ _assert_fetchable_remote_url  # https-only address guard; DNS resolve, IP allowlist
 ├─ _decode_spec            # YAML via _SpecYamlLoader (timestamp→str, #2272), stdlib JSON
 ├─ _validate_openapi_version
 ├─ _validate_openapi_structure  # metaschema gate: refuse invalid 3.x w/ JSON-pointer (#2292)
@@ -2521,7 +2563,8 @@ parse_openapi
       └─ _assert_parameter_schema_standalone  # fail-closed: every stored $ref must self-resolve (#3095)
 ```
 
-`_resolve_shallow_ref` is the load-bearing helper. It inlines exactly
+`resolve_shallow_ref` (`refs.py`; `openapi.py` imports it as
+`_resolve_shallow_ref`) is the load-bearing helper. It inlines exactly
 one level of `$ref` into the parameter / response / body schema and
 preserves any nested `$ref` strings verbatim. Since #3095,
 `_build_parameter_schema` then bundles every component those nested
@@ -2784,7 +2827,7 @@ register_ingested_operations
 │  ├─ type(cls_name, ...)       # synthesise GenericRestConnector subclass
 │  └─ register_connector_v2()   # G0.6-T2 entry point
 └─ _register_in_session         # caller-owned or helper-owned session
-   └─ _upsert_one_operation     # per proto
+   └─ upsert_one_operation      # per proto
       ├─ build_embedding_text   # canonical text per typed-register parity
       ├─ compute_embedding_text_hash
       ├─ natural-key lookup     # (product, version, impl_id, op_id)
@@ -2811,6 +2854,28 @@ recomposed text (via `build_embedding_text`), so no `body_hash`
 column is needed in v0.2 — the cost is one recompose-and-hash per
 op, well under the ONNX inference budget.
 
+The first ingest of a large spec embeds one text per operation (about
+1,300 for vCenter). The embedding model runs in a worker thread, so the
+event loop is free. But the ONNX runtime starts one thread per **host**
+core by default, and it does not read the pod's CPU limit. With a limit
+of one CPU on a large node, those threads use up the limit in a few
+milliseconds of each scheduler period, and the kernel pauses the whole
+process, the event loop too. `/healthz` and `/ready` then time out, on
+and off, for minutes. So the model is built with one thread per CPU the
+container may use (`retrieval/cpu_limit.py`, `embedding_thread_count`).
+See `retrieval.md`.
+
+`backend/scripts/ingest_health_benchmark.py` checks this. It runs the
+real ingest pipeline (a dry run, then the store step with the real
+embedding model) in a server process, and probes `/healthz`, `/ready`
+and the job status from a second process with the chart's probe
+timeouts. `--cpu-limit 1` runs the server in a `systemd-run` scope with
+one CPU, like a pod with that limit; `--threads 32` forces the old thread
+count to show the failure; `--spec` ingests a vendor file under its own
+`info.version`. `tests/test_ingest_health_benchmark.py` pins
+the harness; its two slow tests (`MEHO_RUN_SLOW_TESTS=1`) run the whole
+benchmark with the real model, without a limit and under one CPU.
+
 `OpIdCollision` fires from two distinct sites: the up-front within-
 batch set scan (two ops in one call share `op_id`) and the per-row
 cross-call check (this call's `spec_source` differs from the
@@ -2834,8 +2899,9 @@ run_llm_grouping
 │  ├─ candidates = groups with no typed member (composites allowed)
 │  ├─ if no candidates → _create_groups_and_assign(all unassigned ops)
 │  ├─ else
-│  │  ├─ _assign_and_apply(unassigned ops, candidates)   # Pass 2
-│  │  └─ if leftovers → _create_groups_and_assign(leftovers, extend)
+│  │  ├─ _project_persisted_groups(candidates)
+│  │  └─ _assign_and_apply(unassigned ops, candidates)   # Pass 2
+│  ├─ _extend_until_grouped        # extend rounds for leftovers, at most DEFAULT_MAX_EXTEND_ROUNDS (3)
 │  └─ _summarise_groups            # per-group GroupSummary
 │
 │  _create_groups_and_assign:
@@ -2866,7 +2932,7 @@ lives in the user-prompt body rendered from the Jinja templates.
   `yaml.load(..., Loader=CSafeLoader | SafeLoader)`. The C loader is
   ~5-10× faster on multi-MB specs; the pure-Python fallback works
   identically on platforms without LibYAML.
-* **httpx 0.27+** — fetch for `http(s)://` URLs. The chassis already
+* **httpx 0.27+** — fetch for `https://` URLs. The chassis already
   depends on httpx for Keycloak JWKS + connector adapters.
 * **Pydantic v2** — `EndpointDescriptorProto` uses `ConfigDict(frozen=True)`.
 * **Jinja2 3.1+** — renders the T3 prompt templates from `ingest/prompts/`.
@@ -2874,10 +2940,11 @@ lives in the user-prompt body rendered from the Jinja templates.
   immediately, and `autoescape` disabled because the rendered output
   goes to an LLM (not HTML).
 
-No spec-side validation library (e.g. `openapi-spec-validator`) is
-pulled in. The parser tolerates partial / underspecified docs and
-relies on T4's review queue to surface ambiguities to a human before
-operations go live.
+* **openapi-spec-validator 0.9+** — provides the OpenAPI metaschema
+  check (`_validate_openapi_structure`). Only the metaschema check runs;
+  its extra semantic checks do not. The parser tolerates
+  underspecified docs and relies on T4's review queue to surface
+  ambiguities to a human before operations go live.
 
 ## Async ingest mode (G0.16-T1 / #1303; MCP carry G3.5-T2 / #1531)
 
@@ -2905,9 +2972,31 @@ lifecycle timestamps, and -- on completion -- one of:
 
 * `status="succeeded"` + populated `ingestion` (+ optional `grouping`)
 * `status="failed"` + `error_class` + capped `error` message
+* `status="degraded"` + `error_class` (`ingested_not_dispatchable` or
+  `grouping_failed_after_register`) + the counts that landed
 
 `status="running"` leaves both clusters `None`. Clients branch on
 `status` rather than checking presence.
+
+**Which step runs now (#5786).** Every answer also carries `phase`
+and `phase_started_at` (epoch seconds), so an operator can tell a slow
+import from a stuck one. The steps, in order:
+
+| `phase` | What runs |
+|---|---|
+| `parse` | Read each API file and check its version. A new job starts here, at `started_at`. |
+| `register` | Parse each file and write its operations. |
+| `grouping` | The language model sorts the operations into groups. On a large file this is the longest step. |
+
+The pipeline reports each step when it starts
+(`report_ingest_phase` in `operations/ingest/job_phase.py`).
+`run_ingest_job` puts a reporter for its job in a context variable, so
+the pipeline needs no job id, and the sync path (no job) reports to
+nobody. A finished job keeps the step it ended in: a `failed` job
+shows the step that failed. The other fields of a finished answer do
+not change. `phase_started_at` is declared `format: double` in the
+OpenAPI document, so the generated Go client keeps it as a 64-bit
+float (a 32-bit float rounds an epoch time to about two minutes).
 
 **Why async by default.** The OpenAPI ingest path is the escape
 hatch per [api-shape-conventions.md §1](api-shape-conventions.md) --
@@ -2916,7 +3005,7 @@ what they need and they're willing to handle vendor-shape responses.
 Real-world vendor specs are large: `vmware/9.0.0.0` is 7.55 MB / 1275
 typed REST ops, and a synchronous ingest call blocks the event loop
 for ~30 s in the register + LLM-grouping phases -- past the kubelet
-liveness probe deadline (default 25 s). RDC #771 Finding 20 caught
+liveness probe deadline (default 25 s). A consumer report caught
 the pod restart in production; G0.16-T1 (#1303) replaced the
 synchronous default with the 202 + job-handle shape so an operator
 reaching for the escape hatch doesn't kill the pod.
@@ -2984,10 +3073,12 @@ detached, or lost the waiting session, this verb re-reads the same
 `GET /api/v1/connectors/ingest/jobs/{job_id}` route. Without `--wait`
 it reads one snapshot -- a `running` job prints its identity +
 lifecycle echo (job_id, status, the originating request descriptors,
-`started_at`) and exits 0 (`--json` emits the raw
+`started_at`, and `phase: <step> (since <time>)`) and exits 0 (`--json` emits the raw
 `IngestJobStatusResponse`); a terminal job renders exactly what the
 waiting-ingest path renders. With `--wait` it re-attaches the same
-2s poll loop until terminal. Terminal rendering and the poll loop are
+2s poll loop until terminal. While the job runs, the shared poll loop
+prints one `ingest job phase: <step> (since <time>)` line to stderr
+each time the step changes (both verbs). Terminal rendering and the poll loop are
 **shared** with `ingest` (the extracted `renderIngestTerminal` switch
 + `pollIngestJob`), not duplicated, so succeeded / failed / degraded /
 undocumented-status / 401 / 403 / 404 all behave identically across
@@ -3004,7 +3095,7 @@ the raw poll URL.
 the request with `asyncio.create_task`, and returns an `IngestJobHandle`
 inside the agent's tool-call deadline; the agent polls
 `meho_connector_ingest_status` (which reads the registry through the
-same accessor) until the job is `succeeded` / `failed`. Because both
+same accessor) until the job is `succeeded`, `degraded` or `failed`. Because both
 surfaces resolve the one process-wide registry, a job started over MCP
 is poll-able over `GET /api/v1/connectors/ingest/jobs/{job_id}` and
 vice versa. The MCP path defaults `async=false` (inline) so existing
@@ -3077,7 +3168,9 @@ dispatch. The DELETE surface removes it:
 * **MCP** — `meho_connector_delete(connector_id, tenant_id=None)` →
   `{ok: true, deleted: {...}, warnings: [...]}`. `tenant_id` omitted
   targets the built-in / global scope (the only path that can remove
-  `tenant_id IS NULL` rows), mirroring `meho_connector_ingest`.
+  `tenant_id IS NULL` rows), mirroring `meho_connector_ingest`. This
+  needs `platform_admin`, because every tenant shares these rows. A
+  tenant admin without it gets `builtin_connector_write_forbidden`.
 
 All three delegate to `ReviewService.delete_connector`
 (`operations/ingest/delete_connector.py` is the engine). Semantics:
@@ -3121,7 +3214,7 @@ All three delegate to `ReviewService.delete_connector`
     an agent;
   * an **approval request** that waits, or that is approved and nobody
     has started it (`resumed_at IS NULL`). This is exactly the row that
-    `claim_resume` in `operations/approval_queue.py` could still claim
+    `claim_resume` in `operations/approval_queue.py` can claim
     and run. That claim has no time limit (the approval time limit
     expires waiting requests only), so an approved request that nobody
     ever started blocks the delete however old it is, until someone runs
@@ -3202,10 +3295,10 @@ All three delegate to `ReviewService.delete_connector`
   job rows in Postgres and resume on pod startup.
 * **Parameter name + location collision.** When an op has two params
   with the same `name` in different `in` locations (e.g. `cluster` as
-  path **and** as query), the flat-object representation loses one.
-  Real vendor specs in v0.2 scope (vCenter / NSX / SDDC Manager)
-  never use this combination. T2 will log a warning if it spots a
-  collision after upsert.
+  path **and** as query), the flat object keeps one property. The path
+  parameter always wins, so the path stays usable, and the twin is
+  dropped without a log line. Two path parameters with the same key
+  (`path` and `+path`) raise `InvalidSchemaError`.
 * **Other-bucket `$ref` rejected.** `$ref:
   "#/components/headers/X"`, `$ref: "#/components/securitySchemes/X"`,
   `$ref: "#/components/links/X"`, `$ref:
@@ -3218,8 +3311,8 @@ All three delegate to `ReviewService.delete_connector`
   G3.11-T7 #1241 landed the `#/components/responses/*` and
   `#/components/requestBodies/*` resolvers (unblocked the GitHub REST
   spec's live ingest); T11 #501 landed the
-  `#/components/parameters/*` resolver — see the T8 paragraph above
-  and `docs/architecture/spec-ingestion.md` §T1.
+  `#/components/parameters/*` resolver — see
+  `docs/architecture/spec-ingestion.md` §T1.
 * **Cross-document `$ref` rejected.** External files
   (`other.yaml#/...`) raise `UnsupportedSpecError`. Same v0.2.next
   note.
@@ -3285,10 +3378,11 @@ All three delegate to `ReviewService.delete_connector`
   The product-agnostic convert-then-ingest runbook lives at
   [`connector-ingestion.md` § "Product ships only Swagger 2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
   (VCF Automation's vra-sdk-go fragments are the worked example);
-  the `harbor/2.x` catalog row and
-  [`harbor-onboarding.md`](../cross-repo/harbor-onboarding.md#spec-ingest-swagger-20--openapi-3x-conversion)
-  carry the Harbor-specific conversion runbook for the other exemplar
-  2.0-only surface.
+  Harbor's ops are hand-written in MEHO, so Harbor needs no spec
+  conversion (see [`harbor-onboarding.md`](../cross-repo/harbor-onboarding.md),
+  "No spec ingest or curation needed"). `HarborConnector` still accepts
+  ingested operations from a Harbor API file that an operator adds (see
+  "Which connector class ingested operations run on" above).
 * **`$ref` drill-down rejected.** Refs that walk into a component's
   sub-tree (`#/components/schemas/X/properties/y`,
   `#/components/parameters/X/schema`) raise `InvalidSchemaError`.
@@ -3327,8 +3421,6 @@ All three delegate to `ReviewService.delete_connector`
   canonical architecture doc; companion to this codebase map.
 * [docs/cross-repo/connector-ingestion.md](../cross-repo/connector-ingestion.md) —
   operator runbook for adding a new vendor surface end-to-end.
-* [docs/cross-repo/g07-vsphere-canary.md](../cross-repo/g07-vsphere-canary.md) —
-  the worked-example canary procedure operators reproduce locally.
 * `meho_backplane/db/models.py::EndpointDescriptor` — the ORM target.
 * `meho_backplane/operations/typed_register.py` — typed-connector
   parallel pathway; same body-hash skip-re-embed contract.

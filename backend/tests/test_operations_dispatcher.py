@@ -41,30 +41,24 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
-from typing import Any, ClassVar, cast
+from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from packaging.version import Version
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors import OperationResult, resolve_connector
+from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
     clear_registry,
-    register_connector,
     register_connector_v2,
 )
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
-from meho_backplane.connectors.vmware_rest.connector import (
-    VmwareRest80Connector,
-    VmwareRestConnector,
-)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, AuditLog, EndpointDescriptor, Tenant
 from meho_backplane.operations import (
@@ -79,7 +73,6 @@ from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.dispatcher import _handler_requires_target
 from meho_backplane.operations.ingest import (
-    EndpointDescriptorProto,
     parse_openapi,
     register_ingested_operations,
 )
@@ -156,6 +149,21 @@ def _make_operator(
         principal_kind=principal_kind,
         client_id=client_id,
     )
+
+
+async def _seed_agent_deny_row(op_pattern: str, *, sub: str = "op-test") -> None:
+    """Give the default test agent a ``deny`` row for *op_pattern*."""
+    async with get_sessionmaker()() as seed:
+        seed.add(
+            AgentPermission(
+                tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
+                principal_sub=sub,
+                op_pattern=op_pattern,
+                verdict="deny",
+                created_by_sub="admin",
+            )
+        )
+        await seed.commit()
 
 
 class _FakeFingerprint:
@@ -320,23 +328,37 @@ async def _module_composite_handler_terminal_error(
     }
 
 
-class _AmbiguousVmFolderConnector:
-    """Two datacenters, both with a root VM folder named ``vm`` (#3588)."""
+#: Enough same-named folders to push the refusal envelope well past the 4 KB
+#: inline byte threshold (#4223).
+#: Enough same-named folders to push the refusal envelope well past the 4 KB
+#: inline byte threshold (#4223).
+_MANY_VM_FOLDER_IDS: list[str] = [f"group-v{i}" for i in range(400)]
 
-    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
-        return f"/api{path}"
 
-    async def adapt_op_query(
-        self, target: Any, query: dict[str, Any] | None, operator: Operator
-    ) -> dict[str, Any] | None:
-        return query
+def _ambiguous_parent_envelope(candidates: list[str]) -> dict[str, Any]:
+    """The refusal envelope a multi-step operation returns when a name is not unique.
 
-    async def _get_json(
-        self, target: Any, path: str, *, operator: Operator, params: Any = None
-    ) -> Any:
-        return {
-            "value": [{"folder": "group-v4", "name": "vm"}, {"folder": "group-v115", "name": "vm"}]
-        }
+    Same shape as a real ``folder.create``: a non-``ok`` ``status``, one
+    ``error`` issue, and the matched ids in ``candidate_folders``. The message
+    names only the match count; the ids may be many (#4223).
+    """
+    return {
+        "status": "ambiguous_parent",
+        "parent_folder": "vm",
+        "parent_folder_id": None,
+        "datacenter": None,
+        "new_folder_name": "X",
+        "folder": None,
+        "candidate_folders": candidates,
+        "issues": [
+            {
+                "category": "input",
+                "severity": "error",
+                "message": (f"parent VM folder name 'vm' matched {len(candidates)} VM folders"),
+            }
+        ],
+        "guidance": "pick the intended folder ID from `candidate_folders`; no folder was created",
+    }
 
 
 async def _module_composite_handler_folder_create_ambiguous(
@@ -344,29 +366,9 @@ async def _module_composite_handler_folder_create_ambiguous(
     target: Any,
     params: dict[str, Any],
 ) -> Any:
-    """Run the real ``folder.create`` handler against an ambiguous ``vm`` parent (#3588)."""
-    from meho_backplane.connectors.vmware_rest.composites._write import folder_create_composite
-
-    return await folder_create_composite(
-        operator=operator,
-        target=target,
-        params={"parent_folder": "vm", "folder_name": "X"},
-        connector=_AmbiguousVmFolderConnector(),  # type: ignore[arg-type]
-    )
-
-
-#: Enough same-named folders to push the refusal envelope well past the 4 KB
-#: inline byte threshold (#4223).
-_MANY_VM_FOLDER_IDS: list[str] = [f"group-v{i}" for i in range(400)]
-
-
-class _ManyVmFolderConnector(_AmbiguousVmFolderConnector):
-    """A vCenter where hundreds of VM folders share the name ``vm`` (#4223)."""
-
-    async def _get_json(
-        self, target: Any, path: str, *, operator: Operator, params: Any = None
-    ) -> Any:
-        return {"value": [{"folder": moid, "name": "vm"} for moid in _MANY_VM_FOLDER_IDS]}
+    """A multi-step handler that refuses an ambiguous ``vm`` parent (#3588)."""
+    del operator, target, params
+    return _ambiguous_parent_envelope(["group-v4", "group-v115"])
 
 
 async def _module_composite_handler_folder_create_many_candidates(
@@ -374,15 +376,9 @@ async def _module_composite_handler_folder_create_many_candidates(
     target: Any,
     params: dict[str, Any],
 ) -> Any:
-    """Run the real ``folder.create`` handler against hundreds of ``vm`` parents (#4223)."""
-    from meho_backplane.connectors.vmware_rest.composites._write import folder_create_composite
-
-    return await folder_create_composite(
-        operator=operator,
-        target=target,
-        params={"parent_folder": "vm", "folder_name": "X"},
-        connector=_ManyVmFolderConnector(),  # type: ignore[arg-type]
-    )
+    """A multi-step handler that refuses with hundreds of ``vm`` parents (#4223)."""
+    del operator, target, params
+    return _ambiguous_parent_envelope(list(_MANY_VM_FOLDER_IDS))
 
 
 class _FakeResultRedis:
@@ -1759,6 +1755,7 @@ class _FakeHttpConnector(HttpConnector):
     """Ingested-dispatch test fixture: records ``_request_json`` calls."""
 
     product = "demo"
+    accepts_ingested_operations = True
     version = "1.0"
     impl_id = "demo-rest"
     supported_version_range = ">=1.0,<2.0"
@@ -1806,1063 +1803,9 @@ class _FakeHttpConnector(HttpConnector):
         return {"ok": True, "method": method, "path": path}
 
 
-class _VmwareFakeHttpConnector(_FakeHttpConnector):
-    """VMware-shaped fixture that makes an unexpected hardware call visible."""
-
-    product = "vmware"
-    version = "9.0"
-    impl_id = "vmware-rest"
-    supported_version_range = ">=9.0,<10.0"
-
-
-@pytest.mark.asyncio
-async def test_vmware_ingested_hardware_write_parks_before_http_execution(
-    stub_embedding_service: AsyncMock,
-    session: AsyncSession,
-) -> None:
-    """The connector floor parks a raw NIC create before its HTTP branch runs."""
-    register_connector_v2(
-        product="vmware",
-        version="9.0",
-        impl_id="vmware-rest",
-        cls=_VmwareFakeHttpConnector,
-    )
-    op_id = "POST:/vcenter/vm/{vm}/hardware/ethernet"
-    await register_ingested_operations(
-        product="vmware",
-        version="9.0",
-        impl_id="vmware-rest",
-        spec_source="vcenter.yaml",
-        operations=[
-            EndpointDescriptorProto(
-                op_id=op_id,
-                method="POST",
-                path="/vcenter/vm/{vm}/hardware/ethernet",
-                parameter_schema={
-                    "type": "object",
-                    "properties": {"vm": {"type": "string", "x-meho-param-loc": "path"}},
-                    "required": ["vm"],
-                    "additionalProperties": False,
-                },
-            )
-        ],
-        embedding_service=stub_embedding_service,
-    )
-    descriptor = (
-        await session.execute(select(EndpointDescriptor).where(EndpointDescriptor.op_id == op_id))
-    ).scalar_one()
-    descriptor.is_enabled = True
-    await session.commit()
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id=op_id,
-        target=_FakeTarget(product="vmware", version="9.0"),
-        params={"vm": "vm-42"},
-    )
-
-    assert result.status == "awaiting_approval", result.error
-    from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
-
-    instance = _CONNECTOR_INSTANCE_CACHE[_VmwareFakeHttpConnector]
-    assert isinstance(instance, _VmwareFakeHttpConnector)
-    assert instance.calls == []
-
-
-class _VmwareGuardHttpConnector(VmwareRestConnector):
-    """Production compatibility predicate with a transport-free test seam."""
-
-    async def _request_json(  # type: ignore[override]
-        self,
-        target: Any,
-        method: str,
-        path: str,
-        *,
-        operator: Operator,
-        params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
-        extra_headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        del target, method, path, operator, params, json, extra_headers
-        return {"ok": True}
-
-
-async def _vmware_guard_handler(
-    operator: Operator,
-    target: Any,
-    params: dict[str, Any],
-) -> dict[str, Any]:
-    del operator, target, params
-    return {"ok": True}
-
-
-async def _add_vmware_guard_descriptor(
-    session: AsyncSession,
-    *,
-    source_kind: str = "ingested",
-    requires_approval: bool = True,
-    version: str = "9.0",
-    is_enabled: bool = True,
-    parameter_schema: dict[str, Any] | None = None,
-    safety_level: str = "dangerous",
-) -> None:
-    descriptor = EndpointDescriptor(
-        id=uuid.uuid4(),
-        tenant_id=None,
-        product="vmware",
-        version=version,
-        impl_id="vmware-rest",
-        op_id="POST:/api/vcenter/vm/example",
-        source_kind=source_kind,
-        method="POST",
-        path="/api/vcenter/vm/example",
-        handler_ref=(
-            None
-            if source_kind == "ingested"
-            else "tests.test_operations_dispatcher._vmware_guard_handler"
-        ),
-        summary="VMware guard test",
-        description="VMware guard test.",
-        tags=[],
-        parameter_schema=parameter_schema or {"type": "object", "properties": {}},
-        response_schema=None,
-        llm_instructions=None,
-        safety_level=safety_level,
-        requires_approval=requires_approval,
-        is_enabled=is_enabled,
-        embedding=[0.1] * 384,
-        custom_description=None,
-        custom_notes=None,
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
-    )
-    session.add(descriptor)
-    await session.commit()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("product", "version", "reason"),
-    [
-        ("nsx", "4.2", "target product is not vmware"),
-        ("vmware", "8.0", "outside the supported 9.x catalog boundary"),
-        ("vmware", "8.0.3", "outside the supported 9.x catalog boundary"),
-        ("vmware", None, "target version is missing"),
-        ("vmware", "not-a-version", "target version is invalid"),
-        ("vmware", "10.0", "outside the supported 9.x catalog boundary"),
-    ],
-)
-async def test_vmware_ingested_catalog_guard_rejects_before_policy_and_transport(
-    product: str,
-    version: str | None,
-    reason: str,
-    session: AsyncSession,
-) -> None:
-    """An unqualified target gets one audited error, never an approval park."""
-    from meho_backplane.db.models import ApprovalRequest
-    from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
-
-    register_connector_v2(
-        product="vmware",
-        version="9.0",
-        impl_id="vmware-rest",
-        cls=_VmwareGuardHttpConnector,
-    )
-    # Production registers this v1-shaped fallback beside the 9.0 entry.
-    # It deliberately resolves a known 8.x target after the versioned range
-    # excludes it; the catalog guard must still reject before construction.
-    register_connector("vmware", _VmwareGuardHttpConnector)
-    await _add_vmware_guard_descriptor(session)
-
-    target = _FakeTarget(product=product, version=version)
-    if product == "vmware" and version in {"8.0", "8.0.3"}:
-        assert resolve_connector(target) is _VmwareGuardHttpConnector
-
-    result = await dispatch(
-        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-
-    assert result.status == "error"
-    assert result.extras["error_code"] == "unqualified_target_version"
-    assert reason in result.error
-    assert _CONNECTOR_INSTANCE_CACHE == {}
-    async with get_sessionmaker()() as fresh:
-        audits = (
-            (
-                await fresh.execute(
-                    select(AuditLog).where(AuditLog.path == "POST:/api/vcenter/vm/example")
-                )
-            )
-            .scalars()
-            .all()
-        )
-        assert len(audits) == 1
-        assert audits[0].payload["result_status"] == "unqualified_target_version"
-        assert result.audit_id == audits[0].id
-        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
-        assert approvals == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("version", ["9.1", "9.1.1"])
-async def test_vmware_ingested_catalog_guard_allows_9x_target(
-    version: str,
-    session: AsyncSession,
-) -> None:
-    """Allowing a 9.x target only avoids this guard; it is not catalog qualification."""
-    register_connector_v2(
-        product="vmware",
-        version="9.0",
-        impl_id="vmware-rest",
-        cls=_VmwareGuardHttpConnector,
-    )
-    register_connector("vmware", _VmwareGuardHttpConnector)
-    await _add_vmware_guard_descriptor(session, requires_approval=False)
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version=version),
-        params={},
-    )
-
-    assert result.extras.get("error_code") != "unqualified_target_version"
-
-
-@pytest.mark.asyncio
-async def test_vmware_typed_descriptor_does_not_use_catalog_guard_on_8x(
-    session: AsyncSession,
-) -> None:
-    """The catalog label guard leaves typed and composite dispatch untouched."""
-    register_connector_v2(
-        product="vmware",
-        version="9.0",
-        impl_id="vmware-rest",
-        cls=_VmwareGuardHttpConnector,
-    )
-    register_connector("vmware", _VmwareGuardHttpConnector)
-    await _add_vmware_guard_descriptor(session, source_kind="typed", requires_approval=False)
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="8.0"),
-        params={},
-    )
-
-    assert result.extras.get("error_code") != "unqualified_target_version"
-
-
-class _VmwareGuard80HttpConnector(VmwareRest80Connector):
-    """8.0 U3 catalog compatibility predicate with a transport-free test seam."""
-
-    async def _request_json(  # type: ignore[override]
-        self,
-        target: Any,
-        method: str,
-        path: str,
-        *,
-        operator: Operator,
-        params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
-        extra_headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        del target, method, path, operator, params, json, extra_headers
-        return {"ok": True}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("version", ["8.0.3", "8.0.3.24022510", "8.0"])
-async def test_vmware_8_0_catalog_serves_fingerprinted_8_0_x_target(
-    version: str,
-    session: AsyncSession,
-) -> None:
-    """The 8.0 U3 catalog resolves and serves a fingerprinted 8.0.x target (#3569).
-
-    The 8.0 catalog exists precisely so the fingerprinted 8.0.x targets the
-    9.0 catalog's guard rejects keep a governed generic path. The owner-class
-    lookup on the ``vmware-rest-8.0`` descriptor names VmwareRest80Connector,
-    whose guard band is the 8.0.x line, so the dispatch is not rejected with
-    ``unqualified_target_version`` -- the mirror image of the 9.0 guard's
-    rejection of the same target.
-    """
-    register_connector_v2(
-        product="vmware",
-        version="8.0",
-        impl_id="vmware-rest",
-        cls=_VmwareGuard80HttpConnector,
-    )
-    # Production registers the v1-shaped wildcard beside the versioned entry;
-    # the versioned 8.0 band must still win via ``versioned_over_wildcard``.
-    register_connector("vmware", _VmwareGuard80HttpConnector)
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
-
-    target = _FakeTarget(product="vmware", version=version)
-    assert resolve_connector(target) is _VmwareGuard80HttpConnector
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-8.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-
-    assert result.extras.get("error_code") != "unqualified_target_version"
-
-
 # ---------------------------------------------------------------------------
 # #3600 -- sibling-catalog fallback for ingested ops
 # ---------------------------------------------------------------------------
-
-
-class _RecordingVmwareTransport:
-    """Transport-free seam that records which catalog class sent the request."""
-
-    sent: ClassVar[list[tuple[str, str]]] = []
-
-    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
-        del target, operator
-        return path
-
-    async def _post_json(
-        self,
-        target: Any,
-        path: str,
-        *,
-        operator: Operator,
-        verb: str = "POST",
-        params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
-        extra_headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        del target, operator, verb, params, json, extra_headers
-        _RecordingVmwareTransport.sent.append((cast(Connector, self).version, path))
-        return {"ok": True}
-
-
-class _RecordingVmware90Connector(_RecordingVmwareTransport, VmwareRestConnector):  # type: ignore[misc]
-    """9.0 catalog class with the recording transport."""
-
-
-class _RecordingVmware80Connector(_RecordingVmwareTransport, VmwareRest80Connector):  # type: ignore[misc]
-    """8.0 catalog class with the recording transport."""
-
-
-def _register_vmware_sibling_catalogs() -> None:
-    """Register the 9.0 and 8.0 catalogs (plus the wildcard) like production does."""
-    _RecordingVmwareTransport.sent = []
-    register_connector_v2(
-        product="vmware", version="9.0", impl_id="vmware-rest", cls=_RecordingVmware90Connector
-    )
-    register_connector_v2(
-        product="vmware", version="8.0", impl_id="vmware-rest", cls=_RecordingVmware80Connector
-    )
-    register_connector("vmware", _RecordingVmware90Connector)
-
-
-async def _audit_rows_for_guard_op() -> list[AuditLog]:
-    async with get_sessionmaker()() as fresh:
-        rows = await fresh.execute(
-            select(AuditLog).where(AuditLog.path == "POST:/api/vcenter/vm/example")
-        )
-        return list(rows.scalars().all())
-
-
-@pytest.mark.asyncio
-async def test_vmware_9_0_pin_falls_back_to_8_0_sibling_for_8_0_x_target(
-    session: AsyncSession,
-) -> None:
-    """A ``vmware-rest-9.0`` call for an 8.0.x target runs on the 8.0 catalog (#3600)."""
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="8.0.3"),
-        params={},
-    )
-
-    assert result.status == "ok", result.error
-    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
-    audits = await _audit_rows_for_guard_op()
-    assert len(audits) == 1
-    assert audits[0].payload["result_status"] == "ok"
-    assert audits[0].payload["connector_version"] == "8.0"
-    assert audits[0].payload["connector_impl_id"] == "vmware-rest"
-
-
-@pytest.mark.asyncio
-async def test_vmware_8_0_pin_falls_back_to_9_0_sibling_for_9_x_target(
-    session: AsyncSession,
-) -> None:
-    """The fallback works in both directions: an 8.0 pin for a 9.x target runs on 9.0."""
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-8.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="9.0.1"),
-        params={},
-    )
-
-    assert result.status == "ok", result.error
-    assert _RecordingVmwareTransport.sent == [("9.0", "/api/vcenter/vm/example")]
-    audits = await _audit_rows_for_guard_op()
-    assert [a.payload["connector_version"] for a in audits] == ["9.0"]
-
-
-_NOT_ON_8_0_REASON = (
-    "this operation is not available for vmware 8.0.3: connector vmware-rest-8.0 "
-    "serves this target and does not have this operation; use search_operations "
-    "on connector vmware-rest-8.0 to find a typed operation for this target"
-)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("sibling_state", ["absent", "disabled"])
-async def test_vmware_sibling_fallback_keeps_rejection_when_op_not_enabled_there(
-    sibling_state: str,
-    session: AsyncSession,
-) -> None:
-    """No fallback when the qualified sibling lacks the op or has it disabled."""
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    if sibling_state == "disabled":
-        await _add_vmware_guard_descriptor(
-            session, requires_approval=False, version="8.0", is_enabled=False
-        )
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="8.0.3"),
-        params={},
-    )
-
-    assert result.status == "error"
-    assert result.extras["error_code"] == "unqualified_target_version"
-    # #5069: the reason does not send the caller to vmware-rest-8.0, which
-    # would answer unknown_op. It says the op is not offered for the target.
-    assert result.extras["reason"] == _NOT_ON_8_0_REASON
-    assert "use connector" not in result.error
-    assert result.extras["target_product"] == "vmware"
-    assert result.extras["target_version"] == "8.0.3"
-    assert _RecordingVmwareTransport.sent == []
-    audits = await _audit_rows_for_guard_op()
-    assert len(audits) == 1
-    assert audits[0].payload["result_status"] == "unqualified_target_version"
-    assert audits[0].payload["connector_version"] == "9.0"
-
-
-@pytest.mark.asyncio
-async def test_vmware_sibling_fallback_not_taken_when_named_catalog_qualifies(
-    session: AsyncSession,
-) -> None:
-    """A target the named catalog serves runs on that catalog, even if a sibling has the op."""
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="9.0.1"),
-        params={},
-    )
-
-    assert result.status == "ok", result.error
-    assert _RecordingVmwareTransport.sent == [("9.0", "/api/vcenter/vm/example")]
-    audits = await _audit_rows_for_guard_op()
-    assert [a.payload["connector_version"] for a in audits] == ["9.0"]
-
-
-@pytest.mark.asyncio
-async def test_vmware_sibling_fallback_skips_typed_descriptors(
-    session: AsyncSession,
-) -> None:
-    """A typed descriptor in the sibling catalog is never a fallback target."""
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    await _add_vmware_guard_descriptor(
-        session, source_kind="typed", requires_approval=False, version="8.0"
-    )
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="8.0.3"),
-        params={},
-    )
-
-    assert result.extras["error_code"] == "unqualified_target_version"
-    # The typed op on vmware-rest-8.0 can run, so the hint to use it stays.
-    assert result.extras["reason"].endswith("; use connector vmware-rest-8.0 for this target")
-    assert _RecordingVmwareTransport.sent == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("op_state_on_9_0", ["enabled", "disabled"])
-async def test_vmware_8_0_unknown_op_does_not_name_a_catalog_that_refuses_the_target(
-    op_state_on_9_0: str,
-    session: AsyncSession,
-) -> None:
-    """On an 8.0.x target, ``unknown_op`` on vmware-rest-8.0 does not name vmware-rest-9.0.
-
-    vmware-rest-9.0 refuses the 8.0.x target for its ingested ops, so naming
-    it would send the caller in a circle (#5069). The error points at
-    ``search_operations`` instead, for both the call and the preview.
-    """
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(
-        session,
-        requires_approval=False,
-        version="9.0",
-        is_enabled=op_state_on_9_0 == "enabled",
-    )
-    target = _FakeTarget(product="vmware", version="8.0.3")
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-8.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-    preview = await preview_dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-8.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-
-    assert result.extras["error_code"] == "unknown_op"
-    assert result.extras["connectors_with_op"] == []
-    assert result.error is not None
-    assert "vmware-rest-9.0" not in result.error
-    assert "Use search_operations on connector 'vmware-rest-8.0'" in result.error
-    assert preview["status"] == "error"
-    assert preview["error"] == result.error
-    assert preview["extras"] == result.extras
-    assert _RecordingVmwareTransport.sent == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("target_version", [None, "9.0.1"])
-async def test_vmware_8_0_unknown_op_names_9_0_when_it_accepts_the_target_or_no_target(
-    target_version: str | None,
-    session: AsyncSession,
-) -> None:
-    """With no target, or a target vmware-rest-9.0 serves, the #4031 hint stays."""
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    target = None if target_version is None else _FakeTarget(product="vmware", version="9.0.1")
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-8.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-    preview = await preview_dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-8.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-
-    assert result.extras["error_code"] == "unknown_op"
-    assert result.extras["connectors_with_op"] == ["vmware-rest-9.0"]
-    assert result.error is not None
-    assert "This operation exists on connector(s) vmware-rest-9.0." in result.error
-    assert preview["error"] == result.error
-    assert preview["extras"] == result.extras
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("sibling_state", ["absent", "disabled"])
-async def test_vmware_preview_gives_the_not_available_reason_like_the_call(
-    sibling_state: str,
-    session: AsyncSession,
-) -> None:
-    """The preview refuses with the same #5069 reason as the call."""
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    if sibling_state == "disabled":
-        await _add_vmware_guard_descriptor(
-            session, requires_approval=False, version="8.0", is_enabled=False
-        )
-    target = _FakeTarget(product="vmware", version="8.0.3")
-
-    preview = await preview_dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-
-    assert preview["extras"]["error_code"] == "unqualified_target_version"
-    assert preview["extras"]["reason"] == _NOT_ON_8_0_REASON
-    assert preview["error"] == result.error
-    assert preview["extras"] == result.extras
-
-
-@pytest.mark.asyncio
-async def test_vmware_sibling_fallback_parks_approval_under_resolved_connector_id(
-    session: AsyncSession,
-) -> None:
-    """A parked fallback call names the sibling catalog, so the resume runs there."""
-    from meho_backplane.db.models import ApprovalRequest
-
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, version="9.0")
-    await _add_vmware_guard_descriptor(session, version="8.0")
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="8.0.3"),
-        params={},
-    )
-
-    assert result.status == "awaiting_approval", result.error
-    assert _RecordingVmwareTransport.sent == []
-    async with get_sessionmaker()() as fresh:
-        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
-    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
-
-
-@pytest.mark.asyncio
-async def test_vmware_sibling_fallback_resume_stays_on_the_approved_catalog(
-    session: AsyncSession,
-) -> None:
-    """An approved request never switches catalogs when the target version moved.
-
-    The request parked under ``vmware-rest-8.0`` (the sibling chosen for an
-    8.0.3 target). By the time it resumes, the target reports 9.0.1. The
-    resume runs with the policy gate skipped, so running the 9.0 catalog's
-    op here would be an operation the approver never saw. The resume is
-    refused instead; the caller must make a new request.
-    """
-    from meho_backplane.db.models import ApprovalRequest
-
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, version="9.0")
-    await _add_vmware_guard_descriptor(session, version="8.0")
-
-    parked = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="8.0.3"),
-        params={},
-    )
-    assert parked.status == "awaiting_approval", parked.error
-    async with get_sessionmaker()() as fresh:
-        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
-    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
-
-    resumed = await dispatch(
-        operator=_make_operator(),
-        connector_id=approvals[0].connector_id,
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="9.0.1"),
-        params={},
-        _approved=True,
-    )
-
-    assert resumed.status == "error"
-    assert resumed.extras["error_code"] == "unqualified_target_version"
-    assert resumed.extras["reason"] == (
-        "target version is outside the supported 8.0.x catalog boundary"
-        "; use connector vmware-rest-9.0 for this target"
-    )
-    assert resumed.extras["target_product"] == "vmware"
-    assert resumed.extras["target_version"] == "9.0.1"
-    assert _RecordingVmwareTransport.sent == []
-    audits = await _audit_rows_for_guard_op()
-    assert len(audits) == 1
-    assert audits[0].payload["result_status"] == "unqualified_target_version"
-    assert audits[0].payload["connector_version"] == "8.0"
-
-
-class _RecordingVmware80WideConnector(_RecordingVmwareTransport, VmwareRest80Connector):  # type: ignore[misc]
-    """A second 8.x catalog whose band overlaps the 8.0 catalog's band."""
-
-    version = "8.x"
-    supported_version_range = ">=8.0,<9.0"
-    _catalog_version_floor = Version("8.0")
-    _catalog_version_ceiling = Version("9.0")
-    _catalog_version_band_label = "8.x"
-
-
-@pytest.mark.asyncio
-async def test_vmware_sibling_fallback_uses_resolver_tie_break_when_two_siblings_qualify(
-    session: AsyncSession,
-) -> None:
-    """If two sibling catalogs qualify a target, the resolver's tie-break picks one.
-
-    Both the ``8.0`` band (``>=8.0,<8.1``) and the wider ``8.x`` band
-    (``>=8.0,<9.0``) qualify an 8.0.3 target. The resolver's
-    most-specific-range step picks ``8.0``, so the fallback runs there.
-    """
-    _register_vmware_sibling_catalogs()
-    register_connector_v2(
-        product="vmware",
-        version="8.x",
-        impl_id="vmware-rest",
-        cls=_RecordingVmware80WideConnector,
-    )
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.x")
-    target = _FakeTarget(product="vmware", version="8.0.3")
-    assert resolve_connector(target) is _RecordingVmware80Connector
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-
-    assert result.status == "ok", result.error
-    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
-    audits = await _audit_rows_for_guard_op()
-    assert [a.payload["connector_version"] for a in audits] == ["8.0"]
-
-
-_NAME_ONLY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {"name": {"type": "string"}},
-    "additionalProperties": False,
-}
-
-
-@pytest.mark.asyncio
-async def test_vmware_sibling_fallback_checks_params_against_the_sibling_schema(
-    session: AsyncSession,
-) -> None:
-    """Params are checked against the catalog that runs, not the one the caller named.
-
-    The 9.0 schema has no ``name`` param and refuses undeclared params; the
-    8.0 schema accepts ``name``. An 8.0.3 target runs on 8.0, so the call
-    passes.
-    """
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    await _add_vmware_guard_descriptor(
-        session, requires_approval=False, version="8.0", parameter_schema=_NAME_ONLY_SCHEMA
-    )
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="8.0.3"),
-        params={"name": "vm-a"},
-    )
-
-    assert result.status == "ok", result.error
-    assert _RecordingVmwareTransport.sent == [("8.0", "/api/vcenter/vm/example")]
-
-
-@pytest.mark.asyncio
-async def test_vmware_catalog_guard_reports_target_before_bad_params(
-    session: AsyncSession,
-) -> None:
-    """With no sibling to run on, the target error comes before the params error."""
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="8.0.3"),
-        params={"not_declared": 1},
-    )
-
-    assert result.extras["error_code"] == "unqualified_target_version"
-    assert _RecordingVmwareTransport.sent == []
-
-
-async def _sibling_blast_radius_builder(ctx: Any) -> dict[str, Any]:
-    del ctx
-    return {
-        "blast_radius": {
-            "object": {"kind": "vm", "id": "vm-1"},
-            "children": [],
-            "irreversibility": "permanent",
-        }
-    }
-
-
-@pytest.mark.asyncio
-async def test_vmware_sibling_fallback_destructive_preview_hash_binds_the_sibling(
-    session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A preview taken with the named catalog binds the call that runs on the sibling.
-
-    Preview with ``vmware-rest-9.0`` for an 8.0.3 target, then call with that
-    ``preview_hash``: the destructive op waits for approval under
-    ``vmware-rest-8.0`` instead of failing with ``preview_hash_mismatch``.
-    """
-    from meho_backplane.db.models import ApprovalRequest
-    from meho_backplane.operations._preview import _PREVIEW_BUILDERS
-
-    monkeypatch.setitem(
-        _PREVIEW_BUILDERS, "POST:/api/vcenter/vm/example", _sibling_blast_radius_builder
-    )
-    _register_vmware_sibling_catalogs()
-    for version in ("9.0", "8.0"):
-        await _add_vmware_guard_descriptor(
-            session,
-            version=version,
-            safety_level="destructive",
-            parameter_schema=_NAME_ONLY_SCHEMA if version == "8.0" else None,
-        )
-    target = _FakeTarget(product="vmware", version="8.0.3")
-    params = {"name": "vm-a"}
-
-    preview = await preview_dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params=params,
-    )
-    assert preview["status"] == "ok", preview
-    assert preview["connector_id"] == "vmware-rest-8.0"
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params=params,
-        preview_hash=preview["preview_hash"],
-    )
-
-    assert result.status == "awaiting_approval", result.error
-    assert _RecordingVmwareTransport.sent == []
-    async with get_sessionmaker()() as fresh:
-        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
-    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
-    assert [a.preview_hash for a in approvals] == [preview["preview_hash"]]
-
-
-@pytest.mark.asyncio
-async def test_vmware_preview_reports_the_same_target_refusal_as_the_call(
-    session: AsyncSession,
-) -> None:
-    """With no sibling to run on, the preview is refused like the call (#4984).
-
-    The preview answers ``unqualified_target_version`` with the same reason,
-    target product and target version as the call, gives no preview hash and
-    writes no audit row. Only the call writes one.
-    """
-    _register_vmware_sibling_catalogs()
-    # A write that waits for a second person's approval, like the case in #4984.
-    await _add_vmware_guard_descriptor(session, version="9.0")
-    target = _FakeTarget(product="vmware", version="8.0.3")
-
-    preview = await preview_dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-
-    assert preview["status"] == "error", preview
-    assert preview["connector_id"] == "vmware-rest-9.0"
-    assert "preview_hash" not in preview
-    assert "policy_verdict" not in preview
-    assert await _audit_rows_for_guard_op() == []
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=target,
-        params={},
-    )
-
-    assert result.extras["error_code"] == "unqualified_target_version"
-    assert preview["error"] == result.error
-    assert preview["extras"] == result.extras
-    assert _RecordingVmwareTransport.sent == []
-    assert len(await _audit_rows_for_guard_op()) == 1
-
-
-@pytest.mark.asyncio
-async def test_vmware_preview_on_sibling_catalog_is_ok_and_writes_no_audit_row(
-    session: AsyncSession,
-) -> None:
-    """When a sibling serves the target, the preview is ok on the sibling (#3600)."""
-    _register_vmware_sibling_catalogs()
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
-    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
-
-    preview = await preview_dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-9.0",
-        op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product="vmware", version="8.0.3"),
-        params={},
-    )
-
-    assert preview["status"] == "ok", preview
-    assert preview["connector_id"] == "vmware-rest-8.0"
-    assert preview["preview_hash"]
-    assert _RecordingVmwareTransport.sent == []
-    assert await _audit_rows_for_guard_op() == []
-
-
-class _VmwareTasksList80Connector(VmwareRest80Connector):
-    """8.0 catalog connector that records the outbound body and returns two tasks."""
-
-    sent: ClassVar[list[tuple[str, str, dict[str, Any] | None]]] = []
-
-    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
-        del target, operator
-        return f"/api{path}"
-
-    async def _post_json(  # type: ignore[override]
-        self,
-        target: Any,
-        path: str,
-        *,
-        operator: Operator,
-        verb: str = "POST",
-        params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
-        extra_headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        del target, operator, params, extra_headers
-        type(self).sent.append((verb, path, json))
-        return {
-            "task-1": {"service": "com.vmware.vcenter.vm", "status": "SUCCEEDED"},
-            "task-2": {"service": "com.vmware.vcenter.vm", "status": "RUNNING"},
-        }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("body", "expect_ok"),
-    [
-        ({"filter_spec": {"services": ["com.vmware.vcenter.vm"]}}, True),
-        ({"filter_spec": {"tasks": ["task-1"]}, "result_spec": {"exclude_result": True}}, True),
-        ({"return_all": True, "exclude_result": True}, False),
-        ({"filter_spec": {}}, False),
-        ({"filter_spec": {"services": []}}, False),
-    ],
-)
-async def test_vmware_8_0_tasks_list_dispatch_sends_two_level_body(
-    body: dict[str, Any],
-    expect_ok: bool,
-    stub_embedding_service: AsyncMock,
-    session: AsyncSession,
-) -> None:
-    """The corrected 8.0 tasks-list op sends ``{filter_spec, result_spec}`` (#3700).
-
-    A non-empty ``services`` / ``tasks`` filter reaches vCenter and returns
-    rows. The old flat body and an empty filter are refused with
-    ``invalid_params`` before any request leaves MEHO.
-    """
-    _VmwareTasksList80Connector.sent = []
-    register_connector_v2(
-        product="vmware",
-        version="8.0",
-        impl_id="vmware-rest",
-        cls=_VmwareTasksList80Connector,
-    )
-    flat = EndpointDescriptorProto(
-        op_id="POST:/cis/tasks?action=list",
-        method="POST",
-        path="/cis/tasks?action=list",
-        summary="List tasks",
-        parameter_schema={
-            "type": "object",
-            "properties": {
-                "body": {
-                    "type": "object",
-                    "properties": {
-                        "exclude_result": {"type": "boolean"},
-                        "return_all": {"type": "boolean"},
-                    },
-                    "x-meho-param-loc": "body",
-                }
-            },
-            "additionalProperties": False,
-        },
-        safety_level="caution",
-    )
-    await register_ingested_operations(
-        product="vmware",
-        version="8.0",
-        impl_id="vmware-rest",
-        spec_source="vcenter.yaml",
-        operations=[flat],
-        embedding_service=stub_embedding_service,
-    )
-    row = (
-        await session.execute(
-            select(EndpointDescriptor).where(
-                EndpointDescriptor.op_id == "POST:/cis/tasks?action=list"
-            )
-        )
-    ).scalar_one()
-    row.is_enabled = True
-    await session.commit()
-
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vmware-rest-8.0",
-        op_id="POST:/cis/tasks?action=list",
-        target=_FakeTarget(product="vmware", version="8.0.3"),
-        params={"body": body},
-    )
-
-    if expect_ok:
-        assert result.status == "ok", result.error
-        assert _VmwareTasksList80Connector.sent == [("POST", "/api/cis/tasks?action=list", body)]
-        assert isinstance(result.result, dict)
-        assert set(result.result) == {"task-1", "task-2"}
-    else:
-        assert result.extras.get("error_code") == "invalid_params"
-        assert _VmwareTasksList80Connector.sent == []
 
 
 @pytest.mark.asyncio
@@ -2966,6 +1909,7 @@ class _RoundTripHttpConnector(HttpConnector):
     """
 
     product = "gh"
+    accepts_ingested_operations = True
     version = "3.0"
     impl_id = "gh-rest"
     supported_version_range = ">=3.0,<4.0"
@@ -3087,6 +2031,9 @@ async def test_dispatch_ingested_post_sends_unwrapped_request_body(
             op_id="POST:/repos/{owner}/{repo}/issues",
             target=target,
             params={"owner": "octocat", "repo": "hello", "body": issue_body},
+            # A write sent with a token waits for approval (#3980); this test
+            # checks the wire request of the approved run.
+            _approved=True,
         )
 
     assert route.called
@@ -3199,6 +2146,9 @@ async def test_dispatch_ingested_honors_verb_and_forwards_header_param(
                 "X-Trace": "trace-123",
                 "body": {"state": "closed"},
             },
+            # A write sent with a token waits for approval (#3980); this test
+            # checks the wire request of the approved run.
+            _approved=True,
         )
 
     assert route.called
@@ -3316,6 +2266,9 @@ async def test_dispatch_ingested_post_forwards_query_param(
             op_id="POST:/things/{thing_id}/actions",
             target=target,
             params={"thing_id": "widget-1", "action": "start", "body": {"force": True}},
+            # A write sent with a token waits for approval (#3980); this test
+            # checks the wire request of the approved run.
+            _approved=True,
         )
 
     assert route.called
@@ -4249,16 +3202,16 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_denies_dangerous_op_by_safety_level(
+async def test_dispatch_denies_dangerous_op_by_agent_deny_row(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """``safety_level='dangerous'`` → ``denied`` for an **agent** principal.
+    """A ``deny`` row → ``denied`` for an **agent** principal on a ``dangerous`` op.
 
-    No AgentPermission rows exist for the agent, so the resolver uses the
-    ``safety_level`` default: ``dangerous`` → ``deny``. (Human/service
-    principals keep the v0.2 default-allow contract — see
-    ``test_dispatch_human_dangerous_op_auto_executes``.)
+    Without a row the agent's ``dangerous`` request waits for approval
+    (#3980); a ``deny`` row still makes the agent stricter, and the refusal
+    writes one ``denied`` audit row.
     """
+    await _seed_agent_deny_row("vault.kv.danger")
     register_connector_v2(
         product="vault",
         version="",
@@ -4473,7 +3426,7 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
 
     An ``auto-execute`` dispatch (safe op, human), a ``needs-approval`` park
     (caution op, agent → the ``approval.request`` row), and a ``deny`` (dangerous
-    op, agent, no grant) each land the matching :class:`PermissionVerdict` on the
+    op, agent, ``deny`` row) each land the matching :class:`PermissionVerdict` on the
     ``audit_log`` row — queryable without joining ``method``+``path`` + parsing
     ``payload``.
     """
@@ -4500,6 +3453,7 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
         )
 
     target = _FakeTarget(product="vault")
+    await _seed_agent_deny_row("vault.kv.deny")
 
     auto = await dispatch(
         operator=_make_operator(),
@@ -4552,72 +3506,144 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
     assert by_path["approval.request"].event_class == "policy_decision"
 
 
-@pytest.mark.asyncio
-async def test_dispatch_human_dangerous_op_auto_executes(
-    stub_embedding_service: AsyncMock,
+async def _register_human_op(
+    stub_embedding_service: AsyncMock, *, op_id: str, safety_level: str
 ) -> None:
-    """A **human** dispatching a ``dangerous`` op keeps the v0.2 contract.
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=op_id,
+        handler=_module_handler_returning_dict,
+        summary=f"{safety_level} op dispatched by a person.",
+        description=f"A {safety_level} op.",
+        parameter_schema={"type": "object"},
+        safety_level=safety_level,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
 
-    G11.2-T3 gates *agent* principals through the per-(principal, op,
-    target) resolver; human/service principals are default-allow except
-    ``requires_approval``. So a ``dangerous`` op with no
-    ``requires_approval`` flag auto-executes for a human — the resolver's
-    ``dangerous → deny`` default must not silently start denying human
-    operators (the pre-fix regression that broke vault/vmware suites).
+
+@pytest.mark.parametrize("safety_level", ["caution", "dangerous"])
+@pytest.mark.asyncio
+async def test_dispatch_human_token_non_safe_op_waits(
+    stub_embedding_service: AsyncMock, safety_level: str
+) -> None:
+    """A person's call made with a token runs only ``safe`` ops at once (#3980).
+
+    MCP, the command line and REST all build an Operator without a web
+    session. A ``caution`` or ``dangerous`` op then waits for an approval
+    click, like it does for an agent.
     """
-    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
-    await register_typed_operation(
-        product="vault",
-        version="1.x",
-        impl_id="vault",
-        op_id="vault.kv.human_danger",
-        handler=_module_handler_returning_dict,
-        summary="Dangerous op dispatched by a human.",
-        description="Destructive op; human path stays default-allow.",
-        parameter_schema={"type": "object"},
-        safety_level="dangerous",
-        when_to_use=None,
-        embedding_service=stub_embedding_service,
-    )
+    op_id = f"vault.kv.human_{safety_level}"
+    await _register_human_op(stub_embedding_service, op_id=op_id, safety_level=safety_level)
 
     result = await dispatch(
         operator=_make_operator(principal_kind=PrincipalKind.USER),
         connector_id="vault-1.x",
-        op_id="vault.kv.human_danger",
+        op_id=op_id,
         target=_FakeTarget(product="vault"),
         params={},
     )
-    assert result.status == "ok"
+    assert result.status == "awaiting_approval", result.error
+    assert result.extras["approval_request_id"]
 
 
 @pytest.mark.asyncio
-async def test_dispatch_human_caution_op_auto_executes(
+async def test_dispatch_human_token_caution_park_records_token_reason(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A **human** dispatching a ``caution`` op auto-executes (v0.2 contract)."""
-    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
-    await register_typed_operation(
-        product="vault",
-        version="1.x",
-        impl_id="vault",
-        op_id="vault.kv.human_caution",
-        handler=_module_handler_returning_dict,
-        summary="Caution op dispatched by a human.",
-        description="Caution op; human path stays default-allow.",
-        parameter_schema={"type": "object"},
-        safety_level="caution",
-        when_to_use=None,
-        embedding_service=stub_embedding_service,
-    )
+    """The park of a token ``caution`` call says it waits only for the token (#3980)."""
+    from meho_backplane.db.models import ApprovalRequest
 
+    await _register_human_op(
+        stub_embedding_service, op_id="vault.kv.token_caution", safety_level="caution"
+    )
     result = await dispatch(
         operator=_make_operator(principal_kind=PrincipalKind.USER),
         connector_id="vault-1.x",
-        op_id="vault.kv.human_caution",
+        op_id="vault.kv.token_caution",
         target=_FakeTarget(product="vault"),
         params={},
     )
-    assert result.status == "ok"
+    assert result.status == "awaiting_approval", result.error
+    async with get_sessionmaker()() as fresh:
+        request = await fresh.get(ApprovalRequest, UUID(result.extras["approval_request_id"]))
+    assert request is not None
+    assert request.proposed_effect is not None
+    assert request.proposed_effect["waits_because"] == "token_call"
+    assert request.proposed_effect["safety_level"] == "caution"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_human_token_dangerous_park_has_no_token_reason(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A ``dangerous`` park would wait in the web interface too: no token reason."""
+    from meho_backplane.db.models import ApprovalRequest
+
+    await _register_human_op(
+        stub_embedding_service, op_id="vault.kv.token_danger", safety_level="dangerous"
+    )
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.token_danger",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == "awaiting_approval", result.error
+    async with get_sessionmaker()() as fresh:
+        request = await fresh.get(ApprovalRequest, UUID(result.extras["approval_request_id"]))
+    assert request is not None
+    assert "waits_because" not in (request.proposed_effect or {})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_human_token_safe_op_auto_executes(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A ``safe`` op still runs at once for a person's token call."""
+    await _register_human_op(
+        stub_embedding_service, op_id="vault.kv.human_safe", safety_level="safe"
+    )
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.human_safe",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == "ok", result.error
+
+
+@pytest.mark.parametrize(
+    ("safety_level", "expected"),
+    [
+        ("safe", "ok"),
+        ("caution", "ok"),
+        ("dangerous", "awaiting_approval"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_human_web_session_rule(
+    stub_embedding_service: AsyncMock, safety_level: str, expected: str
+) -> None:
+    """In the web interface ``safe`` and ``caution`` run at once; ``dangerous`` waits."""
+    op_id = f"vault.kv.web_{safety_level}"
+    await _register_human_op(stub_embedding_service, op_id=op_id, safety_level=safety_level)
+    operator = _make_operator(principal_kind=PrincipalKind.USER).model_copy(
+        update={"web_session": True}
+    )
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == expected, result.error
 
 
 @pytest.mark.asyncio
@@ -5540,3 +4566,104 @@ async def test_reingest_repairs_pre_fix_row_through_dispatch_validation(
     assert (repaired.extras or {}).get("error_code") != "invalid_op_schema", (
         f"the repaired descriptor must pass dispatch-time schema validation; got {repaired.error!r}"
     )
+
+
+_TOKEN_RULE_SPEC = """
+openapi: 3.0.3
+info: {title: Widgets, version: "1.0"}
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {name: {type: string}}}
+      responses: {"201": {description: created}}
+  /widgets/{id}:
+    delete:
+      operationId: removeWidget
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses: {"204": {description: removed}}
+"""
+
+
+@pytest.mark.parametrize(
+    ("op_id", "expected_level", "expected_requires_approval", "params"),
+    [
+        ("POST:/widgets", "caution", False, {"body": {"name": "w1"}}),
+        ("DELETE:/widgets/{id}", "dangerous", True, {"id": "w1"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_ingested_write_with_person_token_waits(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    op_id: str,
+    expected_level: str,
+    expected_requires_approval: bool,
+    params: dict[str, Any],
+) -> None:
+    """An ingested ``POST`` / ``DELETE`` sent with a person's token waits (#3980).
+
+    The descriptors come from the real OpenAPI parser: ``POST`` is
+    ``caution`` and ``DELETE`` is ``dangerous`` (the parser also marks a
+    ``DELETE`` ``requires_approval``, #3827). Before #3980 the ``POST``
+    ran at once for a person on every path; a call made with a token now
+    waits for an approval click.
+    """
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+    from meho_backplane.operations.ingest import parse_openapi
+
+    register_connector_v2(
+        product="widgets", version="1.0", impl_id="widgets-rest", cls=_RoundTripHttpConnector
+    )
+    protos = {
+        p.op_id: p
+        for p in parse_openapi("file:///widgets.yaml", spec_source="test", content=_TOKEN_RULE_SPEC)
+    }
+    proto = protos[op_id]
+    assert proto.safety_level == expected_level
+    assert proto.requires_approval is expected_requires_approval
+    now = datetime.now(UTC)
+    session.add(
+        EndpointDescriptor(
+            id=uuid.uuid4(),
+            tenant_id=None,
+            product="widgets",
+            version="1.0",
+            impl_id="widgets-rest",
+            op_id=proto.op_id,
+            source_kind="ingested",
+            method=proto.method,
+            path=proto.path,
+            handler_ref=None,
+            summary=proto.summary,
+            description=proto.description,
+            tags=proto.tags,
+            parameter_schema=proto.parameter_schema,
+            response_schema=proto.response_schema,
+            llm_instructions=proto.llm_instructions,
+            safety_level=proto.safety_level,
+            requires_approval=proto.requires_approval,
+            is_enabled=True,
+            embedding=stub_embedding_service.encode_one.return_value,
+            custom_description=None,
+            custom_notes=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await session.commit()
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="widgets-rest-1.0",
+        op_id=op_id,
+        target=_FakeTarget(product="widgets", version="1.0", host="widgets.test", port=443),
+        params=params,
+    )
+    assert result.status == "awaiting_approval", result.error

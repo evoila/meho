@@ -50,7 +50,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RequestUsage, RunUsage
 
 from meho_backplane.agent import (
     AGENT_INVOKE_DEPTH_TOP_LEVEL,
@@ -59,12 +59,14 @@ from meho_backplane.agent import (
     AgentRunError,
     ChildAgentResolver,
     ChildRunRecorder,
+    ChildRunResult,
     agent_invoke_depth_var,
     current_agent_run_id_var,
     make_invoke_agent_tool,
 )
-from meho_backplane.agent.run import PydanticAgentRun
+from meho_backplane.agent.run import AgentRunEventKind, PydanticAgentRun
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.settings import get_settings
 
 pytestmark = pytest.mark.asyncio
@@ -272,10 +274,10 @@ async def test_depth_check_rejects_before_spend(monkeypatch: pytest.MonkeyPatch)
 
     async def child_runner(
         *, definition: AgentDefinition, operator: Operator, inputs: str, usage: RunUsage
-    ) -> Any:
+    ) -> ChildRunResult:
         nonlocal runner_calls
         runner_calls += 1
-        return "should-not-run"
+        return ChildRunResult(output="should-not-run")
 
     invoke_tool = make_invoke_agent_tool(resolver=resolver, child_runner=child_runner)
     fn = invoke_tool.function
@@ -340,10 +342,10 @@ async def test_child_run_linked_to_parent_in_lineage() -> None:
 
     async def child_runner(
         *, definition: AgentDefinition, operator: Operator, inputs: str, usage: RunUsage
-    ) -> Any:
+    ) -> ChildRunResult:
         # During the child loop, the current-run contextvar is the child's id.
         seen_run_id_in_child.append(current_agent_run_id_var.get())
-        return "child answer"
+        return ChildRunResult(output="child answer")
 
     async def recorder(
         *,
@@ -410,18 +412,22 @@ async def test_finalizer_closes_child_on_success() -> None:
 
     The seam-level invariant behind #1087: the recorded child row must reach a
     terminal state, so the tool calls the finalizer after the child loop returns.
+    The finalizer also gets the child's own token counts (#5853).
     """
     child_run_id = uuid4()
-    finalized: list[tuple[UUID, Any, str | None]] = []
+    child_usage = TokenUsage(input_tokens=7, output_tokens=3, cache_read_tokens=2)
+    finalized: list[tuple[UUID, Any, str | None, TokenUsage | None]] = []
     child_def = AgentDefinition(name="closer", system_prompt="answer", request_limit=5)
 
     async def child_runner(
         *, definition: AgentDefinition, operator: Operator, inputs: str, usage: RunUsage
-    ) -> Any:
-        return "child answer"
+    ) -> ChildRunResult:
+        return ChildRunResult(output="child answer", usage=child_usage)
 
-    async def finalizer(run_id: UUID, *, output: Any, error: str | None) -> None:
-        finalized.append((run_id, output, error))
+    async def finalizer(
+        run_id: UUID, *, output: Any, error: str | None, usage: TokenUsage | None = None
+    ) -> None:
+        finalized.append((run_id, output, error, usage))
 
     invoke_tool = make_invoke_agent_tool(
         resolver=_resolver_for(child_def),
@@ -434,7 +440,7 @@ async def test_finalizer_closes_child_on_success() -> None:
     out = await invoke_tool.function(ctx, agent_name="closer", inputs="go")
 
     assert out == {"agent": "closer", "output": "child answer"}
-    assert finalized == [(child_run_id, "child answer", None)]
+    assert finalized == [(child_run_id, "child answer", None, child_usage)]
 
 
 async def test_finalizer_closes_child_on_failure() -> None:
@@ -446,10 +452,12 @@ async def test_finalizer_closes_child_on_failure() -> None:
 
     async def child_runner(
         *, definition: AgentDefinition, operator: Operator, inputs: str, usage: RunUsage
-    ) -> Any:
+    ) -> ChildRunResult:
         raise AgentRunError("turn budget exhausted: boom")
 
-    async def finalizer(run_id: UUID, *, output: Any, error: str | None) -> None:
+    async def finalizer(
+        run_id: UUID, *, output: Any, error: str | None, usage: TokenUsage | None = None
+    ) -> None:
         finalized.append((run_id, output, error))
 
     invoke_tool = make_invoke_agent_tool(
@@ -479,10 +487,12 @@ async def test_finalizer_not_called_without_recorder() -> None:
 
     async def child_runner(
         *, definition: AgentDefinition, operator: Operator, inputs: str, usage: RunUsage
-    ) -> Any:
-        return "child answer"
+    ) -> ChildRunResult:
+        return ChildRunResult(output="child answer")
 
-    async def finalizer(run_id: UUID, *, output: Any, error: str | None) -> None:
+    async def finalizer(
+        run_id: UUID, *, output: Any, error: str | None, usage: TokenUsage | None = None
+    ) -> None:
         finalized.append(run_id)
 
     invoke_tool = make_invoke_agent_tool(
@@ -506,7 +516,7 @@ async def test_unknown_child_agent_is_a_model_retry() -> None:
 
     async def child_runner(
         *, definition: AgentDefinition, operator: Operator, inputs: str, usage: RunUsage
-    ) -> Any:
+    ) -> ChildRunResult:
         raise AssertionError("child_runner must not run when resolution fails")
 
     invoke_tool = make_invoke_agent_tool(resolver=resolver, child_runner=child_runner)
@@ -542,3 +552,249 @@ class _FakeCtx:
     def __init__(self, *, deps: Operator, usage: RunUsage) -> None:
         self.deps = deps
         self.usage = usage
+
+
+_CHILD_INPUT, _PARENT_FIRST_INPUT, _PARENT_FINAL_INPUT = 100_001, 1_000, 2_000
+
+
+def _delegating_runtime() -> tuple[PydanticAgentRun, AgentDefinition]:
+    """A parent run that calls one child run, each request with known usage."""
+    child_def = AgentDefinition(
+        name="deep-agent",
+        system_prompt="You answer hard sub-questions.",
+        request_limit=5,
+        toolset={"meta_tools": []},
+    )
+
+    async def resolver(operator: Operator, agent_name: str) -> AgentDefinition | None:
+        return child_def if agent_name == "deep-agent" else None
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        is_child = any(
+            part.part_kind == "system-prompt" and "hard sub-questions" in part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if is_child:
+            return ModelResponse(
+                parts=[TextPart("child answer")],
+                usage=RequestUsage(input_tokens=_CHILD_INPUT, output_tokens=10),
+            )
+        has_tool_return = any(
+            part.part_kind == "tool-return"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if not has_tool_return:
+            return ModelResponse(
+                parts=[ToolCallPart("invoke_agent", {"agent_name": "deep-agent", "inputs": "x"})],
+                usage=RequestUsage(input_tokens=_PARENT_FIRST_INPUT, output_tokens=20),
+            )
+        return ModelResponse(
+            parts=[TextPart("parent done")],
+            usage=RequestUsage(input_tokens=_PARENT_FINAL_INPUT, output_tokens=30),
+        )
+
+    runtime = PydanticAgentRun(
+        model_factory=lambda: FunctionModel(model_fn),
+        child_agent_resolver=resolver,
+    )
+    parent_def = AgentDefinition(
+        name="cheap-agent",
+        system_prompt="You delegate hard sub-tasks.",
+        request_limit=5,
+        toolset={"meta_tools": []},
+    )
+    return runtime, parent_def
+
+
+async def test_result_lists_the_usage_of_each_request_including_the_child_run() -> None:
+    """A run's per-request usage holds the parent's requests and the child's.
+
+    The child's messages are not in the parent's message history, while its
+    tokens are in the shared total. So the result lists the child's requests
+    too, and the per-request list adds up to the run's totals.
+    """
+    runtime, parent_def = _delegating_runtime()
+
+    handle = runtime.start(parent_def, _make_operator(), "delegate this")
+    result = await runtime.result(handle)
+
+    assert result.output == "parent done"
+    assert sorted(u.input_tokens for u in result.request_usages) == sorted(
+        [_CHILD_INPUT, _PARENT_FIRST_INPUT, _PARENT_FINAL_INPUT]
+    )
+    assert sum(u.input_tokens for u in result.request_usages) == result.input_tokens
+    assert sum(u.output_tokens for u in result.request_usages) == result.output_tokens
+    assert len(result.request_usages) == result.request_count
+
+
+async def test_streamed_final_event_carries_the_usage_including_the_child_run() -> None:
+    """The final event of a streamed run carries the same usage as a run that is not streamed.
+
+    Only the final event has usage. The usage is not in the event's
+    ``data``, so the SSE frame does not carry it.
+    """
+    runtime, parent_def = _delegating_runtime()
+
+    events = [
+        event
+        async for event in runtime.stream_events(
+            parent_def, _make_operator(), "delegate this", uuid4()
+        )
+    ]
+
+    final = events[-1]
+    assert final.kind is AgentRunEventKind.FINAL
+    assert final.data == {"output": "parent done"}
+    assert final.usage is not None
+    assert sorted(u.input_tokens for u in final.request_usages) == sorted(
+        [_CHILD_INPUT, _PARENT_FIRST_INPUT, _PARENT_FINAL_INPUT]
+    )
+    assert final.usage.input_tokens == _CHILD_INPUT + _PARENT_FIRST_INPUT + _PARENT_FINAL_INPUT
+    assert final.usage.output_tokens == 10 + 20 + 30
+    assert all(e.usage is None and e.request_usages == () for e in events[:-1])
+
+
+async def test_result_keeps_the_requests_of_a_child_that_ran_out_of_budget() -> None:
+    """A child that spends tokens and then trips its limit still counts in the cost.
+
+    The child's first request completes; its second trips the shared
+    request limit, so the child fails. The parent gets that failure as a
+    tool error and answers by itself. The child's completed request is
+    in the shared token total, so it must be in the per-request list too,
+    or the run's cost would leave it out.
+    """
+    child_def = AgentDefinition(
+        name="deep-agent",
+        system_prompt="You answer hard sub-questions.",
+        request_limit=2,  # the parent's first request plus one child request
+        toolset={"meta_tools": []},
+    )
+
+    async def resolver(operator: Operator, agent_name: str) -> AgentDefinition | None:
+        return child_def if agent_name == "deep-agent" else None
+
+    child_input, parent_first_input, parent_final_input = 100_001, 1_000, 2_000
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        is_child = any(
+            part.part_kind == "system-prompt" and "hard sub-questions" in part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if is_child:
+            # A tool call keeps the child loop going until its budget trips.
+            return ModelResponse(
+                parts=[ToolCallPart("noop_tool", {})],
+                usage=RequestUsage(input_tokens=child_input, output_tokens=10),
+            )
+        answered_before = any(isinstance(message, ModelResponse) for message in messages)
+        if not answered_before:
+            return ModelResponse(
+                parts=[ToolCallPart("invoke_agent", {"agent_name": "deep-agent", "inputs": "x"})],
+                usage=RequestUsage(input_tokens=parent_first_input, output_tokens=20),
+            )
+        return ModelResponse(
+            parts=[TextPart("parent done")],
+            usage=RequestUsage(input_tokens=parent_final_input, output_tokens=30),
+        )
+
+    runtime = PydanticAgentRun(
+        model_factory=lambda: FunctionModel(model_fn),
+        child_agent_resolver=resolver,
+    )
+    parent_def = AgentDefinition(
+        name="cheap-agent",
+        system_prompt="You delegate hard sub-tasks.",
+        request_limit=5,
+        toolset={"meta_tools": []},
+    )
+
+    handle = runtime.start(parent_def, _make_operator(), "delegate this")
+    result = await runtime.result(handle)
+
+    assert result.output == "parent done"
+    assert result.request_count == 3
+    assert sorted(u.input_tokens for u in result.request_usages) == sorted(
+        [child_input, parent_first_input, parent_final_input]
+    )
+    assert sum(u.input_tokens for u in result.request_usages) == result.input_tokens
+    assert sum(u.output_tokens for u in result.request_usages) == result.output_tokens
+    assert len(result.request_usages) == result.request_count
+
+
+async def test_parallel_child_runs_each_get_their_own_token_counts() -> None:
+    """Two child runs called in the same model turn each get only their own counts.
+
+    The parent calls ``invoke_agent`` twice in one response, so both child
+    loops run at the same time and add to the same shared usage total. Each
+    child's counts come from its own model responses, so they do not mix.
+    """
+    child_def = AgentDefinition(
+        name="helper", system_prompt="You help.", request_limit=5, toolset={"meta_tools": []}
+    )
+    child_inputs = {"first": 111, "second": 222}
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        prompt = next(
+            part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if part.part_kind == "user-prompt"
+        )
+        if prompt in child_inputs:
+            return ModelResponse(
+                parts=[TextPart(f"{prompt} done")],
+                usage=RequestUsage(input_tokens=child_inputs[prompt], output_tokens=1),
+            )
+        if any(
+            part.part_kind == "tool-return"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        ):
+            return ModelResponse(parts=[TextPart("parent done")])
+        return ModelResponse(
+            parts=[
+                ToolCallPart("invoke_agent", {"agent_name": "helper", "inputs": name})
+                for name in child_inputs
+            ]
+        )
+
+    recorded: list[UUID] = []
+    finalized: dict[str, TokenUsage | None] = {}
+
+    async def recorder(
+        *, operator: Operator, definition: AgentDefinition, parent_run_id: UUID | None
+    ) -> tuple[UUID, str]:
+        recorded.append(uuid4())
+        return recorded[-1], "test-worker:0"
+
+    async def finalizer(
+        run_id: UUID, *, output: Any, error: str | None, usage: TokenUsage | None = None
+    ) -> None:
+        finalized[str(output)] = usage
+
+    runtime = PydanticAgentRun(
+        model_factory=lambda: FunctionModel(model_fn),
+        child_agent_resolver=_resolver_for(child_def),
+        child_run_recorder=recorder,
+        child_run_finalizer=finalizer,
+    )
+    parent_def = AgentDefinition(
+        name="parent", system_prompt="You delegate.", request_limit=5, toolset={"meta_tools": []}
+    )
+
+    result = await runtime.result(runtime.start(parent_def, _make_operator(), "go"))
+
+    assert result.output == "parent done"
+    assert len(recorded) == 2
+    assert finalized == {
+        "first done": TokenUsage(input_tokens=111, output_tokens=1),
+        "second done": TokenUsage(input_tokens=222, output_tokens=1),
+    }

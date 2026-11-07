@@ -56,6 +56,8 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
+from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 
 __all__ = [
     "OperatorRoleProbe",
@@ -98,6 +100,11 @@ def _assert_identity_matches(operator: Operator, session_ctx: UISessionContext) 
     A mismatch is a security anomaly (token swapped under the same
     session row); it must surface as 401, not a silently-honoured
     cross-identity read.
+
+    The token check already ran in the session's current tenant (#5240):
+    the shared tenant choice compared the session tenant with the token's
+    tenant list, so ``operator.tenant_id`` is the session tenant unless
+    the row changed in between.
     """
     if operator.sub != session_ctx.operator_sub or operator.tenant_id != session_ctx.tenant_id:
         _log.warning(
@@ -138,7 +145,7 @@ async def lift_operator_from_session(session_ctx: UISessionContext) -> Operator:
     """
     decrypted = await load_fresh_session(session_ctx.session_id)
     if decrypted is None:
-        _log.info("ui_connectors_session_gone", session_id=str(session_ctx.session_id))
+        _log.info("ui_connectors_session_gone", session_ref=session_ref(session_ctx.session_id))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="ui_session_required",
@@ -147,6 +154,7 @@ async def lift_operator_from_session(session_ctx: UISessionContext) -> Operator:
     _refreshed, operator = await verify_access_token_with_refresh(
         decrypted,
         expected_audience=settings.keycloak_audience,
+        request_tenant=session_ctx.tenant_id,
     )
     _assert_identity_matches(operator, session_ctx)
     return operator
@@ -190,6 +198,8 @@ async def resolve_role_probe(
         session_ctx = await require_ui_session(request)
     try:
         operator = await _lift_operator(session_ctx)
+    except (TenantChangedError, TenantRemovedError):
+        raise
     except Exception as exc:
         if (
             isinstance(exc, HTTPException)
@@ -199,7 +209,7 @@ async def resolve_role_probe(
             raise
         _log.info(
             "ui_connectors_role_probe_unavailable",
-            session_id=str(session_ctx.session_id),
+            session_ref=session_ref(session_ctx.session_id),
             reason=type(exc).__name__,
         )
         return OperatorRoleProbe(is_tenant_admin=False, is_operator=False)

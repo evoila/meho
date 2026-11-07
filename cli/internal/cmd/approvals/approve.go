@@ -95,7 +95,7 @@ func newApproveCmd() *cobra.Command {
 			"Only pending requests can be approved; any other status " +
 			"returns 409. --reason attaches a human-readable " +
 			"rationale to the decision row.\n\n" + severalIDsHelp +
-			"\n\n" + inOrderHelp + "\n\n" + approveSignInHelp +
+			"\n\n" + approveRightsHelp + "\n\n" + inOrderHelp + "\n\n" + approveSignInHelp +
 			"\n\n" + delegatedReasonHelp("approve"),
 		Args:          approveArgs(&workRef, &inOrder),
 		SilenceUsage:  true,
@@ -190,10 +190,13 @@ func runDecision(
 	if cerr != nil {
 		return cerr
 	}
-	detail, err := postDecision(cmd.Context(), client, requestID, verb, reason)
+	detail, decided, err := postDecision(cmd.Context(), client, requestID, verb, reason)
 	var noBrowser *auth.NoBrowserError
 	if errors.As(err, &noBrowser) {
 		return output.RenderError(cmd.ErrOrStderr(), noBrowserError(noBrowser.URL), jsonOut)
+	}
+	if err != nil && verb == "approve" {
+		return routeApproveError(cmd, backplaneURL, err, jsonOut)
 	}
 	if err != nil {
 		return routeRequestError(cmd, backplaneURL, err, jsonOut)
@@ -207,25 +210,29 @@ func runDecision(
 	if jsonOut {
 		return output.PrintJSON(cmd.OutOrStdout(), detail)
 	}
-	printDecision(cmd.OutOrStdout(), idArg, detail)
+	printDecision(cmd.OutOrStdout(), idArg, detail, decided)
 	return nil
 }
 
 // printDecision renders the post-decision summary: the new status, who
-// decided and when, and -- for a delegated decision (#3692) -- who
-// instructed the reviewer, their words, and the refs.
-func printDecision(w io.Writer, idArg string, detail *api.ApprovalRequestView) {
-	fmt.Fprintf(w, "approval_request %s → %s\n", idArg, string(detail.Status))
+// decided and when, a self-approval line (#3329), and -- for a delegated
+// decision (#3692) -- who instructed the reviewer, their words, and the
+// refs. decided is the /decide answer; nil prints no self-approval line.
+func printDecision(w io.Writer, idArg string, detail *api.ApprovalRequestView, decided *api.DecideResponseBody) {
+	fmt.Fprintf(w, "approval_request %s → %s\n", idArg, output.SafeText(string(detail.Status)))
 	if detail.ReviewedBy != nil {
 		fmt.Fprintf(w, "reviewed by: %s\n", principalLabel(*detail.ReviewedBy, detail.ReviewedByName))
 	}
+	if line := selfApprovalLine(decided); line != "" {
+		fmt.Fprintf(w, "%s\n", line)
+	}
 	if detail.DecidedAt != nil {
-		fmt.Fprintf(w, "decided at:  %s\n", *detail.DecidedAt)
+		fmt.Fprintf(w, "decided at:  %s\n", output.SafeText(*detail.DecidedAt))
 	}
 	if dl := detail.Delegation; dl != nil {
-		fmt.Fprintf(w, "instructed by: %s\n", dl.InstructedBy)
+		fmt.Fprintf(w, "instructed by: %s\n", output.SafeText(dl.InstructedBy))
 		fmt.Fprintf(w, "instruction:   %q\n", dl.Instruction)
-		fmt.Fprintf(w, "refs:          %s\n", strings.Join(dl.Refs, ", "))
+		fmt.Fprintf(w, "refs:          %s\n", output.SafeText(strings.Join(dl.Refs, ", ")))
 	}
 	// An approve runs the operation; say how the run ended (#3543).
 	printRunOutcome(w, detail)
@@ -236,16 +243,17 @@ func printDecision(w io.Writer, idArg string, detail *api.ApprovalRequestView) {
 // required; the backend flips the status, writes the decision audit
 // row, and broadcasts the approval_decided event), then re-fetches
 // the ApprovalRequestView via GET /api/v1/approvals/{id} so the
-// caller can render the full post-decision shape. Returns a
-// non-2xx response on the decide POST as an `*httpResponseError`
-// without making the follow-up GET — there's no shape to render
-// when the decision was rejected.
+// caller can render the full post-decision shape. It also returns the
+// /decide answer, which says whether an approve was a self-approval
+// (#3329). Returns a non-2xx response on the decide POST as an
+// `*httpResponseError` without making the follow-up GET — there's no
+// shape to render when the decision was rejected.
 func postDecision(
 	ctx context.Context,
 	client *api.AuthedClient,
 	requestID uuid.UUID,
 	verb, reason string,
-) (*api.ApprovalRequestView, error) {
+) (*api.ApprovalRequestView, *api.DecideResponseBody, error) {
 	// verb is "approve" or "reject"; backend wants the past-tense form.
 	decision := "approved"
 	if verb == "reject" {
@@ -260,14 +268,16 @@ func postDecision(
 	if decision == "approved" {
 		signIn = newApprovalSignIn(client, nil)
 	}
-	if _, err := sendDecide(ctx, client, requestID, body, signIn, false); err != nil {
-		return nil, err
+	resp, err := sendDecide(ctx, client, requestID, body, signIn, false)
+	if err != nil {
+		return nil, nil, err
 	}
 	// Decision committed; fetch the full ApprovalRequestView for
 	// rendering. fetchDetail already retries on 401 (rare here since
 	// the decide call just succeeded, but defensive against a
 	// token-rotation window between the two calls).
-	return fetchDetail(ctx, client, requestID)
+	detail, err := fetchDetail(ctx, client, requestID)
+	return detail, resp.JSON200, err
 }
 
 // sendDecide posts one decision to POST /api/v1/approvals/{id}/decide.

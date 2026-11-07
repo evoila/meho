@@ -70,7 +70,7 @@ import ipaddress
 import json
 import re
 import socket
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -393,6 +393,16 @@ _MAX_REDIRECTS = 5
 # pod memory.
 _MAX_SPEC_BYTES = 20 * 1024 * 1024  # 20 MiB
 
+#: Cap on the expanded node count of a YAML spec, per byte of input. YAML
+#: anchors and aliases let a small file stand for a document with many
+#: times more nodes once every alias is walked (the later full walks of
+#: the ingest pipeline do not share them). A document without aliases
+#: has at most one node per byte, so a cap of this many nodes per byte
+#: never touches a real spec and bounds the walks to the size of the
+#: file. Checked on the composed node graph, before any object is built
+#: (:func:`_load_yaml_spec`).
+_MAX_SPEC_NODES_PER_BYTE = 2
+
 
 # Content-Type prefixes the upstream-fetch path accepts as spec-shaped.
 # OpenAPI specs are served as ``application/json`` (the modern default),
@@ -574,8 +584,10 @@ def _project_spec_bytes_to_protos(
 def read_spec_info_version(spec_path_or_uri: str, *, content: str | None = None) -> str | None:
     """Return the spec's ``info.version`` string, or ``None`` if absent.
 
-    Lightweight companion to :func:`parse_openapi` for the ingest
-    pipeline's spec-vs-label cross-check (G0.9-T8). Loads the spec
+    Companion to :func:`parse_openapi` for the ingest pipeline's
+    spec-vs-label cross-check (G0.9-T8). It is blocking and not light:
+    it downloads and parses the whole spec, so async callers must run
+    it in a worker thread (``asyncio.to_thread``). Loads the spec
     bytes the same way :func:`parse_openapi` does, decodes them, runs
     the supported-OpenAPI-version gate so callers don't need to
     re-validate, and returns ``info.version`` verbatim.
@@ -921,16 +933,89 @@ def _decode_spec(content: bytes) -> dict[str, Any]:
         json.JSONDecodeError: Malformed JSON.
     """
     fmt = detect_spec_format(content)
-    parsed: Any
-    if fmt == "json":
-        parsed = json.loads(content)
-    else:
-        parsed = yaml.load(io.BytesIO(content), Loader=_SpecYamlLoader)
+    parsed: Any = json.loads(content) if fmt == "json" else _load_yaml_spec(content)
     if not isinstance(parsed, dict):
         raise InvalidSpecError(
             f"OpenAPI document must parse to a mapping, got {type(parsed).__name__}"
         )
     return parsed
+
+
+def _load_yaml_spec(content: bytes) -> Any:
+    """Parse YAML spec bytes, refusing a document that expands past the node cap.
+
+    The parse runs in two steps on purpose. The loader first composes
+    the node graph, where every anchor is one node and every alias a
+    reference to it, so the graph is never larger than the input. The
+    expanded size is checked on that graph, and only then are the nodes
+    turned into Python objects. Checking after the objects exist would
+    be too late: a ``<<`` merge key copies every merged entry into the
+    mapping during that step, so a chain of merge aliases can grow
+    without bound there, and the duplicate keys collapse in the
+    finished ``dict``, hiding the growth from a check on the result.
+
+    Raises:
+        InvalidSpecError: The expanded document is over the cap.
+        yaml.YAMLError: Malformed YAML.
+    """
+    loader = _SpecYamlLoader(io.BytesIO(content))
+    try:
+        node = loader.get_single_node()
+        if node is None:
+            return None
+        _assert_expanded_size(node, max_nodes=len(content) * _MAX_SPEC_NODES_PER_BYTE)
+        return loader.construct_document(node)
+    finally:
+        loader.dispose()
+
+
+def _child_nodes(node: yaml.Node) -> Iterator[yaml.Node]:
+    """Yield the direct children of a composed YAML node, keys and values alike."""
+    if isinstance(node, yaml.MappingNode):
+        for key_node, value_node in node.value:
+            yield key_node
+            yield value_node
+    elif isinstance(node, yaml.SequenceNode):
+        yield from node.value
+
+
+def _assert_expanded_size(root: yaml.Node, *, max_nodes: int) -> None:
+    """Refuse a composed YAML graph with more than *max_nodes* nodes once expanded.
+
+    Walks the graph the way the ingest pipeline will walk the result:
+    every alias is visited again at each place it is used, and every
+    entry a ``<<`` merge key would copy in is visited too, so the count
+    is never below the size the constructor would build. The walk is a
+    depth-first descent that keeps one child iterator per level of the
+    current path instead of queuing children, and it counts a node the
+    moment it is entered, so the memory the check itself holds stays
+    bounded by *max_nodes* whatever the document holds. An alias that
+    points back at one of its own ancestors is refused outright: such a
+    document never finishes expanding, so no cap would let it through.
+
+    Raises:
+        InvalidSpecError: The expanded document is over the cap, or an
+            alias refers to a node that contains it.
+    """
+    count = 1
+    on_path: set[int] = {id(root)}
+    path: list[tuple[yaml.Node, Iterator[yaml.Node]]] = [(root, _child_nodes(root))]
+    while path:
+        node, children = path[-1]
+        child = next(children, None)
+        if child is None:
+            path.pop()
+            on_path.discard(id(node))
+            continue
+        if id(child) in on_path:
+            raise InvalidSpecError("spec contains a recursive YAML alias (a node refers to itself)")
+        count += 1
+        if count > max_nodes:
+            raise InvalidSpecError(
+                f"spec expands to more than {max_nodes} nodes (too many YAML aliases for its size)"
+            )
+        on_path.add(id(child))
+        path.append((child, _child_nodes(child)))
 
 
 def _validate_openapi_version(spec: dict[str, Any]) -> None:

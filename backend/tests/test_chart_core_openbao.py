@@ -3,8 +3,10 @@
 
 """Chart-render checks for the built-in OpenBao subchart and its setup Job (#4044).
 
-Off by default: the chart then renders no OpenBao object at all, so a
-bring-your-own install renders what it rendered before. The parent's
+On by default since #4047. These tests start from bring-your-own values
+(every built-in part off) and turn on what they test. Off, the chart renders
+no OpenBao object at all, so a bring-your-own install renders what it
+rendered before. The parent's
 ``coreVault:`` block maps onto ``charts/openbao/`` through a dependency
 alias, and the subchart's own schema checks every value when it is on.
 The parent renders the ``vault-init`` Job with its own account; the Job's
@@ -27,6 +29,13 @@ import yaml
 _CHART_DIR = Path(__file__).resolve().parents[2] / "deploy" / "charts" / "meho"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -59,7 +68,13 @@ _ON = [
     "--set",
     "coreVault.enabled=true",
     "--set",
+    "vault.address=",
+    "--set",
+    "config.vaultAddr=",
+    "--set",
     "corePostgres.enabled=true",
+    "--set",
+    "postgres.credentialsSecret=",
     "--set",
     "keycloak.issuer=",
     "--set",
@@ -104,14 +119,9 @@ def _is_vault_init(doc: dict[str, Any]) -> bool:
     return bool(labels.get("app.kubernetes.io/component") == "vault-init")
 
 
-def test_off_by_default_renders_nothing() -> None:
+def test_off_renders_nothing() -> None:
     docs = _render()
     assert not [d for d in docs if _is_openbao(d) or _is_vault_init(d)]
-    # Saying "off" out loud renders the same objects as leaving it out.
-    explicit = _render("--set", "coreVault.enabled=false")
-    assert [(d["kind"], d["metadata"]["name"]) for d in explicit] == [
-        (d["kind"], d["metadata"]["name"]) for d in docs
-    ]
 
 
 def _openbao_docs(*extra: str, release: str = "test") -> list[dict[str, Any]]:
@@ -546,7 +556,9 @@ def test_setup_job_name_changes_with_its_setup_only() -> None:
 
 
 def test_setup_job_needs_the_built_in_keycloak() -> None:
-    result = _run("--set", "coreVault.enabled=true")
+    result = _run(
+        "--set", "coreVault.enabled=true", "--set", "vault.address=", "--set", "config.vaultAddr="
+    )
     assert result.returncode != 0
     assert "coreVault.enabled needs coreKeycloak.enabled" in result.stderr
 

@@ -16,7 +16,12 @@ constructor accepts only ``withCredentials``), so it sends cookies, not
 a Bearer token. This route lives under ``/ui/`` where
 :class:`~meho_backplane.ui.auth.middleware.UISessionMiddleware` gates it
 with the BFF session cookie. The tenant comes from the validated
-session, never from a query parameter.
+session, never from a query parameter. The ``meho_tenant`` parameter the
+feed puts on the stream URL is only the page's tenant marker (#5240):
+:class:`~meho_backplane.ui.csrf.CSRFMiddleware` refuses the connection
+with ``409`` when it is not the session's tenant any more (a switch in
+another browser tab), also on an ``EventSource`` reconnect. This route
+never reads it.
 
 What it streams (#3758)
 =======================
@@ -42,20 +47,22 @@ from meho_backplane.api.v1.feed import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.archive_reader import AnnouncementFilter
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 
 __all__ = ["build_stream_router", "session_reader"]
 
 #: Module-level :class:`fastapi.Depends` closure (ruff B008).
-_require_ui_session_dep = Depends(require_ui_session)
+#: The ``operator`` floor of the REST broadcast and feed reads: a ``read_only``
+#: session gets ``403 operator_required`` before the handler runs.
+_require_ui_operator_dep = Depends(require_ui_operator)
 
 
 def session_reader(session_ctx: UISessionContext) -> Operator:
     """Build the reader identity the archive helpers take from a UI session.
 
     The archive reads use only ``tenant_id`` (the scope) and ``sub`` (log
-    lines). The session middleware already authenticated the request; the
-    role on this value is not used for any decision.
+    lines). The route's ``require_ui_operator`` check already proved the
+    ``operator`` role; the role on this value is not used for any decision.
     """
     return Operator(
         sub=session_ctx.operator_sub,
@@ -83,7 +90,7 @@ def build_stream_router() -> APIRouter:
             default=None,
             description="Explicit replay cursor; superseded by Last-Event-Id when present.",
         ),
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
     ) -> StreamingResponse:
         """``GET /ui/broadcast/stream`` -- stream the session tenant's announcements."""
         reader = session_reader(session_ctx)

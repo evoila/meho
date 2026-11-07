@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-
-	"github.com/evoila/meho/cli/internal/typedops"
 )
 
 // typedDispatchCases pins every vROps verb whose backend read is typed
@@ -40,8 +38,7 @@ var typedDispatchCases = []struct {
 // dispatch ingested METHOD:/path op_ids — each entry records why no
 // typed op_id exists, so the intent is pinned rather than silently
 // unguarded (#2942). When the backend ships a typed counterpart, move
-// the verb to typedDispatchCases and reclassify it in
-// typedOpCLICoverage.
+// the verb to typedDispatchCases.
 var ingestedDispatchCases = []struct {
 	name   string
 	args   []string
@@ -59,38 +56,6 @@ var ingestedDispatchCases = []struct {
 	{"symptom list", []string{"symptom", "list"}, "GET:/suite-api/api/symptoms"},
 	{"recommendation list", []string{"recommendation", "list"}, "GET:/suite-api/api/recommendations"},
 	{"supermetric list", []string{"supermetric", "list"}, "GET:/suite-api/api/supermetrics"},
-}
-
-// typedOpCLICoverage classifies every typed op_id the backend registers
-// for vcf_operations: the CLI verb that dispatches it, or "" when the
-// op is agent-surface-only (no CLI verb wraps it).
-// TestBackendTypedOpsAreClassified fails when the backend gains a
-// typed op that is not classified here — the "typed op ⇒ repoint the
-// CLI verb ⇒ pin it" contract (#2942).
-var typedOpCLICoverage = map[string]string{
-	"vrops.liveness":                 "about",
-	"vrops.alert.list":               "alert list",
-	"vrops.resource.query":           "", // agent surface only (POST query; `resource list` is the plain GET list)
-	"vrops.resource.stats":           "", // agent surface only
-	"vrops.resource_kind.properties": "", // no verb; use `operation call vrops.resource_kind.properties`
-	"vrops.license.info":             "", // no verb; use `operation call vrops.license.info`
-	// VCF 9 licence management: no CLI verb yet, agent surface only.
-	"vrops.licensing.registration.status": "",
-	"vrops.licensing.server.list":         "",
-	"vrops.licensing.entitlement.query":   "",
-	"vrops.licensing.vcenter.query":       "",
-	"vrops.licensing.server.query":        "",
-	"vrops.licensing.assign":              "",
-	// VCF 9.1 fleet certificates and passwords: no CLI verb yet, agent surface only.
-	"vrops.fleet.certificate.list":    "",
-	"vrops.fleet.certificate.replace": "",
-	"vrops.fleet.password.list":       "",
-	"vrops.fleet.password.rotate":     "",
-	"vrops.fleet.request.get":         "",
-	// VCF 9.1 fleet roles: no CLI verb yet, agent surface only.
-	"vrops.fleet.role.list":      "",
-	"vrops.fleet.principal.find": "",
-	"vrops.fleet.role.assign":    "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed vROps
@@ -114,40 +79,6 @@ func TestIngestedVerbsDispatchPinnedOpIDs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assertVerbDispatchesOpID(t, tc.args, tc.wantOp, nil)
 		})
-	}
-}
-
-// TestBackendTypedOpsAreClassified reconciles the backend's typed-op
-// registry against typedOpCLICoverage so a typed op shipped without a
-// CLI-repoint decision fails this test instead of leaving the verb a
-// zero-catalog dead end (#2942).
-func TestBackendTypedOpsAreClassified(t *testing.T) {
-	inventory, err := typedops.BackendOpIDs("vcf_operations")
-	if err != nil {
-		t.Fatalf("read backend typed-op inventory: %v", err)
-	}
-	invSet := make(map[string]bool, len(inventory))
-	for _, id := range inventory {
-		invSet[id] = true
-	}
-	for _, id := range inventory {
-		if _, ok := typedOpCLICoverage[id]; !ok {
-			t.Errorf("backend typed op %q is unclassified — repoint the CLI verb "+
-				"covering this read (and add it to typedDispatchCases) or record it "+
-				"as agent-surface-only in typedOpCLICoverage (#2942 contract)", id)
-		}
-	}
-	for id := range typedOpCLICoverage {
-		if !invSet[id] {
-			t.Errorf("typedOpCLICoverage entry %q no longer exists in the backend "+
-				"registry — drop or rename it", id)
-		}
-	}
-	for _, tc := range typedDispatchCases {
-		if !invSet[tc.wantOp] {
-			t.Errorf("typed dispatch case %q asserts op_id %q that the backend "+
-				"does not register", tc.name, tc.wantOp)
-		}
 	}
 }
 

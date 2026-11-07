@@ -53,11 +53,18 @@ nav:
       - Reference architecture: architecture.md
       - Deployment shapes: deployment-shapes.md
   - Install & operate:
+      - Ways to install MEHO: install/ways-to-install.md
       - The install trail: install/index.md
       - Credential backends: install/credential-backends.md
       - Keycloak realm setup: install/keycloak-realm.md
       - Company login with authentik: install/company-login-authentik.md
       - "OpenBao unseal key: who keeps what": install/openbao-unseal-key.md
+      - Company login:
+          - install/login/index.md
+          - Local users: install/login/local-users.md
+          - AD / LDAP: install/login/ad-ldap.md
+          - Entra ID: install/login/entra-id.md
+          - Your own Keycloak: install/login/customer-keycloak.md
       - TLS and ingress: install/tls-ingress.md
       - Upgrades: install/upgrades.md
       - Local kind quickstart: install/kind-quickstart.md
@@ -76,10 +83,12 @@ nav:
       - guides/sensors-quickstart.md
       - Approvals and break-glass: guides/approvals-and-break-glass.md
       - Add a tenant: guides/tenant-bootstrap.md
+      - One person in several tenants: guides/several-tenants.md
       - Topology: guides/topology.md
       - Broadcast: guides/broadcast.md
       - Memory and knowledge: guides/memory-and-knowledge.md
       - Audit forensics: guides/audit-forensics.md
+      - The settings file: guides/settings-file.md
       - Flight recorder: guides/flight-recorder.md
       - Runbooks: guides/runbooks.md
       - Hosted agents: guides/hosted-agents.md

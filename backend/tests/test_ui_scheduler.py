@@ -306,6 +306,8 @@ def _client_with_role(
     role: TenantRole,
 ) -> tuple[TestClient, respx.MockRouter, str]:
     """Return a TestClient + respx mock + csrf token for the role-gated routes."""
+    # Each call mints a new key pair, so drop the JWKS cached by an earlier client.
+    clear_jwks_cache()
     keypair, jwks = _make_keypair_and_jwks()
     access_token = _mint_token(
         keypair,
@@ -668,7 +670,9 @@ def test_create_modal_carries_fire_at_utc_conversion() -> None:
     stores verbatim as UTC; the modal must carry the ``htmx:configRequest``
     handler that rewrites ``fire_at`` to a UTC ISO instant plus the live hint
     that makes the conversion visible. Asserts the load-bearing markers rather
-    than exercising the JS (covered by the Playwright regression in CI).
+    than exercising the JS. There is no browser test harness in this repo,
+    so the handler itself is unexercised -- these assertions pin the markers
+    it depends on, nothing more.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_agent(tenant_id=_TENANT_A)

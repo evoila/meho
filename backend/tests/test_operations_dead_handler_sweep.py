@@ -32,10 +32,12 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
+import structlog
 from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.operations import dead_handler_sweep as sweep_mod
 from meho_backplane.operations import typed_register
 from meho_backplane.operations._handler_resolve import import_handler
 from meho_backplane.operations.dead_handler_sweep import (
@@ -51,6 +53,9 @@ _DEAD_UPLINKS_REF = (
     "meho_backplane.connectors.vmware_rest.composites._read.host_network_uplinks_composite"
 )
 _DEAD_VSAN_REF = "meho_backplane.connectors.vmware_rest.composites._read.host_vsan_health_composite"
+_DEAD_INSTALLER_STATUS_REF = (
+    "meho_backplane.connectors.vcf_installer.connector.InstallerConnector.sddc_status"
+)
 _NEWER_ONLY_REF = "meho_backplane.connectors.future_release.typed_ops.newer_only_handler"
 _RETIRED_COMPOSITES = frozenset(
     {"vmware.composite.host.network_uplinks", "vmware.composite.host.vsan_health"}
@@ -135,7 +140,53 @@ def test_handler_ref_resolves() -> None:
 def test_retired_list_names_the_retired_ops() -> None:
     expected = {RetiredOp("vmware", "9.0", "vmware-rest", op_id) for op_id in _RETIRED_COMPOSITES}
     expected.add(RetiredOp("migration", "1.x", "migration-assess", "migration.inventory.csv"))
+    expected.add(RetiredOp("installer", "9.1", "installer-rest", "installer.sddc.status"))
     assert expected == RETIRED_OPS
+
+
+@pytest.mark.asyncio
+async def test_retire_removes_old_installer_status_row_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An upgraded install loses the renamed installer status op, and only it.
+
+    The first sweep deletes the old row and logs ``dead_handler_op_retired``
+    once. The replacement op stays. The next sweep logs nothing for the old op.
+    """
+    monkeypatch.setattr(sweep_mod, "_log", structlog.get_logger(sweep_mod.__name__))
+    await _seed(
+        op_id="installer.sddc.status",
+        source_kind="typed",
+        handler_ref=_DEAD_INSTALLER_STATUS_REF,
+        product="installer",
+        version="9.1",
+        impl_id="installer-rest",
+    )
+    await _seed(
+        op_id="installer.sddc.bringup.status",
+        source_kind="typed",
+        handler_ref=_LIVE_REF,
+        product="installer",
+        version="9.1",
+        impl_id="installer-rest",
+    )
+
+    with structlog.testing.capture_logs() as first:
+        assert await retire_dead_handler_rows() == ["installer.sddc.status"]
+
+    assert set(await _rows()) == {(None, "installer.sddc.bringup.status")}
+    events = [e for e in first if e.get("op_id") == "installer.sddc.status"]
+    assert [e["event"] for e in events] == ["dead_handler_op_retired"]
+    assert (events[0]["product"], events[0]["version"], events[0]["impl_id"]) == (
+        "installer",
+        "9.1",
+        "installer-rest",
+    )
+
+    with structlog.testing.capture_logs() as second:
+        assert await retire_dead_handler_rows() == []
+    assert not [e for e in second if e.get("op_id") == "installer.sddc.status"]
+    assert set(await _rows()) == {(None, "installer.sddc.bringup.status")}
 
 
 @pytest.mark.asyncio
@@ -231,7 +282,7 @@ async def test_older_server_keeps_disabled_op_of_newer_release() -> None:
 
 
 @pytest.mark.asyncio
-async def test_boot_registrar_run_removes_retired_vmware_composites(
+async def test_boot_registrar_run_removes_retired_composites(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """An upgraded install's stale composite rows are gone after boot.
@@ -263,7 +314,6 @@ async def test_boot_registrar_run_removes_retired_vmware_composites(
     rows = await _rows()
     op_ids = {op_id for _tenant, op_id in rows}
     assert op_ids.isdisjoint(_RETIRED_COMPOSITES)
-    assert {"vmware.host.network_uplinks", "vmware.host.vsan_health"} <= op_ids
     assert rows[(None, "vmware.typed.newer_only")].is_enabled is False
 
 

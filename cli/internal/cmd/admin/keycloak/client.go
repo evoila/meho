@@ -35,6 +35,7 @@ type adminClient struct {
 	baseURL    string // e.g. "https://keycloak.evba.lab"
 	realm      string // target realm (where clients land), e.g. "evba"
 	token      string // master-realm admin access token
+	dryRun     bool   // writes are answered by dryRunTransport
 }
 
 // errKeycloakAPI carries the HTTP status + the raw response body from
@@ -342,11 +343,11 @@ func (c *adminClient) createClient(
 	return loc[idx+1:], nil
 }
 
-// updateClient PUTs a merged ClientRepresentation. The caller is
-// responsible for preserving fields it doesn't want to clobber
-// (Keycloak's PUT is a full replacement, not a merge — exception: a
-// missing `attributes` key preserves stored attributes, but a missing
-// `defaultClientScopes` clears them).
+// updateClient PUTs a ClientRepresentation. Keycloak sets each field
+// the body sends and keeps each field it leaves out (null), and each
+// attribute it does not name; an attribute sent empty is removed. The
+// redirect URIs and web origins are always sent, so they are replaced.
+// The PUT does not change the client's scope assignments.
 func (c *adminClient) updateClient(
 	ctx context.Context, uuid string, rep *clientRep,
 ) error {

@@ -13,8 +13,10 @@ extended by #2155's Vault-path ``secret_ref`` contract):
   carrying a Vault KV-v2 **path string** resolved through the
   ``_resolve_secret`` seam (#2155; the embedded-dict shape is the
   bind9 anti-shape and is rejected).
-* Per-target connection pool: same ``target.name`` reuses the same
-  connection object; different names get distinct connections.
+* Connection pool keyed per target and caller: the same caller on the same
+  target reuses the connection object; different targets get distinct
+  connections. The per-caller rule itself is covered in
+  ``test_ssh_pool_per_caller.py``.
 * Idle TTL eviction: connection idle past ``_POOL_TTL_S`` is replaced on
   next ``_connect`` call.
 * Key auth path: the resolved Vault secret with ``ssh_private_key`` uses
@@ -54,7 +56,9 @@ from meho_backplane.connectors.adapters import SshConnector
 from meho_backplane.connectors.adapters.ssh import (
     _POOL_TTL_S,
     SshHostKeyUnpinnedError,
+    SshOutputTooLargeError,
     _known_hosts_from_secret,
+    _pool_key,
     _secret_flag_is_true,
 )
 from meho_backplane.connectors.adapters.ssh import SshConnector as _SshConnectorDirect
@@ -63,6 +67,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from tests._ssh_fakes import FakeSshProcess
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
 # ---------------------------------------------------------------------------
@@ -120,11 +125,36 @@ class _TestSSHServer(asyncssh.SSHServer):
         return key == _CLIENT_PUB
 
 
+#: How much the ``flood`` test command tries to write, and how much it
+#: managed to write before the client closed the channel (one entry per run).
+_FLOOD_TOTAL_BYTES = 64 * 1024 * 1024
+_FLOOD_WRITTEN: list[int] = []
+
+
+async def _flood(process: Any) -> None:
+    """Write ``_FLOOD_TOTAL_BYTES`` of output, or stop when the channel closes."""
+    written = 0
+    try:
+        while written < _FLOOD_TOTAL_BYTES:
+            process.stdout.write("x" * 65536)
+            await process.stdout.drain()
+            written += 65536
+    except Exception:  # any error here means the client closed the channel
+        pass
+    _FLOOD_WRITTEN.append(written)
+
+
 async def _handle_process(process: Any) -> None:
     """Simple command handler for test server."""
     cmd: str = process.command or ""
     if cmd == "echo ok":
         process.stdout.write("ok\n")
+        process.exit(0)
+    elif cmd == "flood":
+        await _flood(process)
+        process.exit(0)
+    elif cmd == "cat":
+        process.stdout.write(await process.stdin.read())
         process.exit(0)
     elif cmd.startswith("sleep "):
         await asyncio.sleep(float(cmd.split()[1]))
@@ -318,6 +348,97 @@ async def test_password_auth_connects_and_runs_command(
 
 
 @pytest.mark.asyncio
+async def test_command_output_over_cap_is_refused(
+    ssh_server: Any,
+    vault_secrets: dict[str, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Output above the cap raises instead of reaching the caller."""
+    monkeypatch.setattr("meho_backplane.connectors.adapters.ssh._MAX_OUTPUT_BYTES", 8)
+    conn = _ConcreteSshConnector()
+    target = _password_target(host=ssh_server.host, port=ssh_server.port)
+
+    try:
+        with pytest.raises(SshOutputTooLargeError, match="above the 8-byte cap"):
+            await conn._run_command(target, "echo 0123456789abcdef")
+        short = await conn._run_command(target, "echo ok")
+    finally:
+        await conn.aclose()
+
+    assert short.exit_status == 0
+
+
+@pytest.mark.asyncio
+async def test_run_command_writes_stdin_to_the_command(
+    ssh_server: Any,
+    vault_secrets: dict[str, dict[str, Any]],
+) -> None:
+    """The stdin value reaches the remote command's standard input."""
+    conn = _ConcreteSshConnector()
+    target = _password_target(host=ssh_server.host, port=ssh_server.port)
+
+    try:
+        result = await conn._run_command(target, "cat", stdin="first line\nsecond ä\n")
+    finally:
+        await conn.aclose()
+
+    assert result.stdout == "first line\nsecond ä\n"
+    assert result.exit_status == 0
+
+
+@pytest.mark.asyncio
+async def test_command_output_over_cap_stops_the_command_early(
+    ssh_server: Any,
+    vault_secrets: dict[str, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command that floods stdout is cut off at the cap, not read to its end.
+
+    The test server tries to write 64 MiB. The cap is 1 MiB, so the
+    client must close the channel long before the server is done.
+    """
+    monkeypatch.setattr("meho_backplane.connectors.adapters.ssh._MAX_OUTPUT_BYTES", 1024 * 1024)
+    _FLOOD_WRITTEN.clear()
+    conn = _ConcreteSshConnector()
+    target = _password_target(host=ssh_server.host, port=ssh_server.port)
+
+    try:
+        with pytest.raises(SshOutputTooLargeError):
+            await conn._run_command(target, "flood", timeout=30.0)
+        # The pooled connection is still usable after the cut-off command.
+        short = await conn._run_command(target, "echo ok")
+    finally:
+        await conn.aclose()
+
+    assert short.stdout == "ok\n"
+    assert len(_FLOOD_WRITTEN) == 1
+    assert _FLOOD_WRITTEN[0] < _FLOOD_TOTAL_BYTES // 4
+
+
+@pytest.mark.asyncio
+async def test_command_output_cap_counts_bytes_not_characters(
+    ssh_server: Any,
+    vault_secrets: dict[str, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multibyte text is measured in bytes: 10 characters of 14 bytes are over a 10-byte cap."""
+    monkeypatch.setattr("meho_backplane.connectors.adapters.ssh._MAX_OUTPUT_BYTES", 10)
+    conn = _ConcreteSshConnector()
+    target = _password_target(host=ssh_server.host, port=ssh_server.port)
+
+    try:
+        # The server echoes the command plus a newline: "echo ääää\n" is
+        # 10 characters but 14 bytes.
+        with pytest.raises(SshOutputTooLargeError, match="above the 10-byte cap"):
+            await conn._run_command(target, "echo ääää")
+        plain = await conn._run_command(target, "echo ok")
+    finally:
+        await conn.aclose()
+
+    assert plain.stdout == "ok\n"
+
+
+@pytest.mark.asyncio
 async def test_key_auth_connects_and_runs_command(
     ssh_server: Any, vault_secrets: dict[str, dict[str, Any]]
 ) -> None:
@@ -378,8 +499,8 @@ async def test_different_targets_get_different_connections(
 
     assert ssh_a is not ssh_b
     # Pool is keyed on the tenant-unique ``(tenant_id, id)`` tuple.
-    assert (target_a.tenant_id, target_a.id) in conn._connections
-    assert (target_b.tenant_id, target_b.id) in conn._connections
+    assert _pool_key(target_a, None) in conn._connections
+    assert _pool_key(target_b, None) in conn._connections
     await conn.aclose()
 
 
@@ -407,8 +528,8 @@ async def test_same_name_different_tenant_get_distinct_connections(
 
     assert ssh_a is not ssh_b
     assert len(conn._connections) == 2
-    assert (target_a.tenant_id, target_a.id) in conn._connections
-    assert (target_b.tenant_id, target_b.id) in conn._connections
+    assert _pool_key(target_a, None) in conn._connections
+    assert _pool_key(target_b, None) in conn._connections
     # Re-fetching B's connection returns B's, not A's (no first-writer bleed).
     assert await conn._connect(target_b) is ssh_b
     await conn.aclose()
@@ -470,13 +591,20 @@ async def test_run_command_timeout_raises_asyncio_timeout_error() -> None:
     """_run_command with a short timeout raises asyncio.TimeoutError."""
     conn = _ConcreteSshConnector()
 
+    class _NeverEnds:
+        async def read(self, n: int = -1) -> bytes:
+            del n
+            await asyncio.sleep(60)
+            return b""
+
+    def _stalled_process(cmd: str, **_kwargs: Any) -> FakeSshProcess:
+        process = FakeSshProcess(command=cmd)
+        process.stdout = _NeverEnds()  # type: ignore[assignment]
+        return process
+
     mock_conn = MagicMock()
     mock_conn.is_closed.return_value = False
-
-    async def _never_finishes(*_args: Any, **_kwargs: Any) -> None:
-        await asyncio.sleep(60)
-
-    mock_conn.run = _never_finishes
+    mock_conn.create_process = _stalled_process
 
     target = types.SimpleNamespace(
         name="timeout-target",
@@ -488,7 +616,7 @@ async def test_run_command_timeout_raises_asyncio_timeout_error() -> None:
         # never runs — the path string is deliberately unregistered.
         secret_ref="meho/testing/ssh/unused-timeout-path",
     )
-    conn._connections[(target.tenant_id, target.id)] = (mock_conn, time.monotonic())
+    conn._connections[_pool_key(target, None)] = (mock_conn, time.monotonic())
 
     with pytest.raises(asyncio.TimeoutError):
         await conn._run_command(target, "sleep 60", timeout=0.05)
@@ -776,7 +904,7 @@ async def test_idle_ttl_evicts_stale_connection(
     ssh_first = await conn._connect(target)
 
     # Backdate last_used to simulate idle expiry.
-    conn._connections[(target.tenant_id, target.id)] = (
+    conn._connections[_pool_key(target, None)] = (
         ssh_first,
         time.monotonic() - _POOL_TTL_S - 1.0,
     )

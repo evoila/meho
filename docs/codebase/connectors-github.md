@@ -23,13 +23,13 @@ Source: `backend/src/meho_backplane/connectors/github/`.
 
 The `composites/` subpackage hosts hand-coded L1 composites that wrap
 multiple L2 sub-ops into one governed call. T4 ships the first one,
-`gh.composite.pr_status_summary`, mirroring the layout precedent at
-`backend/src/meho_backplane/connectors/vmware_rest/composites/`:
+`gh.composite.pr_status_summary` (group `pulls`):
 
 - **`composites/_register.py`** — `_COMPOSITES` tuple and the
-  `register_github_composite_operations` async registrar. T4 shipped one
-  row (`pr_status_summary`); #2081 adds four more (the board + sub-issue
-  composites — see below), all on the same pattern.
+  `register_github_composite_operations` async registrar. The tuple holds
+  14 rows, all on the same pattern: `pr_status_summary`, the board and
+  sub-issue composites, the issue, repository and git composites (see the
+  sections below).
 - **`composites/_read.py`** — module-level `async def` handlers. The
   handler `pr_status_summary_composite` declares a `connector` parameter
   and issues its three reads through the resolved `GitHubRestConnector`'s
@@ -48,32 +48,18 @@ multiple L2 sub-ops into one governed call. T4 ships the first one,
   response contracts. `additionalProperties=False` on params so operator
   typos surface as clear validation errors; response schemas describe
   the seven-key envelope and the two pre-computed status enums.
-- **`composites/_preflight.py`** — per-process cache of which composites
-  have already validated that every declared L2 sub-op is registered in
-  `endpoint_descriptor`. **No longer wired into the composite handler**
-  after the #2255 direct-session migration (the handler dispatches zero
-  ingested rows, so there is no L2 dependency to pre-flight); the module
-  is retained pending the L2-apparatus retirement in #2259. Same
-  lazy-resolve design as the vmware-rest precedent (G0.14-T10 #1183).
 - **`composites/__init__.py`** — side-effect import that queues
   `register_github_composite_operations` onto the lifespan registrar
   list. The parent `github/__init__.py` imports this subpackage so the
   registrar lands during `_eager_import_connectors`.
 
-**Fresh-deploy behaviour after the #2255 direct-session migration.**
-Because the handler now reads through the connector session rather than
-dispatching ingested `endpoint_descriptor` rows, the composite works on
-a fresh deploy with **no gh catalog ingest** — the pre-#1757
-"enabled-but-`composite_l2_missing`" dead-end (#2050) is gone by
-construction, not papered over by a listing marker. Consequently
+**Fresh-deploy behaviour.** The handler reads through the connector
+session and dispatches no ingested `endpoint_descriptor` rows, so the
+composite works on a fresh deploy with **no gh catalog ingest**.
 `_register.py` registers no `composite_backing` entry for the composite
-and no longer runs the `_register_and_assert_composite_backings`
-connector-load guard that raised `UnbackedEnabledCompositeError`. That
-gh-only guard class — and the whole vmware/github failure-coping
-apparatus — is deleted (Task #2259); the platform-wide registration-time
-invariant (#2252) is the sole remaining check. Regressions where a
-code-shipped op accidentally dispatches an ingested row are caught by
-the #2252 platform invariant, not a retired gh-specific check.
+and runs no gh-specific connector-load guard. The platform-wide
+registration-time check catches a code-shipped op that dispatches an
+ingested row by mistake.
 
 Both summarisers — `_summarize_checks` and `_summarize_reviews` — are
 intentionally conservative: an unexpected payload shape collapses to
@@ -85,13 +71,11 @@ reviewer's prior verdict).
 The composite is registered with `safety_level="safe"` (the
 register-time equivalent of the operator-visible "read" label per the
 issue body) and `requires_approval=False`, overriding
-`register_composite_operation`'s `dangerous` / `True` defaults the same
-way the vmware-rest read composites do.
+`register_composite_operation`'s `dangerous` / `True` defaults.
 
-**Live dispatch acceptance.** After the #2255 direct-session migration
-the live dispatch acceptance test at
-`backend/tests/integration/test_github_composite_dispatch.py` no longer
-depends on catalog ingest or a populated `endpoint_descriptor` table: it
+**Live dispatch acceptance.** The live dispatch acceptance test at
+`backend/tests/integration/test_github_composite_dispatch.py` needs no
+catalog ingest and no populated `endpoint_descriptor` table: it
 plugs an HTTPX-backed session stub into the handler's `connector`
 parameter and hits the real GitHub REST API. It is gated on
 `MEHO_GH_INGEST_LIVE=1` + `MEHO_GH_LIVE_PR=<owner/repo#number>` rather
@@ -118,7 +102,7 @@ gh catalog ingest.
   `raise_for_status` cannot catch; `github_graphql()` inspects the parsed
   body, raises `GitHubGraphQlError` on `errors` (or missing `data`), and
   returns the unwrapped `data`. Every dynamic value rides the GraphQL
-  `variables` map (injection-safe); only the `organization`/`user` root
+  `variables` map, never into the query text; only the `organization`/`user` root
   selector is composed from a closed literal map keyed off the validated
   `owner_type` enum.
 - **`composites/_board.py`** — the three `board`-group composites:
@@ -143,43 +127,142 @@ gh catalog ingest.
     trailing `Track` single-select on every assigned item; per-item
     field-value pagination stays a separate follow-on.
   - `gh.composite.project_item_add` (write) — `addProjectV2ItemById`.
+    It first reads the content node (`node(id:)`) and refuses content
+    that is not an issue or pull request of the target's repository.
   - `gh.composite.project_item_set_field` (write) —
     `updateProjectV2ItemFieldValue` with a `singleSelectOptionId` value.
+    It first reads the board item (`node(id:)`) and refuses an item that
+    is not on the target's board, or whose content is not an issue or
+    pull request of the target's repository (a draft issue has no
+    repository, so it is refused).
 - **`composites/_sub_issues.py`** — the sub-issue link of the `issues`
   group, `gh.composite.sub_issue_add` (write), wrapping
   `POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues`.
-  **`sub_issue_id` is the child's database `id`, not its issue number** —
-  the REST create-issue response carries that id; passing the number is
-  the obvious mistake, so the schema and docstring both call it out. The
-  sub-issue must share the parent's repository owner.
+  The caller names the parent (`issue_number`) and the child
+  (`sub_issue_number`) by number. MEHO reads the child with
+  `GET .../issues/{sub_issue_number}`, checks that the answer comes from
+  the target's repository (a moved issue answers from its new one) and
+  that it is not a pull request, and sends GitHub the child's database
+  `id` from that read. GitHub has no call that finds an issue by its
+  database id, so a database id alone could not be checked.
+- **`composites/_scope.py`** — the guard of the five ticket writes; see
+  "Why ticket writes need no approval" below.
 
-**Governance posture.** `project_view` is `safety_level="safe"`; the
-three writes are `safety_level="caution"`, all four
-`requires_approval=False`. Adding a card to a board / setting a status
-field / linking a sub-issue are low-blast-radius, reversible
-board-hygiene mutations — honestly a write, but not `dangerous` like the
-vmware VM-delete composites. Each is a **single** logical mutation, so
-the composite is the reviewed unit: the dispatcher runs `policy_gate`
-against the composite's own descriptor before invoking the handler, which
-fully governs the one write it performs. Unlike the multi-write vmware
-composites there is no heterogeneous internal write sub-op to protect, so
-these do **not** call `enforce_subop_policy` (that seam re-gates
-*additional* writes a direct-session composite fans out to). Under this
-posture a human/service operator auto-executes a board write
-(board-complete filing without a `gh` CLI fallback), while an agent
-principal routes to the approval queue via the `caution` safety default —
-exactly the governance a raw CLI fallback would bypass.
+**Governance posture.** All four are `safety_level="safe"` with
+`requires_approval=False`. `project_view` is a read. The three writes
+(`project_item_add`, `project_item_set_field`, `sub_issue_add`) are
+ticket writes: they run at once for every caller, people and agents,
+but only inside the target's own repository and board. The rules and the
+reasons are in the next section, "Why ticket writes need no approval".
+Each write is one mutation, so the dispatcher's `policy_gate` on the
+composite governs the whole call; these composites do not call
+`enforce_subop_policy` (that seam re-gates *additional* writes a
+direct-session composite fans out to).
+
+#### Why ticket writes need no approval
+
+Decision record:
+[`docs/decisions/2026-11-02-github-ticket-writes-are-safe.md`](../decisions/2026-11-02-github-ticket-writes-are-safe.md).
+
+Five GitHub writes are `safe` with `requires_approval=False`:
+
+| Write | Operation |
+|---|---|
+| File an issue | `gh.composite.issue_create` |
+| Comment on an issue | `gh.composite.issue_comment` |
+| Link a sub-issue | `gh.composite.sub_issue_add` |
+| Add an item to a board | `gh.composite.project_item_add` |
+| Set a board field | `gh.composite.project_item_set_field` |
+
+Why: since the approval rules of 2026-10-10, a call with a token runs only
+`safe` operations at once; every `caution` or higher operation waits until
+a person clicks approve in the web interface. A ticket write changes no
+infrastructure. If it waited, every agent would stop at every comment.
+Every other GitHub operation keeps its risk level, also the raw operations
+generated from GitHub's API file.
+
+Two guards make "safe" true:
+
+1. **Only the target's repository and board** (`composites/_scope.py`).
+   - The repository comes from the target's `host`
+     (`api.github.com/repos/<owner>/<repo>` or `<owner>/<repo>`). A write
+     whose `owner`/`repo` is another repository is refused. Names are
+     compared without case, as GitHub does.
+   - The board comes from the target's `extras.project_id`: the board's
+     node id (`project_id` from `project_view`). A board write with another
+     `project_id` is refused.
+   - `project_item_add` adds only issues and pull requests of the target's
+     repository. `project_item_set_field` changes only a board item that
+     holds such an issue or pull request; it reads the item first. A
+     draft issue has no repository, so its fields cannot be set this
+     way. `sub_issue_add` links only issues of that repository.
+   - A target with no repository cannot run the five writes. A target with
+     no board cannot run the two board writes. The refusal says what to
+     set on the target.
+   - Each refusal is a `TicketWriteScopeError` (a `ValueError`) raised
+     before any call to GitHub; the dispatcher answers `connector_error`
+     and writes the audit row.
+   - Agent grants and service read scopes still decide which caller may
+     run which operation on which target.
+2. **Never an infrastructure trigger.**
+   - MEHO never reads a ticket's state, label or comment as an
+     instruction, and a ticket write never starts a run, a check, an
+     approval or an operation in MEHO.
+   - `connectors/github/op_classes.py` declares the five as `write` and
+     marks them as safe writes (`declare_safe_writes` in
+     `meho_backplane.op_classes`; no other connector's op is on that
+     list). So "safe" does not mean "read" for
+     them: a health check (Sensor) refuses them at create and the check
+     runner never runs them (`checks/service.py`, `_safe_tier_floor` in
+     `checks/runner.py`); a satellite runner never takes them on its read
+     path (`classify_satellite_tier` in `runner/satellite_tier.py` puts
+     them in the excluded tier). The audit row and the broadcast event
+     still carry the class `write`.
+   - The target repository must have no GitHub workflow, webhook or app
+     that acts on issue, comment, sub-issue or board events. The probe
+     checks the workflow files (see "Workflow check" below).
+
+**Set up a target for ticket writes.**
+
+- Set `host` to `api.github.com/repos/<owner>/<repo>`.
+- For the board writes, set `extras.project_id` to the board's node id.
+  Read it with `gh.composite.project_view`.
+- Probe the target and read `ticket_write_warning` in its fingerprint.
+- Check once in the repository settings that no webhook and no installed
+  app acts on issue, comment, sub-issue or board events. The connector's
+  rights cannot read all of them, so MEHO cannot check this for you.
+
+**Workflow check.** The probe of a target that names one repository
+(`workflow_check.py`) lists `.github/workflows/` and reads each `.yml` /
+`.yaml` file (at most 100). It reports every workflow whose `on:` names
+`issues`, `issue_comment`, `sub_issues`, `project`, `project_card`,
+`project_column`, `projects_v2` or `projects_v2_item`. The fingerprint
+`extras` carry:
+
+- `workflow_check`: `ok`, `incomplete` (some files could not be read, or
+  there are more than 100) or `unknown` (the folder could not be read);
+- `ticket_event_workflows`: `[{path, events}]`, or `null` when unknown;
+- `ticket_write_warning`: the text to show, or `null`;
+- `workflow_check_error`: why the check is incomplete or unknown.
+
+A missing folder (404) means no workflows. Any other failed read is
+`unknown`, never "no workflows".
 
 **End-to-end acceptance.**
 `backend/tests/test_github_board_composite_flow.py` drives the full
 create → add-to-board → set-Status → link-sub-issue sequence against one
 shared connector-session stub (deterministic, runs in the default unit
 lane), asserting the board node id threads from `project_view` into the
-add + set-field mutations and that the sub-issue link uses the child's
-database id rather than its number. Per-handler unit tests live in
+add + set-field mutations and that the sub-issue link sends the database
+id MEHO read for the child's number. Per-handler unit tests live in
 `test_connectors_github_composites_board.py` /
 `test_connectors_github_composites_sub_issues.py`; registration/posture
-assertions are in `test_connectors_github_composites_register.py`.
+assertions are in `test_connectors_github_composites_register.py`. The
+ticket-write posture and guards are pinned in
+`test_connectors_github_ticket_writes.py`; the health-check refusal in
+`test_checks_safe_ticket_writes.py`; the satellite refusal in
+`test_runner_satellite_tier.py`; the workflow check in
+`test_connectors_github_workflow_check.py`.
 
 ### One repository (`gh.composite.repo_view`)
 
@@ -340,8 +423,8 @@ they work on a fresh install with no spec import.
 |---|---|---|---|
 | `gh.composite.issue_search` | Finds issues in one repository. | `GET /repos/{owner}/{repo}/issues` or `GET /search/issues` | `safe` |
 | `gh.composite.issue_view` | One issue: title, text, state, labels, assignees, parent, direct sub-issues, number of comments, and on request the newest comments. | `GET .../issues/{n}`, `.../parent`, `.../sub_issues`, `.../comments` | `safe` |
-| `gh.composite.issue_create` | Files one issue. Returns its `number`, its `node_id` (for `project_item_add`) and its database `id` (for `sub_issue_add`). | `POST /repos/{owner}/{repo}/issues` | `caution`, waits for approval |
-| `gh.composite.issue_comment` | Adds one comment to one issue. | `POST .../issues/{n}/comments` | `caution`, waits for approval |
+| `gh.composite.issue_create` | Files one issue in the target's repository. Returns its `number` (for `sub_issue_add`), its `node_id` (for `project_item_add`) and its database `id`. | `POST /repos/{owner}/{repo}/issues` | `safe`, runs at once (ticket write) |
+| `gh.composite.issue_comment` | Adds one comment to one issue in the target's repository. | `POST .../issues/{n}/comments` | `safe`, runs at once (ticket write) |
 
 **The two search modes.** Every answer says which mode ran.
 
@@ -384,8 +467,8 @@ newest `comments_limit` comments (0 to 50), oldest of them first.
 **The writes.** `issue_create` sends only the fields that were given.
 GitHub drops labels and assignees without an error when the identity has
 no push access; the answer shows the labels and assignees GitHub really
-set. Both writes are `caution` and wait for approval for now. A later
-change makes ticket writes `safe` inside the target's own repository.
+set. Both writes are ticket writes: `safe`, no approval, and only in the
+repository the target names (see "Why ticket writes need no approval").
 
 **Lists.** A long search answer goes behind a result handle. The scalars
 (`mode`, `complete`, `total_count`, `count`, `reason`, `query`) are listed
@@ -395,10 +478,11 @@ under `llm_instructions.result_scalars`, so they stay in the direct answer.
 drives the handlers with saved responses (no live GitHub): both search
 modes, a list over several pages, the 1,000-hit limit, the `repo:` prefix
 on every query, the refused inputs, the parent and comments of
-`issue_view`, and `issue_create` feeding its database id to
+`issue_view`, and `issue_create` feeding its number to
 `sub_issue_add`. `backend/tests/test_connectors_github_composites_issues_register.py`
 checks the risk levels, the `issues` group, the operation contract rules,
-and that each call through the dispatcher writes one audit row.
+that each call through the dispatcher writes one audit row, and that a
+write to another repository is refused with no call to GitHub.
 `backend/tests/test_github_board_composite_flow.py` files its issues with
 `issue_create`.
 
@@ -407,8 +491,9 @@ and that each call through the dispatcher writes one audit row.
 - **`GitHubRestConnector`** (`connector.py`) — `HttpConnector` subclass
   with class attributes `product="gh"`, `version="3"`,
   `impl_id="gh-rest"`, `priority=1`. Owns the per-target
-  installation-token cache, the per-target PAT cache, and the
-  `asyncio.Lock` that serialises cold-cache mint calls.
+  installation-token cache, the per-target PAT cache (both keyed on
+  `(tenant_id, id)` from `target_cache_key`), and the `asyncio.Lock` that
+  serialises cold-cache mint calls.
 - **`GitHubAppCredentials`** (`session.py`) — frozen dataclass of
   `(app_id, private_key_pem, installation_id)`. The Vault-stored
   material; never enters a log event or an `OperationResult`.
@@ -418,7 +503,8 @@ and that each call through the dispatcher writes one audit row.
   minted token plus the monotonic-clock expiry timestamp the cache uses
   for validity decisions.
 - **`GitHubTargetLike`** (`session.py`) — runtime-checkable structural
-  Protocol with `name`, `host`, `port`, `secret_ref`, `auth_model`. Any
+  Protocol with `id`, `tenant_id`, `name`, `host`, `port`, `secret_ref`,
+  `auth_model`. Any
   concrete `Target` model satisfying these attributes plugs in unchanged.
 - **`GitHubCredentialError`** + four subclasses (`session.py`) — the T11
   envelopes. Each carries a stable `code` attribute
@@ -430,15 +516,22 @@ and that each call through the dispatcher writes one audit row.
 ### Registration (import time)
 
 `connectors/github/__init__.py` runs at startup via
-`_eager_import_connectors`. It calls:
+`_eager_import_connectors`. It runs these steps:
 
-1. `register_connector("gh", GitHubRestConnector)` — v1 entry. Also
+1. The import of `op_classes.py` declares the five ticket writes as
+   `write` and as safe writes (see "Why ticket writes need no approval").
+2. `register_connector("gh", GitHubRestConnector)` — v1 entry. Also
    writes the `("gh", "", "")` wildcard triple into the v2 table.
-2. `register_connector_v2(product="gh", version="3",
+3. `register_connector_v2(product="gh", version="3",
    impl_id="gh-rest", cls=GitHubRestConnector)` — v2 versioned entry.
-3. `register_typed_op_registrar(register_github_typed_operations)` —
-   queues an async registrar. T1 ships a no-op body; T3 will fill it
-   when the catalog ingests.
+4. `register_typed_op_registrar(register_github_typed_operations)` —
+   queues an async registrar. Its body is a no-op
+   (`GitHubRestConnector.register_operations`); the ingested ops come from
+   `meho connector ingest`.
+5. The import of the `composites` subpackage queues
+   `register_github_composite_operations` (the 14 composites) and
+   registers the approval preview of `gh.composite.branch_commit_files`
+   (`_git_preview.py`).
 
 The dual registration matches the G0.15-T6 mandatory pattern (also used
 by `kubernetes/__init__.py`) so an unfingerprinted `(product="gh",
@@ -450,8 +543,7 @@ fingerprinted target resolves via the versioned entry.
 The target row carries `auth_model="shared_service_account"` (or
 `None` for legacy rows). The connector boundary accepts that and
 rejects every other identity model (`per_user`, `impersonation`)
-with `NotImplementedError`, the same shape `VmwareRestConnector`
-uses. The **upstream credential protocol** — App-installation vs
+with `NotImplementedError`. The **upstream credential protocol** — App-installation vs
 PAT — is picked one layer down by inspecting the Vault payload's
 field shape; G0.16-T2 (#1304) reconciled this with the connector
 code after the v0.8.0 dogfood caught the original `auth_model`-
@@ -464,7 +556,9 @@ auth_headers(target, operator)
         → NotImplementedError naming target + bad value
   └── _auth_token(target, operator)
         └── lock
-        └── cache hit (installation or PAT) → return cached
+        └── cache hit (installation or PAT)
+              → this caller's own Vault read once (SecretReaders)
+              → return cached
         └── credentials_loader(target, operator)
               └── (default) load_github_credentials_from_vault
                     └── load_vault_secret_data (single KV-v2 read)
@@ -514,7 +608,9 @@ closed) and inspects `target.host`:
   `permissions`.
 - `host="api.github.com/repos/<owner>/<repo>"` (or `api.github.com/<owner>/<repo>`)
   → `GET /repos/{owner}/{repo}`. Returns repo identity (`full_name`,
-  `id`, `private`, `default_branch`) + owner identity (`login`, `type`).
+  `id`, `private`, `default_branch`) + owner identity (`login`, `type`),
+  plus the workflow check of the ticket writes (`workflow_check`,
+  `ticket_event_workflows`, `ticket_write_warning`; see "Workflow check").
 
 Transport / credential failures surface as `reachable=False` with both
 the exception class+message in `extras["error"]` and the structured T11
@@ -561,8 +657,8 @@ skips or repeats rows.
 - **`load_basic_credentials`** (`connectors/_shared/vault_creds.py`) —
   shared operator-context Vault KV-v2 read with the no-secret-in-logs
   discipline and the two-phase error contract. Used by the
-  individual App / PAT loaders kept for backwards-compatible test
-  injection.
+  individual App / PAT loaders kept so tests can pass their own
+  loader.
 - **`load_vault_secret_data`** (`connectors/_shared/vault_creds.py`) —
   the same Vault read primitive, but returning the raw KV-v2 data
   dict without named-field extraction. Used by
@@ -593,18 +689,15 @@ skips or repeats rows.
   installation metadata sees what the App can reach, not what their
   personal GitHub account can reach. Operators wanting personal-account
   visibility use `gh` CLI on their workstation.
-- **Installation token caches per-`target.name`** — same scoping
-  vmware-rest uses. If two tenants legitimately hold a target named
-  `"github-main"`, the second tenant's connector instance reads from a
-  separate `GitHubRestConnector` instance (the registry produces one per
-  process; the cache is instance-scoped — same shape as vmware-rest's
-  `_session_tokens`). Cross-tenant token leakage is not possible under
-  the current chassis. Re-key on `target.secret_ref` if a future change
-  introduces shared connector instances across tenants.
-- **PAT cache is connector-instance-scoped + does not respect upstream
-  expiry** — MEHO never re-reads a PAT from Vault during a process
-  lifetime once it's cached. Operators rotating a PAT must redeploy
-  (or evict via `aclose`). The G3.11 follow-up Tasks can introduce a
+- **Token caches are keyed per target row** — both caches use
+  `(tenant_id, id)` from `target_cache_key`, so two tenants with a target
+  of the same name never share a token. A cached token is handed to a
+  caller only after that caller's own Vault read of the target's secret
+  passed once in this process.
+- **PAT cache does not respect upstream expiry** — MEHO re-reads a PAT
+  from Vault only on a cold cache. After rotating a PAT, update the
+  target's connection fields (the update route drops the kept token), or
+  let the next failed login drop it, or restart. The G3.11 follow-up Tasks can introduce a
   Vault-stored expiry hint if operators report this as a friction
   point; not pre-built.
 

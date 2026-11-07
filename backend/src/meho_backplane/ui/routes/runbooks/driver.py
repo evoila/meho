@@ -10,8 +10,9 @@ lifecycle (T1 #1884 ships the list + start modal; each row links here).
 
 This is a pure UI/BFF build over the in-process
 :class:`~meho_backplane.runbooks.run_service.RunbookRunService` -- the
-``require_ui_session`` floor (or the ``require_ui_admin`` hard gate, for
-reassign) + a direct service call, never the Bearer ``/api/v1`` surface.
+``require_ui_operator`` role floor for the read page and for next / abort
+(or the ``require_ui_admin`` hard gate, for reassign) + a direct service
+call, never the Bearer ``/api/v1`` surface.
 The closest write-surface precedent is
 :mod:`meho_backplane.ui.routes.runbooks.lifecycle` (HTMX fragment swap +
 typed-error -> inline alert + CSRF re-mint).
@@ -49,7 +50,8 @@ after T1's literal ``/ui/runbooks/runs/start``)
   - **Abort** -- a confirm dialog with a **required** non-empty reason.
   - **Reassign** -- shown ONLY for a ``tenant_admin``.
 
-* ``POST /ui/runbooks/runs/{run_id}/next`` -- operator floor. Builds a
+* ``POST /ui/runbooks/runs/{run_id}/next`` -- ``require_ui_operator`` role
+  floor (``read_only`` gets 403 at the dependency). Builds a
   :class:`NextStepRequest` and calls :meth:`next_step`. Re-renders the step
   fragment from the returned :class:`CurrentStepResponse`; a
   :class:`RunCompletedResponse` renders the completed state.
@@ -58,7 +60,8 @@ after T1's literal ``/ui/runbooks/runs/start``)
   (Advance hidden, only Abort forward); terminal / verify errors -> inline
   alerts.
 
-* ``POST /ui/runbooks/runs/{run_id}/abort`` -- operator floor; passes
+* ``POST /ui/runbooks/runs/{run_id}/abort`` -- ``require_ui_operator`` role
+  floor; passes
   ``caller_is_admin = probe.is_tenant_admin``. The reason is **required**
   client-side (HTMX ``required``) AND a tampered empty reason is handled
   cleanly (the schema's ``min_length=1`` 422s server-side; the reason is
@@ -140,7 +143,7 @@ from meho_backplane.runbooks.runs_schemas import (
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_admin,
-    require_ui_session,
+    require_ui_operator,
 )
 from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
 from meho_backplane.ui.routes.runbooks.driver_render import (
@@ -156,11 +159,13 @@ __all__ = ["register_driver_routes"]
 log = structlog.get_logger(__name__)
 
 #: Module-level ``Depends`` closures (B008 idiom -- no call in a default
-#: arg). ``_require_session`` is the operator floor the read page + the
-#: next / abort POSTs sit on; ``_require_admin`` is the hard
-#: ``tenant_admin`` gate the reassign POST sits on (an operator gets 403
-#: at the dependency, before the handler body runs).
-_require_session = Depends(require_ui_session)
+#: arg). ``_require_operator`` is the ``operator`` role floor the read page
+#: and the next / abort POSTs sit on (``read_only`` gets 403 at the
+#: dependency, like on REST);
+#: ``_require_admin`` is the hard ``tenant_admin`` gate the reassign POST
+#: sits on (an operator gets 403 at the dependency, before the handler
+#: body runs).
+_require_operator = Depends(require_ui_operator)
 _require_admin = Depends(require_ui_admin)
 
 #: Cap on the ``answer`` form field (a closed ``yes`` / ``no`` / ``escalate``
@@ -552,7 +557,7 @@ def register_driver_routes(router: APIRouter) -> None:
     async def runbooks_run_driver(
         run_id: uuid.UUID,
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         return await render_driver_page(request, session, run_id)
 
@@ -560,7 +565,7 @@ def register_driver_routes(router: APIRouter) -> None:
     async def runbooks_run_next(
         run_id: uuid.UUID,
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         verify_type: str = Form(default="", max_length=_MAX_VERIFY_TYPE_LENGTH),
         answer: str = Form(default="", max_length=_MAX_ANSWER_LENGTH),
     ) -> HTMLResponse:
@@ -570,7 +575,7 @@ def register_driver_routes(router: APIRouter) -> None:
     async def runbooks_run_abort(
         run_id: uuid.UUID,
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         reason: str = Form(default="", max_length=_MAX_REASON_LENGTH),
     ) -> HTMLResponse:
         return await _abort(request, session, run_id, reason)

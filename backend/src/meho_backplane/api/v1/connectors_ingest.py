@@ -61,11 +61,13 @@ impossible. No read or edit surface accepts a tenant id from
 the body or query string — cross-tenant probes are impossible by
 construction. The one nuance: the ``operator`` role sees only their
 own tenant's connectors **and** built-ins (``tenant_id IS NULL``);
-the ``tenant_admin`` role additionally ingests into the built-in scope,
-but mutating an *existing* built-in row (enable / disable / enable-reads
-/ edit-group / edit-op) is a platform action gated on ``platform_admin``
-(a tenant_admin without it gets a 403 ``builtin_connector_write_forbidden``,
-mirroring the doc-collection global-row seat #3616). The service layer
+writing the built-in scope — ingesting into it, or mutating an existing
+built-in row (enable / disable / enable-reads / edit-group / edit-op /
+delete) — is a platform action gated on ``platform_admin`` because the
+rows are shared by every tenant (a tenant_admin without it gets a 403:
+``builtin_connector_write_forbidden`` on the row routes, the plain
+``PermissionError`` text on ``POST /ingest``, mirroring the
+doc-collection global-row seat #3616). The service layer
 (:class:`ReviewService`, :class:`IngestionPipelineService`) carries
 matching tenant guards as defence-in-depth for sibling consumers
 (CLI verbs T5, admin MCP tools T7) that hit the service layer
@@ -141,6 +143,10 @@ The service-layer exceptions map to HTTP status codes uniformly:
   mapped here onto the ``product_impl_id_mismatch`` envelope via the
   shared builder so the REST 422 body and the MCP -32602 ``data``
   member can't drift.
+* :class:`~meho_backplane.operations._ingested_owner.IngestedOperationsNotAccepted`
+  → 422 Unprocessable Entity. The name belongs to a connector class
+  that runs only its own hand-written operations, so MEHO ingests no
+  API file under it. Same shared-builder parity as above.
 * :class:`PermissionError` (raised by
   :meth:`IngestionPipelineService.authorize_scope` — eagerly at the
   route on both ingest branches (#2208), and again inside the
@@ -200,6 +206,10 @@ from meho_backplane.api.v1.operations import connector_not_ingested_404
 from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge, has_fresh_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.operations._ingested_owner import (
+    IngestedOperationsNotAccepted,
+    build_ingested_ops_not_accepted_detail,
+)
 from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
@@ -260,7 +270,7 @@ from meho_backplane.operations.ingest import (
     get_job_registry,
     list_ingested_connectors,
     load_catalog,
-    load_spec_resource,
+    load_entry_spec,
     run_ingest_job,
 )
 from meho_backplane.operations.ingest.api_schemas import (
@@ -416,11 +426,11 @@ def get_llm_client_factory() -> LlmClientFactory:
         # returned for the service-layer PermissionError mapping.
         403: {
             "description": (
-                "The body's ``tenant_id`` is neither omitted/null "
-                "(built-in / global scope) nor the caller's own tenant "
-                "UUID, and the caller does not hold platform_admin. "
-                "Rejected synchronously on both the sync and "
-                "async branches; no job row is created."
+                "The body's ``tenant_id`` is omitted/null (built-in / "
+                "global scope, whose rows every tenant shares) or names "
+                "another tenant, and the caller does not hold "
+                "platform_admin. Rejected synchronously on both the sync "
+                "and async branches; no job row is created."
             ),
             "content": {
                 "application/json": {
@@ -841,6 +851,8 @@ def _job_to_response(job: IngestJob) -> IngestJobStatusResponse:
         spec_uris=list(job.spec_uris),
         started_at=job.started_at,
         ended_at=job.ended_at,
+        phase=job.phase,
+        phase_started_at=job.phase_started_at,
         ingestion=ingestion_model,
         grouping=grouping_model,
         error=job.error,
@@ -929,7 +941,8 @@ def _catalog_entry_specs(entry: ConnectorSpecEntry) -> list[SpecSource]:
     Two on-ramps (#1964 T1):
 
     * **Shipped spec** — ``entry.spec_resource`` is set: load the
-      MEHO-authored OpenAPI bytes from package data and carry them
+      shipped OpenAPI bytes from package data (MEHO's own, or the
+      connector package that brought the row) and carry them
       inline as :attr:`SpecSource.content` (the ``uri`` is the audit
       label ``spec:<resource>``). The ingest pipeline uses the content
       verbatim — no fetch, no SSRF guard — bypassing an ``upstream`` the
@@ -941,7 +954,7 @@ def _catalog_entry_specs(entry: ConnectorSpecEntry) -> list[SpecSource]:
       to fetch under the https guard.
     """
     if entry.spec_resource is not None:
-        content = load_spec_resource(entry.spec_resource)
+        content = load_entry_spec(entry)
         return [SpecSource(uri=f"spec:{entry.spec_resource}", content=content)]
     return [SpecSource(uri=uri) for uri in (entry.upstream or ())]
 
@@ -1165,6 +1178,11 @@ async def _run_ingest_with_http_mapping(
                 tuple(body.auth_secret_fields) if body.auth_secret_fields is not None else None
             ),
         )
+    except IngestedOperationsNotAccepted as exc:
+        raise HTTPException(
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            build_ingested_ops_not_accepted_detail(exc),
+        ) from exc
     except Exception as exc:
         _raise_ingest_http_error(exc, catalog_entry=catalog_entry)
 
@@ -1755,7 +1773,7 @@ async def enable_reads_endpoint(
     Tenant scoping (#1699 contract): no ``tenant_id`` parameter — the
     scope is always the calling operator's tenant from the JWT. The
     MCP sibling ``meho_connector_enable_reads`` accepts an optional
-    ``tenant_id`` for the built-in / global scope (tenant_admin only).
+    ``tenant_id`` for the built-in / global scope (platform_admin only).
 
     The optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)
     resolves the ambiguous-scope 409 directly: ``prefer=tenant`` applies
@@ -1867,8 +1885,9 @@ async def delete_endpoint(
     ``tenant_id`` parameter — the delete scope is always the calling
     operator's tenant from the JWT. Built-in / global connectors
     (``tenant_id IS NULL`` rows) are deleted via the MCP sibling
-    ``meho_connector_delete`` with ``tenant_id`` omitted
-    (tenant_admin only). Unknown ids, cross-tenant probes, and rows
+    ``meho_connector_delete`` with ``tenant_id`` omitted, which needs
+    ``platform_admin`` because every tenant shares those rows. Unknown
+    ids, cross-tenant probes, and rows
     visible only under a scope this route cannot name all collapse
     into the same 404 the other connector routes use; a repeat
     DELETE therefore returns 404 once the first one landed.

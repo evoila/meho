@@ -11,6 +11,35 @@
       "minimum": 1,
       "description": "Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2."
     },
+    "updateStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "description": "The Deployment update strategy (#5024). Recreate (the default) stops the old pod before the new one starts.",
+      "properties": {
+        "type": {"type": "string", "enum": ["Recreate", "RollingUpdate"]},
+        "rollingUpdate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxSurge": {"type": ["integer", "string"]},
+            "maxUnavailable": {"type": ["integer", "string"]}
+          }
+        }
+      },
+      "if": {"properties": {"type": {"const": "Recreate"}}},
+      "then": {"not": {"required": ["rollingUpdate"]}}
+    },
+    "shutdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preStopSleepSeconds", "drainSeconds"],
+      "description": "How the backplane pod stops (#5024). The grace period is preStopSleepSeconds + drainSeconds + 30.",
+      "properties": {
+        "preStopSleepSeconds": {"type": "integer", "minimum": 0, "maximum": 60},
+        "drainSeconds": {"type": "integer", "minimum": 0, "maximum": 3600}
+      }
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
@@ -144,6 +173,24 @@
         }
       }
     },
+    "metricsAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The metrics token. With `enabled: true` (default) the backplane gets `METRICS_AUTH_TOKEN` from a Secret: `existingSecret` when set, else the chart-made `<release>-metrics-auth`. `/metrics` answers only a caller that sends the token as a bearer; `/ready` shows its `features` block only to such a caller and gives every caller the verdict and the checks. The ServiceMonitor (when on) sends the token from the same Secret.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingSecret": {
+          "type": "string",
+          "description": "Name of your own Secret holding the token under `secretKey`. Empty: the chart makes `<release>-metrics-auth`."
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key in the Secret that holds the token."
+        }
+      }
+    },
     "prometheusRule": {
       "type": "object",
       "additionalProperties": false,
@@ -268,7 +315,7 @@
             "enabled": { "type": "boolean" },
             "secretName": {
               "type": "string",
-              "description": "Kubernetes Secret name holding the TLS certificate. Required (non-empty) when both ingress.enabled and ingress.tls.enabled are true — enforced by the allOf below."
+              "description": "Kubernetes Secret name holding the TLS certificate. Required (non-empty) when both ingress.enabled and ingress.tls.enabled are true and no built-in core part is on — enforced by the root allOf. With a built-in part on, empty means `<release>-core-tls`, which the install makes (#4047)."
             }
           }
         }
@@ -286,28 +333,6 @@
                 "type": "string",
                 "minLength": 1,
                 "format": "hostname"
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "enabled": { "const": true },
-              "tls": {
-                "properties": { "enabled": { "const": true } },
-                "required": ["enabled"]
-              }
-            },
-            "required": ["enabled", "tls"]
-          },
-          "then": {
-            "properties": {
-              "tls": {
-                "properties": {
-                  "secretName": { "type": "string", "minLength": 1 }
-                },
-                "required": ["secretName"]
               }
             }
           }
@@ -447,6 +472,21 @@
           "enum": ["true", "false"],
           "description": "Lab-class switch for delegated approval decisions (#3693), rendered unconditionally into the `APPROVAL_ALLOW_DELEGATED_DECISION` env var. A delegated decision is an approve or reject whose reason ends with an `Instructed-by:` block. Default `\"false\"` (fail-closed, production) refuses every delegated decision with 403 `delegated_decision_forbidden`. Set `\"true\"` only on a lab-class deployment. Deliberately absent from `config.required`."
         },
+        "dispatchRateLimitPerMinute": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "How many operations one person or agent may start per minute, counted per tenant and principal in the Valkey store. Rendered into `DISPATCH_RATE_LIMIT_PER_MINUTE`. Default `\"600\"`. `\"0\"` turns the limit off. See `docs/codebase/rate-limiting.md`."
+        },
+        "dispatchMaxConcurrentOps": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "How many operations one person or agent may have running at the same time. Rendered into `DISPATCH_MAX_CONCURRENT_OPS`. Default `\"16\"`. `\"0\"` turns the cap off."
+        },
+        "mcpSessionStartLimitPerMinute": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "How many new MCP sessions one tenant may start per minute. Rendered into `MCP_SESSION_START_LIMIT_PER_MINUTE`. Default `\"60\"`. `\"0\"` turns the cap off."
+        },
         "freshSignInMaxAgeSeconds": {
           "type": "string",
           "pattern": "^([3-9][0-9]|[1-9][0-9]{2}|[12][0-9]{3}|3[0-5][0-9]{2}|3600)$",
@@ -466,15 +506,29 @@
     "postgres": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["credentialsSecret"],
       "properties": {
         "host": { "type": "string" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "database": { "type": "string", "minLength": 1 },
         "credentialsSecret": {
           "type": "string",
-          "minLength": 1,
-          "description": "Kubernetes Secret name holding the DATABASE_URL value at key `url` — required."
+          "description": "Kubernetes Secret name holding the DATABASE_URL value at key `url`. Required (non-empty) unless `corePostgres.enabled` is true; then it must be empty or `<release>-core-postgres-meho`, the Secret the install makes (root allOf, #4047)."
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The login of the running backplane, apart from the owner login in `credentialsSecret` that runs the migrations. Both keys empty = one login for everything.",
+          "properties": {
+            "role": {
+              "type": "string",
+              "pattern": "^([a-z_][a-z0-9_]{0,62})?$",
+              "description": "Name of the runtime role: a lower-case PostgreSQL role name. The migration grants it its rights (`DATABASE_RUNTIME_ROLE`)."
+            },
+            "credentialsSecret": {
+              "type": "string",
+              "description": "Kubernetes Secret holding the runtime login's DSN at key `url`. With your own PostgreSQL, `role` and this key go together. With the built-in PostgreSQL, leave it empty: the install makes `<release>-core-postgres-meho-app`, and the PostgreSQL pod reads only that Secret."
+            }
+          }
         }
       }
     },
@@ -485,7 +539,7 @@
       "properties": {
         "openshift": {
           "type": "boolean",
-          "description": "Set to true on OpenShift. The built-in core parts then leave out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
+          "description": "Set to true on OpenShift. Every pod of the chart then leaves out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
         },
         "imageRegistry": {
           "type": "string",
@@ -509,7 +563,7 @@
     "vault": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Vault credential backend. `address` is required (non-empty, `uri`) only when `config.credentialBackend: vault` — enforced by the root-level `allOf` conditional — so a `gsm` install may leave it blank. The block itself is always present (it ships safe-by-default values); the conditional gates the strictness.",
+      "description": "Vault credential backend. `address` is required (non-empty, `uri`) only when `config.credentialBackend: vault` and `coreVault.enabled` is not true (with the built-in OpenBao the chart sets the address and it must stay empty) — enforced by the root-level `allOf` conditional — so a `gsm` install may leave it blank. The block itself is always present (it ships safe-by-default values); the conditional gates the strictness.",
       "properties": {
         "address": {
           "type": "string",
@@ -657,6 +711,42 @@
           "minimum": 1,
           "maximum": 128000,
           "description": "Most output tokens the agent asks the model for in one answer. Rendered as `AGENT_MAX_OUTPUT_TOKENS`. Used by the Anthropic backend only. Range [1, 128000], the same bounds the backplane checks at start. Default 4096."
+        },
+        "modelBackend": {
+          "type": "string",
+          "enum": ["", "anthropic", "openai", "bedrock", "vcf-paif"],
+          "description": "Which model backend every agent run uses, rendered as `AGENT_MODEL_BACKEND`. Empty: not rendered, and the backplane uses its own default (`anthropic`)."
+        },
+        "openai": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "An OpenAI-compatible model endpoint (#5851), separate from `agent.enabled`. When `enabled: true`, the chart sets `OPENAI_API_KEY` from a Secret (`secretKeyRef`, never a plain value), and `OPENAI_BASE_URL` / `OPENAI_DEFAULT_MODEL` when they are set. There is no field for the key itself, so a plain key is refused. The Secret is `secretName`, or the `<release>-agent-openai` Secret that `eso.agentOpenai.enabled: true` makes; with neither, `helm template` fails with a fix.",
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "baseUrl": {
+              "type": "string",
+              "pattern": "^$|^https?://",
+              "description": "Base URL of the endpoint, rendered as `OPENAI_BASE_URL`. Empty: not rendered, and the backplane uses OpenAI's own service."
+            },
+            "defaultModel": {
+              "type": "string",
+              "description": "Model id the endpoint serves, rendered as `OPENAI_DEFAULT_MODEL`. Empty: not rendered, and the backplane uses its own default."
+            },
+            "secretName": {
+              "type": "string",
+              "description": "Name of the Kubernetes Secret holding the API key. Leave empty with `eso.agentOpenai.enabled: true`."
+            },
+            "secretKey": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Key within the Secret whose value is the API key. Default `api_key`, matching the ESO target."
+            }
+          }
         }
       }
     },
@@ -764,20 +854,27 @@
       "type": "object",
       "additionalProperties": false,
       "description": "Encrypted custody for credential-write approval inputs. When enabled, APPROVAL_HANDOFF_ENCRYPTION_KEY is injected only via secretKeyRef. It is independent of the optional UI session key. REQUIRED if any credential-write operation must wait for approval: while this is disabled, MEHO denies every such operation instead of letting it wait. See docs/codebase/approvals.md.",
-      "required": ["enabled"],
       "properties": {
-        "enabled": { "type": "boolean" },
-        "secretName": { "type": "string" },
+        "enabled": {
+          "type": ["boolean", "null"],
+          "description": "Unset (null, the default) = on when a built-in core part is on, off otherwise (#4047). `true` with an empty `secretName` needs a built-in part, whose secrets Job makes `<release>-core-approval-handoff`; the render fails otherwise."
+        },
+        "secretName": { "type": "string", "description": "Your own Secret with the Fernet key. Empty = `<release>-core-approval-handoff`, which the install makes when a built-in part is on." },
         "secretKey": { "type": "string", "minLength": 1 }
-      },
-      "allOf": [{
-        "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
-        "then": { "required": ["secretName"], "properties": { "secretName": { "type": "string", "minLength": 1 } } }
-      }]
+      }
+    },
+    "paramsHashKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The key of the params hashes and value fingerprints in audit rows and approval requests, injected as PARAMS_HASH_KEY only via secretKeyRef. A new database password keeps this key. With no Secret, MEHO makes the key from DATABASE_URL. See docs/codebase/approvals.md.",
+      "properties": {
+        "secretName": { "type": "string", "description": "Your own Secret with the key. Empty = `<release>-core-params-hash`, which the install makes when a built-in part is on." },
+        "secretKey": { "type": "string", "minLength": 1 }
+      }
     },
     "corePostgres": {
       "type": "object",
-      "description": "Built-in PostgreSQL subchart values (`charts/postgres/`, #4039): one PostgreSQL 17 server with pgvector and two databases, `meho` and `keycloak`, each owned by a role of the same name that is not a superuser. The chart creates the `vector` extension itself. It reads the Secrets `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key `password`), which the install's secrets Job makes. Off by default; with it off the chart renders exactly what it rendered before.",
+      "description": "Built-in PostgreSQL subchart values (`charts/postgres/`, #4039): one PostgreSQL 17 server with pgvector and two databases, `meho` and `keycloak`, each owned by a role of the same name that is not a superuser. The chart creates the `vector` extension itself. It reads the Secrets `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key `password`), which the install's secrets Job makes. On by default; with it on the chart also points the backplane's DATABASE_URL at `<release>-core-postgres-meho` and its NetworkPolicy at the PostgreSQL pod (#4047). With it off the chart renders exactly what it rendered before.",
       "additionalProperties": false,
       "required": ["enabled"],
       "properties": {
@@ -940,10 +1037,11 @@
         "firstLogin": {
           "type": "object",
           "additionalProperties": false,
-          "description": "The two people the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md). Their temporary passwords are in <release>-core-first-login.",
+          "description": "The users the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md): two people, with temporary passwords in <release>-core-first-login, and the console admin (a user of realm master), with its temporary password in <release>-core-console-admin.",
           "properties": {
-            "adminUsername": { "type": "string", "minLength": 1, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
-            "approverUsername": { "type": "string", "minLength": 1, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." }
+            "adminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
+            "approverUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." },
+            "consoleAdminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the console admin: a user of realm master with every role of the master client meho-realm except impersonation, so it administers realm meho in the Keycloak admin console. Its temporary password is in <release>-core-console-admin; it sets up an authenticator code at the first login." }
           }
         },
         "ci": {
@@ -1005,7 +1103,7 @@
     "coreVault": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Built-in OpenBao, the password safe (ADR 0008). When enabled, the OpenBao subchart (`charts/openbao/`) is deployed. The `vault:` block stays for a Vault you bring yourself. This block names every key the subchart has; Helm checks their full shape against `charts/openbao/values.schema.json` when `enabled` is true.",
+      "description": "Built-in OpenBao, the password safe (ADR 0008). On by default. When enabled, the OpenBao subchart (`charts/openbao/`) is deployed and the chart sets the backplane's VAULT_ADDR, login role (`meho-mcp`), mount (`jwt`) and scheduler token itself (#4047); `config.vaultAddr` and `vault.address` must stay empty. The `vault:` block stays for a Vault you bring yourself. This block names every key the subchart has; Helm checks their full shape against `charts/openbao/values.schema.json` when `enabled` is true.",
       "properties": {
         "enabled": { "type": "boolean" },
         "authDelegator": { "type": "boolean", "description": "Render a ClusterRoleBinding of OpenBao's service account to `system:auth-delegator`, the chart's only cluster-wide object. Default false." },
@@ -1484,6 +1582,25 @@
             }
           }
         },
+        "agentOpenai": {
+          "type": "object",
+          "description": "Optional ExternalSecret for the API key of the OpenAI-compatible model endpoint (#5851). Target Secret is `<release>-agent-openai`, keyed `agent.openai.secretKey` (default `api_key`). Independent of `eso.enabled: true`.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "remoteKey": {
+              "type": "string",
+              "description": "Vault KV path holding the API key. Empty → the template derives it as `<vault.paths.kv>/agent-openai` at render time."
+            },
+            "remoteProperty": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Property within the remote KV entry that holds the API key."
+            }
+          }
+        },
         "keycloakAdmin": {
           "type": "object",
           "description": "Optional ExternalSecret for the Keycloak admin client secret (G11.2 #803). Target Secret is `<release>-keycloak-admin`, keyed `client_secret` (matches the chart default `keycloakAdmin.clientSecret.secretKey`). Independent of `eso.enabled: true`.",
@@ -1535,11 +1652,11 @@
         },
         "postgresCIDR": {
           "type": "string",
-          "description": "PostgreSQL egress CIDR (IPv4). Required and shape-validated (non-empty IPv4 CIDR) when networkPolicy.enabled is true — the rendered NetworkPolicy refuses to ship a wide subnet by accident. When networkPolicy.enabled is false the template skips the NetworkPolicy resource entirely and this field may be left blank."
+          "description": "PostgreSQL egress CIDR (IPv4). Not used with the built-in PostgreSQL (`corePostgres.enabled`): the backplane then reaches its pod by podSelector (root allOf). Otherwise required and shape-validated (non-empty IPv4 CIDR) when networkPolicy.enabled is true — the rendered NetworkPolicy refuses to ship a wide subnet by accident. When networkPolicy.enabled is false the template skips the NetworkPolicy resource entirely and this field may be left blank."
         },
         "vaultCIDR": {
           "type": "string",
-          "description": "Vault egress CIDR (IPv4). Same conditional shape rules as postgresCIDR."
+          "description": "Vault egress CIDR (IPv4). Same conditional shape rules as postgresCIDR; not used with the built-in OpenBao (`coreVault.enabled`)."
         },
         "keycloakCIDR": {
           "type": "string",
@@ -1591,30 +1708,7 @@
           },
           "description": "Extra outgoing rules for the backplane NetworkPolicy, each a Kubernetes egress rule added exactly as written (#3516): the networks of the systems MEHO manages, the AI service, and Vault / Keycloak behind an in-cluster ingress (name the ingress Pods and their targetPort — the rule is checked after the Service redirect). Each rule must have a non-empty `to` list, because Kubernetes reads a missing or empty `to` as every destination. Only the keys Kubernetes knows are accepted (`to`, `ports`; in `to`: `ipBlock`, `namespaceSelector`, `podSelector`; in `ports`: `port`, `endPort`, `protocol`), so a typo such as `port:` for `ports:` is refused instead of silently dropping the port limit. Default empty — nothing is added."
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["postgresCIDR", "vaultCIDR"],
-            "properties": {
-              "postgresCIDR": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
-              },
-              "vaultCIDR": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
-              }
-            }
-          }
-        }
-      ]
+      }
     },
     "nodeSelector": {
       "type": "object",
@@ -1677,12 +1771,111 @@
   },
   "allOf": [
     {
-      "description": "When `config.credentialBackend` is `vault` (the default), the deployment reads credentials + the health federation proof from Vault, so `vault.address` must be a non-empty `uri`. A `gsm` install skips this and may leave `vault.address` blank.",
+      "description": "A runtime login needs both keys: `postgres.runtime.credentialsSecret` names the Secret, `postgres.runtime.role` the role the migration grants. A Secret without a role would give the running backplane a login with no rights. The next rule checks the other direction.",
+      "if": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "credentialsSecret": { "minLength": 1 } },
+                "required": ["credentialsSecret"]
+              }
+            },
+            "required": ["runtime"]
+          }
+        },
+        "required": ["postgres"]
+      },
+      "then": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "role": { "minLength": 1 } },
+                "required": ["role"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "With your own PostgreSQL a runtime role needs its Secret too: `postgres.runtime.role` without `postgres.runtime.credentialsSecret` would make the migration grant rights to a login the running backplane never uses, and the backplane would keep the owner login. With the built-in PostgreSQL the install makes the Secret, so `role: meho_app` alone is fine there.",
+      "if": {
+        "allOf": [
+          {
+            "not": {
+              "properties": {
+                "corePostgres": {
+                  "properties": { "enabled": { "const": true } },
+                  "required": ["enabled"]
+                }
+              },
+              "required": ["corePostgres"]
+            }
+          },
+          {
+            "properties": {
+              "postgres": {
+                "properties": {
+                  "runtime": {
+                    "properties": { "role": { "minLength": 1 } },
+                    "required": ["role"]
+                  }
+                },
+                "required": ["runtime"]
+              }
+            },
+            "required": ["postgres"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "credentialsSecret": { "minLength": 1 } },
+                "required": ["credentialsSecret"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "With the built-in PostgreSQL the runtime role is `meho_app`, made by the install together with the Secret `<release>-core-postgres-meho-app`. `postgres.runtime.role` stays empty or `meho_app` there; another name would make the migration wait for a role the install never creates. `postgres.runtime.credentialsSecret` stays empty or names that Secret; the render checks it (`meho.postgres.runtimeSecretName`), because a schema cannot know the release name.",
+      "if": {
+        "properties": {
+          "corePostgres": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["corePostgres"]
+      },
+      "then": {
+        "properties": {
+          "postgres": {
+            "properties": {
+              "runtime": {
+                "properties": { "role": { "enum": ["", "meho_app"] } }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "When `config.credentialBackend` is `vault` (the default), the deployment reads credentials + the health federation proof from Vault, so `vault.address` must be a non-empty `uri`. A `gsm` install skips this and may leave `vault.address` blank. With the built-in OpenBao (`coreVault.enabled`) the chart sets the address (#4047).",
       "if": {
         "properties": {
           "config": {
             "properties": { "credentialBackend": { "const": "vault" } },
             "required": ["credentialBackend"]
+          },
+          "coreVault": {
+            "not": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] }
           }
         },
         "required": ["config"]
@@ -1832,6 +2025,113 @@
                   "minLength": 1,
                   "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "A bring-your-own PostgreSQL (`corePostgres.enabled` not true) needs `postgres.credentialsSecret`, and with the NetworkPolicy on its egress CIDR. With the built-in PostgreSQL the chart uses `<release>-core-postgres-meho` and reaches the PostgreSQL pod by podSelector (#4047).",
+      "if": {
+        "properties": {
+          "corePostgres": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["corePostgres"]
+      },
+      "else": {
+        "properties": {
+          "postgres": {
+            "required": ["credentialsSecret"],
+            "properties": { "credentialsSecret": { "minLength": 1 } }
+          },
+          "networkPolicy": {
+            "if": {
+              "properties": { "enabled": { "const": true } },
+              "required": ["enabled"]
+            },
+            "then": {
+              "required": ["postgresCIDR"],
+              "properties": {
+                "postgresCIDR": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "A bring-your-own Vault (`coreVault.enabled` not true) with the NetworkPolicy on needs its egress CIDR. With the built-in OpenBao the NetworkPolicy reaches the OpenBao pod by podSelector (#4047).",
+      "if": {
+        "properties": {
+          "coreVault": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["coreVault"]
+      },
+      "else": {
+        "properties": {
+          "networkPolicy": {
+            "if": {
+              "properties": { "enabled": { "const": true } },
+              "required": ["enabled"]
+            },
+            "then": {
+              "required": ["vaultCIDR"],
+              "properties": {
+                "vaultCIDR": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "With no built-in core part on, an Ingress with TLS needs `ingress.tls.secretName`. With one on, an empty name means `<release>-core-tls`, which the install's secrets Job makes (#4047).",
+      "if": {
+        "allOf": [
+          { "properties": { "corePostgres": { "not": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } } } },
+          { "properties": { "coreKeycloak": { "not": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } } } },
+          { "properties": { "coreVault": { "not": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } } } },
+          {
+            "properties": {
+              "ingress": {
+                "properties": {
+                  "enabled": { "const": true },
+                  "tls": {
+                    "properties": { "enabled": { "const": true } },
+                    "required": ["enabled"]
+                  }
+                },
+                "required": ["enabled", "tls"]
+              }
+            },
+            "required": ["ingress"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "ingress": {
+            "properties": {
+              "tls": {
+                "properties": {
+                  "secretName": { "type": "string", "minLength": 1 }
+                },
+                "required": ["secretName"]
               }
             }
           }

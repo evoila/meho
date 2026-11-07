@@ -208,6 +208,7 @@ class _Http401Connector(HttpConnector):
     """
 
     product = "vcfops"
+    accepts_ingested_operations = True
     version = "9"
     impl_id = "vcfops-rest"
     supported_version_range = ">=9,<10"

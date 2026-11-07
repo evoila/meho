@@ -78,5 +78,10 @@ a stock PostgreSQL image — swap it as noted in step 2.
 
 The moment you want a real login, real credentials, or an agent
 session, you have outgrown the quickstart — go to
-[the install trail](index.md). Nothing from the quickstart carries
+[the install trail](index.md). For a real login on a throwaway kind
+cluster, use the chart's built-in PostgreSQL, Keycloak and OpenBao
+instead of this overlay. You add an ingress controller and a hostname
+your browser reaches; nothing outside the cluster is needed. The steps
+are in
+[A throwaway install with the built-in parts](https://github.com/evoila/meho/blob/main/docs/deploying.md#a-throwaway-install-with-the-built-in-parts). Nothing from the quickstart carries
 over; treat it as disposable (`kind delete cluster --name meho-dev`).

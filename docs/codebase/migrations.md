@@ -9,8 +9,10 @@ files (`0001_*.py`, `0002_*.py`, …). The chain runs against both SQLite
 
 The Alembic environment (`backend/alembic/env.py`) uses an async cookbook so
 migrations run via the same `asyncio`-aware engine the application uses. Each
-migration file's `upgrade()` and `downgrade()` functions run synchronously
-inside an `asyncio.run()` call made by Alembic — do not `await` in migration
+migration file's `upgrade()` and `downgrade()` functions run synchronously:
+through `AsyncConnection.run_sync`, inside an `asyncio.run()` call in `env.py`
+for a plain `alembic upgrade`, or on the connection that the migration runner
+(`meho_backplane.db.migrate`) hands over. Do not `await` in migration
 bodies; use synchronous SQLAlchemy Core (`op.get_bind()` / `bind.execute()`).
 
 ## File naming
@@ -21,6 +23,43 @@ bodies; use synchronous SQLAlchemy Core (`op.get_bind()` / `bind.execute()`).
 
 Sequence is zero-padded to four digits (`0001`, `0018`, …). The slug is
 lower-case with underscores. Every new migration increments the sequence by one.
+
+## Module names in `__all__` (#5683)
+
+Every new migration lists its module names in `__all__`. The template
+`backend/alembic/script.py.mako` writes this block:
+
+```python
+__all__ = [
+    "branch_labels",
+    "depends_on",
+    "down_revision",
+    "downgrade",
+    "revision",
+    "upgrade",
+]
+```
+
+Why: Alembic reads `revision`, `down_revision`, `branch_labels` and
+`depends_on` from the module itself. Nothing in the file uses them, so the
+code-quality check (the CodeQL rule `py/unused-global-variable`) opened four
+"Unused global variable" review threads on every pull request with a new
+migration. The rule skips names that the module exports. A name in
+`__all__` counts as exported. Without `__all__`, only names set with a plain
+`=` count, and the template sets these names with a type annotation
+(`revision: str = ...`), so they did not count.
+
+Rules for the block:
+
+- Use a plain `__all__ = [...]`, with no type annotation. The check does not
+  read `__all__: list[str] = [...]`.
+- Use a list of string literals, not a tuple. With a tuple the rule turns off
+  for the whole file.
+- Copy the block into a migration you write by hand.
+
+`backend/tests/migrations/test_alembic_migration_exports.py` checks the
+template and every migration after `0134`. Migrations up to `0134` are older
+than the rule and stay as they are.
 
 ## UUID binding convention
 
@@ -155,14 +194,17 @@ example is `audit_log` being **append-only** (CLAUDE.md postulate 7 / v0.1-spec
 section 6). Migration `0100` installs a `BEFORE UPDATE OR DELETE ... FOR EACH ROW`
 trigger (`audit_log_append_only`, calling `audit_log_reject_mutation()`) that
 `RAISE`s on a direct `UPDATE` / `DELETE`, while `INSERT` / `SELECT` stay untouched.
+Migration `0136` uses the same pattern for `instance_settings_revision`
+(trigger `instance_settings_revision_append_only`; see `settings.md`).
 
 What the trigger does and does not stop:
 
 - It fires for every role. It stops mistakes, and roles that have no ownership,
   `TRIGGER` or `TRUNCATE` right on the table.
 - It does not stop the table owner or a superuser. They can disable the trigger,
-  replace the function, or `TRUNCATE` the table. In the default chart the app and
-  the migration job use the same database login, so the app role owns `audit_log`.
+  replace the function, or `TRUNCATE` the table. So the running backplane should
+  not be the owner: see "The runtime role" below. With one login for everything
+  (the default for a bring-your-own PostgreSQL), the app login owns `audit_log`.
 - It does not stop a role with the `TRUNCATE` right (row triggers do not fire on
   `TRUNCATE`), or a role with the `TRIGGER` right. Such a role can add its own
   trigger, which can change a row after the guard has allowed the update, or run
@@ -207,6 +249,49 @@ Before `0103`, the age-off `UPDATE` was rejected too, so `raw_payload` was never
 emptied on PostgreSQL. The testcontainers tests in
 `tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py` run the real
 age-off tick on PostgreSQL and pin every row of this table.
+
+### The runtime role (the login of the running backplane)
+
+The trigger stops writes; ownership and the `TRUNCATE` and `TRIGGER` rights get
+around it. So the running backplane can log in with a second, narrower role,
+apart from the owner login that runs the migrations
+(`backend/src/meho_backplane/db/runtime_role.py`):
+
+- **Who creates it.** The built-in PostgreSQL of the chart creates the role
+  `meho_app` from its SQL file (`charts/postgres`, together with the Secret
+  `<release>-core-postgres-meho-app` the secrets Job makes), with `LOGIN`, no
+  superuser, no ownership, and `CONNECT` on `meho`. With your own PostgreSQL you
+  create it the same way and name it in `postgres.runtime.role` and its DSN
+  Secret in `postgres.runtime.credentialsSecret` (both keys, or neither;
+  the chart schema stops an install with one of them):
+
+  ```sql
+  CREATE ROLE meho_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '<password>';
+  GRANT CONNECT ON DATABASE meho TO meho_app;
+  ```
+
+- **Who grants its rights.** The migration runner, as the owner, after every
+  `alembic upgrade head` (step 5 below). The chart passes the name as
+  `DATABASE_RUNTIME_ROLE` to the migration container. The role gets `SELECT`,
+  `INSERT`, `UPDATE` and `DELETE` on every table of `public` and the use of every
+  sequence, also as the defaults for tables a later migration creates. On
+  `audit_log` it gets only `SELECT`, `INSERT` and `UPDATE` of the column
+  `raw_payload` (the weekly age-off). No `DELETE`, `TRUNCATE` or `TRIGGER`, and
+  as a non-owner it cannot disable the trigger or drop the table.
+- **Which login does what.** The backplane container reads `DATABASE_URL` from
+  the runtime Secret; the hook Job and the `migrate` init container keep the
+  owner login. Both empty (`postgres.runtime.*`) means one login for everything,
+  as before.
+- **What still needs the owner login.** The topology scope cut-over
+  (`python -m meho_backplane.topology.scope_repair cutover`, see
+  `docs/codebase/topology.md`) drops and creates an index and makes a column
+  required. That is owner work, so run that command with the owner login
+  (`DATABASE_URL` from `postgres.credentialsSecret`), not with the runtime login
+  of the backplane pod. With the runtime login it stops before it changes
+  anything (`must be owner of table graph_node`).
+- **Tests.** `tests/migrations/test_migrate_runtime_role.py` runs the runner as
+  a non-superuser owner on PostgreSQL and checks what the role can and cannot
+  do; `tests/test_chart_runtime_database_login.py` pins the render in each mode.
 
 Rules for this kind of migration:
 
@@ -382,7 +467,7 @@ It uses the same image (with the digest pin), command, environment,
 security context, volumes and `migrationJob.resources` as the Job;
 `backend/tests/test_chart_migrate_init_container.py` compares the two.
 
-The runner does four steps on one database connection:
+The runner does five steps on one database connection:
 
 1. **Wait for the database.** In the pod, the built-in database starts at
    the same time as MEHO. The runner tries to connect every 2 seconds, for
@@ -414,6 +499,18 @@ The runner does four steps on one database connection:
    (connection sharing) With Asyncio"); `backend/alembic/env.py` uses it
    instead of opening its own. A plain `alembic upgrade head` from the
    command line still opens its own connection and takes no lock.
+5. **Give the runtime role its rights.** When `DATABASE_RUNTIME_ROLE` is set
+   (see "The runtime role" above), the runner waits for that role to exist,
+   for at most `MIGRATION_DB_WAIT_SECONDS` (it prints
+   `migration_runtime_role_waiting` meanwhile; with the built-in PostgreSQL
+   the reconcile sidecar creates the role a moment after the server
+   answers), then grants it its rights in one transaction and prints
+   `migration_runtime_role_granted: <role>`. A role that never appears fails
+   the run with `migration_failed: RuntimeRoleMissingError: ...` after the
+   schema upgrade went through. A name that is not a plain lower-case
+   identifier fails the run before it connects. The step also runs after a
+   skipped upgrade (step 3), and it is safe to run twice. Off PostgreSQL it
+   prints `migration_runtime_role_skipped`.
 
 Exit codes stay `0` (success, also a skipped run) and `1` (any failure),
 with the line `migration_failed: <ExcClass>: <msg>` on stderr.
@@ -422,9 +519,11 @@ with the line `migration_failed: <ExcClass>: <msg>` on stderr.
 at the hook step, also without `--wait`. With the init container, the
 container exits `1` and the kubelet restarts it with back-off. The pod never
 gets Ready, so `helm install --wait` or `helm upgrade --wait` fails at its
-timeout, and on an upgrade the old pods keep serving (the Deployment's
-rolling update takes no old pod away before a new one is Ready, with one
-replica). Without `--wait`, Helm reports success and only the pod status
+timeout. On an upgrade with the chart's default `Recreate` strategy
+(#5024) the old pod has already stopped, so MEHO is down until
+`helm rollback` (see `docs/acceptance/rollback.md`). Only with
+`updateStrategy.type: RollingUpdate` do the old pods keep serving. Without
+`--wait`, Helm reports success and only the pod status
 shows the failure: install the built-in core with `--wait`. The form-2
 installer does (`deploy/linux-server/lib/core.sh`, `install_core`). To read
 the error: `kubectl logs <pod> -c migrate` (add `--previous` after a
@@ -439,7 +538,7 @@ shows the holder; `pg_terminate_backend(pid)` ends it.
 
 Tests: `backend/tests/migrations/test_migrate_runner.py` (the wait, its time
 limit, a refused login, the lock with real processes against PostgreSQL, the
-skip on a newer database).
+skip on a newer database) and `test_migrate_runtime_role.py` (step 5).
 
 ## Rollback contract (readiness ↔ migrations, #1607)
 
@@ -616,6 +715,8 @@ avoid "event loop already running" errors.
   twin check on a partial-unique natural key, documented no-op downgrade).
 - `backend/tests/migrations/conftest.py`: the `copy_migrated_db` fixture (saved databases per revision, #5295).
 - `backend/tests/migrations/test_alembic_uuid_param_consistency.py`: drift-guard test.
+- `backend/tests/migrations/test_alembic_migration_exports.py`: `__all__` check for new migrations (#5683).
+- CodeQL rule `py/unused-global-variable`: <https://github.com/github/codeql/blob/main/python/ql/src/Variables/UnusedModuleVariable.ql>.
 - `backend/tests/migrations/test_alembic_seed_rdc_conventions.py`: 0018 behavioural tests.
 - `backend/tests/migrations/test_migration_compat.py`: additive-only CI guard tests.
 - `backend/tests/migrations/test_migration_heads.py`: single-head CI guard tests (#4204).

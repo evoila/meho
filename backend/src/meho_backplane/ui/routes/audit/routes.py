@@ -114,7 +114,12 @@ from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.flight_recorder import load_trace
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import (
+    UISessionContext,
+    require_ui_operator,
+    require_ui_session,
+)
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.references import resolve_audit_references
 from meho_backplane.ui.roles import is_ui_tenant_admin
@@ -142,12 +147,19 @@ log = structlog.get_logger(__name__)
 #: ``audit_log``; the substrate caps ``limit`` at 1000 regardless.
 _PAGE_SIZE: Final[int] = 50
 
-#: The ``result_status`` filter dropdown options. These are the four closed
+#: The ``result_status`` filter dropdown options. These are the five closed
 #: values the substrate's ``_result_status_predicate`` understands (an
 #: unknown value matches nothing rather than erroring); the empty default is
 #: the "Any" sentinel that omits the filter. Surfaced in the
-#: ok / pending / error / denied order an operator reads severity in.
-_RESULT_STATUS_OPTIONS: Final[tuple[str, ...]] = ("ok", "pending", "error", "denied")
+#: ok / pending / error / denied order an operator reads severity in, then
+#: ``withdrawn`` (the sender took its approval request back, #5717).
+_RESULT_STATUS_OPTIONS: Final[tuple[str, ...]] = (
+    "ok",
+    "pending",
+    "error",
+    "denied",
+    "withdrawn",
+)
 
 #: Plain labels for the event class (#3733) filter, counters and badges, in
 #: the closed enum order. The empty form value is the "Any" sentinel.
@@ -156,6 +168,7 @@ _EVENT_CLASS_LABELS: Final[dict[str, str]] = {
     AuditEventClass.POLICY_DECISION.value: "Policy decision",
     AuditEventClass.APPROVAL_DECISION.value: "Approval decision",
     AuditEventClass.SECURITY_EVENT.value: "Security event",
+    AuditEventClass.CONFIG_CHANGE.value: "Config change",
     AuditEventClass.LEGACY_REQUEST.value: "Legacy row",
 }
 
@@ -189,6 +202,13 @@ _MY_RECENT_SINCE: Final[str] = "24h"
 #: gate -- the ruff B008 idiom (no call in a default-argument position) the
 #: broadcast / approvals / runbooks routes established.
 _require_session = Depends(require_ui_session)
+
+#: The ``operator`` floor of the page, the results fragment, the my-recent
+#: quick view and the row drawer: the same minimum the audit API applies
+#: (``require_role(TenantRole.OPERATOR)`` in ``api/v1/audit.py``). A
+#: ``read_only`` session gets ``403 operator_required`` and no row is read.
+#: The replay tree keeps its own tenant_admin check on the session floor.
+_require_operator = Depends(require_ui_operator)
 
 #: Module-level :class:`fastapi.Depends` for the raw-session drawer query
 #: (same B008 guard) -- the drawer resolves one row directly, not through
@@ -694,7 +714,7 @@ async def _build_results_context(
     except InvalidCursorError:
         # A tampered / expired cursor is "start over": re-run from page 1
         # with no cursor rather than surfacing a 400/500 to the operator.
-        log.info("ui_audit_invalid_cursor_reset", session_id=str(session.session_id))
+        log.info("ui_audit_invalid_cursor_reset", session_ref=session_ref(session.session_id))
         filters = _build_filters(
             target=target,
             principal=principal,
@@ -751,7 +771,7 @@ async def _results_handler(
     agent_session_id: uuid.UUID | None = Query(default=None),
     event_class: str = Query(default="", max_length=32),
     partial: str = Query(default=""),
-    session: UISessionContext = _require_session,
+    session: UISessionContext = _require_operator,
 ) -> HTMLResponse:
     """``GET /ui/audit/results`` -- the filter-submit + pager fragment.
 
@@ -806,7 +826,7 @@ async def _page_handler(
     audit_id: uuid.UUID | None = Query(default=None),
     agent_session_id: uuid.UUID | None = Query(default=None),
     event_class: str = Query(default="", max_length=32),
-    session: UISessionContext = _require_session,
+    session: UISessionContext = _require_operator,
     db_session: AsyncSession = _get_raw_session_dep,
 ) -> HTMLResponse:
     """``GET /ui/audit`` -- the full page: filter form + first result page.
@@ -864,7 +884,7 @@ async def _page_handler(
 
 async def _my_recent_handler(
     request: Request,
-    session: UISessionContext = _require_session,
+    session: UISessionContext = _require_operator,
 ) -> HTMLResponse:
     """``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.
 
@@ -881,7 +901,7 @@ async def _my_recent_handler(
 async def _drawer_handler(
     request: Request,
     audit_id: uuid.UUID,
-    session: UISessionContext = _require_session,
+    session: UISessionContext = _require_operator,
     db_session: AsyncSession = _get_raw_session_dep,
 ) -> HTMLResponse:
     """``GET /ui/audit/show/{audit_id}`` -- the row detail drawer fragment.

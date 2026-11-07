@@ -7,8 +7,9 @@ The Job renders only with ``coreKeycloak.enabled``. It is a post-install and
 post-upgrade hook at weight 10 under the hook ServiceAccount of the
 ``secrets`` Job, runs the backplane image with the ``keycloak`` stage, gets
 every secret by ``secretKeyRef``, mounts the realm ConfigMap, and its plan
-matches the Python model. The install notes name the first-login Secret and
-never a value. Skips where ``helm`` is absent unless ``MEHO_REQUIRE_HELM=1``.
+matches the Python model. The install notes name the first-login Secret, the
+Keycloak admin's Secret and console, and never a value. Skips where
+``helm`` is absent unless ``MEHO_REQUIRE_HELM=1``.
 """
 
 from __future__ import annotations
@@ -32,6 +33,13 @@ _RELEASE = "rel"
 _TENANT = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -61,6 +69,8 @@ _CORE_ON = [
     "config.keycloakIssuerUrl=",
     "--set",
     "corePostgres.enabled=true",
+    "--set",
+    "postgres.credentialsSecret=",
     "--set",
     "coreKeycloak.enabled=true",
     "--set",
@@ -112,7 +122,10 @@ def _env(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def test_core_keycloak_off_renders_no_bootstrap_job() -> None:
     assert _job(_render()) is None
-    assert _job(_render("--set", "corePostgres.enabled=true")) is None
+    assert (
+        _job(_render("--set", "corePostgres.enabled=true", "--set", "postgres.credentialsSecret="))
+        is None
+    )
 
 
 def test_bootstrap_job_is_a_post_install_hook_under_the_hook_account() -> None:
@@ -147,6 +160,8 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     assert plan.realm_file == "/opt/meho/realm/meho-realm.json"
     assert plan.first_login_secret == f"{_RELEASE}-core-first-login"
     assert (plan.admin_username, plan.approver_username) == ("admin", "approver")
+    assert plan.console_admin_secret == f"{_RELEASE}-core-console-admin"
+    assert plan.console_admin_username == "console-admin"
     assert plan.ci.enabled is False
     assert plan.ci.secret_name == f"{_RELEASE}-core-ci-login"
     assert plan.tenants == ()
@@ -159,6 +174,8 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
             "--set",
             "coreKeycloak.firstLogin.approverUsername=second",
             "--set",
+            "coreKeycloak.firstLogin.consoleAdminUsername=kc-root",
+            "--set",
             "coreKeycloak.ci.enabled=true",
             "--set",
             f"coreKeycloak.ci.tenantId={_TENANT}",
@@ -167,6 +184,7 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     assert custom is not None
     plan = Plan.model_validate_json(_env(custom)["MEHO_CORE_KEYCLOAK_PLAN"]["value"])
     assert (plan.admin_username, plan.approver_username) == ("root-person", "second")
+    assert plan.console_admin_username == "kc-root"
     assert plan.ci.enabled is True
     assert plan.ci.tenant_id == _TENANT
 
@@ -260,7 +278,7 @@ def test_realm_file_is_mounted_from_the_subchart_configmap() -> None:
     ]
 
 
-def test_hook_role_may_read_and_patch_the_first_login_and_ci_secrets() -> None:
+def test_hook_role_may_read_and_patch_the_first_login_console_and_ci_secrets() -> None:
     role = next(
         d
         for d in _render(*_CORE_ON)
@@ -268,6 +286,7 @@ def test_hook_role_may_read_and_patch_the_first_login_and_ci_secrets() -> None:
     )
     rule = next(r for r in role["rules"] if r["verbs"] == ["get", "patch"])
     assert f"{_RELEASE}-core-first-login" in rule["resourceNames"]
+    assert f"{_RELEASE}-core-console-admin" in rule["resourceNames"]
     assert f"{_RELEASE}-core-ci-login" in rule["resourceNames"]
     assert role["metadata"]["annotations"]["helm.sh/hook"] == (
         "pre-install,pre-upgrade,post-install,post-upgrade"
@@ -303,12 +322,27 @@ def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> Non
     block = notes[notes.index("First login (built-in Keycloak)") :]
     assert '{{ printf "%s-core-first-login" .Release.Name }}' in block
     assert "kubectl -n {{ .Release.Namespace }} get secret" in block
-    assert "-o jsonpath='{.data.admin_password}' | base64 -d" in block
+    assert "-o jsonpath='{.data.admin_username}' | base64 -d" in block
+    # The Secret keeps the names of the first install, so the notes read
+    # them from it and never print the ones from values.
+    assert ".Values.coreKeycloak.firstLogin." not in block
     assert "meho login https://{{ .Values.coreKeycloak.hostname }}" in block
     assert "new password, a name and an email at the first login" in block
     assert "MEHO-Admins" in block
     assert "MEHO-SA-Operators" in block
     assert "{{- if .Values.coreKeycloak.enabled }}" in notes[: notes.index("First login")]
+
+
+def test_notes_name_the_console_admin_secret_and_console() -> None:
+    notes = (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")
+    block = notes[notes.index("Keycloak admin console (realm meho)") :]
+    block = block[: block.index("{{- end }}\n{{- if and .Values.checkRunner")]
+    assert ".Values.coreKeycloak.firstLogin." not in block
+    assert '{{ printf "%s-core-console-admin" .Release.Name }}' in block
+    assert "-o jsonpath='{.data.username}' | base64 -d" in block
+    assert "https://{{ .Values.coreKeycloak.hostname }}/auth/admin/master/console/#/meho" in block
+    assert "coreKeycloak.ingress.exposeAdmin=true" in block
+    assert "a user of realm master" in block
 
 
 @pytest.mark.parametrize(
@@ -320,9 +354,26 @@ def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> Non
             "tenantId",
         ),
         (["--set", "coreKeycloak.firstLogin.adminUsername="], "adminUsername"),
+        (["--set", "coreKeycloak.firstLogin.consoleAdminUsername="], "consoleAdminUsername"),
+        (
+            ["--set", "coreKeycloak.firstLogin.consoleAdminUsername=service-account-meho-admin"],
+            "consoleAdminUsername",
+        ),
+        (
+            ["--set", "coreKeycloak.firstLogin.adminUsername=Service-Account-x"],
+            "adminUsername",
+        ),
         (["--set", "coreKeycloak.firstLogin.other=x"], "other"),
     ],
-    ids=["ci-needs-tenant", "ci-bad-tenant", "empty-username", "unknown-key"],
+    ids=[
+        "ci-needs-tenant",
+        "ci-bad-tenant",
+        "empty-username",
+        "empty-console-admin-username",
+        "service-account-console-admin",
+        "service-account-admin",
+        "unknown-key",
+    ],
 )
 def test_bad_values_fail_at_render(extra: list[str], message: str) -> None:
     result = _run(*_CORE_ON, *extra)

@@ -68,8 +68,8 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
-    is_system_operator,
     synthesise_system_operator,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -217,6 +217,8 @@ class HarborConnector(HttpConnector):
     impl_id = "harbor-rest"
     supported_version_range = ">=2.0,<3.0"
     priority = 1
+    # This class serves the operations of its ingested catalog.
+    accepts_ingested_operations = True
 
     def __init__(
         self,
@@ -225,6 +227,8 @@ class HarborConnector(HttpConnector):
     ) -> None:
         super().__init__()
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
         self._credentials_loader: HarborCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -297,17 +301,18 @@ class HarborConnector(HttpConnector):
         Vault read; injected test loaders accept the same
         ``(target, operator)`` pair.
 
-        The cache fast-path is closed to the synthesised system operator
-        (``is_system_operator``): a system/operator-less caller always
-        runs the loader so its fail-closed guard applies, and can never be
-        served warm credentials a real operator primed but it could not
-        resolve itself (#1008). Real-operator behaviour is unchanged —
-        cold load → cache → reuse.
+        A cached entry is handed to a caller only after that caller's own
+        Vault read of the target's secret passed once in this process
+        (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+        A hit for another caller runs the loader under their login first.
+        The synthesised system operator is never recorded, so it always runs
+        the loader. A caller who has read keeps cold load → cache →
+        reuse.
         """
         cache_key = target_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
-            if cached is not None and not is_system_operator(operator):
+            if cached is not None and self._readers.has_read(target, operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
             try:
@@ -320,6 +325,7 @@ class HarborConnector(HttpConnector):
                     "{'username': str, 'password': str}"
                 ) from exc
             self._creds_cache[cache_key] = raw
+            self._readers.record(target, operator)
             _log.info(
                 "harbor_credentials_loaded",
                 target=target.name,
@@ -944,6 +950,7 @@ class HarborConnector(HttpConnector):
         """
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def aclose(self) -> None:
         """Clear cached credentials, then tear down the httpx pool.
@@ -955,4 +962,5 @@ class HarborConnector(HttpConnector):
         """
         async with self._creds_lock:
             self._creds_cache.clear()
+            self._readers.clear()
         await super().aclose()

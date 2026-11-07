@@ -436,9 +436,18 @@ class AuditEventClass(StrEnum):
     * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
       a policy deny, a rate-limit refusal, or a park for approval.
     * :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
-      rejected, or let an approval request expire.
+      rejected, or let an approval request expire, or its sender withdrew
+      it (#5717). The operation did not run on any of these rows.
     * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
       refresh-token replay or a broken satellite effect chain.
+    * :attr:`CONFIG_CHANGE` -- an operator changed the settings of
+      operations, and none of them ran. Two writers: an edit of one
+      operation with ``meho_connector_edit_op`` (turned it on or off, or
+      changed its risk level, approval rule, description or guidance,
+      #5791), and a tenant's own on or off switch with
+      ``meho_connector_tenant_setting``, for one operation or a whole
+      group (#5864). The row's ``payload["op_id"]`` names the edited
+      operation; a group switch names ``payload["group_key"]`` instead.
     * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
       row written before migration ``0106`` reads as this class; it is never
       guessed from ``method`` / ``path``. The REST and MCP request wrapper
@@ -451,10 +460,11 @@ class AuditEventClass(StrEnum):
     POLICY_DECISION = "policy_decision"
     APPROVAL_DECISION = "approval_decision"
     SECURITY_EVENT = "security_event"
+    CONFIG_CHANGE = "config_change"
     LEGACY_REQUEST = "legacy_request"
 
 
-#: Closed tuple mirrored in migration ``0106``'s CHECK constraint.
+#: Closed tuple mirrored in the CHECK constraint of migrations ``0106`` and ``0137``.
 AUDIT_EVENT_CLASSES: tuple[str, ...] = tuple(c.value for c in AuditEventClass)
 
 
@@ -895,6 +905,20 @@ class Tenant(Base):
     # index -- read by primary-key lookup on a cache miss, never a filter.
     mail_recipient_allowlist: Mapped[str | None] = mapped_column(
         Text,
+        nullable=True,
+        default=None,
+    )
+    # Per-tenant prices for agent models that MEHO's own price table
+    # (``MODEL_PRICING``) does not know, for example an open model on a
+    # model server the tenant runs itself (#5853). A map from model id to
+    # ``{"input": "<USD>", "output": "<USD>"}`` per million tokens; the
+    # prices are decimal strings, so no float rounding gets in. ``NULL``
+    # means no prices. Read and written through
+    # :mod:`meho_backplane.operations.tenant_model_prices`. A model in
+    # ``MODEL_PRICING`` always keeps that price. Nullable, so migration
+    # ``0138`` needs no backfill.
+    agent_model_prices: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
         nullable=True,
         default=None,
     )
@@ -3282,6 +3306,11 @@ class AgentAnnouncement(Base):
       ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
       filter, mirroring :class:`AgentRun`'s
       ``agent_run_tenant_work_ref_idx``.
+    * ``agent_announcement_tenant_principal_created_at_idx`` --
+      ``(tenant_id, principal_sub, created_at DESC)`` (migration
+      ``0135``, #5005). Drives the caller's active-claim lookup
+      (:mod:`meho_backplane.broadcast.announce_claim_lookup`), which
+      reads only the caller's own rows, newest first.
 
     Trusted claim columns (#3736, migration ``0112``). All nullable; a
     row written before trusted admission keeps NULL in all six and is
@@ -3462,7 +3491,16 @@ class WebSession(Base):
       discipline: no FK to ``tenant.id``, matching the audit-log
       pattern (``audit_log.tenant_id``). Tenant deletion is a major
       ops operation that scrubs dependent sessions explicitly before
-      removing the tenant row.
+      removing the tenant row. Since #5240 it is the session's
+      **current** tenant: a switch in the web interface changes it.
+
+    * ``tenant_chosen`` -- ``False`` while a person with several
+      tenants has not picked one yet after login (migration ``0130``).
+      The web interface then shows only the tenant picker.
+
+    * ``can_switch_tenant`` -- ``True`` when the person has more than
+      one tenant or is a platform admin (migration ``0130``). Only a
+      hint for the sidebar; the switch itself checks the token.
 
     * ``access_token`` / ``refresh_token`` -- Fernet-encrypted bytes.
       ``LargeBinary`` -> ``bytea`` on PG, ``BLOB`` on SQLite. The
@@ -3538,6 +3576,18 @@ class WebSession(Base):
         DateTime(timezone=True),
         nullable=True,
         default=None,
+    )
+    tenant_chosen: Mapped[bool] = mapped_column(
+        Boolean(),
+        nullable=False,
+        default=True,
+        server_default=sa.true(),
+    )
+    can_switch_tenant: Mapped[bool] = mapped_column(
+        Boolean(),
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
     )
 
     __table_args__ = (
@@ -4298,6 +4348,15 @@ class AgentRun(Base):
         nullable=True,
         default=None,
     )
+    # Token counts of a succeeded run (#5853), summed over its model
+    # requests. ``input_tokens`` is the uncached input only; the cached
+    # input is in the two cache columns (``0`` when the provider does not
+    # report a prompt cache). ``NULL`` on a run that did not succeed and
+    # on rows written before migration ``0138``.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    cache_read_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    cache_write_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     output: Mapped[dict[str, object] | None] = mapped_column(
         _PORTABLE_JSON,
         nullable=True,
@@ -5863,6 +5922,14 @@ class _StandingGrantColumns:
     # Optional reason the operator gave when revoking (#3489). NULL when the
     # revoke carried no reason, and on every live row.
     revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set when a new grant with the same key was made after this one ended
+    # (#5424). It takes the ended row out of the two unique indexes, so the
+    # new grant needs no revoke first. The row stays in the history.
+    replaced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
 
 
 def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
@@ -5874,7 +5941,8 @@ def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
       unique indexes enforcing "at most one active grant per fully-scoped
       key". Split because the nullable ``target_id`` would otherwise defeat
       a single unique index on the targetless case (``NULL != NULL``), and
-      scoped to ``revoked_at IS NULL`` so a revoked scope can be re-granted.
+      scoped to ``revoked_at IS NULL AND replaced_at IS NULL`` so a revoked
+      scope, or one whose grant ended (#5424), can be granted again.
       Since #3349 the ``…_targetless`` index is narrowed to *pure*
       targetless grants (``target_product`` and ``target_name_pattern`` both
       NULL); selector grants (#3349) also key ``target_id IS NULL`` but
@@ -5883,8 +5951,9 @@ def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
     """
     targetless_where = (
         "target_id IS NULL AND target_product IS NULL "
-        "AND target_name_pattern IS NULL AND revoked_at IS NULL"
+        "AND target_name_pattern IS NULL AND revoked_at IS NULL AND replaced_at IS NULL"
     )
+    targeted_where = "target_id IS NOT NULL AND revoked_at IS NULL AND replaced_at IS NULL"
     return (
         Index(
             f"{table}_lookup_idx",
@@ -5901,8 +5970,8 @@ def _standing_grant_table_args(table: str) -> tuple[Index, ...]:
             "connector_id",
             "target_id",
             unique=True,
-            postgresql_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
-            sqlite_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
+            postgresql_where=sa.text(targeted_where),
+            sqlite_where=sa.text(targeted_where),
         ),
         Index(
             f"uq_{table}_targetless",
@@ -5978,8 +6047,9 @@ class ServicePrincipalGrant(_StandingGrantColumns, Base):
       **partial** unique indexes enforcing "at most one active grant per
       fully-scoped key". Split because the nullable ``target_id`` would
       otherwise defeat a single unique index on the targetless case
-      (``NULL != NULL``), and scoped to ``revoked_at IS NULL`` so a revoked
-      scope can be re-granted. Since #3349 the ``…_targetless`` index is
+      (``NULL != NULL``), and scoped to ``revoked_at IS NULL AND replaced_at
+      IS NULL`` so a revoked scope, or one whose grant ended (#5424), can be
+      granted again. Since #3349 the ``…_targetless`` index is
       narrowed to *pure* targetless grants (``target_product`` and
       ``target_name_pattern`` both NULL); selector grants (#3349) also key
       ``target_id IS NULL`` but carry their own CRUD-layer uniqueness check.
@@ -6698,7 +6768,11 @@ class ApprovalRequest(Base):
       request id, not the params — can re-dispatch with the stored params
       rather than only recording the decision. Nullable so pre-0036 rows
       remain valid. Internal re-dispatch input; never serialised onto a
-      read view or broadcast frame.
+      read view or broadcast frame. Each secret-named value in it (a
+      password or a licence key inside a deployment spec) is replaced by a
+      marker as soon as the run claim is won or the request ends without a
+      run (``approval_queue.claim_resume`` / ``end_run_input``); migration
+      ``0132`` did the same for the rows that were already decided.
 
     * ``proposed_effect`` -- JSON (JSONB on PG). Human-readable summary of
       what the op would do if approved; populated at queue time; JSONB for
@@ -9364,3 +9438,39 @@ class RequestUsageEvent(Base):
     route: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+
+
+class InstanceSettingsRevision(Base):
+    """One applied settings-file import (``POST /api/v1/settings/import``).
+
+    Append-only: the service only INSERTs, and on PostgreSQL migration
+    ``0136`` installs a ``BEFORE UPDATE OR DELETE`` trigger that refuses any
+    mutation (a copy of the ``audit_log`` trigger from ``0100``). An import
+    that changes nothing writes no row.
+
+    ``spec_before`` / ``spec_after`` hold the ``spec`` of the tenants the
+    import touched, in the export's shape; the diff is worked out on read
+    (see :mod:`meho_backplane.instance_settings.diff`). ``audit_id`` is the
+    import request's ``audit_log`` id; the ``tenant_convention_history``
+    rows the import wrote link to it by ``request_id``. ``actor_sub`` is
+    always the human operator (machine principals cannot import).
+    """
+
+    __tablename__ = "instance_settings_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    actor_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    audit_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    api_version: Mapped[str] = mapped_column(Text, nullable=False)
+    exported_from: Mapped[dict[str, object] | None] = mapped_column(_PORTABLE_JSON, nullable=True)
+    spec_before: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    spec_after: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    summary: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+
+    __table_args__ = (Index("instance_settings_revision_ts_idx", "ts"),)

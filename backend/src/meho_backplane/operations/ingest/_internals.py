@@ -41,6 +41,7 @@ from meho_backplane.operations.ingest.connector_registration import (
     resolved_profiled_connector_class,
 )
 from meho_backplane.operations.ingest.exceptions import ConnectorNotFoundError
+from meho_backplane.operations.license_reads import LICENSE_PATH_MARK
 
 _log = structlog.get_logger(__name__)
 
@@ -542,6 +543,7 @@ async def write_audit_row(
     operator_tenant_id: UUID,
     op_id: str,
     payload: dict[str, Any],
+    event_class: AuditEventClass = AuditEventClass.OPERATION_EXECUTION,
 ) -> uuid.UUID:
     """Append one :class:`AuditLog` row for a service-level action.
 
@@ -581,11 +583,17 @@ async def write_audit_row(
     not ``AUDIT_WRAPPER_ROWS_RETIRED`` is on (the cutover listener only
     fills lineage when that setting is on). ``None`` for a plain REST
     request without a session.
+
+    ``event_class`` is ``operation_execution`` for every action except a
+    settings change, which passes ``config_change``: an edit of one
+    operation (:data:`OP_EDIT_OP`, #5791) and a tenant's own on or off
+    switch (``meho_connector_tenant_setting``, #5864). No operation ran,
+    so a filter for operations that ran must not return these rows.
     """
     audit_id = uuid.uuid4()
     row = AuditLog(
         id=audit_id,
-        event_class=AuditEventClass.OPERATION_EXECUTION,
+        event_class=event_class,
         occurred_at=datetime.now(UTC),
         operator_sub=operator_sub,
         tenant_id=operator_tenant_id,
@@ -832,7 +840,9 @@ async def bulk_enable_read_ops(
     HTTP method ∈ :data:`READ_HTTP_METHODS` (``GET`` / ``HEAD``) on an
     ``source_kind='ingested'`` row; every write-shaped verb
     (POST / PUT / PATCH / DELETE) and every typed / composite op
-    (``method`` NULL) is left untouched so writes stay default-deny.
+    (``method`` NULL) is left untouched so writes stay default-deny. A
+    read whose path names licences stays off as well: its answer carries
+    licence keys (:mod:`meho_backplane.operations.license_reads`).
 
     Returns the number of rows actually changed. The
     ``is_enabled != True`` guard is what makes the action idempotent:
@@ -861,6 +871,9 @@ async def bulk_enable_read_ops(
             EndpointDescriptor.source_kind == "ingested",
             EndpointDescriptor.method.in_(sorted(READ_HTTP_METHODS)),
             EndpointDescriptor.is_enabled.is_(False),
+            # A read of licence keys stays off; the dispatcher refuses it
+            # too (``operations.license_reads``).
+            ~func.lower(EndpointDescriptor.path).contains(LICENSE_PATH_MARK),
         )
         .values(is_enabled=True)
     )

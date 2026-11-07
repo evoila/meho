@@ -28,6 +28,9 @@ modelled on the ``probe_target`` / connector-enable precedents:
   and idempotent (a re-call against an already-at-target row writes
   nothing).
 
+Both change a global (``tenant_id IS NULL``) row only for a platform admin,
+the same rule :func:`update_doc_collection` applies.
+
 Both reflect state the backend / operator owns; neither triggers ingest
 or a rebuild (out of scope per #1555 — the heavy ingest is the ops side,
 meho probes + reflects).
@@ -44,7 +47,7 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.corpus import corpus_endpoint_host
+from meho_backplane.auth.corpus import assert_corpus_host_allowed, corpus_endpoint_host
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections.lifecycle import (
@@ -62,6 +65,7 @@ from meho_backplane.docs_collections.schemas import (
 from meho_backplane.docs_search.backends import BackendReadiness, resolve_backend
 from meho_backplane.docs_search.backends.corpus_http import CORPUS_HTTP_BACKEND_TYPE
 from meho_backplane.docs_search.backends.registry import all_backends
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.ssrf_guard import (
     TargetDestinationBlockedError,
     assert_public_destination_async,
@@ -178,11 +182,15 @@ class DocCollectionEndpointError(Exception):
 
 
 class DocCollectionGlobalUpdateForbiddenError(Exception):
-    """Updating a global (platform-owned) collection needs the platform seat.
+    """Changing a global (platform-owned) collection needs the platform seat.
 
     A row with ``tenant_id IS NULL`` is a shared platform-catalogue entry
-    every tenant sees; repointing its backend is a platform action, not a
-    tenant one. The update route's ``tenant_admin`` floor authorises a
+    every tenant sees; repointing its backend, turning it off or on, or
+    probing it (the probe writes its status) is a platform action, not a
+    tenant one. Raised by :func:`update_doc_collection`,
+    :func:`set_collection_enabled` and :func:`probe_collection` through
+    :func:`_require_platform_seat_for_global`. The routes' ``tenant_admin``
+    floor authorises a
     tenant to edit *its own* rows; crossing into the platform catalogue is
     the orthogonal ``platform_admin`` capability — the same seat
     :func:`~meho_backplane.auth.rbac.authorize_tenant_scope` requires for a
@@ -200,12 +208,27 @@ class DocCollectionGlobalUpdateForbiddenError(Exception):
             "collection_key": collection_key,
             "message": (
                 f"doc collection {collection_key!r} is a global "
-                f"(platform-owned) row; updating it requires the "
-                f"platform_admin capability, not tenant_admin alone. A "
-                f"tenant-owned collection is editable by its tenant_admin."
+                f"(platform-owned) row; changing it (update, enable, "
+                f"disable, probe) requires the platform_admin capability, "
+                f"not tenant_admin alone. A tenant-owned collection is "
+                f"changeable by its tenant_admin."
             ),
         }
         super().__init__(self.detail["message"])
+
+
+def _require_platform_seat_for_global(operator: Operator, collection: DocCollectionORM) -> None:
+    """Refuse a change to a global row unless *operator* is a platform admin.
+
+    A tenant-owned row passes. A global row (``tenant_id IS NULL``) passes
+    only for ``operator.platform_admin``; otherwise this raises
+    :class:`DocCollectionGlobalUpdateForbiddenError` (REST 403 / MCP
+    ``-32602``) before the row is touched. Every service function that
+    writes a row it did not create calls this first, so each front (REST,
+    console, MCP) gets the same check.
+    """
+    if collection.tenant_id is None and not operator.platform_admin:
+        raise DocCollectionGlobalUpdateForbiddenError(collection.collection_key)
 
 
 def _validate_backend_type(backend_type: str) -> None:
@@ -228,13 +251,17 @@ def _validate_backend_type(backend_type: str) -> None:
 
 
 async def _screen_backend_endpoint(backend: DocCollectionBackend) -> None:
-    """Reject a ``corpus-http`` backend whose endpoint is non-public / non-https.
+    """Reject a ``corpus-http`` backend whose endpoint MEHO would not dial.
 
     Extracts the corpus endpoint from ``backend.ref`` (the ``endpoint`` key,
     alias ``url``) and screens it with the shared target SSRF guard —
     ``https`` scheme + a public, allowlist-aware host — the same
     :func:`~meho_backplane.targets.ssrf_guard.assert_public_destination_async`
-    the connector target dial uses. An explicit ``answer_endpoint`` (#3911,
+    the connector target dial uses. The host must also be one the deployment
+    named as a docs service
+    (:func:`~meho_backplane.auth.corpus.assert_corpus_host_allowed`: the host
+    of ``CORPUS_URL`` or an entry of ``CORPUS_ALLOWED_HOSTS``), so a tenant
+    cannot point a collection at any other server. An explicit ``answer_endpoint`` (#3911,
     the opted-in answer endpoint) or ``read_endpoint`` (#3948, the opted-in
     read endpoint) is a dialed URL too and is screened the same way. Absent
     endpoint (the legacy global
@@ -258,6 +285,7 @@ async def _screen_backend_endpoint(backend: DocCollectionBackend) -> None:
             continue
         try:
             host = corpus_endpoint_host(endpoint)
+            assert_corpus_host_allowed(host, get_settings())
             await assert_public_destination_async(host)
         except TargetDestinationBlockedError as exc:
             raise DocCollectionEndpointError(endpoint, str(exc)) from exc
@@ -473,8 +501,7 @@ async def update_doc_collection(
     # Platform-seat gate for the shared catalogue, checked first: a
     # tenant_admin editing a global row they are not entitled to must be told
     # *that*, before any field-level validation runs.
-    if collection.tenant_id is None and not operator.platform_admin:
-        raise DocCollectionGlobalUpdateForbiddenError(collection.collection_key)
+    _require_platform_seat_for_global(operator, collection)
 
     updates = body.model_dump(exclude_unset=True)
 
@@ -661,6 +688,9 @@ async def probe_collection(
         The :class:`BackendReadiness` snapshot that was persisted.
 
     Raises:
+        DocCollectionGlobalUpdateForbiddenError: *collection* is a global
+            row and *operator* is not a platform admin. Checked before the
+            backend is called; the row is left untouched; HTTP 403.
         CorpusUnavailable: the backend is unconfigured / unreachable /
             non-2xx / malformed, **or** the row routes to no registered
             backend. The row is left untouched (success-only write-back);
@@ -669,6 +699,8 @@ async def probe_collection(
             lifecycle forbids from the current state (e.g. a probe against
             a ``disabled`` row). The row is left untouched; HTTP 409.
     """
+    _require_platform_seat_for_global(operator, collection)
+
     # ``resolve_backend`` raises CorpusUnavailable for an unroutable row —
     # the same 503 arm the search path uses, no new taxonomy. Bundles the
     # adapter with the row's ``backend.ref``.
@@ -704,6 +736,7 @@ async def probe_collection(
 
 async def set_collection_enabled(
     session: AsyncSession,
+    operator: Operator,
     collection: DocCollectionORM,
     *,
     enabled: bool,
@@ -715,8 +748,14 @@ async def set_collection_enabled(
     follow-up probe promotes it to ``ready``). A re-call against an
     already-at-target row is a no-op — no write, no timestamp bump.
 
+    A global row (``tenant_id IS NULL``) is turned off or on only by a
+    platform admin, the same rule as :func:`update_doc_collection`. The
+    check runs first, so a tenant admin is refused even when the row is
+    already at the target status.
+
     Args:
         session: Active async session inside the route's transaction.
+        operator: The verified operator making the change.
         collection: The resolved ORM row to transition.
         enabled: ``True`` → enable (→ ``provisioning``); ``False`` →
             ``disabled``.
@@ -726,9 +765,13 @@ async def set_collection_enabled(
         happened), ``False`` on the idempotent no-op path.
 
     Raises:
+        DocCollectionGlobalUpdateForbiddenError: *collection* is a global
+            row and *operator* is not a platform admin; HTTP 403. The row is
+            left untouched.
         DocCollectionStateError: the move is forbidden from the current
             state; HTTP 409. The row is left untouched.
     """
+    _require_platform_seat_for_global(operator, collection)
     target_status = STATUS_PROVISIONING if enabled else STATUS_DISABLED
     new_status = apply_operator_transition(
         collection_key=collection.collection_key,
@@ -744,6 +787,7 @@ async def set_collection_enabled(
     _log.info(
         "doc_collection_lifecycle_set",
         collection_key=collection.collection_key,
+        tenant_scope="tenant" if collection.tenant_id is not None else "global",
         enabled=enabled,
         status=new_status,
     )

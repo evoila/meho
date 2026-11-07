@@ -199,6 +199,7 @@ class _Http403Connector(HttpConnector):
     """
 
     product = "gh"
+    accepts_ingested_operations = True
     version = "3"
     impl_id = "gh-rest"
     supported_version_range = ">=3,<4"
@@ -318,6 +319,7 @@ class _OkConnector(HttpConnector):
     """Connector whose write transport succeeds -- the regression baseline."""
 
     product = "ok"
+    accepts_ingested_operations = True
     version = "1"
     impl_id = "ok-rest"
     supported_version_range = ">=1,<2"
@@ -365,6 +367,7 @@ class _NotImplementedConnector(HttpConnector):
     """
 
     product = "nie"
+    accepts_ingested_operations = True
     version = "1"
     impl_id = "nie-rest"
     supported_version_range = ">=1,<2"

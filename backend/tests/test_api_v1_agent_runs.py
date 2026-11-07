@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -37,13 +38,24 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 from httpx import ASGITransport
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.usage import RequestUsage
 from sqlalchemy import select
 
 from meho_backplane.agent.invocation import (
     RUN_INPUT_MAX_CHARS,
     AgentInvoker,
+    _finalize_child_run,
+    _record_child_run,
+    _resolve_child_definition,
     reset_agent_invoker_for_testing,
 )
 from meho_backplane.agent.run import PydanticAgentRun
@@ -59,6 +71,12 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.main import app
 from meho_backplane.operations.agent_run import create_run
+from meho_backplane.operations.identity_budget import (
+    MODEL_PRICING,
+    BudgetWindowKind,
+    get_remaining,
+    set_limits,
+)
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -679,6 +697,78 @@ async def test_rest_sse_returns_429_pre_stream_when_budget_exceeded(
     assert "global kill switch" in body["detail"]["reason"]
 
 
+@pytest.mark.asyncio
+async def test_rest_sse_charges_the_run_and_refuses_the_next_at_the_cost_cap(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streamed run counts against the person's daily cost cap.
+
+    The daily cost cap equals the price of one run. The first streamed run
+    runs and is charged. The second is refused with 429 before the stream
+    opens, the same as a run that is not streamed.
+    """
+    model_id = "anthropic:claude-sonnet-5-5"
+    monkeypatch.setenv("AGENT_DEFAULT_MODEL", model_id)
+    get_settings.cache_clear()
+    input_tokens, output_tokens = 2_000, 500
+    pricing = MODEL_PRICING[model_id]
+    one_run_cost = (
+        pricing.input * Decimal(input_tokens) + pricing.output * Decimal(output_tokens)
+    ) / Decimal(1_000_000)
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart("charged answer")],
+            usage=RequestUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+        )
+
+    reset_agent_invoker_for_testing(
+        AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: FunctionModel(fn)))
+    )
+    await _seed_definition()
+    sub = "op-streamed-cap"
+    async with get_sessionmaker()() as session:
+        await set_limits(
+            session,
+            tenant_id=_TENANT_A,
+            principal_sub=sub,
+            window_kind=BudgetWindowKind.DAILY,
+            cost_limit=one_run_cost,
+        )
+        await session.commit()
+
+    key = make_rsa_keypair("kid-budget-sse-cap")
+    headers = {"Authorization": f"Bearer {_token(key, sub=sub)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        with client.stream(
+            "POST", "/api/v1/agents/triage/run/events", json={"input": "go"}, headers=headers
+        ) as first:
+            assert first.status_code == 200, first.read()
+            first_body = "".join(first.iter_text())
+        second = client.post(
+            "/api/v1/agents/triage/run/events", json={"input": "go"}, headers=headers
+        )
+
+    assert "event: final" in first_body
+    assert "charged answer" in first_body
+    async with get_sessionmaker()() as session:
+        reading = await get_remaining(
+            session,
+            tenant_id=_TENANT_A,
+            principal_sub=sub,
+            window_kind=BudgetWindowKind.DAILY,
+        )
+        run_row = (
+            await session.execute(select(AgentRun).where(AgentRun.identity_sub == sub))
+        ).scalar_one()
+    assert reading.cost_consumed == one_run_cost
+    assert run_row.cost == one_run_cost
+    assert second.status_code == 429, second.text
+    assert second.json()["detail"]["error"] == "budget_exceeded"
+
+
 # ---------------------------------------------------------------------------
 # #1828 -- operator run-cancel route contract
 # ---------------------------------------------------------------------------
@@ -894,3 +984,130 @@ async def test_run_input_at_limit_streams(client: TestClient) -> None:
             body = "".join(chunk for chunk in resp.iter_text())
     assert "event: final" in body
     assert "fits" in body
+
+
+@pytest.mark.asyncio
+async def test_run_status_shows_token_counts(client: TestClient) -> None:
+    """``GET /agents/runs/{handle}`` shows a finished run's token counts (#5853)."""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart("counted")],
+            usage=RequestUsage(input_tokens=900, output_tokens=120, cache_read_tokens=400),
+        )
+
+    await _seed_definition()
+    reset_agent_invoker_for_testing(
+        AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: FunctionModel(fn)))
+    )
+    key = make_rsa_keypair("kid-tokens")
+    headers = {"Authorization": f"Bearer {_token(key)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        run = client.post("/api/v1/agents/triage/run", json={"input": "go"}, headers=headers)
+        assert run.status_code == 200, run.text
+        poll = client.get(f"/api/v1/agents/runs/{run.json()['run_id']}", headers=headers)
+    assert poll.status_code == 200, poll.text
+    body = poll.json()
+    assert body["input_tokens"] == 500
+    assert body["cache_read_tokens"] == 400
+    assert body["cache_write_tokens"] == 0
+    assert body["output_tokens"] == 120
+
+
+def _first_prompt(messages: list[ModelMessage]) -> str:
+    """The user prompt the run started with."""
+    for message in messages:
+        if isinstance(message, ModelRequest):
+            for part in message.parts:
+                if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                    return part.content
+    return ""
+
+
+@pytest.mark.asyncio
+async def test_child_run_status_shows_its_own_token_counts(client: TestClient) -> None:
+    """A succeeded child run stores the tokens of its own model requests (#5853).
+
+    The parent run calls one child run through ``invoke_agent``. The child
+    row shows only the child's tokens and has no cost, because the parent
+    run already pays for them. The parent row shows the tokens of all three
+    requests.
+    """
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if _first_prompt(messages) == "sub-task":
+            return ModelResponse(
+                parts=[TextPart("child done")],
+                usage=RequestUsage(input_tokens=700, output_tokens=70, cache_write_tokens=200),
+            )
+        if not any(
+            part.part_kind == "tool-return"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        ):
+            return ModelResponse(
+                parts=[
+                    ToolCallPart("invoke_agent", {"agent_name": "helper", "inputs": "sub-task"})
+                ],
+                usage=RequestUsage(input_tokens=100, output_tokens=10),
+            )
+        return ModelResponse(
+            parts=[TextPart("parent done")],
+            usage=RequestUsage(input_tokens=300, output_tokens=30),
+        )
+
+    await _seed_definition()
+    await _seed_definition(name="helper")
+    reset_agent_invoker_for_testing(
+        AgentInvoker(
+            runtime=PydanticAgentRun(
+                model_factory=lambda: FunctionModel(fn),
+                child_agent_resolver=_resolve_child_definition,
+                child_run_recorder=_record_child_run,
+                child_run_finalizer=_finalize_child_run,
+            )
+        )
+    )
+    key = make_rsa_keypair("kid-child-tokens")
+    headers = {"Authorization": f"Bearer {_token(key)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        run = client.post("/api/v1/agents/triage/run", json={"input": "go"}, headers=headers)
+        assert run.status_code == 200, run.text
+        async with get_sessionmaker()() as session:
+            child_row = (
+                await session.execute(
+                    select(AgentRun).where(AgentRun.trigger == AgentRunTrigger.AGENT_INVOKED.value)
+                )
+            ).scalar_one()
+        child = client.get(f"/api/v1/agents/runs/{child_row.id}", headers=headers)
+        parent = client.get(f"/api/v1/agents/runs/{run.json()['run_id']}", headers=headers)
+
+    assert child.status_code == 200, child.text
+    child_body = child.json()
+    assert child_body["status"] == AgentRunStatus.SUCCEEDED.value
+    assert child_body["input_tokens"] == 500
+    assert child_body["cache_write_tokens"] == 200
+    assert child_body["cache_read_tokens"] == 0
+    assert child_body["output_tokens"] == 70
+    assert child_row.cost is None
+    parent_body = parent.json()
+    assert parent_body["input_tokens"] == 100 + 500 + 300
+    assert parent_body["output_tokens"] == 10 + 70 + 30
+
+
+@pytest.mark.asyncio
+async def test_run_status_tokens_are_null_before_the_run_succeeds(client: TestClient) -> None:
+    handle = await _seed_run()
+    key = make_rsa_keypair("kid-tokens-null")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        poll = client.get(
+            f"/api/v1/agents/runs/{handle}", headers={"Authorization": f"Bearer {_token(key)}"}
+        )
+    assert poll.status_code == 200, poll.text
+    body = poll.json()
+    for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+        assert body[field] is None

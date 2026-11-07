@@ -96,6 +96,7 @@ __all__ = [
     "K8S_NAMESPACED_KIND_LISTERS",
     "K8S_NAMESPACE_LIST_LLM_INSTRUCTIONS",
     "K8S_NODE_LIST_LLM_INSTRUCTIONS",
+    "OPS",
     "age_seconds",
     "namespace_row",
     "node_row",
@@ -599,3 +600,6 @@ CORE_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_NODE_LIST_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = CORE_OPS

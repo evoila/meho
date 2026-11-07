@@ -23,8 +23,10 @@ Bounded on purpose
   second (``-W 1000``) and ping stops after ``count + 2`` seconds
   (``-t``), so the op ends within a few seconds.
 
-The op changes nothing on the firewall, so it is ``safe`` and needs no
-approval.
+The op changes nothing on the firewall. ``host`` is an address the caller
+gives and the firewall connects to it, so the field carries the
+caller-address marker: the op runs at risk level ``caution`` and waits for
+a person's approval (:mod:`meho_backplane.operations.caller_address`).
 
 FreeBSD ``ping(8)`` (pfSense 2.7 runs FreeBSD 14) takes ``-4`` / ``-6``,
 ``-c``, ``-n``, ``-S``, ``-t`` and ``-W`` for both IPv4 and IPv6. Exit 0
@@ -42,6 +44,7 @@ import socket
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
+from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -276,6 +279,7 @@ _PING_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "host": {
             "type": "string",
+            CALLER_ADDRESS_MARKER: True,
             "minLength": 1,
             "maxLength": 253,
             "description": (
@@ -372,6 +376,9 @@ _PING_LLM_INSTRUCTIONS: dict[str, Any] = {
         "pfsense.firewall.rules. Some hosts never answer ping; a loss of 100% "
         "alone does not prove the route is wrong."
     ),
+    "preconditions": (
+        "The ping goes to an address you give, so each call waits until a person approves it."
+    ),
 }
 
 DIAG_OPS: tuple[PfSenseOp, ...] = (
@@ -389,8 +396,8 @@ DIAG_OPS: tuple[PfSenseOp, ...] = (
         response_schema=_PING_RESPONSE_SCHEMA,
         group_key="diagnostics",
         tags=("read-only", "diagnostics", "ping", "routing", "pfsense"),
-        safety_level="safe",
-        requires_approval=False,
+        safety_level="caution",
+        requires_approval=True,
         llm_instructions=_PING_LLM_INSTRUCTIONS,
     ),
 )

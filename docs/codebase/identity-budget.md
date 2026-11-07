@@ -20,6 +20,13 @@ on a `(tenant, principal, window-kind, window-start)` tuple. Task #1079
   cost on every successful run, stamps it on `agent_run.cost`, and
   increments the three active budget buckets (daily + weekly + monthly)
   atomically in the same transaction as the `succeed_run` transition.
+  This holds for a run that is not streamed (`_run_loop_to_completion`)
+  and for a streamed run (`_stream_delegated_run`, used by the REST
+  route `POST /api/v1/agents/{name}/run/events` and by the console's
+  agent run page). A streamed run gets its usage from the `final`
+  event: `AgentRunEvent.usage` and `AgentRunEvent.request_usages`. These
+  two fields are not part of the event's `data`, so the SSE frame does
+  not send them to the client.
 
 Enforcement (the *"refuse at the cap, downgrade at the threshold"*
 half) is Task #1080 (G11.5-T6 / C3-b) — see "Enforcement" below.
@@ -35,7 +42,7 @@ reads the same rows.
 | `BudgetWindowKind` | `db/models.py` | Closed enum (`daily` / `weekly` / `monthly`) backed by a DB-level CHECK |
 | `PerMillionPricing` | `operations/identity_budget.py` | Per-1M-token published rates for one model |
 | `MODEL_PRICING` | `operations/identity_budget.py` | The pinned `provider:model -> PerMillionPricing` map |
-| `TokenUsage` | `operations/identity_budget.py` | Framework-free token-stream record (input / output / cache-read / cache-write) |
+| `TokenUsage` | `operations/identity_budget.py` | Framework-free token-stream record (uncached input / output / cache-read / cache-write) |
 | `BudgetReading` | `operations/identity_budget.py` | Read-side view: limits + consumption + remaining-headroom |
 
 ## Control flow
@@ -65,7 +72,7 @@ agent_run loop ─►│ AgentRun.start / .result    │
             │  (success path)                         │
             │                                         │
             │  1. provider:model = _full_model_id(.)  │
-            │  2. cost = compute_cost(usage, full_id) │
+            │  2. cost = compute_run_cost(usages, id) │
             │  3. succeed_run(session, row, cost=...) │
             │  4. apply_consumption(session, ...)     │
             │  5. commit                              │
@@ -90,10 +97,10 @@ best-effort partial usage on failure, but the v0.2 contract is
 `MODEL_PRICING` is a `Final[dict[str, PerMillionPricing]]` pinned at
 import time. The keys are the **resolved** provider-prefixed ids the
 runtime emits via `AgentRunAuditMeta.model` (e.g.
-`anthropic:claude-sonnet-4-6`). The runtime calls `compute_cost(usage,
-model_id)` with the *resolved* id, not the operator-facing logical
-tier, so the table keys directly on what the provider was actually
-billed for.
+`anthropic:claude-sonnet-5-5`, the default of `AGENT_DEFAULT_MODEL`).
+The runtime calls `compute_run_cost(request_usages, model_id)` with the *resolved*
+id, not the operator-facing logical tier, so the table keys directly
+on what the provider was actually billed for.
 
 Why in code and not the DB:
 
@@ -104,10 +111,90 @@ Why in code and not the DB:
 - A DB-row pricing table invites drift between published rates and
   the live row, plus adds a join to every cost computation.
 
-An unknown model id (lookup miss) yields `Decimal(0)` and logs a
-single `warning` per process — the "known unknown" contract. The gate
-that prevents a run from *starting* against an un-priced model lives
-in the multi-provider resolver (G11.5-C4).
+A tenant can still price a model that is *not* in the table (see "Prices a
+tenant sets" below). That is a fallback only, never a change of a price in
+the table.
+
+An unknown model id (lookup miss) yields `Decimal(0)` and logs one
+`identity_budget_pricing_miss` warning per model id per process — the
+"known unknown" contract. No gate stops a run on a model with no price:
+MEHO warns at start and shows `spend_counted: false` in the status read.
+
+The table has a row for each current Claude model: `claude-opus-5-5`,
+`claude-sonnet-5-5` and `claude-haiku-5-5`. `cache_write` is the price
+of a 5-minute cache write.
+
+Haiku 5.5 has two prices. A request whose prompt is over 100,000 tokens
+(uncached input plus cache read plus cache write) costs 5x more. The
+row carries these rates as `long_prompt`, with the threshold in
+`long_prompt_over`. So the cost is computed one request at a time:
+`compute_cost(usage, model_id)` prices one request and picks the rate
+from that request's prompt length; `compute_run_cost(requests,
+model_id)` adds up a run's requests. The runtime lifts the usage of
+each model response of a run (and of each child run it invoked) into
+`AgentRunResult.request_usages` and passes that list to the cost
+computation, so two short requests are never charged the long-prompt
+price because their prompts add up to more than the threshold. A
+runtime that reports no per-request usage gets the run's total priced
+as one request. A child run that completed some requests and then
+failed (for example, its turn budget tripped) is in the list too: its
+tokens are in the parent's shared total, so the parent's cost counts
+them.
+
+The framework (pydantic_ai 2.x) reports `input_tokens` as the whole
+prompt, cached tokens included. `TokenUsage.from_request_usage` and
+`from_run_usage` take the cache-read and cache-write tokens out of it,
+so `TokenUsage.input_tokens` is the uncached input only. A cached token
+is then counted once, at its cache rate, both in the cost and in the
+budget's token count. `prompt_tokens` adds the streams back up for the
+long-prompt threshold.
+
+A default model with no row is made visible in two places (#5771,
+`operations/unpriced_model.py`):
+
+- **At start.** `warn_if_model_unpriced(settings.agent_default_model)`
+  logs one `agent_default_model_unpriced` warning. MEHO still starts:
+  an install may pick a new model before MEHO knows its price.
+- **In the status read.** `GET /api/v1/health` (and the `meho_status`
+  tool) carries `agent_model_spend: {model, spend_counted}`.
+  `meho status` prints one line when `spend_counted` is false.
+
+`is_model_priced` reads a bare model id (no `provider:` part) as an
+Anthropic id, the same way the runtime stores it.
+
+### Prices a tenant sets
+
+A tenant admin can give an agent model that is not in `MODEL_PRICING` a
+price: input and output, in USD per million tokens (#5853). This is for a
+model MEHO cannot know, such as an open model on a model server the tenant
+runs itself.
+
+- **Where.** The prices are in `tenant.agent_model_prices` (JSON, migration
+  `0138`): `{"<model>": {"input": "0.40", "output": "1.60"}}`. Prices are
+  decimal strings, so no float rounding gets in. The code is
+  `operations/tenant_model_prices.py`.
+- **How to set them.** `GET` and `PATCH /api/v1/tenants/model-prices`, or
+  `meho tenants model-prices list|set|remove`. Only a `tenant_admin` of the
+  tenant may call them; an agent token is never `tenant_admin`. A change is
+  named in the request's audit row (`agent_model_price_*`). Prices are 0 to
+  100,000 with at most six decimals; a tenant can price at most 200 models.
+- **Which price a run uses.** `MODEL_PRICING` first: a model there always
+  keeps MEHO's price, and `PATCH` refuses to price it. Else the tenant price
+  for the full id (`openai:my-model`), then for the model name alone
+  (`my-model`). The run's tenant is the only tenant read.
+- **What it changes.** `_finalize_run` passes the tenant price to
+  `compute_run_cost(..., fallback=...)`. The run gets a cost, and
+  `apply_consumption` adds it to the person's daily, weekly and monthly
+  buckets like any other run. The setting has one input price, so cached
+  input tokens (read or written) cost the same as other input tokens.
+- **No price.** The run costs 0, and `compute_cost` logs the same
+  `identity_budget_pricing_miss` warning as before. A stored entry that is
+  not readable counts as no price and logs `tenant_model_price_unreadable`.
+- **Not changed.** The start warning and the `agent_model_spend` status field
+  above read `MODEL_PRICING` only. They are about the install's default model,
+  not one tenant.
+- **Not in the settings file.** `meho-settings.yaml` (`settings.md`) does not
+  carry the prices yet.
 
 ## Window truncation
 
@@ -284,4 +371,4 @@ fires only at the hard refusal.
   - `backend/tests/test_agent_run_consumption.py`
 - Initiative #806 §C3; Task #1079; sibling Task #1080 (C3-b
   enforcement gate).
-- Anthropic published pricing (as of 2026-05-27).
+- Anthropic published pricing (5.5 rows as of 2026-11-05).

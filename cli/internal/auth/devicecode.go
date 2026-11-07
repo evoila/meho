@@ -78,19 +78,26 @@ func (e *DiscoveryError) Error() string {
 func (e *DiscoveryError) Unwrap() error { return e.Underlying }
 
 // FetchDiscovery loads the OAuth 2.0 / OIDC discovery document at the
-// supplied URL. The URL should end in either
+// supplied URL. The URL must end in either
 // .well-known/openid-configuration (OIDC) or
 // .well-known/oauth-authorization-server (RFC 8414). Both shapes
 // expose the device-authorization-endpoint field we depend on, so we
 // don't differentiate at the call site.
 //
+// The discovery URL itself, every redirect on the way, the issuer
+// and the endpoints of the document must use https (http only to a
+// loopback host), and the issuer must be the realm address the URL
+// was built from. Login, token refresh and the approval sign-in all
+// load the document here, so all of them get these checks.
+//
 // httpClient is injectable so tests can pass an httptest.Server's
 // client; pass nil to use http.DefaultClient (which is what every
 // production call site does).
 func FetchDiscovery(ctx context.Context, httpClient *http.Client, discoveryURL string) (*DiscoveryDocument, error) {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
+	if err := checkEndpointURL("discovery URL", discoveryURL); err != nil {
+		return nil, &DiscoveryError{URL: discoveryURL, Underlying: err}
 	}
+	httpClient = WithRedirectCheck(httpClient)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, http.NoBody)
 	if err != nil {
 		return nil, &DiscoveryError{URL: discoveryURL, Underlying: err}
@@ -138,6 +145,9 @@ func FetchDiscovery(ctx context.Context, httpClient *http.Client, discoveryURL s
 			Underlying: errors.New("discovery document missing token_endpoint"),
 		}
 	}
+	if err := checkDiscoveryDocument(discoveryURL, &doc); err != nil {
+		return nil, &DiscoveryError{URL: discoveryURL, Underlying: err}
+	}
 	return &doc, nil
 }
 
@@ -152,8 +162,8 @@ func FetchDiscovery(ctx context.Context, httpClient *http.Client, discoveryURL s
 func DiscoveryURLs(realmURL string) []string {
 	base := strings.TrimRight(realmURL, "/")
 	return []string{
-		base + "/.well-known/openid-configuration",
-		base + "/.well-known/oauth-authorization-server",
+		base + oidcWellKnownPath,
+		base + oauthWellKnownPath,
 	}
 }
 
@@ -254,14 +264,9 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 
 	// Push the HTTPClient through the oauth2 context handle — that's
 	// the package's documented mechanism for injecting an
-	// http.Client. http.DefaultClient is fine when no override is
-	// supplied; oauth2 falls back to it on its own when the context
-	// key is absent, but we set it explicitly for symmetry with the
-	// FetchDiscovery call earlier in the chain.
-	httpClient := opts.HTTPClient
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	// http.Client. The redirect check applies to the device-code
+	// request and to every token request, as it does to discovery.
+	httpClient := WithRedirectCheck(opts.HTTPClient)
 	flowCtx := context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 
 	scopes := opts.Scopes
@@ -283,7 +288,15 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 		Scopes: scopes,
 	}
 
-	deviceResp, err := cfg.DeviceAuth(flowCtx)
+	// PKCE (S256) rides on the device flow too. RFC 8628 doesn't
+	// define it, but Keycloak enforces it on the device endpoint when
+	// the client's "PKCE challenge method" is set — without it the
+	// realm answers `invalid_request: Missing parameter:
+	// code_challenge_method`. IdPs that don't require it ignore the
+	// extra parameters, so we always send them.
+	verifier := oauth2.GenerateVerifier()
+
+	deviceResp, err := cfg.DeviceAuth(flowCtx, oauth2.S256ChallengeOption(verifier))
 	if err != nil {
 		return nil, fmt.Errorf("meho: device auth initiation: %w", err)
 	}
@@ -292,7 +305,7 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 		return nil, err
 	}
 
-	tok, err := pollDeviceToken(ctx, httpClient, doc.TokenEndpoint, clientID, deviceResp)
+	tok, err := pollDeviceToken(ctx, httpClient, doc.TokenEndpoint, clientID, deviceResp, verifier)
 	if err != nil {
 		return nil, classifyDeviceTokenError(opts.ParentContext, err)
 	}
@@ -341,13 +354,14 @@ var errDeviceCodeExpired = errors.New("meho: device code expired before authoris
 // longer). The last check before the code's end is planned ahead
 // (see nextCheck) so that it, too, keeps the full wait to the check
 // before it; the IdP answers slow_down to a check that comes sooner,
-// which would hide an approval.
+// which would hide an approval. Every check carries the PKCE
+// code_verifier that matches the device request's code_challenge.
 //
 // The code's end is also a deadline for the sleeps and the requests,
 // as it was in the oauth2 package's own loop. An answer that stalls
 // past the end stops the login with the "device code expired"
 // message, not with the outer PollTimeout message.
-func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, clientID string, da *oauth2.DeviceAuthResponse) (*oauth2.Token, error) {
+func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, clientID string, da *oauth2.DeviceAuthResponse, verifier string) (*oauth2.Token, error) {
 	wait := defaultPollInterval
 	if da.Interval > 0 {
 		wait = time.Duration(da.Interval) * time.Second
@@ -365,9 +379,10 @@ func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, cli
 	codeEnded := func() bool { return pollCtx.Err() != nil && ctx.Err() == nil }
 
 	form := url.Values{
-		"grant_type":  {deviceCodeGrantType},
-		"device_code": {da.DeviceCode},
-		"client_id":   {clientID},
+		"grant_type":    {deviceCodeGrantType},
+		"device_code":   {da.DeviceCode},
+		"client_id":     {clientID},
+		"code_verifier": {verifier},
 	}
 
 	first := true

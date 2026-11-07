@@ -56,6 +56,7 @@ from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations import typed_register as tr_module
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import PreviewContext
+from meho_backplane.operations.approval_object_check import REASON_APPEARED
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
@@ -425,7 +426,8 @@ async def test_full_governed_flow_preview_park_approve_resume() -> None:
     assert blast["irreversibility"] == "recreatable"
 
     # 4) A DIFFERENT operator approves (four-eyes) — the binding re-verifies.
-    approver = _make_operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -440,6 +442,79 @@ async def test_full_governed_flow_preview_park_approve_resume() -> None:
     assert resume.result["op_class"] == "write"
     assert resume.result["fqdn"] == "dual.example.test"
     assert len(recorder.sudo_calls) == 1
+
+
+async def test_approved_remove_of_an_absent_name_is_refused_when_records_appear() -> None:
+    """Park a remove of a name with no records, records appear, approve: nothing is cleared.
+
+    The approver saw an empty card. The card is built again right before the
+    run, now lists the new values, and the run is refused without a write.
+    """
+    recorder = _RecordingBind9Connector()
+    await _bootstrap(recorder)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = _args(params={"fqdn": "nope.example.test"})
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok", preview
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        blast = dict(row.proposed_effect)["blast_radius"]
+    assert blast["children"] == []
+    assert blast["match_count"] == 0
+
+    # While the request waited, someone added records at the name.
+    recorder._zonefile = _ZONEFILE + "nope IN A 192.0.2.40\nnope IN AAAA 2001:db8::40\n"
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "denied", resume
+    assert resume.extras["error_code"] == "object_changed_since_approval"
+    assert resume.extras["reason"] == REASON_APPEARED
+    assert recorder.sudo_calls == [], "nothing may be staged"
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert row.resume_result is not None
+        assert row.resume_result["extras"]["reason"] == REASON_APPEARED
+
+
+async def test_approved_remove_runs_when_the_records_are_gone() -> None:
+    """Park a remove of a name with records, the records go away, approve: the run goes ahead."""
+    recorder = _RecordingBind9Connector()
+    await _bootstrap(recorder)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = _args()  # dual.example.test — an A + AAAA name
+    preview = await preview_operation(requester, args)
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+
+    recorder._zonefile = _ZONEFILE.replace("dual IN A 192.0.2.30\ndual IN AAAA 2001:db8::30\n", "")
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "ok", resume.error
+    assert resume.result["fqdn"] == "dual.example.test"
 
 
 # ===========================================================================

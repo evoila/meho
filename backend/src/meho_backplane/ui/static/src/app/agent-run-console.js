@@ -229,7 +229,11 @@ document.addEventListener("alpine:init", () => {
         response = await fetch(url, {
           method: "POST",
           credentials: "same-origin",
-          headers: { "X-CSRF-Token": this.csrfToken },
+          // #5240: the tenant this page was made for (page-tenant.js).
+          headers: {
+            "X-CSRF-Token": this.csrfToken,
+            "Meho-Tenant": document.body.dataset.mehoTenant || "",
+          },
         });
       } catch (e) {
         this.cancelling = false;
@@ -237,6 +241,10 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       this.cancelling = false;
+      if (response.status === 409 && response.headers.get("x-meho-tenant-changed")) {
+        this.cancelError = "The tenant changed. Reload the page.";
+        return;
+      }
       // 204 (cancelled) or 409 (already terminal) both mean "this run is
       // no longer running" -- transition the console and stop streaming.
       if (response.ok || response.status === 409) {

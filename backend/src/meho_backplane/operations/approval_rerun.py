@@ -55,6 +55,7 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditEventClass
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._validate import params_hash_matches
+from meho_backplane.operations.approval_object_check import object_changed_since_request
 from meho_backplane.operations.approval_queue import (
     ApprovalError,
     ApprovalResultState,
@@ -105,6 +106,7 @@ class RerunRefusal(StrEnum):
     TARGET_GONE = "target_gone"
     TARGET_CHANGED = "target_changed"
     PREVIEW_CHANGED = "preview_changed"
+    OBJECT_CHANGED = "object_changed"
     INPUT_NOT_KEPT = "input_not_kept"
 
 
@@ -118,6 +120,9 @@ _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
         "the connection settings of the approved target changed after the request was made"
     ),
     RerunRefusal.PREVIEW_CHANGED: "the preview of the call differs from the approved one",
+    RerunRefusal.OBJECT_CHANGED: (
+        "the object of the call is not the one on the approval card, or could not be read"
+    ),
     RerunRefusal.INPUT_NOT_KEPT: (
         "MEHO did not keep the input of this multi-step credential write after its first run"
     ),
@@ -165,8 +170,9 @@ class RerunParamsRequiredError(ApprovalError):
 
     def __init__(self, request_id: uuid.UUID) -> None:
         super().__init__(
-            f"approval request {request_id} has no stored params (a credential write "
-            "keeps them only until the first run). Send the original params again"
+            f"approval request {request_id} has no stored params (a credential write, "
+            "and a call whose params hold a password or a licence key, keeps them "
+            "only until the first run). Send the original params again"
         )
         self.request_id = request_id
 
@@ -337,6 +343,8 @@ async def _check_rerun(
             reason = _target_refusal(denied)
         elif await preview_changed_since_request(operator, request, target, effective):
             reason = RerunRefusal.PREVIEW_CHANGED
+        elif await object_changed_since_request(operator, request, target, effective) is not None:
+            reason = RerunRefusal.OBJECT_CHANGED
     if reason is not None:
         raise await _refuse(
             operator,

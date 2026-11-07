@@ -31,6 +31,7 @@ acceptance which populates the ``endpoint_descriptor`` rows. The
 the lifespan can call cheaply; T3 fills in the body.
 """
 
+from meho_backplane.connectors.github import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.github.connector import GitHubRestConnector
 from meho_backplane.connectors.github.session import (
     DEFAULT_GITHUB_API_URL,

@@ -9,6 +9,109 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.45.0](https://github.com/evoila/meho/releases/tag/v0.45.0) — 2026-11-06
+
+- **Token calls run only safe operations at once.** MCP, the command
+  line, REST and agents run only `safe` operations at once. Every other
+  change waits for an approval click. In the web interface, `caution`
+  changes still run at once. Put at least one person in
+  `MEHO-SA-Operators` before you upgrade.
+- **See who may approve.** The web interface and the command line show
+  for each request whether you may approve it, and why not.
+- **The built-in parts are on by default.** The chart installs
+  PostgreSQL, Keycloak and OpenBao and connects MEHO to them. An install
+  that brings its own parts sets `corePostgres.enabled`,
+  `coreKeycloak.enabled` and `coreVault.enabled` to `false` before it
+  upgrades.
+- **Approval for operations that connect to an address you give.** Such
+  an operation waits for a person's approval. The built-in network
+  checks stay safe, so sensors can use them.
+- **More secrets stay hidden.** Link secrets are hidden in approvals and
+  traces. The Azure connector masks keys in traces. Licence operations
+  from a vendor API file stay off for every method.
+- **Security fix in the container image.** The Debian `apt` packages in
+  the base image are updated to a version that fixes a known
+  vulnerability.
+- **Connector kit 1.2.** A connector package can mark address
+  parameters, and can remove the operations that a newer version
+  dropped.
+- **Settings file.** Export the settings of a tenant as one file, and
+  import it with a preview and a history of every change.
+- **Smaller changes.** OpenShift picks every pod's user id. The first
+  start may take up to 15 minutes. A running ingest shows its step. The
+  audit log says why a call in an agent run was refused.
+- **Read first.** Two database migrations, a new chart default, and a
+  new approval rule for token calls. See "Breaking changes" and "Steps
+  after the upgrade" in the release notes.
+
+## [v0.44.0](https://github.com/evoila/meho/releases/tag/v0.44.0) — 2026-11-04
+
+- **The first release without the VMware connectors in the public
+  image.** They now come as a separate, signed connector package that
+  runs on top of the public image. The
+  [decision record](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-own-connectors-leave-the-public-tree.md)
+  says which connectors moved and why.
+- **Connector kit 1.1.** A connector package can bring its own catalog
+  rows: the vendor API file, the login profile and the risk levels.
+- **Credential reads wait for a person.** An ingested credential read
+  waits for a person's approval. Ingested licence reads stay off.
+- **Who may approve.** Only an SA-Operator or a tenant admin may approve
+  another person's dangerous change. A withdrawn request is recorded as
+  withdrawn.
+- **More secrets stay hidden, and more limits.** More secret values are
+  hidden in answers, previews and records. Request limits and a metrics
+  token are on by default in the chart.
+- **New FreeIPA connector.** Reads, and writes that wait for approval.
+- **Smaller fixes.** A mail policy change holds for the next send. The
+  appliance can send its own logs to your log server. A console bookmark
+  of a page part opens the whole page.
+- **Read first.** Three database migrations, new chart defaults, and a
+  few scripts must change. See "Breaking changes" and "Steps after the
+  upgrade" in the release notes.
+
+## [v0.43.0](https://github.com/evoila/meho/releases/tag/v0.43.0) — 2026-11-02
+
+- **The last release with the VMware connectors in the public image.**
+  From the next release on, the VMware connectors come as a separate
+  connector package, built on top of the public image. The
+  [decision record](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-own-connectors-leave-the-public-tree.md)
+  says which connectors move and why.
+- **Cached logins are checked for each caller.** A caller reads a
+  target's secret once before MEHO uses a cached login for them. SSH
+  keeps one login per caller and target.
+- **Only a platform admin changes shared things.** Ingesting or
+  deleting built-in connectors and setting the Vault login role of a
+  target need `platform_admin`.
+- **Approvals keep fewer secrets.** A decided approval request keeps no
+  secret values. A change of the connector packages in the image ends
+  the requests that still wait.
+- **Tighter rules in the console and for mail.** Running an operation
+  in the console needs the `operator` role, as on REST and MCP. Mail
+  goes only to plain addresses.
+- **The appliance build.** A new script builds the MEHO appliance for
+  vSphere. The appliance is not published yet.
+- **Read first.** One database migration, a corrected Keycloak step for
+  `meho login`, and a few scripts must change. See "Breaking changes"
+  and "Steps after the upgrade" in the release notes.
+
+## [v0.42.0](https://github.com/evoila/meho/releases/tag/v0.42.0) — 2026-11-02
+
+- **Secret fields stay hidden everywhere.** Every operation hides
+  secret-named fields in its answer. A person can still ask for a value.
+- **Approvals need a recent sign-in, also in the web interface.** On the
+  command line, one sign-in covers 15 minutes of approvals. It uses the
+  new login client `meho-cli-approve`.
+- **Logins last longer.** `meho login` renews itself, and the Claude
+  clients keep their login through a short network problem.
+- **The connector kit.** Connector packages import MEHO through one
+  module and name the kit versions they fit.
+- **New operations.** vSphere hosts, VMs, vApps, templates and vSAN,
+  HCX, fleet management, VCF Automation, VCF Operations 9.1,
+  Orchestrator, Salt, and a new Identity Broker connector.
+- **Read first.** One database migration, a new Keycloak client for
+  approvals on the command line, and a few scripts must change. See
+  "Breaking changes" and "Steps after the upgrade" in the release notes.
+
 ## [v0.41.0](https://github.com/evoila/meho/releases/tag/v0.41.0) — 2026-11-01
 
 - **More vCenter 8.0 reads are guarded.** The reads of content
@@ -30,7 +133,8 @@ notes.
   target and preview the person approved. Approving on the command line
   needs a fresh sign-in. A failed approved run can run again, and a
   change ticket can be approved step by step.
-- **Agents work with operator rights.** Tenant admin work is for people.
+- **Agents work with operator rights.** Tenant admin work is for people
+  and service logins.
 - **One tenant at a time.** A person in several tenants picks one with
   `meho tenants use`. The MCP clients send it too.
 - **New operations.** HCX, Site Recovery Manager, vSphere Replication,
@@ -341,7 +445,8 @@ notes.
 
 - **You can now read and change a VM's CPU and memory limits and reservations.**
   Two new vCenter operations show a VM's current CPU and memory limit,
-  reservation, and shares, and change any of them. A change needs approval
+  reservation, and shares. They can change the limits and the
+  reservations. A change needs approval
   first; the approval request shows the current values next to the requested
   ones, and the result reports the before and after values. Only the fields you
   ask for are changed, a request that already matches the VM changes nothing,
@@ -650,13 +755,65 @@ connector and shared-instance work that landed since.
   secrets no longer reach an agent on a shared instance.
 - **More governed VMware and SDDC lifecycle.** Resource-pool create/delete and a
   DRS VM-Host affinity rule, an NFS tag-based storage policy, vSphere Supervisor
-  enable/disable/status, and SDDC Manager workload-domain build ops — each
-  approval-gated and audited on the governed dispatch path — plus a governed read
+  enable/disable/status, and SDDC Manager workload-domain build ops. Every
+  change needs approval and is audited; the status and list reads need no
+  approval. There is also a governed read
   that stages a guest-cluster kubeconfig to a Vault reference instead of an
   agent transcript.
-- **Shared-instance isolation controls.** Per-principal and per-tenant dispatch
-  rate limits, a per-tenant mail-recipient allowlist, an opt-in bearer guard on
+- **Shared-instance isolation controls.** A rate limit and a cap on parallel
+  operations for each principal, a cap on new MCP sessions for each tenant,
+  a per-tenant mail-recipient allowlist, an opt-in bearer guard on
   `/metrics` and `/ready`, and a per-tenant bound on targetless network probes.
+
+## [v0.34.0](https://github.com/evoila/meho/releases/tag/v0.34.0) — 2026-09-08
+
+- **A hardening release.** Many checks are tighter: logins, approvals,
+  connectors, the chart and the release pipeline. The release notes list
+  each one.
+- **The audit log cannot be changed.** A database trigger refuses every
+  update and delete of an audit row. A write that cannot save its audit
+  row fails. After a set time, MEHO clears the raw vendor answer that an
+  audit row keeps; the row itself stays.
+- **Credentials go only to a checked peer.** SSH, mail and the Keycloak
+  admin client check the other side before MEHO sends a credential.
+- **The broadcast store has its own guard.** The Valkey store of the
+  broadcast subchart gets its own network policy and a password by
+  default.
+- **The image is scanned before it is released.** The release pipeline
+  scans each image and gives the release tags only to the scanned
+  digest.
+- **Read first.** One database migration (`0100`). See the release notes.
+
+## [v0.33.5](https://github.com/evoila/meho/releases/tag/v0.33.5) — 2026-09-06
+
+- **Approval decisions are for people on every path.** REST, like MCP,
+  takes approve, reject, grant and principal-admin calls only from a
+  person.
+- **Grants for targets made at run time.** A service principal's
+  standing grant can name a product or a target name pattern instead of
+  one target. A new REST route lists the governed steps a multi-step
+  operation may run, so an operator can grant them.
+- **An approved step of a multi-step operation runs.** Approving a step
+  that a multi-step operation sent for approval now runs that step.
+- **The Holodeck kubectl operation waits for approval.**
+- **Read first.** Two database migrations (`0098`, `0099`). See the
+  release notes.
+
+## [v0.33.4](https://github.com/evoila/meho/releases/tag/v0.33.4) — 2026-09-06
+
+- **Query a result handle on the server.** `result_query` gains a query
+  mode: filter, select, group, count and sort the rows of a result
+  handle on the server, with no raw SQL. An `IN` list holds up to 1000
+  values, and a query selects up to 64 columns.
+- **New Linux connector.** `linux-ssh` reads any systemd Linux host over
+  SSH. Its writes (files, services, scripts, sysctl, firewall) wait for
+  approval.
+- **New pfSense read.** `pfsense.mgmt_flow.summary` classifies the live
+  connections to the management plane.
+- **Approvals show names.** The approval pages, the CLI and the review
+  dialog show the names of the requester and the approver, and enough
+  context to judge the request.
+- **Read first.** One database migration (`0097`). See the release notes.
 
 ## [v0.33.3](https://github.com/evoila/meho/releases/tag/v0.33.3) — 2026-09-05
 
@@ -743,8 +900,8 @@ connector and shared-instance work that landed since.
 - **Governed permanent deletes.** A destructive-delete tier previews
   exactly what would be removed, binds the human approval to that exact
   preview, and refuses to run until a person approves — so a delete of a
-  VM, a DNS record, a firewall rule, or a secret always has a person who
-  owns it.
+  VM, a DNS record, a firewall NAT rule, or a Harbor robot account always
+  has a person who owns it.
 - **Flight recorder.** A complete, redaction-safe record of each
   dispatch, captured at the vendor-API level with secrets stripped, and
   readable by operators and by the agent's own session.
@@ -781,8 +938,9 @@ connector and shared-instance work that landed since.
 
 ## [v0.30.0](https://github.com/evoila/meho/releases/tag/v0.30.0) — 2026-08-25
 
-- **VMware Cloud Foundation bring-up through the backplane.** Submit and
-  poll a management-domain bring-up as governed, approval-gated steps.
+- **VMware Cloud Foundation bring-up through the backplane.** Start a
+  management-domain bring-up as a governed step that a person must
+  approve. Check its progress with safe reads.
 - **Air-gapped installs.** Govern the depot configuration, TLS-trust,
   and bundle pre-download steps an air-gapped bring-up depends on.
 - **Recover from a failed bring-up.** Resume a failed management-domain
@@ -802,8 +960,9 @@ connector and shared-instance work that landed since.
   now carries a sample of the offending rows in its evidence, so a
   notification names the specific items, not just that the aggregate
   tripped.
-- **PostgreSQL 12 dropped from the supported range.** The end-of-life
-  release is no longer supported.
+- **The PostgreSQL connector supports PostgreSQL 13 and newer.** It drops
+  the end-of-life PostgreSQL 12. A new read shows replication health and
+  how far each standby lags.
 - **More curated read operations across connectors.** Kubernetes,
   Harbor, and database connectors gained typed read operations that
   dispatch on a fresh boot with no ingest step.

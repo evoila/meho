@@ -867,7 +867,7 @@ One login can list several tenants (the `meho_tenants` claim). An MCP
 session works in **one** tenant, fixed at the start by the `Meho-Tenant`
 request header (a tenant name or UUID). To switch, the client changes the
 setting and starts a new session. There is no tool to switch tenants, so
-the working surface stays at its size.
+the working surface stays at its size. Admin guide: `docs-site/guides/several-tenants.md`.
 
 The two connection helpers send the header (#5242): the Claude Code plugin
 shim from `MEHO_TENANT` (`clients/claude-code-plugin/bin/meho-mcp-remote`),
@@ -906,7 +906,10 @@ is not set.
   state. It runs no tenant work (no credential check, no add-on
   pairings, no tool comparison). With a current tenant, `meho_status`
   answers as before and also lists `operator.tenants`, with `current`
-  set on the current one.
+  set on the current one. Inside an agent run that a person started, no
+  `tenants[].tenant_role` is higher than `operator.tenant_role`, the
+  run's own role (#5773): the person's login groups may give a higher
+  role, but the agent never gets it.
 - MEHO keeps no MCP session store (the session id only correlates audit
   rows), so nothing is kept per session that could mix tenants. Result
   links are stored per tenant and per person
@@ -1097,7 +1100,10 @@ registration at all.
 
 The map + remediation strings live in `mcp/human_only.py`; the
 registry-absence + wire-behaviour + static re-add guards are in
-`tests/test_mcp_human_only_surface.py`.
+`tests/test_mcp_human_only_surface.py`. The approval groups
+(MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers, #3325) decide only
+*which people* may approve on REST, the command line and the web
+interface; they never open an MCP path.
 
 ### Elevation: the `mcp:admin` scope
 
@@ -1242,10 +1248,11 @@ policy gate (`operations/_validate.py`) runs per call. The write is
 modelled as a **targetless typed op on a synthetic connector** (no
 vendor connector backs it), registered with `safety_level="caution"` +
 `requires_approval=False` — the dial that parks agent principals only
-(`caution` AGENT verdict floor → `needs-approval`) while a human rides
-the default-allow immediate branch. `requires_approval=True` would park
-humans too; `safety_level="dangerous"` would deny agents rather than
-park them.
+(`caution` AGENT verdict floor → `needs-approval`) while a person in the
+web interface runs it at once (a call made with a token waits, #3980).
+`requires_approval=True` would make the web interface wait too; so would
+`safety_level="dangerous"`. For an agent, `dangerous` waits for approval
+just like `caution` (#3980); it is not refused.
 
 Five synthetic connectors follow this mould (natural key
 `(product, "1.x", impl_id)` → wire `connector_id`):
@@ -1257,8 +1264,28 @@ Five synthetic connectors follow this mould (natural key
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
+| `targets-registry-1.x` | `targets.probe` | (dispatch-only; a `safe` op that detects a target's product and version and stores them, the same code as `POST /api/v1/targets/{name}/probe`) | #5653 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
 | `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
+
+**Per-op role floor.** `targets.register` and the five `topology.*`
+writes need the `tenant_admin` role from a person, the same as their
+REST routes and `meho_*` tools. Those fronts check the role at the door,
+but `call_operation` (and the REST dispatch route and the CLI) needs only
+`operator`, so the operations carry a role floor of their own
+(`operations/role_floors.py`, registered at import by the connector
+module). The policy gate (`_validate.py`) refuses a person below the
+floor with `denied` and a `denied` audit row; the approval queue refuses
+an approver below the floor at the decision (403, the request stays
+pending), so an approved call was approved by a person with the role
+whichever resume path runs it. Agents and service
+logins keep their park-for-approval behaviour. `secret.move` and the
+`secret.handoff.*` ops need no floor: they are `dangerous` with
+`requires_approval=True`, so a person's call always waits for a second
+person, and no front door of theirs asks for a higher role.
+`targets.remove` checks `tenant_admin` inside its handler (see below),
+because its sandbox-mode exception for a service login under a delete
+grant needs the gate's verdict.
 
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last
@@ -1287,7 +1314,8 @@ its name ends in `.remove`, so the rules for deletes apply: a person's call
 waits until a second person approves it, an agent login is refused, a
 service principal waits for a person and cannot get a standing grant for
 it, and only in sandbox mode can a delete grant made in the web console let
-a service principal run it at once. It is reached through
+a service principal run it at once. That call needs no `tenant_admin`: a
+service login has the `operator` role, and the delete grant is enough (#5480). It is reached through
 `call_operation` only; there is no `meho_*` tool for it. See
 [`targets.md`](targets.md#removing-a-target-targetsremove).
 

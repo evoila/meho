@@ -148,6 +148,8 @@ from meho_backplane.connector_packages import connector_package_of
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations.built_in_check_upgrade import restore_built_in_check_defaults
+from meho_backplane.operations.caller_address import raise_for_caller_address
 from meho_backplane.operations.catalog_release import record_catalog_release
 from meho_backplane.operations.composite_invariant import (
     assert_registered_composites_have_no_ingested_dispatch,
@@ -160,6 +162,7 @@ from meho_backplane.operations.embed import (
 )
 from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
+from meho_backplane.version import build_git_sha
 
 if TYPE_CHECKING:
     from meho_backplane.connectors import OperationResult
@@ -514,6 +517,7 @@ async def operation_catalog_write(
                 await retire_dead_handler_rows(session=session)
                 await assert_registered_composites_have_no_ingested_dispatch(session=session)
                 await record_catalog_release(session)
+                await _fail_start_for_test(session)
             yield
             await session.commit()
     except Exception as exc:
@@ -523,6 +527,38 @@ async def operation_catalog_write(
             error_class=type(exc).__name__,
         )
         raise
+
+
+async def _fail_start_for_test(session: AsyncSession) -> None:
+    """Fail the start on purpose after the rows were written. Test-only.
+
+    Runs only when ``MEHO_TEST_FAIL_START_AFTER_REGISTRATION`` is set. It
+    first disables every built-in operation row in *session*, so the
+    attempted change is visible and differs from the rows a good start
+    writes, logs what it attempted, and then raises. The caller's
+    transaction rolls back: the rows and the release stamp stay as the
+    last good start left them. The CI proof on a throwaway install checks
+    exactly that (#5024).
+    """
+    if not get_settings().test_fail_start_after_registration:
+        return
+    result = await session.execute(
+        update(EndpointDescriptor)
+        .where(
+            EndpointDescriptor.tenant_id.is_(None),
+            EndpointDescriptor.source_kind.in_(("typed", "composite")),
+        )
+        .values(is_enabled=False)
+    )
+    structlog.get_logger(__name__).warning(
+        "operation_catalog_test_failure",
+        reason="MEHO_TEST_FAIL_START_AFTER_REGISTRATION is set; failing the start on purpose",
+        rows_changed=getattr(result, "rowcount", None),
+        attempted_release=build_git_sha(),
+    )
+    raise RuntimeError(
+        "start failed on purpose after registration: MEHO_TEST_FAIL_START_AFTER_REGISTRATION is set"
+    )
 
 
 #: The session of the start-up registration transaction while
@@ -1244,7 +1280,10 @@ async def register_typed_operation(
     safety_level
         ``"safe"`` (default), ``"caution"``, or ``"dangerous"``. The
         policy gate consumes this; safe ops execute under the
-        default-allow policy.
+        default-allow policy. A parameter marked with
+        ``x-meho-caller-address: true`` raises the op to at least
+        ``caution`` with ``requires_approval=True``
+        (:mod:`meho_backplane.operations.caller_address`).
     requires_approval
         When ``True``, the dispatcher writes an audit row in
         ``status='pending'`` and waits for operator decision before
@@ -1644,6 +1683,11 @@ async def _register_in_session(
             "requires_approval=False; the destructive tier is "
             "human-approval-always — register it with requires_approval=True"
         )
+    # A parameter that holds an address MEHO connects to raises the op to at
+    # least ``caution`` with approval, whatever the registrar declared.
+    safety_level, requires_approval = raise_for_caller_address(
+        parameter_schema, safety_level=safety_level, requires_approval=requires_approval
+    )
 
     log = structlog.get_logger()
     now = datetime.now(UTC)
@@ -1723,6 +1767,15 @@ async def _register_in_session(
                 f"(handler_ref={handler_ref!r}). If this is intentional, "
                 "delete the existing endpoint_descriptor row first."
             )
+
+        # A built-in network check stored with the old caller-address values
+        # goes back to its new values before the raise-only update below.
+        restore_built_in_check_defaults(
+            existing,
+            parameter_schema=parameter_schema,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+        )
 
         existing_text = build_embedding_text(
             summary=existing.summary or "",

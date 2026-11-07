@@ -85,7 +85,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 import httpx
 import structlog
@@ -93,6 +93,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
     VaultCredentialsReadError,
@@ -111,6 +112,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakAdminCredentialsLoader,
@@ -149,6 +151,12 @@ _DEFAULT_TOKEN_TTL_SECONDS: float = 60.0
 #: idempotent-GET retry decorator (re-firing a side effect on a transient
 #: 5xx is the bug that guard prevents).
 _MUTATING_METHODS: frozenset[str] = frozenset({"POST", "PUT", "DELETE"})
+
+#: What the flight recorder stores in place of an Admin REST answer that is
+#: not JSON, or that the mask could not walk. Keycloak answers JSON on every
+#: recorded call; anything else is left out of the trace rather than stored
+#: unread.
+_TRACE_BODY_WITHHELD: Final[str] = "<response body left out: MEHO could not mask it>"
 
 
 @dataclass(frozen=True)
@@ -356,6 +364,8 @@ class KeycloakConnector(HttpConnector):
         # (``target_cache_key``) so two same-named targets in different
         # tenants never share a cached admin token (#1642/#1672).
         self._admin_tokens: dict[tuple[str, str], _CachedToken] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._token_lock = asyncio.Lock()
         self._credentials_loader: KeycloakAdminCredentialsLoader = (
             credentials_loader
@@ -417,8 +427,13 @@ class KeycloakConnector(HttpConnector):
             now = time.monotonic()
             cached = self._admin_tokens.get(cache_key)
             if cached is not None and cached.is_fresh(now):
+                # The caller's own Vault read, once per caller and target.
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credentials_loader(target, operator)
+                )
                 return cached.token
             token, ttl = await self._mint_admin_token(target, operator)
+            self._readers.record(target, operator)
             self._admin_tokens[cache_key] = _CachedToken(token, now + ttl)
             return token
 
@@ -606,6 +621,32 @@ class KeycloakConnector(HttpConnector):
             probed_at=fp.probed_at,
         )
 
+    # -- flight recorder trace mask -------------------------------------
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Record Admin REST answers with every secret field masked.
+
+        The flight recorder stores the vendor answer of each recorded call.
+        A client representation carries the confidential client's
+        ``secret``, a user representation can carry ``credentials``, and a
+        realm's ``smtpServer`` map carries a ``password``. The trace gets
+        the same scrub the operation result gets
+        (:func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`),
+        so the stored trace and the agent copy hold ``***REDACTED***`` where
+        the result does. An empty body is recorded as it is. A body that is
+        not JSON is replaced by a fixed marker. Never raises.
+        """
+        if not response.content:
+            return None
+        try:
+            body = response.json()
+        except ValueError:
+            return _TRACE_BODY_WITHHELD
+        try:
+            return redact_secret_fields(body)
+        except Exception:  # a trace must never break the call, and never hold a secret
+            return _TRACE_BODY_WITHHELD
+
     # -- admin-auth JSON GET helpers ------------------------------------
 
     async def _get_admin_json(
@@ -791,7 +832,9 @@ class KeycloakConnector(HttpConnector):
         try:
             role = await self._get_admin_json(
                 target,
-                fill_path(_ROLE_PATH, {"realm": managed_realm, "role-name": role_name}),
+                fill_path(
+                    _ROLE_PATH, {"realm": managed_realm, "role-name": quote_segment(role_name)}
+                ),
                 operator=operator,
             )
         except httpx.HTTPStatusError as exc:
@@ -1102,6 +1145,36 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_check_login(self, operator, target, params)
 
+    async def authflow_ensure_approval_flow(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_approval_flow``."""
+        from meho_backplane.connectors.keycloak.ops_authflow import (
+            keycloak_authflow_ensure_approval_flow,
+        )
+
+        return await keycloak_authflow_ensure_approval_flow(self, operator, target, params)
+
+    async def authflow_ensure_passkey_code_skip(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_passkey_code_skip``."""
+        from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
+            keycloak_authflow_ensure_passkey_code_skip,
+        )
+
+        return await keycloak_authflow_ensure_passkey_code_skip(self, operator, target, params)
+
+    async def identity_provider_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.identity_provider.list``."""
+        from meho_backplane.connectors.keycloak.ops_identity_provider import (
+            keycloak_identity_provider_list,
+        )
+
+        return await keycloak_identity_provider_list(self, operator, target, params)
+
     # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 
     @classmethod
@@ -1131,13 +1204,26 @@ class KeycloakConnector(HttpConnector):
         walk — every write registers ``requires_approval=True``. #3944 adds
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
-        ``user.check_login`` (one login test) rides the same walk.
+        ``user.check_login`` (one login test) rides the same walk, and so do
+        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``
+        and ``identity_provider.list``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
         # pure-fingerprint / pure-probe unit test should not pay. Lifespan
         # callers already have the embedding service warmed by the time
         # this runs.
+        from meho_backplane.connectors.keycloak.ops_authflow import (
+            APPROVAL_FLOW_OPS,
+            WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+        )
+        from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
+            PASSKEY_CODE_SKIP_OPS,
+        )
+        from meho_backplane.connectors.keycloak.ops_identity_provider import (
+            IDENTITY_PROVIDER_OPS,
+            WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
+        )
         from meho_backplane.connectors.keycloak.ops_login_check import (
             LOGIN_CHECK_OPS,
             WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
@@ -1159,10 +1245,19 @@ class KeycloakConnector(HttpConnector):
             **WHEN_TO_USE_BY_GROUP,
             **WHEN_TO_USE_WRITE_BY_GROUP,
             **WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
+            **WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+            **WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
         }
 
         bindings: list[tuple[Any, Any]] = []
-        for op in (*READ_OPS, *WRITE_OPS, *LOGIN_CHECK_OPS):
+        for op in (
+            *READ_OPS,
+            *WRITE_OPS,
+            *LOGIN_CHECK_OPS,
+            *APPROVAL_FLOW_OPS,
+            *PASSKEY_CODE_SKIP_OPS,
+            *IDENTITY_PROVIDER_OPS,
+        ):
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:
                 raise AttributeError(
@@ -1264,6 +1359,7 @@ class KeycloakConnector(HttpConnector):
         """
         async with self._token_lock:
             self._admin_tokens.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def aclose(self) -> None:
         """Clear cached admin tokens then tear down the httpx pool.
@@ -1277,6 +1373,7 @@ class KeycloakConnector(HttpConnector):
         """
         async with self._token_lock:
             self._admin_tokens.clear()
+            self._readers.clear()
         await super().aclose()
 
 

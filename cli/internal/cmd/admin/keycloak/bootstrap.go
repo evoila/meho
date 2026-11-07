@@ -112,9 +112,9 @@ type BootstrapOptions struct {
 	// which is 30 days on a default Keycloak realm.
 	MCPOfflineSessionIdleSeconds int
 
-	// DryRun true → print every API call that would be made and exit
-	// 0 without mutating anything. Mirrors the reference shell
-	// script's `--dry-run`.
+	// DryRun true → log in, read the realm, and print each change a
+	// real run would make, without changing anything: every request
+	// other than a read is answered in the process (dryRunTransport).
 	DryRun bool
 
 	// Out / Err are where structured progress lines go. nil → stdout
@@ -468,10 +468,14 @@ var cliRedirectURIs = []string{"http://127.0.0.1:*"}
 // the description in a 255-character column; a longer one fails the
 // create with HTTP 500.
 //
-// The standard (browser) flow is on with PKCE S256 and loopback
-// redirect URIs only: `meho approvals approve` uses it for the fresh
-// sign-in an approval needs (#3979). `meho login` still uses the
-// device flow.
+// The standard (browser) flow is on with loopback redirect URIs only:
+// older CLI versions use it for the fresh sign-in an approval needs
+// (#3979). `meho login` uses the device flow. CLI versions before
+// 0.44.0 send no PKCE there, and Keycloak checks PKCE at the device
+// login the same way as at the browser sign-in, so a required PKCE
+// method would refuse their `meho login`. The client therefore
+// requires no PKCE method; a login that sends a challenge is still
+// accepted (#5624).
 func (o BootstrapOptions) desiredCLIClient() *clientRep {
 	c := &clientRep{
 		ClientID:                  o.CLIClientID,
@@ -485,7 +489,9 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 		ServiceAccountsEnabled:    boolPtr(false),
 		FrontchannelLogout:        boolPtr(false),
 		Attributes: map[string]string{
-			"pkce.code.challenge.method":                  "S256",
+			// An empty value makes Keycloak drop a PKCE method that an
+			// earlier run (0.40.0, 0.41.0) set on this client.
+			"pkce.code.challenge.method":                  "",
 			"oauth2.device.authorization.grant.enabled":   "true",
 			"use.refresh.tokens":                          "true",
 			"client.use.lightweight.access.token.enabled": "false",
@@ -674,9 +680,9 @@ func Bootstrap(
 	}
 
 	if opts.DryRun {
-		fmt.Fprintln(out, "==> DRY RUN — no admin token will be minted; "+
-			"no realm state will change.")
-		return dryRunSummary(opts, out)
+		fmt.Fprintln(out, "==> DRY RUN — reads the realm and changes nothing. "+
+			"The events at the end show each change a real run would make.")
+		dryRunSummary(opts, out)
 	}
 
 	fmt.Fprintf(out,
@@ -689,7 +695,11 @@ func Bootstrap(
 		return nil, fmt.Errorf("mint admin token: %w", err)
 	}
 
+	if opts.DryRun {
+		httpClient = dryRunHTTPClient(httpClient)
+	}
 	c := newAdminClient(httpClient, opts.KeycloakBaseURL, opts.Realm, token)
+	c.dryRun = opts.DryRun
 	res := &Result{}
 
 	// --- CLI device-code client ---------------------------------------------
@@ -721,7 +731,7 @@ func Bootstrap(
 	// the opt-out needs its own call.
 	if cliOptional := opts.requiredCLIOptionalScopes(); len(cliOptional) > 0 {
 		cliOptionalEvents, oerr := reconcileOptionalScopes(
-			ctx, c, cliUUID, cliOptional)
+			ctx, c, cliUUID, cliOptional, nil)
 		if oerr != nil {
 			return nil, fmt.Errorf("reconcile CLI optional scopes: %w", oerr)
 		}
@@ -790,14 +800,14 @@ func Bootstrap(
 		return nil, fmt.Errorf("reconcile MCP default scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, mcpScopeEvents...)
-	realmScopeEvents, err := reconcileRealmClientScopes(
+	createdScopes, realmScopeEvents, err := reconcileRealmClientScopes(
 		ctx, c, mcpClientScopes())
 	if err != nil {
 		return nil, fmt.Errorf("reconcile MCP client scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, realmScopeEvents...)
 	mcpOptionalEvents, err := reconcileOptionalScopes(
-		ctx, c, mcpUUID, requiredMCPOptionalScopes())
+		ctx, c, mcpUUID, requiredMCPOptionalScopes(), createdScopes)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile MCP optional scopes: %w", err)
 	}
@@ -844,14 +854,17 @@ func Bootstrap(
 	}
 
 	res.ConfigKeysToSet = buildConfigKeySummary(opts)
+	if opts.DryRun {
+		for i, line := range res.MapperEventsLog {
+			res.MapperEventsLog[i] = dryRunEvent(line)
+		}
+	}
 	return res, nil
 }
 
-// dryRunSummary prints what would change and returns a result whose
-// IDs are empty strings — callers must not pass the UUIDs onward.
-func dryRunSummary(
-	opts BootstrapOptions, out io.Writer,
-) (*Result, error) {
+// dryRunSummary prints the shape a run sets up. The changes against
+// the realm follow in the events of the dry run.
+func dryRunSummary(opts BootstrapOptions, out io.Writer) {
 	fmt.Fprintf(out, "==> would provision against %s realm=%s\n",
 		opts.KeycloakBaseURL, opts.Realm)
 	fmt.Fprintf(out, "==> CLI device-code client: %s\n", opts.CLIClientID)
@@ -912,17 +925,11 @@ func dryRunSummary(
 	} else {
 		fmt.Fprintln(out, "==> admin user skipped")
 	}
-	return &Result{
-		CLIClientID:     opts.CLIClientID,
-		ApproveClientID: opts.CLIApproveClientID,
-		MCPClientID:     opts.MCPClientID,
-		ConfigKeysToSet: buildConfigKeySummary(opts),
-	}, nil
 }
 
-// reconcileClient creates or PUT-updates a client to the desired
-// shape. Returns the client's UUID + an events log (one bullet line
-// per mutation, suitable for printing).
+// reconcileClient creates a missing client, or PUT-updates an existing
+// one when a field that desired sets differs. Returns the client's UUID
+// + an events log; an update names each changed field.
 func reconcileClient(
 	ctx context.Context, c *adminClient, desired *clientRep,
 ) (string, []string, error) {
@@ -941,20 +948,26 @@ func reconcileClient(
 				desired.ClientID, uuid))
 		return uuid, events, nil
 	}
-	// PUT-update with the existing UUID baked in, mirroring the
-	// shell script's `$existing * $desired` merge semantic: the
-	// desired shape wins for every key it sets, the existing wins
-	// for everything it doesn't set. Keycloak's PUT is a full
-	// replacement at the client-rep level, so we carry the UUID +
-	// the desired shape's full set of fields explicitly.
-	merged := *desired
-	merged.ID = existing.ID
-	if err := c.updateClient(ctx, existing.ID, &merged); err != nil {
+	// The PUT sends only the desired shape. Keycloak sets every field
+	// the PUT sends, so each value desired sets replaces the existing
+	// one, also one an admin changed on purpose: the name, the
+	// description, the flow switches, the redirect URIs, the web
+	// origins and the attributes desired names. Keycloak keeps a field
+	// the PUT leaves out and an attribute it does not name.
+	changes := clientChanges(existing, desired)
+	if len(changes) == 0 {
+		events = append(events,
+			fmt.Sprintf("[skip]    client %s (already matches)", desired.ClientID))
+		return existing.ID, events, nil
+	}
+	update := *desired
+	update.ID = existing.ID
+	if err := c.updateClient(ctx, existing.ID, &update); err != nil {
 		return "", nil, err
 	}
 	events = append(events,
-		fmt.Sprintf("[updated] client %s (uuid=%s)",
-			desired.ClientID, existing.ID))
+		fmt.Sprintf("[updated] client %s (uuid=%s): %s",
+			desired.ClientID, existing.ID, strings.Join(changes, "; ")))
 	return existing.ID, events, nil
 }
 
@@ -1001,14 +1014,15 @@ func reconcileMappers(
 		// Keycloak's PUT replaces the mapper type and config in place.
 		// On an older realm this turns the fixed-value tenant-id /
 		// tenant-role mappers into User Attribute mappers.
+		changes := strings.Join(mapperChanges(got, want), "; ")
 		if got.ProtocolMapper != want.ProtocolMapper {
 			events = append(events,
-				fmt.Sprintf("[updated] mapper %s (replaced %s with %s)",
-					want.Name, got.ProtocolMapper, want.ProtocolMapper))
+				fmt.Sprintf("[updated] mapper %s (replaced %s with %s): %s",
+					want.Name, got.ProtocolMapper, want.ProtocolMapper, changes))
 			continue
 		}
 		events = append(events,
-			fmt.Sprintf("[updated] mapper %s", want.Name))
+			fmt.Sprintf("[updated] mapper %s: %s", want.Name, changes))
 	}
 	return events, nil
 }
@@ -1084,19 +1098,20 @@ func reconcileDefaultScopes(
 
 // reconcileRealmClientScopes creates every desired realm-level client
 // scope that does not exist yet, matched by name. An existing scope is
-// left as it is: an admin may have changed it on purpose.
+// left as it is: an admin may have changed it on purpose. Returns the
+// names of the scopes it created plus one event line per scope.
 func reconcileRealmClientScopes(
 	ctx context.Context, c *adminClient, desired []clientScopeRep,
-) ([]string, error) {
+) ([]string, []string, error) {
 	allScopes, err := c.listRealmClientScopes(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	exists := make(map[string]bool, len(allScopes))
 	for _, s := range allScopes {
 		exists[s.Name] = true
 	}
-	var events []string
+	var created, events []string
 	for _, want := range desired {
 		if exists[want.Name] {
 			events = append(events,
@@ -1105,13 +1120,14 @@ func reconcileRealmClientScopes(
 			continue
 		}
 		if err := c.createClientScope(ctx, want); err != nil {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"create client scope %s: %w", want.Name, err)
 		}
+		created = append(created, want.Name)
 		events = append(events,
 			fmt.Sprintf("[created] client scope %s", want.Name))
 	}
-	return events, nil
+	return created, events, nil
 }
 
 // reconcileOptionalScopes resolves each desired-scope name to its
@@ -1122,9 +1138,14 @@ func reconcileRealmClientScopes(
 //
 // Used to assign `offline_access` and the `mcp:*` scopes to the MCP
 // browser-flow client; see requiredMCPOptionalScopes.
+//
+// created names the realm scopes this run made just before
+// (reconcileRealmClientScopes). A real run finds them in the realm. A
+// dry run did not make them, so it takes them as the scopes it would
+// create and reports that it would assign them.
 func reconcileOptionalScopes(
 	ctx context.Context, c *adminClient,
-	clientUUID string, desired []string,
+	clientUUID string, desired, created []string,
 ) ([]string, error) {
 	allScopes, err := c.listRealmClientScopes(ctx)
 	if err != nil {
@@ -1133,6 +1154,13 @@ func reconcileOptionalScopes(
 	scopeIDByName := make(map[string]string, len(allScopes))
 	for _, s := range allScopes {
 		scopeIDByName[s.Name] = s.ID
+	}
+	if c.dryRun {
+		for _, name := range created {
+			if _, ok := scopeIDByName[name]; !ok {
+				scopeIDByName[name] = dryRunNewID
+			}
+		}
 	}
 	existing, err := c.listClientOptionalScopes(ctx, clientUUID)
 	if err != nil {
@@ -1236,8 +1264,8 @@ func reconcileGroups(
 		if err != nil {
 			return nil, nil, fmt.Errorf("read group %s: %w", g.Name, err)
 		}
-		merged, changed := mergeOwnedAttributes(existing.Attributes, want, g.Owned)
-		if !changed {
+		merged, changes := mergeOwnedAttributes(existing.Attributes, want, g.Owned)
+		if len(changes) == 0 {
 			events = append(events, fmt.Sprintf(
 				"[skip]    group %s (already matches)", g.Name))
 			continue
@@ -1248,36 +1276,49 @@ func reconcileGroups(
 		}); err != nil {
 			return nil, nil, fmt.Errorf("update group %s: %w", g.Name, err)
 		}
-		events = append(events, fmt.Sprintf("[updated] group %s (%s)",
-			g.Name, formatAttributes(want)))
+		events = append(events, fmt.Sprintf("[updated] group %s: %s",
+			g.Name, strings.Join(changes, ", ")))
 	}
 	return uuids, events, nil
 }
 
 // mergeOwnedAttributes returns existing with the owned keys set to want:
 // an owned key in want is set, an owned key not in want is removed, and
-// every other key is kept. changed reports whether anything differs.
+// every other key is kept. changes names each key that differs, as
+// "key: old -> new", in the order of owned; a removed key ends in
+// "(removed)".
 func mergeOwnedAttributes(
 	existing, want map[string][]string, owned []string,
-) (map[string][]string, bool) {
+) (map[string][]string, []string) {
 	merged := make(map[string][]string, len(existing)+len(want))
 	for k, v := range existing {
 		merged[k] = v
 	}
-	changed := false
+	var changes []string
 	for _, k := range owned {
 		wantVal, keep := want[k]
 		gotVal, has := existing[k]
 		switch {
 		case keep && !slices.Equal(gotVal, wantVal):
 			merged[k] = wantVal
-			changed = true
+			changes = append(changes, fmt.Sprintf("%s: %s -> %s",
+				k, attributeText(gotVal, has), listText(wantVal)))
 		case !keep && has:
 			delete(merged, k)
-			changed = true
+			changes = append(changes, fmt.Sprintf("%s: %s -> (removed)",
+				k, listText(gotVal)))
 		}
 	}
-	return merged, changed
+	return merged, changes
+}
+
+// attributeText renders an attribute's values, or "(none)" when the
+// group does not have the attribute.
+func attributeText(values []string, ok bool) string {
+	if !ok {
+		return "(none)"
+	}
+	return listText(values)
 }
 
 // formatAttributes renders the owned attributes in a fixed order for

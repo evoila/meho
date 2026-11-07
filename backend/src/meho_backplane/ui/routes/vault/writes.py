@@ -30,7 +30,8 @@ Why a session BFF (same rationale as T1)
 
 The Bearer-gated ``POST /api/v1/operations/call`` cannot be authenticated by a
 browser carrying only the BFF session cookie, so these routes are
-``require_ui_session``-gated and call
+gated on the ``require_ui_operator`` role floor (confirm GETs and dispatch
+POSTs alike, the same floor as REST) and call
 :func:`~meho_backplane.operations.meta_tools.call_operation` IN-PROCESS -- the
 exact confirm-gated-dispatch pattern ``ui/routes/operations/routes.py`` uses
 for its Run surface. ``call_operation`` is complete and tested; NO backend
@@ -59,7 +60,7 @@ Route inventory (write -- confirm GETs + dispatch POSTs)
   ``secret-broker-1.x`` connector with the schema's ``from`` / ``to``
   references (+ optional ``reason``). VALUE-FREE by contract: there is NO
   inline value input, the dispatched params carry no value, and the render
-  surfaces only the ``{status, value_sha256, length}`` confirmation -- the
+  surfaces only the ``{status, value_fingerprint, length}`` confirmation -- the
   value never enters op params, the response, a log event, or the audit row.
 
 CSRF (load-bearing -- writes, unlike T1's reads, are gated)
@@ -133,7 +134,7 @@ from fastapi.responses import HTMLResponse
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import call_operation
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import parked_request_chain, set_csrf_cookie
 from meho_backplane.ui.routes.vault.routes import (
@@ -197,8 +198,11 @@ _MAX_VERSIONS_LENGTH: Final[int] = 1024
 _MAX_REF_LENGTH: Final[int] = 1024
 
 #: Module-level ``Depends`` closure -- built once (rather than inline) to
-#: satisfy ruff B008, matching the operations / approvals / T1 routers.
-_require_session = Depends(require_ui_session)
+#: satisfy ruff B008, matching the operations / approvals / T1 routers. The
+#: ``operator`` role floor of the dispatch POSTs AND the confirm GETs (the
+#: same floor as REST ``/api/v1/operations/call``): the whole vault console
+#: is for operators, so a ``read_only`` session gets ``403 operator_required``.
+_require_operator = Depends(require_ui_operator)
 
 
 async def _secret_broker_connector_id(operator: Operator) -> str | None:
@@ -250,7 +254,7 @@ def build_vault_writes_router() -> APIRouter:
     @router.get("/ui/vault/put/confirm", response_class=HTMLResponse)
     async def vault_put_confirm(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = "",
         mount: str = _DEFAULT_MOUNT,
         path: str = "",
@@ -276,7 +280,7 @@ def build_vault_writes_router() -> APIRouter:
     @router.get("/ui/vault/delete/confirm", response_class=HTMLResponse)
     async def vault_delete_confirm(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = "",
         mount: str = _DEFAULT_MOUNT,
         path: str = "",
@@ -301,7 +305,7 @@ def build_vault_writes_router() -> APIRouter:
     @router.get("/ui/vault/move/confirm", response_class=HTMLResponse)
     async def vault_move_confirm(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         """Render the ``secret.move`` confirm modal (dangerous / requires approval).
 
@@ -317,7 +321,7 @@ def build_vault_writes_router() -> APIRouter:
     @router.post("/ui/vault/put", response_class=HTMLResponse)
     async def vault_put(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         mount: str = Form(default=_DEFAULT_MOUNT, max_length=_MAX_MOUNT_LENGTH),
         path: str = Form(default="", max_length=_MAX_PATH_LENGTH),
@@ -326,8 +330,9 @@ def build_vault_writes_router() -> APIRouter:
     ) -> HTMLResponse:
         """Dispatch ``vault.kv.put`` in-process; render the result inline.
 
-        CSRF-gated (a ``POST`` under ``/ui/``) + ``require_ui_session``-gated.
-        ``data`` is the operator-supplied secret key/value JSON object;
+        CSRF-gated (a ``POST`` under ``/ui/``) + ``require_ui_operator``-gated
+        (``read_only`` gets 403 before any dispatch). ``data`` is the
+        operator-supplied secret key/value JSON object;
         ``cas`` rides in ``params`` ONLY when the operator set it (the CLI
         ``Changed("cas")`` rule). The BFF logs no secret material.
         """
@@ -336,7 +341,7 @@ def build_vault_writes_router() -> APIRouter:
     @router.post("/ui/vault/delete", response_class=HTMLResponse)
     async def vault_delete(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         mount: str = Form(default=_DEFAULT_MOUNT, max_length=_MAX_MOUNT_LENGTH),
         path: str = Form(default="", max_length=_MAX_PATH_LENGTH),
@@ -344,7 +349,7 @@ def build_vault_writes_router() -> APIRouter:
     ) -> HTMLResponse:
         """Dispatch ``vault.kv.delete`` in-process; render the result inline.
 
-        CSRF-gated + ``require_ui_session``-gated. ``versions`` is the
+        CSRF-gated + ``require_ui_operator``-gated. ``versions`` is the
         comma-separated list of version numbers to soft-delete.
         """
         return await _render_delete_result(request, session, target, mount, path, versions)
@@ -352,17 +357,17 @@ def build_vault_writes_router() -> APIRouter:
     @router.post("/ui/vault/move", response_class=HTMLResponse)
     async def vault_move(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         from_ref: str = Form(default="", alias="from", max_length=_MAX_REF_LENGTH),
         to_ref: str = Form(default="", alias="to", max_length=_MAX_REF_LENGTH),
         reason: str = Form(default="", max_length=_MAX_REF_LENGTH),
     ) -> HTMLResponse:
         """Dispatch ``secret.move`` in-process; render the value-free result.
 
-        CSRF-gated + ``require_ui_session``-gated. Dispatches the SEPARATE
+        CSRF-gated + ``require_ui_operator``-gated. Dispatches the SEPARATE
         ``secret-broker-1.x`` connector with ``from`` / ``to`` references (+
         optional reason). VALUE-FREE: no value field is accepted, dispatched,
-        logged, or rendered -- only the ``{status, value_sha256, length}``
+        logged, or rendered -- only the ``{status, value_fingerprint, length}``
         confirmation surfaces.
         """
         return await _render_move_result(request, session, from_ref, to_ref, reason)
@@ -539,7 +544,7 @@ async def _render_move_result(
     Dispatches the SEPARATE ``secret-broker-1.x`` connector with the schema's
     ``from`` / ``to`` reference fields (+ optional ``reason``). NO value field
     is accepted or forwarded -- the no-``--value`` invariant -- and the result
-    fragment renders only ``{status, value_sha256, length}``. A blank ``from``
+    fragment renders only ``{status, value_fingerprint, length}``. A blank ``from``
     or ``to`` is a typed inline 400 form error (the schema requires both).
     """
     operator = await _resolve_operator(session)

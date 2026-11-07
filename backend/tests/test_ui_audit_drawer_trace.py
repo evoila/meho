@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+import warnings
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -38,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.jwt import clear_jwks_cache
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.flight_recorder import SpanInput, record_trace
@@ -52,6 +54,10 @@ from meho_backplane.ui.csrf import CSRFMiddleware
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
+from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
+from tests._oidc_jwt_helpers import mint_token as _mint_token
+from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
+from tests._oidc_jwt_helpers import public_jwks as _public_jwks
 
 _BACKPLANE_URL = "https://meho.test"
 _DEFAULT_ISSUER = "https://keycloak.test/realms/meho"
@@ -162,7 +168,37 @@ def _seed_trace(
     asyncio.run(_do())
 
 
+# One keypair for the whole module. Every seeded session carries a real
+# ``operator`` JWT signed with it (unless a test passes its own token), and
+# the autouse fixture below serves its JWKS, so the console's operator gate
+# can lift the role on every request.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _KEYPAIR = _make_rsa_keypair("ui-audit-trace-test-kid")
+_JWKS = _public_jwks(_KEYPAIR)
+
+
+@pytest.fixture(autouse=True)
+def _jwks_mock(_bff_env: None) -> Iterator[None]:
+    """Serve the module keypair's JWKS so the operator role lift succeeds."""
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, _JWKS)
+        yield
+
+
+def _operator_token(operator_sub: str, tenant_id: uuid.UUID) -> str:
+    """A real ``operator`` JWT for *operator_sub* signed with the module keypair."""
+    return _mint_token(
+        _KEYPAIR,
+        sub=operator_sub,
+        tenant_id=str(tenant_id),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+
+
 def _seed_session_sync(*, tenant_id: uuid.UUID, operator_sub: str = _OPERATOR_SUB) -> uuid.UUID:
+    """Create a ``web_session`` row with a real ``operator`` JWT; return its UUID."""
+
     async def _do() -> uuid.UUID:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session, session.begin():
@@ -170,7 +206,7 @@ def _seed_session_sync(*, tenant_id: uuid.UUID, operator_sub: str = _OPERATOR_SU
                 session,
                 operator_sub=operator_sub,
                 tenant_id=tenant_id,
-                access_token="access-token-plaintext",
+                access_token=_operator_token(operator_sub, tenant_id),
                 refresh_token="refresh-token-plaintext",
                 lifetime=timedelta(hours=1),
             )

@@ -113,11 +113,13 @@ from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     MAX_REASON_LENGTH,
     ApprovalExpiredReason,
+    ApprovalGroupForbiddenError,
     ApprovalListOrder,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
     ApprovalResultState,
+    ApprovalRoleFloorError,
     ApprovalSignInReusedError,
     ApprovalSignInTooOldError,
     DelegatedDecisionForbiddenError,
@@ -147,6 +149,7 @@ from meho_backplane.operations.approval_rerun import (
     RerunParamsRequiredError,
     rerun_failed_request,
 )
+from meho_backplane.operations.approval_rights import ApproveRight, approve_right
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.settings import get_settings
 
@@ -297,6 +300,10 @@ class ApprovalRequestView(BaseModel):
     #: for a non-destructive request. Additive.
     preview_hash: str | None = None
     proposed_effect: dict[str, Any]
+    #: The requester asked for the hidden values of the answer
+    #: (``reveal_secret: true``). When ``True``, the approved run returns
+    #: the secret values to the requester. Read off the row. Additive.
+    reveal_secret: bool = False
     status: ApprovalRequestStatus
     #: Run phase of an approved request (#3486): ``not_started`` /
     #: ``started`` / ``executed`` / ``failed``. ``None`` unless ``status`` is
@@ -344,6 +351,17 @@ class ApprovalRequestView(BaseModel):
     #: who instructed the approver, their words, and the refs. ``None`` on
     #: the list view, before a decision, and for an ordinary decision.
     delegation: DelegationView | None = None
+    #: Whether the caller may approve this request (#3329), worked out by
+    #: the server with the same checks as the approve. ``False`` for a
+    #: request that is not pending. ``None`` on the withdraw answer.
+    #: Additive; a client that ignores it is unaffected.
+    may_approve: bool | None = None
+    #: Why the caller may or may not approve (#3329): ``ok``,
+    #: ``own_change``, ``wrong_group``, ``role_too_low``,
+    #: ``no_approval_access``, ``not_a_person`` or ``not_pending``. With
+    #: ``may_approve`` true, ``own_change`` means a self-approval is
+    #: allowed. ``None`` when ``may_approve`` is ``None``.
+    may_approve_reason: str | None = None
 
 
 class ApprovalResultView(BaseModel):
@@ -501,6 +519,7 @@ def _view(
     row: ApprovalRequest,
     reviewer_context: ReviewerContextView | None = None,
     delegation: Delegation | None = None,
+    right: ApproveRight | None = None,
 ) -> ApprovalRequestView:
     """Convert an ORM row to a response view.
 
@@ -508,7 +527,8 @@ def _view(
     supplied only on the single-request path (its resolution runs a few
     tenant-scoped reads); the list view passes ``None`` and the field is
     simply absent there. *delegation* (#3692) is likewise single-request
-    only -- it is read off the decision audit row.
+    only -- it is read off the decision audit row. *right* (#3329) says
+    whether the caller may approve the request; list and show pass it.
     """
     expired_reason = approval_expired_reason(row)
     return ApprovalRequestView(
@@ -524,6 +544,7 @@ def _view(
         params_hash=row.params_hash,
         preview_hash=row.preview_hash,
         proposed_effect=row.proposed_effect,
+        reveal_secret=bool(row.reveal_secret),
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
         resume_outcome=_resume_outcome_view(row),
@@ -548,6 +569,8 @@ def _view(
             if delegation is not None
             else None
         ),
+        may_approve=right.may_approve if right is not None else None,
+        may_approve_reason=right.reason.value if right is not None else None,
     )
 
 
@@ -556,6 +579,30 @@ def _delegated_reason_http_error(exc: DelegatedReasonInvalidError) -> HTTPExcept
     return HTTPException(
         status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=f"delegated_reason_invalid: {exc}",
+    )
+
+
+def _approval_group_http_error(exc: ApprovalGroupForbiddenError) -> HTTPException:
+    """Map another person's high-risk change, wrong group, to 403 (#3328).
+
+    Caught before the generic ``insufficient_role`` mapping of its parent
+    class, so the detail names the groups that may approve.
+    """
+    return HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail=f"approval_group_required: {exc}",
+    )
+
+
+def _approval_role_floor_http_error(exc: ApprovalRoleFloorError) -> HTTPException:
+    """Map an approver below the operation's role floor to 403.
+
+    Caught before the generic ``insufficient_role`` mapping of its parent
+    class, so the detail names the role the operation needs.
+    """
+    return HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail=f"role_floor_required: {exc}",
     )
 
 
@@ -635,6 +682,10 @@ async def _capture_operator_decision(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="approval_request_not_found",
         ) from exc
+    except ApprovalGroupForbiddenError as exc:
+        raise _approval_group_http_error(exc) from exc
+    except ApprovalRoleFloorError as exc:
+        raise _approval_role_floor_http_error(exc) from exc
     except UnauthorizedApprovalError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
@@ -773,7 +824,7 @@ async def list_approvals(
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
 
-    return [_view(r) for r in rows]
+    return [_view(r, right=approve_right(operator, r)) for r in rows]
 
 
 @router.get("/{request_id}", response_model=ApprovalRequestView)
@@ -808,7 +859,7 @@ async def get_approval_request(
         # resolver never raises, so a resolution miss just omits the block.
         reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
         delegation = await get_decision_delegation(session, row)
-    return _view(row, reviewer_context, delegation)
+    return _view(row, reviewer_context, delegation, approve_right(operator, row))
 
 
 @router.get("/{request_id}/result", response_model=ApprovalResultView)
@@ -913,6 +964,10 @@ async def _record_approval_decision(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="approval_request_not_found",
         ) from exc
+    except ApprovalGroupForbiddenError as exc:
+        raise _approval_group_http_error(exc) from exc
+    except ApprovalRoleFloorError as exc:
+        raise _approval_role_floor_http_error(exc) from exc
     except UnauthorizedApprovalError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
@@ -1203,8 +1258,9 @@ class RerunRequestBody(BaseModel):
         default=None,
         description=(
             "The original params, unchanged. Leave out to use the params MEHO "
-            "stored with the request. Required for a credential write, whose "
-            "params MEHO keeps only until the first run. Params that do not "
+            "stored with the request. Required for a credential write, and for "
+            "a call whose params hold a password or a licence key: MEHO keeps "
+            "those params only until the first run. Params that do not "
             "match the approved ones are refused (409)."
         ),
     )
@@ -1357,6 +1413,13 @@ class DecideResponseBody(BaseModel):
     so a client renders *who* without resolving the GUID itself. ``None``
     when the token carried no name — the client fails open to ``decided_by``.
     Display name only: no email or other profile field is added here.
+
+    ``self_approved`` and ``approval_rule`` (#3329) are the same values the
+    ``approval.decision`` audit row records: whether the person approved
+    their own change, and the rule that allowed the approval
+    (``sa_operator_self_approval``, ``break_glass_self_approval``,
+    ``sa_operator_or_admin`` or ``reviewer``). The command line prints a
+    self-approval line from them. Both are ``None`` on a rejection.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1370,6 +1433,8 @@ class DecideResponseBody(BaseModel):
     dispatch_op_id: str | None = None
     dispatch_result: dict[str, Any] | list[Any] | None = None
     dispatch_error: str | None = None
+    self_approved: bool | None = None
+    approval_rule: str | None = None
 
 
 @router.post(
@@ -1464,6 +1529,8 @@ async def decide_approval_request(
             dispatch_op_id=dispatch_result.op_id,
             dispatch_result=dispatch_result.result,
             dispatch_error=dispatch_result.error,
+            self_approved=request.principal_sub == operator.sub,
+            approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
         )
 
     return DecideResponseBody(

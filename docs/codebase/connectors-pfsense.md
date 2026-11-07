@@ -34,7 +34,7 @@ unless an operator gave a standing grant for it. #3937 adds
 `pfsense.user.disable` and `pfsense.user.enable`: they turn one local user off
 or on again, and a second person must approve each call. #3965 adds an
 optional `descr` to `pfsense.gateway.add` and `pfsense.route.static.add`, and
-the safe read `pfsense.diag.ping`: a short ping that runs on the firewall, from
+the read `pfsense.diag.ping`: a short ping that runs on the firewall, from
 one of the firewall's own addresses, to prove that a route carries traffic.
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
@@ -65,12 +65,12 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (21 ops total). T1 shipped
+  composition function, and the `PFSENSE_OPS` tuple (24 ops total). T1 shipped
   `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
   appends `pfsense.dhcp.leases`; #3090 appends the two write ops via the
   `ops_write` module; #3232 appends the first two destructive deletes and #3313
   the three teardown-inverse deletes, both via the `ops_delete` module;
-  meho-internal#252 appends the parameterized management-plane flow classifier
+  a later change appends the parameterized management-plane flow classifier
   `pfsense.mgmt_flow.summary` via the `ops_mgmt_flow` module; #3954 appends
   `pfsense.user.list` and `pfsense.route.static.list` via the
   `ops_config_reads` module; #3850 appends `pfsense.filter.rule.add` and
@@ -127,7 +127,10 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
 - **Write op handlers** (`ops_write.py`, #3090) — input validators
   (`_validate_gateway_name` / `_validate_interface` / `_validate_gateway_ip` /
-  `_validate_network_cidr`), the `parse_static_routes_xml` config parser, the
+  `_validate_network_cidr`; `_validate_gateway_ip` refuses an IPv6 zone
+  (`%...`) and spaces, like the filter-rule address check, and the
+  `gateway` schema has a pattern for the same rule), the
+  `parse_static_routes_xml` config parser, the
   `pfSsh.php playback` fragment builders (`_build_gateway_playback` /
   `_build_route_playback`), the stage/playback/cleanup helper (`_apply_playback`),
   and the handler functions `pfsense_gateway_add` / `pfsense_route_static_add`
@@ -139,9 +142,8 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
     output parsers. `parse_pfctl_states` reads the real `pfctl -ss` field
     order — **interface first, protocol second** (`<if> <proto> <ep1>
     <-|-> <ep2>  <state>`, pfSense 2.7 / pf state format, redmine #2121);
-    the `proto`/`iface` capture groups were transposed before #252, which
-    mislabelled every row (and, latently, `pfsense.firewall.state`'s
-    output). A NAT-translated first endpoint (`addr:port (xlate:port)`) does
+    `pfsense.firewall.state` and `pfsense.mgmt_flow.summary` both use
+    this parser. A NAT-translated first endpoint (`addr:port (xlate:port)`) does
     not match and is returned unparsed (`proto=None`) rather than misparsed.
   - `parse_ifconfig` / `_netmask_to_cidr` — ifconfig output parser.
   - `parse_gateways_xml` — XML parser for the `<gateways>` block.
@@ -154,6 +156,10 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   - Handler functions: `pfsense_version`, `pfsense_firewall_rules`,
     `pfsense_firewall_state`, `pfsense_nat_rules`, `pfsense_interface_list`,
     `pfsense_gateway_list`, `pfsense_config_show`, `pfsense_dhcp_leases`.
+- **Op classes** (`op_classes.py`) — declares `pfsense.user.disable` and
+  `pfsense.user.enable` as `write` for the broadcast classifier. Their names
+  do not end in a write suffix, so the pattern rules alone would not see
+  them as writes.
 - **Config secret removal** (`redaction.py`, with `redaction_names.py` and
   `redaction_shapes.py`) — `redact_config_xml` (returns the cleaned text and
   `redacted_count`), the name rule `is_secret_name` and its lists
@@ -172,7 +178,12 @@ method before opening any TCP connection. It resolves `target.secret_ref`
 adapter's `_resolve_secret` (operator-context Vault read, #2155), then:
 
 1. `ssh_private_key` present → parse via `asyncssh.import_private_key`, return
-   `{username, client_keys=[key]}`.
+   `{username, known_hosts, client_keys=[key]}`. `known_hosts` comes from
+   the shared SSH adapter helper `_known_hosts_from_secret`: the secret's
+   `known_hosts` pin, or no check when the secret sets
+   `known_hosts_insecure: true`. This host-key step runs first, also when
+   the key is missing: a secret with neither raises
+   `SshHostKeyUnpinnedError` (a `ValueError`) before any connection opens.
 2. No `ssh_private_key` (even if `password` is present) → `ValueError` naming
    the WebGUI break-glass credential. No password auth is attempted.
 
@@ -187,7 +198,8 @@ adapter's `_resolve_secret` (operator-context Vault read, #2155), then:
 
 `parse_pfsense_version()` extracts `version` (e.g. `"2.7.2-RELEASE"`), `build`
 (the full first line), and `kernel` (the first `FreeBSD <token>` fragment).
-Unreachable targets (OSError or asyncssh.Error from `_run_command`) return
+Unreachable targets (`OSError` or `asyncssh.Error` from `_run_command`), and
+credential failures (`ValueError`, `VaultClientError`, `CredentialsReadError`), return
 `reachable=False` with `extras["error"]` holding the exception message.
 
 ### Probe (shell-access assertion)
@@ -200,7 +212,7 @@ Unreachable targets (OSError or asyncssh.Error from `_run_command`) return
 | TCP socket refused / unreachable | `False` | `tcp_unreachable` |
 | SSH handshake failed (protocol error) | `False` | `ssh_handshake_failed` |
 | SSH auth rejected | `False` | `auth_failed` |
-| `ValueError` from `_auth_config` (missing key) | `False` | `auth_failed` |
+| `ValueError` from `_auth_config` (missing key or missing host-key pin), `VaultClientError`, `CredentialsReadError` | `False` | `auth_failed` |
 | `cat /etc/version` raises after a successful connect (drop / `asyncssh.Error` / timeout) | `False` | `command_failed` |
 | `cat /etc/version` stdout empty or non-zero exit | `False` | `no_shell_access` |
 | SSH connects + `/etc/version` returns content | `True` | `None` |
@@ -243,7 +255,10 @@ Two-phase registration, identical to the bind9 pattern:
 
 1. **Import-time (synchronous)**: `connectors/pfsense/__init__.py` calls
    `register_connector_v2(product="pfsense", version="2.7",
-   impl_id="pfsense-ssh", cls=PfSenseConnector)`.
+   impl_id="pfsense-ssh", cls=PfSenseConnector)`. It also registers a
+   wildcard entry (`version=""`, `impl_id=""`), so a target with no version
+   yet still resolves to this connector. The versioned entry wins when both
+   match.
 2. **Lifespan-time (asynchronous)**: `register_pfsense_typed_operations` is
    queued via `register_typed_op_registrar` and called by
    `run_typed_op_registrars` after `_eager_import_connectors`. It delegates to
@@ -257,6 +272,8 @@ Two-phase registration, identical to the bind9 pattern:
   project-wide mypy config.
 - **`SshConnector`** (`connectors/adapters/ssh.py`) — parent class providing
   the per-target connection pool, `_connect`, `_run_command`, and `aclose`.
+  `_connect` checks the target address again when it connects
+  (`connect_checked` in `connectors/_shared/dial_guard.py`).
 - **`register_connector_v2`** / **`register_typed_op_registrar`**
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
@@ -288,20 +305,26 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.alias.member.remove` | `cat /cf/conf/config.xml` guard (match one `<aliases><alias>` by name + locate the member token) + `pfSsh.php playback` fragment (read-modify-write `<address>`/`<detail>` + `write_config()` + `filter_configure()`) + read-back verify | `alias` | `destructive` |
 | `pfsense.user.disable` | `cat /cf/conf/config.xml` guard (match one `<system><user>` by name, refuse the admin account) + `pfSsh.php playback` fragment (set `disabled` + `local_user_set()` + `write_config()`) + read-back verify | `users` | `dangerous` |
 | `pfsense.user.enable` | same as `pfsense.user.disable`, but clears `disabled` | `users` | `dangerous` |
-| `pfsense.diag.ping` | `ifconfig -a` (the source must be one of these addresses) + `ping -4\|-6 -n -c <1-5> -W 1000 -t <count+2> -S <source> <host>` | `diagnostics` | `safe` |
+| `pfsense.diag.ping` | `ifconfig -a` (the source must be one of these addresses) + `ping -4\|-6 -n -c <1-5> -W 1000 -t <count+2> -S <source> <host>` | `diagnostics` | `caution` |
 
-The 11 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier and
-`pfsense.diag.ping` are `safety_level="safe"`; the 2 write ops (#3090)
-are `safety_level="caution"` / `requires_approval=False` — the same posture
+The 11 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier
+are `safety_level="safe"`. `pfsense.diag.ping` is `safety_level="caution"` /
+`requires_approval=True`, see "Diagnostics" below.
+The 2 write ops (`gateway.add`, `route.static.add`) are
+`safety_level="caution"` / `requires_approval=False` — the same posture
 `bind9.record.add` / `windns.record.add` carry for an additive, recoverable,
-idempotent config write. `pfsense.filter.rule.add` (#3850) is
+idempotent config write. A person's call made with a token (MCP, the command line,
+REST) still waits for an approval click for a `caution` op; in the web
+interface it runs at once. `pfsense.filter.rule.add` is
 `safety_level="dangerous"` / `requires_approval=True`: a firewall rule changes
 what traffic the whole firewall lets through, so every add waits for a human
 approval, unless an operator gave a standing grant for this op.
 The 6 destructive ops (#3232 nat/alias; #3313 the three teardown-inverse ops;
 #3850 `filter.rule.delete`) are `safety_level="destructive"` /
 `requires_approval=True` — the governed-delete tier: mandatory human approval
-(no agent path, no standing grant, no self-approval even under break-glass, no
+(no agent path, no standing grant except a delete grant on an instance in
+sandbox mode (`docs/decisions/sandbox-mode.md`), no self-approval even under
+break-glass, no
 satellite mint), a #3197 preview-hash binding, and a mandatory blast-radius
 statement naming the exact object. Each acts on exactly one object by stable
 identity (`<tracker>` for a NAT rule, exact name for an alias / gateway,
@@ -323,8 +346,8 @@ second person approves. See "User writes" below.
 and are the JSONFlux reduction candidates: connection-state tables and busy
 DHCP pools can each carry many rows. `pfsense.user.list` and
 `pfsense.route.static.list` return `{rows, total}` too, so a long user or
-route list also comes back as a handle. The reducer (key `pfsense_firewall_state`
-/ `pfsense_dhcp_leases`) wraps the payload in a `ResultHandle` when `total`
+route list also comes back as a handle. The dispatcher's default JSONFlux
+reducer (`JsonFluxReducer`) wraps the payload in a `ResultHandle` when the set
 exceeds its threshold; smaller payloads pass through inline. Handle-vs-inline
 is the reducer's job, not the connector's — every handler returns rows inline.
 
@@ -525,10 +548,10 @@ Two `safe` reads, with no approval. Each reads `config.xml` once and returns
   broken read never looks like "no users".
 - **CLI.** `meho pfsense user list` and `meho pfsense route list`.
 
-### `pfsense.mgmt_flow.summary` — management-plane flow classifier (meho-internal#252)
+### `pfsense.mgmt_flow.summary` — management-plane flow classifier
 
-The enabling read op for the management-plane lockdown ratchet's **alert**
-stage (Goal meho-internal#234, Initiative #249, Task #252). It runs `pfctl -ss`
+The enabling read op for the **alert** stage of a management-plane
+lockdown. It runs `pfctl -ss`
 and classifies every live TCP connection state whose *server* side (resolved
 from the `pfctl -ss` direction arrow, then required to carry a management
 port) sits in a caller-supplied management network into **sanctioned** vs
@@ -572,7 +595,7 @@ Design notes:
   port-based classifier) is counted in the result's `unparsed_lines` scalar and
   never classified. A Sensor pins `$.unparsed_lines <= 0` alongside the source
   assertion so an unrecognised state cannot be silently absorbed into a clean
-  summary (the second false-all-clear the field-order fix closed for #252).
+  summary.
 - **Server side is resolved from the direction arrow (#3471).** The `pfctl -ss`
   arrow points from the connection initiator (client) to the listener
   (server): `->` puts the server on the `dst` endpoint, `<-` on the `src`.
@@ -729,8 +752,8 @@ and no audit.
   this way.
 - **Safe to run twice.** If a rule with the id already exists and does the
   same thing, the add returns `already_present` and changes nothing. If it
-  does something different, the add returns `conflict` and changes nothing,
-  and `guidance` names the settings that differ. "The same thing" means every
+  does something different, the add refuses with `conflict` and changes
+  nothing, and the message names the settings that differ. "The same thing" means every
   setting the add can write is equal, the stored rule is not disabled, it
   does not negate its source or destination, and it has none of the settings
   the add never writes (a gateway, a schedule, a tag, a queue, a state
@@ -742,7 +765,10 @@ and no audit.
   `any`, an IP address or a CIDR, each with an optional port or port range
   (protocol `tcp`, `udp` or `tcp/udp` only). Aliases, `not`, gateways and
   schedules are not supported. The interface must exist in `<interfaces>` or
-  `<ifgroups>` (`unknown_interface` otherwise).
+  `<ifgroups>`, or be one of pfSense's built-in rule tabs: `openvpn`
+  (OpenVPN), `enc0` (IPsec), `l2tp` (L2TP VPN) or `pppoe` (PPPoE Server).
+  Those tabs have no `<interfaces>` entry, but their rules store these names
+  (#5136). Any other name is refused (`unknown_interface`).
 - **Order.** The first matching rule wins, so a block rule under a broad pass
   rule does nothing. `position` puts the rule at the `top` (default) or
   `bottom` of its interface's rules (or of the floating rules), the same way
@@ -758,6 +784,17 @@ and no audit.
   (`mgmt_path_unknown`). Only the SSH path is checked, not the web GUI.
 - **NAT rules.** The delete refuses a rule linked to a NAT port forward
   (`nat_associated`); remove it together with the NAT rule.
+- **A refusal fails the call (#5136).** Every refusal above (`conflict`,
+  `ambiguous`, `unknown_interface`, `mgmt_path`, `mgmt_path_unknown`,
+  `nat_associated`) changes nothing and raises
+  `PfSenseFilterRuleRefusedError`. The call then ends with `status: error`,
+  the audit record says it failed, and an approved request shows
+  `result_state: failed`. The message reads
+  `pfsense.filter.rule.add refused (<code>): <why>`. Before #5136 the
+  handlers returned the refusal as a result, so an approver read "ran OK"
+  for a rule that was never added. Only the "safe to run twice" answers stay
+  results: `already_present` (add) and `not_found` (delete), because the
+  wanted state is already true.
 - **One edit at a time.** Both handlers hold the appliance's config-write
   lock (`serialized_config_write` in `ops_write.py`, one `asyncio.Lock` per
   SSH host on the connector) from the first read to the read-back. The
@@ -867,9 +904,15 @@ packets take, without the user's own client.
   times out after `count + 15` seconds.
 - **Errors.** A ping that prints no summary (for example an unknown host
   name, exit 68) raises with the first line of ping's error output.
-- **Safety.** `safe`, no approval: it changes nothing on the firewall.
-  Unlike `net.ping`, it does not use MEHO's own probe allow-list, because the
-  packets leave from the firewall, not from MEHO.
+- **Safety.** `caution` with `requires_approval=True`. The op changes
+  nothing on the firewall. But the firewall sends packets to a `host` that
+  the caller gives, so the `host` field carries the caller-address marker
+  (`CALLER_ADDRESS_MARKER`). Every call waits for a person's approval. An
+  operator override or a standing grant of a service principal does not
+  remove this. A sensor runs only `safe` ops, so a sensor cannot use this op;
+  use `net.ping` for sensors. Unlike `net.ping`, it does not use MEHO's own
+  probe allow-list, because the packets leave from the firewall, not from
+  MEHO.
 - **Not included.** The issue also mentioned reading a service banner with
   `nc` as a stronger proof. That is left out: ping answers "does traffic
   pass", and a TCP check would need its own bounds (port, timeout, output
@@ -881,9 +924,10 @@ back), 2 (no reply) or another value (an error).
 
 ## Known issues
 
-- `known_hosts=None` in the SSH adapter disables host-key verification for
-  v0.2. Key pinning is deferred to v0.2.next once a Vault-managed key store
-  is in place.
+- Host-key checks depend on the target's secret. The SSH adapter checks the
+  host key against the secret's `known_hosts` pin. A secret that sets
+  `known_hosts_insecure: true` turns the check off for that target, and MEHO
+  logs a warning.
 
 ## References
 
@@ -919,7 +963,7 @@ back), 2 (no reply) or another value (an error).
   management-path guard, and read-back. pfSense 2.7.2 sources used:
   `firewall_rules_edit.php`, `firewall_rules.php`, `filter.inc`, `util.inc`.
 - Task #3965: optional `descr` on `pfsense.gateway.add` /
-  `pfsense.route.static.add`, and the safe read `pfsense.diag.ping`.
+  `pfsense.route.static.add`, and the read `pfsense.diag.ping`.
   FreeBSD `ping(8)`: https://man.freebsd.org/cgi/man.cgi?query=ping&sektion=8.
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.

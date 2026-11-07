@@ -1,8 +1,8 @@
 # MEHO locked architecture decisions
 
 **MEHO's foundational decision register.** These are live, load-bearing
-architecture decisions that the codebase actively enforces — they are cited by
-~84 places across the backend source, four Alembic migrations, tests, and docs.
+architecture decisions that the codebase actively enforces — they are cited in
+about 90 files across the backend source, four Alembic migrations, tests, and docs.
 
 > **On the numbering and the dates.** The register was first captured in a
 > planning pass on **2026-05-12** (it was previously titled "v0.2 Strategic
@@ -48,7 +48,7 @@ After G0 (#221) ships, three producer-side tracks run in parallel:
 
 Phase 2 (G4 / G5 / G8 + G3 tier-2/3) and Phase 3 (G3 tier-4 + G9 full topology) fan in once Phase-1 tracks are in flight. Estimated **~12-15 weeks** to v0.2 ship at 3 effective tracks.
 
-**Why:** Damir chose the most aggressive option (~30 weeks at 1 track vs ~12 weeks at 3 tracks). Requires 3 effective parallel agent/human capacity. Coordination risk acknowledged in the G0.1 (#222) Initiative body — single migration includes all the columns G3 / G6 / G7 will need so migrations don't conflict during parallel Phase 1.
+**Why:** The maintainer chose the most aggressive option (~30 weeks at 1 track vs ~12 weeks at 3 tracks). Requires 3 effective parallel agent/human capacity. Coordination risk acknowledged in the G0.1 Initiative body — single migration includes all the columns G3 / G6 / G7 will need so migrations don't conflict during parallel Phase 1.
 
 ### 2. G4 knowledge migration — **one-shot import + 1-month overlap**
 
@@ -70,7 +70,7 @@ Per-op opt-in to flip credential_read / audit_query to full detail is a G6.3 sur
 
 ### 4. G7 server-side partition — **operational rules only**
 
-Migrated to `rdc-internal` tenant conventions (Layer 1, server-side database-backed):
+Migrated to the lab tenant's conventions (Layer 1, server-side database-backed):
 - "Vault is canonical; 1Password is bootstrap-residual"
 - Naming rule — no `claude` / AI-tool names in operator-visible identifiers
 - Secret-handling discipline (never paste into chat, never commit secrets)
@@ -87,7 +87,7 @@ NOT migrated (stay in repo CLAUDE.md):
 
 ### 5. G7 Layer 2 starter — **ship `docs/examples/consumer-onboarding/CLAUDE.md` + onboarding guide**
 
-MEHO ships a starter CLAUDE.md template in `docs/examples/consumer-onboarding/`. Consumer repos (today: `claude-rdc-hetzner-dc`; future: any external customer) copy it into their root or merge with an existing CLAUDE.md. The template teaches local Claude sessions to:
+MEHO ships a starter CLAUDE.md template in `docs/examples/consumer-onboarding/`. Consumer repos (today: the private lab repo; future: any external customer) copy it into their root or merge with an existing CLAUDE.md. The template teaches local Claude sessions to:
 
 - Prefer `meho kb search` over `grep kb/`
 - Prefer `meho <connector> <op>` over local `./scripts/*.sh` wrappers
@@ -107,13 +107,13 @@ G9 ships full ~100% topology in v0.2:
 
 The edge-type vocabulary is the load-bearing modeling decision; locked early in G9 (filed when we approach Phase 3 Initiative drafting).
 
-**Why:** Damir chose the aggressive option (full ~100% v0.2 vs auto-discovery-only). Adds ~1 Initiative to G9's original 2-Initiative scope, but unlocks topology-aware policy in v0.2.next without a deferred-curation re-litigation. Risk: cross-system edge modeling is wildcard LoE; if it slides, the auto-discovery half can still ship as v0.2.
+**Why:** The maintainer chose the aggressive option (full ~100% v0.2 vs auto-discovery-only). Adds ~1 Initiative to G9's original 2-Initiative scope, but unlocks topology-aware policy in v0.2.next without a deferred-curation re-litigation. Risk: cross-system edge modeling is wildcard LoE; if it slides, the auto-discovery half can still ship as v0.2.
 
 ### 7. MCP server front — **ship in v0.2 alongside CLI**
 
 MEHO speaks MCP from v0.2 day 1. Bootstrap filed as G0.5 (#226).
 
-**Architectural correction (2026-05-14):** The original framing of *"every G3–G9 Initiative gains a parallel MCP-tool-parity Task"* and *"every CLI command gets an MCP tool definition"* was wrong against [CLAUDE.md](../../CLAUDE.md) postulate 5. The corrected shape:
+**Architectural correction (2026-05-14):** The original framing of *"every G3–G9 Initiative gains a parallel MCP-tool-parity Task"* and *"every CLI command gets an MCP tool definition"* was wrong against `CLAUDE.md` postulate 5 (the project guide for coding sessions; it is not committed to this repository). The corrected shape:
 
 - **The agent surface is ~17 meta-tools** registered by G0.5 (`search_connectors` / `list_connectors` / `list_operation_groups` / `search_operations` / `call_operation` / `search_knowledge` / `add_to_knowledge` / `search_memory` / `add_to_memory` / `broadcast_recent` / `broadcast_announce` / `broadcast_watch` / `list_targets` / `query_topology` / `query_audit` / `result_query` / `result_aggregate` / `result_export` / `result_describe`). Per CLAUDE.md.
 - **No per-vendor MCP tools.** Vendor operations (vCenter's 3,000+ paths, K8s's 13 ops, etc.) reach the agent through `call_operation`, dispatched by [#388 G0.6 operation registry](https://github.com/evoila/meho/issues/388).
@@ -126,7 +126,7 @@ MEHO speaks MCP from v0.2 day 1. Bootstrap filed as G0.5 (#226).
 
 **Transport:** Streamable HTTP. Stdio explicitly NOT supported (MEHO is hosted, not a local subprocess).
 
-**Why:** Damir chose the aggressive option (ship-in-v0.2 vs defer-to-v0.2.next). The narrow-waist meta-tool surface (post-correction) collapses the agent's tool-routing problem from "thousands of vendor-specific tools" to "~17 stable surfaces over an endpoint table." Risk: MCP spec is still iterating; pin to 2025-06-18 and document upgrade discipline.
+**Why:** The maintainer chose the aggressive option (ship-in-v0.2 vs defer-to-v0.2.next). The narrow-waist meta-tool surface (post-correction) collapses the agent's tool-routing problem from "thousands of vendor-specific tools" to "~17 stable surfaces over an endpoint table." Risk: MCP spec is still iterating; pin to 2025-06-18 and document upgrade discipline.
 
 ### 8. Kubernetes connector library — **`kubernetes_asyncio`**
 
@@ -147,6 +147,19 @@ The Kubernetes connector (G3.2, filed against #214) uses **`kubernetes_asyncio`*
 
 Goal G10 (Operator web UI, [#336](https://github.com/evoila/meho/issues/336)) ships as a server-rendered hypermedia application served by the existing FastAPI backplane. No SPA framework, no Node toolchain in CI, no separate frontend deploy artifact.
 
+> **Note (2026-11-05) — the SPA direction was taken and withdrawn.** In October 2026 an
+> internal decision proposed rebuilding the MEHO web interface as a single-page app,
+> the approvals page first. It would have superseded this decision and relaxed the
+> "no SPA bundle" clause of decision #10. **That direction was withdrawn on 2026-11-05**
+> and never reached the codebase: no SPA bundle, Node toolchain or second build step was
+> ever added. Decisions #9 and #10 stand exactly as written — the pages are server-built,
+> the approvals page included.
+>
+> What survives from that October decision is organisational rather than architectural,
+> and does not change #9: one UI team across the MEHO web interfaces, one shared component
+> library and style guide, one login, and one top bar with an app switcher. The approvals
+> page is still the first surface to improve; it is improved as a server-built page.
+
 - **HTMX 2** for partial-page swaps over the wire. GA Jun 2024; 2.x supported in perpetuity per [htmx.org/posts/2024-06-17-htmx-2-0-0-is-released](https://htmx.org/posts/2024-06-17-htmx-2-0-0-is-released/). Operator-driven actions (e.g., `meho vsphere vm.list`) render a Jinja2 template fragment that HTMX swaps into the page; no full-page reload.
 - **Jinja2** for HTML templates — already FastAPI's recommended templating. One template tree per surface (broadcast feed, topology, KB search, memory, audit, connectors).
 - **Tailwind CSS 4** for styling. [v4.0 GA 22 Jan 2025](https://tailwindcss.com/blog/tailwindcss-v4); CSS-first config via `@theme`; oklch palette; ~5× faster builds than v3 (Lightning CSS engine). Built once at backend-image build time via the standalone CLI binary — no `node_modules` enters CI or the image.
@@ -166,13 +179,17 @@ Goal G10 (Operator web UI, [#336](https://github.com/evoila/meho/issues/336)) sh
 2. **"No undoables later."** HTMX → React migration is per-page incremental (one surface at a time can flip if there's ever a reason). React → HTMX would be the same scope as building from scratch. HTMX preserves optionality.
 3. **"Not too complicated or fancy. Simplicity bias."** FastAPI + Jinja2 + HTMX is a mature 2025 production pattern for governance/admin UIs (e.g. `fasthx-admin`, server-rendered ML dashboards, IoT admin panels). React + TanStack Router + Query + state-machine glue ships substantially more concept count for the same surfaces.
 4. **"Should look very nicely."** DaisyUI 5's ceiling clears the bar for a governance tool (polished tables/dialogs/cards/themes out of the box, all Tailwind-customizable). Vercel/Linear-grade polish is a designer-driven ceiling, not a framework-driven one — neither React+shadcn nor HTMX+DaisyUI gets there without a designer.
-5. **"Reference visual cues from MEHO.X."** MEHO.X has no frontend (verified — `gh api /repos/evoila-bosnia/MEHO.X/contents/` shows no `frontend/` / `ui/` / `web/`). Both stacks start from a blank slate; team-fit becomes the deciding factor.
+5. **"Reference visual cues from MEHO.X."** MEHO.X has no frontend (verified — the MEHO.X repo has no `frontend/` / `ui/` / `web/` folder). Both stacks start from a blank slate; team-fit becomes the deciding factor.
 
 Also load-bearing: decision #11 below picks the Backend-for-Frontend auth pattern, which is a natural fit for a server-rendered stack (the FastAPI backplane *is* the BFF). Browser-side PKCE + sessionStorage tokens runs against current OWASP and the in-progress OAuth Browser-Based-Apps BCP.
 
 ### 10. Frontend deploy shape — **server-rendered from the existing FastAPI backplane at `/ui/*`; tiny static CSS+JS bundle at `/ui/static/*`**
 
 The web UI is part of the backplane process. No separate deploy artifact, no separate ingress, no separate TLS cert, no SPA bundle.
+
+> **Note (2026-11-05).** The "no SPA bundle" clause above was briefly in question — an
+> October 2026 internal decision would have relaxed it. That direction was withdrawn;
+> see the note under decision #9. The clause stands.
 
 - **Routes** at `/ui/*` resolve to FastAPI handlers that render Jinja2 templates and return HTML. HTMX partial swaps target the same surface.
 - **Static assets** (one compiled `tailwind.css`, vendored `htmx.min.js`, `alpine.min.js`, `cytoscape.min.js`, logos) live under `backend/src/meho_backplane/ui/static/` and are served by FastAPI's `StaticFiles` mount at `/ui/static/*` ([FastAPI tutorial/static-files](https://fastapi.tiangolo.com/tutorial/static-files/)).

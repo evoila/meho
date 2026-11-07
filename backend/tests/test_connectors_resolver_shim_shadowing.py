@@ -314,32 +314,21 @@ def test_shim_dropped_when_multiple_hand_rolled_remain() -> None:
 
 
 def _real_connector_classes() -> dict[str, type[Connector]]:
-    """Import the six hand-coded connectors keyed by their short product.
+    """Import two hand-coded connectors keyed by their short product.
 
     Imported call-locally so the module import stays light and the
     autouse ``clear_registry`` fixture controls registry state.
     """
+    from meho_backplane.connectors.harbor.connector import HarborConnector
     from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
-    from meho_backplane.connectors.sddc_manager import SddcManagerConnector
-    from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
-    from meho_backplane.connectors.vcf_fleet import VcfFleetConnector
-    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
-    from meho_backplane.connectors.vcf_operations import VcfOperationsConnector
 
     return {
-        "sddc": SddcManagerConnector,
-        "vcfa": VcfAutomationConnector,
-        "fleet": VcfFleetConnector,
-        "vrops": VcfOperationsConnector,
+        "harbor": HarborConnector,
         "hetzner": HetznerRobotConnector,
-        "vrli": VcfLogsConnector,
     }
 
 
-@pytest.mark.parametrize(
-    "short_product",
-    ["sddc", "vcfa", "fleet", "vrops", "hetzner", "vrli"],
-)
+@pytest.mark.parametrize("short_product", ["harbor", "hetzner"])
 def test_realigned_short_token_resolves_hand_coded_connector_not_shim(
     short_product: str,
 ) -> None:

@@ -49,7 +49,7 @@ backend/src/meho_backplane/events/
 ```
 
 Plus the persistence shape in
-[backend/src/meho_backplane/db/models.py](backend/src/meho_backplane/db/models.py):
+[backend/src/meho_backplane/db/models.py](../../backend/src/meho_backplane/db/models.py):
 
 - `EventOutbox` — one row per emitted event. Columns: `event_id` (PG
   `BIGSERIAL` / SQLite `Integer`), `tenant_id` (FK), `event_kind`
@@ -59,8 +59,8 @@ Plus the persistence shape in
   (`NULL` for internal producers; a producer-supplied idempotency token
   for at-least-once external ingest), and `origin` (`NULL` = internal
   producer, else the external event-source id). Two partial indexes:
-  `(processed_at, event_id)` on `processed_at IS NULL` drives the
-  drain's claim query, and the **unique** `event_outbox_tenant_dedupe_idx`
+  `event_outbox_unprocessed_idx` on `(event_id)` `WHERE processed_at IS
+  NULL` drives the drain's claim query, and the **unique** `event_outbox_tenant_dedupe_idx`
   on `(tenant_id, dedupe_key)` `WHERE dedupe_key IS NOT NULL` makes a
   duplicate external delivery collide at insert.
 - `EVENT_OUTBOX_NOTIFY_CHANNEL` — the PG channel name the producer
@@ -145,7 +145,7 @@ events. When the producer's transaction commits, the listener opens a
 
 `drain.py`'s background `asyncio` task is wired into the FastAPI
 lifespan via `start_event_drain` / `stop_event_drain` in
-[backend/src/meho_backplane/main.py](backend/src/meho_backplane/main.py).
+[backend/src/meho_backplane/main.py](../../backend/src/meho_backplane/main.py).
 It is gated on `EVENT_DRAIN_ENABLED=true` (default), the same shape as
 the scheduler / topology-refresh / memory-expiry / grant-expiry
 sweepers.
@@ -176,12 +176,12 @@ On each tick (default 10s, settable via
    `SKIP LOCKED` is the belt-and-braces guarantee: even with the
    advisory-lock guard removed, two concurrent claimers never receive
    the same row. The partial index
-   `event_outbox_unprocessed_idx ON (processed_at, event_id) WHERE
-   processed_at IS NULL` keeps the claim query O(log unprocessed)
+   `event_outbox_unprocessed_idx ON (event_id) WHERE processed_at IS
+   NULL` (a plain index on `event_id` on SQLite) keeps the claim query O(log unprocessed)
    rather than O(total rows).
 
 3. **Stamp `claimed_at` + `claimed_by`** (observability — the
-   `claimed_by` column carries `pod_name` so a stuck poll can be
+   `claimed_by` column carries `<hostname>:<pid>` so a stuck poll can be
    traced to the holding replica). The claim is a separate UPDATE on
    the same open session as the SELECT; the FOR UPDATE row-lock
    carries through to the UPDATE.
@@ -215,15 +215,23 @@ On each tick (default 10s, settable via
 
 ## Advisory-lock keys
 
-Two PG advisory locks coexist on the same DB; each has a distinct
-63-bit signed-int key so the locks never collide:
+Several PG advisory locks coexist on the same DB. Each has a distinct
+64-bit signed-int key so the locks never collide. The fixed keys spell
+ASCII words:
 
 | Key | Hex | ASCII | Owner |
 |---|---|---|---|
 | `_SCHEDULER_ADVISORY_LOCK_KEY` | `0x4D45_484F_5343_4844` | `MEHOSCHD` | `scheduler/loop.py` (cron + one-off, T2 #1065) |
 | `_EVENT_DRAIN_ADVISORY_LOCK_KEY` | `0x4D45_484F_4556_5442` | `MEHOEVTB` | `events/drain.py` (event outbox, this Task) |
+| `_SENSOR_RUNNER_ADVISORY_LOCK_KEY` | `0x4D45_484F_5345_4E53` | `MEHOSENS` | `checks/runner.py` (sensor runner) |
+| `MIGRATION_LOCK_KEY` | `0x4D45_484F_4D49_4752` | `MEHOMIGR` | `db/migrate.py` (start-up migrations) |
 
-Distinct keys mean both loops can run concurrently without starving
+Other loops derive their key from a blake2b hash of a fixed label:
+`agent/reaper.py`, `operations/operation_run_reaper.py`,
+`gateway/deadman.py` and `gateway/unreported_mint.py`. The topology
+scheduler takes one lock per `(tenant, target)`.
+
+Distinct keys mean the loops can run concurrently without starving
 each other — the scheduler's lock holder does not block the drain's
 claim, and vice versa. The ASCII spellings make the keys easy to
 recognise in `pg_locks` during operator triage.
@@ -369,41 +377,62 @@ the source's Vault-custodied secret, not by a Keycloak JWT.
 
 1. **Resolve** the source by slug via
    `resolve_event_source_by_slug` (global — the webhook carries no
-   tenant). A missing *or* paused source returns the identical uniform
-   `404`, so the two are indistinguishable (no paused-vs-missing oracle).
+   tenant). A missing or paused source does not stop the request here:
+   it goes on with the default config and is refused at the auth step,
+   so a missing, a paused and a wrongly signed delivery all get the same
+   uniform `401` with the same body (see the note below).
 2. **Body cap** (`413`) is enforced *before* the whole body is buffered:
    a `Content-Length` fast-reject plus a streaming running-total guard
    (`_read_capped_body`) so an absent/understated length header cannot
-   smuggle an oversize body past it (the `ui/csrf.py` DoS lesson). The
+   get an oversize body past it (the `ui/csrf.py` DoS lesson). The
    cap defaults to 256 KiB; a source's `extras["max_body_bytes"]` can
-   only *lower* it, never raise it above the ceiling.
-3. **Auth** (`401`) per the source's `auth_strategy`, **constant-time**
+   only *lower* it, never raise it above the ceiling. The default cap
+   applies when there is no source.
+3. **Rate limit** (`429` + `Retry-After`) — the broadcast fixed-window
+   `INCR`/`EXPIRE` pattern under a new key namespace
+   `meho:ratelimit:ingest:{tenant}:{source}` (`events/ingest/rate_limit.py`).
+   It runs **before** the Vault read and the auth check, so every
+   delivery to a source counts, accepted or refused, and the limit also
+   caps how many Vault reads a source can cause per window. Fail-loud
+   on a Valkey outage (`503`; a webhook sender retries).
+4. **Auth** (`401`) per the source's `auth_strategy`, **constant-time**
    (`events/ingest/auth.py`, every secret comparison through
    `hmac.compare_digest`): `hmac-sha256` over the raw body (with an
    optional timestamp bound into the signature and gated by a replay
-   window), `static-header`, or `basic` (username from `extras`,
-   password is the secret). Header names are `extras`-configurable, so a
+   window; the timestamp must be a finite number), `static-header`, or
+   `basic` (username from `extras`, password is the secret). Header
+   values are compared as UTF-8 bytes, so a value outside ASCII is a
+   plain mismatch. Header names are `extras`-configurable, so a
    vendor whose headers differ (Grafana's `X-Grafana-Alerting-Signature`)
    is config, not a code branch — richer per-vendor normalisation is
    #2882. The failure reason is logged server-side, never returned, so
-   every rejection is the same uniform `401`.
-4. **Rate limit** (`429` + `Retry-After`) — the broadcast fixed-window
-   `INCR`/`EXPIRE` pattern under a new key namespace
-   `meho:ratelimit:ingest:{tenant}:{source}` (`events/ingest/rate_limit.py`).
-   Fail-loud on a Valkey outage (`503`; a webhook sender retries).
-5. **Dedupe** — the sender's delivery id where one exists, else a SHA-256
-   of the raw body, namespaced by source id, written as `event_outbox.dedupe_key`
-   (#2879). A `(tenant_id, dedupe_key)` collision (the partial unique
-   index) is caught as an `IntegrityError` and mapped to an idempotent
-   `200` — never a second outbox row, never a second audit row, so a
-   retry-storming sender never double-fires a subscriber.
+   every rejection is the same uniform `401`. On success the check
+   returns the **signed message**: `"<ts>." + body` for a timestamped
+   HMAC, else the raw body.
+5. **Dedupe** — a SHA-256 of the signed message, namespaced by source
+   id, written as `event_outbox.dedupe_key` (#2879). Only data the
+   credential covers goes into the key; no request header does. So a
+   redelivery of the same signed request collides, while the same body
+   signed at another time is a new event. A `(tenant_id, dedupe_key)`
+   collision (the partial unique index) is caught as an `IntegrityError`
+   and mapped to an idempotent `200` — never a second outbox row, never
+   a second audit row, so a retry-storming sender never double-fires a
+   subscriber.
 6. **Publish + audit in one transaction.** `events.publish()` (now
    carrying `origin` = source id and the `dedupe_key`) inserts the
    outbox row in the **same** `session.begin()` block as a synchronous
    audit row under the synthetic `__ingest__` identity (the `__sensor__`
    / `__scheduler__` sentinel precedent; `audit_log.operator_sub` is
    plain `Text`). No success without a committed audit row (postulate 7).
-   A **fail-open** broadcast follows the commit.
+
+**Which auth mode to use.** `hmac-sha256` with a timestamp (the
+default, `require_timestamp` on) is the strongest: the signature covers
+the body and the time, and the replay window bounds how long a signed
+request stays valid. `hmac-sha256` without a timestamp, `static-header`
+and `basic` have no time window; a delivery in these modes stays
+acceptable as long as the secret is the same, and only the body-hash
+dedupe stops an exact repeat. Use them when the sender cannot sign with
+a timestamp (Harbor, Alertmanager), and rotate their secrets.
 
 ### The `__ingest__` audit + Vault-read identities
 
@@ -430,15 +459,16 @@ correct posture. A dedicated ingest principal (its own client and Vault
 role) is a possible later step; it would need one more client on every
 install.
 
-### Reconciliation note (404 vs 401)
+### One answer for every refusal
 
-The #2880 resolver docstring suggests mapping a missing slug to the
-*same* response as an auth failure. This endpoint instead follows the
-#2881 contract: missing/paused → `404`, bad signature → `401`. The
-residual "a 404 vs 401 distinguishes a real slug" oracle is acceptable
-because a slug is a high-entropy routing token (not enumerable), while
-the uniform 404 still hides the operationally sensitive paused-vs-missing
-distinction.
+A missing source, a paused source, a source with no secret, and a bad
+or missing credential all answer `401` with the same body. The reason
+(`unknown_source`,
+`source_paused`, `no_secret_configured`, `bad_signature`, ...) goes to
+the server log only. The body cap runs before that answer, so an
+oversize body gets `413` whether or not the slug exists. What still
+differs is work: an active source costs a rate-limit count and a Vault
+read before its answer, a missing one does not.
 
 ## First-wave payload normalisers (#2882)
 
@@ -597,11 +627,11 @@ comfortable; revisit if a connector emits bursts.
 
 ## Settings
 
-Both gated via env vars (defaults shown in parens):
+All three are set through env vars (defaults shown in parens):
 
 - `EVENT_DRAIN_ENABLED` (`true`) — start the drain task at lifespan
-  startup. `false` opts out cleanly (the start helper returns `None`
-  and the lifespan shutdown tolerates that shape).
+  startup. `false` opts out cleanly (the lifespan does not start the
+  drain task, and shutdown skips the stop step).
 - `EVENT_DRAIN_TICK_INTERVAL_SECONDS` (`10`, range `[1, 3600]`) —
   bound between consecutive polled scans. The `NOTIFY` hint can cut
   the actual wake-up shorter than this interval; this bounds the
@@ -614,9 +644,9 @@ Both gated via env vars (defaults shown in parens):
 
 ## Test coverage
 
-- [backend/tests/test_event_outbox.py](backend/tests/test_event_outbox.py)
+- [backend/tests/test_event_outbox.py](../../backend/tests/test_event_outbox.py)
   — producer + drain unit tests:
-  - `test_publish_inserts_outbox_row_in_caller_transaction`
+  - `test_publish_commits_with_producer`
   - `test_publish_rolls_back_with_producer`
   - `test_succeed_run_publishes_outbox_event_in_same_tx`
   - `test_fail_run_publishes_outbox_event`
@@ -625,37 +655,37 @@ Both gated via env vars (defaults shown in parens):
     ticks, sum of processed == N exactly
   - `test_restart_durability_drains_unprocessed_rows` — publish →
     simulate kill → restart → tick drains the row
-- [backend/tests/test_event_matcher.py](backend/tests/test_event_matcher.py)
+- [backend/tests/test_event_matcher.py](../../backend/tests/test_event_matcher.py)
   — subscription-matcher unit tests (#2878): containment direction,
   end-to-end `agent_run.completed` → matching trigger → agent run with
   work_ref, non-matching filter fires nothing, redelivery dedupe,
   `BudgetExceededError` no-retry, input-less trigger fires with a
   synthesised untrusted-enveloped prompt.
-- [backend/tests/integration/test_event_matcher_pg.py](backend/tests/integration/test_event_matcher_pg.py)
+- [backend/tests/integration/test_event_matcher_pg.py](../../backend/tests/integration/test_event_matcher_pg.py)
   — the same end-to-end chain against a real Postgres container (#2878).
-- [backend/tests/migrations/test_migration_0027_event_outbox.py](backend/tests/migrations/test_migration_0027_event_outbox.py)
+- [backend/tests/migrations/test_migration_0027_event_outbox.py](../../backend/tests/migrations/test_migration_0027_event_outbox.py)
   — schema + index migration round-trip
-- [backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py](backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py)
+- [backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py](../../backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py)
   — `dedupe_key` / `origin` additive columns + partial unique dedupe
   index (per-tenant uniqueness, NULL-unconstrained, SQLite partial-index
   parity, downgrade round-trip)
 - Inbound ingest (#2881):
-  - [backend/tests/test_events_ingest_auth.py](backend/tests/test_events_ingest_auth.py)
+  - [backend/tests/test_events_ingest_auth.py](../../backend/tests/test_events_ingest_auth.py)
     — per-strategy constant-time auth: bad signature, replay window,
     static-header, basic, and the `compare_digest`-for-every-secret guard
-  - [backend/tests/test_events_ingest_rate_limit.py](backend/tests/test_events_ingest_rate_limit.py)
+  - [backend/tests/test_events_ingest_rate_limit.py](../../backend/tests/test_events_ingest_rate_limit.py)
     — 429 + `Retry-After`, per-source isolation, `0` disables, Valkey
     fail-loud
-  - [backend/tests/test_events_ingest_config.py](backend/tests/test_events_ingest_config.py)
+  - [backend/tests/test_events_ingest_config.py](../../backend/tests/test_events_ingest_config.py)
     — per-source `extras` config resolution + security clamps
-  - [backend/tests/test_api_v1_events_ingest.py](backend/tests/test_api_v1_events_ingest.py)
-    — endpoint: uniform 404, 413-before-buffer, 401, 202 + outbox
-    `origin`/`dedupe_key` + `__ingest__` audit row, idempotent 200,
-    broadcast fail-open, 429/400 mapping
-  - [backend/tests/test_events_ingest_e2e.py](backend/tests/test_events_ingest_e2e.py)
+  - [backend/tests/test_api_v1_events_ingest.py](../../backend/tests/test_api_v1_events_ingest.py)
+    — endpoint: one uniform 401 for a missing, paused or wrongly signed
+    source, 413-before-buffer, 202 + outbox `origin`/`dedupe_key` +
+    `__ingest__` audit row, idempotent 200, 429/400 mapping
+  - [backend/tests/test_events_ingest_e2e.py](../../backend/tests/test_events_ingest_e2e.py)
     — POSTed event → drain tick → matched `kind=event` trigger → agent run
 - First-wave normalisers (#2882):
-  - [backend/tests/test_event_normalizers.py](backend/tests/test_event_normalizers.py)
+  - [backend/tests/test_event_normalizers.py](../../backend/tests/test_event_normalizers.py)
     — golden per-vendor payloads (Alertmanager v4, Grafana ≥ 12,
     VCF Operations template, Harbor default + CloudEvents, generic-json):
     `event_type` + match-field extraction, the top-level lift + filter-recipe

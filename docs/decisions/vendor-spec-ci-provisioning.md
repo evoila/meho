@@ -5,6 +5,7 @@
 repository admin provisions the `SPEC_SHELF_TOKEN` secret. With this signoff
 and the "Known findings" fix merged on `main` (#2970 / PR #2974,
 `6938222c`), provisioning is unblocked per the runbook below.
+**Superseded in part by:** [own connectors leave the public tree](2026-10-28-own-connectors-leave-the-public-tree.md). The five vCenter lanes, `_vcenter_spec.py` and the VMware extension sections below left this repository in 0.44.0, with the VMware connectors. The secret, the shelf checkout and the non-VMware extensions stay here. The shelf folders CI fetches are listed in `ci/spec-shelf/`. The shelf resolver is `backend/tests/_spec_shelf.py`.
 **Date:** 2026-08-17
 **Task:** [#2949](https://github.com/evoila/meho/issues/2949) (split out of
 [#2944](https://github.com/evoila/meho/issues/2944) precisely because this is a
@@ -28,8 +29,8 @@ against the **real** pinned vSphere OpenAPI specs:
 
 The specs (`vcenter.yaml` ~961 paths, `vi-json.yaml` ~2,195 paths) are
 **Broadcom/VMware vendor-licensed** and deliberately **not** committed to this
-public repo — they live in the operator's private spec-shelf (the
-`evoila-bosnia/claude-rdc-hetzner-dc` consumer repo, `docs/vcenter-9.0/`; see
+public repo — they live in the operator's private spec-shelf (a private
+consumer repo, `docs/vcenter-9.0/`; see
 `backend/tests/acceptance/_vcenter_spec.py`). Consequence: every one of the
 five lanes `pytest.skip()`s in CI, so a shape-correct-but-nonexistent path (a
 typo, a renamed endpoint, a wrong API version) sails through CI and only fails
@@ -45,12 +46,12 @@ pattern: [`shipped-spec-provenance.md`](shipped-spec-provenance.md) and
 
 ## What CI does with the specs (technical facts)
 
-- **Source.** The private repo `evoila-bosnia/claude-rdc-hetzner-dc`
+- **Source.** The operator's private consumer repo
   (verified private), directory `docs/vcenter-9.0/` only, fetched via
   `actions/checkout` with a cone-mode sparse checkout + `filter: blob:none` —
   the runner materialises the shelf directory (~18 MB), not the whole repo.
 - **Destination.** The ephemeral runner workspace of an ARC (Actions Runner
-  Controller) pod on the internal `rke2-ci` cluster. The pod — including the
+  Controller) pod on an internal CI cluster. The pod — including the
   workspace and the fetched specs — is destroyed when the job ends.
 - **Use.** Read-only input to pytest: the lanes parse the specs
   (`operations.ingest.parse_openapi`) and assert that every declared op_id /
@@ -151,16 +152,16 @@ actually serve — likely their vi-json / vim analogues) must merge first.
    sit inside required merge-gate jobs, so every PR's checks go red the
    moment the secret lands otherwise.
 3. **Mint the credential** — recommended shape: a **fine-grained PAT**
-   - Resource owner: `evoila-bosnia`
+   - Resource owner: the organisation that owns the shelf repo
    - Repository access: *Only select repositories* →
-     `evoila-bosnia/claude-rdc-hetzner-dc`
+     the shelf repo only
    - Permissions: **Contents: Read-only** (Metadata: Read is implied)
    - Expiration: per org policy; record the rotation date. On rotation,
      repeat step 4 with the new token — no workflow change needed.
 
    Alternative shape: a read-only **deploy key** on the shelf repo. That
    requires a one-line workflow change (swap `token:` for `ssh-key:` in the
-   two "Checkout vendor vCenter spec-shelf" steps of `ci.yml`) and SSH
+   two "Checkout vendor spec-shelf" steps of `ci.yml`) and SSH
    egress from the runner pool; the PAT/HTTPS shape is the shipped default
    because the runners' 443 egress is already proven.
 4. **Set the secret** on the public repo (interactive paste — keep the token
@@ -172,8 +173,8 @@ actually serve — likely their vi-json / vim analogues) must merge first.
 
 5. **Verify activation.** Re-run CI on any open same-repo PR (or push a
    no-op branch). Expect:
-   - the "Checkout vendor vCenter spec-shelf" and "Verify spec-shelf
-     provisioned the pinned vCenter specs" steps run (not skipped) and pass
+   - the "Checkout vendor spec-shelf" and "Verify spec-shelf
+     provisioned the pinned specs" steps run (not skipped) and pass
      in both `Python (ruff + mypy + pytest)` and
      `Python (integration testcontainers)`;
    - the five lanes above **run, not skip** — the skip reason string
@@ -192,7 +193,7 @@ operator's private spec-shelf into ephemeral CI jobs, never committed, never
 in artifacts or logs* — for the signoff of record. It does **not** assert a
 legal conclusion.
 
-- **Reviewer:** Damir Topic (@damir-topic), maintainer/operator
+- **Reviewer:** the maintainer/operator
 - **Date:** 2026-08-17
 - **Determination:** Attestation that the ephemeral CI use recorded above is
   acceptable under the operator's vendor license — fetching the pinned
@@ -250,7 +251,7 @@ the same `sddc-rest-9.0` connector (range `>=9.0,<10.0`; no path was
 removed 9.0 → 9.1), so the connector's read paths stay guarded against
 `sddc-manager-9.0` while the new write paths are guarded against
 `sddc-manager-9.1`. **Sequencing:** the spec already ships on the shelf
-(consumer-repo PRs #2602 / #2608), so this extension arms with **no new
+(earlier consumer-repo PRs), so this extension arms with **no new
 consumer-repo PR** — this repo change adds only the sparse-checkout
 widening (`docs/sddc-manager-9.1` in both Python jobs' checkout list +
 fail-loud verify step) and the lane.
@@ -290,7 +291,7 @@ conditions recorded in "What CI does with the specs" above:
 **Attestation for the NSX extension:** completed (mirrors the #2949
 flow — attestation comment linked below).
 
-- **Reviewer:** Damir Topic (@damir-topic), maintainer/operator
+- **Reviewer:** the maintainer/operator
 - **Date:** 2026-08-18
 - **Determination:** Attestation that fetching the pinned NSX
   manager-served OpenAPI specs from the private spec-shelf into
@@ -351,7 +352,7 @@ deterministic derivative pinned next to the byte-identical vendor fetch
 the OpenAPI 3.0 metaschema, so `parse_openapi` refuses it; recipe +
 sha256 in the shelf MANIFEST — the nsx-9.0 derived-artifact shape).
 **Sequencing:** the derivative lands via consumer-repo PR
-(`claude-rdc-hetzner-dc#2534`) which must merge before this repo's
+which must merge before this repo's
 widened verify step can pass.
 
 ### Signoff extension — Hetzner Robot (hetzner-robot-2026-04, 2026-08-18, #2985)
@@ -434,7 +435,7 @@ extension mechanics. The artifact stays Swagger 2.0 (no OpenAPI 3
 derivative): ingest rejects Swagger 2.0 by decision (#2090), so the
 lane supplies its own extraction — the vcf-automation `vra-iaas.json`
 precedent. **Sequencing:** the pin lands via consumer-repo PR
-(`claude-rdc-hetzner-dc#2540`) which must merge before this repo's
+which must merge before this repo's
 widened verify step can pass.
 
 ### Extension: Loki (loki-3.7, 2026-08-18, #2991)
@@ -465,7 +466,7 @@ Loki 3.7.6) — the provenance note of record is the shelf's
 [`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
 extension mechanics; the documented-route precedent is
 `hetzner-robot-2026-04`, here from an OSS source. **Sequencing:** the
-pin lands via consumer-repo PR (`claude-rdc-hetzner-dc#2547`) which must
+pin lands via consumer-repo PR which must
 merge before this repo's widened verify step can pass.
 Proxmox VE publishes no OpenAPI/Swagger for its REST API, so the pinned
 artifact is the vendor's own apidoc schema (`apidata.js`, the file the
@@ -482,7 +483,7 @@ form in
 extension mechanics. The lab runs no Proxmox deployment, so the shelf
 pins latest stable 8.x (PVE 8.4); meho's `proxmox-api` connector
 advertises `>=7.0,<9.0`. **Sequencing:** the pin lands via consumer-repo
-PR (`claude-rdc-hetzner-dc#2546`) which must merge before this repo's
+PR which must merge before this repo's
 widened verify step can pass.
 ### Extension: harbor / harbor-2.12 (#2990)
 
@@ -507,7 +508,7 @@ derivative): ingest rejects Swagger 2.0 by decision (#2090), so the
 lane supplies its own extraction — folding the document's
 `basePath: /api/v2.0` onto every path key (the argocd `argocd-swagger.json`
 precedent, reading YAML rather than JSON). **Sequencing:** the pin lands
-via consumer-repo PR (`claude-rdc-hetzner-dc#2549`) which must merge
+via consumer-repo PR which must merge
 before this repo's widened verify step can pass.
 
 ### Extension: vcf-logs (vRLI, `vcf-operations-9.0/vcf-operations-for-logs-openapi.json`, #2993)
@@ -572,7 +573,7 @@ Unlike the vcf-logs extension, this spec lands in a **new** shelf directory
 `docs/fleet-lcm-9.0` is added to both Python jobs' sparse-checkout list, and
 `fleet-lcm-9.0/fleet-lcm-openapi.yaml` to their fail-loud verify step + echo
 confirmation. The lane and this CI wiring land in the evoila/meho PR; the shelf
-pin lands via the operator's consumer-shelf PR (`claude-rdc-hetzner-dc#2560`).
+pin lands via the operator's consumer-shelf PR.
 **Until that shelf PR merges, the fail-loud verify step reports the file
 missing and the Python jobs fail** — the intended fail-closed behaviour (a
 layout/pin regression must fail CI, not silently skip the lane); the entry is
@@ -795,7 +796,8 @@ tests, none skipped).
 - Resolver contract: `backend/tests/acceptance/_vcenter_spec.py` (env-var
   priority; skip semantics).
 - Workflow wiring: `.github/workflows/ci.yml` — the two "Checkout vendor
-  vCenter spec-shelf" steps and the `SPEC_SHELF_TOKEN_PRESENT` /
+  spec-shelf" steps (their folders come from the lists in
+  `ci/spec-shelf/`, read by `scripts/ci/spec_shelf.sh`) and the `SPEC_SHELF_TOKEN_PRESENT` /
   `MEHO_CONSUMER_DOCS_ROOT` job env rows; operator-facing summary in
   [`docs/codebase/devops.md`](../codebase/devops.md).
 - Precedent ADRs: [`shipped-spec-provenance.md`](shipped-spec-provenance.md)

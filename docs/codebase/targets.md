@@ -31,6 +31,42 @@ shown to the people and agents that read the target (#5075). Every
 through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
+`targets.register` needs the `tenant_admin` role from a person, the same
+as `POST /api/v1/targets` and the MCP tool. The REST route and the tool
+check the role at the door. `call_operation`, the REST dispatch route and
+the CLI reach the operation through `dispatch`, where the policy gate
+checks the **per-op role floor** (`operations/role_floors.py`;
+`connectors/targets/ops.py` registers it at import): a person with a
+lower role gets `denied`, nothing is written, and the audit row says
+`denied`. `preview_operation` shows the same verdict. An agent's call
+still waits for approval; a service login's call still waits or runs
+under a grant. The approval queue checks the approver against the same
+floor at the decision: a person below it cannot approve the request, so
+the approved call, run by the agent itself or by the person from an
+approvals surface, was approved by a `tenant_admin`. The dispatcher
+checks the person who runs it from an approvals surface once more. The
+requester's own run is not checked again: the agent's resume, and the
+re-run of a failed approved call by the requester, also a service login.
+
+**REST writes are for people.** `POST`, `PATCH` and `DELETE
+/api/v1/targets` use one gate, `_require_admin_person` in
+`api/v1/targets.py`. It checks the `tenant_admin` role first, then that
+the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
+
+- A person with `tenant_admin` writes at once (the CLI, scripts).
+- A service login with `tenant_admin` gets 403 `human_principal_required`.
+  The text names `targets.register` and `targets.remove`, the operations
+  a machine login uses. Both go through the approval check above. No
+  operation changes a target, so a machine login cannot change one.
+- An agent login gets 403 `insufficient_role`: MEHO caps its role at
+  `operator`.
+- Reads (`GET`, `probe`) keep the `operator` role and stay open to
+  machine logins.
+
+The console and the operations call `create_target`, `update_target` and
+`soft_delete_target` as functions, not through the routes, so the gate
+does not apply to them. The console signs people in through the browser.
+
 This document covers the two **list** paths, how `list_targets`
 bounds its response (#3858), how the single-target REST routes find a
 target, the name and host rules for new targets (#5244), the per-target
@@ -46,7 +82,7 @@ These four routes take a name, an alias or an id in the path (#5245):
 - `POST /api/v1/targets/{value}/probe`
 - `DELETE /api/v1/targets/{value}`
 
-All four call `_resolve_route_target` in `api/v1/targets.py`. It tries,
+All four call `resolve_route_target` in `api/v1/targets.py`. It tries,
 in this order:
 
 1. Exact name, then exact alias, through `resolve_target`. Everything
@@ -143,6 +179,29 @@ Limits:
   pooled HTTP client is not affected: its key already includes the
   host, port, scheme and TLS settings.
 
+## Vault login role keys in `extras`
+
+A vault target may name the Vault login role and auth mount in
+`extras["vault_role"]` and `extras["vault_mount"]`
+([`connectors-vault.md`](connectors-vault.md)). Only a platform admin
+may set or change them. `create_target` and `update_target` call
+`enforce_vault_login_extras_platform_admin` (`targets/vault_login_extras.py`)
+before they store `extras`. The check compares the stored value of each
+key with the value the request would store:
+
+- Nothing changed, or the operator has `platform_admin`: the request
+  passes. A `PATCH` that re-sends the same values (the UI import does
+  that) or touches other fields passes too, so an existing target keeps
+  its role.
+- A key is added, changed or removed, and the operator has no
+  `platform_admin`: HTTP 403 `vault_login_role_requires_platform_admin`,
+  and the row is not changed. Values are compared as stored, so a blank
+  string is a change like any other.
+
+`targets.register` calls `create_target`, so the same rule holds there:
+the operation answers with an invalid-parameters error that names the
+403 detail.
+
 ## Control flow — listing targets
 
 ### REST and CLI: `GET /api/v1/targets`
@@ -164,7 +223,12 @@ context window, which the REST front does not feed.
 ### MCP: `list_targets`
 
 1. **Tenant scope.** No `tenant_id` → the caller's tenant. A slug or
-   UUID naming another tenant requires `platform_admin` (#1641).
+   UUID naming another tenant requires `platform_admin`, held by a
+   person. A caller without it may name only their own tenant;
+   every other value gets one fixed `-32602` error, whether that tenant
+   exists or not, and MEHO reads no tenant row but the caller's own. A
+   platform admin naming a tenant that does not exist gets
+   `no tenant matches`.
 2. **One query.** A single SELECT of the five projected columns —
    `id`, `name`, `aliases`, `product`, `host` — keyset on `name`,
    `limit` default 100 / max 500, optionally narrowed by the product
@@ -191,8 +255,7 @@ context window, which the REST front does not feed.
    `result_query` reads back under the JWT's tenant and subject, so that
    is the only key the caller can drill into.
 5. The MCP dispatcher (`mcp/handlers.py`) packs the result as a text
-   block **and** `structuredContent` (#2774), then writes the audit row
-   and publishes the broadcast event.
+   block **and** `structuredContent` (#2774), then writes the audit row.
 
 An agent reads a reduced page with `result_query(handle_id=…)`: page
 with `offset` / `limit`, or pass a `query` such as
@@ -351,7 +414,7 @@ automation pack therefore works for SSH key login with no map at all. When
 both fields are present, `ssh_private_key` wins.
 ## Control flow — deleting a target
 
-`DELETE /api/v1/targets/{name}` (`tenant_admin`) and the CLI verb
+`DELETE /api/v1/targets/{name}` (a person with `tenant_admin`) and the CLI verb
 `meho targets delete <name> [--force] [--confirm]` (#3943) on top of it:
 
 1. The CLI asks y/N first unless `--confirm` is given. Closed stdin
@@ -394,6 +457,13 @@ params={"target_id": "<target-uuid>"})`. It is the opposite of
   the same rule as the REST route. Any other role gets an error and the
   target stays. A call that waits for approval runs, once approved, under
   the login of the person who approved it, so that person's role counts.
+  One exception (#5480): in sandbox mode a service principal whose call
+  runs at once needs no `tenant_admin`. For this op that happens only under
+  a live delete grant. A service login has the `operator` role on purpose,
+  so without the exception the delete grant could never help. The handler
+  checks `sandbox_mode_active()`, the principal kind and the gate's verdict
+  (`policy_decision_var` is `auto-execute`). A call that ran after approval
+  keeps the role check.
 - **Approval.** `dangerous` with `requires_approval=True`; the name ends in
   `.remove`, so the delete rules apply. A second person must approve every
   call. See [`mcp.md`](mcp.md#admin-registry-writes-route-through-the-dispatcher).
@@ -405,12 +475,54 @@ params={"target_id": "<target-uuid>"})`. It is the opposite of
 - Code: `connectors/targets/ops.py` (handler, preview, registration) and
   `connectors/targets/schemas.py`. Tests: `tests/test_targets_remove_op.py`.
 
+## Detecting a target's product and version (`targets.probe`)
+
+An agent runs detection on a target with
+`call_operation(connector_id="targets-registry-1.x", op_id="targets.probe",
+params={"name": "<target-name>"})`. So a target the agent registered with
+`targets.register` gets its detected product and version without a person.
+
+- **One code path.** The op and `POST /api/v1/targets/{name}/probe` both
+  find the target with `resolve_route_target` (name, alias or id, in the
+  caller's tenant) and then call `probe_and_store_fingerprint`, both in
+  `api/v1/targets.py`. It picks the connector, asks the system, and stores
+  the answer in `targets.fingerprint`. When something fails, nothing is
+  stored and the last answer stays.
+- **Policy on the named target.** The op is targetless: the dispatcher's
+  policy gate runs with no target, so a grant that names one target does
+  not match there. The handler checks MEHO's policy for `targets.probe` on
+  the found target (`secondary_target_refusal`) before the system is
+  contacted. A deny grant for that target refuses the call, and nothing is
+  stored. Another target of the same agent is still probed.
+- **A call that waits for approval.** An agent with a `needs-approval`
+  grant parks the call; a reviewer runs the approved call as the reviewer.
+  So the park records who asked and the requester's policy on the named
+  target (`targets_probe_preflight`, through `requester_policy_preflight`),
+  and the approved run checks the requester again. A deny for the target
+  added while the request waited still stops it; nothing is stored then.
+- **Result.** `{target_id, name, vendor, product, version, build, edition,
+  reachable, probed_at, probe_method}`. The connector's `extras` are not in
+  the result. An unreachable system that the connector reports as
+  `reachable: false` is stored and returned like that; a connector that
+  raises gives an error.
+- **Errors.** An unknown target, a target of another tenant, a product
+  with no connector, or a failing connector give an error that names the
+  cause (the same cause the REST route gives as 404, 501, 409 or 500).
+- **Role.** Like the REST route, it needs the `operator` or `tenant_admin`
+  role. A `read_only` login is refused.
+- **Risk level.** `safe`, no approval: it reads the system and writes only
+  the detected fields of MEHO's own target row.
+- **Audit.** Every call writes an audit row with op id `targets.probe`.
+- Code: `connectors/targets/probe.py` (schemas, handler, registration).
+  Tests: `tests/test_targets_probe_op.py`.
+
 ## Dependencies
 
 - SQLAlchemy 2.0 async sessions. A column select returns `Row` objects
   with attribute access by column name, not ORM instances.
-- `JsonFluxReducer` and `ResultHandleStore`, which shares the broadcast
-  Valkey client (`BROADCAST_REDIS_URL`). If the store cannot persist the
+- `JsonFluxReducer` and `ResultHandleStore`, which uses the result-cache
+  Valkey (`RESULT_CACHE_REDIS_URL`; when unset, the broadcast Valkey
+  `BROADCAST_REDIS_URL`). If the store cannot persist the
   spill, the handle still ships with `drill_in.available=false` and
   `reason="result_store_unavailable"`; the agent falls back to
   `native_pagination` (narrow with `connector_id`, or a smaller

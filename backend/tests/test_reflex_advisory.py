@@ -54,13 +54,13 @@ from meho_backplane.broadcast import (
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.broadcast.announce_gate import reset_announce_gate_cache_for_testing
-from meho_backplane.broadcast.history import ADVISORY_EXTRAS_KEY
 from meho_backplane.broadcast.reflex import (
     _ANNOUNCE_NUDGES,
     _READ_NUDGE,
     REFLEX_ADVISORY_EXTRAS_KEY,
     build_reflex_advisory,
 )
+from meho_backplane.broadcast.target_advisory import ADVISORY_EXTRAS_KEY
 from meho_backplane.checks.advisory import CHECKS_ADVISORY_EXTRAS_KEY
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -737,7 +737,8 @@ async def test_write_with_an_unknown_last_word_gets_both_write_warnings(
         _bound_session(_SESSION),
     ):
         result = await dispatch(
-            operator=_operator(),
+            # In the web interface the ``caution`` op runs at once (#3980).
+            operator=_operator().model_copy(update={"web_session": True}),
             connector_id="vault-1.x",
             op_id="vault.kv.purge",
             target=_FakeTarget(),

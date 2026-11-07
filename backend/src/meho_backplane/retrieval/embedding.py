@@ -71,6 +71,8 @@ from typing import Any
 
 import structlog
 
+from meho_backplane.retrieval.cpu_limit import embedding_thread_count
+
 __all__ = [
     "BAKED_MODEL_CACHE_DIR",
     "DEFAULT_EMBEDDING_MODEL",
@@ -186,8 +188,11 @@ class EmbeddingService:
     batch sizes).
     """
 
-    def __init__(self, model_name: str, cache_dir: str) -> None:
+    def __init__(self, model_name: str, cache_dir: str, *, threads: int | None = None) -> None:
         self._model_name = model_name
+        # ``threads`` forces the ONNX thread count. ``None`` (production)
+        # reads the container's CPU limit at model load (see cpu_limit.py).
+        self._threads = threads
         # ``cache_dir`` is expanded eagerly so a literal ``~`` in the
         # settings value (typical dev override) resolves at construction
         # time rather than per-encode call. Production values are
@@ -268,15 +273,21 @@ class EmbeddingService:
             from fastembed import TextEmbedding
 
             log = structlog.get_logger()
+            # One ONNX thread per CPU the container may use, not per host
+            # core: more threads than the CPU limit make the kernel pause
+            # the whole process, the event loop too (see cpu_limit.py).
+            threads = self._threads if self._threads is not None else embedding_thread_count()
             log.info(
                 "embedding_model_loading",
                 model=self._model_name,
                 cache_dir=self._cache_dir,
+                threads=threads,
             )
             try:
                 self._model = TextEmbedding(
                     model_name=self._model_name,
                     cache_dir=self._cache_dir,
+                    threads=threads,
                 )
             except Exception as exc:
                 # fastembed builds the onnxruntime InferenceSession in

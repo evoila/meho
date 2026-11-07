@@ -43,6 +43,7 @@ from meho_backplane.connectors._shared.microsoft_login import (
     MicrosoftLoginError,
     fetch_client_credentials_token,
 )
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -52,6 +53,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     is_acceptable_auth_model,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_or_empty
+from meho_backplane.connectors.azure import trace_mask
 from meho_backplane.connectors.azure._errors import AzureApiError, AzureNotFoundError
 from meho_backplane.connectors.azure._http import NoRedirectClient, send
 from meho_backplane.connectors.azure._paths import SUBSCRIPTIONS_API_VERSION, subscription_path
@@ -113,7 +115,7 @@ from meho_backplane.connectors.azure.security import SecurityOps
 from meho_backplane.connectors.azure.storage import StorageOps
 # isort: on
 
-__all__ = ["AzureConnector"]
+__all__ = ["TRACE_BODY_WITHHELD", "AzureConnector"]
 
 _log = structlog.get_logger(__name__)
 
@@ -137,6 +139,10 @@ _UNREACHABLE_ERRORS: Final[tuple[type[BaseException], ...]] = (
     AzureApiError,
     AzureNotFoundError,
 )
+
+#: What the flight recorder stores in place of an answer the trace mask could
+#: not walk. Left out rather than stored unmasked.
+TRACE_BODY_WITHHELD: Final[str] = "<response body left out: MEHO could not mask it>"
 
 #: A clock for the cache. Tests replace it to move time forward.
 _monotonic = time.monotonic
@@ -200,6 +206,10 @@ class AzureConnector(
     product = "azure"
     version = "2026.10"
     impl_id = "azure-arm"
+    summary = (
+        "Reads Azure subscriptions (VMs, Kubernetes clusters, networks, storage, costs, security "
+        "and policy), changes tags and starts patch checks."
+    )
     supported_version_range: str | None = None
     priority = 1
     #: No redirect is followed: every subscription shares one host, so even a
@@ -213,6 +223,8 @@ class AzureConnector(
         )
         self._credentials: dict[_CredentialKey, AzureCredentials] = {}
         self._tokens: dict[_TokenKey, _CachedToken] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._credential_locks: dict[_CredentialKey, asyncio.Lock] = {}
         self._token_locks: dict[_TokenKey, asyncio.Lock] = {}
 
@@ -266,7 +278,7 @@ class AzureConnector(
         login = (credentials.tenant_id, credentials.client_id)
         scope = config.cloud.arm_scope if scope is None else scope
         key: _TokenKey = (*target_cache_key(target), *login, scope)
-        use_cache = _may_use_cache(operator)
+        use_cache = _may_use_cache(operator) and self._readers.has_read(target, operator)
         cached = self._tokens.get(key)
         if use_cache and cached is not None and _monotonic() < cached.renew_at:
             return cached.token, login
@@ -302,7 +314,9 @@ class AzureConnector(
     ) -> AzureCredentials:
         """Return the target's login, from the cache or from its secret."""
         key: _CredentialKey = (*target_cache_key(target), str(target.secret_ref or ""))
-        use_cache = _may_use_cache(operator)
+        checked = _may_use_cache(operator)
+        # A cached secret is used by a caller only after their own Vault read passed once.
+        use_cache = checked and self._readers.has_read(target, operator)
         cached = self._credentials.get(key)
         if use_cache and cached is not None:
             return cached
@@ -312,6 +326,8 @@ class AzureConnector(
                 return cached
             credentials = await self._credentials_loader(target, operator)
             self._credentials[key] = credentials
+            if checked:
+                self._readers.record(target, operator)
             return credentials
 
     async def invalidate_session(
@@ -339,6 +355,7 @@ class AzureConnector(
         prefix = target_cache_key(target)
         for key in [key for key in self._credentials if key[:2] == prefix]:
             del self._credentials[key]
+        self._readers.forget(target)
         self._drop_tokens(target)
 
     def _drop_tokens(self, target: AzureTargetLike) -> None:
@@ -350,6 +367,7 @@ class AzureConnector(
         """Forget every cached secret and token, then close the HTTP clients."""
         self._credentials.clear()
         self._tokens.clear()
+        self._readers.clear()
         await super().aclose()
 
     # ------------------------------------------------------------------
@@ -392,6 +410,35 @@ class AzureConnector(
     ) -> MicrosoftAccessToken:
         """Return the token the next call to *target* uses, to show its ids."""
         return await self._access_token(target, operator)
+
+    # ------------------------------------------------------------------
+    # Flight recorder trace mask
+    # ------------------------------------------------------------------
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Record Azure's answer with every key and password field masked.
+
+        Every family reaches this hook through ``send``, the Blob service
+        caller too. The trace gets Azure's JSON with the fields of
+        :data:`~meho_backplane.connectors.azure.trace_mask.SECRET_FIELDS`
+        replaced (:func:`~meho_backplane.connectors.azure.trace_mask.mask_answer`);
+        the shared redaction still runs on the result. An empty answer or one
+        that is not JSON gives ``None``, so the shared redaction records the
+        raw answer as before. An answer the mask cannot parse or walk is left
+        out (:data:`TRACE_BODY_WITHHELD`). Never raises.
+        """
+        if not response.content:
+            return None
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        except RecursionError:  # JSON nested too deep to parse cannot be masked either
+            return TRACE_BODY_WITHHELD
+        try:
+            return trace_mask.mask_answer(body)
+        except Exception:  # a trace must never break the call, and never hold a secret
+            return TRACE_BODY_WITHHELD
 
     # ------------------------------------------------------------------
     # Fingerprint and probe

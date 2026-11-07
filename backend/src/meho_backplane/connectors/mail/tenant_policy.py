@@ -30,17 +30,19 @@ decision where doubt should record less; this is a *delivery-authorization*
 decision where doubt should deliver less. So an unreadable / unparseable policy
 resolves to **deny** (an empty allowlist), never to inherit: falling through to
 the instance floor on a read error would defeat the containment the override
-exists to provide. The deny is not cached, so a transient DB error does not pin
-the tenant to deny for the cache TTL.
+exists to provide.
 
-Cache discipline mirrors :mod:`meho_backplane.flight_recorder.config`: a 60s
-per-key TTL keeps the policy off the DB on the per-dispatch path; only a miss
-awaits a one-row SELECT. Only successfully-resolved values are cached.
+**Read per send, never cached.** The policy is read from the database on
+every dispatched ``mail.send``: one primary-key SELECT of a single column.
+A send is slow (it opens an SMTP session) and rare, so the read costs
+nothing that matters, and it buys the property that counts for a
+delivery-authorization decision: the moment an operator's policy write is
+committed, the next send in **every** process and replica obeys it. A
+per-process cache cannot give that property, so this resolver keeps none.
 """
 
 from __future__ import annotations
 
-import time
 from typing import Final
 from uuid import UUID
 
@@ -51,44 +53,14 @@ from meho_backplane.connectors.mail.allowlist import parse_recipient_allowlist
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
 
-__all__ = [
-    "invalidate_tenant_mail_policy_cache",
-    "reset_tenant_mail_policy_cache_for_testing",
-    "resolve_tenant_recipient_allowlist",
-]
+__all__ = ["resolve_tenant_recipient_allowlist"]
 
 _log = structlog.get_logger(__name__)
-
-#: Per-key TTL, mirroring the flight-recorder / announce-gate resolvers.
-_CACHE_TTL_SECONDS: Final[float] = 60.0
-
-#: Per-tenant resolved-policy cache. Value = (resolved, monotonic_expires_at)
-#: where ``resolved`` is ``None`` (inherit) or the parsed ``(addresses,
-#: domains)`` tuple. A hit is a pure dict lookup; a miss awaits a one-row
-#: SELECT of the single ``mail_recipient_allowlist`` column.
-_TENANT_CACHE: dict[UUID, tuple[tuple[frozenset[str], frozenset[str]] | None, float]] = {}
 
 #: The deny sentinel a fail-closed resolution returns (empty allowlist admits
 #: nothing). Distinct object identity is irrelevant — an empty parsed tuple is
 #: the deny state everywhere in the connector.
 _DENY: Final[tuple[frozenset[str], frozenset[str]]] = (frozenset(), frozenset())
-
-
-def reset_tenant_mail_policy_cache_for_testing() -> None:
-    """Clear the per-tenant cache (test isolation only)."""
-    _TENANT_CACHE.clear()
-
-
-def invalidate_tenant_mail_policy_cache(tenant_id: UUID) -> None:
-    """Evict the cached allowlist for *tenant_id* after an operator policy write.
-
-    The ``PATCH /api/v1/tenants/mail-recipient-policy`` route calls this on a
-    change so the new value takes effect on the next dispatched ``mail.send``
-    instead of waiting out :data:`_CACHE_TTL_SECONDS` (or a restart).
-    Idempotent — popping an absent key is a no-op, so a no-op write can call it
-    safely.
-    """
-    _TENANT_CACHE.pop(tenant_id, None)
 
 
 async def resolve_tenant_recipient_allowlist(
@@ -101,15 +73,11 @@ async def resolve_tenant_recipient_allowlist(
     ``(addresses, domains)`` tuple is the tenant's own allowlist; an empty
     tuple denies every recipient.
 
-    Fail-closed: any error reading or parsing the policy resolves to the deny
-    sentinel (empty tuple) and is **not** cached, so a transient DB error
-    refuses this send without pinning the tenant to deny for the TTL. Cache-
-    aware for the success path.
+    Reads the committed column on every call, so a policy write is in force
+    for the very next send with no eviction, restart, or wait. Fail-closed:
+    any error reading or parsing the policy resolves to the deny sentinel
+    (empty tuple) for this send only.
     """
-    now = time.monotonic()
-    cached = _TENANT_CACHE.get(tenant_id)
-    if cached is not None and cached[1] > now:
-        return cached[0]
     try:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -120,9 +88,9 @@ async def resolve_tenant_recipient_allowlist(
             ).one_or_none()
         # ``raw is None`` → no tenant row; ``raw[0] is None`` → NULL column.
         # Both mean "no per-tenant override" → inherit the instance floor.
-        resolved: tuple[frozenset[str], frozenset[str]] | None = (
-            None if raw is None or raw[0] is None else parse_recipient_allowlist(raw[0])
-        )
+        if raw is None or raw[0] is None:
+            return None
+        return parse_recipient_allowlist(raw[0])
     except Exception:
         _log.warning(
             "mail_tenant_policy_resolve_failed_deny",
@@ -130,5 +98,3 @@ async def resolve_tenant_recipient_allowlist(
             exc_info=True,
         )
         return _DENY
-    _TENANT_CACHE[tenant_id] = (resolved, now + _CACHE_TTL_SECONDS)
-    return resolved

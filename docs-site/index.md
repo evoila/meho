@@ -12,9 +12,13 @@ what the caller needs, and an immutable audit row records who did what,
 where, and when.
 
 MEHO is open source (Apache 2.0) and runs entirely on infrastructure
-you control. There is no hosted service and no phone-home: you deploy
-the backplane into your own Kubernetes cluster, next to your own
-PostgreSQL, Keycloak, and secret store.
+you control. There is no hosted service and no phone-home. You install
+it with one Helm chart into your own Kubernetes cluster. The chart
+brings its own PostgreSQL, Keycloak and OpenBao (an open-source fork of
+Vault), or connects to the ones you already run. Two more ways to
+install are coming: the install on a plain Linux server is available
+and in testing, and a VMware appliance is in progress. See
+[Ways to install MEHO](install/ways-to-install.md).
 
 ## The problem it solves
 
@@ -34,8 +38,9 @@ and keeps the receipts.
 ## What every operation gets
 
 - **Policy-gated** — operations are authorised against the caller's
-  role and per-target grants before they execute; destructive
-  operations can require explicit human approval.
+  role and per-target grants before they execute. A call made with a
+  token (MCP, the CLI or REST) runs only `safe` operations at once;
+  every other change waits until a person approves it.
 - **Credential-federated** — the agent never holds a backend
   credential. A short-lived identity token is exchanged with your
   secret store ([Vault or Google Secret
@@ -73,19 +78,21 @@ same ones the product itself displays.
 
 | Section | What lives there |
 |---|---|
-| **Start here** | This page, plus the [reference architecture](architecture.md). |
+| **Start here** | This page, plus the [reference architecture](architecture.md) and the [deployment shapes](deployment-shapes.md). |
 | **[Install & operate](install/index.md)** | The [install trail](install/index.md) — one continuous path from a bare Kubernetes cluster to a running backplane and a successful login — plus [credential backends](install/credential-backends.md), [Keycloak realm setup](install/keycloak-realm.md), [TLS and ingress](install/tls-ingress.md), [upgrades](install/upgrades.md), and a [local quickstart](install/kind-quickstart.md). |
 | **[Connect clients](clients/index.md)** | Connecting the CLI and MCP clients (Claude Desktop, Claude Code, and others) to a running backplane. |
 | **[Do real work](guides/index.md)** | Task guides: register targets and secrets, run first operations, watch your estate. |
-| **[Reference](reference/index.md)** | Generated reference material, starting with the [feature maturity index](reference/maturity.md). |
+| **[Extend MEHO](extend/connector-kit.md)** | Write your own connector package against the connector kit. |
+| **[Reference](reference/index.md)** | [What's new](reference/whats-new.md) in each release, plus generated reference material, such as the [feature maturity index](reference/maturity.md). |
 | **[Project](project/index.md)** | How the project is run: versioning, security policy, roadmap. |
 
 ## Where to start
 
-- **Deploying MEHO for your team?** Follow the
-  [install trail](install/index.md). It assumes a Kubernetes cluster, a
-  PostgreSQL database, and a Keycloak — and takes you from there to a
-  running backplane and a working `meho login`.
+- **Deploying MEHO for your team?** Read
+  [Ways to install MEHO](install/ways-to-install.md), then follow the
+  [install trail](install/index.md). You need a Kubernetes cluster, a
+  DNS name and a certificate. The chart brings the database, the login
+  server and the password safe.
 - **Just want to see it run?** The
   [local kind quickstart](install/kind-quickstart.md) brings the
   backplane up on your workstation in minutes — with placeholder

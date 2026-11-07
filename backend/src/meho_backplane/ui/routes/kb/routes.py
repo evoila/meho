@@ -93,7 +93,9 @@ RBAC
 ----
 
 ``operator`` role minimum for read + preview routes (enforced by
-:func:`~meho_backplane.ui.auth.middleware.require_ui_session`). The
+:func:`~meho_backplane.ui.auth.middleware.require_ui_operator`, the same floor
+as the REST ``GET /api/v1/kb``; a ``read_only`` session gets ``403
+operator_required``). The
 ``POST /ui/kb/new`` save route additionally requires ``tenant_admin``:
 it loads the full decrypted session via
 :func:`~meho_backplane.ui.auth.session_store.load_session`, re-verifies
@@ -103,7 +105,7 @@ the access token through
 mirrors the ``/api/v1/kb POST`` RBAC posture without adding a separate
 auth middleware layer.
 Read routes (T1): ``operator`` role minimum (enforced by
-:func:`~meho_backplane.ui.auth.middleware.require_ui_session`).
+:func:`~meho_backplane.ui.auth.middleware.require_ui_operator`).
 Upload routes (T2): ``tenant_admin`` required, enforced by
 :func:`~meho_backplane.ui.auth.middleware.require_ui_admin` which
 loads the session's access token and decodes the role claim.
@@ -153,7 +155,7 @@ from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_admin,
-    require_ui_session,
+    require_ui_operator,
 )
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
@@ -196,9 +198,10 @@ _MAX_TAGS_LENGTH: Final[int] = 500
 #: the embedding path (the indexer holds the body in-process during
 #: embedding). Bulk uploads apply this limit per file.
 _MAX_UPLOAD_BYTES: Final[int] = 512 * 1024
-#: Module-level Depends closure for the require_ui_session gate.
-#: Matches the ruff B008 idiom the topology and dashboard routes use.
-_require_session = Depends(require_ui_session)
+#: Module-level Depends closure for the operator-role gate (``require_ui_operator``
+#: chains ``require_ui_session``). Matches the ruff B008 idiom the topology and
+#: dashboard routes use.
+_require_session = Depends(require_ui_operator)
 
 #: Module-level Depends closure for the require_ui_admin gate (T2 upload).
 #: Chains require_ui_admin which itself chains require_ui_session; callers
@@ -229,6 +232,7 @@ async def _require_tenant_admin(session_ctx: UISessionContext) -> None:
     _refreshed, operator = await verify_access_token_with_refresh(
         decrypted,
         expected_audience=settings.keycloak_audience,
+        request_tenant=session_ctx.tenant_id,
     )
     if operator.tenant_role != TenantRole.TENANT_ADMIN:
         raise HTTPException(status_code=403, detail="tenant_admin_required")

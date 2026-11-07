@@ -44,7 +44,6 @@ skip-re-embed branch is being exercised on idempotent re-calls.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
@@ -61,7 +60,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
-    _eager_import_connectors,
     all_connectors_v2,
     clear_registry,
     register_connector_v2,
@@ -82,7 +80,6 @@ from meho_backplane.operations.ingest import (
     parse_openapi,
     register_ingested_operations,
 )
-from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
 from meho_backplane.settings import get_settings
 
 
@@ -250,262 +247,6 @@ async def test_first_call_persists_method_and_path(
     assert row.method == "GET"
     assert row.path == "/api/vcenter/cluster"
     assert row.handler_ref is None
-
-
-@pytest.mark.asyncio
-async def test_vmware_hardware_writes_receive_connector_safety_floor(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """VMware hardware writes are dangerous and approval-gated at registration."""
-    paths = (
-        "/vcenter/vm/{vm}/hardware/ethernet",
-        "/vcenter/vm/{vm}/hardware/disk/{disk}",
-        "/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
-        "/vcenter/vm/{vm}/hardware/boot",
-        "/vcenter/vm/{vm}/hardware/serial",
-        "/vcenter/vm/{vm}/hardware/parallel",
-        "/vcenter/vm/{vm}/hardware/floppy",
-        "/vcenter/vm/{vm}/hardware/cpu",
-        "/vcenter/vm/{vm}/hardware/memory",
-    )
-    operations = [
-        _proto(f"{method}:{path}", method=method, path=path)
-        for method in ("POST", "PUT", "PATCH", "DELETE")
-        for path in paths
-    ]
-
-    await register_ingested_operations(
-        product="vmware",
-        version="9.0",
-        impl_id="vmware-rest",
-        spec_source="vcenter.yaml",
-        operations=operations,
-        embedding_service=stub_embedding_service,
-    )
-
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        rows = (
-            await session.execute(
-                select(EndpointDescriptor).where(EndpointDescriptor.product == "vmware")
-            )
-        ).scalars()
-        assert {(row.safety_level, row.requires_approval) for row in rows} == {("dangerous", True)}
-
-
-@pytest.mark.asyncio
-async def test_vmware_floor_corrects_existing_row_without_weakening_review_state(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """Re-ingest upgrades a legacy row but retains stricter review metadata."""
-    operation = _proto(
-        "POST:/vcenter/vm/{vm}/hardware/ethernet",
-        method="POST",
-        path="/vcenter/vm/{vm}/hardware/ethernet",
-    )
-    kwargs: dict[str, Any] = {
-        "product": "vmware",
-        "version": "9.0",
-        "impl_id": "vmware-rest",
-        "spec_source": "vcenter.yaml",
-        "operations": [operation],
-        "embedding_service": stub_embedding_service,
-    }
-    await register_ingested_operations(**kwargs)
-
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        row = (
-            await session.execute(
-                select(EndpointDescriptor).where(EndpointDescriptor.op_id == operation.op_id)
-            )
-        ).scalar_one()
-        row.safety_level = "destructive"
-        row.requires_approval = False
-        row.is_enabled = True
-        await session.commit()
-
-    await register_ingested_operations(**kwargs)
-
-    async with sessionmaker() as session:
-        row = (
-            await session.execute(
-                select(EndpointDescriptor).where(EndpointDescriptor.op_id == operation.op_id)
-            )
-        ).scalar_one()
-        assert row.safety_level == "destructive"
-        assert row.requires_approval is True
-        assert row.is_enabled is True
-
-
-@pytest.mark.parametrize(
-    ("method", "path"),
-    [
-        ("POST", "/api/vcenter/vm"),
-        ("DELETE", "/vcenter/vm/{vm}"),
-        ("POST", "/vcenter/vm/{vm}/power"),
-        ("POST", "/vcenter/vm/{vm}/power/start"),
-        ("PUT", "/vcenter/vm/{vm}/hardware/ethernet"),
-    ],
-)
-def test_vmware_sibling_write_floors_cover_api_aliases(
-    method: str,
-    path: str,
-) -> None:
-    """Adjacent governed VM write families and the API-prefix alias are covered."""
-    proto = _proto(f"{method}:{path}", method=method, path=path)
-    floored = apply_safety_floor(
-        product="vmware",
-        version="9.0",
-        impl_id="vmware-rest",
-        proto=proto,
-    )
-    assert floored.safety_level == "dangerous"
-    assert floored.requires_approval is True
-
-
-def test_vmware_floor_leaves_reads_and_non_vmware_connectors_unchanged() -> None:
-    """The connector contract cannot promote reads or another vendor's operation."""
-    read = _proto(
-        "GET:/vcenter/vm/{vm}/hardware/ethernet",
-        path="/vcenter/vm/{vm}/hardware/ethernet",
-    )
-    assert (
-        apply_safety_floor(product="vmware", version="9.0", impl_id="vmware-rest", proto=read)
-        is read
-    )
-    write = _proto(
-        "POST:/vcenter/vm/{vm}/hardware/ethernet",
-        method="POST",
-        path="/vcenter/vm/{vm}/hardware/ethernet",
-    )
-    assert (
-        apply_safety_floor(product="other", version="9.0", impl_id="other-rest", proto=write)
-        is write
-    )
-
-
-@pytest.mark.parametrize("requires_approval", [False, True])
-def test_vmware_floor_keeps_an_incoming_destructive_tier(
-    requires_approval: bool,
-) -> None:
-    """A floor adds approval without weakening a stricter parser classification."""
-    proto = _proto(
-        "POST:/vcenter/vm/{vm}/hardware/ethernet",
-        method="POST",
-        path="/vcenter/vm/{vm}/hardware/ethernet",
-        safety_level="destructive",
-        requires_approval=requires_approval,
-    )
-    floored = apply_safety_floor(
-        product="vmware",
-        version="9.0",
-        impl_id="vmware-rest",
-        proto=proto,
-    )
-    assert floored.safety_level == "destructive"
-    assert floored.requires_approval is True
-
-
-def test_eager_connector_import_registers_vmware_safety_floor() -> None:
-    """The normal connector lifecycle advertises VMware's floor from cold start."""
-    from meho_backplane.operations.ingest import safety_floors
-
-    safety_floors._FLOORS.clear()
-    sys.modules.pop("meho_backplane.connectors.vmware_rest.ingest_safety", None)
-    sys.modules.pop("meho_backplane.connectors.vmware_rest", None)
-
-    _eager_import_connectors()
-
-    proto = _proto(
-        "POST:/vcenter/vm/{vm}/hardware/ethernet",
-        method="POST",
-        path="/vcenter/vm/{vm}/hardware/ethernet",
-    )
-    floored = apply_safety_floor(
-        product="vmware",
-        version="9.0",
-        impl_id="vmware-rest",
-        proto=proto,
-    )
-    assert floored.safety_level == "dangerous"
-    assert floored.requires_approval is True
-
-
-@pytest.mark.asyncio
-async def test_vmware_8_0_catalog_hardware_writes_receive_connector_safety_floor(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """The 8.0 U3 catalog gets the same VM-write floor as 9.0 at registration (#3569).
-
-    The floor is keyed on ``(product, impl_id)``, and #3569 scopes it to both
-    qualified catalog versions, so ingesting the same hardware-write families
-    under ``version="8.0"`` must promote them to dangerous + approval-gated
-    exactly as the 9.0 catalog does.
-    """
-    paths = (
-        "/vcenter/vm/{vm}/hardware/ethernet",
-        "/vcenter/vm/{vm}/hardware/disk/{disk}",
-        "/vcenter/vm/{vm}/hardware/cpu",
-        "/vcenter/vm/{vm}/hardware/memory",
-    )
-    operations = [
-        _proto(f"{method}:{path}", method=method, path=path)
-        for method in ("POST", "PUT", "PATCH", "DELETE")
-        for path in paths
-    ]
-
-    await register_ingested_operations(
-        product="vmware",
-        version="8.0",
-        impl_id="vmware-rest",
-        spec_source="vcenter.yaml",
-        operations=operations,
-        embedding_service=stub_embedding_service,
-    )
-
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        rows = (
-            await session.execute(
-                select(EndpointDescriptor).where(
-                    EndpointDescriptor.product == "vmware",
-                    EndpointDescriptor.version == "8.0",
-                )
-            )
-        ).scalars()
-        assert {(row.safety_level, row.requires_approval) for row in rows} == {("dangerous", True)}
-
-
-@pytest.mark.parametrize("version", ["8.0", "9.0"])
-def test_vmware_floor_promotes_both_qualified_catalog_versions(version: str) -> None:
-    """The connector floor covers both the 8.0 U3 and 9.0 catalogs (#3569)."""
-    proto = _proto(
-        "POST:/vcenter/vm/{vm}/hardware/ethernet",
-        method="POST",
-        path="/vcenter/vm/{vm}/hardware/ethernet",
-    )
-    floored = apply_safety_floor(
-        product="vmware",
-        version=version,
-        impl_id="vmware-rest",
-        proto=proto,
-    )
-    assert floored.safety_level == "dangerous"
-    assert floored.requires_approval is True
-
-
-def test_vmware_floor_leaves_unqualified_version_unchanged() -> None:
-    """The floor is scoped to the qualified catalog versions, not every version."""
-    proto = _proto(
-        "POST:/vcenter/vm/{vm}/hardware/ethernet",
-        method="POST",
-        path="/vcenter/vm/{vm}/hardware/ethernet",
-    )
-    assert (
-        apply_safety_floor(product="vmware", version="8.1", impl_id="vmware-rest", proto=proto)
-        is proto
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1675,45 +1416,46 @@ async def test_service_ingest_rejects_divergent_product_with_handrolled_impl_no_
     :meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`
     closes the hole for every entry point: the divergent product is
     rejected with :class:`ProductImplIdMismatch` *before any DB write*, so
-    no rows persist. ``VcfLogsConnector`` registers under the canonical
-    ``vrli`` (matching the real post-#1814 state); the operator supplying
-    ``product='vcf-logs'`` is the divergence.
+    no rows persist. ``HarborConnector`` registers under the canonical
+    ``harbor``; the operator supplying ``product='container-registry'`` is
+    the divergence.
     """
-    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+    from meho_backplane.connectors.harbor.connector import HarborConnector
 
-    # The hand-coded class covers impl_id ``vrli-rest`` under ``vrli`` —
-    # exactly the post-#1814 production registration.
+    # The hand-coded class covers impl_id ``harbor-rest`` under ``harbor`` —
+    # exactly the production registration.
     register_connector_v2(
-        product="vrli",
-        version="9.0",
-        impl_id="vrli-rest",
-        cls=VcfLogsConnector,
+        product="harbor",
+        version="2.x",
+        impl_id="harbor-rest",
+        cls=HarborConnector,
     )
     operator = Operator(
-        sub="tenant-admin",
+        sub="platform-admin",
         raw_jwt="test-jwt",
         tenant_id=uuid.uuid4(),
         tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
     )
     service = IngestionPipelineService(operator=operator)
 
     with pytest.raises(ProductImplIdMismatch) as excinfo:
         await service.ingest(
-            product="vcf-logs",  # diverges from the parser-derived "vrli"
-            version="9.0",
-            impl_id="vrli-rest",
-            specs=[SpecSource(uri="https://example.test/vrli.yaml")],
+            product="container-registry",  # diverges from the parser-derived "harbor"
+            version="2.x",
+            impl_id="harbor-rest",
+            specs=[SpecSource(uri="https://example.test/harbor.yaml")],
             tenant_id=None,
             dry_run=False,
         )
     err = excinfo.value
-    assert err.product == "vcf-logs"
-    assert err.derived_product == "vrli"
+    assert err.product == "container-registry"
+    assert err.derived_product == "harbor"
     # The message names both spellings so the agent driving the MCP tool
     # knows the fix.
     rendered = str(err)
-    assert "vcf-logs" in rendered
-    assert "vrli" in rendered
+    assert "container-registry" in rendered
+    assert "harbor" in rendered
 
     # The guard runs before any spec fetch or DB write, so the divergent
     # ingest persisted nothing under either spelling.
@@ -1730,28 +1472,28 @@ async def test_aligned_ingest_reuses_handrolled_class_no_shim(
     """An aligned ingest whose impl_id is hand-coded reuses it; no shim, rows under the product.
 
     G0.26-T4 (#1798) ingest guard, post-#1814/#1817. The real
-    :class:`VcfLogsConnector` registers under the canonical
-    ``product="vrli"`` (``vrli-rest-9.0`` round-trips to ``vrli``), so
-    ingesting ``vrli`` / ``vrli-rest`` finds the hand-coded class via the
+    :class:`HarborConnector` registers under the canonical
+    ``product="harbor"`` (``harbor-rest-2.x`` round-trips to ``harbor``), so
+    ingesting ``harbor`` / ``harbor-rest`` finds the hand-coded class via the
     impl_id guard, synthesises **no** auto-shim, and persists the rows
-    under ``vrli`` — dispatchable through ``VcfLogsConnector``, not a
+    under ``harbor`` — dispatchable through ``HarborConnector``, not a
     shadowing shim. This is the structural fix for the v0.16.0 SEV-2.
     """
-    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+    from meho_backplane.connectors.harbor.connector import HarborConnector
 
-    assert parse_connector_id("vrli-rest-9.0")[0] == "vrli"
+    assert parse_connector_id("harbor-rest-2.x")[0] == "harbor"
     register_connector_v2(
-        product="vrli",
-        version="9.0",
-        impl_id="vrli-rest",
-        cls=VcfLogsConnector,
+        product="harbor",
+        version="2.x",
+        impl_id="harbor-rest",
+        cls=HarborConnector,
     )
 
     result = await register_ingested_operations(
-        product="vrli",  # the parser-derived product the ingest path supplies
-        version="9.0",
-        impl_id="vrli-rest",
-        spec_source="vrli.yaml",
+        product="harbor",  # the parser-derived product the ingest path supplies
+        version="2.x",
+        impl_id="harbor-rest",
+        spec_source="harbor.yaml",
         operations=[_proto("GET:/api/v2/version", path="/api/v2/version")],
         embedding_service=stub_embedding_service,
     )
@@ -1765,17 +1507,17 @@ async def test_aligned_ingest_reuses_handrolled_class_no_shim(
     assert shim_keys == [], f"expected no auto-shim for an aligned ingest; got {shim_keys!r}"
 
     # Rows persist under the supplied (canonical) product and dispatch
-    # through VcfLogsConnector.
+    # through HarborConnector.
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
         rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
     assert len(rows) == 1
-    assert rows[0].product == "vrli"
+    assert rows[0].product == "harbor"
     exists = await connector_exists(
         tenant_id=uuid.uuid4(),
-        product="vrli",
-        version="9.0",
-        impl_id="vrli-rest",
+        product="harbor",
+        version="2.x",
+        impl_id="harbor-rest",
     )
     assert exists is True
 
@@ -1985,106 +1727,3 @@ async def test_reingest_repairs_curated_row_on_reembed_branch(
     assert row.custom_description == "Curated: governed ISO/OVA import step 3."
     assert row.custom_notes == "Falls back to govc library.import -pull."
     assert row.llm_instructions == {"when_to_call": "during governed content-library PULL"}
-
-
-def _flat_tasks_list_proto() -> EndpointDescriptorProto:
-    """The 8.0 tasks-list op as the 8.0 spec ingests it: a flat ``GetSpec`` body (#3700)."""
-    return EndpointDescriptorProto(
-        op_id="POST:/cis/tasks?action=list",
-        method="POST",
-        path="/cis/tasks?action=list",
-        summary="List tasks",
-        description="Returns information about tasks.",
-        tags=["Cis.Tasks"],
-        parameter_schema={
-            "type": "object",
-            "properties": {
-                "body": {
-                    "type": "object",
-                    "properties": {
-                        "exclude_result": {"type": "boolean"},
-                        "return_all": {"type": "boolean"},
-                    },
-                    "x-meho-param-loc": "body",
-                },
-            },
-            "additionalProperties": False,
-        },
-        safety_level="caution",
-    )
-
-
-async def _tasks_list_row() -> EndpointDescriptor:
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        return (
-            await session.execute(
-                select(EndpointDescriptor).where(
-                    EndpointDescriptor.op_id == "POST:/cis/tasks?action=list"
-                )
-            )
-        ).scalar_one()
-
-
-@pytest.mark.asyncio
-async def test_vmware_8_0_tasks_list_registers_corrected_body_and_instructions(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """The 8.0 tasks-list row stores the ``{filter_spec, result_spec}`` body (#3700)."""
-    await register_ingested_operations(
-        product="vmware",
-        version="8.0",
-        impl_id="vmware-rest",
-        spec_source="vcenter.yaml",
-        operations=[_flat_tasks_list_proto()],
-        embedding_service=stub_embedding_service,
-    )
-
-    row = await _tasks_list_row()
-    body = row.parameter_schema["properties"]["body"]
-    assert set(body["properties"]) == {"filter_spec", "result_spec"}
-    assert "body" in row.parameter_schema["required"]
-    assert row.llm_instructions is not None
-    assert "non-empty `services` or `tasks`" in row.llm_instructions["parameter_hints"]["body"]
-
-
-@pytest.mark.asyncio
-async def test_reingest_seeds_missing_instructions_but_keeps_operator_edits(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """Re-ingest fills empty ``llm_instructions`` and never replaces an operator edit."""
-    kwargs: dict[str, Any] = {
-        "product": "vmware",
-        "version": "8.0",
-        "impl_id": "vmware-rest",
-        "spec_source": "vcenter.yaml",
-        "operations": [_flat_tasks_list_proto()],
-        "embedding_service": stub_embedding_service,
-    }
-    await register_ingested_operations(**kwargs)
-
-    sessionmaker = get_sessionmaker()
-
-    async def _set_instructions(value: dict[str, Any] | None) -> None:
-        async with sessionmaker() as session:
-            row = (
-                await session.execute(
-                    select(EndpointDescriptor).where(
-                        EndpointDescriptor.op_id == "POST:/cis/tasks?action=list"
-                    )
-                )
-            ).scalar_one()
-            row.llm_instructions = value
-            await session.commit()
-
-    # A row ingested before the correction existed has no instructions.
-    await _set_instructions(None)
-    await register_ingested_operations(**kwargs)
-    seeded = (await _tasks_list_row()).llm_instructions
-    assert seeded is not None
-    assert "parameter_hints" in seeded
-
-    # An operator's own instructions survive the next re-ingest.
-    await _set_instructions({"when_to_use": "operator text"})
-    await register_ingested_operations(**kwargs)
-    assert (await _tasks_list_row()).llm_instructions == {"when_to_use": "operator text"}

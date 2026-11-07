@@ -59,6 +59,9 @@ from meho_backplane.operations._preview import (
     register_preview_builder,
 )
 from meho_backplane.operations._validate import compute_audit_digest_hash
+from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
+from meho_backplane.operations.dead_handler_sweep import RetiredOp, register_retired_operations
+from meho_backplane.operations.ingest.catalog import register_connector_catalog
 from meho_backplane.operations.typed_register import (
     register_typed_op_registrar,
     register_typed_operation,
@@ -130,6 +133,7 @@ def target_cache_key(target: Target) -> tuple[str, str]:
 
 
 __all__ = [
+    "CALLER_ADDRESS_MARKER",
     "AuthModel",
     "Connector",
     "ConnectorAuthError",
@@ -144,6 +148,7 @@ __all__ = [
     "PreviewBuilder",
     "PreviewContext",
     "ProbeResult",
+    "RetiredOp",
     "Target",
     "VaultClientError",
     "VaultCredentialsReadError",
@@ -152,9 +157,11 @@ __all__ = [
     "is_system_operator",
     "load_param_secret_data",
     "load_vault_secret_data",
+    "register_connector_catalog",
     "register_connector_v2",
     "register_permission_preflight",
     "register_preview_builder",
+    "register_retired_operations",
     "register_typed_op_registrar",
     "register_typed_operation",
     "strip_credential_value",

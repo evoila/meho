@@ -3,12 +3,12 @@
 
 """Probe allowlist for the ``net.*`` network-diagnostics connector.
 
-The ``net.*`` ops give the backplane (and, since they register
-``safety_level="safe"``, an autonomous agent) a network vantage: they
-open a socket toward an operator-named ``host``/``port``. Unbounded,
-that is a recon primitive against everything the deployment can reach.
+The ``net.*`` ops are network checks. They register
+``safety_level="safe"``, so an agent can run them too. Each one opens a
+socket toward an operator-named ``host``/``port``. Without a limit, a
+check could reach everything the deployment can reach.
 :data:`PROBE_ALLOWLIST_ENV` (``MEHO_NETDIAG_PROBE_ALLOWLIST``) is the
-instance-wide floor that scopes it.
+instance-wide allow-list that limits where checks can connect.
 
 **Inverted semantics vs. the SSRF guard.** The SSRF guard
 (``targets/ssrf_guard.py``) is *deny-non-public-minus-allowlist*: a

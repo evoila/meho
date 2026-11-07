@@ -36,6 +36,13 @@ _GSM_VALUES = _REPO_ROOT / "deploy" / "values-examples" / "values-gsm-example.ya
 # ``config.vaultAddr`` — each test sets (or omits) it to exercise the
 # conditional.
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",

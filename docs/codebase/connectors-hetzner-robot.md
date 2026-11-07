@@ -19,8 +19,7 @@ operator onboarding doc. Task #2848 (Initiative #2833) curates the per-server
 firewall read (`GET:/firewall/{server-ip}`) into the `robot-networking`
 group — the **11th** core op — and adds the `hetzner-robot firewall get
 <server-ip>` CLI verb, so the consumer onboarding runbook's firewall-verify
-step no longer shells `scripts/hetzner-robot.sh GET /firewall/<server-number>`
-outside MEHO's policy / audit / broadcast / JSONFlux path.
+step runs through MEHO's policy / audit / broadcast / JSONFlux path.
 
 Task #3973 adds **vSwitch membership**: an operator can add a dedicated
 server to a vSwitch, or remove it, through MEHO. What changed:
@@ -33,8 +32,8 @@ server to a vSwitch, or remove it, through MEHO. What changed:
 - Every vSwitch write **waits for a human approval**, for every kind of
   login. A standing grant cannot skip the wait, except on an instance in
   sandbox mode (see "Approval for vSwitch writes" below).
-- The two vSwitch ops the spec described wrongly now say what they really
-  do. `POST:/vswitch/{vswitch-id}` renames the vSwitch or changes its VLAN
+- The spec describes the two other vSwitch writes as the vendor does.
+  `POST:/vswitch/{vswitch-id}` renames the vSwitch or changes its VLAN
   ID. `DELETE:/vswitch/{vswitch-id}` cancels the whole vSwitch. Both stay
   switched off.
 
@@ -43,8 +42,9 @@ Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
 ## Key types
 
 - **`HetznerRobotConnector`** (`connector.py`) — `HttpConnector` subclass.
-  Class attributes: `product="hetzner-robot"`, `version="2026.04"`,
-  `impl_id="hetzner-rest"`, `priority=1`. The priority outranks a future
+  Class attributes: `product="hetzner"`, `version="2026.04"`,
+  `impl_id="hetzner-rest"`, `priority=1`. The connector id is
+  `hetzner-rest-2026.04`. The priority outranks a future
   `GenericRestConnector` auto-shim (priority=0) defensively.
 - **`HetznerRobotTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape: `name`, `host`, `port`, `secret_ref`,
@@ -56,7 +56,7 @@ Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
 - **`load_credentials_from_vault`** (`session.py`) — default loader.
   Performs the **live** operator-context KV-v2 read by delegating to the
   shared `_shared/vault_creds.load_basic_credentials` helper (#2079) — the
-  same read harbor / vmware / sddc use. The Webservice-user credential is
+  same read harbor, argocd and github use. The Webservice-user credential is
   read under the operator's Vault identity; a system-initiated call
   (`raw_jwt=""`) fails closed with `VaultCredentialsReadError` rather than
   falling back.
@@ -200,23 +200,30 @@ Vault path as `{"username": ..., "password": ...}`.
 1. Lifespan calls `_eager_import_connectors()`, which walks every
    `connectors/<product>/` subpackage in name-sorted order.
 2. Importing `meho_backplane.connectors.hetzner_robot` triggers the
-   module-level `register_connector_v2(product="hetzner-robot",
+   module-level `register_connector_v2(product="hetzner",
    version="2026.04", impl_id="hetzner-rest", cls=HetznerRobotConnector)`.
-3. The registry's v2 table resolves `("hetzner-robot", "2026.04",
+   A second call registers the same class for `("hetzner", "", "")`, so a
+   target with no version yet still resolves to this connector. The
+   versioned entry wins when both match.
+3. The registry's v2 table resolves `("hetzner", "2026.04",
    "hetzner-rest")` to `HetznerRobotConnector`.
 
 ### Auth flow
 
 1. `auth_headers(target, operator)` checks `target.auth_model` — must be
-   `shared_service_account` or `None`. The `operator` is accepted for the
-   shared HTTP auth surface (G3.9-T1) but unused — `shared_service_account`
-   mode authenticates with a Vault-sourced Webservice-user credential, not
-   the operator's OIDC token.
-2. `_load_credentials(target)` checks `_creds_cache`; on miss, calls the
-   injectable loader.
+   `shared_service_account` or `None`. Any other value raises
+   `NotImplementedError`. The `operator` is passed on to the loader: the
+   Vault read runs under the operator's login. The Robot request itself
+   uses the Webservice-user credential, not the operator's OIDC token.
+2. `_load_credentials(target, operator)` checks `_creds_cache` (keyed by
+   tenant and target id). It hands out a cached entry only to a caller
+   whose own Vault read of the target's secret passed once in this
+   process (`SecretReaders`). Any other caller, and the system caller
+   always, runs the loader first.
 3. Loader returns `{"username": ..., "password": ...}`; connector computes
-   `Authorization: Basic <base64>` and caches the raw dict.
-4. Every subsequent call against the same target uses the cached value.
+   `Authorization: Basic <base64>` and caches the raw dict. A missing key
+   raises `RuntimeError` that names the target and the key.
+4. A later call by a caller whose read passed uses the cached value.
 
 ### Fingerprint flow
 
@@ -251,23 +258,16 @@ no OpenAPI document, MEHO ships a hand-authored minimal spec as package data:
   covering list/get servers, the IP, subnet, failover IP and SSH key lists,
   vSwitch get + membership add/remove + rename + cancel, per-server firewall
   get/set, reverse DNS, and the `server_addon` order. The four vSwitch writes declare `application/x-www-form-urlencoded`
-  bodies and match the vendor reference (#3973; before that, the rename and
-  cancel routes were described as membership add and remove). Each of these spec GET
+  bodies and match the vendor reference. Each of these spec GET
   op_ids (`GET:/server`, `GET:/server/{server-ip}`, `GET:/ip`, `GET:/subnet`,
   `GET:/vswitch`, `GET:/vswitch/{vswitch-id}`, `GET:/failover`,
   `GET:/firewall/{server-ip}`, `GET:/rdns`, `GET:/key`) is curated in
   `ROBOT_CORE_OPS`, so the ingested rows and the curated read core agree on
-  the same strings. The IP, subnet, failover and SSH key lists joined the
-  spec in #4963. Before that, an install that ingested only this spec could
-  not finish the curation: it switched on the curated groups, then stopped
-  at `GET:/ip` before it wrote the guidance of the later ops, the two
-  vSwitch writes included. Now `apply_robot_core_curation` first checks
+  the same strings, and an install that ingests only this spec can finish
+  the curation. `apply_robot_core_curation` first checks
   that every curated op was ingested. If any is missing it raises
   `RobotCoreOpsMissingError`, which names all of them, before it changes
-  anything. `GET:/firewall/{server-ip}` was ingested from this
-  spec from the start but only joined the curated core in #2848; before that it
-  was ingested-but-uncurated (`is_enabled=False`, no `llm_instructions`) and
-  unreachable through `search_operations` / `call_operation`. (`GET:/rdns/{ip}`
+  anything. (`GET:/rdns/{ip}`
   is the one spec GET the core deliberately leaves uncurated — the account-wide
   `GET:/rdns` list covers the read need.)
 - **Spec-reconcile lane (#2985)** —
@@ -296,9 +296,10 @@ no OpenAPI document, MEHO ships a hand-authored minimal spec as package data:
 - Env-gated automated canary: the full spec ingest against
   `IngestionPipelineService` with a real LLM stub is a follow-up to T8
   requiring the Robot spec reachable from CI.
-- Writes: only vSwitch membership add and remove are curated (#3973). Server
-  reset, vSwitch rename / VLAN change, vSwitch cancel, the firewall set and
-  rDNS edits stay switched off. Purchases (ordering or cancelling servers and
+- Writes: only vSwitch membership add and remove are curated. The
+  vSwitch rename / VLAN change, the vSwitch cancel and the firewall set are
+  in the spec but stay switched off. Server reset and rDNS edits are not in
+  the spec. Purchases (ordering or cancelling servers and
   add-ons) are manual by policy: a person does them in the Hetzner portal.
   The `server_addon` order in the spec stays off; its body uses `product`,
   but Robot wants `product_id`.

@@ -83,6 +83,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_exclusive
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditEventClass
 from meho_backplane.operations.ingest._internals import (
     _UNSET,
     OP_DELETE_CONNECTOR,
@@ -646,7 +647,8 @@ class ReviewService:
 
         A built-in connector row is a shared, global-catalogue entry every
         tenant sees, so mutating it (enable / disable / bulk-enable-reads /
-        edit-group / edit-op) affects every tenant and is a platform action.
+        edit-group / edit-op / delete) affects every tenant and is a platform
+        action.
         Mirrors :func:`~meho_backplane.docs_collections.service.update_doc_collection`'s
         global-row seat (#3616): a ``tenant_admin`` without
         ``platform_admin`` is refused with
@@ -1128,6 +1130,7 @@ class ReviewService:
                 operator_sub=self._operator.sub,
                 operator_tenant_id=self._operator.tenant_id,
                 op_id=OP_EDIT_OP,
+                event_class=AuditEventClass.CONFIG_CHANGE,
                 payload=payload,
             )
             await session.commit()
@@ -1226,6 +1229,7 @@ class ReviewService:
                 operator_sub=self._operator.sub,
                 operator_tenant_id=self._operator.tenant_id,
                 op_id=OP_EDIT_OP,
+                event_class=AuditEventClass.CONFIG_CHANGE,
                 payload={
                     "connector_id": connector_id,
                     "op_id": op_id,
@@ -1587,8 +1591,16 @@ class ReviewService:
         the copy this delete removes. A second delete then removes the
         current tenant copy. The built-in row is untouched either way, so the
         tenant keeps using it for calls.
+
+        Deleting the built-in rows (``tenant_id`` ``None``) needs
+        ``platform_admin``, the same gate as enable, disable and edit
+        (:meth:`_require_platform_admin_for_builtin`): the rows are
+        shared by every tenant. A ``tenant_admin`` without it is refused
+        with :class:`BuiltinConnectorWriteForbiddenError` before any row
+        is read.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
+        self._require_platform_admin_for_builtin(connector_id, scope)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
             # #5027: the first statement, so no new sensor, runbook template,

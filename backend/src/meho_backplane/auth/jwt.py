@@ -978,10 +978,10 @@ def _is_service_account_token(claims: Any, settings: Settings) -> bool:
     test (security review S11), and only then to the ``user`` default. That
     backstop matters: a prefix-marker false negative is safe **only**
     because the shape test catches the client-credentials token it missed —
-    on its own it is *not* safe, because for a mutating ``caution`` /
-    ``dangerous`` op the #3152 gate auto-executes a ``user``-classified
-    principal instead of parking it (only ``requires_approval`` and the
-    ``destructive`` tier park for a ``user``). A false positive, conversely,
+    on its own it is *not* safe, because a ``user``-classified principal
+    in the web interface runs a ``caution`` op at once, where a service
+    principal waits unless a standing grant covers the op (#3152, #3980).
+    A false positive, conversely,
     would silently upgrade an ordinary user into the unattended-dispatch
     surface, so this marker must stay a positive prefix signal only. An
     empty configured prefix disables *this* marker; the shape test still
@@ -1034,7 +1034,7 @@ def _is_client_credentials_token(claims: Any) -> bool:
 
     Fail-closed by construction: it returns ``True`` only on that positive
     shape. An interactive human token always carries a session claim, so it
-    is never upgraded — the human-``user`` default-allow is preserved. A
+    is never upgraded — it stays a ``user``. A
     degenerate token with no client-identity claim stays ``user`` too (the
     absence of session claims alone never upgrades).
     """
@@ -1593,6 +1593,52 @@ def _extract_azp(claims: Any) -> str | None:
     return azp if isinstance(azp, str) and azp else None
 
 
+#: Longest address the ``email`` claim may hold (RFC 3696 errata 1690).
+_MAX_EMAIL_LENGTH: int = 320
+
+
+def _email_problem(email: str) -> str | None:
+    """Return why *email* is not usable as an address, or ``None`` if it is.
+
+    Checks only the shape: an ``@`` with text on both sides, no
+    whitespace or control characters, and not too long. Reserved domains
+    such as ``.local`` or ``.test`` pass on purpose (#5561): the address
+    is never mailed, so whether it is deliverable does not matter.
+    """
+    if len(email) > _MAX_EMAIL_LENGTH:
+        return "too_long"
+    if any(ch.isspace() or not ch.isprintable() for ch in email):
+        return "whitespace_or_control"
+    local, at, domain = email.rpartition("@")
+    if not at:
+        return "no_at_sign"
+    if not local or not domain:
+        return "empty_part"
+    return None
+
+
+def _extract_email(claims: Any, sub: str) -> str | None:
+    """Read the ``email`` claim: soft identity for audit rows and the UI.
+
+    An absent claim gives ``None``. A malformed value is dropped (``None``)
+    with an ``email_claim_dropped`` warning naming the reason, and the token
+    stays valid (#5561): a directory's email format must not decide who can
+    use MEHO. The address itself is not logged.
+    """
+    email = claims.get("email")
+    if email is None:
+        return None
+    if isinstance(email, str):
+        reason = _email_problem(email)
+        if reason is None:
+            return email
+    else:
+        reason = "non_string"
+    log = structlog.get_logger(__name__)
+    log.warning("email_claim_dropped", claim_name="email", reason=reason, sub=sub)
+    return None
+
+
 def _start_tenant(
     claims: Any, settings: Settings, tenants: tuple[TenantMembership, ...]
 ) -> tuple[UUID, TenantRole, bool]:
@@ -1659,11 +1705,11 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     """Project the validated claims into the public :class:`Operator` shape.
 
     A signature-valid JWT can still carry malformed claim values — most
-    notably an ``email`` that fails the ``EmailStr`` validator on
-    :class:`Operator`, or a tenant claim shape that the issuer hasn't
-    been configured to populate. The security contract is that *every*
-    failure to materialise a trusted operator from a token surfaces as
-    401 — never an unhandled 500 — but the failure *reason* must be
+    notably a tenant claim shape that the issuer hasn't been configured
+    to populate. A malformed ``email`` is not one of them: it is dropped
+    with a warning and the token stays valid (#5561). The security
+    contract is that *every* failure to materialise a trusted operator
+    from a token surfaces as 401 — never an unhandled 500 — but the failure *reason* must be
     distinguishable in logs so on-call doesn't have to guess between a
     misconfigured issuer, a tampered token, and a legitimate
     ``tenant_role`` the v0.2 enum doesn't yet model.
@@ -1673,7 +1719,8 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     detail token (``missing_tenant_claim`` / ``malformed_tenant_claim``
     / ``missing_tenant_role_claim`` / ``unknown_tenant_role``) so the
     bare ``invalid_token`` fallback is reserved for unexpected
-    pydantic validation failures (the malformed-email regression case).
+    pydantic validation failures, logged as ``operator_validation_failed``
+    with the failing fields.
     The one-group check (``multiple_role_groups``, #4594) runs before
     them: a person in two login groups carries a ``tenant_role`` Keycloak
     picked at random, so the tenant extractors would accept it.
@@ -1693,7 +1740,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     """
     sub = _extract_sub(claims)
     name = claims.get("name")
-    email = claims.get("email")
+    email = _extract_email(claims, sub)
     principal_kind = _extract_principal_kind(claims, settings)
     tenants = _extract_tenants(claims, settings, principal_kind)
     tenant_id, tenant_role, approver = _start_tenant(claims, settings, tenants)
@@ -1720,7 +1767,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
         return Operator(
             sub=sub,
             name=name if isinstance(name, str) else None,
-            email=email if isinstance(email, str) else None,
+            email=email,
             raw_jwt=raw_jwt,
             tenant_id=tenant_id,
             tenant_role=tenant_role,
@@ -1740,6 +1787,13 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             azp=_extract_azp(claims),
         )
     except pydantic.ValidationError as exc:
+        # Field names only: the input values may hold personal data.
+        log = structlog.get_logger(__name__)
+        log.warning(
+            "operator_validation_failed",
+            fields=sorted({".".join(str(part) for part in err["loc"]) for err in exc.errors()}),
+            sub=sub,
+        )
         raise _http_401("invalid_token") from exc
 
 

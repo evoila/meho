@@ -14,14 +14,14 @@ for hosts VMware Tools cannot reach — Tools-less appliances,
 non-VMware-hypervisor guests, bare metal, or any host no vCenter target
 fronts. It is complementary to the `vmware.composite.vm.guest.*` family
 (branch (a), #3255), not a replacement; the two coexist by target
-fingerprint (see `connectors-vmware-rest-guest-ops.md`).
+fingerprint (see `connectors-vmware-rest-guest-ops.md`,
+in the private connectors repository).
 
-This page documents **T1 (#3360)**, the keystone read floor: the connector
-skeleton, transport, probe / fingerprint, and the `safe` read verbs plus
-the `linux.about` identity canary (six reads at T1; `linux.dns.lookup`
-joined later as the first structured safe diagnostic). The governed write
-surface (T2, #3361) and the day-0 verification recipe (T3, #3362) land
-separately.
+This page documents the read floor (T1): the connector skeleton,
+transport, probe / fingerprint, the `safe` read verbs and the
+`linux.about` identity canary. It also documents the governed write
+surface (T2, § *The write surface*) and the day-0 verification recipe
+(T3, § *Day-0 verification recipe*).
 
 The motivating failure T1 retires: a provisioning run stands up a
 services/router VM and returns `configured` on deploy + power-on alone,
@@ -68,9 +68,15 @@ policy), not a rewrite.
 
 `LinuxSshConnector` subclasses the shared `SshConnector` adapter and
 **inherits** the asyncssh connection pool (keyed on the tenant-unique
-`(tenant_id, id)` cache key, 5-minute idle TTL, per-target handshake
-lock), the per-command timeout, the one-flight-recorder-span-per-command
-seam, and `aclose()`. It overrides only `fingerprint` / `probe` /
+`(tenant_id, id)` cache key plus the caller's kind and `sub`, so each
+caller logs in once after their own Vault read, and neither a Sensor run
+by the check runner under a person's `sub` nor a runbook verification
+without a token under that `sub` gets that person's login;
+5-minute idle TTL; one handshake lock per key), the per-command timeout,
+the one-flight-recorder-span-per-command
+seam, the 16 MiB cap on the output of one command (`run_capped`), the
+address check at connect time (it dials only an address it checked,
+`connect_checked`), and `aclose()`. It overrides only `fingerprint` / `probe` /
 `execute` and adds `about` plus the per-op bound-method handler shims. It
 does **not** override `_auth_config`; it therefore inherits the base
 adapter's fail-closed host-key contract (#270) unchanged — a target
@@ -84,7 +90,8 @@ credential per target" avoids the guest-ops one-cred-per-vCenter-target
 limitation. Resolution reuses the base seam unchanged: `target.secret_ref`
 (a Vault KV-v2 path **string**, not an embedded dict) →
 `load_vault_secret_data` under the operator's identity → key auth
-preferred (`ssh_private_key` → `client_keys`), password fallback
+preferred (`ssh_private_key`, or `private_key` when it is absent →
+`client_keys`), password fallback
 (`password`), default username `root`; every field through
 `strip_credential_value`. Operator-less callers (probe / readiness) fall
 back to the synthesised system operator, which live Vault rejects —
@@ -205,11 +212,13 @@ control bytes are refused, and a non-absolute path is rejected.
 
 **Key and password files are refused** even under an allowed root
 (`LINUX_READ_DENY`, `fnmatch` patterns on the full path): `/etc/shadow`,
-`/etc/gshadow` and their `-` backups, SSH host private keys, `/etc/ssl/private`,
+`/etc/gshadow` and their `-` backups, `/etc/security/opasswd`, SSH host
+private keys, `/etc/ssl/private`,
 `/etc/pki/tls/private`, `/etc/letsencrypt`, kubeconfigs and PKI under
 `/etc/kubernetes`, `/etc/rancher`, the RKE2 / K3s server tokens,
-credentials, TLS and database under `/var/lib/rancher/*/server`,
-`/var/lib/kubelet/pki`, the kubelet kubeconfig, the pod volumes under
+credentials, TLS and database under `/var/lib/rancher/*/server`, the
+agent kubeconfigs under `/var/lib/rancher/*/agent`, `/var/lib/kubelet/pki`,
+the kubelet kubeconfig, the pod volumes under
 `/var/lib/kubelet/pods` (mounted Kubernetes Secrets and service account
 tokens), the etcd data under `/var/lib/etcd`, the Docker container config
 files (`/var/lib/docker/containers/*/config.v2.json`), NetworkManager
@@ -417,8 +426,12 @@ host), exactly the un-governed footgun this connector exists to retire.
 
 - **Reference shape.** `<vault-path>` is a logical KV-v2 path under the
   `secret` mount — the same convention `load_vault_secret_data` accepts for the
-  connector (a `targets/<id>`-style path, **not** an API-path-shaped
-  `secret/data/…`). `#<field>` names the field within that secret. Each
+  connector (**not** an API-path-shaped `secret/data/…`). The path must sit
+  under the caller's tenant path (`tenants/<tenant_id>/` with the default
+  `VAULT_KV_TENANT_SCOPE_PREFIX`); `check_param_secret_ref` refuses any
+  other path before the Vault read, and the call answers
+  `vault_credentials_read_error`. `#<field>` names the field within that
+  secret. Each
   `ENV_NAME` must be a valid POSIX identifier, must not start with a digit,
   must not collide with a reserved wrapper variable (`tmp` / `args` / `f`) or
   with a name already declared in `env`, and the mapping is bounded (≤ 32
@@ -463,6 +476,12 @@ connector has no `command.run` verb to extend it to.
   `ops_host.py` (service.status / sysctl.read / dns.lookup),
   `ops_firewall.py` (firewall.show), `ops_storage.py` (mount.list) — each
   ships its handler, command builder, output parser, and `LinuxOp` rows.
+- `ops_write.py` — the five write verbs (`WRITE_OPS`), `LINUX_WRITE_ROOTS`
+  / `confine_write_path`, the `secret_env` checks and the two park-time
+  preview builders (`register_linux_write_previews`).
+- `_sudo.py` — `run_remote_bash_with_sudo`, the root-elevation primitive.
+- `op_classes.py` — declares `linux.file.write` and `linux.script.run` as
+  `credential_write` for the broadcast classifier.
 
 ## Control flow
 
@@ -495,14 +514,7 @@ connector has no `command.run` verb to extend it to.
 
 ## Known issues / follow-ups
 
-- **T2 (#3361) governed writes** — `file.write`, `service.control`,
-  `script.run`, `sysctl.write`, `firewall.load` with tiers, sudo (the
-  copied `rke2/_sudo.py` primitive), approvals, the broadcast clamp, and
-  the two bespoke park-time previews. Depends on T1.
-- **T3 (#3362) verification recipe** — the day-0 verification recipe as an
-  ordered sequence of T1 read ops, documented and wired into consumer
-  onboarding. Depends on T1.
-- **`connectors-vmware-rest-guest-ops.md`** still names tier (b) as
+- **`connectors-vmware-rest-guest-ops.md`** (in the private connectors repository) still names tier (b) as
   deferred; that pointer is updated to reference this built connector as
   part of the initiative wrap-up (T3), not T1.
 - **Host-key verification** is inherited from the base adapter, which is
@@ -534,7 +546,7 @@ provisioning run that deploys a services host, powers it on, and applies a
 couple of perimeter reach ops has proven only that the VM is *running* —
 not that its in-guest day-0 configuration succeeded. For a Tools-less host
 (outside the VMware-Tools guest-ops path — see
-[`connectors-vmware-rest-guest-ops.md`](connectors-vmware-rest-guest-ops.md)),
+`connectors-vmware-rest-guest-ops.md`, in the private connectors repository),
 this connector is the only governed channel that can look inside. This
 recipe is the ordered sequence of T1 read ops a run (or an operator) issues
 **at the moment it would declare readiness**, so a silently-aborted
@@ -570,10 +582,11 @@ are the fixed part.
 | 6 | `linux.mount.list` (`linux-ssh-1.x`) | — | The mount table + NFS exports (`findmnt` + `exportfs -s` / `showmount -e`). Confirm the **base NFS export the dependent hosts need is live** and the expected mount is present. |
 | 7 | `net.dns_lookup` / `net.ntp_check` (`net-probe-1.x`) | dns: `name`, `type?`, `resolver?`; ntp: `host`, `port?` | **Cross-connector functional probe.** A unit being `active` (step 3) is not proof the service *answers* — resolve a name against the host's resolver, read the NTP peer — closing the gap between "unit active" and "service correct." Served by the existing `net` connector, referenced not duplicated. |
 
-Steps 1–6 are the six T1 read verbs of this connector; step 7 is a
-functional probe on the `net` diagnostics connector, **not** a Linux verb —
-this connector adds no functional-service probe of its own (Initiative
-#3359 non-goal). The `net` probe destinations must be inside
+Steps 1–6 use six T1 read verbs of this connector; step 7 is a
+functional probe on the `net` diagnostics connector, **not** a Linux verb.
+To check name lookup from the host's own side, `linux.dns.lookup` asks
+the host's resolver (§ *DNS lookup on the host*). The `net` probe
+destinations must be inside
 `MEHO_NETDIAG_PROBE_ALLOWLIST` or the probe is refused before any packet is
 sent. `net` ships no DHCP-lease probe today; a lease-liveness functional
 check would be a separate `net`-connector follow-up.

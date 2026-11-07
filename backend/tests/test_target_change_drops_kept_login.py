@@ -42,15 +42,11 @@ from meho_backplane.api.v1.targets import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors.adapters.ssh import SshConnector, SshTargetChangedError
+from meho_backplane.connectors.adapters.ssh import SshConnector, SshTargetChangedError, _pool_key
 from meho_backplane.connectors.github import GitHubPATCredentials, GitHubRestConnector
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector, _CachedToken
 from meho_backplane.connectors.proxmox.connector import ProxmoxConnector
 from meho_backplane.connectors.proxmox.session import ProxmoxCredentials
-from meho_backplane.connectors.vcf_automation.connector import (
-    VcfAutomationConnector,
-    _plane_cache_key,
-)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import (
@@ -165,21 +161,6 @@ async def test_keycloak_invalidate_credentials_drops_only_that_target() -> None:
 
 
 @pytest.mark.asyncio
-async def test_vcf_automation_invalidate_credentials_drops_both_planes() -> None:
-    changed, other = _Target(), _Target(name="other", secret_ref=_NARROW_REF)
-    conn = VcfAutomationConnector()
-    conn._provider_tokens[_plane_cache_key(changed, "provider")] = "provider-old"
-    conn._tenant_tokens[_plane_cache_key(changed, "tenant")] = "tenant-old"
-    conn._tenant_tokens[_plane_cache_key(other, "tenant")] = "tenant-other"
-
-    await conn.invalidate_credentials(changed)
-
-    assert _plane_cache_key(changed, "provider") not in conn._provider_tokens
-    assert _plane_cache_key(changed, "tenant") not in conn._tenant_tokens
-    assert _plane_cache_key(other, "tenant") in conn._tenant_tokens
-
-
-@pytest.mark.asyncio
 async def test_proxmox_hook_drops_the_ticket_so_the_next_call_logs_in_again() -> None:
     """A narrower username/password credential is used on the next call, not the old ticket."""
     users = iter([("wide@pam", "wide-pw"), ("narrow@pve", "narrow-pw")])
@@ -231,19 +212,22 @@ class _Ssh(SshConnector):
 
 
 @pytest.mark.asyncio
-async def test_ssh_invalidate_credentials_closes_and_drops_the_pooled_connection() -> None:
+async def test_ssh_invalidate_credentials_closes_and_drops_every_pooled_connection() -> None:
     changed, other = _Target(), _Target(name="other")
     conn = _Ssh()
     old, kept = _FakeSshConnection(), _FakeSshConnection()
-    conn._connections[target_cache_key(changed)] = (old, 0.0)  # type: ignore[assignment]
-    conn._connections[target_cache_key(other)] = (kept, 0.0)  # type: ignore[assignment]
+    old_other_caller = _FakeSshConnection()
+    conn._connections[_pool_key(changed, None)] = (old, 0.0)  # type: ignore[assignment]
+    conn._connections[_pool_key(changed, _operator())] = (old_other_caller, 0.0)  # type: ignore[assignment]
+    conn._connections[_pool_key(other, None)] = (kept, 0.0)  # type: ignore[assignment]
 
     await conn.invalidate_credentials(changed)  # type: ignore[arg-type]
 
     assert old.closed
-    assert target_cache_key(changed) not in conn._connections
+    assert old_other_caller.closed
+    assert not any(key[:2] == target_cache_key(changed) for key in conn._connections)
     assert not kept.closed
-    assert target_cache_key(other) in conn._connections
+    assert _pool_key(other, None) in conn._connections
 
 
 @pytest.mark.asyncio
@@ -278,7 +262,7 @@ async def test_ssh_login_that_finishes_after_the_drop_is_not_kept() -> None:
 
     with patch.object(conn, "_auth_config", _auth), patch("asyncssh.connect", _fast_connect):
         assert await conn._connect(target) is fresh  # type: ignore[arg-type]
-    assert conn._connections[target_cache_key(target)][0] is fresh
+    assert conn._connections[_pool_key(target, None)][0] is fresh
 
 
 @pytest.mark.asyncio
@@ -326,7 +310,7 @@ async def test_ssh_call_that_waited_for_the_lock_during_the_drop_is_not_kept() -
 
     with patch.object(conn, "_auth_config", _auth), patch("asyncssh.connect", _fast_connect):
         assert await conn._connect(target) is fresh  # type: ignore[arg-type]
-    assert conn._connections[target_cache_key(target)][0] is fresh
+    assert conn._connections[_pool_key(target, None)][0] is fresh
 
 
 # ---------------------------------------------------------------------------

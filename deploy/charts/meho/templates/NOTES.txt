@@ -26,16 +26,19 @@ Resources deployed:
 
 Built-in PostgreSQL (corePostgres):
   - StatefulSet / {{ include "corePostgres.statefulSetName" . }} and Service {{ include "corePostgres.fullname" . }}:5432
-  - Databases meho and keycloak, each owned by a role of the same name; neither role is a superuser.
+  - Databases meho and keycloak, each owned by a role of the same name; no role is a superuser.
+  - The running backplane logs in as meho_app. That role can add audit rows but not change or delete them; the owner role meho runs the migrations.
   - It reads these Secrets (key `password`); the install's secrets Job makes them:
       {{ .Values.corePostgres.existingSecrets.superuser | default (printf "%s-core-postgres-superuser" .Release.Name) }} (mounted by the PostgreSQL pod alone)
       {{ printf "%s-core-postgres-meho" .Release.Name }}
+      {{ printf "%s-core-postgres-meho-app" .Release.Name }}
       {{ .Values.corePostgres.existingSecrets.keycloak | default (printf "%s-core-postgres-keycloak" .Release.Name) }}
   - The disk (PVC data-{{ include "corePostgres.statefulSetName" . }}-0) stays after helm uninstall.
     Delete the PVC and these Secrets together, or neither.
 {{- end }}
 {{- if .Values.coreVault.enabled }}
 {{- $unseal := printf "%s-core-vault-unseal" .Release.Name }}
+{{- $vault := include "meho.vaultSettings" . | fromYaml }}
 
 Built-in OpenBao (coreVault), the password safe:
   - StatefulSet / {{ include "coreVault.fullname" . }}; pods reach it at http://{{ include "coreVault.fullname" . }}:{{ .Values.coreVault.service.port }}.
@@ -48,6 +51,29 @@ Built-in OpenBao (coreVault), the password safe:
     In keyholder mode, unseal by hand with:
       kubectl -n {{ .Release.Namespace }} exec -it {{ include "coreVault.fullname" . }}-0 -c {{ .Values.coreVault.binary }} -- {{ .Values.coreVault.binary }} operator unseal
     Never create the Secret again just to unseal once: that switches back to self-unseal.
+  - MEHO logs in at {{ $vault.addr }} with the role {{ $vault.role }} on {{ $vault.mountPath }}/.
+    Each tenant reads and writes only secret/tenants/<its tenant id>/.
+{{- end }}
+{{- if include "meho.core.enabled" . }}
+
+Built-in core: what this install made
+  Parts: {{ list (ternary "PostgreSQL" "" .Values.corePostgres.enabled) (ternary "Keycloak" "" .Values.coreKeycloak.enabled) (ternary "OpenBao" "" .Values.coreVault.enabled) | compact | join ", " }}, wired to MEHO by the chart.
+  Passwords and keys: Secrets named {{ .Release.Name }}-core-*. They are made once and kept on
+  every upgrade. List them with:
+       kubectl -n {{ .Release.Namespace }} get secrets -l meho.evoila.com/managed-by=core-bootstrap
+  Read once, then keep in your own key store:
+{{- if .Values.coreKeycloak.enabled }}
+    - {{ .Release.Name }}-core-first-login: the first two people's temporary passwords (below)
+{{- end }}
+{{- if .Values.coreVault.enabled }}
+    - {{ .Release.Name }}-core-vault-unseal: OpenBao's unseal key (above)
+{{- end }}
+{{- if and .Values.ingress.enabled .Values.ingress.tls.enabled (or (not .Values.ingress.tls.secretName) (eq .Values.ingress.tls.secretName (printf "%s-core-tls" .Release.Name))) }}
+    - {{ .Release.Name }}-core-tls: the made certificate; give the CLI its ca.crt
+{{- end }}
+  First-start checks: after `meho login https://{{ .Values.ingress.host }}`, run
+       meho status
+  and open https://{{ .Values.ingress.host }}/ready for the server side.
 {{- end }}
 
 {{- if .Values.sandboxMode.enabled }}
@@ -80,11 +106,12 @@ Next steps:
 {{- if .Values.coreKeycloak.enabled }}
 
 First login (built-in Keycloak):
-  The install made two people with temporary passwords:
-    - {{ .Values.coreKeycloak.firstLogin.adminUsername }}: the first admin (group MEHO-Admins, with platform_admin)
-    - {{ .Values.coreKeycloak.firstLogin.approverUsername }}: a second person who can approve (group MEHO-SA-Operators)
-  Their passwords are in the Secret {{ printf "%s-core-first-login" .Release.Name }}. Read one with:
-       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d
+  The install made two people with temporary passwords: the first admin
+  (groups MEHO-Admins and MEHO-Platform-Admins, with platform_admin) and a
+  second person who can approve (group MEHO-SA-Operators). The Secret
+  {{ printf "%s-core-first-login" .Release.Name }} holds their user names and passwords; it keeps the names
+  from the first install even when coreKeycloak.firstLogin changes later. Read one with:
+       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_username}' | base64 -d
   (keys: admin_username, admin_password, approver_username, approver_password)
   Then log in with `meho login https://{{ .Values.coreKeycloak.hostname }}` or open https://{{ .Values.coreKeycloak.hostname }}/ui/.
   Keycloak asks for a new password, a name and an email at the first login.
@@ -99,6 +126,23 @@ Company login (built-in Keycloak):
   (for example when the company login is down), set coreKeycloak.companyLogin.autoRedirect=false and run helm upgrade.
 {{- end }}
 {{- end }}
+
+Keycloak admin console (realm meho):
+  The first install also made the console admin, a user of realm master who
+  administers realm meho in the Keycloak admin console (for example to connect
+  a user directory, LDAP). MEHO refuses it. The Secret {{ printf "%s-core-console-admin" .Release.Name }} holds
+  its user name and temporary password. At the first login it sets a new
+  password and an authenticator code:
+       kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-console-admin" .Release.Name }} -o jsonpath='{.data.username}' | base64 -d
+  (keys: username, password)
+  The console is https://{{ .Values.coreKeycloak.hostname }}/auth/admin/master/console/#/meho
+{{- if .Values.coreKeycloak.ingress.exposeAdmin }}
+  (routed: coreKeycloak.ingress.exposeAdmin=true).
+{{- else }}
+  and needs coreKeycloak.ingress.exposeAdmin=true (helm upgrade --set coreKeycloak.ingress.exposeAdmin=true).
+{{- end }}
+  When the Secret is missing (an install older than the console admin), the
+  bootstrap Job log says how to add one by hand.
 {{- end }}
 {{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
 
@@ -132,7 +176,7 @@ WARNING: checkRunner.enabled=true on a Vault credential backend (#2642).
   the binding is in force:
        vault write auth/jwt/login role={{ .Values.config.vaultOidcRole }} jwt="$RUNNER_TOKEN"
 {{- end }}
-{{- if not .Values.approvalHandoff.enabled }}
+{{- if not (include "meho.approvalHandoff" . | fromYaml).enabled }}
 
 WARNING: approvalHandoff.enabled=false, so APPROVAL_HANDOFF_ENCRYPTION_KEY is not set (#3712).
 

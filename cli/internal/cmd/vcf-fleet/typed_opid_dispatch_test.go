@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-
-	"github.com/evoila/meho/cli/internal/typedops"
 )
 
 // typedDispatchCases pins every Fleet verb whose backend read is typed
@@ -34,8 +32,7 @@ var typedDispatchCases = []struct {
 // dispatch ingested METHOD:/path op_ids — each entry records why no
 // typed op_id exists, so the intent is pinned rather than silently
 // unguarded (#2942). When the backend ships a typed counterpart, move
-// the verb to typedDispatchCases and reclassify it in
-// typedOpCLICoverage.
+// the verb to typedDispatchCases.
 var ingestedDispatchCases = []struct {
 	name   string
 	args   []string
@@ -45,42 +42,6 @@ var ingestedDispatchCases = []struct {
 	// (fleet.datacenter.list covers all datacenters at once).
 	{"vcenter list", []string{"vcenter", "list", "dc-1"}, "GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters"},
 	{"product list", []string{"product", "list", "env-1"}, "GET:/lcm/lcops/api/v2/environments/{environmentId}/products"},
-}
-
-// typedOpCLICoverage classifies every typed op_id the backend registers
-// for vcf_fleet: the CLI verb that dispatches it, or "" when the op is
-// agent-surface-only (no CLI verb wraps it).
-// TestBackendTypedOpsAreClassified fails when the backend gains a
-// typed op that is not classified here — the "typed op ⇒ repoint the
-// CLI verb ⇒ pin it" contract (#2942).
-var typedOpCLICoverage = map[string]string{
-	"fleet.about":            "about",
-	"fleet.environment.list": "environment list",
-	"fleet.api_file.get":     "", // agent surface only: the lab pins the vendor API files through MCP, no CLI verb
-	"fleet.environment.get":  "environment info",
-	"fleet.request.list":     "request list",
-	"fleet.request.get":      "request info",
-	"fleet.datacenter.list":  "datacenter list",
-	// Agent surface only: no CLI verb wraps these yet.
-	"fleet.health":                 "",
-	"fleet.request.retry":          "",
-	"fleet.product.inventory_sync": "",
-	// Upgrades, binaries and environments: changes that wait for approval.
-	// Agent surface only for now; run them with "meho operation call" or MCP call_operation.
-	"fleet.binary.list":              "",
-	"fleet.binary.map":               "",
-	"fleet.product.upgrade.precheck": "",
-	"fleet.product.upgrade":          "",
-	"fleet.environment.precheck":     "",
-	"fleet.environment.create":       "",
-	"fleet.environment.delete":       "",
-	// Locker and product-certificate ops: no CLI verb yet. They run through
-	// `meho operation call` and MCP call_operation like any other op.
-	"fleet.locker.password.list":        "",
-	"fleet.locker.password.add":         "",
-	"fleet.locker.certificate.list":     "",
-	"fleet.locker.certificate.import":   "",
-	"fleet.product.certificate.replace": "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed Fleet
@@ -103,40 +64,6 @@ func TestIngestedVerbsDispatchPinnedOpIDs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assertVerbDispatchesOpID(t, tc.args, tc.wantOp)
 		})
-	}
-}
-
-// TestBackendTypedOpsAreClassified reconciles the backend's typed-op
-// registry against typedOpCLICoverage so a typed op shipped without a
-// CLI-repoint decision fails this test instead of leaving the verb a
-// zero-catalog dead end (#2942).
-func TestBackendTypedOpsAreClassified(t *testing.T) {
-	inventory, err := typedops.BackendOpIDs("vcf_fleet")
-	if err != nil {
-		t.Fatalf("read backend typed-op inventory: %v", err)
-	}
-	invSet := make(map[string]bool, len(inventory))
-	for _, id := range inventory {
-		invSet[id] = true
-	}
-	for _, id := range inventory {
-		if _, ok := typedOpCLICoverage[id]; !ok {
-			t.Errorf("backend typed op %q is unclassified — repoint the CLI verb "+
-				"covering this read (and add it to typedDispatchCases) or record it "+
-				"as agent-surface-only in typedOpCLICoverage (#2942 contract)", id)
-		}
-	}
-	for id := range typedOpCLICoverage {
-		if !invSet[id] {
-			t.Errorf("typedOpCLICoverage entry %q no longer exists in the backend "+
-				"registry — drop or rename it", id)
-		}
-	}
-	for _, tc := range typedDispatchCases {
-		if !invSet[tc.wantOp] {
-			t.Errorf("typed dispatch case %q asserts op_id %q that the backend "+
-				"does not register", tc.name, tc.wantOp)
-		}
 	}
 }
 

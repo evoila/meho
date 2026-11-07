@@ -159,8 +159,10 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
         "result_status": {
             "type": ["string", "null"],
             "description": (
-                'One of "ok" / "error" / "denied" / "pending". Maps to '
-                'status-code ranges on the substrate side. "pending" is '
+                'One of "ok" / "error" / "denied" / "pending" / "withdrawn". '
+                "Most values map to status-code ranges on the substrate side. "
+                '"withdrawn" is matched by the `approval.withdraw` row instead: the sender took '
+                'its approval request back and the operation never ran. "pending" is '
                 "history: the run stopped to wait for approval (the "
                 "`approval.request` row, and the stopped operation's own "
                 "`operation_execution` row). It stays "
@@ -181,7 +183,10 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "action ran (deny, rate limit, or wait for approval). "
                 "`approval_decision`: a person approved or rejected a "
                 "request, or it expired. `security_event`: a security "
-                "signal. `legacy_request`: a row from before record "
+                "signal. `config_change`: an operator changed the "
+                "settings of an operation or group, for example turned "
+                "it on or off for one tenant; it did not run. "
+                "`legacy_request`: a row from before record "
                 "kinds existed. Without it you get every kind. Same "
                 "filter as the REST route `POST /api/v1/audit/query`."
             ),

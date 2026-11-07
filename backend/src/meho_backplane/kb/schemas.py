@@ -49,6 +49,7 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict
 
 __all__ = [
+    "CURATION_METADATA_KEYS",
     "KB_KIND_ENTRY",
     "KB_KIND_PASSAGE",
     "KB_PASSAGE_SOURCE",
@@ -60,6 +61,7 @@ __all__ = [
     "SLUG_PATTERN",
     "InvalidKbSlugError",
     "KbEntry",
+    "KbEntryNotOwnedError",
     "KbEntryRevision",
     "KbEntrySearchHit",
     "KbIngestConflict",
@@ -67,6 +69,7 @@ __all__ = [
     "KbPassageEvidence",
     "KbPassageLocator",
     "KbProvenance",
+    "KbReservedMetadataError",
     "validate_slug",
 ]
 
@@ -142,6 +145,39 @@ class InvalidKbSlugError(ValueError):
     importing the kb module; the API surface (T2) and the CLI (T4)
     catch this explicitly and translate to a 422 / nonzero exit.
     """
+
+
+class KbEntryNotOwnedError(PermissionError):
+    """A write to a slug another principal created, by a caller limited to own entries.
+
+    Raised by :meth:`~meho_backplane.kb.service.KbService.create_entry`
+    when ``own_entries_only`` is set and the existing row's
+    ``created_by_sub`` is missing or is not the caller. The MCP
+    ``add_to_knowledge`` tool turns it into a permission refusal.
+    """
+
+    def __init__(self, slug: str, created_by_sub: str | None) -> None:
+        super().__init__(
+            f"the knowledge entry {slug!r} was created by another principal; "
+            "only a tenant admin can change it"
+        )
+        self.slug = slug
+        self.created_by_sub = created_by_sub
+
+
+#: Metadata keys that mark an entry as curated content. Only a tenant
+#: admin may set them: ``source_kind`` is the key the search filter
+#: example ``{"source_kind": "evoila-distilled"}`` scopes to.
+CURATION_METADATA_KEYS: Final[frozenset[str]] = frozenset({"source_kind"})
+
+
+class KbReservedMetadataError(PermissionError):
+    """Caller metadata carries a :data:`CURATION_METADATA_KEYS` key the caller may not set."""
+
+    def __init__(self, keys: frozenset[str]) -> None:
+        self.keys = keys
+        names = ", ".join(sorted(keys))
+        super().__init__(f"the metadata key(s) {names} are reserved for a tenant admin")
 
 
 def validate_slug(slug: str) -> str:

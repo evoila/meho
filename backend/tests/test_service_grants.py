@@ -339,6 +339,97 @@ async def test_existing_grant_row_never_lets_a_vendor_delete_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "descriptor_kwargs"),
+    [
+        pytest.param(
+            "POST:/vswitch/{vswitch-id}",
+            {"source_kind": "ingested", "method": "POST", "tags": ["write"]},
+            id="ingested-post-on-the-default-list",
+        ),
+        pytest.param(
+            "msad.group.delete",
+            {"source_kind": "typed", "tags": ["write", "group", "delete"]},
+            id="typed-op-named-delete",
+        ),
+        pytest.param(
+            "DELETE:/vcenter/vm/{vm}",
+            {"source_kind": "composite"},
+            id="inner-step-with-delete-verb-in-the-id",
+        ),
+    ],
+)
+async def test_existing_grant_row_never_lets_a_pattern_match_run(
+    op_id: str, descriptor_kwargs: dict[str, object]
+) -> None:
+    """A stored grant on an op id that matches the pattern list is inert at dispatch.
+
+    These records carry no delete sign of their own: the method is ``POST``
+    or missing, the level is below ``destructive`` and no tag says
+    ``destructive``. The op id matches a default pattern, and that is enough
+    at call time too, so a row written before the pattern was on the list
+    never clears the call.
+    """
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        safety_level="dangerous",
+        requires_approval=True,
+        parameter_schema={},
+        **descriptor_kwargs,
+    )
+
+    grant_id = await consult_and_record_grant(
+        operator=_service_operator(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR,
+    )
+
+    assert grant_id is None
+    assert await _grant_use_audit_rows() == 0
+
+
+@pytest.mark.asyncio
+async def test_existing_grant_row_never_lets_a_later_pattern_match_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pattern added to the setting after the grant was made applies at call time."""
+    op_id = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        source_kind="ingested",
+        method="POST",
+        safety_level="caution",
+        requires_approval=False,
+        parameter_schema={},
+    )
+    operator = _service_operator()
+
+    before = await consult_and_record_grant(
+        operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR
+    )
+    assert before is not None
+    assert await _grant_use_audit_rows() == 1
+
+    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "POST:/PropertyCollector/*")
+    get_settings.cache_clear()
+
+    after = await consult_and_record_grant(
+        operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR
+    )
+    assert after is None
+    assert await _grant_use_audit_rows() == 1
+
+
+@pytest.mark.asyncio
 async def test_existing_grant_row_still_clears_an_ordinary_write() -> None:
     """Control: the same seeded-row path auto-approves a non-delete inner step."""
     op_id = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
@@ -584,6 +675,148 @@ async def test_list_can_hide_expired_grants() -> None:
     assert {live.id, expired.id} <= {entry.id for entry in historic}
     assert live.id in {entry.id for entry in active}
     assert expired.id not in {entry.id for entry in active}
+
+
+# ---------------------------------------------------------------------------
+# A grant that ended but was never revoked does not block a new one (#5424)
+# ---------------------------------------------------------------------------
+
+_SHAPES = ("targetless", "targeted", "selector")
+_SHAPE_TARGET = uuid.UUID("00000000-0000-0000-0000-000000005424")
+
+
+def _shape_payload(shape: str, op_id: str, expires_at: datetime | None) -> ServiceGrantCreate:
+    """One grant of each shape: no target, one target id, or a target selector."""
+    return ServiceGrantCreate(
+        principal_sub=_PRINCIPAL,
+        op_id=op_id,
+        connector_id=_CONNECTOR,
+        target_id=_SHAPE_TARGET if shape == "targeted" else None,
+        target_name_pattern="<target-name>" if shape == "selector" else None,
+        reason="one-day test run",
+        expires_at=expires_at,
+    )
+
+
+async def _end_grant(grant_id: uuid.UUID) -> None:
+    """Move a grant's expiry into the past, as if its time ran out."""
+    async with get_sessionmaker()() as db_session, db_session.begin():
+        await db_session.execute(
+            update(ServicePrincipalGrant)
+            .where(ServicePrincipalGrant.id == grant_id)
+            .values(expires_at=datetime.now(UTC) - timedelta(days=1))
+        )
+
+
+async def _replaced_at(grant_id: uuid.UUID) -> datetime | None:
+    async with get_sessionmaker()() as db_session:
+        row = await db_session.get(ServicePrincipalGrant, grant_id)
+        assert row is not None
+        return row.replaced_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", _SHAPES)
+async def test_ended_grant_does_not_block_a_new_grant_with_the_same_key(shape: str) -> None:
+    """An ended, never revoked grant frees its key; the old row stays in the history."""
+    svc = ServicePrincipalGrantService()
+    op_id = f"vmware.composite.vm.{shape}_ended"
+    ended = await svc.create(
+        _TENANT_ID, _CREATOR, _shape_payload(shape, op_id, datetime.now(UTC) + timedelta(days=1))
+    )
+    await _end_grant(ended.id)
+
+    again = await svc.create(
+        _TENANT_ID, _CREATOR, _shape_payload(shape, op_id, datetime.now(UTC) + timedelta(days=1))
+    )
+    assert again.id != ended.id
+    assert again.revoked_at is None
+    assert await _replaced_at(ended.id) is not None
+    assert await _replaced_at(again.id) is None
+
+    old = await svc.get(_TENANT_ID, ended.id)
+    assert old is not None
+    assert old.revoked_at is None
+    assert old.expires_at is not None
+    listed = await svc.list_(_TENANT_ID, principal_sub=_PRINCIPAL, include_expired=True)
+    assert {ended.id, again.id} <= {entry.id for entry in listed}
+    live = await svc.list_(_TENANT_ID, principal_sub=_PRINCIPAL, include_expired=False)
+    assert ended.id not in {entry.id for entry in live}
+
+    # The new grant has not ended, so it still blocks a third one.
+    with pytest.raises(GrantValidationError, match="already exists"):
+        await svc.create(_TENANT_ID, _CREATOR, _shape_payload(shape, op_id, None))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", _SHAPES)
+async def test_grant_that_has_not_ended_still_blocks_a_second_one(shape: str) -> None:
+    """A live grant with an expiry in the future still refuses a duplicate."""
+    svc = ServicePrincipalGrantService()
+    op_id = f"vmware.composite.vm.{shape}_live"
+    live = await svc.create(
+        _TENANT_ID, _CREATOR, _shape_payload(shape, op_id, datetime.now(UTC) + timedelta(hours=1))
+    )
+    with pytest.raises(GrantValidationError, match="already exists; revoke it first"):
+        await svc.create(_TENANT_ID, _CREATOR, _shape_payload(shape, op_id, None))
+    assert await _replaced_at(live.id) is None
+    assert await _grant_rows_for(op_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_refused_selector_duplicate_keeps_the_ended_grant_unmarked() -> None:
+    """A refused create rolls back its mark: the ended selector row stays as it was.
+
+    No index guards selector grants, so an unmarked ended row can sit next to
+    a live one (for example rows from before the mark existed).
+    """
+    svc = ServicePrincipalGrantService()
+    op_id = "vmware.composite.vm.selector_both"
+    ended = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        _shape_payload("selector", op_id, datetime.now(UTC) + timedelta(days=1)),
+    )
+    await _end_grant(ended.id)
+    await svc.create(_TENANT_ID, _CREATOR, _shape_payload("selector", op_id, None))
+    async with get_sessionmaker()() as db_session, db_session.begin():
+        await db_session.execute(
+            update(ServicePrincipalGrant)
+            .where(ServicePrincipalGrant.id == ended.id)
+            .values(replaced_at=None)
+        )
+
+    with pytest.raises(GrantValidationError, match="already exists"):
+        await svc.create(_TENANT_ID, _CREATOR, _shape_payload("selector", op_id, None))
+    assert await _replaced_at(ended.id) is None
+    assert await _grant_rows_for(op_id) == 2
+
+
+@pytest.mark.asyncio
+async def test_ended_grant_of_another_key_is_not_marked() -> None:
+    """Only the ended grant with the exact same key is marked; others keep their state."""
+    svc = ServicePrincipalGrantService()
+    op_id = "vmware.composite.vm.key_check"
+    other_principal = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        _payload(
+            op_id=op_id,
+            principal_sub="svc:other-bot",
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+        ),
+    )
+    other_shape = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        _shape_payload("selector", op_id, datetime.now(UTC) + timedelta(days=1)),
+    )
+    await _end_grant(other_principal.id)
+    await _end_grant(other_shape.id)
+
+    await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op_id))
+    assert await _replaced_at(other_principal.id) is None
+    assert await _replaced_at(other_shape.id) is None
 
 
 # ---------------------------------------------------------------------------

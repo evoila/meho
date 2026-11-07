@@ -70,6 +70,15 @@ from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
 # ---------------------------------------------------------------------------
@@ -368,15 +377,16 @@ def test_target_dropdown_excludes_soft_deleted_targets() -> None:
 
 
 def test_fragment_no_filters_streams_unfiltered() -> None:
-    """No filters → the fragment's sse-connect is the bare bridge URL."""
+    """No filters → the fragment's sse-connect carries only the page tenant marker."""
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         response = client.get("/ui/broadcast/feed")
     assert response.status_code == 200, response.text
     body = response.text
-    # Bare bridge URL -- no query string -> stream everything.
-    assert 'sse-connect="/ui/broadcast/stream"' in body
+    # No filter in the URL -> stream everything. Only the page's tenant
+    # marker rides along (#5240).
+    assert f'sse-connect="/ui/broadcast/stream?meho_tenant={_TENANT_A}"' in body
     # The fragment is the swap target root.
     assert 'id="broadcast-feed"' in body
     # Fragment only -- no full-page chrome.
@@ -390,7 +400,7 @@ def test_fragment_single_filter_embedded_in_sse_url() -> None:
         client = _authenticated_client(session_id)
         response = client.get("/ui/broadcast/feed", params={"op_class": "write"})
     body = response.text
-    assert 'sse-connect="/ui/broadcast/stream?op_class=write"' in body
+    assert f'sse-connect="/ui/broadcast/stream?op_class=write&amp;meho_tenant={_TENANT_A}"' in body
 
 
 def test_fragment_combined_filters_all_embedded_in_sse_url() -> None:

@@ -26,12 +26,24 @@ Job runs it, with a fake Secret store in place of the Kubernetes API:
    ``MEHO-lab-b-Operators`` gets both tenants in ``meho_tenants`` and the
    first tenant's ``tenant_id`` as before; a person only in the extra
    tenant's groups gets no ``tenant_id``.
-5. The second run logs in as ``meho-admin`` and changes nothing: the realm
+5. The first run also made the console admin: a user of realm ``master``
+   with every role of the master client ``meho-realm``. With a password it
+   can add an identity provider and an LDAP user federation to realm
+   ``meho`` (what the company-login recipes need), MEHO refuses its token,
+   and ``meho-admin`` can neither find it nor reset its password.
+6. The second run logs in as ``meho-admin`` and changes nothing: the realm
    and the Secrets are the same, and the output holds no secret.
-6. On a realm whose ``meho-cli`` has no long login (as before #5516), the
+7. On a realm whose ``meho-cli`` has no long login (as before #5516), the
    next run adds ``offline_access`` and the 48-hour idle limit, and a login
    that asks for ``offline_access`` then gets an offline token. When an
    admin revokes it (the person's Consents tab), its renewal is refused.
+8. On an install without the console admin's Secret, a run as
+   ``meho-admin`` makes nothing in realm ``master``, says how to add the
+   console admin by hand and does not fail.
+
+The container also has a master admin user of its own (``_INSPECTOR``) so
+the tests can look at realm ``master`` after the first-start account is
+gone; the stage never uses it.
 
 Set ``MEHO_TEST_CORE_KEYCLOAK_IMAGE`` to use a mirror of the subchart's
 image. Skips when Docker is missing or the container cannot start.
@@ -55,6 +67,7 @@ import httpx
 import pytest
 import yaml
 from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from httpx import ASGITransport
 
 from meho_backplane.auth.approval_sign_in import ApprovalAuth
@@ -86,6 +99,8 @@ _SUBCHART = (
 _PUBLIC_URL = "https://meho.example.test"
 _TENANT_ID = "6b0d7c55-41a8-4b52-9a8e-2f3c1d0e9a77"
 _LAB_B_ID = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
+_INSPECTOR = "test-inspector"
+_INSPECTOR_PASSWORD = secrets.token_urlsafe(24)
 
 
 @dataclass
@@ -139,6 +154,8 @@ def _plan() -> Plan:
         admin_username="admin",
         approver_username="approver",
         tenants=(TenantPlan(name="lab-b", id=UUID(_LAB_B_ID)),),
+        console_admin_secret="rel-core-console-admin",
+        console_admin_username="console-admin",
     )
 
 
@@ -169,6 +186,8 @@ def keycloak() -> Iterator[_Keycloak]:
         .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_ID", env[BOOTSTRAP_ID_ENV])
         .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", env[BOOTSTRAP_SECRET_ENV])
+        .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", _INSPECTOR)
+        .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", _INSPECTOR_PASSWORD)
         .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
         .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
         .with_env("MEHO_REALM_TENANT_NAME", "main")
@@ -220,6 +239,30 @@ def _admin_headers(kc: _Keycloak) -> dict[str, str]:
     )
     resp.raise_for_status()
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+def _master_headers(kc: _Keycloak) -> dict[str, str]:
+    """The test's own master admin, to look at realm master."""
+    resp = _token(
+        kc,
+        "master",
+        {
+            "grant_type": "password",
+            "client_id": "admin-cli",
+            "username": _INSPECTOR,
+            "password": _INSPECTOR_PASSWORD,
+        },
+    )
+    resp.raise_for_status()
+    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+def _master_users(kc: _Keycloak, username: str | None = None) -> list[dict[str, Any]]:
+    params = {"username": username, "exact": "true"} if username else {}
+    users: list[dict[str, Any]] = httpx.get(
+        f"{kc.base_url}/admin/realms/master/users", headers=_master_headers(kc), params=params
+    ).json()
+    return users
 
 
 def _user(kc: _Keycloak, username: str) -> dict[str, Any]:
@@ -436,6 +479,170 @@ def test_a_create_with_an_unknown_group_makes_no_user(keycloak: _Keycloak) -> No
         f"{admin}/users", headers=headers, params={"username": "half-made", "exact": "true"}
     ).json()
     assert found == []
+
+
+# --- The Keycloak admin of realm meho ----------------------------------------
+
+
+def _meho_realm_roles(kc: _Keycloak, user_id: str) -> tuple[set[str], set[str]]:
+    """``(every role of meho-realm, the ones the user holds in effect)``."""
+    master = f"{kc.base_url}/admin/realms/master"
+    headers = _master_headers(kc)
+    client = httpx.get(
+        f"{master}/clients", headers=headers, params={"clientId": "meho-realm"}
+    ).json()[0]
+    every = {
+        r["name"]
+        for r in httpx.get(f"{master}/clients/{client['id']}/roles", headers=headers).json()
+    }
+    held = httpx.get(
+        f"{master}/users/{user_id}/role-mappings/clients/{client['id']}/composite", headers=headers
+    ).json()
+    return every, {r["name"] for r in held}
+
+
+async def test_console_admin_administers_realm_meho_from_realm_master(
+    keycloak: _Keycloak, store: _FakeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    console = store.secrets["rel-core-console-admin"]
+    assert console["username"] == "console-admin"
+    assert "user console-admin: created (in no group)" in keycloak.output
+    assert "meho-realm roles granted" in keycloak.output
+    assert (
+        httpx.get(
+            f"{keycloak.base_url}/admin/realms/meho/users",
+            headers=_admin_headers(keycloak),
+            params={"username": "console-admin", "exact": "true"},
+        ).json()
+        == []
+    ), "not a user of realm meho"
+    (user,) = _master_users(keycloak, "console-admin")
+    assert sorted(user["requiredActions"]) == ["CONFIGURE_TOTP", "UPDATE_PASSWORD"]
+    every, held = _meho_realm_roles(keycloak, user["id"])
+    assert "impersonation" in every
+    assert held == every - {"impersonation"}
+
+    # What the person does at the first console login: a new password (set
+    # here through the Admin API) and nothing else pending.
+    master = f"{keycloak.base_url}/admin/realms/master"
+    headers = _master_headers(keycloak)
+    password = secrets.token_urlsafe(24)
+    httpx.put(
+        f"{master}/users/{user['id']}/reset-password",
+        headers=headers,
+        json={"type": "password", "value": password, "temporary": False},
+    ).raise_for_status()
+    rep = httpx.get(f"{master}/users/{user['id']}", headers=headers).json()
+    rep.update(
+        {
+            "requiredActions": [],
+            "firstName": "Console",
+            "lastName": "Admin",
+            "email": "console-admin@example.com",
+        }
+    )
+    httpx.put(f"{master}/users/{user['id']}", headers=headers, json=rep).raise_for_status()
+
+    token = _token(
+        keycloak,
+        "master",
+        {
+            "grant_type": "password",
+            "client_id": "admin-cli",
+            "username": "console-admin",
+            "password": password,
+        },
+    )
+    assert token.status_code == 200, token.text
+    access = token.json()["access_token"]
+    as_console = {"Authorization": f"Bearer {access}"}
+
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    idp = httpx.post(
+        f"{admin}/identity-provider/instances",
+        headers=as_console,
+        json={
+            "alias": "company-oidc",
+            "providerId": "oidc",
+            "enabled": True,
+            "config": {
+                "authorizationUrl": "https://idp.example.test/auth",
+                "tokenUrl": "https://idp.example.test/token",
+                "clientId": "meho",
+                "clientSecret": "not-a-real-secret",
+                "clientAuthMethod": "client_secret_post",
+            },
+        },
+    )
+    assert idp.status_code == 201, idp.text
+    realm_id = httpx.get(admin, headers=as_console).json()["id"]
+    ldap = httpx.post(
+        f"{admin}/components",
+        headers=as_console,
+        json={
+            "name": "company-ldap",
+            "providerId": "ldap",
+            "providerType": "org.keycloak.storage.UserStorageProvider",
+            "parentId": realm_id,
+            "config": {
+                "enabled": ["false"],
+                "vendor": ["other"],
+                "connectionUrl": ["ldap://ldap.example.test:389"],
+                "usersDn": ["ou=people,dc=example,dc=test"],
+                "usernameLDAPAttribute": ["uid"],
+                "rdnLDAPAttribute": ["uid"],
+                "uuidLDAPAttribute": ["entryUUID"],
+                "userObjectClasses": ["inetOrgPerson"],
+                "authType": ["none"],
+                "editMode": ["READ_ONLY"],
+            },
+        },
+    )
+    assert ldap.status_code == 201, ldap.text
+
+    # No impersonation: it cannot log in as a person of realm meho.
+    (person,) = httpx.get(
+        f"{admin}/users", headers=as_console, params={"username": "admin", "exact": "true"}
+    ).json()
+    impersonate = httpx.post(f"{admin}/users/{person['id']}/impersonation", headers=as_console)
+    assert impersonate.status_code == 403, impersonate.text
+    components = httpx.get(f"{admin}/components", headers=as_console)
+    assert components.status_code == 200
+    assert "company-ldap" in {c["name"] for c in components.json()}
+    # Leave the realm as the stage left it for the second run.
+    httpx.delete(ldap.headers["location"], headers=as_console).raise_for_status()
+    httpx.delete(
+        f"{admin}/identity-provider/instances/company-oidc", headers=as_console
+    ).raise_for_status()
+
+    # A token of realm master: MEHO, which trusts realm meho, refuses it.
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
+    get_settings.cache_clear()
+    clear_jwks_cache()
+    with pytest.raises(HTTPException) as refused:
+        await verify_jwt_for_audience(f"Bearer {access}", expected_audience="meho-backplane")
+    assert refused.value.status_code == 401
+
+
+def test_meho_admin_cannot_find_or_take_over_the_console_admin(keycloak: _Keycloak) -> None:
+    """The takeover a user of realm meho was open to: meho-admin resets its password."""
+    (user,) = _master_users(keycloak, "console-admin")
+    master = f"{keycloak.base_url}/admin/realms/master"
+    as_meho_admin = _admin_headers(keycloak)
+
+    found = httpx.get(
+        f"{master}/users",
+        headers=as_meho_admin,
+        params={"username": "console-admin", "exact": "true"},
+    )
+    reset = httpx.put(
+        f"{master}/users/{user['id']}/reset-password",
+        headers=as_meho_admin,
+        json={"type": "password", "value": secrets.token_urlsafe(24), "temporary": False},
+    )
+
+    assert found.status_code in (401, 403), found.text
+    assert reset.status_code in (401, 403), reset.text
 
 
 # --- The admin's credential write and the second person's approval ----------
@@ -723,3 +930,26 @@ async def test_the_stage_gives_an_older_cli_client_a_long_login(
     )
     assert renewal.status_code == 400, renewal.text
     assert renewal.json()["error"] == "invalid_grant"
+
+
+async def test_a_run_as_meho_admin_without_the_console_admin_does_not_fail(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """An install older than the console admin: its Secret is missing.
+
+    Runs on a copy of the store, so the shared Keycloak and store are left
+    as they were and the order of the tests does not matter.
+    """
+    older = _FakeStore()
+    older.secrets = {k: dict(v) for k, v in store.secrets.items() if k != "rel-core-console-admin"}
+    master_before = sorted(u["id"] for u in _master_users(keycloak))
+    capfd.readouterr()
+
+    await _run_stage(keycloak, older)
+
+    output = capfd.readouterr().out
+    assert "login: meho-admin" in output
+    assert "console admin: none, and meho-admin cannot make users in realm master" in output
+    assert "created" not in output
+    assert older.created == []
+    assert sorted(u["id"] for u in _master_users(keycloak)) == master_before

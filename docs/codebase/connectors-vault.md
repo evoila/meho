@@ -46,6 +46,16 @@ on:
 | `vault_role` | selector | JWT role to log in under | `settings.vault_oidc_role` (`meho-mcp`) |
 | `vault_mount` | optional | JWT auth-method mount the role lives on | `settings.vault_oidc_mount_path` |
 
+Only a platform admin may set or change these two keys. `POST` and
+`PATCH /api/v1/targets`, and `targets.register` (which calls the same
+create handler), run `enforce_vault_login_extras_platform_admin`
+(`targets/vault_login_extras.py`) before they store `extras`: when the
+stored value of `vault_role` or `vault_mount` would change and the
+operator has no `platform_admin`, the request gets HTTP 403
+`vault_login_role_requires_platform_admin`. A `PATCH` that re-sends the
+same values, or touches other fields, passes; so an existing target keeps
+its role and still logs in under it. The resolver below does not change.
+
 The Vault **address** stays global (`settings.vault_addr`) — there is one
 Vault. Only role + auth-mount are per-target.
 
@@ -433,7 +443,7 @@ target registration) is documented in
   never returns the private key). Vault refuses to delete a key that a
   role (or an OIDC provider client or a mount) still uses; the key delete
   turns that 400 into `VaultOidcKeyInUseError` (a `ConnectorUpstreamError`)
-  whose `remediation` names the roles. Unlike the older identity ops, all
+  whose `remediation` names the roles. Like the other identity ops, all
   six log in through `vault_client_for_target`, so the target's
   `extras["vault_role"]` decides which Vault role runs the call. Both
   deletes register a park-time permission preflight for `delete` on their
@@ -601,6 +611,15 @@ target registration) is documented in
 
 All nine register into operation group `kv`.
 
+**What `vault.kv.read` returns.** The answer keeps the key names under
+`data` and the `version`. Every value is hidden as
+`[REDACTED:secret_value]` (`operations/_secret_values.py`,
+`_VALUE_HIDING_OPS`). A person or a service principal who passes
+`reveal_secret: true` gets the values. An agent that passes it gets
+`denied`. The op is registered `safe`, so it runs at once with no
+approval. See
+[redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals).
+
 **Folder delete (`vault.kv.folder.delete`, `ops_kv_folder.py`).** Soft-deletes
 many secrets under one folder with one approval. Before it, each secret
 needed its own `vault.kv.delete` call and its own approval.
@@ -754,7 +773,8 @@ degrades to a runtime `connector_error`; `[^/]+` rejects a
 slash-bearing value (`"secret/data"`) where hvac expects the bare
 mount handle.
 
-**Mount-included `path` guard (#1755).** All seven handlers resolve their
+**Mount-included `path` guard.** The seven handlers in `ops.py`, plus
+`vault.kv.folder.delete` and `vault.kv.compare`, resolve their
 `(mount, path)` pair through the shared `_extract_mount_and_path(op_id,
 params)` helper, which applies the `mount` default + `.strip()` and adds
 a **path-shape pre-flight**: a `path` beginning with `"<mount>/"` raises
@@ -800,9 +820,11 @@ derived **from the op-id**, not a per-descriptor field:
 `broadcast.events.classify_op` consults the `_CREDENTIAL_READ_OPS`
 allowlist (for this connector `{vault.kv.read, vault.kv.list,
 vault.kv.compare}`), the
-`_CREDENTIAL_WRITE_OPS` allowlist (G11.7-T1 #1401 / G3.15-T1 #1409 —
-`{vault.kv.put, vault.kv.patch, vault.auth.userpass.write,
-vault.auth.userpass.update_password, k8s.secret.create, k8s.job.create}`),
+`_CREDENTIAL_WRITE_OPS` allowlist (for this connector `{vault.kv.put,
+vault.kv.patch, vault.auth.userpass.write,
+vault.auth.userpass.update_password}`; the Kubernetes connector declares
+`k8s.secret.create`, `k8s.secret.update` and `k8s.job.create` in its own
+`connectors/kubernetes/op_classes.py`),
 and the `_WRITE_SUFFIXES` / `_READ_SUFFIXES`
 tuples. The shipped G0.6 `endpoint_descriptor` table has **no
 `op_class` column** — decision #3 locks the classifier on the op-id, so
@@ -857,11 +879,13 @@ once G11.7-T1 (#1401) routed human principals hitting a
 `requires_approval` op to the **approval queue** (park for review)
 instead of hard-denying — so the gate no longer blocks the operator,
 it parks the write. The read ops (`vault.kv.read` / `vault.kv.list` /
-`vault.kv.versions`) omit the key and default `False`.
-`requires_approval` is carried per-op in `_KV_OP_SPECS`; the
-registration loop forwards `spec.get("requires_approval", False)`.
-`safety_level` is the orthogonal posture signal (it does not by itself
-gate execution).
+`vault.kv.versions`, and `vault.kv.compare`) set it `False`. Every
+spec in `_KV_OP_SPECS` states `safety_level` and `requires_approval`,
+and the registration loop passes the spec through as it is.
+`safety_level` also decides what runs at once (`operations/_validate.py`):
+an agent, and a person's call made with a token, run only `safe`
+operations at once; in the web interface a person runs `safe` and
+`caution` at once. Everything else waits for approval.
 
 The auth-write ops (G3.15-T3 #1411) likewise register
 `requires_approval=True`: each is a privilege assignment (binding
@@ -1007,9 +1031,9 @@ register the same kind of preflight (`ops_identity_oidc.py`): `delete` on
 
 ## JSONFlux result-handle path (`vault.kv.list`)
 
-`vault.kv.list` is the only set-shaped op on the v0.2 Vault surface
-(it returns `{"keys": [...]}`; every other op returns a bounded scalar
-or single-secret dict). Per v0.1-spec §4 / CLAUDE.md postulate 6, a
+`vault.kv.list` is the main set-shaped op of the Vault connector
+(it returns `{"keys": [...]}`). `vault.sys.ha_status` (`nodes`) and
+`vault.sys.raft.autopilot_state` (`servers`) answer with lists too. Per v0.1-spec §4 / CLAUDE.md postulate 6, a
 set larger than the JSONFlux threshold (~50 rows / 4 KB) must come
 back as a sample + `ResultHandle`, not the raw list.
 
@@ -1043,11 +1067,13 @@ raw >50-key list once a handle is produced.
    `register_vault_identity_token_operations`,
    `register_vault_auth_jwt_operations`) onto the lifespan-driven
    registrar list. `register_vault_typed_operations` registers the
-   KV-v2 group and then calls `register_vault_auth_operations` (auth
+   KV-v2 group (with `vault.kv.compare` and, from `ops_kv_folder.py`,
+   `vault.kv.folder.delete`) and then calls `register_vault_auth_operations` (auth
    read) + `register_vault_auth_write_operations` (auth write).
    `register_vault_identity_token_operations` composes the `identity` +
    `token` groups from their per-module spec tables (`ops_identity.py`,
-   `ops_identity_oidc.py`, `ops_token.py`, `ops_token_role.py`).
+   `ops_identity_oidc.py`, `ops_token.py`, `ops_token_role.py`,
+   `ops_token_store.py`).
 2. At FastAPI lifespan startup, `run_typed_op_registrars()` invokes
    all registrars, which upsert the `endpoint_descriptor` rows. Upsert
    is idempotent: a restart against unchanged descriptions is a no-op
@@ -1181,8 +1207,6 @@ and a real Postgres audit store (reusing the integration conftest's
   landed in G3.15-T5 (#1413), also approval-gated. Unseal / rekey
   (destructive cluster-lifecycle ops) remain out of scope — not in the
   govc-parity verb set, not filed.
-- AppRole secret-id generation is out of scope for v0.2 (high-risk
-  write with policy implications; v0.2.next behind a policy gate).
 
 ## References
 

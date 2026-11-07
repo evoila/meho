@@ -76,6 +76,15 @@ from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.broadcast_admission_helpers import seed_announcement
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
 # ---------------------------------------------------------------------------
@@ -227,7 +236,9 @@ class TestWallMode:
             response = client.get("/ui/broadcast?wall=1")
         body = response.text
         # The same SSE bridge wiring as the in-chrome feed (reused fragment).
-        assert 'sse-connect="/ui/broadcast/stream"' in body
+        assert f'sse-connect="/ui/broadcast/stream?meho_tenant={_TENANT_A}"' in body
+        # The standalone page carries the page tenant marker too (#5240).
+        assert f'data-meho-tenant="{_TENANT_A}"' in body
         assert 'sse-swap="broadcast"' in body
         # Wall mode flips the controller's auto-scroll on + makes the list
         # scrollable (the feed fragment forwards ``wall=True``).

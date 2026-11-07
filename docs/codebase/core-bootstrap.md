@@ -17,6 +17,11 @@ today, the realm stage, finishes the Keycloak realm `meho`:
 - It makes two people with temporary passwords: the first admin and a
   second person who can approve. The passwords go into the Secret
   `<release>-core-first-login`.
+- On the first run it makes the console admin: a user of realm `master`
+  who administers realm `meho` in the Keycloak admin console (every role
+  of the `master` client `meho-realm` except `impersonation`). Its name and
+  temporary password go into the Secret `<release>-core-console-admin`. At
+  its first login it sets a new password and an authenticator code.
 - On the first run it logs in with Keycloak's temporary first-start account,
   checks that `meho-admin` can log in, and then removes the first-start
   account. Every later run logs in as `meho-admin`.
@@ -32,9 +37,18 @@ What is true after the Job ran:
 - The first admin can log in with `meho login https://<host>` or in the
   browser. Keycloak asks for a new password first. The token then carries
   the first tenant's id, the role `tenant_admin` and `platform_admin`.
-- The second person is in `MEHO-SA-Operators`, the group that may approve
-  changes that wait for a second person. The first admin cannot approve
-  their own request.
+- The second person is in `MEHO-SA-Operators`. That group gives the role
+  `operator`, and its members may also approve their own changes
+  (`RoleGroup.SA_OPERATORS` in `auth/operator.py`). A change that waits
+  for a second person can be approved by any operator other than the
+  person who asked, or by a member of `MEHO-Approvers`. So the second
+  person can approve the first admin's changes. The first admin cannot
+  approve their own request.
+- The console admin can log in to the admin console at
+  `https://<host>/auth/admin/master/console/#/meho` (with
+  `coreKeycloak.ingress.exposeAdmin: true`), pick realm `meho` and manage
+  people and user directories (LDAP user federation). MEHO
+  refuses its token: it does not come from realm `meho`.
 - A second run with the same values changes nothing.
 - The Job's output names objects and says `created`, `kept` or `removed`. It
   never holds a password or a secret.
@@ -65,6 +79,68 @@ and surrounding spaces in a user name, so `Admin` and `admin` are the same
 person. The Job refuses such a pair before it makes the Secret, so a wrong
 pair never leaves one person with a stored password that does not work.
 
+## The console admin
+
+| User | Values key (user name) | Realm | Rights |
+|---|---|---|---|
+| Console admin | `coreKeycloak.firstLogin.consoleAdminUsername` (default `console-admin`) | `master` | every role of the `master` client `meho-realm` except `impersonation` |
+
+Without it nobody could administer realm `meho`: the first-start account
+is removed on the first run, `meho-admin` has only `manage-clients` and
+`manage-users`, and the two people have no Keycloak admin rights. The
+AD / LDAP recipe (docs-site/install/login/ad-ldap.md) needs a user
+federation, which only a realm admin can add. A company login through
+OpenID Connect is set from Helm values instead ("The company login"
+below).
+
+`meho-realm` is the client Keycloak makes in realm `master` to administer
+realm `meho`. Its roles give the same powers over realm `meho` as
+`realm-management` → `realm-admin`.
+
+Two limits on the console admin:
+
+- **No `impersonation`.** With it, the console admin could log in as any
+  person of realm `meho` with no password and no code. It could then
+  approve in the web console in an approver's name, and the audit would
+  name the approver. The Job never grants it. A role granted by hand
+  stays: the Job only adds roles. This closes only the direct way in:
+  `manage-users` still lets the console admin reset a person's password
+  and log in as them. Treat it as a full admin of realm `meho`.
+- **An authenticator code.** Realm `master` asks for no code by default.
+  The user is made with the required actions `UPDATE_PASSWORD` and
+  `CONFIGURE_TOTP`, so the first login sets both a new password and a
+  code.
+
+It lives in realm `master` on purpose. `manage-users` lets `meho-admin`
+reset the password of any user of realm `meho`, so a realm admin there
+could be taken over by anyone holding `meho-admin`'s secret. `meho-admin`
+cannot see users of realm `master`. MEHO refuses the console admin's
+tokens: they do not come from realm `meho`. Its password is made like the
+people's (temporary, `UPDATE_PASSWORD`). The Secret
+`<release>-core-console-admin` holds `username` and `password`. The
+Secret keeps the name of the first run: read the name from the Secret,
+not from the values. It is a Secret of its own, not two more keys in
+`<release>-core-first-login`: the Job refuses an existing Secret that
+lacks a key, so new keys there would break every upgrade.
+
+Only a `master` admin can make users in realm `master`. So:
+
+- **Fresh install** (the run logs in with the first-start account, a
+  `master` admin): the Job makes the Secret and the user and grants the
+  `meho-realm` roles it lacks (all but `impersonation`), before it removes
+  the first-start account.
+- **Upgrade** (the first-start account is gone, the run logs in as
+  `meho-admin`): the Job makes nothing. With the Secret it prints
+  `console admin: kept`. Without it it prints one line that points to
+  docs-site/install/keycloak-realm.md, "Console admin on an older
+  install", and does not fail. `meho-admin` gets no more rights for it.
+- A user of realm `master` with the chosen name that exists before the
+  Secret was not made by this install. The Job stops and asks for another
+  name in `coreKeycloak.firstLogin.consoleAdminUsername`.
+- No user name may start with `service-account-` (Keycloak's prefix for
+  service accounts). The Job refuses it for all three users: the first
+  admin, the second person and the console admin.
+
 **One role group per person.** A person is in exactly one of the five role
 groups (`docs/decisions/login-role-groups.md`). `MEHO-Platform-Admins` is
 not a role group: it carries only `platform_admin: true` and no tenant or
@@ -75,7 +151,8 @@ log in with (`meho-cli`, `meho-mcp`, `meho-web`), the same way as the
 
 ## Several tenants
 
-Design: `docs/decisions/2026-10-28-several-tenants-per-person.md`.
+Design: `docs/decisions/2026-10-28-several-tenants-per-person.md`. Admin
+guide (add a tenant, put a person in two tenants, switch): `docs-site/guides/several-tenants.md`.
 
 - The five role groups carry `meho_tenant` =
   `<tenant-uuid>:<tenant>:<Role>`, from the placeholders
@@ -301,7 +378,13 @@ Steps of the realm stage, in order:
    request, so Keycloak makes both or neither; a run that fails here
    leaves no person without groups, and the next run makes the person
    again.
-6. **Swap.** Only when step 2 used the first-start account: check that
+6. **Console admin.** Only with the first-start account: read
+   `<release>-core-console-admin`; make it when missing. Make the user in
+   realm `master` when missing (new password and authenticator code at the
+   first login) and grant every `meho-realm` role it lacks, except
+   `impersonation`. As `meho-admin`, make nothing; without the Secret, print how to
+   add the console admin by hand.
+7. **Swap.** Only when step 2 used the first-start account: check that
    `meho-admin` logs in with its secret, then delete the first-start
    account's client in realm `master`. If `meho-admin` cannot log in, the
    first-start account stays and the Job stops.
@@ -311,7 +394,7 @@ Rights: `meho-admin` has `manage-clients` and `manage-users` on realm
 flows; with the company login on, the chart adds `manage-identity-providers`
 and `manage-realm` (see "Rights" under the company login), and then the
 Job can make the login flows too. Only the first-start account can do
-step 6, and only it is needed there.
+steps 6 and 7.
 
 ### Network rules
 
@@ -350,7 +433,8 @@ when nothing is missing. The Secrets it makes carry only the label
   `ssoSessionIdleTimeoutRememberMe` and `ssoSessionMaxLifespanRememberMe`
   at 30 days) and the passkey policy
   (`webAuthnPolicyPasswordlessPasskeysEnabled`, user verification
-  `required`, discoverable credential `Yes`). The stage cannot set them:
+  `required`, discoverable credential `required` through
+  `webAuthnPolicyPasswordlessResidentKey`). The stage cannot set them:
   `meho-admin` has no `manage-realm` right (unless the company login is on).
   A running realm gets them once with `keycloak.realm.update` or by hand;
   see `docs-site/install/keycloak-realm.md`, "Remember the browser, and
@@ -366,10 +450,9 @@ when nothing is missing. The Secrets it makes carry only the label
   value in the Secret alone locks the Job out: it can no longer log in to
   set the new value on the client, and every later run fails. Instead:
   1. In Keycloak, set the new secret on the client `meho-admin` (realm
-     `meho`, Clients, Credentials). This needs a Keycloak admin login; the
-     first-start account is gone after the first run, so use a Keycloak
-     admin you made, or a temporary one from Keycloak's
-     `bootstrap-admin` recovery command (see the link below).
+     `meho`, Clients, Credentials). Log in as the console admin (Secret
+     `<release>-core-console-admin`) at
+     `https://<host>/auth/admin/master/console/#/meho`.
   2. Write the same value into the Secret `<release>-core-keycloak-admin`
      (key `client_secret`).
   3. Restart the pods that read it, or run `helm upgrade`. The Job then
@@ -382,7 +465,11 @@ when nothing is missing. The Secrets it makes carry only the label
   login is tested there too, in
   `backend/tests/integration/test_core_company_login_keycloak.py`: a second
   realm in the same Keycloak plays the company login, and a browser login
-  through it gives the right token fields.
+  through it gives the right token fields. The same file proves that a
+  realm from before the approval sign-in flow gets the flow from the
+  stage, and that with the company login as the default the approval
+  sign-in of `meho-cli-approve` still asks for the password and the
+  one-time code at Keycloak, and its token passes MEHO's approval check.
 
 ## References
 

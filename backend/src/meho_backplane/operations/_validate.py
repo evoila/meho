@@ -38,13 +38,15 @@ from jsonschema import Draft202012Validator
 from referencing.exceptions import Unresolvable
 
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.operator import Operator, PrincipalKind, is_human_principal
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
+from meho_backplane.operations.caller_address import has_caller_address
+from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
 
@@ -57,11 +59,13 @@ _READ_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "TOKEN_CALL_WAIT",
     "InvalidOpSchemaError",
     "ParamsCheck",
     "compute_audit_digest_hash",
     "compute_audit_params_hash",
     "compute_params_hash",
+    "compute_value_fingerprint",
     "ingested_schema_for_validation",
     "params_check_errors",
     "params_hash_candidates",
@@ -70,6 +74,7 @@ __all__ = [
     "policy_gate",
     "register_params_check",
     "validate_params",
+    "waits_only_for_token_call",
 ]
 
 #: A check of one op's params that its JSON schema cannot express. It gets
@@ -86,6 +91,16 @@ _PARAMS_HASH_KEY_LABEL: Final[bytes] = b"meho-params-hash-key-v1"
 #: Prefix for :func:`compute_audit_digest_hash`, so its output never equals a
 #: params hash of the same text.
 _DIGEST_HASH_PREFIX: Final[bytes] = b"meho-audit-digest-v1\x00"
+
+#: Prefix for :func:`compute_value_fingerprint`, so a value's fingerprint never
+#: equals a params hash or a digest hash of the same bytes.
+_VALUE_FINGERPRINT_PREFIX: Final[bytes] = b"meho-secret-value-v1\x00"
+
+#: The value of ``proposed_effect["waits_because"]`` on a request that waits
+#: only because a person sent a ``caution`` call with a token (#3980). The
+#: same person may approve such a request with a click in the web interface
+#: (:func:`~meho_backplane.operations.approval_queue._check_self_approval`).
+TOKEN_CALL_WAIT: Final[str] = "token_call"
 
 
 class InvalidOpSchemaError(Exception):
@@ -123,18 +138,32 @@ def _canonical_params(params: Any) -> bytes:
     return json.dumps(params, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
 
 
-def _params_hash_key() -> bytes:
-    """Return the server key for the params hashes.
+def _derive_key(source: str) -> bytes:
+    return hmac.new(_PARAMS_HASH_KEY_LABEL, source.encode("utf-8"), hashlib.sha256).digest()
 
-    The key is derived from ``DATABASE_URL``, the one secret every install
-    has: HMAC-SHA256 of it under :data:`_PARAMS_HASH_KEY_LABEL`. It is never
-    stored or sent anywhere. Every pod of an install gets the same key, so
-    hashes stay comparable inside the install. When ``DATABASE_URL`` changes
-    (for example a new database password), the key changes too, and new
-    hashes no longer match the older ones.
+
+def _params_hash_key() -> bytes:
+    """Return the server key for the params hashes and value fingerprints.
+
+    The key is HMAC-SHA256 of ``PARAMS_HASH_KEY`` under
+    :data:`_PARAMS_HASH_KEY_LABEL`. ``PARAMS_HASH_KEY`` is a secret of its
+    own (the Helm chart makes it once, in ``<release>-core-params-hash``), so
+    a new database password leaves the key, and every hash and fingerprint,
+    as it is. Every pod of an install gets the same key, so hashes stay
+    comparable inside the install. The key is never stored or sent anywhere.
+
+    Without ``PARAMS_HASH_KEY`` the key comes from ``DATABASE_URL`` instead
+    (:func:`_database_url_key`), and it changes when ``DATABASE_URL`` changes.
     """
-    source = get_settings().database_url.encode("utf-8")
-    return hmac.new(_PARAMS_HASH_KEY_LABEL, source, hashlib.sha256).digest()
+    own_key = get_settings().params_hash_key
+    if own_key:
+        return _derive_key(own_key)
+    return _database_url_key()
+
+
+def _database_url_key() -> bytes:
+    """The key made from ``DATABASE_URL``: the key without ``PARAMS_HASH_KEY``."""
+    return _derive_key(get_settings().database_url)
 
 
 def _keyed_params_hash(params: Any) -> str:
@@ -194,6 +223,22 @@ def compute_audit_digest_hash(value: str) -> str:
     return hmac.new(_params_hash_key(), message, hashlib.sha256).hexdigest()
 
 
+def compute_value_fingerprint(value: bytes) -> str:
+    """Return the keyed fingerprint an answer carries in place of a secret value.
+
+    For an operation that moves or stages a secret value and must say which
+    value it was without showing it: the secret broker and the Kubernetes
+    kubeconfig read. HMAC-SHA256 under the server key, with its own prefix,
+    over the exact bytes. Equal values give equal fingerprints inside one
+    install, so an auditor can match two rows that carried the same value.
+    Without the server key the fingerprint cannot be computed again from a
+    value, so a stored fingerprint tells nothing about a short or common
+    value.
+    """
+    message = _VALUE_FINGERPRINT_PREFIX + value
+    return hmac.new(_params_hash_key(), message, hashlib.sha256).hexdigest()
+
+
 def _unkeyed_params_hash(params: dict[str, Any]) -> str:
     """The plain SHA-256 that approval requests stored before the keyed hash.
 
@@ -202,22 +247,28 @@ def _unkeyed_params_hash(params: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_params(params)).hexdigest()
 
 
-def params_hash_candidates(params: dict[str, Any]) -> tuple[str, str]:
+def params_hash_candidates(params: dict[str, Any]) -> tuple[str, ...]:
     """Return the hashes an approval request for *params* can carry.
 
-    The keyed :func:`compute_params_hash` first, then the plain SHA-256 that
-    earlier versions stored. A request that was already waiting for
-    approval when MEHO was upgraded carries the plain one; accepting it
-    keeps that request usable. Both cover every value, so the check is as
-    strict as before.
+    The keyed :func:`compute_params_hash` first. With ``PARAMS_HASH_KEY`` set,
+    then the keyed hash under the key made from ``DATABASE_URL``: a request
+    made before ``PARAMS_HASH_KEY`` was set carries that one. Last the plain
+    SHA-256 that earlier versions stored. Accepting these keeps such a
+    request usable. All of them cover every value, so the check is as strict
+    as with the first one alone.
     """
-    return compute_params_hash(params), _unkeyed_params_hash(params)
+    candidates = [compute_params_hash(params)]
+    if get_settings().params_hash_key:
+        older = hmac.new(_database_url_key(), _canonical_params(params), hashlib.sha256)
+        candidates.append(older.hexdigest())
+    candidates.append(_unkeyed_params_hash(params))
+    return tuple(candidates)
 
 
 def params_hash_matches(params: dict[str, Any], stored: str) -> bool:
     """True when *stored* (an approval request's ``params_hash``) is a hash of *params*.
 
-    Accepts either value from :func:`params_hash_candidates`.
+    Accepts any value from :func:`params_hash_candidates`.
     """
     stored_bytes = stored.encode("utf-8")
     return any(
@@ -357,8 +408,17 @@ def _is_mutating(descriptor: EndpointDescriptor) -> bool:
     return descriptor.safety_level != "safe"
 
 
-def _sandbox_delete_grant_note() -> str:
-    """The sentence a park reason adds in sandbox mode (#4622)."""
+def _sandbox_delete_grant_note(*, decide_only: bool = False) -> str:
+    """The sentence a park reason adds in sandbox mode (#4622).
+
+    The preview (``decide_only``, #5492) has already looked for a delete
+    grant when it shows this reason, so it says that none covers the call.
+    """
+    if decide_only:
+        return (
+            "; this instance is in sandbox mode, but no live delete grant covers "
+            "this call, so it waits for approval"
+        )
     return (
         "; this instance is in sandbox mode, so a delete grant made in the web console may cover it"
     )
@@ -497,8 +557,11 @@ async def _service_grant_verdict(
     """Consult a standing grant for a parking service-principal op (#3151 / #3349).
 
     Returns ``(AUTO_EXECUTE, reason)`` when a live grant (concrete-target or
-    selector, #3349) clears the gate, else ``(None, gate_reason)`` — with the
-    #3349 null-target hint appended to *gate_reason* when the dispatch is
+    selector, #3349) clears the gate, else ``(None, gate_reason)``. For an
+    op with a parameter marked ``x-meho-caller-address: true`` the grant
+    lookup refuses every row, and *gate_reason* says that a person approves
+    each call. Otherwise *gate_reason* gets the
+    #3349 null-target hint appended when the dispatch is
     target-scoped and the only live candidate for this
     ``(principal, op, connector)`` is a null-target grant (the operator
     likely created it believing null = "any target").
@@ -525,8 +588,22 @@ async def _service_grant_verdict(
             target_id=target_id_str,
             grant_id=str(grant_id),
         )
+    if grant_id is not None and decide_only and descriptor.safety_level == "destructive":
+        # #5492: only a delete grant can cover a destructive call, and the
+        # real call uses it only with the hash of this preview.
+        return PermissionVerdict.AUTO_EXECUTE, (
+            f"auto-granted by delete grant {grant_id}, when the call sends the "
+            "preview_hash of this preview"
+        )
     if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
+
+    if has_caller_address(descriptor.parameter_schema):
+        note = (
+            "the operation connects to an address the caller gives, so no "
+            "standing grant covers it; a person approves each call"
+        )
+        return None, f"{gate_reason}; {note}" if gate_reason else note
 
     hint = await _null_target_park_hint(
         operator=operator,
@@ -539,7 +616,58 @@ async def _service_grant_verdict(
     return None, gate_reason
 
 
-def _non_agent_park_reason(descriptor: EndpointDescriptor, *, is_service: bool) -> str | None:
+def waits_only_for_token_call(operator: Operator, descriptor: EndpointDescriptor) -> bool:
+    """True when a person's call waits only because it came with a token (#3980).
+
+    That is a ``caution`` operation not marked ``requires_approval``, sent by
+    a person (not an agent, not a service) outside the web interface, and not
+    as part of a hosted agent run. In the web interface the same call would
+    run at once. The park stamps :data:`TOKEN_CALL_WAIT` on such a request.
+    """
+    return (
+        is_human_principal(operator)
+        and not operator.web_session
+        and resolve_actor_sub() is None
+        and descriptor.safety_level == "caution"
+        and not descriptor.requires_approval
+    )
+
+
+def _person_park_reason(operator: Operator, descriptor: EndpointDescriptor) -> str | None:
+    """Why a person's call waits for approval, by how it arrived (#3980).
+
+    * In the web interface (:attr:`Operator.web_session`): ``safe`` and
+      ``caution`` run at once; every other level waits for an approval click.
+    * With a token (MCP, the command line, REST, also a person's own token,
+      and every in-process caller without a web session): only ``safe`` runs
+      at once. MEHO does not try to tell who is behind a token, because an AI
+      tool can use a person's login.
+
+    An unknown level waits on both paths (fail closed).
+    """
+    level = descriptor.safety_level
+    if level == "safe":
+        return None
+    if operator.web_session and is_human_principal(operator):
+        if level == "caution":
+            return None
+        return (
+            f"safety_level={level}; in the web interface only safe and caution "
+            "operations run at once, so this waits for an approval click (#3980)"
+        )
+    return (
+        f"safety_level={level}; a call made with a token runs only safe operations "
+        "at once, so this waits for an approval click (#3980)"
+    )
+
+
+def _non_agent_park_reason(
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    *,
+    is_service: bool,
+    decide_only: bool = False,
+) -> str | None:
     """Why a non-agent call parks, or ``None`` when it runs at once.
 
     * ``destructive`` (#3198): mandatory human approval for EVERY non-agent
@@ -552,7 +680,9 @@ def _non_agent_park_reason(descriptor: EndpointDescriptor, *, is_service: bool) 
       the destructive tier (decision ``governed-delete-operations.md``
       requirement 1).
     * ``requires_approval`` (G11.7-T1): the approval queue.
-    * Service principals only: :func:`_service_safety_gate_reason` (#3152).
+    * Service principals: :func:`_service_safety_gate_reason` (#3152). They
+      keep their standing-grant rule and are not under the token rule.
+    * Everyone else: :func:`_person_park_reason` (#3980).
     """
     if descriptor.safety_level == "destructive":
         reason = (
@@ -561,13 +691,13 @@ def _non_agent_park_reason(descriptor: EndpointDescriptor, *, is_service: bool) 
             "auto-executes, and no standing grant can pre-clear it (#3183)"
         )
         if is_service and sandbox_mode_active():
-            reason += _sandbox_delete_grant_note()
+            reason += _sandbox_delete_grant_note(decide_only=decide_only)
         return reason
     if descriptor.requires_approval:
         return "requires_approval is True; routed to the approval queue (G11.7-T1)"
     if is_service:
         return _service_safety_gate_reason(descriptor)
-    return None
+    return _person_park_reason(operator, descriptor)
 
 
 async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str | None:
@@ -584,6 +714,33 @@ async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str 
     return await read_scope_denial(operator=operator, target=target)
 
 
+def _person_role_floor_denial(
+    operator: Operator, descriptor: EndpointDescriptor, target_id_str: str | None
+) -> str | None:
+    """Why a person may not run this op, or ``None`` (also for a machine login).
+
+    The op's role floor (:mod:`meho_backplane.operations.role_floors`) is
+    the same role its dedicated REST route and MCP tool ask for at the
+    door; here it holds for ``call_operation``, the REST dispatch route
+    and the CLI too. Agents and service logins are not checked: they park
+    or run under a grant, and the person who approves is checked by the
+    approval queue at the decision.
+    """
+    if not is_human_principal(operator):
+        return None
+    denial = role_floor_denial(descriptor.op_id, operator.tenant_role)
+    if denial is not None:
+        _log.info(
+            "policy_gate_role_floor_denied",
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            actual_role=operator.tenant_role.value,
+            target_id=target_id_str,
+        )
+    return denial
+
+
 async def _non_agent_verdict(
     *,
     operator: Operator,
@@ -596,9 +753,7 @@ async def _non_agent_verdict(
 ) -> tuple[PermissionVerdict, str | None]:
     """Resolve the verdict for a human / service (non-agent) principal.
 
-    Preserves the v0.2 default-allow contract for a human ``USER`` operator
-    — an ordinary op auto-executes and a ``requires_approval`` op routes to
-    the approval queue (G11.7-T1 #1401); they are their own approver.
+    For a person it depends on how the call arrived (:func:`_person_park_reason`).
 
     For a **service** principal (client-credentials, ``principal_kind =
     service``) the gate additionally consults ``safety_level`` (#3152) so a
@@ -612,12 +767,21 @@ async def _non_agent_verdict(
     or a read-only ``caution`` op) is first checked against the
     principal's **read scope** (#4992): when a person has set one and it
     does not cover the call's target, the verdict is ``DENY`` with a
-    ``read_scope_denied`` reason. This is the one ``DENY`` this branch
-    returns. Calls that park keep today's rules (grants or approval).
+    ``read_scope_denied`` reason. Calls that park keep today's rules
+    (grants or approval).
+
+    A person below the op's role floor (:func:`_person_role_floor_denial`)
+    is ``DENY`` before any other rule. These two are the only ``DENY``
+    verdicts this branch returns.
     """
     target_id_str = str(getattr(target, "id", None)) if target is not None else None
     is_service = operator.principal_kind is PrincipalKind.SERVICE
-    gate_reason = _non_agent_park_reason(descriptor, is_service=is_service)
+    role_denial = _person_role_floor_denial(operator, descriptor, target_id_str)
+    if role_denial is not None:
+        return PermissionVerdict.DENY, role_denial
+    gate_reason = _non_agent_park_reason(
+        operator, descriptor, is_service=is_service, decide_only=decide_only
+    )
 
     if gate_reason is None and is_service:
         denial = await _service_read_scope_denial(operator=operator, target=target)
@@ -702,9 +866,10 @@ async def policy_gate(
       :class:`~meho_backplane.db.models.ApprovalRequest` row and return an
       ``awaiting_approval`` result, via
       :func:`~meho_backplane.operations.approval_queue.create_pending_request`
-      (G11.2-T4, #817). Reached by both agent principals (verdict floor)
-      and, since G11.7-T1 (#1401), human/service principals on a
-      ``requires_approval`` op.
+      (G11.2-T4, #817). Reached by agent principals, by people and service
+      principals on a ``requires_approval`` or ``destructive`` op, and by a
+      person on any op that is not ``safe`` (only ``caution`` runs at once,
+      and only in the web interface, #3980).
     * ``deny`` — write an audit row in ``denied`` status, return
       :func:`~meho_backplane.operations._errors.result_denied` with the
       *reason* string so the agent can reason about the refusal.
@@ -719,10 +884,11 @@ async def policy_gate(
 
     The per-(principal, op, target) agent-permission model gates **agent
     principals** (``principal_kind == agent``) through
-    :func:`~meho_backplane.auth.permissions.resolve_verdict`. Human
-    operators keep the v0.2 default-allow contract for ordinary ops, but a
-    ``requires_approval`` op now routes them to the **approval queue**
-    (``needs-approval``) rather than hard-denying.
+    :func:`~meho_backplane.auth.permissions.resolve_verdict`: only ``safe``
+    runs at once, every other level waits for a person's approval.
+
+    **People** (#3980): only the web interface (``Operator.web_session``)
+    runs ``caution`` at once; a token call runs only ``safe`` at once.
 
     **Direct hosted-agent runs** (#4237): when an actor is bound, the call
     gets the stricter of the caller's and the hosted agent's verdict
@@ -740,8 +906,7 @@ async def policy_gate(
 
     G11.7-T1 (#1401) routes ``USER`` operators to ``needs-approval`` on a
     ``requires_approval`` op (reusing the queue/approve/resume substrate)
-    rather than hard-denying — so no existing human-runnable op regresses.
-    The agent path additionally folds ``requires_approval`` into the
+    rather than hard-denying. The agent path additionally folds ``requires_approval`` into the
     verdict as a ``needs-approval`` floor, so an op the connector author
     marked as requiring approval is never auto-executed by an agent
     regardless of its ``safety_level``.
@@ -753,10 +918,8 @@ async def policy_gate(
     ``preview_hash`` and ``params`` (#4622) matter only to the
     service-principal grant consult in sandbox mode (a ``destructive``
     delete must present its own preview hash and a valid blast radius
-    first). ``decide_only`` (#4923) returns the verdict and writes nothing:
-    a grant that would clear the call is reported but not used; the
-    preview relies on this.
-    """
+    first). ``decide_only`` (#4923, #5492) returns the verdict and writes
+    nothing: a grant that would clear the call is reported but not used."""
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
         return await _direct_run_verdict(

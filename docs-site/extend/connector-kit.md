@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.0**.
+The kit version this page describes: **1.2**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -77,6 +77,10 @@ part that starts with an underscore is private by its name too.
 | Register | `register_connector_v2` | Register the connector class under its product, version and implementation id. |
 | Register | `register_typed_op_registrar` | Queue the function that registers your operations when MEHO starts. |
 | Register | `register_typed_operation` | Register one operation: the shape of its inputs and its answer, its risk level, whether it waits for approval, and its texts for agents. |
+| Register | `register_connector_catalog` | Bring the catalog rows of your package: for a product and version, the vendor API file MEHO can load, the ingest profile, and the safety overlay for the operations made from that file. |
+| Register | `register_retired_operations` | List the operations a later version of your package removed, so MEHO deletes their stored rows at start. |
+| Register | `RetiredOp` | One entry of that list: product, version, implementation id and operation id. |
+| Register | `CALLER_ADDRESS_MARKER` | The schema keyword `x-meho-caller-address`. Put `CALLER_ADDRESS_MARKER: True` on each input that holds an address MEHO connects to. See "An input that holds an address" below. |
 | Register | `EmbeddingService` | The type of the `embedding_service` value that MEHO hands to your registering function. Pass it on unchanged. |
 | Connector | `Connector` | The base class of every connector. |
 | Connector | `HttpConnector` | The base class for an HTTP API. It brings MEHO's checks for TLS (secure, encrypted connections), addresses, redirects and answer size. |
@@ -170,6 +174,28 @@ The inputs of `register_typed_operation`:
   from these texts, so write them with care.
 - `embedding_service`: pass on the value MEHO hands to your function.
 
+**An input that holds an address.** Some operations connect to an
+address the caller gives: a URL, a host name, or a host and port. The
+connection can come from MEHO, or from the target for MEHO (for example a
+ping that a firewall sends). Mark each such input in `parameter_schema`
+with `kit.CALLER_ADDRESS_MARKER: True`, also when it sits inside a nested
+object or a list:
+
+```python
+"properties": {
+    "url": {"type": "string", kit.CALLER_ADDRESS_MARKER: True, "description": "..."},
+}
+```
+
+MEHO then runs the operation at risk level `caution` or higher, and it
+waits until a person approves each call. This holds whatever
+`safety_level` you set, and an operator override cannot turn the approval
+off. Set `safety_level="caution"` (or higher) and `requires_approval=True`
+yourself too, so your code says what MEHO does. Do not mark an input
+that only stores or names an address and never connects to it, for
+example a host name written into an inventory record. MEHO's sensors run
+only `safe` operations, so a sensor cannot use a marked operation.
+
 **A preview for a change.** Register a preview with
 `kit.register_preview_builder`. It shows the person who approves what the
 change will do. Every `destructive` operation needs one.
@@ -182,6 +208,40 @@ What MEHO does for you, so you do not:
 - removing secret values from the answer;
 - result handles for long lists
   ([jsonflux.md](https://github.com/evoila/meho/blob/main/docs/codebase/jsonflux.md)).
+
+**Catalog rows.** MEHO can also make operations from a vendor's API file
+(an OpenAPI file). The catalog says, per product and version, which file
+to load, how to log in (the ingest profile), and which of the operations
+made from the file need a higher risk level or an approval (the safety
+overlay). Your package can bring such rows. Put a `catalog.yaml` with the
+same shape as MEHO's own
+[`catalog.yaml`](https://github.com/evoila/meho/blob/main/backend/src/meho_backplane/operations/ingest/catalog.yaml)
+in your connector folder, next to the API file and the profile it names,
+and call `kit.register_connector_catalog(__name__)` from the folder's
+`__init__.py`. MEHO reads the rows when it starts and checks them like its
+own. A row for a product and version that MEHO already has stops the
+start. The details are in
+[connector-packages.md, "Bring catalog rows"](https://github.com/evoila/meho/blob/main/docs/codebase/connector-packages.md#bring-catalog-rows).
+
+**Remove an operation.** When a new version of your package drops an
+operation, MEHO still has its stored row from the older version. Agents
+would still find it, and every call would fail. So list it in the
+folder's `__init__.py`:
+
+```python
+kit.register_retired_operations(
+    __name__,
+    [kit.RetiredOp("example", "1.x", "example-widget", "example.widget.old_report")],
+)
+```
+
+At start, MEHO deletes each listed row that your package wrote, and logs
+`dead_handler_op_retired` once for each row it deletes. It never deletes a row of MEHO itself or
+of another package. Keep each entry in later versions, because an
+install can skip a version. Never use a listed operation id again. A row
+whose code is gone and that no list names stays, and MEHO logs
+`dead_handler_op_kept` for it: during an upgrade, an older MEHO server
+can share the database with a newer one.
 
 ## 6. Say which MEHO releases fit
 
@@ -211,7 +271,7 @@ wheels without any package index, against the kit of the base image, so a
 package that does not fit the kit cannot be installed.
 
 The kit is never published on a public package index. It ships only with
-MEHO's own image and release files.
+MEHO's own image and its source code.
 
 ## 7. Test
 

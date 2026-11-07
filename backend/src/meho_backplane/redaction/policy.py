@@ -36,10 +36,11 @@ Shape (mirrors the YAML):
   asterisk run plus a short suffix (``"********a1b2"``). Useful when
   downstream consumers correlate by identifier shape but cannot see
   the value.
-* ``hash`` -- replace the matched span with the prefix
-  ``"sha256:<12-hex>"`` of the SHA-256 of the match. Stable across
-  identical inputs so audit replay can compare hashed views without
-  reissuing the secret.
+* ``hash`` -- replace the matched span with ``"hmac-sha256:<12-hex>"``,
+  the start of a keyed fingerprint of the match (HMAC-SHA256 under the
+  server key). Stable across identical inputs inside one install, so
+  audit replay can compare hashed views without reissuing the secret;
+  not computable again from a guess without the server key.
 
 **Why version-controlled and testable.** The parent initiative (#805
 DoD) treats redaction policies as code: every rule has a unit-test

@@ -1,6 +1,7 @@
 # Spec-reconcile guards as standard — hand-coded vendor paths are checked against a vendor spec when one is pinned (decision)
 
 **Status:** accepted; changed on 2026-10-30 (see "The standard")
+**Superseded in part by:** [own connectors leave the public tree](2026-10-28-own-connectors-leave-the-public-tree.md). The VMware lanes, their tests and `_vcenter_spec.py` left this repository in 0.44.0, with the VMware connectors. The standard and the harness stay here. The public lanes are the ones whose files are in `ci/spec-shelf/`.
 **Date:** 2026-08-17
 **Task:** [#2980](https://github.com/evoila/meho/issues/2980) (initiative
 [#2979](https://github.com/evoila/meho/issues/2979), wave 3 of the guard
@@ -21,7 +22,8 @@ pinned file is not a step before coding.**
   internet research, and live exploration in the sandbox or the lab.
 - A live test is the proof that a path works.
 - The guards that exist stay as they are. CI keeps its list of required
-  spec files for the files that exist.
+  spec files for the files that exist, in `ci/spec-shelf/` (one small
+  file per product version; step 3 below).
 
 Why it changed: the old rule made a pinned file a step before coding, so
 build Tasks waited for separate file Tasks. Now one Task per capability
@@ -65,8 +67,8 @@ Scope boundaries:
 ## The harness (what a lane is)
 
 `backend/tests/_spec_shelf.py` (#2980) generalises the vcenter-only
-resolver (`tests/acceptance/_vcenter_spec.py`, which now delegates its
-shelf-root branch to it) into three calls; a complete lane is
+resolver (`tests/acceptance/_vcenter_spec.py`, which left this repository
+with the VMware connectors) into three calls; a complete lane is
 `backend/tests/test_spec_shelf_example_lane.py` (<30 lines):
 
 ```python
@@ -106,7 +108,9 @@ Two cost classes of shelf-backed test, two CI homes:
 - **Reconcile lanes** (this standard's subject, every #2981-#2993
   lane): parse the pinned spec, set-compare op_ids. No DB, no
   embeddings, no containers — **seconds** when armed. They live in the
-  required unit sweep (`python-lint-test`) like any unit test, and
+  required unit sweep (the `python-unit-shard` jobs behind the
+  `Python (ruff + mypy + pytest)` check; one job named
+  `python-lint-test` when this was decided) like any unit test, and
   need **no gating of any kind**.
 - **Full-ingest canaries** (today: the G0.7 vSphere canary,
   `tests/acceptance/test_g07_vsphere_canary.py`): drive the whole
@@ -114,13 +118,14 @@ Two cost classes of shelf-backed test, two CI homes:
   grouping pass — over the full pinned corpus. **Minutes per lane**
   when armed (a full two-spec ingest measures ~164 s on CI runners,
   amortised once per module — see the shared-corpus pattern below).
-  They run in exactly one armed lane: `python-integration` (its pytest
-  step selects the canary module alongside `tests/integration/`), and
-  the unit sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1`, honored
-  by a collection-time `skipif` marker on every full-ingest test (so
-  an opted-out lane never even spins the module-scoped Postgres
-  container), with backstop re-checks in the canary's shared
-  `_canary_corpus` fixture and its `vcenter_spec_path` fixture.
+  They run in exactly one armed lane: the `python-integration-shard`
+  jobs (their pytest step runs `tests/integration/`; `python-integration`
+  collects their results). A full-ingest test placed in the unit
+  sweep must opt out there with a collection-time `skipif` marker, so an
+  opted-out lane never even spins the module-scoped Postgres container.
+  (The vSphere canary that set this pattern left the public tree with
+  evoila's own connectors, #3345; its `MEHO_SKIP_SPEC_INGEST_TESTS`
+  opt-out left with it.)
   Everywhere the var is unset (local dev, the integration lane) the
   armed-shelf contract is unchanged.
 
@@ -189,13 +194,18 @@ it chooses to add a spec file.
    `MANIFEST.md` provenance. Freely-licensed (OSS) specs need only that
    provenance note; vendor-licensed specs follow the signoff model
    below.
-3. **CI checkout widened** — one line per job in
-   `.github/workflows/ci.yml`: add the product dir to the spec-shelf
-   `sparse-checkout` list, and one line in the fail-loud verify step so
-   a shelf-layout move fails the job instead of silently regressing the
-   lane to skip. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
-   PAT already reads the whole private shelf repo. These one-liners
-   collide trivially across parallel lane tasks; rebase, don't battle.
+3. **CI checkout widened** — one new list file
+   `ci/spec-shelf/<product>-<version>.txt`. Each line names one required
+   file, as a path from the shelf repo root
+   (`docs/<product>-<version>/<spec-file>`). `scripts/ci/spec_shelf.sh`
+   reads every list: both Python test jobs in
+   `.github/workflows/ci.yml` check out the listed shelf folders, and
+   the fail-loud verify step fails the job with the "Spec-shelf layout
+   drift" error when a listed file is missing, so a shelf-layout move
+   fails the job instead of silently regressing the lane to skip.
+   `ci.yml` itself names no shelf file, so this step changes no line
+   there. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
+   PAT already reads the whole private shelf repo.
 4. **Signoff extended** — one paragraph per vendor appended to
    [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md)'s
    signoff of record (what is fetched, same ephemeral-use conditions).
@@ -234,8 +244,8 @@ pinnable. The record below replaces the exclusion; the lane is armed.
   30 paths covered the vendor-documented
   `/api/v1/spec/openapi/nsx_*` family** the NSX REST API portal
   (`developer.broadcom.com/xapis/nsx-t-data-center-rest-api/latest/`)
-  actually names. Probed 2026-08-18 against the live lab manager
-  (`c2fs1-nsx` / `nsx-mgmt-01a`, NSX 9.1.0.0.25318225, session-auth):
+  actually names. Probed 2026-08-18 against a live lab manager
+  (NSX 9.1.0.0.25318225, session-auth):
   `GET /api/v1/spec/openapi/nsx_api.json` (200; 4,417,173 B),
   `nsx_api.yaml` (200; 5,429,995 B), `nsx_policy_api.json` (200;
   12,195,576 B), `nsx_policy_api.yaml` (200; 14,683,229 B). The public
@@ -285,8 +295,8 @@ pinnable. The record below replaces the exclusion; the lane is armed.
   [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md)
   (vendor-licensed form — NSX manager-served content is fetched into
   ephemeral CI); local pre-verify green against a full local shelf.
-  **Sequencing:** the shelf pin lands via consumer-repo PR
-  (`claude-rdc-hetzner-dc#2514`) which must merge before this repo's
+  **Sequencing:** the shelf pin lands via a consumer-repo PR
+  which must merge before this repo's
   widened verify step can pass.
 
 ### vcf-automation-9.0 — tenant plane ARMED, provider plane excluded (#2983)
@@ -331,13 +341,13 @@ split.
   `*openapi*.{json,yaml}` is empty in both; the hand-written
   `govcd/openapi_endpoints.go` endpoint→version map is the only
   machine-readable surface (consumer kb
-  `vcf-automation-9.0-provider-object-model.md`, #501). That map
+  `vcf-automation-9.0-provider-object-model.md`). That map
   covers only the cloudapi object families — not the classic `/api/*`
   surface, not the session endpoints, not `/site` — so pinning it
   cannot serve a reconcile authority for the five paths above without
   false reds. (2) **Appliance-served spec** —
   `/cloudapi/1.0.0/openapi*` → 404 with a correctly-versioned
-  `Accept` (live Holodeck VCFA 9.0.2, 2026-05-16, #501). (3)
+  `Accept` (live Holodeck VCFA 9.0.2, 2026-05-16). (3)
   **Broadcom dev-portal (xapis)** — the VCFA pages there cover the
   consumption/tenant surface already vendored in `vra-sdk-go`
   (MANIFEST survey note). **Residual risk, named** (the nsx lesson —
@@ -356,8 +366,8 @@ split.
   parse (the path is provider-plane): the pinned SDK map places
   Region under the `vcf/` cloudapi prefix, and the shelf's live-probe
   record has the `1.0.0/` form → 404 with `/cloudapi/vcf/regions`
-  serving (2026-05-16 #505 build run; re-confirmed by later probes,
-  #499/#2006). **Mechanical repoint** to `GET:/cloudapi/vcf/regions`
+  serving (2026-05-16 build run; re-confirmed by later probes).
+  **Mechanical repoint** to `GET:/cloudapi/vcf/regions`
   — same resource, same paged `values[]`/`resultTotal` envelope, same
   `Accept` (the cloudapi form; `provider_accept_for_path` keys on the
   `/api/` prefix only), plane classification unchanged. A residual left
@@ -431,7 +441,7 @@ is proven on every run, with no served-op-id compare.
   plane speaks (VCFA absorbed vCD's provider plane); the appliance serves
   no `/cloudapi/1.0.0/openapi*` (the evidenced 404 recorded for the
   `vcf-automation-9.0` provider plane above — live Holodeck VCFA 9.0.2,
-  2026-05-16, #501 — applies to the same endpoint family). A VMware Cloud
+  2026-05-16 — applies to the same endpoint family). A VMware Cloud
   Director OpenAPI *is* published on the Broadcom developer portal
   (`developer.broadcom.com/xapis/vmware-cloud-director-openapi`), but it
   is not a pinnable vendored Apache-2.0 artifact and covers only the
@@ -778,6 +788,39 @@ call twelve hand-written path constants (twelve `METHOD:/path` pairs).
 - **Activation:** a vendor API file for either product. Then the file goes on
   the shelf, the check gets a compare test, and this entry is withdrawn.
 
+### freeipa-jsonrpc-4.x — command list exists, GPL-3.0, so it lives on the shelf; check ships skipping (#5357)
+
+The `freeipa-jsonrpc-4.x` connector (product `freeipa`) calls FreeIPA's
+JSON-RPC API. It has no HTTP paths per operation: every call is
+`POST /ipa/session/json` with an IPA command name in the body. So the check
+compares command names, not paths. FreeIPA publishes the contract of each
+release in `API.txt`, one block per command. The file is GPL-3.0 licensed
+(FreeIPA's license), so it is not copied into this Apache-2.0 repository.
+It goes on the private spec shelf, and the check ships now and skips until
+the file is there.
+
+- **Check file:** `backend/tests/test_connectors_freeipa_spec_reconcile.py`.
+  It reads the `*_COMMAND` constants of `connectors/freeipa/rpc.py` live and
+  pins the set (17 commands on 2026-10-29; 34 since the write commands
+  were added), with the login and JSON paths. These tests run
+  always. The compare test reads `freeipa-4.13.4/API.txt` from the shelf,
+  takes every `command: <name>/<version>` line, and skips while the file is
+  missing.
+- **What was checked (2026-10-29).** `API.txt` at the tag `release-4-13-4`
+  of [`freeipa/freeipa`](https://github.com/freeipa/freeipa) (commit
+  `ad8e56f5cc414fcaf54b468ebbc629192414a623`, tagged 2026-09-07). Size
+  361,558 bytes, sha256
+  `bcd63e5b9c31a1142345dbabe1b416676db3ef1cc2d5c51ffd5311dc347666f8`,
+  506 commands, API version 2.257. All 17 commands are in it. The compare
+  test passed against this file with `MEHO_CONSUMER_DOCS_ROOT` pointed at a
+  local folder that held it.
+- **Residual risk, named.** Until the file is on the shelf, CI does not
+  compare a new or renamed command with FreeIPA. The always-on manifest test
+  still makes sure every new `*_COMMAND` constant shows up in the pinned
+  list, so a change cannot slip past the check without an edit here.
+- **Activation:** the file lands on the shelf at `freeipa-4.13.4/API.txt`,
+  with its source commit and sha256. The compare test then runs for real.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,
@@ -809,7 +852,7 @@ guard") and #2970 confirmed it at 11/13. The protocol, per finding:
   `METHOD:/path` literal for a shelf-pinned product must extend that
   product's lane (or the lane's introspection must already sweep it in).
 - The example lane doubles as the harness's CI-armed integration proof:
-  it runs against the real `vcenter-9.0` shelf on every same-repo PR.
+  it runs against the real `keycloak-26.3` shelf on every same-repo PR.
 
 ## References
 

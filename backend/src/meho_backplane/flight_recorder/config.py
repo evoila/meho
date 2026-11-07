@@ -66,6 +66,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.db.change_counter import ChangeCounter
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target, Tenant
 from meho_backplane.settings import get_settings
@@ -95,11 +96,18 @@ _TENANT_CACHE: dict[UUID, tuple[tuple[bool, int | None, bool | None], float]] = 
 #: where the tri-state is ``True`` / ``False`` / ``None`` (inherit).
 _TARGET_CACHE: dict[UUID, tuple[bool | None, float]] = {}
 
+#: Change counts per key. A read that overlaps a clear of its key does not fill
+#: the cache (see :mod:`meho_backplane.db.change_counter`).
+_TENANT_CHANGES = ChangeCounter()
+_TARGET_CHANGES = ChangeCounter()
+
 
 def reset_flight_recorder_config_cache_for_testing() -> None:
-    """Clear both per-key caches (test isolation only)."""
+    """Clear both per-key caches and their change counts (test isolation only)."""
     _TENANT_CACHE.clear()
     _TARGET_CACHE.clear()
+    _TENANT_CHANGES.reset_for_testing()
+    _TARGET_CHANGES.reset_for_testing()
 
 
 def invalidate_tenant_policy_cache(tenant_id: UUID) -> None:
@@ -112,7 +120,9 @@ def invalidate_tenant_policy_cache(tenant_id: UUID) -> None:
     ``_retention_days`` must call this so the flip takes effect on the next
     dispatch instead of waiting out the TTL (or a process restart). Idempotent
     -- popping an absent key is a no-op, so a no-op write can call it safely.
+    A read of the tenant that is still running does not fill the cache.
     """
+    _TENANT_CHANGES.bump(tenant_id)
     _TENANT_CACHE.pop(tenant_id, None)
 
 
@@ -123,7 +133,9 @@ def invalidate_target_override_cache(target_id: UUID) -> None:
     ``targets.flight_recorder_capture`` override. The target PATCH route calls
     this whenever the column changes so :func:`should_capture` sees the new
     tri-state on the next dispatch rather than a stale cached one. Idempotent.
+    A read of the target that is still running does not fill the cache.
     """
+    _TARGET_CHANGES.bump(target_id)
     _TARGET_CACHE.pop(target_id, None)
 
 
@@ -150,6 +162,7 @@ async def _resolve_tenant_policy(tenant_id: UUID) -> tuple[bool, int | None, boo
     cached = _TENANT_CACHE.get(tenant_id)
     if cached is not None and cached[1] > now:
         return cached[0]
+    seen = _TENANT_CHANGES.current(tenant_id)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = (
@@ -164,7 +177,8 @@ async def _resolve_tenant_policy(tenant_id: UUID) -> tuple[bool, int | None, boo
     policy: tuple[bool, int | None, bool | None] = (
         (False, None, None) if row is None else (bool(row[0]), row[1], row[2])
     )
-    _TENANT_CACHE[tenant_id] = (policy, now + _CACHE_TTL_SECONDS)
+    if _TENANT_CHANGES.unchanged_since(tenant_id, seen):
+        _TENANT_CACHE[tenant_id] = (policy, now + _CACHE_TTL_SECONDS)
     return policy
 
 
@@ -180,6 +194,7 @@ async def _resolve_target_override(target_id: UUID) -> bool | None:
     cached = _TARGET_CACHE.get(target_id)
     if cached is not None and cached[1] > now:
         return cached[0]
+    seen = _TARGET_CHANGES.current(target_id)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         override: bool | None = (
@@ -187,7 +202,8 @@ async def _resolve_target_override(target_id: UUID) -> bool | None:
                 select(Target.flight_recorder_capture).where(Target.id == target_id)
             )
         ).scalar_one_or_none()
-    _TARGET_CACHE[target_id] = (override, now + _CACHE_TTL_SECONDS)
+    if _TARGET_CHANGES.unchanged_since(target_id, seen):
+        _TARGET_CACHE[target_id] = (override, now + _CACHE_TTL_SECONDS)
     return override
 
 

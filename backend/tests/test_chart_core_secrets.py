@@ -30,6 +30,13 @@ _CHART_DIR = _REPO_ROOT / "deploy" / "charts" / "meho"
 _RELEASE = "rel"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -63,6 +70,8 @@ _CORE_ON = [
     "--set",
     "corePostgres.enabled=true",
     "--set",
+    "postgres.credentialsSecret=",
+    "--set",
     "coreKeycloak.enabled=true",
     "--set",
     "coreKeycloak.hostname=meho.test",
@@ -76,15 +85,18 @@ _CORE_NAMES = [
     for kind in (
         "postgres-superuser",
         "postgres-meho",
+        "postgres-meho-app",
         "postgres-keycloak",
         "keycloak-bootstrap",
         "keycloak-admin",
         "ui-auth",
         "check-runner",
         "approval-handoff",
+        "params-hash",
         "broadcast-auth",
         "tls",
         "first-login",
+        "console-admin",
         "ci-login",
     )
 ]
@@ -179,7 +191,7 @@ def test_role_grants_exactly_the_designed_rights() -> None:
         assert rule["resources"] == ["secrets"]
     assert "resourceNames" not in by_verbs[("create",)]
     assert by_verbs[("get", "patch")]["resourceNames"] == _CORE_NAMES
-    assert by_verbs[("get",)]["resourceNames"] == ["meho-postgres", "my-handoff"]
+    assert by_verbs[("get",)]["resourceNames"] == ["my-handoff"]
     assert not any(
         kind in {"ClusterRole", "ClusterRoleBinding"} for kind in [d["kind"] for d in docs]
     )
@@ -191,7 +203,7 @@ def test_role_has_no_operator_rule_when_nothing_is_named() -> None:
     assert ("get",) not in verbs
 
 
-def test_postgres_plan_makes_the_three_database_secrets() -> None:
+def test_postgres_plan_makes_the_four_database_secrets() -> None:
     plan = _plan(
         _render(
             "--set",
@@ -204,12 +216,15 @@ def test_postgres_plan_makes_the_three_database_secrets() -> None:
     assert made == {
         f"{_RELEASE}-core-postgres-superuser": "postgres-superuser",
         f"{_RELEASE}-core-postgres-meho": "postgres-meho",
+        f"{_RELEASE}-core-postgres-meho-app": "postgres-meho-app",
         f"{_RELEASE}-core-postgres-keycloak": "postgres-keycloak",
         f"{_RELEASE}-core-approval-handoff": "approval-handoff",
+        f"{_RELEASE}-core-params-hash": "params-hash",
         f"{_RELEASE}-core-broadcast-auth": "broadcast-auth",
     }
-    meho = next(e for e in plan.make if e.kind == "postgres-meho")
-    assert meho.host == f"{_RELEASE}-postgres"
+    for kind in ("postgres-meho", "postgres-meho-app"):
+        entry = next(e for e in plan.make if e.kind == kind)
+        assert entry.host == f"{_RELEASE}-postgres"
     assert plan.check == ()
 
 
@@ -226,12 +241,14 @@ def test_keycloak_plan_makes_the_bootstrap_and_three_client_secrets() -> None:
     assert set(made.values()) == {
         "postgres-superuser",
         "postgres-meho",
+        "postgres-meho-app",
         "postgres-keycloak",
         "keycloak-bootstrap",
         "keycloak-admin",
         "ui-auth",
         "check-runner",
         "approval-handoff",
+        "params-hash",
         "broadcast-auth",
     }
 
@@ -247,20 +264,25 @@ def test_operator_named_secrets_are_checked_with_the_keys_meho_reads() -> None:
             "--set",
             "approvalHandoff.secretName=my-handoff",
             "--set",
+            "paramsHashKey.secretName=my-hash-key",
+            "--set",
             "broadcast.auth.existingSecret=my-valkey",
         )
     )
     checks = {entry.name: (entry.values_key, entry.keys) for entry in plan.check}
     assert checks == {
         "my-su": ("corePostgres.existingSecrets.superuser", ("password",)),
-        "meho-postgres": ("postgres.credentialsSecret", ("password", "url")),
         "my-boot": ("coreKeycloak.existingSecrets.bootstrap", ("client_id", "client_secret")),
         "my-handoff": ("approvalHandoff.secretName", ("approval_handoff_encryption_key",)),
+        "my-hash-key": ("paramsHashKey.secretName", ("params_hash_key",)),
         "my-valkey": ("broadcast.auth.existingSecret", ("requirepass",)),
     }
     made = set(_made(plan).values())
-    assert made.isdisjoint({"postgres-superuser", "postgres-meho", "keycloak-bootstrap"})
-    assert made.isdisjoint({"approval-handoff", "broadcast-auth", "tls"})
+    # The backplane reads only the made database Secret (#4047), so
+    # `postgres.credentialsSecret` cannot name another one.
+    assert "postgres-meho" in made
+    assert made.isdisjoint({"postgres-superuser", "keycloak-bootstrap"})
+    assert made.isdisjoint({"approval-handoff", "params-hash", "broadcast-auth", "tls"})
 
 
 def test_tls_secret_is_made_only_when_the_core_name_is_used() -> None:

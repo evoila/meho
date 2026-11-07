@@ -24,7 +24,7 @@ shows it unprompted today — see
   `{"checks_alert_advisory": [{"dashboard_id", "name", "state"}, ...]}`
   or `{}`.
 - `CHECKS_ADVISORY_EXTRAS_KEY = "checks_alert_advisory"` — the extras
-  key, sibling of `broadcast.history.ADVISORY_EXTRAS_KEY`
+  key, sibling of `broadcast.target_advisory.ADVISORY_EXTRAS_KEY`
   (`target_activity_advisory`, #2550).
 - `settings.checks_alert_advisory_window_minutes` — dedupe window,
   default `30`, `ge=0`; `0` disables the feature before any I/O.
@@ -46,7 +46,8 @@ dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
           advisory:{tenant}:{principal_sub}:{actor_sub|-}:{dashboard_id}:
           {state} 1 NX EX <window-seconds>   # ONE awaited round-trip
         → include the dashboard ONLY when its SET claimed the key
-  → wrap_ok_result(..., extras={**activity, **checks})
+  → build_reflex_advisory(...)             # third fragment (agent sessions)
+  → wrap_ok_result(..., extras={**activity, **checks, **reflex})
 ```
 
 ## Design contract
@@ -125,16 +126,17 @@ whether an agent or `meho operation call` issued it. What the **Go
 CLI's default human render** does with it is the gap:
 
 ```go
-// cli/internal/cmd/operation/call.go — printCallResult
+// cli/internal/cmd/operation/call.go — PrintCallResult
 if r.Status == "ok" {
-    ... print r.Result ...
+    ... print r.Result, the handle, the audit receipt ...
     return                      // ← returns before the extras block
 }
-...
-if len(r.Extras) > 0 && ... {   // ← non-ok path only
+dispatch.WriteErrorTrailer(w, &dispatch.CallResult{
+    ..., Extras: r.Extras, ...  // ← non-ok path only
+})
 ```
 
-`printCallResult` prints `extras` only on the **non-ok** branch, and
+`PrintCallResult` prints `extras` only on the **non-ok** branch, and
 this advisory only ever rides a *successful* dispatch. So today:
 
 | Front | Sees the fragment? |

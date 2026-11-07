@@ -8,14 +8,18 @@ checks it ("nft -c", check only) and loads it, in a new user and network
 namespace (unshare --map-root-user --net). The namespace has its own empty
 firewall, so the machine that runs the tests keeps its own rules. One test
 then changes the SSH rule with meho-host admin-network, which checks and
-loads the new file with the real nft too. Another reads the loaded table
+loads the new file with the real nft too; another adds and removes the rule
+for the log server with meho-host log-server. Another reads the loaded table
 with firewall_state, so its check of the chain prerouting matches the real
 output of nft.
 
 One test also loads the variant of the MEHO appliance, where the chains
 input, forward and output have policy drop, and opens a TCP connection over
 lo with it. Programs on the machine (the kubelet, the API server, etcd)
-reach each other that way.
+reach each other that way. Another one opens a connection to a service
+address that a stand-in for kube-proxy sends to the machine's own address,
+as the Kubernetes API service does. One test runs the checks of the CIS
+firewall rules on the real output of "nft list ruleset".
 
 The tests need nft, unshare, user namespaces, and a kernel with the
 nftables parts the rules use (ct and fib for the inet family). Without them
@@ -87,6 +91,69 @@ with socket.create_server(("127.0.0.1", 0)) as server:
 """
 
 
+# A stand-in for kube-proxy's destination NAT in the output hook: the
+# Kubernetes API service 10.43.0.1:443 goes to this machine's own address.
+SERVICE_NAT = """\
+table ip kube_proxy_standin {
+    chain output {
+        type nat hook output priority dstnat; policy accept;
+        ip daddr 10.43.0.1 tcp dport 443 dnat to 192.0.2.10:6443
+    }
+}
+"""
+
+# Runs in the namespace after the setup of SERVICE_SETUP: listen on the
+# machine's own address, as the API server does on 6443, and connect to the
+# service address. A dropped packet makes the connect time out.
+SERVICE_CONNECTION = """\
+import socket
+
+with socket.create_server(("192.0.2.10", 6443)) as server:
+    with socket.create_connection(("10.43.0.1", 443), timeout=3) as client:
+        peer, _ = server.accept()
+        with peer:
+            client.sendall(b"ok")
+            assert peer.recv(2) == b"ok"
+"""
+
+# A dummy network card with the machine's address, and the route to the
+# service range through it, as on a real machine. Then the rules and the NAT.
+SERVICE_SETUP = (
+    "ip link set lo up && ip link add meho0 type dummy"
+    " && ip addr add 192.0.2.10/24 dev meho0 && ip link set meho0 up"
+    ' && ip route add 10.43.0.0/16 dev meho0 && nft -f "$1" && nft -f "$2"'
+    ' && "$3" -I -c "$4"'
+)
+
+
+def cis_nftables_checks(ruleset: str) -> dict[str, bool]:
+    """The checks of the CIS Ubuntu 24.04 rules 4.3.5, 4.3.6 and 4.3.8.
+
+    They follow the check scripts of ComplianceAsCode v0.1.82 (sce/ of
+    set_nftables_base_chain, set_nftables_loopback_traffic and
+    nftables_ensure_default_deny_policy), which read "nft list ruleset". The
+    loopback check reads awk '/hook input/,/}/': from each line with
+    "hook input" to the next line with a closing brace. It asks for the
+    ip6 rule only when IPv6 is on; here it always asks.
+    """
+    lines = ruleset.splitlines()
+    input_lines, in_range = [], False
+    for line in lines:
+        in_range = in_range or "hook input" in line
+        if in_range:
+            input_lines.append(line)
+            in_range = "}" not in line
+    loopback = "\n".join(input_lines)
+    return {
+        "4.3.5": all(f"hook {hook}" in ruleset for hook in APPLIANCE_CHAINS),
+        "4.3.6": all(rule in loopback for rule in ('iif "lo" accept', "ip saddr", "ip6 saddr")),
+        "4.3.8": all(
+            any(f"hook {hook}" in line and "policy drop" in line for line in lines)
+            for hook in APPLIANCE_CHAINS
+        ),
+    }
+
+
 def in_namespace(*command: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["unshare", "--map-root-user", "--net", *command],
@@ -110,6 +177,18 @@ def why_nft_cannot_run() -> str | None:
         os.unlink(probe.name)
     if result.returncode != 0:
         return "nft cannot check ct and fib rules in a user and network namespace here: " + (
+            result.stderr.strip() or f"exit code {result.returncode}"
+        )
+    return None
+
+
+def why_dummy_cannot_run() -> str | None:
+    """None when the namespace can have a dummy network card, else the reason."""
+    if shutil.which("ip") is None:
+        return "'ip' is not on PATH"
+    result = in_namespace("ip", "link", "add", "meho_probe", "type", "dummy")
+    if result.returncode != 0:
+        return "the namespace cannot create a dummy network card: " + (
             result.stderr.strip() or f"exit code {result.returncode}"
         )
     return None
@@ -177,6 +256,41 @@ class NftCheckTests(InstallTestCase):
                     self.assertNotIn("elements", result.stdout)
                 else:
                     self.assertIn(elements, result.stdout)
+
+    def test_nft_accepts_the_file_after_meho_host_log_server(self) -> None:
+        # meho-host runs the real nft -c -f and nft -f in the namespace, on
+        # the fake appliance. Stubs answer rsyslog's check and its restart; an
+        # address needs no look-up.
+        rules = self.rules_file("--admin-network", "10.0.0.0/24")
+        installed = rules.read_text()
+        for folder in ("/opt/meho/appliance", "/etc/rsyslog.d"):
+            self.machine.host_path(folder).mkdir(parents=True, exist_ok=True)
+        stubs = self.machine.home / "log-server-stubs"
+        stubs.mkdir()
+        for tool in ("rsyslogd", "systemctl"):
+            (stubs / tool).write_text("#!/bin/sh\nexit 0\n")
+            (stubs / tool).chmod(0o755)
+        rule = r"ip daddr (\{ )?192\.0\.2\.20( \})? tcp dport 6514 accept"
+        for value, listed in (("192.0.2.20:6514", True), ("none", False)):
+            with self.subTest(log_server=value):
+                result = in_namespace(
+                    "sh",
+                    "-c",
+                    'PATH="$1:$PATH" MEHO_TEST_ROOT="$2" "$3" log-server "$4"'
+                    " && nft list chain inet meho output",
+                    "sh",
+                    str(stubs),
+                    str(self.machine.root),
+                    str(LINUX_SERVER / "meho-host"),
+                    value,
+                )
+
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                if listed:
+                    self.assertRegex(result.stdout, rule)
+                else:
+                    self.assertNotRegex(result.stdout, rule)
+        self.assertEqual(installed, rules.read_text())
 
     def test_firewall_state_reads_the_real_nft_output(self) -> None:
         # firewall_state runs with the real nft in the namespace. A stub
@@ -260,6 +374,74 @@ class NftCheckTests(InstallTestCase):
         self.assertIn("type filter hook prerouting priority mangle; policy drop;", result.stdout)
         for hook in APPLIANCE_CHAINS:
             self.assertIn(f"type filter hook {hook} priority filter; policy drop;", result.stdout)
+
+    def test_the_cis_checks_on_the_loaded_rules(self) -> None:
+        rules = self.rules_file("--admin-network", "10.0.0.0/24").read_text()
+        other = self.machine.home / "other-tables.nft"
+        other.write_text(OTHER_TABLES)
+        appliance = rules.replace("policy accept;", "policy drop;")
+        # Form 2 keeps the policy accept, so 4.3.8 fails there by design: an
+        # exception of ADR 0009 decision 2.
+        cases = {
+            "form 2": (rules, {"4.3.5": True, "4.3.6": True, "4.3.8": False}),
+            "appliance": (appliance, {"4.3.5": True, "4.3.6": True, "4.3.8": True}),
+        }
+        for case, (content, expected) in cases.items():
+            with self.subTest(case=case):
+                variant = self.machine.home / "variant.nft"
+                variant.write_text(content)
+
+                result = in_namespace(
+                    "sh",
+                    "-c",
+                    'nft -f "$1" && nft -f "$2" && nft list ruleset',
+                    "sh",
+                    str(other),
+                    str(variant),
+                )
+
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(expected, cis_nftables_checks(result.stdout))
+
+    def test_the_appliance_variant_lets_the_machine_reach_a_service_on_itself(self) -> None:
+        reason = why_dummy_cannot_run()
+        if reason is not None:
+            if REQUIRED:
+                self.fail(f"MEHO_REQUIRE_NFT_CHECK=1, but {reason}")
+            self.skipTest(reason)
+        rules = self.rules_file("--admin-network", "10.0.0.0/24").read_text()
+        local_rule = "        fib daddr type local accept\n"
+        self.assertEqual(1, rules.count(local_rule))
+        appliance = rules.replace("policy accept;", "policy drop;")
+        nat = self.machine.home / "service-nat.nft"
+        nat.write_text(SERVICE_NAT)
+        # Without the rule, the chain output drops the connection: the test
+        # proves that this rule lets it through.
+        cases = {
+            "with the rule": (appliance, True),
+            "without the rule": (appliance.replace(local_rule, ""), False),
+        }
+        for case, (content, connects) in cases.items():
+            with self.subTest(case=case):
+                variant = self.machine.home / "variant.nft"
+                variant.write_text(content)
+
+                result = in_namespace(
+                    "sh",
+                    "-c",
+                    SERVICE_SETUP,
+                    "sh",
+                    str(variant),
+                    str(nat),
+                    sys.executable,
+                    SERVICE_CONNECTION,
+                )
+
+                if connects:
+                    self.assertEqual(0, result.returncode, result.stderr)
+                else:
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn("TimeoutError", result.stderr)
 
 
 if __name__ == "__main__":

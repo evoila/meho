@@ -64,6 +64,20 @@ under ``/ui/`` must carry the CSRF token in **either** the
 form field (server-rendered form fallback). Missing or invalid →
 ``403 Forbidden`` with a stable detail string.
 
+Page tenant (#5240)
+===================
+
+Every console page carries the tenant it was made for: htmx sends it
+in the ``Meho-Tenant`` header (``static/src/app/page-tenant.js``), a
+plain form in the hidden ``meho_tenant`` field, and a live-feed stream
+(the browser's ``EventSource`` can send no header) in the
+``meho_tenant`` query parameter of its URL. When it differs from the
+session's current tenant (the person switched in another browser tab),
+the request is refused with ``409`` and "The tenant changed. Reload the
+page." -- for read-only methods too, so an old tab cannot load another
+tenant's data into its page. Nothing runs. The switch form
+(``/ui/tenant/switch``) is not checked: it names its new tenant.
+
 Token issuance
 ==============
 
@@ -103,15 +117,23 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from typing import Final
 from urllib.parse import parse_qs
 
 import structlog
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from meho_backplane.auth.current_tenant import TENANT_HEADER
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.routes import SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import EncryptionKeyMissingError
+from meho_backplane.ui.auth.tenant import (
+    PAGE_TENANT_FORM_FIELD,
+    TENANT_CHANGED_HEADER,
+    TENANT_CHANGED_MESSAGE,
+    TENANT_SWITCH_PATH,
+)
 
 __all__ = [
     "CSRF_COOKIE_NAME",
@@ -364,6 +386,18 @@ def _extract_header(scope: Scope, header_name: str) -> str | None:
     return None
 
 
+def _extract_query_param(scope: Scope, name: str) -> str | None:
+    """Return the first value of query parameter *name*, or ``None``."""
+    raw = scope.get("query_string")
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return None
+    try:
+        values = parse_qs(bytes(raw).decode("utf-8"), keep_blank_values=False).get(name)
+    except UnicodeDecodeError:
+        return None
+    return values[0] if values else None
+
+
 def _forbidden_response(reason: str) -> tuple[int, list[tuple[bytes, bytes]], bytes]:
     """Build the ASGI three-tuple (status, headers, body) for a 403.
 
@@ -387,8 +421,11 @@ async def _send_forbidden(send: Send, reason: str) -> None:
     await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
-async def _extract_form_token(receive: Receive) -> tuple[str | None, list[Message]]:
-    """Drain the request body, return ``(token, buffered_messages)``.
+async def _extract_form_token(receive: Receive) -> tuple[str | None, str | None, list[Message]]:
+    """Drain the request body, return ``(token, page_tenant, buffered_messages)``.
+
+    ``page_tenant`` is the hidden ``meho_tenant`` field: the tenant the
+    page with the form was made for (#5240).
 
     ASGI body messages can only be received once; if the middleware
     consumes the body to read a form field, the downstream handler
@@ -427,18 +464,21 @@ async def _extract_form_token(receive: Receive) -> tuple[str | None, list[Messag
             # bails on the oversize case by skipping the form parse.
             continue
     if body_total > max_body:
-        return None, buffered
+        return None, None, buffered
     body = b"".join(body_parts)
     if not body:
-        return None, buffered
+        return None, None, buffered
     try:
         parsed = parse_qs(body.decode("utf-8"), keep_blank_values=False)
     except UnicodeDecodeError:
-        return None, buffered
-    values = parsed.get(CSRF_FORM_FIELD)
-    if not values:
-        return None, buffered
-    return values[0], buffered
+        return None, None, buffered
+    tokens = parsed.get(CSRF_FORM_FIELD)
+    page_tenants = parsed.get(PAGE_TENANT_FORM_FIELD)
+    return (
+        tokens[0] if tokens else None,
+        page_tenants[0] if page_tenants else None,
+        buffered,
+    )
 
 
 def _replay_receive(buffered: list[Message]) -> Receive:
@@ -463,8 +503,8 @@ def _replay_receive(buffered: list[Message]) -> Receive:
 async def _resolve_presented_token(
     scope: Scope,
     receive: Receive,
-) -> tuple[str | None, Receive]:
-    """Return the presented CSRF token + a (possibly-replayed) ``receive``.
+) -> tuple[str | None, str | None, Receive]:
+    """Return the presented CSRF token, the form's page tenant + a (possibly-replayed) ``receive``.
 
     Tries the ``X-CSRF-Token`` request header first; falls back to the
     ``csrf_token`` form field on a form-urlencoded request body. Form-
@@ -472,15 +512,60 @@ async def _resolve_presented_token(
     returns a replayed receive that yields the buffered messages back
     to the downstream handler when the body fallback ran. When the
     header is present the original ``receive`` is returned untouched.
+    The page tenant comes from the same form parse (``meho_tenant``),
+    so it is ``None`` when the header path ran.
     """
     header_token = _extract_header(scope, CSRF_HEADER_NAME)
     if header_token is not None:
-        return header_token, receive
+        return header_token, None, receive
     content_type = _extract_header(scope, "content-type") or ""
     if "application/x-www-form-urlencoded" not in content_type.lower():
-        return None, receive
-    form_token, buffered = await _extract_form_token(receive)
-    return form_token, _replay_receive(buffered)
+        return None, None, receive
+    form_token, page_tenant, buffered = await _extract_form_token(receive)
+    return form_token, page_tenant, _replay_receive(buffered)
+
+
+def _page_tenant_changed(scope: Scope, form_page_tenant: str | None) -> bool:
+    """Return whether the request comes from a page made for another tenant (#5240).
+
+    Every console page carries the tenant it was made for: htmx sends it
+    in the ``Meho-Tenant`` header (``page-tenant.js``), a plain form in
+    the hidden ``meho_tenant`` field, a live-feed stream in the
+    ``meho_tenant`` query parameter (an ``EventSource`` sends no header,
+    and it reconnects with the same URL). After a switch in another
+    browser tab, the session's tenant differs, and the request must not
+    run. A request without the marker passes (an API-style call, or a
+    page from before this check existed). The switch form itself names
+    its new tenant, so it is not checked.
+    """
+    if _select_path(scope) == TENANT_SWITCH_PATH:
+        return False
+    state = scope.get("state")
+    session_context = state.get("ui_session") if isinstance(state, dict) else None
+    session_tenant = getattr(session_context, "tenant_id", None)
+    if session_tenant is None:
+        return False
+    page_tenant = (
+        _extract_header(scope, TENANT_HEADER)
+        or form_page_tenant
+        or _extract_query_param(scope, PAGE_TENANT_FORM_FIELD)
+    )
+    if not page_tenant:
+        return False
+    return page_tenant.strip().lower() != str(session_tenant).lower()
+
+
+async def _send_tenant_changed(send: Send) -> None:
+    """Refuse a request from a page made for another tenant: ``409``, nothing runs."""
+    body = json.dumps({"detail": TENANT_CHANGED_MESSAGE}).encode("utf-8")
+    headers: list[tuple[bytes, bytes]] = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+        (b"cache-control", b"no-store"),
+        (TENANT_CHANGED_HEADER.encode("ascii"), b"1"),
+    ]
+    await send({"type": "http.response.start", "status": 409, "headers": headers})
+    await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
 def _validate_csrf(
@@ -542,7 +627,12 @@ class CSRFMiddleware:
             return
 
         method = _select_method(scope)
+        log = structlog.get_logger(__name__)
         if method in _SAFE_METHODS:
+            if _page_tenant_changed(scope, None):
+                log.info("ui_page_tenant_changed", path=path, method=method)
+                await _send_tenant_changed(send)
+                return
             # Read-only methods cannot mutate state, so a CSRF token
             # check is by definition not required. The double-submit
             # cookie is set on the GET response by the dashboard
@@ -551,7 +641,6 @@ class CSRFMiddleware:
             await self.app(scope, receive, send)
             return
 
-        log = structlog.get_logger(__name__)
         session_id = _extract_cookie(scope, SESSION_COOKIE_NAME)
         cookie_token = _extract_cookie(scope, CSRF_COOKIE_NAME)
 
@@ -575,7 +664,7 @@ class CSRFMiddleware:
             await _send_forbidden(send, "missing_token")
             return
 
-        presented_token, replay = await _resolve_presented_token(scope, receive)
+        presented_token, form_page_tenant, replay = await _resolve_presented_token(scope, receive)
 
         rejection = _validate_csrf(
             session_id=session_id,
@@ -590,6 +679,11 @@ class CSRFMiddleware:
                 reason=rejection,
             )
             await _send_forbidden(send, rejection)
+            return
+
+        if _page_tenant_changed(scope, form_page_tenant):
+            log.info("ui_page_tenant_changed", path=path, method=method)
+            await _send_tenant_changed(send)
             return
 
         await self.app(scope, replay, send)

@@ -610,12 +610,14 @@ async def test_malformed_client_list_is_refused_before_it_waits_for_approval(
 async def test_realm_delete_waits_for_a_second_person_then_runs(kc: KeycloakConnector) -> None:
     """Preview → wait for approval → a second person approves → the delete runs once."""
     requester = _operator("kc-realm-delete-requester")
-    approver = _operator("kc-realm-delete-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _operator("kc-realm-delete-approver").model_copy(update={"self_approver": True})
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get(_REALM_PATH).mock(
             side_effect=[
                 httpx.Response(200, json=_realm_rep()),  # the card at park time
+                httpx.Response(200, json=_realm_rep()),  # the card again, before the run
                 httpx.Response(200, json=_realm_rep()),  # the handler's read
                 httpx.Response(404),  # the gone-check
             ]

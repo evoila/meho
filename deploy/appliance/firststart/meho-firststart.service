@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# The appliance's first start: reads the import wizard's fields and makes
+# this appliance its own (firststart.sh). It runs before SSH and the console
+# login, because it makes the SSH host keys and the admin account. Once it
+# is done, the condition keeps it from running again.
+#
+# Without wizard fields, firststart.sh asks for them on the VM console, so
+# its standard input is tty1, the screen the VM console shows; /dev/console
+# is the serial port on this image. With a file: input the output stays in
+# the journal (firststart.sh copies it to tty1). Plymouth, the boot splash,
+# would read the same keys, so it quits first, as in systemd's own
+# emergency.service.
+
+[Unit]
+Description=MEHO appliance first start
+ConditionPathExists=!/var/lib/meho/firststart.done
+After=network.target
+Before=ssh.service systemd-user-sessions.service getty-pre.target
+Wants=getty-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/bin/plymouth --wait quit
+ExecStart=/opt/meho/appliance/firststart/firststart.sh
+StandardInput=file:/dev/tty1
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

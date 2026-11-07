@@ -214,3 +214,189 @@ def test_iter_quoted_secret_fields_lists_secret_names_only() -> None:
         ("sessionToken", "t1"),
     ]
     assert all(text[field.start : field.end] == field.value for field in fields)
+
+
+def test_value_of_a_secret_named_pair_is_replaced() -> None:
+    node = {
+        "fields": [
+            {"name": "USER", "value": "root"},
+            {"name": "PASSWORD", "value": "hunter2"},
+            {"name": "PASSWORD"},
+        ],
+        "name": "my-credential",
+    }
+    assert scrub_secret_fields(node) == {
+        "fields": [
+            {"name": "USER", "value": "root"},
+            {"name": "PASSWORD", "value": SECRET_FIELD_MARKER},
+            {"name": "PASSWORD"},
+        ],
+        "name": "my-credential",
+    }
+
+
+# ---------------------------------------------------------------------------
+# A name/value pair object in text: the value of a secret-named pair is replaced
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            '{"name":"PASSWORD","value":"hunter2"}',
+            f'{{"name":"PASSWORD","value":"{SECRET_FIELD_MARKER}"}}',
+        ),
+        (
+            '[{"name": "USER", "value": "root"}, {"name": "PASSWORD", "value": "hunter2"}]',
+            '[{"name": "USER", "value": "root"}, '
+            f'{{"name": "PASSWORD", "value": "{SECRET_FIELD_MARKER}"}}]',
+        ),
+        # Other members between the two.
+        (
+            '{"name": "PASSWORD", "type": "string", "value": "hunter2"}',
+            f'{{"name": "PASSWORD", "type": "string", "value": "{SECRET_FIELD_MARKER}"}}',
+        ),
+        # The value before the name.
+        (
+            '{"value": "hunter2", "name": "PASSWORD"}',
+            f'{{"value": "{SECRET_FIELD_MARKER}", "name": "PASSWORD"}}',
+        ),
+        # Python repr and escaped JSON inside a JSON string.
+        (
+            "{'name': 'PASSWORD', 'value': 'hunter2'}",
+            f"{{'name': 'PASSWORD', 'value': '{SECRET_FIELD_MARKER}'}}",
+        ),
+        (
+            '{"detail": "{\\"name\\": \\"PASSWORD\\", \\"value\\": \\"hunter2\\"}"}',
+            '{"detail": "{\\"name\\": \\"PASSWORD\\", '
+            f'\\"value\\": \\"{SECRET_FIELD_MARKER}\\"}}"}}',
+        ),
+        # An object as the value: replaced whole.
+        (
+            '{"name": "credentials", "value": {"user": "u", "pw": "x"}}',
+            f'{{"name": "credentials", "value": {_QUOTED_MARKER}}}',
+        ),
+        # A value with no closing quote: replaced to the end.
+        (
+            '{"name": "PASSWORD", "value": "hunter2',
+            f'{{"name": "PASSWORD", "value": "{SECRET_FIELD_MARKER}',
+        ),
+        # Not a secret pair: a plain name, no value member, a nested value member,
+        # a number, an empty value, an already masked value.
+        ('{"name": "USER", "value": "root"}', None),
+        ('{"value": "hunter2", "name": "USER"}', None),
+        ('{"name": "PASSWORD"}', None),
+        ('{"name": "PASSWORD", "other": {"value": "x"}}', None),
+        ('{"name": "PASSWORD", "value": 3}', None),
+        ('{"name": "PASSWORD", "value": ""}', None),
+        ('{"name": "PASSWORD", "value": "[REDACTED:param_name]"}', None),
+        # The pair of an inner object does not reach the members of the outer one.
+        (
+            '{"items": [{"name": "PASSWORD", "value": "p"}], "name": "USER", "value": "root"}',
+            f'{{"items": [{{"name": "PASSWORD", "value": "{SECRET_FIELD_MARKER}"}}], '
+            '"name": "USER", "value": "root"}',
+        ),
+    ],
+)
+def test_value_of_a_secret_named_pair_in_text(text: str, expected: str | None) -> None:
+    assert scrub_secret_fields_in_text(text) == (text if expected is None else expected)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The name of a pair written with a JSON escape, in both member orders.
+        (
+            '[{"name":"\\u0050ASSWORD","value":"hunter2"}]',
+            f'[{{"name":"\\u0050ASSWORD","value":"{SECRET_FIELD_MARKER}"}}]',
+        ),
+        (
+            '[{"value":"hunter2","name":"\\u0050ASSWORD"}]',
+            f'[{{"value":"{SECRET_FIELD_MARKER}","name":"\\u0050ASSWORD"}}]',
+        ),
+        # The same pair as escaped JSON inside a JSON string: the escape is escaped once more.
+        (
+            '{"detail": "{\\"name\\": \\"\\\\u0050ASSWORD\\", \\"value\\": \\"hunter2\\"}"}',
+            '{"detail": "{\\"name\\": \\"\\\\u0050ASSWORD\\", '
+            f'\\"value\\": \\"{SECRET_FIELD_MARKER}\\"}}"}}',
+        ),
+        (
+            '{"detail": "{\\"value\\": \\"hunter2\\", \\"name\\": \\"\\\\u0050ASSWORD\\"}"}',
+            f'{{"detail": "{{\\"value\\": \\"{SECRET_FIELD_MARKER}\\", '
+            '\\"name\\": \\"\\\\u0050ASSWORD\\"}"}',
+        ),
+        # The member keys of the pair written with an escape.
+        (
+            '{"\\u006eame": "PASSWORD", "value": "hunter2"}',
+            f'{{"\\u006eame": "PASSWORD", "value": "{SECRET_FIELD_MARKER}"}}',
+        ),
+        (
+            '{"name": "PASSWORD", "\\u0076alue": "hunter2"}',
+            f'{{"name": "PASSWORD", "\\u0076alue": "{SECRET_FIELD_MARKER}"}}',
+        ),
+        # A secret-named key written with an escape, plain and inside a JSON string.
+        (
+            '{"\\u0050ASSWORD": "hunter2"}',
+            f'{{"\\u0050ASSWORD": "{SECRET_FIELD_MARKER}"}}',
+        ),
+        (
+            '{"detail": "{\\"\\\\u0050ASSWORD\\": \\"hunter2\\"}"}',
+            f'{{"detail": "{{\\"\\\\u0050ASSWORD\\": \\"{SECRET_FIELD_MARKER}\\"}}"}}',
+        ),
+        # A name that decodes to a plain name stays; so does a name that is no JSON string.
+        ('{"name": "\\u0055SER", "value": "root"}', None),
+        ('{"name": "\\u00ZZASSWORD", "value": "root"}', None),
+        ('{"\\u0055SER": "root"}', None),
+    ],
+)
+def test_escaped_name_is_decoded_before_the_check(text: str, expected: str | None) -> None:
+    assert scrub_secret_fields_in_text(text) == (text if expected is None else expected)
+
+
+def test_escaped_name_is_listed_decoded() -> None:
+    text = '{"\\u0050ASSWORD": "p1", "name": "\\u0054OKEN", "value": "t1"}'
+    assert [(field.name, field.value) for field in iter_quoted_secret_fields(text)] == [
+        ("PASSWORD", "p1"),
+        ("TOKEN", "t1"),
+    ]
+
+
+def test_secret_named_key_between_the_name_and_the_value_of_a_pair_is_replaced_too() -> None:
+    text = '{"name": "PASSWORD", "token": "t1", "value": "hunter2"}'
+    assert [(field.name, field.value) for field in iter_quoted_secret_fields(text)] == [
+        ("token", "t1"),
+        ("PASSWORD", "hunter2"),
+    ]
+    assert scrub_secret_fields_in_text(text) == (
+        f'{{"name": "PASSWORD", "token": "{SECRET_FIELD_MARKER}", '
+        f'"value": "{SECRET_FIELD_MARKER}"}}'
+    )
+
+
+def test_pair_value_found_from_both_members_is_listed_once() -> None:
+    text = '{"name": "PASSWORD", "value": "hunter2", "name": "TOKEN"}'
+    assert [(field.name, field.value) for field in iter_quoted_secret_fields(text)] == [
+        ("PASSWORD", "hunter2"),
+    ]
+
+
+def test_many_pairs_in_text_are_scrubbed_quickly() -> None:
+    pairs = [{"name": "PASSWORD", "value": "p" * 20}, {"name": "USER", "value": "root"}] * 25_000
+    text = json.dumps(pairs)
+    started = time.monotonic()
+    scrubbed = scrub_secret_fields_in_text(text)
+    assert time.monotonic() - started < 2.0
+    assert "p" * 20 not in scrubbed
+    assert scrubbed.count(SECRET_FIELD_MARKER) == 25_000
+    assert scrubbed.count('"value": "root"') == 25_000
+
+
+def test_many_value_members_before_the_name_are_scrubbed_quickly() -> None:
+    members = ", ".join(f'"value": "v{index}"' for index in range(50_000))
+    text = "{" + members + ', "name": "PASSWORD"}'
+    started = time.monotonic()
+    scrubbed = scrub_secret_fields_in_text(text)
+    assert time.monotonic() - started < 2.0
+    assert scrubbed.count(SECRET_FIELD_MARKER) == 1
+    assert scrubbed.endswith(f'"value": "{SECRET_FIELD_MARKER}", "name": "PASSWORD"}}')

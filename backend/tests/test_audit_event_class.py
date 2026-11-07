@@ -149,12 +149,13 @@ def test_shared_writers_require_an_event_class(writer: object) -> None:
     assert param.kind is inspect.Parameter.KEYWORD_ONLY
 
 
-def test_vocabulary_is_the_closed_five() -> None:
+def test_vocabulary_is_the_closed_six() -> None:
     assert set(AUDIT_EVENT_CLASSES) == {
         "operation_execution",
         "policy_decision",
         "approval_decision",
         "security_event",
+        "config_change",
         "legacy_request",
     }
 

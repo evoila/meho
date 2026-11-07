@@ -9,20 +9,31 @@ each rule fails with a message that names the problem, without a database.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
 
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
+from tests._operation_contract_addresses import (
+    NOT_CALLER_ADDRESSES,
+    stored_secret_fields,
+    unmarked_address_fields,
+)
+from tests._operation_contract_placeholders import REAL_TOP_LEVEL_DOMAINS, load_top_level_domains
 from tests.test_operation_contracts import (
     DESCRIPTION_MAX,
     GAPS_FILE,
+    NOT_OPERATION_IDS,
     READS_WITH_A_WRITE_WORD,
     SUMMARY_MAX,
     OperationContract,
     check_operation,
     compare_with_gaps,
     find_problems,
+    load_gaps,
+    refused_gaps,
 )
 
 _GOOD_PARAMS: Final[dict[str, Any]] = {
@@ -36,7 +47,15 @@ _GOOD_PARAMS: Final[dict[str, Any]] = {
         },
     },
     "required": ["vm"],
-    "examples": [{"vm": "vm-1", "spec": {"cpu": 2}}],
+    "examples": [{"vm": "<vm-id>", "spec": {"cpu": 2}}],
+}
+
+
+_GUIDANCE: Final[dict[str, str]] = {
+    "when_to_call": "To change CPUs.",
+    "output_shape": "The VM id.",
+    "next_step": "Read the VM back.",
+    "preconditions": "The VM is powered off.",
 }
 
 
@@ -48,12 +67,7 @@ def _good_op(**overrides: Any) -> OperationContract:
         "description": "Sets the number of virtual CPUs of one VM.",
         "parameter_schema": _GOOD_PARAMS,
         "response_schema": {"type": "object", "properties": {"vm": {"type": "string"}}},
-        "llm_instructions": {
-            "when_to_call": "To change CPUs.",
-            "output_shape": "The VM id.",
-            "next_step": "Read the VM back.",
-            "preconditions": "The VM is powered off.",
-        },
+        "llm_instructions": _GUIDANCE,
         "safety_level": "caution",
         "requires_approval": True,
         "group_text": "VM changes.",
@@ -289,10 +303,18 @@ def test_a_new_gap_and_a_gone_gap_each_name_the_operation_and_rule() -> None:
     assert compare_with_gaps(problems, set(problems)) == []
 
 
+_UNMARKED_HOST_PARAMS: Final[dict[str, Any]] = {
+    **_GOOD_PARAMS,
+    "properties": {
+        **_GOOD_PARAMS["properties"],
+        "host": {"type": "string", "description": "The host to check."},
+    },
+}
+
 _NESTED_FIELD_NO_DESCRIPTION: Final[dict[str, Any]] = {
     **_GOOD_PARAMS,
     "properties": {"vm": {"type": "object", "description": "VM.", "properties": {"id": {}}}},
-    "examples": [{"vm": {"id": "vm-1"}}],
+    "examples": [{"vm": {"id": "<vm-id>"}}],
 }
 
 
@@ -307,6 +329,15 @@ _NESTED_FIELD_NO_DESCRIPTION: Final[dict[str, Any]] = {
         ({"requires_approval": False}, "requires_approval"),
         ({"safety_level": "destructive"}, "preview_builder"),
         ({"safety_level": "safe", "requires_approval": False}, "write_name"),
+        (
+            {"parameter_schema": {**_GOOD_PARAMS, "examples": [{"vm": "vm-42"}]}},
+            "example_placeholders",
+        ),
+        (
+            {"llm_instructions": {**_GUIDANCE, "next_step": "Call `fake.vm.nope`."}},
+            "named_operations_exist",
+        ),
+        ({"parameter_schema": _UNMARKED_HOST_PARAMS}, "caller_address"),
     ],
 )
 def test_each_bad_operation_fails_with_a_message_naming_operation_and_rule(
@@ -315,3 +346,515 @@ def test_each_bad_operation_fails_with_a_message_naming_operation_and_rule(
     messages = compare_with_gaps(find_problems([_good_op(**overrides)]), set())
     assert len(messages) == 1
     assert messages[0].startswith(f"NEW GAP vmware-rest fake.vm.update rule {rule!r}: ")
+
+
+# ---------------------------------------------------------------------------
+# Rule 11: example values look made up
+# ---------------------------------------------------------------------------
+
+
+def _with_example(example: dict[str, Any]) -> OperationContract:
+    return _good_op(parameter_schema={**_GOOD_PARAMS, "examples": [example]})
+
+
+def test_a_real_looking_vm_id_fails_and_a_placeholder_passes() -> None:
+    problems = _only_rule(_with_example({"vm": "vm-42"}), "example_placeholders")
+    assert problems == [
+        "example 0: vm holds 'vm-42', which looks real; use a placeholder in angle "
+        "brackets, such as <vm-id>"
+    ]
+    assert check_operation(_with_example({"vm": "<vm-id>"})) == {}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "vm-42",
+        "host-12",
+        "domain-c8",
+        "domain-s3",
+        "datastore-15",
+        "resgroup-8",
+        "resgroup-v12",
+        "group-v3",
+        "dvportgroup-21",
+        "datacenter-2",
+        "moref=vm-42",
+        "10.20.30.40",
+        "10.9.0.0/24",
+        "https://172.16.0.5:443/api",
+        "fe80::1",
+        "fd00::10",
+        "vc01.not-a-real-host.com",
+        "vc01.not-a-real-host.fr",
+        "nas.made-up.uk",
+        "app.made-up.tech",
+        "shop.made-up.xyz",
+        "esx-01.local",
+        "nas.lan",
+        "admin@made-up-domain.net",
+        "https://vcenter.made-up.de/ui",
+        "release-notes.md",
+        "0b6e3e0c-1f2a-4c55-9a51-2f6d7a8b9c01",
+        "00000000-0000-4000-8000-000000000001",
+        "0B6E3E0C-1F2A-4C55-9A51-2F6D7A8B9C01",
+    ],
+)
+def test_a_real_looking_value_fails(value: str) -> None:
+    problems = _only_rule(_with_example({"vm": "<vm-id>", "target": value}), "example_placeholders")
+    assert len(problems) == 1, problems
+    assert "target holds" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "<vm-id>",
+        "<vcenter-host.example>",
+        "192.0.2.10",
+        "198.51.100.0/24",
+        "203.0.113.7",
+        "2001:db8::1",
+        "vc.example.com",
+        "example.org",
+        "mail.example.net",
+        "esx01.test",
+        "vc.lab.example",
+        "host.invalid",
+        "management.azure.com",
+        "Microsoft.Storage/storageAccounts",
+        "compute.provision.post",
+        "sa@example-project.iam.gserviceaccount.com",
+        "kubernetes.default.svc.cluster.local",
+        "cert-manager.io",
+        "vsphere.local\\<group>",
+        "00000000-0000-0000-0000-000000000000",
+        "config.yaml",
+        "web-vm-01",
+        "vm-name",
+        "datastore1",
+        "12:30:00",
+        "aa:bb:cc:dd:ee:ff",
+        "https://<backup-store>/<folder>/",
+    ],
+)
+def test_a_made_up_value_passes(value: str) -> None:
+    assert check_operation(_with_example({"vm": "<vm-id>", "target": value})) == {}
+
+
+def test_a_nested_real_looking_id_fails_with_its_path() -> None:
+    example = {
+        "vm": "<vm-id>",
+        "spec": {"cpu": 2, "placement": {"cluster": "domain-c8"}},
+        "disks": [{"datastore": "datastore-15"}],
+    }
+    problems = _only_rule(_with_example(example), "example_placeholders")
+    assert [p.split(" holds ")[0] for p in problems] == [
+        "example 0: spec.placement.cluster",
+        "example 0: disks[].datastore",
+    ]
+
+
+def test_every_example_is_checked_not_only_the_first() -> None:
+    params = {**_GOOD_PARAMS, "examples": [{"vm": "<vm-id>"}, {"vm": "vm-7"}]}
+    problems = _only_rule(_good_op(parameter_schema=params), "example_placeholders")
+    assert len(problems) == 1
+    assert problems[0].startswith("example 1: vm holds 'vm-7'")
+
+
+def test_a_version_field_may_look_like_an_address() -> None:
+    """``9.0.2.0`` in a field named ``*version*`` is a version, not an IPv4 address."""
+    assert check_operation(_with_example({"vm": "<vm-id>", "target_version": "9.0.2.0"})) == {}
+    example = {"vm": "<vm-id>", "address": "9.0.2.0"}
+    problems = _only_rule(_with_example(example), "example_placeholders")
+    assert "'9.0.2.0'" in problems[0]
+
+
+@pytest.mark.parametrize("field", ["path", "files[].path", "tar_path", "config_file"])
+def test_a_path_field_may_hold_a_file_name_that_ends_like_a_domain(field: str) -> None:
+    """``release-notes.md`` in a ``*path*`` or ``*file*`` field is a file name, not a host."""
+    example: dict[str, Any] = {"vm": "<vm-id>"}
+    if "[]" in field:
+        example["files"] = [{"path": "docs/release-notes.md"}]
+    else:
+        example[field] = "docs/release-notes.md"
+    assert check_operation(_with_example(example)) == {}
+    problems = _only_rule(
+        _with_example({"vm": "<vm-id>", "name": "release-notes.md"}), "example_placeholders"
+    )
+    assert "'release-notes.md'" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "\\\\nas01.made-up.com\\backups\\full.bak",
+        "//nas01.made-up.local/backups/full.bak",
+        "file://nas01.made-up.com/backups/release-notes.md",
+        "smb://backup@nas01.made-up.com:445/backups/full.bak",
+        "nfs-01.made-up.net:/exports/backups",
+    ],
+)
+def test_a_path_field_with_a_real_looking_host_fails(value: str) -> None:
+    """The host of a network share, a file URL or an NFS export is still checked."""
+    problems = _only_rule(_with_example({"vm": "<vm-id>", "path": value}), "example_placeholders")
+    assert len(problems) == 1, problems
+    assert problems[0].startswith("example 0: path holds 'n")
+    assert "made-up." in problems[0]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "\\\\<backup-server>\\backups\\<file>.bak",
+        "\\\\nas.example.com\\backups\\release-notes.md",
+        "file://nas.example.com/backups/release-notes.md",
+        "file:///var/backups/release-notes.md",
+        "nas.example.com:/exports/release-notes.md",
+        "C:/Users/<name>/release-notes.md",
+    ],
+)
+def test_a_path_field_with_a_made_up_host_passes(value: str) -> None:
+    """A placeholder or example host passes, and the file name part is never a host."""
+    assert check_operation(_with_example({"vm": "<vm-id>", "path": value})) == {}
+
+
+def test_the_top_level_domain_list_is_the_public_one(tmp_path: Path) -> None:
+    """The snapshot holds the public domains, lowercase; the reserved names are not in it."""
+    assert {"com", "fr", "uk", "tech", "xyz", "io"} <= REAL_TOP_LEVEL_DOMAINS
+    assert not {"test", "example", "invalid", "localhost"} & REAL_TOP_LEVEL_DOMAINS
+    assert all(domain == domain.lower() for domain in REAL_TOP_LEVEL_DOMAINS)
+    snapshot = tmp_path / "tlds.txt"
+    snapshot.write_text("# a comment\nCOM\n\n  fr \n", encoding="utf-8")
+    assert load_top_level_domains(snapshot) == {"com", "fr"}
+
+
+# ---------------------------------------------------------------------------
+# Rule 12: the guidance names only registered operations
+# ---------------------------------------------------------------------------
+
+
+def _guided(next_step: str, **overrides: Any) -> OperationContract:
+    return _good_op(llm_instructions={**_GUIDANCE, "next_step": next_step}, **overrides)
+
+
+@pytest.mark.parametrize(
+    "next_step",
+    [
+        "Call `fake.vm.nope` next.",
+        "Call ``fake.vm.nope`` next.",
+        "Use `fake.vm.nope` or `fake.vm.update`.",
+    ],
+)
+def test_guidance_naming_an_unregistered_operation_fails(next_step: str) -> None:
+    result = check_operation(_guided(next_step), registered={"fake.vm.update"})
+    assert result == {
+        "named_operations_exist": [
+            "guidance names 'fake.vm.nope', which is no registered operation"
+        ]
+    }
+
+
+def test_rule_12_needs_the_registry() -> None:
+    """A check of one operation alone has no registry, so rule 12 does not run."""
+    assert check_operation(_guided("Call `fake.vm.nope` next.")) == {}
+
+
+def test_guidance_naming_a_registered_operation_passes() -> None:
+    reader = _good_op(op_id="fake.vm.get", safety_level="safe", requires_approval=False)
+    writer = _guided("Read it back with `fake.vm.get`, then `fake.vm.update` again.")
+    assert find_problems([reader, writer]) == {}
+
+
+def test_the_registry_spans_every_connector() -> None:
+    """Guidance may name an operation of another connector."""
+    other = _good_op(
+        connector="k8s", op_id="other.node.get", safety_level="safe", requires_approval=False
+    )
+    op = _guided("When the API is up, call `other.node.get`; never `other.node.lost`.")
+    assert find_problems([other, op]) == {
+        ("vmware-rest", "fake.vm.update", "named_operations_exist"): [
+            "guidance names 'other.node.lost', which is no registered operation"
+        ]
+    }
+
+
+def test_a_wrong_first_part_is_caught() -> None:
+    """``kubernetes.node.list`` is no operation when only ``k8s`` operations exist."""
+    node_list = _good_op(
+        connector="k8s", op_id="k8s.node.list", safety_level="safe", requires_approval=False
+    )
+    op = _guided("When the API is down, `kubernetes.node.list` cannot answer.")
+    assert find_problems([node_list, op]) == {
+        ("vmware-rest", "fake.vm.update", "named_operations_exist"): [
+            "guidance names 'kubernetes.node.list', which is no registered operation"
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "next_step",
+    [
+        "Run `call_operation` with `op_id` and read `status`.",
+        "A wildcard such as `fake.vm.*` is no name.",
+        "`Fake.Vm.Nope` has capitals.",
+        "A placeholder such as `<op-id>` is no name.",
+        "Plain text fake.vm.nope without backticks.",
+    ],
+)
+def test_backticked_words_that_are_no_operation_id_pass(next_step: str) -> None:
+    assert find_problems([_guided(next_step)]) == {}
+
+
+def test_a_listed_non_operation_name_passes_and_an_unlisted_one_fails() -> None:
+    name = next(iter(NOT_OPERATION_IDS))
+    assert find_problems([_guided(f"Check `{name}`.")]) == {}
+    assert find_problems([_guided("Check `status.phase`.")]) != {}
+
+
+# ---------------------------------------------------------------------------
+# Rule 13: an address field carries the caller-address marker
+# ---------------------------------------------------------------------------
+
+
+def _with_field(name: str, schema: dict[str, Any]) -> OperationContract:
+    return _good_op(
+        parameter_schema={
+            **_GOOD_PARAMS,
+            "properties": {**_GOOD_PARAMS["properties"], name: {"description": "x", **schema}},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "schema"),
+    [
+        ("url", {"type": "string"}),
+        ("uri", {"type": "string"}),
+        ("host", {"type": "string"}),
+        ("hostname", {"type": "string"}),
+        ("address", {"type": "string"}),
+        ("fqdn", {"type": "string"}),
+        ("server", {"type": "string"}),
+        ("remote", {"type": "string"}),
+        ("peer", {"type": "string"}),
+        ("endpoint", {"type": "string"}),
+        ("resolver", {"type": "string"}),
+        ("Host", {"type": "string"}),
+        ("callback_url", {"type": "string"}),
+        ("jump_host", {"type": "string"}),
+        ("portal_address", {"type": "string"}),
+        ("to", {"type": "string", "format": "uri"}),
+        ("to", {"type": "string", "format": "url"}),
+        ("to", {"type": "string", "format": "hostname"}),
+        ("to", {"type": "string", "format": "ipv4"}),
+        ("to", {"type": "string", "format": "ipv6"}),
+    ],
+)
+def test_an_address_field_without_marker_fails_with_its_name(
+    name: str, schema: dict[str, Any]
+) -> None:
+    problems = _only_rule(_with_field(name, schema), "caller_address")
+    assert len(problems) == 1
+    assert problems[0].startswith(f"parameter field {name!r} looks like an address")
+
+
+@pytest.mark.parametrize(
+    ("name", "schema"),
+    [
+        ("host", {"type": "string", CALLER_ADDRESS_MARKER: True}),
+        ("to", {"type": "string", "format": "uri", CALLER_ADDRESS_MARKER: True}),
+        ("hostgroup", {"type": "string"}),
+        ("url_path", {"type": "string"}),
+        ("to", {"type": "string", "format": "date-time"}),
+    ],
+)
+def test_a_marked_or_other_field_passes(name: str, schema: dict[str, Any]) -> None:
+    assert check_operation(_with_field(name, schema)) == {}
+
+
+def test_a_marker_false_does_not_count() -> None:
+    op = _with_field("host", {"type": "string", CALLER_ADDRESS_MARKER: False})
+    assert _only_rule(op, "caller_address")
+
+
+def test_a_nested_address_field_fails_with_its_path() -> None:
+    nested = {
+        "type": "object",
+        "properties": {
+            "targets": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"url": {"type": "string"}}},
+            }
+        },
+    }
+    assert unmarked_address_fields("fake.op", nested) == ["targets[].url"]
+
+
+def test_a_marker_on_a_list_covers_its_items() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "urls": {
+                "type": "array",
+                CALLER_ADDRESS_MARKER: True,
+                "items": {"type": "string", "format": "uri"},
+            }
+        },
+    }
+    assert unmarked_address_fields("fake.op", schema) == []
+
+
+def test_an_allow_listed_field_passes_and_every_entry_has_a_reason() -> None:
+    assert NOT_CALLER_ADDRESSES
+    for (op_id, path), reason in NOT_CALLER_ADDRESSES.items():
+        assert reason.strip(), f"{op_id} {path} has no reason"
+        schema = {"type": "object", "properties": {path: {"type": "string"}}}
+        if "." not in path and "[" not in path:
+            assert unmarked_address_fields(op_id, schema) == []
+            assert unmarked_address_fields("fake.other.op", schema) == [path]
+
+
+# ---------------------------------------------------------------------------
+# Rule 14: a stored secret sent to an address the caller gives needs approval
+# ---------------------------------------------------------------------------
+
+_MARKED_FQDN: Final[dict[str, Any]] = {
+    "type": "string",
+    "description": "The host to log in to.",
+    CALLER_ADDRESS_MARKER: True,
+}
+_SECRET_REF: Final[dict[str, Any]] = {"type": "string", "description": "Vault path of the login."}
+
+
+def _secret_op(
+    properties: dict[str, Any], *, safety_level: str = "safe", requires_approval: bool = False
+) -> OperationContract:
+    return _good_op(
+        op_id="fake.location.check",
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+        parameter_schema={
+            "type": "object",
+            "properties": properties,
+            "examples": [dict.fromkeys(properties, "<value>")],
+        },
+    )
+
+
+@pytest.mark.parametrize("secret_name", ["secret_ref", "admin_secret_ref", "password_ref"])
+def test_a_stored_secret_sent_to_a_caller_address_below_caution_fails(secret_name: str) -> None:
+    op = _secret_op({"fqdn": _MARKED_FQDN, secret_name: _SECRET_REF})
+    problems = _only_rule(op, "stored_secret_address")
+    assert problems[0].startswith(f"takes a stored secret ('{secret_name}')")
+
+
+def test_a_stored_secret_sent_to_a_caller_address_without_approval_fails() -> None:
+    op = _secret_op({"fqdn": _MARKED_FQDN, "secret_ref": _SECRET_REF}, safety_level="dangerous")
+    assert set(check_operation(op)) == {"requires_approval", "stored_secret_address"}
+
+
+def test_a_stored_secret_in_a_nested_field_counts() -> None:
+    login = {
+        "type": "object",
+        "description": "The login.",
+        "properties": {"secret_ref": _SECRET_REF},
+    }
+    op = _secret_op({"endpoint": _MARKED_FQDN, "login": login})
+    problems = _only_rule(op, "stored_secret_address")
+    assert "'login.secret_ref'" in problems[0]
+
+
+def _login_definition_params(defs_key: str, host: dict[str, Any]) -> dict[str, Any]:
+    """Parameters whose ``login`` field points at a schema definition that holds the secret."""
+    return {
+        "type": "object",
+        "properties": {
+            "host": host,
+            "login": {"$ref": f"#/{defs_key}/login", "description": "The login."},
+        },
+        defs_key: {
+            "login": {
+                "type": "object",
+                "description": "The login.",
+                "properties": {"secret_ref": _SECRET_REF},
+            }
+        },
+        "examples": [{"host": "<value>", "login": {"secret_ref": "<value>"}}],
+    }
+
+
+@pytest.mark.parametrize("defs_key", ["$defs", "definitions"])
+def test_a_stored_secret_in_a_schema_definition_counts(defs_key: str) -> None:
+    schema = _login_definition_params(defs_key, _MARKED_FQDN)
+    assert stored_secret_fields(schema) == [f"{defs_key}/login.secret_ref"]
+    op = _good_op(
+        op_id="fake.location.check",
+        parameter_schema=schema,
+        safety_level="safe",
+        requires_approval=False,
+    )
+    problems = _only_rule(op, "stored_secret_address")
+    assert f"'{defs_key}/login.secret_ref'" in problems[0]
+
+
+@pytest.mark.parametrize("defs_key", ["$defs", "definitions"])
+def test_the_gap_list_may_not_hold_an_unmarked_host_with_a_secret_in_a_definition(
+    defs_key: str,
+) -> None:
+    schema = _login_definition_params(defs_key, {"type": "string", "description": "The host."})
+    op = _good_op(
+        op_id="fake.location.check",
+        parameter_schema=schema,
+        safety_level="safe",
+        requires_approval=False,
+    )
+    assert set(check_operation(op)) == {"caller_address", "stored_secret_address"}
+    known = {("vmware-rest", "fake.location.check", "caller_address")}
+    assert [m.split(":")[0] for m in refused_gaps([op], known)] == [
+        "REFUSED vmware-rest fake.location.check rule 'caller_address'"
+    ]
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        {"fqdn": _MARKED_FQDN, "secret_ref": _SECRET_REF},
+        {"fqdn": _MARKED_FQDN},
+    ],
+)
+def test_caution_with_approval_or_no_secret_passes(properties: dict[str, Any]) -> None:
+    op = _secret_op(properties, safety_level="caution", requires_approval=True)
+    assert check_operation(op) == {}
+
+
+def test_a_stored_secret_with_no_caller_address_passes() -> None:
+    assert check_operation(_secret_op({"secret_ref": _SECRET_REF})) == {}
+
+
+def test_a_stored_secret_with_an_allow_listed_address_passes() -> None:
+    (op_id, path) = ("targets.register", "fqdn")
+    assert (op_id, path) in NOT_CALLER_ADDRESSES
+    schema = {"type": "object", "properties": {path: {"type": "string"}, "secret_ref": {}}}
+    op = OperationContract(connector="targets", op_id=op_id, parameter_schema=schema)
+    assert check_operation(op).get("stored_secret_address") is None
+
+
+def test_the_gap_list_may_not_hold_a_stored_secret_operation() -> None:
+    secret_op = _secret_op({"fqdn": {"type": "string", "description": "x"}, "secret_ref": {}})
+    plain_op = _good_op(op_id="fake.vm.read", parameter_schema=_UNMARKED_HOST_PARAMS)
+    known = {
+        ("vmware-rest", "fake.location.check", "caller_address"),
+        ("vmware-rest", "fake.location.check", "summary"),
+        ("vmware-rest", "fake.vm.read", "caller_address"),
+        ("vmware-rest", "fake.other.op", "stored_secret_address"),
+    }
+    messages = refused_gaps([secret_op, plain_op], known)
+    assert [m.split(":")[0] for m in messages] == [
+        "REFUSED vmware-rest fake.location.check rule 'caller_address'",
+        "REFUSED vmware-rest fake.other.op rule 'stored_secret_address'",
+    ]
+
+
+def test_the_live_gap_list_holds_no_stored_secret_rule() -> None:
+    assert not {gap for gap in load_gaps() if gap[2] == "stored_secret_address"}

@@ -69,6 +69,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from meho_backplane.connectors.profile import AuthSchemeName
 from meho_backplane.operations.ingest.catalog import _compatibility_pattern_to_specifier
+from meho_backplane.operations.ingest.job_phase import IngestJobPhase
 
 __all__ = [
     "AffectedSensorModel",
@@ -276,7 +277,8 @@ class IngestRequest(BaseModel):
             "null to ingest under the built-in / global scope "
             "(tenant_id IS NULL) — the same omit-equals-global "
             "semantics as the MCP tool meho_connector_ingest "
-            "(tenant_admin only). Pass your own tenant UUID for a "
+            "(platform_admin only: the rows are shared by every "
+            "tenant). Pass your own tenant UUID for a "
             "tenant-scoped ingest; another tenant's UUID is rejected "
             "with 403 unless the caller holds platform_admin, which "
             "may ingest into another tenant when it names that "
@@ -1286,7 +1288,11 @@ class IngestJobStatusResponse(BaseModel):
       correlate against their own state.
     * **Lifecycle** -- ``status`` + ``started_at`` + optional
       ``ended_at``. Status moves ``running`` → one of ``succeeded`` /
-      ``degraded`` / ``failed`` exactly once.
+      ``degraded`` / ``failed`` exactly once. ``phase`` is the step the
+      job is on (``parse`` → ``register`` → ``grouping``) and
+      ``phase_started_at`` is when that step started (#5786), so a slow
+      import can be told from a stuck one. A finished job keeps the step
+      it ended in.
     * **Result vs error** -- keyed on status. ``succeeded`` populates
       ``ingestion`` (with optional ``grouping``) and leaves ``error``
       ``None``; ``failed`` populates ``error`` / ``error_class`` and
@@ -1319,6 +1325,19 @@ class IngestJobStatusResponse(BaseModel):
     spec_uris: list[str] = Field(default_factory=list)
     started_at: float
     ended_at: float | None = None
+    phase: IngestJobPhase = Field(
+        description=(
+            "The step the job is on: parse (read and check the API files), "
+            "register (write the operations), grouping (the language model "
+            "groups the operations). A finished job keeps the step it ended in."
+        ),
+    )
+    # ``format: double`` makes generated clients keep full precision; a
+    # 32-bit float rounds an epoch time to about two minutes.
+    phase_started_at: float = Field(
+        description="When the current step started (epoch seconds).",
+        json_schema_extra={"format": "double"},
+    )
     ingestion: IngestionResultModel | None = None
     grouping: GroupingResultModel | None = None
     error: str | None = None

@@ -87,7 +87,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors._shared.system_operator import is_system_operator
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.argocd.redaction import redact_argocd_credentials
 from meho_backplane.connectors.argocd.routes import (
@@ -221,6 +221,8 @@ class ArgoCdConnector(HttpConnector):
     impl_id = "argocd-api"
     supported_version_range = ">=2.0,<4.0"
     priority = 1
+    # This class serves the operations of its ingested catalog.
+    accepts_ingested_operations = True
 
     def __init__(
         self,
@@ -232,6 +234,8 @@ class ArgoCdConnector(HttpConnector):
         # (``target_cache_key``) so two same-named targets in different
         # tenants never share a cached token (#1642/#1672).
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        # The callers whose own Vault read of a target's secret passed.
+        self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
         self._credentials_loader: ArgoCdCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -280,17 +284,18 @@ class ArgoCdConnector(HttpConnector):
         operator-context Vault read; injected test loaders accept the same
         ``(target, operator)`` pair.
 
-        The cache fast-path is closed to the synthesised system operator
-        (``is_system_operator``): a system/operator-less caller always runs
-        the loader so its fail-closed guard applies, and can never be
-        served a warm token a real operator primed but it could not resolve
-        itself (#1008). Real-operator behaviour is unchanged — cold load →
-        cache → reuse.
+        A cached entry is handed to a caller only after that caller's own
+        Vault read of the target's secret passed once in this process
+        (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+        A hit for another caller runs the loader under their login first.
+        The synthesised system operator is never recorded, so it always runs
+        the loader. A caller who has read keeps cold load → cache →
+        reuse.
         """
         cache_key = target_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
-            if cached is not None and not is_system_operator(operator):
+            if cached is not None and self._readers.has_read(target, operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
             if ARGOCD_TOKEN_FIELD not in raw:
@@ -300,6 +305,7 @@ class ArgoCdConnector(HttpConnector):
                     "{'token': str}"
                 )
             self._creds_cache[cache_key] = raw
+            self._readers.record(target, operator)
             _log.info(
                 "argocd_credentials_loaded",
                 target=target.name,
@@ -817,6 +823,7 @@ class ArgoCdConnector(HttpConnector):
         """
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+            self._readers.forget(target)
 
     async def aclose(self) -> None:
         """Clear the cached token, then tear down the httpx pool.
@@ -827,4 +834,5 @@ class ArgoCdConnector(HttpConnector):
         """
         async with self._creds_lock:
             self._creds_cache.clear()
+            self._readers.clear()
         await super().aclose()

@@ -54,6 +54,10 @@ from uuid import UUID
 
 import structlog
 
+from meho_backplane.operations.ingest.job_phase import (
+    IngestJobPhase,
+    ingest_phase_reporter,
+)
 from meho_backplane.operations.ingest.pipeline import (
     GroupingPhaseFailedError,
     IngestionPipelineResult,
@@ -188,6 +192,12 @@ class IngestJob:
     structured reason they're not usable). The route projects the right
     subset of fields per status into the polling response.
 
+    ``phase`` is the step the pipeline is on (``parse`` -> ``register``
+    -> ``grouping``, see :mod:`~meho_backplane.operations.ingest.job_phase`)
+    and ``phase_started_at`` is when that step started (#5786). A new job
+    starts in ``parse`` at ``started_at``. A finished job keeps the step
+    it was on when it ended, so a failed job shows where it failed.
+
     The dataclass is mutable on purpose -- the background coroutine
     flips ``status`` / ``ended_at`` / ``result`` / ``error`` on
     completion under the registry's lock.
@@ -207,6 +217,12 @@ class IngestJob:
     result: IngestionPipelineResult | None = None
     error: str | None = None
     error_class: str | None = None
+    phase: IngestJobPhase = "parse"
+    phase_started_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.phase_started_at:
+            self.phase_started_at = self.started_at
 
 
 class IngestJobRegistry:
@@ -365,6 +381,19 @@ class IngestJobRegistry:
             job.error = message if len(message) <= 1024 else message[:1024] + "...<truncated>"
             self._jobs.move_to_end(job_id)
 
+    async def set_phase(self, job_id: UUID, phase: IngestJobPhase) -> None:
+        """Record that *job_id* moved to *phase* now.
+
+        No-op when the job was evicted or already finished: a finished
+        job keeps the phase it ended in.
+        """
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.status != "running":
+                return
+            job.phase = phase
+            job.phase_started_at = time.time()
+
     async def get(
         self,
         job_id: UUID,
@@ -518,11 +547,24 @@ async def run_ingest_job(
     own ``connector_id`` logger, so a plain ``_log.bind`` here would leave
     a job-id-filtered grep blind to every pipeline event. See
     ``docs/codebase/spec-ingestion.md`` for the full narrative.
+
+    The pipeline reports each step it starts through
+    :func:`~meho_backplane.operations.ingest.job_phase.report_ingest_phase`;
+    the reporter installed here writes it to the job row (#5786).
     """
     if registry is None:
         registry = get_job_registry()
     timeout_seconds = _INGEST_JOB_TIMEOUT_SECONDS if timeout_s is None else timeout_s
-    with structlog.contextvars.bound_contextvars(ingest_job_id=str(job_id)):
+    job_registry = registry
+
+    async def _set_phase(phase: IngestJobPhase) -> None:
+        _log.info("ingest_job_phase", phase=phase)
+        await job_registry.set_phase(job_id, phase)
+
+    with (
+        structlog.contextvars.bound_contextvars(ingest_job_id=str(job_id)),
+        ingest_phase_reporter(_set_phase),
+    ):
         try:
             # Watchdog: time-box the whole body -- the pipeline call AND
             # the post-run dispatchability probe (a real DB read whose own

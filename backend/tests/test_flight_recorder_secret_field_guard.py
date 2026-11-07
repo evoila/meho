@@ -69,8 +69,6 @@ _EXEMPT: dict[str, str] = {
     "k8s.job.list": "continue_token is the paging cursor of the list, not a secret.",
     "k8s.workload.list": "continue_token is the paging cursor of the list, not a secret.",
     "k8s.pod.list": "continue_token is the paging cursor of the list, not a secret.",
-    "sddc.network_pool.create": "A network pool spec holds VLANs, subnets and IP ranges only.",
-    "vmware.composite.namespace.create": "Its specs name storage policies, libraries, VM classes.",
 }
 
 
@@ -199,14 +197,14 @@ def test_the_guard_sees_the_registered_operations(registered_ops: list[_Op]) -> 
     assert len(registered_ops) >= 100
     flagged = {op.op_id for op in registered_ops if _flagged_fields(op.parameter_schema or {})}
     assert {
-        "sddc.host.commission",
-        "sddc.domain.validate",
-        "sddc.domain.create",
-        "installer.sddc.spec.validate",
-        "installer.sddc.bringup.start",
-        "installer.sddc.bringup.retry",
-        "installer.composite.sddc.bringup",
-        "installer.system.depot.set",
+        "k8s.secret.update",
+        "keycloak.user.create",
+        "keycloak.user.reset_password",
+        "msad.user.set-password",
+        "secret.handoff.import",
+        "vault.auth.userpass.update_password",
+        "vault.auth.userpass.write",
+        "vault.token.create_and_store",
     } <= flagged
 
 

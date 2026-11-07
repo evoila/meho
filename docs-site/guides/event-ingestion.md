@@ -51,8 +51,9 @@ Two identifiers matter:
 
 A source registered without a secret has no credential yet, so ingest
 **fails closed** until you set one with a later update. A source can also
-be **paused**: a paused or non-existent slug both return the same `404`,
-so an outsider cannot probe which slugs are real.
+be **paused**. A paused slug, a non-existent slug and a delivery with a
+wrong credential all return the same `401` with the same body, so the
+answer never tells an outsider which slugs are real.
 
 ## Webhook authentication modes
 
@@ -63,13 +64,21 @@ case.
 
 | Mode | How the sender proves itself |
 |---|---|
-| `hmac-sha256` | An HMAC of the raw request body, in a signature header — optionally binding a timestamp that is checked against a replay window. |
+| `hmac-sha256` | An HMAC of the raw request body, in a signature header — by default binding a timestamp that is checked against a replay window. |
 | `static-header` | A shared secret presented verbatim in a named header. |
 | `basic` | HTTP Basic — the username is configuration, the password is the source's secret. |
 
+Prefer `hmac-sha256` with the timestamp (the default) when the sender
+supports it: the signature covers the body and the time, so a signed
+request is only valid inside the replay window (five minutes by
+default). The other two modes, and `hmac-sha256` without a timestamp,
+have no time window: a delivery stays valid as long as the secret is
+the same. Use them when the sender cannot sign with a timestamp, and
+rotate their secrets.
+
 Every rejection returns the **same** uniform `401`; the specific reason
-is logged server-side, never in the response, so a probing sender learns
-nothing.
+is logged server-side, never in the response, so a sender learns
+nothing from the answer.
 
 ## The shipped source kinds
 
@@ -90,15 +99,21 @@ story, but auth is per-source configuration, not welded to the kind.
 The ingest endpoint runs a fixed, fail-closed sequence for every
 delivery, and the order is load-bearing:
 
-1. **Resolve** the source by slug (uniform `404` if missing or paused).
+1. **Resolve** the source by slug. A missing or paused source is refused
+   at the authentication step below, with the same `401` as a wrong
+   credential.
 2. **Body cap** (`413`) — enforced before the whole body is buffered, so
-   an understated `Content-Length` cannot smuggle an oversize payload
-   past it. A source may lower the cap, never raise it.
-3. **Authenticate** (`401`) per the source's `auth_strategy`.
-4. **Rate-limit** (`429` with `Retry-After`) per tenant and source.
-5. **De-duplicate** — a delivery id (or a hash of the body) makes a
-   redelivery collide at insert and return an idempotent `200`, so a
-   retry-storming sender never double-fires a subscriber.
+   an understated `Content-Length` cannot get an oversize payload past
+   it. A source may lower the cap, never raise it.
+3. **Rate-limit** (`429` with `Retry-After`) per tenant and source. Every
+   delivery counts, accepted or refused, and the limit runs before the
+   secret is read.
+4. **Authenticate** (`401`) per the source's `auth_strategy`.
+5. **De-duplicate** — a hash of the signed data (the timestamp and the
+   body for a timestamped HMAC, else the body) makes a redelivery of the
+   same request collide at insert and return an idempotent `200`, so a
+   retry-storming sender never double-fires a subscriber. The same body
+   signed at a later time is a new event.
 6. **Publish and audit in one transaction.** The event is written to the
    durable event log and a synchronous audit row is committed in the
    *same* transaction. As everywhere in MEHO, there is no success without
@@ -144,8 +159,9 @@ other way round.
 
 ```bash
 # Fire the incident-triage agent on any critical, firing alert.
+# --agent-definition takes the definition's UUID (`meho agent show incident-triage`).
 meho scheduler create --kind event \
-  --agent-definition incident-triage \
+  --agent-definition <definition-uuid> \
   --event-filter '{"status": "firing", "labels": {"severity": "critical"}}'
 ```
 
@@ -197,9 +213,9 @@ dispatch, on the audit ledger.
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| Every delivery returns `404` | The slug is wrong, or the source is paused — the two are deliberately indistinguishable. | Confirm the slug and that the source's status is active. |
-| Deliveries return `401` | The signature or secret did not verify; the reason is never returned. | Re-check the sender's secret and signature header against the source's `auth_strategy`. |
-| Ingest returns `200` but no agent run fires | The event was accepted but no `event` trigger's filter matched it. | Compare the trigger's `--event-filter` against the lifted top-level fields; test with a broader filter first. |
+| Deliveries return `401` | The slug is wrong, the source is paused, the source has no secret yet, or the signature or secret did not verify — the answer is the same for all of them on purpose, and the reason is never returned. | Confirm the slug and that the source is active with a secret set, then re-check the sender's secret and signature header against the source's `auth_strategy`. The server log names the reason. |
+| Deliveries return `503 secret_unavailable` | MEHO could not read the source's secret from Vault. Intake reads it with the check-runner identity, so that role's policy must cover `secret/data/tenants/+/event-sources/*`. | Give the check-runner Vault role read access to the event-source secrets ([`docs/cross-repo/vault-provisioning.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md)). |
+| Ingest returns `202` (or `200` for a repeat of the same delivery) but no agent run fires | The event was accepted but no `event` trigger's filter matched it. | Compare the trigger's `--event-filter` against the lifted top-level fields; test with a broader filter first. |
 | One alert fires many agent runs | A filter is too broad (in the limit, `{}` matches everything). | Tighten the filter to the fields and source `kind` you mean. |
 | A source registered but ingest still fails closed | It was registered without a secret. | Set the secret with an update before pointing the sender at it. |
 

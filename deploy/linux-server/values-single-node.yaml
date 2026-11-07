@@ -22,12 +22,16 @@ coreKeycloak:
   enabled: true
 coreVault:
   enabled: true
-# shortcut: the chart does not yet derive these from its built-in parts
-# (#4047). Until it does, name the Secret the install makes and the
-# built-in OpenBao's address. Delete these three keys when #4047 lands.
-postgres:
-  credentialsSecret: meho-core-postgres-meho
-vault:
-  address: http://meho-vault:8200
+# The web console. The chart's secrets Job makes its Secret (#4041); these
+# keys only wire it into the backplane. Without them, the console login
+# answers 503. The approval hand-off key needs no lines: with the built-in
+# core the chart turns it on with the Secret the install makes (#4047).
+# When #4766 lets the chart fill in the names for the built-in Keycloak,
+# only the "enabled: true" line stays.
+uiConsole:
+  enabled: true
+  secretName: meho-core-ui-auth
 config:
-  vaultAddr: http://meho-vault:8200
+  # The schema requires the client of the console when uiConsole is on. With
+  # the built-in Keycloak the chart uses meho-web either way (#4766).
+  uiKeycloakClientId: meho-web

@@ -36,14 +36,15 @@ Enforcement is **service-principal-only**. The branch structure:
 
 | Principal | `requires_approval` | mutating `caution` / `dangerous` | safe / read |
 |---|---|---|---|
-| `USER` (human, interactive) | park (queue) | **auto-execute** (unchanged) | auto-execute |
+| `USER` (person) | park (queue) | park; a `caution` op runs at once in the web interface (#3980) | `safe` runs at once; a token call parks a `caution` read (#3980) |
 | `SERVICE` (client-credentials) | park unless granted | **park unless granted** (#3152) | auto-execute |
 | `AGENT` | `resolve_verdict` (agent-permission model) — untouched | | |
 
-A human `USER` operator keeps the v0.2 default-allow contract (they are
-their own approver via the approval queue); `safety_level` is consulted
-**only** for a `SERVICE` principal. That is how "operator-interactive"
-is distinguished from "service principal": the `principal_kind` claim
+A person follows the web-interface and token rule of
+`_person_park_reason` (#3980; see
+[agent-permission-model.md](agent-permission-model.md#safety-levels-at-a-glance)).
+Standing grants apply **only** to a `SERVICE` principal. The
+`principal_kind` claim tells a person from a service principal
 (`user` vs `service`, `auth/jwt.py::_extract_principal_kind`). Agents are
 unaffected — they keep the `AgentPermission` verdict model.
 
@@ -71,14 +72,14 @@ the **absent-claim** case on either of two positive markers:
 
 Fail-closed for the policy path: only a positive marker *upgrades*; any
 unrecognised shape stays `user`, and an interactive human token (which
-always carries a session claim) is never upgraded, so the `user`
-default-allow is preserved. As a residual-drift signal, `_non_agent_verdict`
+always carries a session claim) is never upgraded, so a person keeps
+the person rule. As a residual-drift signal, `_non_agent_verdict`
 emits a WARN (`policy_gate_grant_holder_classified_non_service`) whenever a
 **parking** non-service principal still holds ≥1 live grant.
 
 **"Mutating" is grounded in existing descriptor fields** (no new column,
 `_is_mutating`): an ingested op is read-class iff its HTTP `method` ∈
-`{GET, HEAD}` (the `READ_HTTP_METHODS` set); a typed / composite op
+`{GET, HEAD}` (the `_READ_METHODS` set in `_validate.py`); a typed / composite op
 carries no `method`, so its curated `safety_level` stands in (`safe` =
 read, `caution` / `dangerous` / `destructive` = write). `destructive`
 parks always **and is never grant-satisfiable** (#3183); `dangerous`
@@ -89,9 +90,12 @@ When a `SERVICE` op would park, the gate consults a live standing grant
 matched — the dispatcher and the composite sub-op gate both pass it; the
 gateway path is safe-only and never needs it). A match auto-approves the
 op and records the use; absent a match, the op parks for a human decision.
-The one exception is the `destructive` tier: `consult_and_record_grant`
-refuses it **before** any grant lookup, so even a stale grant row cannot
-auto-approve a destructive op — the tier always parks for a human.
+Two ops are refused **before** any grant lookup, so even a stale grant
+row cannot auto-approve them: the `destructive` tier (the tier always
+parks for a human) and an op with a parameter marked
+`x-meho-caller-address: true` (it connects to an address the caller
+gives; a grant never covers the address, so a person approves each call,
+and grant create refuses such a grant — `caller_address_grant_reason`).
 Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).
@@ -135,6 +139,20 @@ explicit — no wildcards** on `principal_sub`, `op_id`, or `connector_id`
 (contrast `AgentPermission`, whose `op_pattern` is a glob for the *agent*
 model). Creating the grant IS the operator's upfront review, deny-by-default
 absent a match.
+
+**Role floor.** Some ops need a role from the person who runs them
+(`operations/role_floors.py`): `targets.register` and the `topology.*`
+writes need `tenant_admin`. A grant lets the service principal run the op
+with no approval, so the person who makes the grant needs the same role,
+like the person who approves a parked call. `_review` checks
+`role_floor_denial(op_id, creator_role)` and raises `GrantRoleFloorError`
+(a `GrantValidationError`) below the floor. Every path that makes a grant
+passes `_review`: `create` and the renewal of delete grants. Both take
+`creator_role`, the role of the person. Its default is `operator`, the
+lowest role that makes grants, so a caller that does not pass it is held to
+the floor. REST answers 403 `role_floor_required: <op> needs the
+tenant_admin role; your role is operator`. The console passes the
+session's role; its grant writes need `tenant_admin` anyway.
 
 The **target scope** is one of three shapes:
 
@@ -235,6 +253,23 @@ layer (`ServicePrincipalGrantService.create`, NULL-safe on the nullable
 selector columns) rather than by a partial index, sidestepping the awkward
 NULL-vs-NULL portability across Postgres / SQLite.
 
+**A grant that has ended does not block a new one (#5424).** A grant whose
+`expires_at` is in the past gives no rights, but an index cannot compare with
+the current time. So both indexes also carry `AND replaced_at IS NULL`
+(migration `0134`, on `service_principal_grant` and `sandbox_delete_grant`).
+When a grant is created, `_insert` first sets `replaced_at` on every ended,
+never revoked row with the exact same key (target id and both selector
+columns matched NULL-safe), in the same transaction. The selector check skips
+rows with `replaced_at` set too. Then:
+
+- the same grant can be made again without a revoke first;
+- a grant that has not ended still blocks a second one (422 "already exists;
+  revoke it first");
+- the ended row keeps its `expires_at` and `revoked_at`, so it stays in the
+  history and in the list with `include_expired=true`. `replaced_at` is not
+  part of the read shape;
+- a refused create is rolled back, so it marks nothing.
+
 ### Orphaned grants — the target was deleted or registered again (#3430)
 
 A grant with a concrete `target_id` matches only that exact target id. When
@@ -304,17 +339,21 @@ delete-shaped ops:
   `DELETE` verb, or a hand-authored `destructive` tag on a typed op.
 
 The first two signs need only the op id (`delete_shaped_refusal_reason`),
-so they also work for an op with no stored row. The action-name sign and
-`_delete_shaped_reason_by_descriptor` are consulted at **both** ends:
-create-time (above) and dispatch-time (`consult_and_record_grant`, so a
-stale grant predating an op's promotion into the `destructive` tier, or a
-grant row written for a VI-JSON delete, can never satisfy it). An inner
-step of a multi-step operation reaches the gate as an in-memory record with
-only its declared level — no method, no tags — so for it the op id is the
-only sign, and the action name is what catches `Destroy_Task`. That is what
-makes "a standing grant can never satisfy a destructive op" hold whether
-the grant is being created or consulted. A grant row that already exists
-for such an op stays in the list but never lets the op run; revoke it with
+so they also work for an op with no stored row. All three signs are one
+rule, `delete_grant_reason`, and it is consulted at **both** ends:
+create-time (above) and dispatch-time (`consult_and_record_grant`). So a
+grant row that is older than the sign can never satisfy the op: a grant
+made before a pattern joined the list (a release that adds one, or an
+operator who adds one to `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`), a grant
+predating an op's promotion into the `destructive` tier, or a grant row
+written for a VI-JSON delete. An inner step of a multi-step operation
+reaches the gate as an in-memory record with only its declared level — no
+method, no tags — so for it the op id is the only sign: the action name is
+what catches `Destroy_Task`, and the pattern list is what catches an inner
+`DELETE:` step or a typed `*.delete`. That is what makes "a standing grant
+can never satisfy a destructive op" hold whether the grant is being created
+or consulted. A grant row that already exists for such an op stays in the
+list but never lets the op run; revoke it with
 `meho service-principals grants revoke <id>`. The one exception is an
 instance in sandbox mode; see [Sandbox mode](#sandbox-mode-4622) below.
 
@@ -439,7 +478,7 @@ What the code does:
   on (a `Settings` field, read at boot only, default `false`; chart value
   `sandboxMode.deleteGrantsFromApi`), REST and the CLI may create a delete
   grant too: `POST /api/v1/service-principals/grants` passes
-  `by_tenant_admin`, and an `operator` without `tenant_admin` gets
+  the caller's role as `creator_role`, and an `operator` without `tenant_admin` gets
   `DeleteGrantNeedsTenantAdminError`, HTTP 403
   `grants_require_tenant_admin`. A machine token still gets 403 before the
   route runs. The checks are the console's (`_review`). The mode check
@@ -479,6 +518,13 @@ What the code does:
   so a `destructive` step or child stays refused. A delete below
   `destructive` needs no hash. With no delete grant the call falls through
   to the rules above, so an ordinary grant never changes its verdict.
+- **Role checks in a handler.** A service login has the `operator` role
+  on purpose. An op whose handler asks for `tenant_admin` must let a
+  service principal through when its call runs at once in sandbox mode,
+  or the delete grant cannot help. `targets.remove` does this (#5480): the
+  handler checks `sandbox_mode_active()`, the principal kind and the
+  gate's verdict (`policy_decision_var` is `auto-execute`). See
+  [`targets.md`](targets.md#removing-a-target-targetsremove).
 - **The grant-use row.** `payload.delete_grant = true`, plus
   `preview_hash` and `blast_radius` for a `destructive` call, or
   `proposed_effect` for a delete below it. A step's row names its
@@ -498,7 +544,7 @@ What the code does:
   render fails when the host is not `ingress.host`; the notes warn.
 
 Tests: `test_sandbox_mode_boot.py`, `test_sandbox_mode_grants.py`,
-`test_sandbox_mode_calls.py`, `test_sandbox_mode_verdict_table.py` (with
+`test_sandbox_mode_verdict_table.py` (with
 the checked-in mode-off table `tests/data/sandbox_mode_verdict_table_off.json`),
 `test_sandbox_mode_audit_mark.py`, `test_sandbox_mode_display.py`,
 `test_chart_sandbox_mode.py`, `migrations/test_migration_0115_add_sandbox_mode.py`.
@@ -525,7 +571,8 @@ supported alternative:
 `connector_id` the answer carries. A vCenter write step is checked under the
 connector the target resolves to (#4991): ask with `vmware-rest-8.0` for a
 vCenter 8.0.x target and with `vmware-rest-9.0` for a 9.x target. Without
-`connector_id` the route answers for `vmware-rest-9.0`.
+`connector_id` the route answers for the connector the composite is
+registered against.
 
 Each entry carries the child `op_id`, a best-effort `safety_level`
 (descriptor-resolved; `null` for a code-shipped vim sub-op with no
@@ -556,7 +603,9 @@ Create and revoke need a person. A token of an agent, a service principal
 or a runner gets 403 `human_principal_required` (the same check
 `require_human_principal` in `auth/rbac.py` that the approval decision
 routes and the agent-grant create / elevate routes use, #4616). List and
-show keep the role check alone.
+show keep the role check alone. Create also checks the op's role floor
+(see "Role floor" above): an `operator` gets 403 `role_floor_required` for
+`targets.register` and the `topology.*` writes.
 
 | Verb | Path | Purpose |
 |---|---|---|
@@ -615,7 +664,6 @@ on one of these routers has no matching CLI verb in that reference.
   stored display-name field, so their JWT `sub` is deliberately shown as the
   fail-open identity; concrete target UUIDs resolve to a tenant-local target
   name when available, while selector and targetless grants remain explicit.
-  / `path=approval.decision`.
 - **No agent-path change** — `resolve_verdict` and the `AgentPermission`
   model are untouched; agents keep their own grant model.
 

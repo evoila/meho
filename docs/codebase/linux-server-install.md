@@ -4,9 +4,9 @@
 
 Install form 2 puts MEHO on a plain Linux server that has no internet. The
 customer copies one download onto the machine and runs one script as root:
-`install.sh`. The design is in meho-internal
-`docs/design/2026-10-10-install-forms/form-2-linux-server.md`. Section 4
-gives the layout of the download, and section 5 gives the steps.
+`install.sh`. The design is in the internal form-2 design note. Section 4
+gives the layout of the download, and section 5 gives the steps. The
+Linux server install is not released for customers yet.
 
 Before step 1 the script finds out whether MEHO is installed already (see
 [The update](#the-update)). On a machine without MEHO it runs the six steps
@@ -80,7 +80,7 @@ update, read with `meho status --first-start`.
 | `lib/update.sh` | The update: finding the install, reading `install.json`, the refused options, the version step, the backup question, the OS packages of the appliance, the result lines. |
 | `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the install record, the result lines. |
 | `values-single-node.yaml` | The Helm values for one node. The download ships it as `chart/values-single-node.yaml`. |
-| `meho-host` | The host command: `check` (with the hardening lines), `support-bundle`, `admin-network` and `uninstall`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
+| `meho-host` | The host command: `check` (with the hardening lines), `support-bundle`, `admin-network`, `log-server` (only on the appliance) and `uninstall`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
 | `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with five changes. |
 | `tests/` | Python `unittest` suites that run `install.sh` against a fake machine. |
 | `.shellcheckrc` | Lets shellcheck follow the `source` lines of `install.sh`. |
@@ -102,7 +102,7 @@ about names that another file defines.
 | memory | `MemTotal` at least 7 GiB, which a machine with 8 GB shows | `/proc/meminfo` |
 | disk | at least 80 GB free for `/var/lib` | `df -P -k /var/lib` |
 | other runtime | none of `k3s`, `rke2`, `kubelet`, `containerd`, `dockerd`, `crio` is on `PATH` or runs | `command -v`, `pgrep -x` |
-| ports | TCP 80, 443, 6443, 9345, 10250, 2379, 2380, 2381, 9099 and UDP 8472 are free | `ss -H -l -n` |
+| ports | TCP 80, 443, 6443, 9345, 10250, 2379, 2380, 2381, 9099, 8081, 9091 and UDP 8472 are free, and the ports that parts of RKE2 listen on only on 127.0.0.1: TCP 2382, 10010, 10248, 10249, 10256, 10257, 10258, 10259 | `ss -H -l -n` |
 | clock | the clock is synchronised | `timedatectl show --property=NTPSynchronized` |
 | host name | a fully qualified name; default `hostname -f`, in lower case | `--hostname` |
 | DNS | the name has an A record in DNS; `/etc/hosts` does not count | see below |
@@ -180,16 +180,14 @@ command that shows RKE2's log.
 
 `write_place_values` writes `/etc/meho/values-place.yaml` (form-2 design,
 section 6): the host name as `ingress.host` and `coreKeycloak.hostname`,
-the first tenant's id, the two user names, and the pod range as the two
-network-policy ranges, so MEHO may reach the built-in PostgreSQL and
-OpenBao. Without `--first-tenant-id`, the id comes from an existing
-`values-place.yaml`, so a second run keeps the id Keycloak already uses;
-on a fresh machine it is a new UUID read once from
-`/proc/sys/kernel/random/uuid`. The two network-policy ranges are wiring
-until the chart derives them from its built-in parts (#4047), not a place
-answer. The update writes the file again from the answers in `install.json`,
-so when #4047 drops the two keys, the next update removes them from the
-file. The file holds no secret.
+the first tenant's id and the two user names. Without `--first-tenant-id`,
+the id comes from an existing `values-place.yaml`, so a second run keeps the
+id Keycloak already uses; on a fresh machine it is a new UUID read once from
+`/proc/sys/kernel/random/uuid`. The chart reaches its built-in parts by pod
+label (#4047), so the file holds no network-policy range. Older installs
+wrote the pod range there as `networkPolicy.postgresCIDR` and `vaultCIDR`;
+the update writes the file again from the answers in `install.json`, which
+removes them. The file holds no secret.
 
 `install_core` runs the download's Helm:
 
@@ -230,9 +228,9 @@ own messages are dropped, so a failure shows only the script's line.
 The first-login Secret must exist; the script stops otherwise. The unseal
 Secret may be missing: without it OpenBao is in keyholder mode (a person
 unseals it after every restart), so the script prints one `[WARN]` line,
-writes no key file and goes on. This is a shortcut until the OpenBao setup
-Job lands (#4044): the Secret then always exists after a fresh install,
-and a missing one becomes a `[FAIL]`.
+writes no key file and goes on. The OpenBao setup Job (#4044) makes this
+Secret on every fresh install, but `install.sh` still treats a missing one
+as a warning, not a `[FAIL]` (`lib/core.sh`).
 
 ### Step 6: the `meho` command, the install record and the result
 
@@ -493,10 +491,24 @@ kernel, the script prints a note to restart the machine after the update.
 `networkPolicy.ingressControllerNamespace: kube-system` (RKE2's Traefik
 runs there) and `ingress.tls.secretName: meho-core-tls`, the self-signed
 certificate the install makes. Every storage class stays at the chart's
-default, empty, so the volumes use the default class. Until the chart
-derives them from its built-in parts (#4047), the file also names the
-PostgreSQL Secret the install makes (`postgres.credentialsSecret`) and the
-built-in OpenBao's address (`vault.address`, `config.vaultAddr`).
+default, empty, so the volumes use the default class. The chart points
+MEHO at the built-in parts itself (#4047), so the file names no database
+Secret and no OpenBao address.
+
+It also turns on the web console (`uiConsole`), with the Secret
+`meho-core-ui-auth` that the chart's secrets Job makes. The Job makes a
+Secret when its values key is empty or holds the Job's own name, so naming
+it changes nothing on a fresh install. The approval hand-off key needs no
+line: with the built-in core the chart turns it on by itself (#4047). The schema requires a
+console client when `uiConsole` is on, so the file sets
+`config.uiKeycloakClientId: meho-web`, the client the chart uses with the
+built-in Keycloak. Without these keys, `/ui/auth/login` answered 503
+(`ui_oauth_not_configured`) after the week-4 install, and MEHO refused
+every credential write that must wait for an approval (#5630). When #4766
+lets the chart fill in the names for the built-in Keycloak, only the
+`uiConsole.enabled: true` line stays. The update passes the new download's
+file to the same Helm call (`install_core`), so an update turns the
+console on too.
 
 `/etc/meho/values-place.yaml` is written by step 4 (above). The download
 build renders the chart with `packaging/render-values.yaml`, which holds
@@ -536,14 +548,23 @@ customer's security team. `render_firewall_rules` writes it.
 - **The machine's own traffic passes first.** Packets on `lo`, on Calico's
   pod interfaces (`cali*`) and on flannel's VXLAN interface (`flannel*`)
   come from this machine or its pods. The chain accepts them before any
-  other rule. Then it accepts the packets of connections that are already
+  other rule. `lo` matches by its index (`iif "lo"`, `oif "lo"`): it always
+  exists, and CIS rule 4.3.6 looks for exactly `iif "lo" accept`. The
+  others match by name (`iifname "cali*"`), because Calico and flannel
+  create them later and the names need a wildcard (nft(8), "META
+  EXPRESSIONS"). Then it accepts the packets of connections that are already
   open (`ct state established,related`), and drops packets that
   connection tracking marks invalid.
-- **Pod and service ranges.** A packet from a network card with a source
-  address in the pod or service range is forged, so the chain drops it.
-  The ranges are the `--cluster-cidr` and `--service-cidr` values that
-  `config.yaml` gets too. The chain does not accept packets by these
-  ranges alone, because anyone on the network can forge a source address.
+- **Forged sources.** A packet from a network card with a source address
+  in the loopback range (`127.0.0.0/8`, `::1`), the pod range or the
+  service range is forged, so the chain drops it. kube-proxy in iptables
+  mode sets `net.ipv4.conf.all.route_localnet` to 1 for NodePorts on
+  127.0.0.1 (`--iptables-localhost-nodeports`, on by default). With it,
+  the kernel no longer treats a loopback address as invalid ("martian")
+  itself (ip-sysctl, `route_localnet`). The pod and service ranges are the
+  `--cluster-cidr` and `--service-cidr` values that `config.yaml` gets
+  too. The chain does not accept packets by these ranges alone, because
+  anyone on the network can forge a source address.
 - **Only for this machine.** The accept rules for 80, 443, SSH and ping
   match `fib daddr type local`: the packet is for an address of this
   machine. RKE2 turns IP forwarding on, so without this match a packet
@@ -558,8 +579,10 @@ customer's security team. `render_firewall_rules` writes it.
 - **Three chains for the appliance.** The table also has base chains on
   the `input`, `forward` and `output` hooks, at priority `filter` (0).
   They hold the rules of the MEHO appliance for traffic to the machine,
-  through it and from it. On a form-2 machine their policy is `accept`
-  and they have no drop rule, so they change nothing. The appliance build
+  through it and from it. On a form-2 machine their policy is `accept`.
+  Their only drop rules are the two loopback rules of CIS 4.3.6 in
+  `input`, for packets that `prerouting` drops first, so they change
+  nothing. The appliance build
   sets the three policies to `drop` and changes nothing else (form-2
   design, section 2, "One file for both forms"; ADR 0009 decision 1). The
   CIS Ubuntu 24.04 rules 4.3.5 to 4.3.8 look for a base chain with policy
@@ -574,22 +597,45 @@ customer's security team. `render_firewall_rules` writes it.
     hook. The kubelet, the API server and etcd reach each other over `lo`,
     also when they use the machine's own address, because Linux sends a
     packet for a local address through `lo`. Pods reach them over their
-    `cali*` interfaces. The drop rules of `prerouting` (`ct state invalid`
-    and the forged pod and service sources) stay in `prerouting` only.
+    `cali*` interfaces. After the cluster interfaces it drops the loopback
+    sources `127.0.0.0/8` and `::1`, the rules that CIS rule 4.3.6 looks
+    for. Its check (ComplianceAsCode `set_nftables_loopback_traffic`)
+    reads `nft list ruleset | awk '/hook input/,/}/'`: from the
+    `hook input` line to the next line with a closing brace. There it wants
+    `iif "lo" accept`, an `ip saddr` rule and, with IPv6 on, an
+    `ip6 saddr` rule. So these rules come before the first set of the
+    chain. The other drop rules of `prerouting` (`ct state invalid` and the
+    forged pod and service sources) stay in `prerouting` only.
   - `forward`: connections already set up, packets that the port
     forwarding rewrote (`ct status dnat`), and the pod and service ranges
     as source or destination.
   - `output`: `lo` and the cluster interfaces (for example the kubelet's
-    health checks), connections already set up, the pod and service
+    health checks), the machine's own addresses (`fib daddr type local`,
+    below), connections already set up, the pod and service
     ranges, DNS (UDP and TCP 53), NTP (UDP 123), the requests of the DHCP
     clients, ping, IPv6 neighbour discovery, and the multicast listener
     reports of MLD versions 1 and 2. Linux sends version 2 by default
     (`force_mld_version` is 0), so the chain accepts
-    `mld2-listener-report` next to the design's list. The rule for the
-    customer's log server comes with `meho-host log-server` (#4739).
-  - The loopback drop rules that CIS rule 4.3.6 also looks for (packets
-    from `127.0.0.0/8` or `::1` on a network card) are not in the file.
-    They can come with the appliance build.
+    `mld2-listener-report` next to the design's list. On the appliance,
+    `meho-host log-server` (#5752) adds one more rule in front of the
+    counter: the way out to the customer's log server, to its addresses
+    and TCP port only ([linux-server-meho-host.md](linux-server-meho-host.md)).
+  - `fib daddr type local` in `output` is for kube-proxy's destination
+    NAT. A connection from this machine to a service whose endpoint is
+    this machine, for example the Kubernetes API service `10.43.0.1:443`,
+    gets the machine's own address (`<host>:6443`) in the NAT of the
+    output hook (priority `dstnat`). The chain `output` (priority
+    `filter`) then still sees the network card of the first route as the
+    output interface, not `lo`, so `oif "lo"` does not match it. The
+    week-4 install (#4741) showed this with `nft monitor trace`. Without
+    the rule, with the policy `drop`, Calico's CNI plugin could not reach
+    the API service, and no new pod started (#5629). nft(8) allows the
+    `type` result of `fib` in the output hook.
+  - On the week-4 install (#4741), with the three policies set to `drop`
+    and these rules, the ComplianceAsCode checks of the CIS rules 4.3.5,
+    4.3.6 and 4.3.8 pass, new pods start, and every pod is Ready again
+    after a restart of the machine. Before #5631, the file had no loopback
+    drop rules, and 4.3.6 failed.
 - **The customer's own rules.** The header of the file says where they
   go: accept rules in the chain `prerouting`, before its last rule
   (`counter`), then a reload. The form-2 design (section 8) tells the
@@ -685,9 +731,14 @@ the SSH session, `none`, or `meho-host admin-network`.
 - `firewall_port_list` prints the ports as a port scan from another
   machine must see them: `80/tcp open`, `443/tcp open`,
   `22/tcp admin-network`, and RKE2's ports as `closed` (6443, 9345, 10250,
-  2379, 2380, 2381, 9099, 30000-32767 and 8472/udp). The arrays are in
-  `lib/firewall.sh`. The release test of form 2 (#4742) reads this list.
-  A test checks that every port of the free-port check of step 1 is in it.
+  2379, 2380, 2381, 9099, 8081, 9091, 30000-32767 and 8472/udp). 8081
+  (flanneld) and 9091 (calico-node) are Canal's: they listen on every
+  address, as `ss -tulpn` showed on the week-4 install (#4741). The arrays
+  are in `lib/firewall.sh`. The release test of form 2 (#4742) reads this
+  list. A test checks that every port of the free-port check of step 1 is
+  in it. The ports that parts of RKE2 listen on only on 127.0.0.1
+  (`REQUIRED_LOCAL_TCP_PORTS` in `lib/checks.sh`) are not in it: they
+  never answer from another machine. Step 1 checks that they are free.
 - The SSH rule reads the set `admin_network`. `meho-host admin-network`
   (#4739) changes only that set and its note, so a change to the rendering
   of the set must keep the lines it looks for (`set admin_network {`,
@@ -933,18 +984,27 @@ machine for each test:
 `tests/test_firewall.py` covers the admin network check, the three
 firewall files, the order of step 2, firewalld and ufw, the port list and
 `firewall_state`. It also checks that the chains `input`, `forward` and
-`output` have policy `accept` and no drop rule, and that the chain `input`
+`output` have policy `accept` and no drop rule except the two loopback
+drops in `input`, that these come before the first set of `input`, that
+`output` accepts `fib daddr type local`, and that the chain `input`
 accepts the same traffic as the chain `prerouting`, so the two cannot
 drift apart. `tests/test_firewall_nft.py` checks the written rules
 file with the real `nft` and the real kernel: `nft -c -f`, and a load
 twice next to stand-in tables of kube-proxy and Canal. It also loads the
 appliance variant, with the three policies set to `drop`, and opens a TCP
-connection over `lo` with it. It runs in a new
+connection over `lo` with it. With a dummy network card and a stand-in
+for kube-proxy's NAT, it connects to `10.43.0.1:443`, which the NAT sends
+to the machine's own address; without `fib daddr type local` in `output`
+that connection times out. It also runs the checks of the CIS rules
+4.3.5, 4.3.6 and 4.3.8 (as the ComplianceAsCode scripts do them) on the
+real `nft list ruleset`, for the form-2 file and the appliance variant.
+It runs in a new
 user and network namespace (`unshare --map-root-user --net`), so the
 machine's own firewall stays as it is. It needs `nft`, user namespaces and
-a kernel with `nft_ct` and `nft_fib_inet`, and it is skipped without them.
-The CI job installs `nftables` and sets `MEHO_REQUIRE_NFT_CHECK=1`, which
-turns that skip into a failure.
+a kernel with `nft_ct` and `nft_fib_inet`, and the service test also needs
+`ip` and dummy network cards. It is skipped without them.
+The CI job installs `nftables` and `iproute2` and sets
+`MEHO_REQUIRE_NFT_CHECK=1`, which turns that skip into a failure.
 
 `tests/test_cis.py` covers RKE2's CIS profile: the two lines in
 `config.yaml`, the pod security file against RKE2's own file (only
@@ -988,7 +1048,9 @@ CI job sets `MEHO_REQUIRE_APT_CHECK=1`, which turns that skip into a
 failure.
 
 `tests/test_core_install.py` also renders the chart with
-`values-single-node.yaml` and the place values the script wrote. It skips
+`values-single-node.yaml` and the place values the script wrote. It checks
+that the backplane reads the console and approval hand-off keys from the
+two Secrets, and that the secrets Job makes both of them. It skips
 when `helm` is not on `PATH`, unless `MEHO_REQUIRE_HELM=1` is set; CI sets
 it, with the Helm version the download ships.
 
@@ -1001,7 +1063,8 @@ shellcheck deploy/linux-server/install.sh deploy/linux-server/lib/*.sh
 ```
 
 CI: `.github/workflows/linux-server-test.yml` runs on every pull request
-that changes `deploy/linux-server/` or the chart. It installs shellcheck
+that changes `deploy/linux-server/`, `deploy/appliance/`, the chart or the
+workflow itself. It installs shellcheck
 v0.11.0 and Helm v3.16.4 (both pinned with a checksum) and nftables, runs
 shellcheck on every `*.sh` file and every file with a shell shebang there,
 checks the local-path fixture against upstream, checks the two RKE2
@@ -1046,12 +1109,9 @@ Tasks add in this folder are checked by the same job.
   an update refuses. A machine whose DNS record changed since the install
   is a case for support.
 
-- **Three parts of the core are not on `main` yet, so an install cannot be
-  green on a real machine until they land:** the OpenBao init Job and the
-  unseal Secret (#4044, #4046; the script warns and writes no key file),
-  the chart's own wiring of the built-in parts (#4047; three keys in
-  `values-single-node.yaml` do it by hand until then), and
-  `meho status --first-start` (#4042; the result names the list as missing).
+- **`meho status --first-start` is not on `main` yet** (#4042; the result
+  names the list as missing), so an install cannot show its first-start
+  checks until it lands.
 - **The Helm time limit is 15 minutes per operation:** the wait for the
   pods, and each hook Job, so the whole install may take longer. The
   week-4 install (#4741) shows whether a 4-processor machine needs more.
@@ -1065,14 +1125,12 @@ Tasks add in this folder are checked by the same job.
   reason, and `check-download.sh` checks every digest; see
   [linux-server-download.md](linux-server-download.md). A `docker save`
   archive would get new digests, and RKE2 would not find the images offline.
-- **The CIS profile is not proven on a real machine yet.** The tests here
+- **The CIS profile is proven on one real machine only.** The tests here
   prove the files and the order of the steps, not RKE2 itself. The week-4
-  install (#4741) checks that every pod is Ready under the profile, that no
-  MEHO namespace needs an exception, and that the console loads through
-  Traefik. An offline check of the chart, rendered with
-  `values-single-node.yaml`, found no pod of the `meho` namespace that
-  breaks the "restricted" rules, but only the API server's own check
-  proves it.
+  install (#4741, MEHO 0.41.0 on Ubuntu 24.04) had every pod Ready under
+  the profile with no MEHO namespace exception, and the console loaded
+  through Traefik. The release test (#4742) repeats this for every
+  release.
 - **A later sysctl file can undo a kernel setting.** The install stops when
   a file that `systemd-sysctl` reads after `60-rke2-cis.conf` sets one of
   RKE2's values again. If someone adds such a line after the install, RKE2
@@ -1082,16 +1140,16 @@ Tasks add in this folder are checked by the same job.
   The admin network is IPv4 too, so SSH over IPv6 gets no answer.
 - **SSH on port 22 only.** The rules open SSH on port 22. A session on
   another port stops the install (see [The admin network](#the-admin-network)).
-- **The live proof is still open.** No test here runs RKE2 with Canal
-  behind the rules. The week-4 install (#4741) checks them on a real
-  machine: `ss -tulpn`, a port scan from inside and outside the admin
-  network, the console in a browser, the redirect of port 80, and every
-  pod Ready. It records the real port list, and the closed list in
-  `lib/firewall.sh` follows it. It also sets the policies of the chains
-  `input`, `forward` and `output` to `drop`, as the appliance does, and
-  checks the CIS rules 4.3.5 to 4.3.8 with Canal running. The kernel test
-  here proves only that nft loads that variant and that traffic over `lo`
-  passes it.
+- **The live proof is from one machine.** No test here runs RKE2 with
+  Canal behind the rules. The week-4 install (#4741) checked them on a
+  real machine: from the admin network only TCP 22, 80 and 443 answer,
+  from outside it only 80 and 443, port 80 redirects, and every pod is
+  Ready. With the policies of `input`, `forward` and `output` set to
+  `drop`, as the appliance does, it found the two gaps that #5629 and
+  #5631 close. The real port list is in #4741; the port check of step 1
+  follows it in #5632. The kernel tests here prove that nft loads the
+  appliance variant, that traffic over `lo` and to a service on the
+  machine itself passes it, and that the CIS checks pass on it.
 - **A customer's `nftables.service`.** Its stop command (and on RHEL its
   reload) runs `flush ruleset`, which removes the MEHO table and the rules
   of kube-proxy and Canal. RKE2 keeps running until its next start, which

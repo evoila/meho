@@ -8,8 +8,9 @@ Covers the connector's load-bearing contracts on the ``net.*`` mould:
 * ``mail.send`` is a **synthetic** targetless typed op: it dispatches
   with ``target=None``, the wire ``connector_id`` ``mail-smtp-1.x``
   round-trips through the parser, and the descriptor row carries
-  ``safety_level="caution"`` + ``requires_approval=False`` (operators
-  auto-run; agents ride the policy gate's needs-approval default).
+  ``safety_level="caution"`` + ``requires_approval=False`` (a person in
+  the web interface runs it at once; a token call and an agent wait for
+  approval, #3980).
 * The recipient allowlist ``MAIL_RECIPIENT_ALLOWLIST`` has **inverted**
   semantics: empty ⇒ every send refused *before any SMTP connection
   opens*; full-address and domain entries admit recipients.
@@ -47,12 +48,12 @@ import ssl
 from collections.abc import AsyncIterator, Iterator
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.mail import ops as mail_ops
@@ -63,10 +64,7 @@ from meho_backplane.connectors.mail.allowlist import (
     parse_recipient_allowlist,
 )
 from meho_backplane.connectors.mail.ops import register_mail_typed_operations
-from meho_backplane.connectors.mail.tenant_policy import (
-    reset_tenant_mail_policy_cache_for_testing,
-    resolve_tenant_recipient_allowlist,
-)
+from meho_backplane.connectors.mail.tenant_policy import resolve_tenant_recipient_allowlist
 from meho_backplane.connectors.mail.transport import MailSendResult, send_email
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
@@ -108,11 +106,9 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
     reset_dispatcher_caches()
-    reset_tenant_mail_policy_cache_for_testing()
     yield
     get_settings.cache_clear()
     reset_dispatcher_caches()
-    reset_tenant_mail_policy_cache_for_testing()
 
 
 def _configure_mail_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
@@ -294,6 +290,7 @@ async def _registered_mail_op(stub_embedding_service: AsyncMock) -> AsyncIterato
 
 
 def _make_operator() -> Operator:
+    # A person in the web interface, so the ``caution`` send runs at once (#3980).
     return Operator(
         sub="test-operator",
         name=None,
@@ -301,6 +298,7 @@ def _make_operator() -> Operator:
         raw_jwt="fake.jwt.value",
         tenant_id=UUID(int=0),
         tenant_role=TenantRole.OPERATOR,
+        web_session=True,
     )
 
 
@@ -403,6 +401,64 @@ async def test_recipient_outside_allowlist_refuses_whole_send(
     result = await send_email(to=["oncall@example.com", "exfil@evil.test"], subject="s", body="b")
 
     assert result == MailSendResult(sent=False, reason="not_in_recipient_allowlist")
+
+
+#: Addresses whose domain is listed but whose local part holds a character
+#: outside letters, digits and ``. _ + -``. A relay may read ``%`` or ``!``
+#: in a local part as a forwarding instruction, so the gate refuses them.
+_NON_PLAIN_LOCAL_PART_RECIPIENTS: Final[list[str]] = [
+    "<box>x@example.com",
+    "box>x@example.com",
+    "box%other.test@example.com",
+    "other.test!box@example.com",
+]
+_NON_PLAIN_LOCAL_PART_IDS: Final[list[str]] = [
+    "angle-brackets",
+    "closing-bracket",
+    "percent",
+    "bang",
+]
+
+
+@pytest.mark.parametrize(
+    "recipient", _NON_PLAIN_LOCAL_PART_RECIPIENTS, ids=_NON_PLAIN_LOCAL_PART_IDS
+)
+async def test_non_plain_local_part_is_refused_before_any_smtp_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    recipient: str,
+) -> None:
+    """The allowlist gate refuses a non-plain local part on the shared transport.
+
+    The domain is listed, so only the local-part rule stands between the
+    send and the (exploding) SMTP constructor. This is the path the checks
+    notifier uses, which never passes through the ``mail.send`` schema.
+    """
+    _configure_mail_env(monkeypatch)
+
+    result = await send_email(to=[recipient], subject="s", body="b")
+
+    assert result == MailSendResult(sent=False, reason="not_in_recipient_allowlist")
+
+
+@pytest.mark.parametrize(
+    "recipient", _NON_PLAIN_LOCAL_PART_RECIPIENTS, ids=_NON_PLAIN_LOCAL_PART_IDS
+)
+async def test_non_plain_local_part_is_invalid_params_on_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+    recipient: str,
+) -> None:
+    """A dispatched ``mail.send`` rejects a non-plain local part at the schema."""
+    _configure_mail_env(monkeypatch)
+
+    result = await _dispatch_send({"to": [recipient], "subject": "s", "body": "b"})
+
+    assert result.status == "error"
+    assert result.extras is not None
+    assert result.extras["error_code"] == "invalid_params"
+    assert any(err["validator"] == "pattern" for err in result.extras["validation_errors"])
 
 
 async def test_unconfigured_host_refuses_with_smtp_unconfigured(
@@ -925,8 +981,31 @@ def test_assert_recipient_allowed_full_address_and_domain(
 
 @pytest.mark.parametrize(
     "recipient",
-    ["", "no-at-sign", "two@@example.com", "a@b@c", "evil@example.com\r\nBcc: x@y.z"],
-    ids=["empty", "no-at", "double-at", "two-ats", "crlf-injection"],
+    ["plain@example.com", "first.last+tag@example.com", "On-Call_1@ops.test"],
+    ids=["plain", "dot-plus", "listed-address-hyphen-underscore-digit"],
+)
+def test_assert_recipient_allowed_admits_plain_local_parts(
+    monkeypatch: pytest.MonkeyPatch,
+    recipient: str,
+) -> None:
+    """Letters, digits and ``. _ + -`` in the local part still pass both entry shapes."""
+    monkeypatch.setenv("MAIL_RECIPIENT_ALLOWLIST", "on-call_1@ops.test, example.com")
+    get_settings.cache_clear()
+    assert_recipient_allowed(recipient)
+
+
+@pytest.mark.parametrize(
+    "recipient",
+    [
+        "",
+        "no-at-sign",
+        "two@@example.com",
+        "a@b@c",
+        "evil@example.com\r\nBcc: x@y.z",
+        '"quoted box"@example.com',
+        "box=tag@example.com",
+    ],
+    ids=["empty", "no-at", "double-at", "two-ats", "crlf", "quoted-local", "equals-sign"],
 )
 def test_assert_recipient_allowed_rejects_malformed_recipient(
     monkeypatch: pytest.MonkeyPatch,
@@ -1162,6 +1241,46 @@ async def test_resolver_fails_closed_to_deny_on_read_error(
     )
     resolved = await resolve_tenant_recipient_allowlist(UUID(int=7))
     assert resolved == (frozenset(), frozenset())
+
+
+async def _narrow_tenant_mail_allowlist(value: str | None) -> None:
+    """Change the seeded tenant's column in a fresh session, as another process would."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        await session.execute(
+            update(Tenant).where(Tenant.id == _TENANT_ID).values(mail_recipient_allowlist=value)
+        )
+        await session.commit()
+
+
+async def test_resolver_sees_a_policy_change_on_the_next_read() -> None:
+    """A change committed after a read governs the very next read, with no eviction."""
+    await _seed_tenant_mail_allowlist(None)
+    assert await resolve_tenant_recipient_allowlist(_TENANT_ID) is None
+
+    await _narrow_tenant_mail_allowlist("")
+
+    assert await resolve_tenant_recipient_allowlist(_TENANT_ID) == (frozenset(), frozenset())
+
+
+async def test_narrowed_policy_refuses_the_next_dispatched_send(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_smtp: type,
+    _registered_mail_op: None,
+) -> None:
+    """A send that was allowed a moment ago is refused right after the policy narrows."""
+    _configure_mail_env(monkeypatch)
+    await _seed_tenant_mail_allowlist(None)
+    first = await _dispatch_send({"to": ["a@example.com"], "subject": "s", "body": "b"})
+    assert first.status == "ok", first.error
+    assert first.result["sent"] is True
+
+    await _narrow_tenant_mail_allowlist("")
+
+    second = await _dispatch_send({"to": ["a@example.com"], "subject": "s", "body": "b"})
+    assert second.status == "ok", second.error
+    assert second.result["sent"] is False
+    assert second.result["reason"] == "not_in_recipient_allowlist"
 
 
 async def test_tenant_denied_send_writes_audit_row(

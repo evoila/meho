@@ -69,7 +69,11 @@ from meho_backplane.db.models import (
     Target,
     Tenant,
 )
-from meho_backplane.operations._errors import result_already_resumed
+from meho_backplane.operations._errors import (
+    result_already_resumed,
+    result_target_gone_since_approval,
+)
+from meho_backplane.operations.approval_queue import claim_resume, persist_resume_result
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -925,7 +929,14 @@ def test_approve_through_bff_destructive_needs_a_sign_in_of_its_own() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     plain = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
     destructive = _seed_destructive_request()
-    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=20, sid="kc-sid-a")
+    # An admin may approve another person's destructive change (#3328).
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        sub=_REVIEWER_SUB,
+        role=TenantRole.TENANT_ADMIN,
+        sign_in_age=20,
+        sid="kc-sid-a",
+    )
 
     assert _post_decision(operator, plain).status_code == 200  # type: ignore[attr-defined]
     assert _request_status(plain) == ApprovalRequestStatus.APPROVED.value
@@ -934,7 +945,13 @@ def test_approve_through_bff_destructive_needs_a_sign_in_of_its_own() -> None:
     response = _post_decision(operator, destructive, resume_mock=resume_mock)
     _assert_sign_in_asked(response, destructive, resume_mock)
 
-    new_sign_in = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=5, sid="kc-sid-b")
+    new_sign_in = _operator(
+        tenant_id=_TENANT_A,
+        sub=_REVIEWER_SUB,
+        role=TenantRole.TENANT_ADMIN,
+        sign_in_age=5,
+        sid="kc-sid-b",
+    )
     assert _post_decision(new_sign_in, destructive).status_code == 200  # type: ignore[attr-defined]
     assert _request_status(destructive) == ApprovalRequestStatus.APPROVED.value
     recorded = _decision_approval_auth(destructive)
@@ -946,7 +963,9 @@ def test_approve_through_bff_destructive_keeps_its_own_age_limit() -> None:
     """A 400-second-old sign-in is inside the window but too old for a destructive request."""
     _seed_tenant(_TENANT_A, "tenant-a")
     destructive = _seed_destructive_request()
-    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sign_in_age=400)
+    operator = _operator(
+        tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.TENANT_ADMIN, sign_in_age=400
+    )
     resume_mock = AsyncMock(return_value=_dispatch_result())
 
     response = _post_decision(operator, destructive, resume_mock=resume_mock)
@@ -1154,6 +1173,87 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
     assert "APPROVAL_ALLOW_SELF_APPROVAL" in body
     assert "guides/approvals-and-break-glass" in body
     # The row is NOT approved, and nothing was re-dispatched.
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+    resume_mock.assert_not_awaited()
+
+
+_TOKEN_CAUTION_EFFECT: dict[str, object] = {
+    "op_id": "vsphere.vm.create",
+    "connector_id": "vsphere-1.x",
+    "safety_level": "caution",
+    "waits_because": "token_call",
+}
+
+
+def test_self_approve_of_token_caution_with_web_click_is_allowed() -> None:
+    """#3980: a person's own ``caution`` change that waited only for the token.
+
+    The change came with a token, so it waited. The same person may approve
+    it with a click in the web interface: the Approve button is enabled and
+    the approval goes through.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A, principal_sub=_REVIEWER_SUB, proposed_effect=_TOKEN_CAUTION_EFFECT
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB).model_copy(
+        update={"web_session": True}
+    )
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, resume_mock),
+        ):
+            modal = client.get(f"/ui/approvals/{rid}")
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert modal.status_code == 200, modal.text
+    approve_button = modal.text.split('data-action="approve"')[1].split("</button>")[0]
+    assert "disabled" not in approve_button
+    assert response.status_code == 200, response.text
+    assert "Request approved" in response.text
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
+    resume_mock.assert_awaited_once()
+
+
+def test_self_approve_of_requires_approval_caution_keeps_group_rules() -> None:
+    """#3980: without the token reason, the same web click is refused (#3328 rules)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        principal_sub=_REVIEWER_SUB,
+        proposed_effect={"op_id": "vsphere.vm.create", "safety_level": "caution"},
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB).model_copy(
+        update={"web_session": True}
+    )
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, resume_mock),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "cannot approve your own request" in response.text.lower()
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
     resume_mock.assert_not_awaited()
 
@@ -2783,7 +2883,7 @@ def test_detail_modal_release_refusal_says_the_run_did_not_happen() -> None:
 
     assert response.status_code == 200, response.text
     body = response.text
-    assert 'data-testid="approval-release-refused"' in body
+    assert 'data-testid="approval-run-refused"' in body
     assert "MEHO was updated after this request was made" in body
     assert "The operation did not run." in body
     assert "The requester must ask again." in body
@@ -2833,6 +2933,84 @@ def test_approve_refused_by_release_change_says_nothing_ran() -> None:
     assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
 
 
+#: The stored envelope of a run MEHO refused because the target changed.
+_TARGET_REFUSED_ENVELOPE: dict[str, object] = {
+    "status": "denied",
+    "op_id": "vsphere.vm.create",
+    "error": "target_changed_since_approval: the target changed.",
+    "duration_ms": 0.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {
+        "error_code": "target_changed_since_approval",
+        "target_id": "11111111-1111-1111-1111-111111111111",
+    },
+}
+
+
+def test_detail_modal_target_refusal_says_the_run_did_not_happen() -> None:
+    """A run MEHO refused because the target changed is not described as a run."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="refused.op", resume_result=_TARGET_REFUSED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-run-refused"' in body
+    assert 'data-error-code="target_changed_since_approval"' in body
+    assert "The connection settings of the target changed" in body
+    assert "The operation did not run." in body
+    assert "The requester must ask again." in body
+    assert "The approved operation ran" not in body
+    assert "did not succeed" not in body
+    assert 'data-result-state="failed"' in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
+def test_approve_refused_by_target_gone_says_nothing_ran() -> None:
+    """An approve MEHO refuses because the target is gone does not say the run failed."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    refused = SimpleNamespace(
+        status="denied",
+        op_id="vsphere.vm.create",
+        audit_id=uuid.UUID(_RUN_AUDIT_ID),
+        extras={"error_code": "target_gone_since_approval"},
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=refused)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but MEHO did not run it" in body
+    assert "The target of this request no longer exists" in body
+    assert "The operation did not run." in body
+    assert "Approved, but the run failed" not in body
+    assert "was approved and ran" not in body
+    assert "Request approved" not in body
+    assert "target_gone_since_approval" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
 def test_approve_whose_run_fails_shows_a_failed_card() -> None:
     """An approve whose run errors does not render the plain success card."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -2868,32 +3046,100 @@ def test_approve_whose_run_fails_shows_a_failed_card() -> None:
     assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
 
 
-def test_approve_already_resumed_elsewhere_shows_the_approved_card() -> None:
-    """Another resumer won the run claim: that is not a failed run."""
-    _seed_tenant(_TENANT_A, "tenant-a")
-    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+def _post_approve_with_resume(rid: uuid.UUID, resume_mock: AsyncMock) -> str:
+    """Approve *rid* in the console with *resume_mock* as the resume; return the card."""
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    already = result_already_resumed("vsphere.vm.create", rid, 1.0)
-
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
-            patch(_RESUME_DISPATCH, AsyncMock(return_value=already)),
+            patch(_RESUME_DISPATCH, resume_mock),
         ):
             response = client.post(
                 f"/ui/approvals/{rid}/approve",
                 data={"reason": "looks safe"},
                 headers={CSRF_HEADER_NAME: csrf},
             )
-
     assert response.status_code == 200, response.text
-    body = response.text
+    return response.text
+
+
+def _resume_lost_to(rid: uuid.UUID, stored: object | None) -> AsyncMock:
+    """A resume that loses the run claim to another caller.
+
+    Plays the waiting requester: before the console's resume answers
+    ``already_resumed``, it takes the claim and, when *stored* is given,
+    records that result on the row, as the agent waiter does.
+    """
+
+    async def _lose(**_: object) -> object:
+        assert await claim_resume(rid)
+        if stored is not None:
+            await persist_resume_result(rid, stored, parked_op_id="vsphere.vm.create")
+        return result_already_resumed("vsphere.vm.create", rid, 1.0)
+
+    return AsyncMock(side_effect=_lose)
+
+
+def test_approve_already_resumed_elsewhere_says_the_run_is_still_going() -> None:
+    """Another resumer won the run claim and no result is stored yet.
+
+    The card must not say the operation was re-dispatched: it says the run
+    is still going and where its result will show.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body = _post_approve_with_resume(rid, _resume_lost_to(rid, None))
+
+    assert 'data-testid="approval-run-started"' in body
+    assert "Approved, the run is still going" in body
+    assert "Request approved" not in body
+    assert "re-dispatched" not in body
+    assert "the run failed" not in body
+    assert 'data-testid="approval-outcome"' not in body
+
+
+def test_approve_already_resumed_by_a_target_refusal_says_nothing_ran() -> None:
+    """The waiting requester recorded a target refusal before the console resumed.
+
+    The console's resume loses the claim and answers ``already_resumed``.
+    The card reads the stored result off the row and says MEHO did not run
+    the operation and why, instead of "Request approved".
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    refusal = result_target_gone_since_approval(
+        "vsphere.vm.create", approval_request_id=rid, target_id=uuid.uuid4()
+    ).model_copy(update={"audit_id": uuid.UUID(_RUN_AUDIT_ID)})
+
+    body = _post_approve_with_resume(rid, _resume_lost_to(rid, refusal))
+
+    assert "Approved, but MEHO did not run it" in body
+    assert 'data-testid="approval-run-refused"' in body
+    assert "The target of this request no longer exists" in body
+    assert "The operation did not run." in body
+    assert "target_gone_since_approval" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+    assert "Request approved" not in body
+    assert "re-dispatched" not in body
+    assert "Approved, but the run failed" not in body
+
+
+def test_approve_already_resumed_elsewhere_and_landed_shows_the_approved_card() -> None:
+    """The waiting requester ran the operation and it landed: a plain approved card."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    landed = {"status": "ok", "op_id": "vsphere.vm.create", "result": {"vm": "vm-1"}}
+
+    body = _post_approve_with_resume(rid, _resume_lost_to(rid, landed))
+
     assert "Request approved" in body
     assert "the run failed" not in body
+    assert 'data-testid="approval-run-started"' not in body
     assert 'data-testid="approval-outcome"' not in body
 
 

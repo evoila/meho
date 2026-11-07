@@ -768,6 +768,7 @@ def _agent() -> Operator:
 
 
 def _approver() -> Operator:
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
     return Operator(
         sub=_APPROVER,
         name=None,
@@ -775,6 +776,7 @@ def _approver() -> Operator:
         raw_jwt="fake.jwt.value",
         tenant_id=_TENANT_ID,
         tenant_role=TenantRole.OPERATOR,
+        self_approver=True,
     )
 
 

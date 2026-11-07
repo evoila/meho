@@ -48,6 +48,11 @@ These are the failure modes each test would catch if the fix regressed:
   ``asyncio.to_thread`` hop (running the parse on the loop) would freeze
   the loop for the whole parse; the deterministic injected block makes
   that crisp and CPU-speed-independent.
+* :func:`test_spec_version_check_stays_off_the_event_loop` — running the
+  spec-vs-label version check on the loop (dropping its
+  ``asyncio.to_thread``) would freeze the loop for the whole download and
+  parse that ``read_spec_info_version`` does, before the first ``await``
+  of ``ingest()``.
 * :func:`test_catalog_entry_ingest_rides_the_async_job_path` — a
   ``--catalog`` request that fell onto the synchronous branch would
   reintroduce the crash for the exact command the catalog next-step hint
@@ -188,6 +193,7 @@ def _operator() -> Operator:
         raw_jwt="header.payload.signature",
         tenant_id=uuid.uuid4(),
         tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
     )
 
 
@@ -442,6 +448,66 @@ async def test_blocking_parse_stays_off_the_event_loop(
     assert worst_spanning < block_s, (
         f"a {worst_spanning:.3f}s gap spanned the {block_s}s parse window; "
         "the loop was frozen for the block's duration (asyncio.to_thread regressed)"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True], ids=["real-run", "dry-run"])
+async def test_spec_version_check_stays_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+) -> None:
+    """A slow, blocking ``read_spec_info_version`` must not freeze the loop.
+
+    ``ingest()`` checks each spec's ``info.version`` against the label
+    before it parses anything. The helper downloads and parses the whole
+    spec with blocking calls, so ``ingest()`` runs the check in
+    ``asyncio.to_thread``. Here the helper is replaced with a stub that
+    blocks for a fixed time. Offloaded, the heartbeat keeps ticking while
+    the stub blocks. On the loop, no heartbeat can land inside the block.
+
+    Same tick-count shape as :func:`test_blocking_parse_stays_off_the_event_loop`:
+    the test counts heartbeats inside the block and checks no time limit,
+    so a busy runner cannot fail it. Both the real run (used by the
+    background and the blocking request) and the dry run go through the
+    same call in ``ingest()``.
+    """
+    from meho_backplane.operations.ingest import pipeline as _pipeline_mod
+
+    block_s = 0.3
+    block_window: list[float] = []
+
+    def _blocking_read_version(uri: str, *, content: str | None = None) -> str | None:
+        block_window.append(time.monotonic())
+        time.sleep(block_s)
+        block_window.append(time.monotonic())
+        return "1.0.0"
+
+    monkeypatch.setattr(_pipeline_mod, "read_spec_info_version", _blocking_read_version)
+
+    service = _service(monkeypatch)
+    spec = SpecSource(uri="spec:loadtest-tiny", content=_synth_openapi_spec(3))
+
+    _result, beats = await _run_with_heartbeat(
+        service.ingest(
+            product=_PRODUCT,
+            version=_VERSION,
+            impl_id=_IMPL_ID,
+            specs=[spec],
+            tenant_id=None,
+            dry_run=dry_run,
+        )
+    )
+
+    assert len(block_window) == 2, "the patched version check did not run exactly once"
+    block_start, block_end = block_window
+
+    ticks_in_block = [gap for wake, gap in beats if block_start <= wake <= block_end]
+    assert len(ticks_in_block) >= _MIN_TICKS_DURING_BLOCK, (
+        f"only {len(ticks_in_block)} heartbeats landed inside the {block_s}s version "
+        f"check (need >= {_MIN_TICKS_DURING_BLOCK}); the loop was not free while "
+        "read_spec_info_version ran, so the check is not offloaded "
+        "(asyncio.to_thread regressed)"
     )
 
 

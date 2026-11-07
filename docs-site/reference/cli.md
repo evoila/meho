@@ -111,7 +111,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--cli-approve-client-id` — public client_id for the fresh browser sign-in of `meho approvals approve` (matches chart's `config.keycloakCliApproveClientId`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
 - `--cli-offline-access` — how many seconds an unused CLI login stays valid: assigns `offline_access` as an optional client scope on the device-code CLI client and sets its `client.offline.session.idle.timeout` attribute, so `meho login` gets a login that renews itself. Default 172800 seconds (48h). Use the equals form for another value, e.g. `--cli-offline-access=86400`. `--cli-offline-access=0` turns the long CLI login off and removes it from a client an earlier run set up. The refresh token is a long-lived secret on the operator's disk (OS keyring first)
-- `--dry-run` — print what would be provisioned without making any API calls
+- `--dry-run` — read the realm and print each change a real run would make, without changing anything (needs the admin login, for the reads)
 - `--insecure-skip-tls-verify` — escape hatch: skip TLS certificate AND hostname verification for every Keycloak request (sends the admin password + token over an unverified connection; prints a loud warning). Prefer --keycloak-ca-bundle
 - `--keycloak-base-url` — Keycloak base URL, e.g. https://keycloak.example.com
 - `--keycloak-ca-bundle` — path to a PEM CA bundle to verify the Keycloak server certificate against (keeps chain + hostname verification ON while trusting an internal realm CA). Preferred over --insecure-skip-tls-verify; the two are mutually exclusive
@@ -127,7 +127,7 @@ meho admin keycloak bootstrap-clients [flags]
 
 ## `meho agent`
 
-Manage agent definitions (list / show / create / edit / delete)
+Manage agent definitions, runs and grants (list / show / create / edit / delete / run / grant)
 
 ```
 meho agent
@@ -717,7 +717,7 @@ meho audit count [flags]
 - `--op-id` — count only one op-id (glob with * wildcards)
 - `--parent-audit-id` — count only the rows whose parent is this audit-id (UUID)
 - `--principal` — count only one operator (part of the user id or the name; case does not matter)
-- `--result-status` — count only one result-status (ok|error|denied|pending)
+- `--result-status` — count only one result-status (ok|error|denied|pending|withdrawn)
 - `--session-id` — count only one agent session (UUID)
 - `--since` — start of the window; 24h / 7d / 30m / 2w shorthand or ISO-8601 (default: the last 24 hours)
 - `--target` — count only one target (name or alias; server-side resolution)
@@ -754,7 +754,7 @@ meho audit query [flags]
 - `--op-id` — narrow to one op-id (glob with * wildcards)
 - `--parent-audit-id` — narrow to the rows whose parent is this audit-id (UUID); e.g. the decision and run rows of one approval request
 - `--principal` — narrow to one operator (part of the user id or the name; case does not matter)
-- `--result-status` — narrow to one result-status (ok|error|denied|pending); pending is history: the run stopped to wait for approval and the row stays pending after the decision; use 'meho approvals list' to see what waits now
+- `--result-status` — narrow to one result-status (ok|error|denied|pending|withdrawn); pending is history: the run stopped to wait for approval and the row stays pending after the decision; use 'meho approvals list' to see what waits now
 - `--session-id` — narrow to one agent session (UUID); the flat companion to `meho audit replay`
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
 - `--target` — narrow to one target (name or alias; server-side resolution)
@@ -1052,7 +1052,7 @@ meho bind9 zone read <zone> [flags]
 
 ## `meho broadcast`
 
-Manage broadcast-detail overrides (overrides list / set / remove)
+Read, announce and watch agent announcements, and manage broadcast-detail overrides (recent / announce / watch / overrides)
 
 ```
 meho broadcast
@@ -1160,7 +1160,7 @@ meho broadcast watch [flags]
 
 ## `meho connector`
 
-spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable / delete)
+Ingest vendor specs and review connectors (ingest / ingest-status / list / catalog / review / edit-group / edit-op / enable / enable-reads / disable / delete / overrides / remove-override / tenant-setting)
 
 ```
 meho connector
@@ -1285,7 +1285,7 @@ meho connector ingest [flags]
 - `--save-converted` — manual mode: when a --spec is a Swagger 2.0 file the CLI converts to OpenAPI 3, also write the converted file here so you can check it and keep it next to the original
 - `--spec` — spec URI; repeat for multi-spec merge under one connector_id; manual mode
 - `--spec-info-versions-compatible` — manual mode: declare that the spec's info.version is compatible with --version even when they differ (e.g. a vendor /api/v2 surface self-versioning as info.version=v2 ingested under --version 9.0). Each entry is a glob (2.x, 9.0.x) or a PEP 440 specifier set (>=2,<3); repeatable or comma-separated. Without it, a spec/label major mismatch is rejected; mutually exclusive with --catalog (the catalog row carries its own band)
-- `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 unless you hold platform_admin)
+- `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant; needs platform_admin); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 unless you hold platform_admin)
 - `--version` — product version (e.g. 9.0, 1.x); manual mode
 
 ### `meho connector ingest-status`
@@ -1486,7 +1486,7 @@ meho conventions show <slug> [flags]
 
 ## `meho dashboard`
 
-Manage deterministic-check dashboards (list / show / create / delete)
+Manage deterministic-check dashboards (list / show / create / edit / delete)
 
 ```
 meho dashboard
@@ -1521,6 +1521,24 @@ meho dashboard delete <dashboard_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit a structured JSON result instead of plain text
 - `--tenant` — target tenant UUID (platform_admin cross-tenant delete)
+
+### `meho dashboard edit`
+
+Change members, name or mail settings of one dashboard (tenant_admin)
+
+```
+meho dashboard edit <dashboard_id> [flags]
+```
+
+- `--add-sensor` — sensor UUID to add (repeatable)
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw DashboardDetail JSON instead of the human summary
+- `--name` — new dashboard name (unique per tenant)
+- `--notify-email` — new comma-separated mail recipient(s)
+- `--notify-min-state` — new mail floor: degraded or critical
+- `--notify-off` — turn transition mail off
+- `--remove-sensor` — sensor UUID to remove (repeatable)
+- `--tenant` — target tenant UUID (platform_admin cross-tenant edit)
 
 ### `meho dashboard list`
 
@@ -2887,7 +2905,8 @@ meho kb list [flags]
 - `--filter` — narrow entries by a SQL LIKE pattern (e.g. `vcenter%`)
 - `--json` — emit raw KbListResponse JSON instead of the human table
 - `--limit` — max entries per page (1..500, server default 100 when omitted)
-- `--offset` — offset into the slug-sorted result set (default 0)
+- `--offset` — offset into the result set, in the chosen order (default 0)
+- `--order` — sort order: slug (A to Z) or newest (most recently updated first) (default: slug)
 
 ### `meho kb search`
 
@@ -4550,7 +4569,7 @@ meho secret read <mount> <path> [flags]
 
 ## `meho sensor`
 
-Manage deterministic-check sensors (list / create / delete)
+Manage deterministic-check sensors (list / create / edit / delete / results)
 
 ```
 meho sensor
@@ -4570,6 +4589,7 @@ meho sensor create [flags]
 - `--connector-id` — connector id of the operation to evaluate
 - `--cron-expr` — 5-field cron expression (required when --cadence-kind=cron)
 - `--for-seconds` — hold-time hysteresis in seconds a failing state must persist (default 0)
+- `--force` — create the sensor even when its connector does not fit the target's product and version
 - `--identity-sub` — identity sub the runner dispatches under (default '__sensor__')
 - `--interval-seconds` — interval in seconds, 5..86400 (required when --cadence-kind=interval)
 - `--json` — emit raw Sensor JSON instead of the human summary
@@ -4594,6 +4614,28 @@ meho sensor delete <sensor_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit a structured JSON result instead of plain text
 - `--tenant` — target tenant UUID (platform_admin cross-tenant delete)
+
+### `meho sensor edit`
+
+Change some fields of one sensor (tenant_admin)
+
+```
+meho sensor edit <sensor_id> [flags]
+```
+
+- `--assertion` — new assertion spec JSON object (inline JSON, @<path>, or @-)
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cadence-kind` — new cadence kind: interval | cron
+- `--connector-id` — new connector id
+- `--cron-expr` — new 5-field cron expression
+- `--interval-seconds` — new interval in seconds, 5..86400
+- `--json` — emit raw Sensor JSON instead of the human summary
+- `--name` — new sensor name (unique per tenant)
+- `--op-id` — new operation id (must be safe)
+- `--params` — new op-params JSON object (inline JSON, @<path>, or @-)
+- `--severity` — new severity: degraded | critical
+- `--tenant` — target tenant UUID (platform_admin cross-tenant edit)
+- `--timezone` — new IANA timezone for cron evaluation
 
 ### `meho sensor list`
 
@@ -4904,7 +4946,7 @@ meho targets update <name, alias or id> [flags]
 
 ## `meho tenants`
 
-Choose the current tenant and operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)
+Choose the current tenant and operate per-tenant policy (flight-recorder capture, mail-recipient allowlist, model prices)
 
 ```
 meho tenants
@@ -4926,12 +4968,12 @@ Update the tenant flight-recorder capture policy (tenant_admin)
 meho tenants flight-recorder-policy set [flags]
 ```
 
-- `--agent-readable` — agent-read override (F5): true | false | inherit (inherit clears to the capture default)
+- `--agent-readable` — agent-read override: true | false | inherit (inherit clears to the capture default)
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--clear-retention` — clear the retention override back to the global default
-- `--enabled` — per-tenant capture default (F1); send true or false
+- `--enabled` — per-tenant capture default; send true or false
 - `--json` — emit the resolved policy as JSON instead of the human summary
-- `--retention-days` — per-tenant trace retention window in days (F4; 1..365)
+- `--retention-days` — per-tenant trace retention window in days (1..365)
 
 #### `meho tenants flight-recorder-policy show`
 
@@ -4965,6 +5007,49 @@ meho tenants mail-recipient-policy set [flags]
 - `--clear` — clear the per-tenant override back to inheriting the instance floor
 - `--json` — emit the resolved policy as JSON instead of the human summary
 
+### `meho tenants model-prices`
+
+Prices for agent models MEHO has no price for (tenant_admin)
+
+```
+meho tenants model-prices
+```
+
+#### `meho tenants model-prices list`
+
+List the tenant's model prices (tenant_admin)
+
+```
+meho tenants model-prices list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the tenant's prices as JSON instead of a table
+
+#### `meho tenants model-prices remove`
+
+Remove the price of one model (tenant_admin)
+
+```
+meho tenants model-prices remove <model> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the tenant's prices as JSON instead of a table
+
+#### `meho tenants model-prices set`
+
+Set the price of one model, in USD per million tokens (tenant_admin)
+
+```
+meho tenants model-prices set <model> --input <usd> --output <usd> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--input` — price of one million input tokens, in USD
+- `--json` — emit the tenant's prices as JSON instead of a table
+- `--output` — price of one million output tokens, in USD
+
 ### `meho tenants use`
 
 Choose the tenant every command works in; without a name, list your tenants
@@ -4978,7 +5063,7 @@ meho tenants use [<name|id>] [flags]
 
 ## `meho topology`
 
-Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / diff / history / annotate / unannotate / list-edges)
+Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / diff / history / annotate / unannotate / bulk-import / list-edges)
 
 ```
 meho topology

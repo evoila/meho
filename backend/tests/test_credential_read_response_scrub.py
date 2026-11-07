@@ -32,6 +32,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -312,6 +313,77 @@ async def _module_metadata_handler(
     return {"password": _PASSWORD_SECRET, "note": "not a credential_read op"}
 
 
+async def _module_pair_fields_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """A read whose answer lists the fields of a credential as name/value pairs."""
+    return {
+        "credentialInstances": [
+            {
+                "id": "<credential-id>",
+                "name": "my-credential",
+                "fields": [
+                    {"name": "USER", "value": "root"},
+                    {"name": "PASSWORD", "value": _PASSWORD_SECRET},
+                ],
+            }
+        ]
+    }
+
+
+async def _module_pair_fields_http_error_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """A read whose vendor answers with an error body that lists fields as pairs."""
+    request = httpx.Request("GET", "https://vendor.test/api/credentials")
+    response = httpx.Response(
+        500,
+        json=[{"name": "USER", "value": "root"}, {"name": "PASSWORD", "value": _PASSWORD_SECRET}],
+        request=request,
+    )
+    raise httpx.HTTPStatusError("500 Server Error", request=request, response=response)
+
+
+async def _module_escaped_pair_name_http_error_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """A read whose vendor error body writes the name of a pair with a JSON escape."""
+    request = httpx.Request("GET", "https://vendor.test/api/credentials")
+    body = (
+        '[{"name": "USER", "value": "root"}, '
+        '{"name": "\\u0050ASSWORD", "value": "' + _PASSWORD_SECRET + '"}, '
+        '{"value": "' + _PASSWORD_SECRET + '", "name": "\\u0050ASSWORD"}]'
+    )
+    response = httpx.Response(
+        500, content=body.encode(), headers={"content-type": "application/json"}, request=request
+    )
+    raise httpx.HTTPStatusError("500 Server Error", request=request, response=response)
+
+
+async def _register_pair_fields_read(
+    stub_embedding_service: AsyncMock, handler: Any = _module_pair_fields_handler
+) -> None:
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.versions",
+        handler=handler,
+        summary="List credential fields.",
+        description="Name/value pairs.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+
 async def _register_metadata_read(stub_embedding_service: AsyncMock) -> None:
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
@@ -399,3 +471,168 @@ def test_scrub_secret_named_values_passthrough_when_no_secret() -> None:
     scrubbed, found = scrub_secret_named_values(payload)
     assert found is False
     assert scrubbed == payload
+
+
+# ---------------------------------------------------------------------------
+# Name/value pairs
+# ---------------------------------------------------------------------------
+
+
+def test_scrub_hides_the_value_of_a_secret_named_pair() -> None:
+    """A ``{"name": "PASSWORD", "value": ...}`` pair hides its value; the others stay."""
+    scrubbed, found = scrub_secret_named_values(
+        {
+            "fields": [
+                {"name": "USER", "value": "root"},
+                {"name": "PASSWORD", "value": _PASSWORD_SECRET},
+                {"name": "apiToken", "value": {"parts": [_PASSWORD_SECRET]}},
+            ]
+        }
+    )
+    assert found is True
+    assert scrubbed == {
+        "fields": [
+            {"name": "USER", "value": "root"},
+            {"name": "PASSWORD", "value": _REDACTED},
+            {"name": "apiToken", "value": _REDACTED},
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # No ``value`` key: nothing to hide.
+        {"fields": [{"name": "PASSWORD"}]},
+        # A secret-shaped ``name`` on an object that is not a pair.
+        {"name": "my-credential", "fields": []},
+        # ``name`` is not a string.
+        {"name": 7, "value": "kept"},
+        # ``None`` and booleans under the pair stay.
+        {"name": "PASSWORD", "value": None},
+        {"name": "PASSWORD", "value": True},
+    ],
+)
+def test_scrub_keeps_what_is_not_a_secret_named_pair(payload: dict[str, Any]) -> None:
+    scrubbed, found = scrub_secret_named_values(payload)
+    assert found is False
+    assert scrubbed == payload
+
+
+def test_scrub_hides_a_number_under_a_secret_named_pair_only_when_asked() -> None:
+    payload = {"name": "pin_code_password", "value": 1234}
+    assert scrub_secret_named_values(payload) == (payload, False)
+    assert scrub_secret_named_values(payload, hide_numbers=True) == (
+        {"name": "pin_code_password", "value": _REDACTED},
+        True,
+    )
+
+
+def test_scrub_keeps_the_pair_of_a_declared_plain_name() -> None:
+    payload = {"fields": [{"name": "token", "value": "mode 600, owner root"}]}
+    assert scrub_secret_named_values(payload, plain_names=frozenset({"token"})) == (
+        payload,
+        False,
+    )
+
+
+async def test_read_op_hides_the_value_of_a_secret_named_pair_and_fingerprints_it(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The caller's view hides the pair value; the audit row stores its fingerprint."""
+    await _register_pair_fields_read(stub_embedding_service)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.versions",
+        target=None,
+        params={},
+    )
+    assert result.status == "ok", result.error
+    [instance] = result.result["credentialInstances"]
+    assert instance["name"] == "my-credential"
+    assert instance["fields"] == [
+        {"name": "USER", "value": "root"},
+        {"name": "PASSWORD", "value": _REDACTED},
+    ]
+    assert _PASSWORD_SECRET not in result.model_dump_json()
+
+    row = await _audit_row("vault.kv.versions")
+    raw = json.dumps(row.raw_payload)
+    assert _PASSWORD_SECRET not in raw
+    [stored] = row.raw_payload["credentialInstances"]
+    assert stored["fields"][0] == {"name": "USER", "value": "root"}
+    assert stored["fields"][1]["value"].startswith(_FINGERPRINT)
+
+
+async def test_read_op_http_error_body_hides_the_value_of_a_secret_named_pair(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The vendor's error text keeps the USER pair and hides the PASSWORD pair value.
+
+    The text reaches the caller in the error envelope and the audit row in
+    the stored error; neither holds the value.
+    """
+    await _register_pair_fields_read(stub_embedding_service, _module_pair_fields_http_error_handler)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.versions",
+        target=None,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.extras["http_status"] == 500
+    assert json.loads(result.extras["upstream_message"]) == [
+        {"name": "USER", "value": "root"},
+        {"name": "PASSWORD", "value": _REDACTED},
+    ]
+    assert _PASSWORD_SECRET not in result.model_dump_json()
+
+    row = await _audit_row("vault.kv.versions")
+    stored = json.dumps(
+        {column.name: getattr(row, column.name) for column in AuditLog.__table__.columns},
+        default=str,
+    )
+    assert _PASSWORD_SECRET not in stored
+    assert row.payload["result_status"] == "error"
+    assert _REDACTED in json.dumps(row.payload["error"])
+
+
+async def test_read_op_http_error_body_hides_the_value_of_a_pair_with_an_escaped_name(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A pair name written with a JSON escape is read by what it says.
+
+    The USER pair stays. Both PASSWORD pairs, name first and value first,
+    lose their value in the error envelope and in the audit row.
+    """
+    await _register_pair_fields_read(
+        stub_embedding_service, _module_escaped_pair_name_http_error_handler
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.versions",
+        target=None,
+        params={},
+    )
+    assert result.status == "error"
+    assert json.loads(result.extras["upstream_message"]) == [
+        {"name": "USER", "value": "root"},
+        {"name": "PASSWORD", "value": _REDACTED},
+        {"value": _REDACTED, "name": "PASSWORD"},
+    ]
+    assert _PASSWORD_SECRET not in result.model_dump_json()
+
+    row = await _audit_row("vault.kv.versions")
+    stored = json.dumps(
+        {column.name: getattr(row, column.name) for column in AuditLog.__table__.columns},
+        default=str,
+    )
+    assert _PASSWORD_SECRET not in stored
+    assert row.payload["result_status"] == "error"
+    assert _REDACTED in json.dumps(row.payload["error"])

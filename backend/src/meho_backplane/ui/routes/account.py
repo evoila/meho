@@ -21,18 +21,18 @@ This module adds an operator-tier Account page at ``/ui/account``:
   "revoke all other sessions" action.
 
 * ``POST /ui/account/sessions/revoke-others`` -- revoke every active
-  session for this operator **except** the current one.
+  session of this person, in every tenant, **except** the current one.
 
-* ``POST /ui/account/sessions/revoke`` -- revoke one session. The
-  session id travels in the form body (field ``session_id``), never in
-  the URL: the request path is the same for every row, so neither the
-  ingress access log nor the audit row's ``path`` ever holds a live
-  session id (the console session id is the session cookie value).
-  Ownership (``operator_sub`` AND ``tenant_id``) is enforced
-  **server-side** from the validated session context before
+* ``POST /ui/account/sessions/revoke`` -- revoke one session. The page
+  never holds a session id: the console session id is the session
+  cookie value. Each row carries its session ref instead
+  (:func:`~meho_backplane.ui.auth.session_ref.session_ref`, a short HMAC
+  of the id), and the form body sends it (field ``session_ref``). The
+  request path is the same for every row. The route looks the ref up
+  **only among the caller's own active sessions** (by ``operator_sub``
+  from the validated session context) before
   :func:`~meho_backplane.ui.auth.session_store.revoke_session` runs
-  (that helper does no ownership check); a non-owned / cross-tenant id
-  returns 404 so another operator's session id is never confirmed.
+  (that helper does no ownership check); an unknown ref returns 404.
   Revoking the current session ("this device") logs the operator out:
   the response carries an ``HX-Redirect`` to ``/ui/auth/login`` (and the
   next request's ``load_session`` returns ``None`` anyway, so the
@@ -42,14 +42,20 @@ RBAC: this is operator-tier -- any authenticated operator sees their
 **own** account. There is no ``tenant_admin`` gate and no "list/revoke
 another operator's sessions" surface; the listing and both revoke
 actions are scoped to the caller's own ``operator_sub`` from the
-session, never a form field.
+session, never a form field. They cover the person's sessions in every
+tenant: a tenant switch keeps the same session row, so a session that
+works in another tenant is listed (with its tenant) and can be revoked.
 
-Out of scope (Keycloak-owned / future): role editing, tenant switching
-(a slot is left in the template), password / MFA / token rotation.
+The page also lists the person's tenants with the role in each (#5240);
+switching happens on the tenant picker (:mod:`meho_backplane.ui.routes.tenant`).
+
+Out of scope (Keycloak-owned / future): role editing, password / MFA /
+token rotation.
 """
 
 from __future__ import annotations
 
+import hmac
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -57,13 +63,15 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_session
-from meho_backplane.db.models import WebSession
+from meho_backplane.db.models import Tenant
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.routes import LOGIN_PATH
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     ActiveSessionRow,
     list_active_sessions,
@@ -71,8 +79,10 @@ from meho_backplane.ui.auth.session_store import (
     revoke_other_sessions,
     revoke_session,
 )
+from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import _lift_operator
+from meho_backplane.ui.routes.tenant import TenantChoice, tenant_choices
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_account_router"]
@@ -95,53 +105,78 @@ _ROLE_UNKNOWN: str = "unknown"
 class _SessionRowView:
     """Template-facing projection of one active-session row.
 
-    Carries the pre-formatted relative + absolute timestamps and the
+    Carries the session ref (never the session id, which is the cookie
+    value), the tenant the session works in, the timestamps and the
     ``is_current`` flag (the "This device" badge) so the template stays
-    logic-light and the formatting is unit-testable on the route side.
+    logic-light.
     """
 
-    id: str
+    ref: str
+    tenant_label: str
     created_at: datetime
     last_seen_at: datetime
     expires_at: datetime
     is_current: bool
 
 
-async def _lift_role_value(session_ctx: UISessionContext) -> str:
-    """Return the live ``tenant_role`` value from the freshly-verified token.
+async def _lift_identity(session_ctx: UISessionContext) -> tuple[str, list[TenantChoice]]:
+    """Return the live role and the person's tenants from the freshly-verified token.
 
-    Lifts the full :class:`~meho_backplane.auth.operator.Operator` through
-    the shared JWT re-verify path
-    (:func:`~meho_backplane.ui.routes.connectors.operator._lift_operator`)
-    so a same-session role demotion shows up immediately -- the role is
-    never read from a value cached on the session row. Fails **soft**: a
-    JWT-validation hiccup (session row gone, JWKS unreachable, token
-    swapped) degrades the rendered role to ``"unknown"`` rather than
-    5xx-ing the read-only account page. No security gate hangs off this
-    value; the page only displays it.
+    The tenants carry the role in each (#5240). Fails soft like the role:
+    an empty list when the token cannot be lifted.
     """
     try:
         operator = await _lift_operator(session_ctx)
+    except (TenantChangedError, TenantRemovedError):
+        raise
     except Exception as exc:
         _log.info(
             "ui_account_role_lift_unavailable",
-            session_id=str(session_ctx.session_id),
+            session_ref=session_ref(session_ctx.session_id),
             reason=type(exc).__name__,
         )
-        return _ROLE_UNKNOWN
+        return _ROLE_UNKNOWN, []
     role = operator.tenant_role
-    return role.value if isinstance(role, TenantRole) else str(role)
+    role_value = role.value if isinstance(role, TenantRole) else str(role)
+    return role_value, await tenant_choices(operator, include_all=False)
 
 
-def _project_session_row(row: ActiveSessionRow, *, current_id: uuid.UUID) -> _SessionRowView:
+def _project_session_row(
+    row: ActiveSessionRow, *, current_id: uuid.UUID, tenant_labels: dict[uuid.UUID, str]
+) -> _SessionRowView:
     """Project an :class:`ActiveSessionRow` into the template view shape."""
     return _SessionRowView(
-        id=str(row.id),
+        ref=session_ref(row.id),
+        tenant_label=tenant_labels.get(row.tenant_id, str(row.tenant_id)),
         created_at=row.created_at,
         last_seen_at=row.last_seen_at,
         expires_at=row.expires_at,
         is_current=row.id == current_id,
     )
+
+
+async def _tenant_labels(
+    db_session: AsyncSession, tenant_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """Return the display name (else slug) of each tenant in *tenant_ids*."""
+    if not tenant_ids:
+        return {}
+    result = await db_session.execute(
+        select(Tenant.id, Tenant.slug, Tenant.name).where(Tenant.id.in_(tenant_ids))
+    )
+    return {row.id: row.name or row.slug for row in result}
+
+
+async def _session_views(
+    db_session: AsyncSession, session_ctx: UISessionContext
+) -> list[_SessionRowView]:
+    """Return the caller's active sessions in every tenant, as template rows."""
+    rows = await list_active_sessions(db_session, operator_sub=session_ctx.operator_sub)
+    labels = await _tenant_labels(db_session, {r.tenant_id for r in rows})
+    return [
+        _project_session_row(r, current_id=session_ctx.session_id, tenant_labels=labels)
+        for r in rows
+    ]
 
 
 async def _load_expires_at(
@@ -167,23 +202,18 @@ async def _render_page(
     db_session: AsyncSession,
 ) -> HTMLResponse:
     """Render ``GET /ui/account`` -- the full account page."""
-    role_value = await _lift_role_value(session_ctx)
+    role_value, tenants = await _lift_identity(session_ctx)
     expires_at = await _load_expires_at(db_session, session_ctx)
-    rows = await list_active_sessions(
-        db_session,
-        operator_sub=session_ctx.operator_sub,
-        tenant_id=session_ctx.tenant_id,
-    )
-    session_views = [_project_session_row(r, current_id=session_ctx.session_id) for r in rows]
+    session_views = await _session_views(db_session, session_ctx)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context: dict[str, object] = {
         "page_title": "Account",
         "active_surface": "account",
         "operator_sub": session_ctx.operator_sub,
         "role_value": role_value,
+        "tenants": tenants,
         "expires_at": expires_at,
         "sessions": session_views,
-        "current_session_id": str(session_ctx.session_id),
         "now_utc": datetime.now(UTC),
         "csrf_token": csrf_token,
     }
@@ -199,16 +229,10 @@ async def _render_sessions_fragment(
     db_session: AsyncSession,
 ) -> HTMLResponse:
     """Render the active-sessions list fragment (post-revoke HTMX swap)."""
-    rows = await list_active_sessions(
-        db_session,
-        operator_sub=session_ctx.operator_sub,
-        tenant_id=session_ctx.tenant_id,
-    )
-    session_views = [_project_session_row(r, current_id=session_ctx.session_id) for r in rows]
+    session_views = await _session_views(db_session, session_ctx)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context: dict[str, object] = {
         "sessions": session_views,
-        "current_session_id": str(session_ctx.session_id),
         "now_utc": datetime.now(UTC),
         "csrf_token": csrf_token,
     }
@@ -249,42 +273,34 @@ def _logout_redirect() -> HTMLResponse:
 async def _do_revoke_one(
     request: Request,
     *,
-    raw_session_id: str,
+    raw_session_ref: str,
     session_ctx: UISessionContext,
     db_session: AsyncSession,
 ) -> HTMLResponse:
-    """Revoke one session after enforcing server-side ownership.
+    """Revoke one of the caller's own sessions, found by its session ref.
 
-    *raw_session_id* is the ``session_id`` form field. Ownership is
-    asserted from the validated ``session_ctx`` -- never a form field:
-    the target row's ``operator_sub`` AND ``tenant_id`` must match the
-    caller's. A missing or malformed id, a missing row, or a
-    non-owned / cross-tenant row all return 404 so another operator's
-    session id is never confirmed (a 403 would reveal existence).
+    *raw_session_ref* is the ``session_ref`` form field. The ref is looked
+    up only among the caller's own active sessions (``operator_sub`` from
+    the validated ``session_ctx``, never a form field), in every tenant.
+    A missing or unknown ref returns 404.
     """
-    try:
-        session_id = uuid.UUID(raw_session_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="session not found") from exc
-
-    row = await db_session.get(WebSession, session_id)
-    if (
-        row is None
-        or row.operator_sub != session_ctx.operator_sub
-        or row.tenant_id != session_ctx.tenant_id
-    ):
-        # Either no such row, or it belongs to another operator / tenant.
-        # Collapse both to 404 so the response cannot be used to probe
-        # for the existence of another operator's session id.
+    target: uuid.UUID | None = None
+    wanted = raw_session_ref.encode("utf-8")
+    if wanted:
+        for row in await list_active_sessions(db_session, operator_sub=session_ctx.operator_sub):
+            if hmac.compare_digest(session_ref(row.id).encode("ascii"), wanted):
+                target = row.id
+                break
+    if target is None:
         raise HTTPException(status_code=404, detail="session not found")
 
-    await revoke_session(db_session, session_id)
-    is_current = session_id == session_ctx.session_id
+    await revoke_session(db_session, target)
+    is_current = target == session_ctx.session_id
     _log.info(
         "ui_account_session_revoked",
         operator_sub=session_ctx.operator_sub,
         tenant_id=str(session_ctx.tenant_id),
-        revoked_session_id=str(session_id),
+        revoked_session_ref=session_ref(target),
         is_current=is_current,
     )
     if is_current:
@@ -298,11 +314,10 @@ async def _do_revoke_others(
     session_ctx: UISessionContext,
     db_session: AsyncSession,
 ) -> HTMLResponse:
-    """Revoke every active session for this operator except the current one."""
+    """Revoke every active session of this person, in every tenant, except the current one."""
     revoked = await revoke_other_sessions(
         db_session,
         operator_sub=session_ctx.operator_sub,
-        tenant_id=session_ctx.tenant_id,
         keep_session_id=session_ctx.session_id,
     )
     _log.info(
@@ -318,8 +333,8 @@ def build_account_router() -> APIRouter:
     """Construct the Account surface :class:`APIRouter`.
 
     Both revoke routes are literal paths; the single revoke reads the
-    target session id from the form body so no route under
-    ``/ui/account/sessions/`` carries a session id in its path.
+    target's session ref from the form body, so no route under
+    ``/ui/account/sessions/`` carries anything about a session in its path.
     """
     router = APIRouter(tags=["ui-account"])
 
@@ -341,14 +356,14 @@ def build_account_router() -> APIRouter:
 
     async def _revoke_one(
         request: Request,
-        session_id: str = Form(default=""),
+        ref: str = Form(default="", alias="session_ref"),
         session_ctx: UISessionContext = _require_ui_session_dep,
         db_session: AsyncSession = _get_session_dep,
     ) -> HTMLResponse:
-        """``POST /ui/account/sessions/revoke`` -- the id is a form field."""
+        """``POST /ui/account/sessions/revoke`` -- the session ref is a form field."""
         return await _do_revoke_one(
             request,
-            raw_session_id=session_id,
+            raw_session_ref=ref,
             session_ctx=session_ctx,
             db_session=db_session,
         )
@@ -376,10 +391,8 @@ def build_account_router() -> APIRouter:
         responses={
             404: {
                 "description": (
-                    "The session_id form field is missing or malformed, the "
-                    "session does not exist, or it belongs to another "
-                    "operator / tenant. Collapsed to 404 so another "
-                    "operator's session id is never confirmed."
+                    "The session_ref form field is missing, or it names "
+                    "none of the caller's own active sessions."
                 ),
                 "content": {"text/html": {}},
             },

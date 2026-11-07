@@ -8,15 +8,15 @@ SSH → PowerShell. It is registered under the
 `(product="windns", version="2016.x", impl_id="windns-ssh")` registry triple
 plus the `("windns", "", "")` wildcard fallback row, and is a child of the
 shared `SshConnector` adapter (`connectors/adapters/ssh.py`) — the same
-transport base as `Bind9Connector`, `HolodeckConnector`, `PfSenseConnector`,
-and `Rke2SshConnector`.
+transport base as `Bind9Connector`, `PfSenseConnector`, `Rke2SshConnector`,
+`MsadConnector` and `WinsrvConnector`.
 
 Windows AD-DNS exposes **no record-management REST API**; before this
 connector the only path was manual `ssh <dc> powershell
 Add-DnsServerResourceRecord…`, which bypasses MEHO's audit/approval plane
 entirely. The connector is a structural sibling of bind9 (it mirrors bind9's
 identity + zone + record op surface and safety levels) built on the
-PowerShell-over-SSH transport the Holodeck connector established (base64
+shared PowerShell-over-SSH transport `_shared/pwsh.py` (base64
 UTF-16LE `-EncodedCommand` + stdlib `json` parse). Zone creation/deletion is
 out of scope, matching bind9 — the write surface is record-scoped.
 
@@ -47,6 +47,10 @@ Source: `backend/src/meho_backplane/connectors/windows_dns/`.
 
 `record.add` is `safety_level="caution"` (a DNS change is global — no
 per-caller scoping), mirroring bind9's `record.add`; `requires_approval=false`.
+Still, a call made with a token (MCP, the command line, REST) runs only `safe` ops at
+once. A `caution` op without its own approval flag then waits for an approval
+click; in the web interface it runs at once (`_person_park_reason` in
+`operations/_validate.py`).
 `record.remove` was promoted to the governed destructive tier by the #3288
 operator ruling (mirroring #3247 for `bind9.record.remove`):
 `safety_level="destructive"` + `requires_approval=True`, tagged
@@ -74,10 +78,12 @@ new op meaningfully expands surface beyond this posture sweep.
   Class attributes: `product="windns"`, `version="2016.x"`,
   `impl_id="windns-ssh"`, `POWERSHELL_EXECUTABLE="powershell"`. Ships
   `fingerprint`, `probe`, `about`, the bound-method op shims
-  (`windows_dns_zone_list`, `windows_dns_record_get` / `_add` / `_remove`),
+  (`windows_dns_zone_list`, `windows_dns_zone_get` / `_set`,
+  `windows_dns_record_get` / `_add` / `_remove`, `windows_dns_forwarder_list` /
+  `_set`),
   `register_operations`, and the operator-less `execute` dispatcher shim
-  (same shape as bind9 / Holodeck). Inherits the per-target asyncssh
-  connection pool, `_auth_config`, `_run_command`, `_assert_reachable`,
+  (same shape as bind9). Inherits the asyncssh connection pool (one login
+  per caller and target), `_auth_config`, `_run_command`, `_assert_reachable`,
   and `aclose()` from the adapter.
 - **Shared pwsh transport** (`_shared/pwsh.py`) — `pwsh_run` (the single
   seam every handler routes its script through), `encode_pwsh_command`
@@ -93,15 +99,15 @@ new op meaningfully expands surface beyond this posture sweep.
   `POWERSHELL_SCRIPT_PREFIX` (the `$ProgressPreference` guard here),
   `POWERSHELL_LOG_EVENT` (`windows_dns_pwsh_executed`).
 - **Op metadata** (`ops.py`) — `WindowsDnsOp` frozen dataclass (mirrors
-  `Bind9Op` / `HolodeckOp`) and `WINDOWS_DNS_OPS` (`about` + `ZONE_OPS` +
-  `RECORD_OPS`).
+  `Bind9Op`) and `WINDOWS_DNS_OPS` (`about` + `ZONE_OPS` +
+  `ZONE_SETTINGS_OPS` + `RECORD_OPS` + `FORWARDER_OPS`).
 - **Zone read** (`ops_zone.py`) — `windows_dns_zone_list` and
   `normalise_json_rows` (collapses `ConvertTo-Json`'s dict / list / null
   shapes to `list[dict]`).
 - **Record ops** (`ops_record.py`) — `windows_dns_record_get` / `_add` /
   `_remove` and the supported-`RRType` frozensets. `ps_single_quote` (the
   PowerShell analogue of `shlex.quote`) is imported from `_shared/pwsh`.
-- **Registration** (`__init__.py`) — two-phase, mirroring bind9/holodeck:
+- **Registration** (`__init__.py`) — two-phase, mirroring bind9:
   synchronous `register_connector_v2` at import time (versioned triple +
   wildcard row); async `register_windows_dns_typed_operations` queued onto
   the lifespan registrar list. No v1 `register_connector` — no chassis
@@ -129,7 +135,7 @@ Every op runs `powershell -NoProfile -NonInteractive -EncodedCommand
   `RecordData`) and `pwsh_run` parses stdout with stdlib `json`.
 - **Hashtable envelope for reads** — `ConvertTo-Json` emits *nothing* on a
   zero-object pipeline, which would trip `pwsh_run`'s empty-stdout guard,
-  so both reads wrap their result:
+  so both list reads (`zone.list`, `record.get`) wrap their result:
   `ConvertTo-Json -Depth 4 -InputObject @{ rows = $x; total = $x.Count }`.
   `record.get` runs under `$ErrorActionPreference = 'SilentlyContinue'`
   (a missing zone / no-match read is a legitimate empty result);
@@ -176,8 +182,9 @@ failure (`OSError`, `asyncssh.Error`, `ValueError`, `VaultClientError`,
 ## Auth
 
 Uses the base `SshConnector._auth_config` **unchanged** — a Vault secret
-with `ssh_private_key` prefers key auth, otherwise password auth runs (the
-Holodeck password-default + key-fallback shape). Credentials resolve via
+with `ssh_private_key` prefers key auth, otherwise password auth runs.
+The secret also holds a `known_hosts` line for the host or
+`known_hosts_insecure: true`. Credentials resolve via
 `_shared/vault_creds` from the Vault KV-v2 path string in
 `target.secret_ref` (the #2155 either/or shape). `probe()` carries no
 operator, so its Vault read runs under the synthesised system operator and
@@ -193,7 +200,7 @@ fails closed to `ssh_auth_failed`.
    `WindowsDnsConnector.register_operations`, which upserts each
    `WINDOWS_DNS_OPS` entry into `endpoint_descriptor` (idempotent across
    restarts) with the curated per-group `when_to_use`
-   (`identity` / `zone` / `record` groups).
+   (`identity` / `zone` / `record` / `forwarder` groups).
 3. **Dispatch** — `POST /api/v1/operations/call` resolves
    `connector_id="windns-ssh-2016.x"` + the target and invokes the bound
    handler through the policy/audit path. Transport/auth failures propagate
@@ -212,6 +219,8 @@ record.remove `-Force`, `about` mapping, the probe post-connect
 `command_failed` guard (parametrized over `OSError` /
 `asyncssh.ConnectionLost` / `TimeoutError`), and the registry-triple
 round-trip + safety-level invariants.
+`backend/tests/test_connectors_windows_dns_record_remove.py` covers the
+`record.remove` preview, approval and blast radius.
 
 ## Server settings for a new DNS server
 
@@ -252,15 +261,19 @@ Code: `ops_zone_settings.py`, `ops_forwarder.py`. Tests:
   bind9's whole-name `record.remove`. Tracked as an explicit follow-up.
 - `record.add` supports A + CNAME only (the deliberate bind9
   write-surface mirror); zone create/delete is out of scope.
-- Writes were live-validated against a WS2022 AD-DNS DC via `-WhatIf`
-  (2026-08-03); cmdlet surfaces are cross-checked against Microsoft Learn.
-- Host-key checking is disabled (`known_hosts=None`) at the adapter level
-  for v0.2, shared across the whole SSH family; pinning is deferred
-  repo-wide.
+- The record writes were live-checked against a WS2022 AD-DNS DC via
+  `-WhatIf` (2026-08-03). The zone and forwarder settings writes are checked
+  by the unit tests only. Cmdlet surfaces are cross-checked against Microsoft
+  Learn.
+- Host-key checking is on for the whole SSH family. The target's Vault secret
+  holds a `known_hosts` pin for the host, or `known_hosts_insecure: true` to
+  turn the check off for that one target. A secret with neither stops the
+  connection before any credential is sent (`SshHostKeyUnpinnedError` in
+  `connectors/adapters/ssh.py`).
 - The transport helper was hoisted from the package-local `_pwsh.py` to
   the shared `_shared/pwsh.py` (#3260, executing the #2759 note) — one
-  copy now serves windows_dns, holodeck, and the incoming Microsoft-estate
-  connectors (#3259). Per-connector wire differences ride three
+  copy serves windows_dns and the Microsoft-estate connectors (`winsrv`,
+  `msad`, `wsfc`, `hyperv`; #3259). Per-connector wire differences ride three
   class-level seams (`POWERSHELL_EXECUTABLE` / `POWERSHELL_SCRIPT_PREFIX`
   / `POWERSHELL_LOG_EVENT`).
 
@@ -269,7 +282,7 @@ Code: `ops_zone_settings.py`, `ops_forwarder.py`. Tests:
 - Task #2759 (connector); PR #2760.
 - Molds: `docs/codebase/connectors-bind9.md` (op-surface mirror + #986
   probe discipline), `docs/codebase/connectors-holodeck.md`
-  (PowerShell-over-SSH transport), `docs/codebase/connectors-rke2.md`
+  (in the private connectors repository; PowerShell-over-SSH transport), `docs/codebase/connectors-rke2.md`
   (SSH-family doc shape).
 - DnsServer module cmdlet reference:
   <https://learn.microsoft.com/en-us/powershell/module/dnsserver/>

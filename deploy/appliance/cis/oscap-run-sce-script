@@ -1,0 +1,13 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# oscap-run-sce-script: OpenSCAP runs a script check of the CIS content
+# through this file when it cannot run the check itself. On the appliance
+# that is every time: OpenSCAP writes the checks under /tmp, and /tmp is
+# noexec (CIS 1.1.2.1). Without this file each script check ends in
+# "error". Ubuntu ships it only in openscap-utils, which also pulls in rpm.
+# Every script check of the content is a bash script. harden.sh installs it
+# in /usr/local/bin, where OpenSCAP finds it on PATH. See
+# docs/codebase/appliance-cis.md.
+exec /bin/bash "$1"

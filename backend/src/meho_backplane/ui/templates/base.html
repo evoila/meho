@@ -150,7 +150,11 @@
     {% block component_scripts %}{% endblock %}
     {% include "_head_assets.html" %}
   </head>
-  <body class="min-h-full text-base-content antialiased">
+  {# ``data-meho-tenant``: the tenant this page was made for (#5240).
+     ``page-tenant.js`` sends it with every htmx request and plain form, so
+     a request from this tab after a tenant switch in another tab is
+     refused ("The tenant changed. Reload the page."). #}
+  <body class="min-h-full text-base-content antialiased"{% if session_tenant is not none %} data-meho-tenant="{{ session_tenant.id }}"{% endif %}>
     <div
       class="drawer lg:drawer-open"
       x-data="{
@@ -280,14 +284,27 @@
           {# Bottom block: tenant + account + status #}
           <div class="mt-auto px-5 pb-6">
             <div class="space-y-4 border-t border-base-content/8 pt-5">
-              {# Live read-only tenant chip (G0.15-T9 #1217): the BFF
-                 session's tenant, lifted into ``session_tenant`` by the
+              {# Live tenant chip (G0.15-T9 #1217): the BFF session's
+                 current tenant, lifted into ``session_tenant`` by the
                  chassis context processor (human name, slug fallback,
                  UUID fallback). ``None`` on the pre-session auth surfaces,
-                 so the chip shows the sign-in hint. A cross-tenant
-                 *selector* is still future (T4 #865). #}
+                 so the chip shows the sign-in hint. With more than one
+                 tenant, or for a platform admin, the chip is a link to the
+                 tenant picker (#5240); otherwise it is read-only as before. #}
               <div>
                 <div class="meho-overline mb-1.5">Tenant</div>
+                {% if session_tenant is not none and session_tenant.can_switch %}
+                <a
+                  href="/ui/tenant"
+                  class="flex items-center justify-between gap-2 truncate rounded-lg border border-base-content/10 bg-base-100/60 px-2.5 py-2 font-mono text-xs text-base-content/70 hover:border-primary/40 hover:text-base-content"
+                  aria-label="Active tenant, switch tenant"
+                  title="Switch tenant"
+                  data-testid="tenant-switch"
+                >
+                  <span class="truncate">{{ session_tenant.name or session_tenant.slug or session_tenant.id }}</span>
+                  <span class="shrink-0 font-sans text-[0.7rem] text-primary">Switch</span>
+                </a>
+                {% else %}
                 <div
                   class="truncate rounded-lg border border-base-content/10 bg-base-100/60 px-2.5 py-2 font-mono text-xs text-base-content/55"
                   {% if session_tenant is not none %}aria-label="Active tenant"{% endif %}
@@ -295,6 +312,7 @@
                 >
                   {% if session_tenant is not none %}{{ session_tenant.name or session_tenant.slug or session_tenant.id }}{% else %}(sign in to choose){% endif %}
                 </div>
+                {% endif %}
               </div>
 
               {# Account row: user menu (opens upward) + theme toggle.

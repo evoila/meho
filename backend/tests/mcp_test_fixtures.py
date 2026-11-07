@@ -157,6 +157,8 @@ def required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
+    # The hosts the doc-collection tools' tests point a collection at.
+    monkeypatch.setenv("CORPUS_ALLOWED_HOSTS", "corpus.test,corpus-new.test")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

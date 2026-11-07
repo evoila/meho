@@ -42,6 +42,12 @@ Approval posture — the load-bearing dial (mirrors ``topology.*`` #2537):
   ``needs-approval`` in :mod:`meho_backplane.auth.permissions`), while a
   human ``tenant_admin`` rides the default-allow branch and executes
   immediately.
+* The role floor is ``tenant_admin``, the same as REST ``POST
+  /api/v1/targets`` and the MCP tool. It is registered below with
+  :func:`~meho_backplane.operations.role_floors.register_role_floor`, so
+  the policy gate refuses a person with a lower role on every path
+  (``call_operation``, the REST dispatch route, the CLI), and the
+  approval queue refuses an approver with a lower role.
 * NOT ``requires_approval=True`` — that would park humans too.
 * NOT ``safety_level="dangerous"`` — that would DENY agents by default
   rather than park them. Target registration is reversible
@@ -85,7 +91,7 @@ from meho_backplane.api.v1.targets import (
     create_target,
     soft_delete_target,
 )
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import PrincipalKind, TenantRole
 from meho_backplane.connectors.targets.schemas import (
     TARGETS_REGISTER_PARAMETER_SCHEMA,
     TARGETS_REGISTER_RESPONSE_SCHEMA,
@@ -93,7 +99,11 @@ from meho_backplane.connectors.targets.schemas import (
     TARGETS_REMOVE_RESPONSE_SCHEMA,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import PermissionVerdict
+from meho_backplane.operations._audit import policy_decision_var
+from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetCreate
 
@@ -128,7 +138,8 @@ _GROUP_KEY = "registry"
 _GROUP_WHEN_TO_USE = (
     "Write to the tenant's target registry: register a new target "
     "(name + product + host, plus optional connection detail) so it can "
-    "be dispatched against, or remove a target whose system is gone. Use "
+    "be dispatched against, detect a target's product and version, or "
+    "remove a target whose system is gone. Use "
     "when onboarding a system the agent must later drive — an rke2 "
     "cluster, a vCenter, a DNS server — or when cleaning up after it. "
     "A registration from an agent principal waits for a person to approve "
@@ -143,7 +154,8 @@ _DESCRIPTION = (
     "`host`/`fqdn`, and the JWT-derived `tenant_id` all apply. "
     "Tenant-scoped automatically — no `tenant_id` argument (cross-tenant "
     "registration is structurally impossible). `fingerprint` is "
-    "server-managed and rejected. Agent-principal calls park as approval "
+    "server-managed and rejected. Needs the `tenant_admin` role, like the "
+    "REST route. Agent-principal calls park as approval "
     "requests; human tenant_admin calls execute immediately."
 )
 
@@ -153,6 +165,10 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "back to a raw REST POST. Supply name + product + host (plus any "
         "optional connection detail); the tenant is taken from your "
         "identity."
+    ),
+    "preconditions": (
+        "A person needs the `tenant_admin` role; any lower role is refused. "
+        "An agent's call waits until a person with that role approves it."
     ),
     "parameter_hints": {
         "name": "Required. Unique within the tenant; the dispatch handle.",
@@ -290,6 +306,13 @@ async def register_targets_registry_operations(
 # once runs under the caller; a call that runs after approval runs under the
 # person who approved it (``resume_dispatch_after_approval``).
 #
+# One exception (#5480): in sandbox mode a service principal may remove a
+# target without ``tenant_admin`` when its call runs at once. For this op
+# that happens only under a live delete grant, because the op needs
+# approval and no ordinary grant can cover a ``.remove`` op. A service
+# login keeps the ``operator`` role on purpose, so without this exception
+# the delete grant could never help.
+#
 # Approval posture: ``safety_level="dangerous"`` + ``requires_approval=True``.
 # A person's call waits for a second person; an agent login is refused (the
 # ``dangerous`` default for agents); a service principal waits, and the
@@ -304,21 +327,28 @@ async def register_targets_registry_operations(
 # this op looks up by id so an alias cannot pick the wrong target.
 
 _REMOVE_DESCRIPTION = (
-    "Remove one target of your tenant by its UUID. Runs the same delete "
-    "service as REST `DELETE /api/v1/targets/{name}`. Removes MEHO's record "
-    "only: the system and its Vault secret stay. A missing target gives "
-    "`unchanged`. Needs the `tenant_admin` role. A second person must "
-    "approve every call."
+    "Remove one target of your tenant by its UUID, with the delete service "
+    "of REST `DELETE /api/v1/targets/{name}`. Only MEHO's record goes. "
+    "Needs `tenant_admin`; a second person approves each call. In sandbox "
+    "mode a service principal with a delete grant runs it at once, with any role."
 )
+
+# The policy gate checks the floor for a person on every path, and the
+# approval queue checks it for the approver.
+register_role_floor(TARGETS_REGISTER_OP_ID, TenantRole.TENANT_ADMIN)
+
 
 _REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_call": (
         "A system you registered as a target is gone (for example a test "
         "system you deleted), and its target should stop showing in "
-        "list_targets."
+        "list_targets. Only MEHO's record goes: the system and its Vault "
+        "secret stay."
     ),
     "preconditions": (
         "Needs the `tenant_admin` role; any other role is refused. "
+        "One exception: in sandbox mode a service principal with a delete "
+        "grant for this op runs it at once with any role. "
         "Get the target's `id` from list_targets; do not pass a name. "
         "Preview the call first: the preview shows the target, its product "
         "and how many topology records point at it. When that count is not "
@@ -332,6 +362,8 @@ _REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "next_step": (
         "The call waits until a second person approves it. It then runs "
         "under that person's login, so that person needs `tenant_admin`. "
+        "In sandbox mode a delete grant lets a service principal skip the "
+        "wait. "
         "After it runs, "
         "list_targets no longer shows the target. `unchanged` means there "
         "was nothing to remove in your tenant."
@@ -347,6 +379,22 @@ def _parse_target_id(params: dict[str, Any]) -> uuid.UUID:
         raise ValueError(f"target_id must be a UUID, got {raw!r}") from exc
 
 
+def _sandbox_service_call(operator: Operator) -> bool:
+    """Whether a service principal's call runs at once in sandbox mode (#5480).
+
+    The policy gate lets a service principal run ``targets.remove`` at once
+    only under a live delete grant (sandbox mode, #4622): the op needs
+    approval, and an ordinary grant can never cover it. The gate's verdict
+    for this dispatch is in ``policy_decision_var``. A call that ran after
+    approval carries ``needs-approval`` there and keeps the role check.
+    """
+    return (
+        sandbox_mode_active()
+        and operator.principal_kind is PrincipalKind.SERVICE
+        and policy_decision_var.get() == PermissionVerdict.AUTO_EXECUTE.value
+    )
+
+
 async def targets_remove(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Remove one target of the operator's tenant, named by its id.
 
@@ -359,9 +407,11 @@ async def targets_remove(operator: Operator, target: Any, params: dict[str, Any]
     :func:`targets_register`.
 
     The REST route asks for ``tenant_admin``; so does this op. Any other
-    role is refused before the target is looked up.
+    role is refused before the target is looked up, except for a service
+    principal whose call runs at once in sandbox mode
+    (:func:`_sandbox_service_call`, #5480).
     """
-    if operator.tenant_role is not TenantRole.TENANT_ADMIN:
+    if operator.tenant_role is not TenantRole.TENANT_ADMIN and not _sandbox_service_call(operator):
         raise ValueError(
             f"targets.remove needs the tenant_admin role; your role is {operator.tenant_role}"
         )

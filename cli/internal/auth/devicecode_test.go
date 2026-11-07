@@ -5,6 +5,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,14 +28,15 @@ import (
 // the only ones we assert against — the loader explicitly ignores
 // extras per the spec.
 func TestFetchDiscoveryOIDCShape(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/.well-known/openid-configuration" {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/realms/meho/.well-known/openid-configuration" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                        "https://kc.example/realms/meho",
+			"issuer":                        srv.URL + "/realms/meho",
 			"device_authorization_endpoint": "https://kc.example/realms/meho/protocol/openid-connect/auth/device",
 			"token_endpoint":                "https://kc.example/realms/meho/protocol/openid-connect/token",
 			"unrelated_field":               "ignored",
@@ -41,11 +44,11 @@ func TestFetchDiscoveryOIDCShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	doc, err := FetchDiscovery(context.Background(), srv.Client(), srv.URL+"/.well-known/openid-configuration")
+	doc, err := FetchDiscovery(context.Background(), srv.Client(), srv.URL+"/realms/meho/.well-known/openid-configuration")
 	if err != nil {
 		t.Fatalf("FetchDiscovery: %v", err)
 	}
-	if doc.Issuer != "https://kc.example/realms/meho" {
+	if doc.Issuer != srv.URL+"/realms/meho" {
 		t.Errorf("issuer: %q", doc.Issuer)
 	}
 	if !strings.HasSuffix(doc.DeviceAuthorizationEndpoint, "/auth/device") {
@@ -119,7 +122,8 @@ func TestFetchDiscoveryNon2xxSurfacesStatus(t *testing.T) {
 // second returns the document.
 func TestFetchDiscoveryFromRealmTriesOAuthFallback(t *testing.T) {
 	var oauthHits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/realms/meho/.well-known/openid-configuration":
 			http.NotFound(w, r)
@@ -127,7 +131,7 @@ func TestFetchDiscoveryFromRealmTriesOAuthFallback(t *testing.T) {
 			atomic.AddInt32(&oauthHits, 1)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"issuer":                        "https://kc/realms/meho",
+				"issuer":                        srv.URL + "/realms/meho",
 				"device_authorization_endpoint": "https://kc/device",
 				"token_endpoint":                "https://kc/token",
 			})
@@ -141,7 +145,7 @@ func TestFetchDiscoveryFromRealmTriesOAuthFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchDiscoveryFromRealm: %v", err)
 	}
-	if doc.Issuer != "https://kc/realms/meho" {
+	if doc.Issuer != srv.URL+"/realms/meho" {
 		t.Errorf("issuer: %q", doc.Issuer)
 	}
 	if atomic.LoadInt32(&oauthHits) != 1 {
@@ -675,6 +679,77 @@ func TestNextCheck(t *testing.T) {
 				t.Errorf("got (%v, %v, %v), want (%v, %v, %v)", got, last, ok, tc.want, tc.wantLast, tc.wantOK)
 			}
 		})
+	}
+}
+
+// TestRunDeviceFlowSendsPKCE pins the PKCE contract a Keycloak client
+// with "PKCE challenge method: S256" enforces on the device flow: the
+// device request carries an S256 code_challenge, and every token poll
+// carries the matching code_verifier. The fake server refuses both
+// mismatches itself, as Keycloak's DeviceEndpoint and DeviceGrantType do,
+// so a successful login is the proof.
+func TestRunDeviceFlowSendsPKCE(t *testing.T) {
+	var challenge string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/auth/device":
+			if r.PostForm.Get("code_challenge_method") != "S256" || r.PostForm.Get("code_challenge") == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error":             "invalid_request",
+					"error_description": "Missing parameter: code_challenge_method",
+				})
+				return
+			}
+			challenge = r.PostForm.Get("code_challenge")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"device_code":      "dev-code-fixture",
+				"user_code":        "ABCD-EFGH",
+				"verification_uri": "https://kc.example/device",
+				"expires_in":       600,
+				"interval":         1,
+			})
+		case "/token":
+			sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
+			if base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error":             "invalid_grant",
+					"error_description": "PKCE verification failed",
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "at-from-fake-idp",
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	doc := &DiscoveryDocument{
+		Issuer:                      "https://kc.example/realms/meho",
+		DeviceAuthorizationEndpoint: srv.URL + "/auth/device",
+		TokenEndpoint:               srv.URL + "/token",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := RunDeviceFlow(ctx, doc, "meho-cli", DeviceFlowOptions{
+		HTTPClient: srv.Client(),
+		Prompter:   func(context.Context, *oauth2.DeviceAuthResponse) error { return nil },
+	}); err != nil {
+		t.Fatalf("RunDeviceFlow against a server that requires PKCE: %v", err)
 	}
 }
 

@@ -775,7 +775,11 @@ async def test_dangerous_writes_park_for_approval(
 
 @pytest.mark.asyncio
 async def test_service_control_caution_does_not_park(linux_write_registered: None) -> None:
-    """AC: service.control is caution -- an un-approved dispatch runs, does not park."""
+    """AC: service.control is caution -- an un-approved dispatch runs, does not park.
+
+    The person works in the web interface: with a token the same call would
+    wait for approval (#3980).
+    """
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations import dispatch
     from meho_backplane.targets.resolver import resolve_target
@@ -789,7 +793,7 @@ async def test_service_control_caution_does_not_park(linux_write_registered: Non
     )
     with patch("meho_backplane.connectors.linux.ops_write.linux_service_control", handler):
         result = await dispatch(
-            operator=_OPERATOR,
+            operator=_OPERATOR.model_copy(update={"web_session": True}),
             connector_id=_CONNECTOR_ID,
             op_id="linux.service.control",
             target=target,

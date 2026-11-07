@@ -2,7 +2,6 @@
 
 **Initiative:** #1666 — G0.24 v0.13.0 log-sentry extended dogfood hardening
 **Task:** #1683 — expose the literal would-be HTTP request for a dispatch
-**Consumer signal:** `claude-rdc-hetzner-dc#1138`
 
 ## Overview
 
@@ -44,7 +43,8 @@ governed approval tier (`safety_level='destructive'` #3198, or a
 like `vault.kv.put` stays `unavailable` because its secret rides in the
 params), a **synthetic preview** — a params-bound projection (the hash
 binding) plus the reused park-time `proposed_effect` (`_composite_preview.py`,
-egress-free).
+egress-free). Its `redacted_body` is a safe view of the params, not a copy
+(see Redaction below).
 
 Out of scope (honouring #1683's dispositions):
 
@@ -98,12 +98,18 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │
         ├─ parse_connector_id → (product, version, impl_id)
         ├─ lookup_descriptor → None ? → status=error error_code=unknown_op
-        │       (or unknown_connector; op_miss_result, #4031)
+        │       (or unknown_connector; op_miss_result, #4031; a visible
+        │       ingested licence read that is off → license_read_off)
+        ├─ ingested op whose path names licences ? → status=error
+        │       error_code=license_read_off (same answer and order as /call;
+        │       the read never runs, see spec-ingestion.md)
         ├─ target is None and descriptor_requires_target ? → status=error
         │       error_code=target_required (same answer and order as /call, #4139)
         ├─ choose_catalog_for_target → sibling fits ? → use the sibling (#3600)
         │       → refused ? → status=error error_code=unqualified_target_version
-        │       (same reason and target fields as dispatch, no audit row, #4984)
+        │       (same reason and target fields as dispatch, no audit row, #4984;
+        │       a composite is refused here when the target is outside its
+        │       connector's composite_supported_version_range)
         ├─ not previewable (see _is_previewable: ingested, OR destructive,
         │       OR requires_approval AND not credential-class) ?
         │       → status=unavailable (not_ingested)     ◄── governed tiers pass (#3198/#3312)
@@ -136,8 +142,9 @@ After the descriptor lookup, every envelope — `ok`, `unavailable`, and the
 dispatcher runs at Step 4, called with `decide_only=True`. The verdict is
 what MEHO would do with this call for this caller and this target:
 `auto-execute` (runs at once), `needs-approval` (waits for a second
-person), or `deny` (refused, with the reason). Only the `unknown_op` /
-`unknown_connector` envelope has no descriptor and so no fields. The
+person), or `deny` (refused, with the reason). The `unknown_op` /
+`unknown_connector`, `license_read_off` and `target_required` envelopes
+have no governance fields. The
 `unqualified_target_version` envelope has no fields either: like the real
 call, the preview stops there, before the params check and the policy gate
 (#4984).
@@ -155,18 +162,63 @@ mode (#4923): it returns the verdict and writes nothing — no audit row, no
 approval request, and no standing-grant use. A service principal whose
 standing grant would clear the call sees `auto-execute`, but the grant is
 not used until the real call. In sandbox mode a delete grant is consulted
-without building its evidence (that may read the target); a `destructive`
-delete therefore previews as `needs-approval` even when a delete grant
-would later clear the real call, because the preview presents no hash of
-its own. Both surfaces stay `OPERATOR`-gated at the route / tool layer.
+without building its evidence (that may read the target). A live delete
+grant on a `destructive` delete previews as `auto-execute` too (#5492);
+the reason names the grant and says that the call must send the
+`preview_hash` of this preview, because the real call checks the hash and
+the blast radius before it uses the grant. Without a live grant, the
+reason says that no delete grant covers the call and that it waits for
+approval.
+
+**Steps (#5492).** A multi-step operation checks MEHO policy again before
+each write step, so a grant on the operation alone does not let it run.
+When the gate says `auto-execute`, the preview also checks the steps the
+connector lists for the operation (`governed_subops_for`, the list behind
+`GET /api/v1/operations/governed-subops`), in `_preview_steps.py`. It
+skips plain `GET` / `HEAD` reads and runs the same decide-only gate on
+each other step, with the step gate's facts (`dangerous`, no
+`requires_approval`). A denied step makes the verdict `deny`; a step that
+would wait makes it `needs-approval`, and the reason names those steps.
+A step that is itself a multi-step operation with its own list is
+checked the same way, at every level, and each operation only once, so
+a list that loops back cannot run forever. The step check runs on every
+instance, not only in sandbox mode.
+The list has every step the operation may run, also reads sent as `POST`
+and the steps of every way the connector can do the work. The preview
+cannot tell which ones the call will run, because it never contacts the
+target. So it can say "waits" for a call that then does not need a step,
+but it never says "runs at once" for a call whose step would wait. Both
+surfaces stay `OPERATOR`-gated at the route / tool layer.
 
 ## Envelope shape
 
 | `status` | meaning | extra fields |
 |---|---|---|
 | `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding). Every synthetic preview also carries `plan_shown` (#4028): `true` with `proposed_effect`, or `false` with a plain `plan_note` when the builder needs the target and declined (both unhashed). Plus the four governance fields below |
-| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` also carries the four governance fields below |
+| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `refused_before_approval` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` also carries the four governance fields below |
 | `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested`, plus the four governance fields below |
+
+An ingested operation whose path names licences, with any HTTP method,
+answers `error` with `extras.error_code=license_read_off` and no
+governance fields: it never runs (see `spec-ingestion.md`, "Ingested licence reads stay off").
+
+An ingested operation whose target resolves to a connector class that
+does not accept ingested operations answers `error` with
+`extras.error_code=ingested_ops_not_accepted`, like the call (see
+`spec-ingestion.md`, "Which connector class ingested operations run on").
+
+When the op has its own check that runs before the wait for approval
+(`_park_check_envelope` in `operations/_request_preview.py`), the preview
+runs that check too. A refusal answers `error` with
+`extras.error_code=refused_before_approval` and the same `error` and
+`extras` the call would give, plus the four governance fields. See
+`approvals.md`.
+
+**`params_digest` (synthetic previews only).** A governed-tier typed /
+composite preview also carries `params_digest`, a keyed hash of the full
+params. `compute_preview_hash` includes it when present, so a value the
+safe view of `redacted_body` hides still changes `preview_hash`. An
+ingested preview has no digest and its hash is unchanged. See Redaction.
 
 **Governance fields (#3973 / #4923).** Every envelope whose op resolved
 carries, unhashed: `safety_level` (`safe` / `caution` / `dangerous` /
@@ -237,6 +289,34 @@ name: a bare `{"password": "…"}` field is not masked by the default
 policy unless its *value* matches a named pattern; a `{"upstream_auth":
 "Bearer eyJ…"}` value is. See `docs/codebase/redaction.md` for the
 named-pattern catalogue and policy resolution.
+
+**Synthetic preview.** The `redacted_body` of a governed-tier typed /
+composite op is the safe view `safe_params_view` builds
+(`_composite_preview.py`), the same view the generic plan (`params_echo`)
+shows, plus one schema rule:
+
+1. Every value of a **free-form map** is replaced by `***REDACTED***` and
+   its keys stay. A free-form map is a parameter the descriptor's
+   `parameter_schema` types as an object without fixed `properties` (for
+   example the OVF properties of an appliance deploy, typed
+   `additionalProperties: {type: string}`), a key an object schema does not
+   name, or a map the schema does not describe at all (fails closed). The
+   top-level keys are the operation's parameter names and always stay;
+   scalars and lists of scalars pass through; a list is walked with its
+   `items` schema.
+2. A value under a secret-shaped name (`password`, `client_secret`,
+   `api_key`, ...) is masked (`_scrub_secret_param_keys`, the broadcast
+   name check).
+3. The connector-boundary value-shape engine runs on the result.
+
+The `preview_hash` still binds every value: the envelope carries
+`params_digest`, the keyed params hash of the approval queue
+(`compute_params_hash`, HMAC under the server key), and
+`compute_preview_hash` includes it when present. Two previews that differ
+only in a hidden value show the same `redacted_body` and bind different
+hashes; the digest cannot be computed again from a guessed value without
+the server key. The dispatcher and the approval resume check recompute the
+hash by building the preview again, so they stay in step.
 
 ## Surfaces
 

@@ -59,7 +59,8 @@ Usage:
 {{- end }}
 
 {{/*
-Pod security context for a core pod. With `global.openshift: true` it
+Pod security context for every pod of the chart and its subcharts (#4102).
+With `global.openshift: true` it
 leaves out `runAsUser`, `runAsGroup` and `fsGroup`, because OpenShift picks
 them from the project's range and refuses fixed ones. Everything else
 (`runAsNonRoot`, `seccompProfile`, ...) stays.

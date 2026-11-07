@@ -22,13 +22,17 @@ What is true after the Job ran:
 With every built-in part off (bring-your-own), the chart renders none of the
 new objects, so existing installs render byte for byte as before.
 
-Pointing MEHO's own pods at these Secrets (the backplane, Valkey, the
-Ingress) is the work of the wiring Task (#4047). With the built-in
-PostgreSQL on, the database migration already runs in the backplane pod, as
-its `migrate` init container (#5233). Until #4047 lands
-an install can point at a made Secret by name, for example
-`approvalHandoff.secretName: <release>-core-approval-handoff` (see
-"Use your own Secret" below).
+The chart points the backplane and the Ingress at these Secrets itself
+(#4047, [devops.md](devops.md#wiring-the-built-in-core-to-the-backplane-templates_core-wiringtpl-4047)):
+`DATABASE_URL` from `-core-postgres-meho`, the approval hand-off key from
+`-core-approval-handoff` (on by default with a built-in part),
+`PARAMS_HASH_KEY` (the key of the params hashes and value fingerprints,
+[approvals.md](approvals.md)) from `-core-params-hash`, and the Ingress
+certificate from `-core-tls`. With the built-in PostgreSQL on, the
+database migration runs in the backplane pod, as its `migrate` init
+container (#5233). `postgres.credentialsSecret` cannot name a Secret of
+your own while `corePostgres.enabled` is on: the PostgreSQL pod sets the
+`meho` password from `-core-postgres-meho` only, so the render stops.
 
 ## The Secrets
 
@@ -39,13 +43,15 @@ Names are `<release>-core-…`. "alnum 32" means 32 characters from
 | Secret | Keys | Format | Made when | Values key for your own Secret |
 |---|---|---|---|---|
 | `-core-postgres-superuser` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.superuser` |
-| `-core-postgres-meho` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho:<password>@<release>-postgres:5432/meho` | `corePostgres.enabled` | `postgres.credentialsSecret` |
+| `-core-postgres-meho` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho:<password>@<release>-postgres:5432/meho` (the owner login that runs the migrations) | `corePostgres.enabled` | none: `postgres.credentialsSecret` must stay empty or name this Secret (#4047) |
+| `-core-postgres-meho-app` | `password`, `url` | alnum 32; `postgresql+asyncpg://meho_app:<password>@<release>-postgres:5432/meho` (the login of the running backplane; `meho` above runs the migrations) | `corePostgres.enabled` | `postgres.runtime.credentialsSecret` (must stay empty or name this Secret, see below) |
 | `-core-postgres-keycloak` | `password` | alnum 32 | `corePostgres.enabled` | `corePostgres.existingSecrets.keycloak` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-keycloak-bootstrap` | `client_id`, `client_secret` | alnum 32 | `coreKeycloak.enabled` | `coreKeycloak.existingSecrets.bootstrap` |
 | `-core-keycloak-admin` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `keycloakAdmin.clientSecret.secretName` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-ui-auth` | `session_encryption_key`, `client_secret` | Fernet; alnum 32 | `coreKeycloak.enabled` | `uiConsole.secretName` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-check-runner` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `checkRunner.clientSecret.secretName` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-approval-handoff` | `approval_handoff_encryption_key` | Fernet | any built-in part | `approvalHandoff.secretName` |
+| `-core-params-hash` | `params_hash_key` | alnum 32 | any built-in part | `paramsHashKey.secretName` |
 | `-core-broadcast-auth` | `requirepass` | alnum 32 | any built-in part, with `broadcast.enabled` and `broadcast.auth.enabled` | `broadcast.auth.existingSecret` |
 | `-core-tls` | `tls.crt`, `tls.key`, `ca.crt` | type `kubernetes.io/tls`; a CA and a certificate for `ingress.host` | any built-in part, with the Ingress and TLS on | `ingress.tls.secretName` |
 
@@ -61,16 +67,21 @@ pair with their own certificate by setting `ingress.tls.secretName`.
 
 **Not made by this Job:**
 
-- `-core-first-login` (the first admin's temporary passwords): the realm
-  stage of the `bootstrap` Job (#4043).
+- `-core-first-login` (the first admin's temporary passwords) and
+  `-core-console-admin` (the console admin's user name and temporary
+  password, keys `username` and `password`): the realm stage of the
+  `bootstrap` Job (#4043).
 - The `meho-backplane` client secret: Keycloak makes it at realm import, and
   it never leaves Keycloak.
 - `-core-vault-unseal`, `-core-vault-init`, `-core-vault-snapshot`,
   `-core-vault-scheduler`: the `vault-init` Job (#4044,
   docs/codebase/core-vault-init.md).
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MAIL_SMTP_PASSWORD`,
-  `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`, `VCF_PAIF_OIDC_CLIENT_SECRET`:
-  the operator gives them; they are never generated.
+  `CORPUS_SERVICE_TOKEN`, `VCF_PAIF_OIDC_CLIENT_SECRET`: the operator gives
+  them; they are never generated.
+- `METRICS_AUTH_TOKEN`: the chart's own template
+  `templates/metrics-auth-secret.yaml` makes `<release>-metrics-auth` on
+  every install, built-in core or not (docs/codebase/metrics-ready-access.md).
 
 ## Use your own Secret
 
@@ -103,6 +114,15 @@ Secret (#4591). To use your own value for one of these Secrets, create it
 with the `<release>-core-…` name before the install: the Job keeps a Secret
 that exists. Only `coreKeycloak.existingSecrets.bootstrap` may name another
 Secret, because the Keycloak subchart reads that key too.
+
+**With the built-in PostgreSQL.** The PostgreSQL pod mounts
+`<release>-core-postgres-meho-app`, the login of the running backplane, by
+that name only. While `corePostgres.enabled` is on,
+`postgres.runtime.credentialsSecret` must stay empty or name that Secret;
+another name would make the Job check your Secret instead of making the
+core one, and the database pod would wait forever. The render stops with
+one sentence that names the key and the expected Secret
+(`meho.postgres.runtimeSecretName` in `templates/_helpers.tpl`).
 
 ## Key types and files
 
@@ -162,8 +182,9 @@ One namespaced Role, nothing cluster-wide:
 - `create` on Secrets. Kubernetes cannot limit `create` to names; creating a
   name that exists fails with 409 and changes nothing, so an operator's
   Secret is never overwritten.
-- `get` and `patch` only on the twelve `<release>-core-*` names (the ten
-  above, and `-core-first-login` and `-core-ci-login` of the realm stage).
+- `get` and `patch` only on the fourteen `<release>-core-*` names (the
+  eleven above, and `-core-first-login`, `-core-console-admin` and `-core-ci-login`
+  of the realm stage).
 - `get` only on the Secrets the operator named in values, to check their
   keys.
 - No `list`, no `watch`, no access to the chart's own ServiceAccount.
@@ -210,9 +231,9 @@ volumes together, or neither: new passwords do not match old data.
   user, one key per value. To rotate, write the new value and restart the
   pods that read it.
 - `-core-broadcast-auth` is made, but Valkey and the backplane keep reading
-  the subchart's own `<release>-broadcast-auth` until #4047 wires them. A
-  subchart cannot read the parent's `core*` values; only `global` or the
-  `broadcast:` block reach it.
+  the subchart's own `<release>-broadcast-auth`; the wiring (#4047) left it
+  out. A subchart cannot read the parent's `core*` values; only `global` or
+  the `broadcast:` block reach it.
 - The PostgreSQL subchart (#4039) must name its Service `<release>-postgres`;
   the made database URL points there.
 - A kept `-core-tls` keeps the host it was made for. After a change of

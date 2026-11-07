@@ -95,14 +95,21 @@ author can tell them from the ``agent_toolset_resolved`` log line:
 
 * **missing** — the spec names a tool this runtime does not ship (a typo or
   a newer tool). Nothing can be registered for it.
-* **disabled** — the tool exists, but this run does not get it: either the
-  spec's ``meta_tools`` list leaves it out (``not_in_allow_list``) or the
-  run's role is below the tool's floor (``role_below_floor``).
+* **disabled** — the tool exists, but this run does not get it: the spec's
+  ``meta_tools`` list leaves it out (``not_in_allow_list``), the run's role
+  is below the tool's floor (``role_below_floor``), or the tenant lacks the
+  tool's capability (``capability_missing``).
 
 A disabled tool is still not registered, so the model never sees it.
 
-Opt-in context tools (#3759)
-============================
+Opt-in context, write and docs tools (#3759, #5852)
+===================================================
+
+The write tools ``add_to_memory`` and ``add_to_knowledge`` and the docs
+tools ``list_doc_collections``, ``search_docs`` and ``read_docs`` are opt-in
+too (bridged by :mod:`meho_backplane.agent.toolset_discovery`). A docs tool
+also needs the tenant's ``meho-docs`` capability, as on MCP; without it the
+tool is reported ``capability_missing``.
 
 Four tools return stored tenant text: ``query_topology``, ``search_memory``,
 ``search_knowledge`` (bridged from MCP by
@@ -136,14 +143,19 @@ from meho_backplane.agent.tool_audit import ToolRefusedRetry
 from meho_backplane.agent.toolset_broadcast import build_broadcast_meta_tools
 from meho_backplane.agent.toolset_discovery import (
     CONNECTOR_LIST,
+    DOCS_META_TOOL_NAMES,
     RETRIEVAL_META_TOOL_NAMES,
+    WRITE_META_TOOL_NAMES,
     build_discovery_meta_tools,
+    build_docs_meta_tools,
     build_retrieval_meta_tools,
+    build_write_meta_tools,
     keep_allowed_connectors,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import role_at_least
+from meho_backplane.mcp.registry import capability_satisfied, role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
+from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED, ROLE_INSUFFICIENT
 from meho_backplane.operations.meta_tools import (
     call_operation,
     list_operation_groups,
@@ -293,12 +305,20 @@ _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
     *build_broadcast_meta_tools(),
     *build_retrieval_meta_tools(),
     build_read_context_resource_tool(),
+    *build_write_meta_tools(),
+    *build_docs_meta_tools(),
 )
 
-#: Catalog tools a spec must name in ``meta_tools`` to get (#3759). They
-#: return stored tenant text, so an omitted allow-list does not add them.
+#: Catalog tools a spec must name in ``meta_tools`` to get (#3759, #5852).
+#: They return stored tenant text or vendor docs, or write Memory and
+#: knowledge entries, so an omitted allow-list does not add them.
 OPT_IN_META_TOOL_NAMES: frozenset[str] = frozenset(
-    {*RETRIEVAL_META_TOOL_NAMES, READ_CONTEXT_RESOURCE},
+    {
+        *RETRIEVAL_META_TOOL_NAMES,
+        READ_CONTEXT_RESOURCE,
+        *WRITE_META_TOOL_NAMES,
+        *DOCS_META_TOOL_NAMES,
+    },
 )
 
 #: The set of meta-tool names the agent surface knows about. Public so a
@@ -404,7 +424,9 @@ def _refuse_disallowed_connector(
     raise ToolRefusedRetry(
         f"connector_id {connector_id!r} is not in this agent's "
         f"allowed connectors {sorted(allowed_connectors)!r}. Pick "
-        f"an allowed connector or stop."
+        f"an allowed connector or stop.",
+        reason_code=CONNECTOR_NOT_ALLOWED,
+        reason=f"{tool_name}: the connector is not in this agent's allowed connectors",
     )
 
 
@@ -485,7 +507,12 @@ def _make_meta_tool(
                 tenant_id=str(ctx.deps.tenant_id),
             )
             raise ToolRefusedRetry(
-                f"forbidden: {meta.name!r} requires a higher role. Do not retry it."
+                f"forbidden: {meta.name!r} requires a higher role. Do not retry it.",
+                reason_code=ROLE_INSUFFICIENT,
+                reason=(
+                    f"{meta.name} needs the {meta.required_role.value} role; "
+                    f"the role in this run is {ctx.deps.tenant_role.value}"
+                ),
             )
         if is_connector_scoped and allowed_connectors is not None:
             _refuse_disallowed_connector(
@@ -516,7 +543,7 @@ def _make_meta_tool(
 
 
 #: Why a catalog tool was not registered for a run.
-DisabledReason = Literal["not_in_allow_list", "role_below_floor"]
+DisabledReason = Literal["not_in_allow_list", "role_below_floor", "capability_missing"]
 
 
 @dataclass(frozen=True)
@@ -527,8 +554,8 @@ class ToolsetResolution:
       catalog order.
     * ``missing`` — names the spec asked for that this runtime does not ship.
     * ``disabled`` — catalog tools that exist but were not registered, with
-      the reason: left out of the spec's ``meta_tools`` list, or the role is
-      below the tool's floor.
+      the reason: left out of the spec's ``meta_tools`` list, the role is
+      below the tool's floor, or the tenant lacks the tool's capability.
     """
 
     tools: list[Tool[Operator]]
@@ -608,6 +635,9 @@ def resolve_agent_toolset(
         # A tool the identity can't call is simply not registered.
         if not role_at_least(operator.tenant_role, meta.required_role):
             disabled[meta.name] = "role_below_floor"
+            continue
+        if not capability_satisfied(operator, meta.required_capability):
+            disabled[meta.name] = "capability_missing"
             continue
         tools.append(_make_meta_tool(meta, allowed_connectors=allowed_connectors))
 

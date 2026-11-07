@@ -155,8 +155,9 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         "wsfc.groups.offline",
         "wsfc.groups.online",
     }
-    # Every dangerous op requires approval; nothing else does.
-    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous
+    # Every dangerous op requires approval, and so does the witness change (the
+    # cluster connects to a file share the caller gives).
+    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous | {"wsfc.witness.set"}
     assert caution == {
         "wsfc.cluster.test",
         "wsfc.nodes.pause",
@@ -255,14 +256,49 @@ async def test_cluster_test_rejects_bad_include() -> None:
     run_mock.assert_not_awaited()
 
 
-async def test_cluster_test_escapes_report_name() -> None:
+async def test_cluster_test_quotes_a_plain_report_name() -> None:
     connector = WsfcConnector()
     run_mock = _run('{"ok":true,"report_path":"C:\\\\r.mht"}')
     with patch.object(connector, "_run_command", run_mock):
-        await wsfc_cluster_test(connector, _TARGET, {"report_name": "run o'clock"})
-    # EncodedCommand-decode injection check: the operator report name is escaped
-    # inside a single-quoted literal (embedded quote doubled).
-    assert "-ReportName 'run o''clock'" in _script_from_call(run_mock)
+        await wsfc_cluster_test(connector, _TARGET, {"report_name": "Pre add node.v2"})
+    assert "-ReportName 'Pre add node.v2'" in _script_from_call(run_mock)
+
+
+@pytest.mark.parametrize(
+    "report_name",
+    [
+        "C:\\Temp\\report",
+        "\\\\fileserver\\share\\report",
+        "//fileserver/share/report",
+        "reports/run1",
+        "..",
+        "run..1",
+        ".hidden",
+        " leading-space",
+        "run o'clock",
+        "x" * 65,
+        "run\nname",
+        7,
+    ],
+)
+async def test_cluster_test_refuses_a_report_name_that_is_not_a_plain_file_name(
+    report_name: object,
+) -> None:
+    connector = WsfcConnector()
+    run_mock = _run("{}")
+    with patch.object(connector, "_run_command", run_mock), pytest.raises(ValueError):
+        await wsfc_cluster_test(connector, _TARGET, {"report_name": report_name})
+    run_mock.assert_not_awaited()
+
+
+def test_cluster_test_schema_allows_only_a_plain_report_name() -> None:
+    from jsonschema import Draft202012Validator
+
+    op = next(o for o in WSFC_OPS if o.op_id == "wsfc.cluster.test")
+    validator = Draft202012Validator(op.parameter_schema)
+    assert validator.is_valid({"report_name": "Pre add node.v2"})
+    for bad in ("C:\\Temp\\report", "\\\\fileserver\\share\\r", "reports/run1"):
+        assert not validator.is_valid({"report_name": bad})
 
 
 # ---------------------------------------------------------------------------

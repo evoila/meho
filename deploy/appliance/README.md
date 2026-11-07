@@ -1,0 +1,84 @@
+# The appliance build
+
+Builds `meho-appliance-<version>.ova`, install form 1 of MEHO: a Linux
+machine where the form-2 install already ran, cleaned and exported. The
+design is the internal design note `form-1-appliance.md`, section 1.
+The code walkthrough is `docs/codebase/appliance-build.md`, and for the
+first start `docs/codebase/appliance-firststart.md`.
+
+| File | What |
+| --- | --- |
+| `build.sh` | The five steps against the lab's vCenter: base image, form-2 install, appliance pieces, clean, export. |
+| `clean.sh` | Runs on the build VM: removes everything that must differ between appliances, checks itself, powers off. |
+| `rewrite-ovf.sh` | Puts our product section and the OVF transports into the exported `.ovf`. |
+| `product-section.xml` | The wizard fields of the import in vCenter. |
+| `firststart/` | Runs once at the appliance's first boot: reads the wizard fields (or, without them, asks on the VM console), sets up the machine, installs the core from the disk. Also the console banner. |
+| `cis/` | The OS hardening to CIS Ubuntu 24.04 Level 1 - Server, which step 3 runs on the build VM, and its scan. The tailoring and the lists of rules that do not apply and of exceptions. |
+| `tests/` | Unit tests of `clean.sh`, `rewrite-ovf.sh`, `build.sh` (against a stub `govc`) and first start. No vCenter. |
+
+`.github/workflows/appliance-build.yml` runs the build on the lab runner.
+
+## Run it by hand
+
+On a Linux machine that reaches the lab's vCenter and the build VM's
+address, with `govc`, `ssh`, `scp`, `curl`, `tar`, `sha256sum` and
+`sha512sum`:
+
+```bash
+export GOVC_URL=https://vcenter.example.lab GOVC_USERNAME=... GOVC_PASSWORD=... GOVC_INSECURE=1
+export GOVC_DATASTORE=... GOVC_FOLDER=meho-appliance GOVC_RESOURCE_POOL=... GOVC_NETWORK=...
+export MEHO_BUILD_HOSTNAME=meho-build.example.lab
+export MEHO_BUILD_ADDRESS=10.0.0.10/24 MEHO_BUILD_GATEWAY=10.0.0.1 MEHO_BUILD_DNS=10.0.0.2
+ssh-keygen -t ed25519 -N '' -f /tmp/build-key
+export MEHO_BUILD_SSH_KEY=/tmp/build-key
+export MEHO_DOWNLOAD=/path/to/meho-linux-0.40.0-amd64.tar
+deploy/appliance/build.sh 0.40.0 /tmp/ova
+```
+
+The form-2 download is the one of the release, checked as
+`docs/RELEASING.md` says. Use v0.40.0 or later: the first release with
+`meho-host admin-network none` (#4739), the pod security file of the
+CIS profile (#4636), the migration fix (#5248) and the OpenBao setup
+(#4044). With an older download, step 2 or the clean fails. `MEHO_BUILD_HOSTNAME` needs a DNS record in the
+lab that points to `MEHO_BUILD_ADDRESS`, because the form-2 install checks
+it. Make a new SSH key for every build.
+
+Step 3 hardens the OS to CIS Ubuntu 24.04 Level 1 - Server
+(`cis/harden.sh`). The build VM must reach the Ubuntu archive then, and
+the machine that runs `build.sh` downloads the CIS content of
+ComplianceAsCode from GitHub once (about 180 MB, kept in the cache). The
+scan's result list is `meho-appliance-<version>-cis.txt` in the out-dir;
+`[WARN]` lines in the build output name failing rules that are in neither
+`cis/not-applicable.md` nor `cis/exceptions.md`, and the build stops at
+step 3. Fix each rule in `cis/harden.sh`, or add it to `cis/exceptions.md`
+with its reason, then go on with `--from-step 3`.
+
+When a step fails, the build VM stays in vCenter. Fix the cause and go on
+from that step with `--from-step N` (2 the form-2 install, 3 the appliance
+pieces, 4 the clean, 5 the export), or destroy the VM with
+`govc vm.destroy <name>`.
+
+`--from-step 2` works only when `rke2-server` does not run on the build
+VM, that is, when `install.sh` stopped before its step 3. After a later
+failure, `install.sh` (v0.39.0 and later) finds a partly installed machine
+and changes nothing: destroy the VM and build again from step 1.
+
+A failed clean is different. `--from-step 4` works only when `clean.sh`
+stopped in its step 1 (the Secrets), while RKE2 still runs and SSH is
+open. After any later failure, RKE2 is stopped, and the build user and SSH
+may be gone: read the `[FAIL]` and `[LEFT]` lines on the VM console in
+vCenter, destroy the VM with `govc vm.destroy <name>`, and build again
+from step 1.
+
+## Test it
+
+The unit tests need Linux bash 5 (macOS bash 3.2 cannot run the scripts).
+They also read the form-2 scripts in `deploy/linux-server/lib`:
+
+```bash
+docker run --rm -v "$PWD/deploy:/work/deploy:ro" -w /work python:3.14-slim python -m unittest discover -s deploy/appliance/tests -v
+```
+
+```bash
+shellcheck deploy/appliance/*.sh deploy/appliance/firststart/*.sh deploy/appliance/cis/*.sh
+```

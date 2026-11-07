@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Operation table, group texts and registrar of the FreeIPA connector.
+
+The connector has typed operations only: FreeIPA has no OpenAPI description.
+Seventeen operations read (``safe``). Seventeen change something: host
+groups, their members, automember rules and hosts; sudo commands, sudo rules
+and access rules; password policies. Each change waits until a second person
+approves. They are registered at start-up with ``source_kind="typed"``, so
+they work on a fresh install with nothing to ingest. The read bodies live in
+:mod:`meho_backplane.connectors.freeipa.reads`, the write bodies in
+:mod:`.writes` and :mod:`.access_writes`; their metadata in
+:mod:`.ops_directory`, :mod:`.ops_access`, :mod:`.ops_host_writes` and
+:mod:`.ops_access_writes`.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import structlog
+
+from meho_backplane.connectors.freeipa._op_common import (
+    GROUP_ACCESS,
+    GROUP_HOSTS,
+    GROUP_IDENTITY,
+    GROUP_SERVER,
+    FreeipaTypedOp,
+)
+from meho_backplane.connectors.freeipa.ops_access import ACCESS_OPS
+from meho_backplane.connectors.freeipa.ops_access_writes import ACCESS_WRITE_OPS
+from meho_backplane.connectors.freeipa.ops_directory import DIRECTORY_OPS
+from meho_backplane.connectors.freeipa.ops_host_writes import HOST_WRITE_OPS
+
+if TYPE_CHECKING:
+    from meho_backplane.retrieval.embedding import EmbeddingService
+
+__all__ = [
+    "FREEIPA_TYPED_OPS",
+    "FREEIPA_TYPED_WHEN_TO_USE_BY_GROUP",
+    "FreeipaTypedOp",
+    "register_freeipa_typed_operations",
+]
+
+_log = structlog.get_logger(__name__)
+
+#: The text of each group. The AI reads it through ``list_operation_groups``
+#: to choose where to search.
+FREEIPA_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    GROUP_SERVER: (
+        "Use to check a Red Hat Identity Management (FreeIPA) server: that MEHO can log in, "
+        "the server version and the API version (freeipa.about). One read."
+    ),
+    GROUP_HOSTS: (
+        "Use to read and change the hosts and host groups of a FreeIPA domain. Reads: find "
+        "hosts, list the hosts of one host group (freeipa.host.list with hostgroup), and read "
+        "one host or host group with its members. Changes: create a host group, add existing "
+        "hosts or host groups to it, create an automember rule that puts new hosts into a host "
+        "group by their name, and delete a host or a host group. Every change waits until a "
+        "second person approves."
+    ),
+    GROUP_IDENTITY: (
+        "Use to read the users, user groups and roles of a FreeIPA domain, and its password "
+        "policies: find users, read one user with its groups, read a group's or a role's "
+        "members, read a group's or the global password policy. One change: set values of a "
+        "group's or the global password policy (freeipa.pwpolicy.set), which waits until a "
+        "second person approves."
+    ),
+    GROUP_ACCESS: (
+        "Use to read and change who may do what on which host in a FreeIPA domain: sudo rules, "
+        "access rules (HBAC, including the default rule allow_all), and freeipa.hbac.test, "
+        "which answers whether one user may use one service (for example sshd) on one host. "
+        "Changes: create sudo commands and sudo rules and add their users, hosts and commands; "
+        "create access rules and add their users, hosts and services; disable an access rule, "
+        "allow_all too. Every change waits until a second person approves."
+    ),
+}
+
+#: Every FreeIPA typed operation. The reads need no approval; every write does.
+FREEIPA_TYPED_OPS: tuple[FreeipaTypedOp, ...] = (
+    *DIRECTORY_OPS,
+    *ACCESS_OPS,
+    *HOST_WRITE_OPS,
+    *ACCESS_WRITE_OPS,
+)
+
+
+async def register_freeipa_typed_operations(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """Store every operation of :data:`FREEIPA_TYPED_OPS` in ``endpoint_descriptor``.
+
+    Runs at start-up after every connector package was imported. Safe to run
+    twice: an unchanged operation is not embedded again.
+    """
+    # Imported here: the operations package loads the embedding model, which
+    # connector unit tests should not pay for.
+    from meho_backplane.connectors.freeipa.connector import FreeipaConnector
+    from meho_backplane.operations.typed_register import register_typed_operation
+
+    for op in FREEIPA_TYPED_OPS:
+        handler = getattr(FreeipaConnector, op.handler_attr, None)
+        if handler is None:
+            raise AttributeError(
+                f"FreeIPA typed op {op.op_id!r} names handler_attr={op.handler_attr!r}, "
+                "but FreeipaConnector has no such method"
+            )
+        when_to_use = FREEIPA_TYPED_WHEN_TO_USE_BY_GROUP.get(op.group_key)
+        if when_to_use is None:
+            raise ValueError(
+                f"FreeIPA typed op {op.op_id!r} names group_key={op.group_key!r}, which has "
+                "no text in FREEIPA_TYPED_WHEN_TO_USE_BY_GROUP"
+            )
+        await register_typed_operation(
+            product=FreeipaConnector.product,
+            version=FreeipaConnector.version,
+            impl_id=FreeipaConnector.impl_id,
+            op_id=op.op_id,
+            handler=handler,
+            summary=op.summary,
+            description=op.description,
+            parameter_schema=op.parameter_schema,
+            response_schema=op.response_schema,
+            group_key=op.group_key,
+            when_to_use=when_to_use,
+            tags=list(op.tags),
+            safety_level=op.safety_level,
+            requires_approval=op.requires_approval,
+            llm_instructions=op.llm_instructions,
+            embedding_service=embedding_service,
+        )
+    _log.info(
+        "freeipa_typed_operations_registered",
+        count=len(FREEIPA_TYPED_OPS),
+        product=FreeipaConnector.product,
+        version=FreeipaConnector.version,
+        impl_id=FreeipaConnector.impl_id,
+    )

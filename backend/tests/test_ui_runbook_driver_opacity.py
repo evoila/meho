@@ -101,6 +101,18 @@ from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mint_token as _mint_token
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
+from tests._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check.
+
+    The ``read_only`` tests keep the real check: they prove the 403.
+    """
+    if "read_only" not in request.node.name:
+        allow_ui_operator_role(monkeypatch)
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -676,9 +688,10 @@ def test_next_confirm_no_renders_failed_dead_end_banner() -> None:
     _seed_template(tenant_id=_TENANT_A, slug="drain", body=_two_step_body())
     run_id = _start_run(tenant_id=_TENANT_A, slug="drain", assigned_to=_OPERATOR_SUB)
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    session_id, jwks = _role_session(TenantRole.OPERATOR)
     token = mint_csrf_token(str(session_id))
-    with respx.mock(assert_all_called=False):
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         response = client.post(
             f"/ui/runbooks/runs/{run_id}/next",
@@ -702,9 +715,10 @@ def test_next_confirm_yes_advances_to_step_two() -> None:
     _seed_template(tenant_id=_TENANT_A, slug="drain", body=_two_step_body())
     run_id = _start_run(tenant_id=_TENANT_A, slug="drain", assigned_to=_OPERATOR_SUB)
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    session_id, jwks = _role_session(TenantRole.OPERATOR)
     token = mint_csrf_token(str(session_id))
-    with respx.mock(assert_all_called=False):
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         response = client.post(
             f"/ui/runbooks/runs/{run_id}/next",
@@ -731,9 +745,10 @@ def test_abort_empty_reason_handled_not_500() -> None:
     _seed_template(tenant_id=_TENANT_A, slug="drain", body=_two_step_body())
     run_id = _start_run(tenant_id=_TENANT_A, slug="drain", assigned_to=_OPERATOR_SUB)
 
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    session_id, jwks = _role_session(TenantRole.OPERATOR)
     token = mint_csrf_token(str(session_id))
-    with respx.mock(assert_all_called=False):
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         response = client.post(
             f"/ui/runbooks/runs/{run_id}/abort",
@@ -755,9 +770,10 @@ def test_abort_valid_reason_flips_state_and_audits() -> None:
     run_id = _start_run(tenant_id=_TENANT_A, slug="drain", assigned_to=_OPERATOR_SUB)
 
     reason = "node lost; escalating to on-call"
-    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    session_id, jwks = _role_session(TenantRole.OPERATOR)
     token = mint_csrf_token(str(session_id))
-    with respx.mock(assert_all_called=False):
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
         client = _authenticated_client(session_id)
         response = client.post(
             f"/ui/runbooks/runs/{run_id}/abort",
@@ -773,6 +789,44 @@ def test_abort_valid_reason_flips_state_and_audits() -> None:
     audits = _abort_audit_rows(_TENANT_A)
     assert len(audits) == 1
     assert audits[0].payload.get("reason") == reason
+
+
+@pytest.mark.parametrize(
+    ("suffix", "form"),
+    [
+        ("next", {"verify_type": "confirm", "answer": "yes"}),
+        ("abort", {"reason": "node lost"}),
+    ],
+)
+def test_next_and_abort_read_only_forbidden_403_run_unchanged(
+    suffix: str, form: dict[str, str]
+) -> None:
+    """A ``read_only`` session's next / abort POST is 403 at the role floor.
+
+    The POST clears the CSRF gate (valid token) but the real JWT carries
+    ``read_only``, so ``require_ui_operator`` refuses it before the service
+    runs: the run keeps its state, and no abort audit row lands.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="drain", body=_two_step_body())
+    run_id = _start_run(tenant_id=_TENANT_A, slug="drain", assigned_to=_OPERATOR_SUB)
+
+    session_id, jwks = _role_session(TenantRole.READ_ONLY)
+    token = mint_csrf_token(str(session_id))
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.post(
+            f"/ui/runbooks/runs/{run_id}/{suffix}",
+            data=form,
+            **_csrf_kwargs(token),
+        )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}
+    assert "x-csrf-rejection-reason" not in response.headers
+    assert _run_row(run_id).state == "in_progress"
+    assert _abort_audit_rows(_TENANT_A) == []
 
 
 def test_abort_missing_csrf_rejected_403() -> None:

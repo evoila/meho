@@ -46,6 +46,9 @@ Error contract
   ``safety_level`` is not ``safe``. Mapped to 422.
 * :class:`SensorNameConflictError` -- the ``(tenant_id, name)`` pair is
   already taken. Mapped to 409.
+* :class:`SensorConnectorMismatchError` -- the connector does not fit the
+  target's product and version, and the create did not set ``force``.
+  Mapped to 422.
 * List / get / delete signal *absence* via ``None`` / ``False`` rather
   than an exception, so the 404-vs-existence-leak collapse stays trivial
   at the boundary.
@@ -64,6 +67,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.checks.connector_fit import connector_fit_for_target, with_connector_fit
 from meho_backplane.checks.repository import create_sensor, list_sensor_results
 from meho_backplane.checks.schemas import (
     SensorCreate,
@@ -75,6 +79,7 @@ from meho_backplane.checks.schemas import (
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Sensor, SensorResult
+from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
@@ -83,9 +88,11 @@ from meho_backplane.operations._lookup import (
 
 __all__ = [
     "SensorAdminService",
+    "SensorConnectorMismatchError",
     "SensorIdentitySubForbiddenError",
     "SensorNameConflictError",
     "SensorOperationNotFoundError",
+    "SensorRequiresReadOperationError",
     "SensorRequiresSafeOperationError",
     "SensorResultsCursorError",
 ]
@@ -164,6 +171,26 @@ class SensorRequiresSafeOperationError(Exception):
         )
 
 
+class SensorRequiresReadOperationError(SensorRequiresSafeOperationError):
+    """Raised when a Sensor's op is ``safe`` but changes something.
+
+    A few writes are ``safe`` because they need no approval, for example the
+    GitHub ticket writes (``docs/decisions/2026-11-02-github-ticket-writes-are-safe.md``).
+    Their connector marks them as safe writes
+    (:func:`meho_backplane.op_classes.is_safe_write`). A Sensor would run
+    such a write on every tick with no person, so it is refused like any other
+    non-read. Same error code and status as the parent class.
+    """
+
+    def __init__(self, connector_id: str, op_id: str, safety_level: str) -> None:
+        super().__init__(connector_id, op_id, safety_level)
+        self.args = (
+            f"operation {op_id!r} on connector {connector_id!r} is a write "
+            f"(safety_level={safety_level!r}, but it changes the target); a Sensor "
+            "may reference only reads (it is evaluated unattended)",
+        )
+
+
 class SensorNameConflictError(Exception):
     """Raised when the ``(tenant_id, name)`` pair is already taken.
 
@@ -180,6 +207,25 @@ class SensorNameConflictError(Exception):
     def __init__(self, name: str) -> None:
         self.name = name
         super().__init__(f"a sensor named {name!r} already exists in this tenant")
+
+
+class SensorConnectorMismatchError(Exception):
+    """Raised when a new Sensor's connector does not fit its target.
+
+    The target's detected product and version are outside what the
+    connector declares, so the Sensor would read ``unknown`` at its first
+    run. The create is refused unless it sets ``force``. The message is the
+    plain warning, and names the connector that fits the target when there
+    is one. The boundary maps it to 422 ``sensor_connector_mismatch``.
+    """
+
+    #: Machine-readable error code surfaced on every transport.
+    error_code = "sensor_connector_mismatch"
+
+    def __init__(self, warning: str, matching_connector_id: str | None) -> None:
+        self.warning = warning
+        self.matching_connector_id = matching_connector_id
+        super().__init__(f"{warning} Set force to create the Sensor anyway.")
 
 
 class SensorIdentitySubForbiddenError(Exception):
@@ -362,6 +408,23 @@ async def _lock_and_require_operation(
         raise SensorOperationNotFoundError(payload.connector_id, payload.op_id)
 
 
+def _require_read(payload: SensorCreate, descriptor: EndpointDescriptor) -> None:
+    """Refuse a Sensor whose op is not ``safe``, or is a ``safe`` write.
+
+    Raises :class:`SensorRequiresSafeOperationError` for a non-safe op and
+    :class:`SensorRequiresReadOperationError` for a safe op its connector
+    marks as a safe write (:func:`~meho_backplane.op_classes.is_safe_write`).
+    """
+    if descriptor.safety_level != "safe":
+        raise SensorRequiresSafeOperationError(
+            payload.connector_id, payload.op_id, descriptor.safety_level
+        )
+    if is_safe_write(payload.op_id):
+        raise SensorRequiresReadOperationError(
+            payload.connector_id, payload.op_id, descriptor.safety_level
+        )
+
+
 class SensorAdminService:
     """Tenant-scoped CRUD over :class:`Sensor`.
 
@@ -402,6 +465,10 @@ class SensorAdminService:
         SensorRequiresSafeOperationError
             The descriptor's ``safety_level`` is not ``safe``. The boundary
             maps this to 422 ``sensor_requires_safe_operation``.
+        SensorConnectorMismatchError
+            The connector does not fit the target's product and version and
+            ``payload.force`` is not set. The boundary maps this to 422
+            ``sensor_connector_mismatch``.
         SensorNameConflictError
             The ``(tenant_id, name)`` pair is already taken. The boundary
             maps this to 409 ``sensor_name_conflict``.
@@ -428,12 +495,10 @@ class SensorAdminService:
         )
         if descriptor is None:
             raise SensorOperationNotFoundError(payload.connector_id, payload.op_id)
-        if descriptor.safety_level != "safe":
-            raise SensorRequiresSafeOperationError(
-                payload.connector_id,
-                payload.op_id,
-                descriptor.safety_level,
-            )
+        _require_read(payload, descriptor)
+        fit = await connector_fit_for_target(tenant_id, payload.connector_id, payload.target)
+        if fit is not None and fit.warning is not None and not payload.force:
+            raise SensorConnectorMismatchError(fit.warning, fit.matching_connector_id)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             await _lock_and_require_operation(session, tenant_id, payload)
@@ -470,7 +535,7 @@ class SensorAdminService:
                 # it surfaces as a 500 rather than a misleading 409.
                 raise
             await session.refresh(row)
-            return _row_to_read(row)
+            return _row_to_read(row).model_copy(update={"connector_fit": fit})
 
     async def list_(
         self,
@@ -482,6 +547,9 @@ class SensorAdminService:
         offset: int = 0,
     ) -> Sequence[SensorRead]:
         """List sensors under *tenant_id*; newest-first.
+
+        Each Sensor carries ``connector_fit``: its target's current product
+        and version, and a warning when the connector does not fit them.
 
         Optional *status* / *cadence_kind* filters narrow the result by the
         respective columns. The route layer validates the values against
@@ -503,7 +571,7 @@ class SensorAdminService:
                 stmt = stmt.where(Sensor.cadence_kind == cadence_kind)
             result = await session.execute(stmt)
             rows = list(result.scalars().all())
-            return [_row_to_read(r) for r in rows]
+        return await with_connector_fit(tenant_id, [_row_to_read(r) for r in rows])
 
     async def list_results(
         self,

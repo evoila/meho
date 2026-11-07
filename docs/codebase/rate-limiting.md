@@ -88,12 +88,19 @@ is therefore unknowable without building a session registry, which #3500 did
 not do. The cheap, deterministic backstop is a per-tenant cap on **new session
 handshakes per window**: every `initialize` is one new session, so bounding
 `initialize` volume bounds session creation. `_initialize` calls
-`_enforce_mcp_session_cap` first; over the cap it raises `McpRateLimitedError`
+`_enforce_mcp_session_cap` first when the session has a current tenant (a
+session with no tenant skips the cap); over the cap it raises `McpRateLimitedError`
 (JSON-RPC `-32000`) with a `retry_after_seconds` hint.
 
 ## Settings
 
-All default to disabled. Per-tenant override CSV is `<tenant-uuid>=<int>`
+The code defaults are disabled (`0`), so a local run without Valkey still
+dispatches. The Helm chart turns the three limits on for every install
+(`config.dispatchRateLimitPerMinute: "600"`,
+`config.dispatchMaxConcurrentOps: "16"`,
+`config.mcpSessionStartLimitPerMinute: "60"`), because every chart install
+has the Valkey store the limits count in. Set a chart value to `"0"` to
+turn that limit off. Per-tenant override CSV is `<tenant-uuid>=<int>`
 pairs (case-insensitive UUID, whitespace ignored); a tenant absent from the
 map uses the global default.
 
@@ -107,8 +114,8 @@ map uses the global default.
 | `mcp_session_start_limit_per_minute` / `MCP_SESSION_START_LIMIT_PER_MINUTE` | `0` | Global per-tenant new-MCP-sessions/min. |
 | `mcp_session_start_limit_per_minute_overrides` / `..._OVERRIDES` | `""` | Per-tenant override map. |
 
-The lab enables tight caps for the untrusted-visitor (Envision) tenant only,
-leaving production tenants at the unlimited default.
+A shared instance can hold one tenant to a tighter cap through the
+override maps while the other tenants keep the chart default.
 
 ## Dependencies
 
@@ -141,7 +148,7 @@ leaving production tenants at the unlimited default.
 
 ## References
 
-- Task: `evoila/meho#3500`; finding: `evoila-bosnia/meho-internal#321`.
+- Task: `evoila/meho#3500`.
 - Prior art: `broadcast/rate_limit.py`, `events/ingest/rate_limit.py`.
 - Not this: `operations/budget_enforcement.py` / `identity-budget.md`
   (internal agent-run LLM spend only, not client request volume).

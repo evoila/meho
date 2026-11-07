@@ -39,6 +39,13 @@ _FORM_2_VALUES = [
 ]
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -65,8 +72,15 @@ _BASE_OVERRIDES = [
     "networkPolicy.keycloakCIDR=10.0.3.0/24",
 ]
 
-# Operator extras the Job and the init container must both carry.
+# Operator extras the Job and the init container must both carry. The
+# runtime login is what the built-in PostgreSQL sets up on its own; the
+# bring-your-own render names the same role and Secret so the two renders
+# compare line by line.
 _EXTRAS = [
+    "--set",
+    "postgres.runtime.role=meho_app",
+    "--set",
+    "postgres.runtime.credentialsSecret=test-core-postgres-meho-app",
     "--set",
     "image.digest=sha256:" + "a" * 64,
     "--set",
@@ -79,7 +93,7 @@ _EXTRAS = [
     'extraVolumes=[{"name":"trust","configMap":{"name":"trust-bundle"}}]',
 ]
 
-_CORE_ON = ["--set", "corePostgres.enabled=true"]
+_CORE_ON = ["--set", "corePostgres.enabled=true", "--set", "postgres.credentialsSecret="]
 
 # Everything that makes the runner's container; `name` is "migrate" in both.
 _SAME_FIELDS = (
@@ -146,12 +160,14 @@ def test_built_in_postgres_migrates_in_the_backplane_pod() -> None:
     (init,) = pod["initContainers"]
     assert init["name"] == "migrate"
     assert init["command"] == ["python", "-m", "meho_backplane.db.migrate"]
-    # The runner needs the database URL and nothing else.
-    assert [e["name"] for e in init["env"]] == ["DATABASE_URL"]
+    # The runner needs the owner login and the name of the runtime role
+    # it grants (test_chart_runtime_database_login.py), nothing else.
+    assert [e["name"] for e in init["env"]] == ["DATABASE_URL", "DATABASE_RUNTIME_ROLE"]
     assert init["env"][0]["valueFrom"]["secretKeyRef"] == {
         "name": "test-core-postgres-meho",
         "key": "url",
     }
+    assert init["env"][1]["value"] == "meho_app"
     # The /tmp emptyDir is the pod's own volume.
     assert {"name": "tmp", "mountPath": "/tmp"} in init["volumeMounts"]
     assert {"name": "tmp", "emptyDir": {}} in pod["volumes"]

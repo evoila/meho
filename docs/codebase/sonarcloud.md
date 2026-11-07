@@ -85,11 +85,13 @@ new-code-period + scan-trigger section below for why it is kept advisory).
 `scripts/ci/measure_test_map.py` counts how many tests a "run only the tests
 for the changed code" map would pick for recent merged pull requests. CI does
 not use it. It needs coverage data that records which test ran each line:
-`dynamic_context = test_function` in `.coveragerc.ci`. That setting is **not**
-on `main`. To get the data, open a pull request that adds it, give it the
-`ci-coverage-validate` label, and keep the combined `.coverage` file from the
-combine job (it is not uploaded today, only `coverage.xml`). How to run the
-script is in its docstring.
+`dynamic_context = test_function` in `.coveragerc.ci`. Since #5642 that
+setting is on `main`: the nightly run records the test names and makes the
+unit test map that pull requests use (see "Test map run" in
+[`devops.md`](devops.md)). The combined `.coverage` file is not uploaded, only
+`coverage.xml` and the map. To get the data, give a pull request the
+`ci-coverage-validate` label and add an upload of `backend/.coverage` to the
+combine job. How to run the script is in its docstring.
 
 The script also needs the list from `pytest --collect-only`. Make that list
 on the **exact commit the coverage run tested**. For a `pull_request` run this
@@ -122,8 +124,9 @@ Things to know about the data:
 - `test_function` records only lines that run inside the test function
   itself. Lines that run in fixtures, at import time, or in background tasks
   get the empty context, so the map does not see them.
-- Coverage cannot use the faster `sysmon` core with test contexts. It falls
-  back to the C tracer, so the shards run slower and need more time.
+- Coverage cannot use the faster `sysmon` core with test contexts. The
+  coverage shards use the C tracer (`COVERAGE_CORE=ctrace`), so they run
+  slower: their pytest step limit is 45 minutes, not 30.
 
 ## When coverage collapses to ~24% — the invisible-import failure mode
 
@@ -160,13 +163,13 @@ dedicated job was the sole coverage producer and nothing else caught the gap.
 3. The artifact list on the CI run — a present `python-coverage` artifact rules
    out this failure mode.
 
-**The durable fix landed 2026-08-27 (#3172 / rdc-gitops#115).** The coverage
+**The durable fix landed 2026-08-27 (#3172).** The coverage
 tax is intrinsic (~12.5 GiB peak at `-n 1`) and barely moves with parallelism —
 and the "~1.2 GiB under the pod limit" this section used to claim was fiction:
 the live heavy-pool runner limit was **8Gi** (13.67 GiB was #1982's measured
 local peak, mistaken for the cap), so the sweep never fit and every main-push
 coverage run since ~2026-06-20 died as an OOM runner-loss or a memory-thrash
-wedge. rdc-gitops#115 resized the pool in place to **14Gi** (request==limit,
+wedge. The runner pool was resized in place to **14Gi** (request==limit,
 node-exclusive by memory on the 15.62-GiB-allocatable workers) — the job's
 `runs-on:` stays. Real headroom is now ~1.5 GiB; if the suite outgrows
 ~13 GiB serial, the next lever is sharding the sweep into sequential pytest
@@ -205,7 +208,7 @@ Nothing turns red because the coverage jobs are non-blocking by design.
    nothing. **Fix:** the `pytest_sessionfinish` hook in `backend/tests/conftest.py`
    saves the worker's coverage data (and stops the tracer) before the worker
    reports "finished". Pinned by `backend/tests/test_ci_coverage_shards.py`.
-2. **The shard hits its 30-minute step limit.** Then all of its processes are
+2. **The shard hits its pytest step limit (45 minutes since #5642).** Then all of its processes are
    killed and every data file of that shard is lost (the shard uploads an
    empty or missing artifact). With 5 shards on the 7 GiB heavy runner, a
    shard with about 4,500 tests ran up to 29 minutes. **Fix:** the sweep runs
@@ -224,9 +227,9 @@ Nothing turns red because the coverage jobs are non-blocking by design.
    file reports under 20%.
 2. The shard's `coverage-pytest-log-shard-N` artifact (kept 7 days): a
    `KeyboardInterrupt` after the last test, or a step that stopped at the
-   30-minute limit, means the shard lost its worker data.
+   45-minute limit, means the shard lost its worker data.
 3. The `Print peak memory` step of each shard: a peak at the memory limit
-   or a pytest step near 30 minutes means the shard count must go up.
+   or a pytest step near 45 minutes means the shard count must go up.
 
 ## New-code period + scan trigger — how they're configured
 
@@ -300,21 +303,23 @@ Other accepted issue-level false positives: `go:S4830`/`S5527` on
 shell script). Mark these *Accepted* / *Won't fix* in SonarCloud with the rationale
 above so the ratings reflect real risk.
 
-The 8 production CRITICAL TLS findings are **by-design and suppressed in code**
+The 5 production CRITICAL TLS findings are **by-design and suppressed in code**
 via rule-scoped `# NOSONAR(Sxxxx)` comments (rule-scoped so only the named rule is
 muted, not every issue on the line), each pointing at the module docstring that
 carries the justification:
 
 | Line | Rule | Why by-design |
 |---|---|---|
-| `connectors/net/tls.py:439` | S4423 | probe negotiates whatever the appliance offers; protocol version is *reported* output |
-| `connectors/net/tls.py:440` | S4830 | inspection-only handshake; verification-off is the operation's purpose |
-| `connectors/net/tls.py:441` | S5527 | hostname match is computed and *reported* by the handler, not enforced |
-| `connectors/adapters/http.py:125` | S5527 | per-target `verify_tls=false` opt-out (default `True`); WARN-logged + audited; `tls_ca_pin` is the secure supersession |
-| `connectors/adapters/http.py:127` | S4830 | same justification; see the module docstring's TLS-trust precedence |
-| `connectors/vmware_rest/ovf_transfer.py:271` | S4830 | pre-flight cert-fetch handshake to the device host builds an unverified context; the lease `sslThumbprint` pin (`verify_device_thumbprint`) is the identity control (module docstring #3229/#3284) |
-| `connectors/vmware_rest/ovf_transfer.py:272` | S5527 | same handshake; the device host is self-signed, so hostname match is not the control — the pin fails closed on a cert mismatch |
-| `connectors/vmware_rest/ovf_transfer.py:273` | S4830 | same handshake; `CERT_NONE` fetches the cert to hash for the pin, it is not the trust decision |
+| `connectors/net/tls.py:518` | S4423 | probe negotiates whatever the appliance offers; protocol version is *reported* output |
+| `connectors/net/tls.py:519` | S4830 | inspection-only handshake; verification-off is the operation's purpose |
+| `connectors/net/tls.py:520` | S5527 | hostname match is computed and *reported* by the handler, not enforced |
+| `connectors/adapters/http.py:177` | S5527 | per-target `verify_tls=false` opt-out (default `True`); WARN-logged + audited; `tls_ca_pin` is the secure supersession |
+| `connectors/adapters/http.py:179` | S4830 | same justification; see the module docstring's TLS-trust precedence |
+
+One more TLS comment, `# NOSONAR S4830` without brackets, is on the
+reachability probe of the Kubernetes connector
+(`connectors/kubernetes/connector.py`, `probe`): it checks `/readyz` without
+a kubeconfig, and its docstring gives the reason.
 
 These are deliberately **not** muted project-wide (no source-tree multicriteria on
 the TLS rules) so future genuinely-insecure TLS code still gets flagged.

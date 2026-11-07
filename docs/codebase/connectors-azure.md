@@ -5,10 +5,14 @@ subscription. The connector logs in to Microsoft Entra ID with a login (a
 service principal) from Vault, keeps the access token in its own cache, and
 calls Azure Resource Manager (Azure's management API) with it.
 
-Today the connector has three operations: `azure.about`,
-`azure.location.list` and `azure.operation.status`. Later reads (inventory, compute, network, storage,
-cost and more) build on the login, the cache, the retry budget, the paging
-helper and the polling helper described here.
+The connector has 71 operations in 12 groups. The group `account` holds
+`azure.about`, `azure.location.list` and `azure.operation.status`. The other
+groups are the families (inventory, compute, network, storage, cost and
+more), each with its own section at the end of this page. Every family builds
+on the login, the cache, the retry budget, the paging helper and the polling
+helper described here. Two operations change something in Azure and wait for
+a person's approval (`caution`): `azure.tag.update` and
+`azure.patching.assessment.start`. All the others are `safe` reads.
 
 Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 `backend/src/meho_backplane/connectors/_shared/microsoft_login.py`.
@@ -21,7 +25,7 @@ Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 | Connector ID | `azure-arm-2026.10` (implementation `azure-arm`, version `2026.10`) |
 | Registration | the versioned row plus the wildcard row `("azure", "", "")` |
 | Kind | typed operations only; nothing is ingested from a spec |
-| Operations | `azure.about`, `azure.location.list` and `azure.operation.status` (group `account`, `safe`) |
+| Operations | 71 in 12 groups: `account`, `aks`, `arc`, `automation`, `avs`, `compute`, `cost`, `inventory`, `migrate`, `network`, `security`, `storage` |
 | Spec path check | `backend/tests/test_connectors_azure_spec_reconcile.py` against the shelf folder `azure-arm-2026.10` |
 | Onboarding | [`docs/cross-repo/azure-onboarding.md`](../cross-repo/azure-onboarding.md) |
 
@@ -76,6 +80,8 @@ methods that `AzureConnector` takes over.
   line per list for each family.
 - `_paths.py` keeps the paths, in one marked section per family. It has no
   `__all__`, because every family would add its names at the same place.
+- `trace_mask.py` holds what the flight recorder leaves out of every Azure
+  answer (see [Trace mask](#trace-mask)).
 
 Every place that collects the families has one fixed comment line per family,
 `# <family> (Task #<n>)`, in alphabetical order. A family adds its lines
@@ -213,7 +219,7 @@ and for a system call that read fails on purpose.
 
 ## Recovery
 
-- **Azure answers 401** (the token is no longer accepted): `send` calls
+- **Azure answers 401** (Azure does not accept the token): `send` calls
   `invalidate_session(target)`, which drops the target's tokens, and tries
   once more inside the same retry budget. The retry logs in again with the
   cached secret. When Azure answers 401 again, the call fails with
@@ -303,11 +309,36 @@ For `connector_error` the extras carry `exception_class` (the kind above),
 `remediation` (what to do). Azure's message is untrusted data. `clean_azure_text`
 filters secrets out of it with MEHO's default redaction policy and then cuts
 it to 2,048 characters, in that order: cutting first could split a token at
-the boundary into a fragment the filter no longer recognises. When the filter
+the boundary into a fragment the filter does not recognise. When the filter
 itself fails, the text is withheld. The cleaned text goes only into
 `upstream_message`, which the dispatcher filters and cuts once more. The same
 function cleans the error message of a failed long-running operation. MEHO's
 own text names Azure's error code only when it looks like a code.
+
+## Trace mask
+
+When the flight recorder is on, it keeps Azure's answer to each call in the
+trace (the record of one call, for debugging). `AzureConnector.trace_response_body`
+hands it Azure's JSON with the value of each field below replaced by
+`<left out by MEHO: can hold a secret>`, at any depth, in any case and for
+every family; `send` asks this hook for every call, the Blob service calls
+too. The shared filter of the flight recorder then still runs on the result.
+An empty answer, or one that is not JSON, is left to the shared filter as it
+is. An answer the mask cannot parse or walk is left out.
+
+| Field | Where Azure sends it |
+|---|---|
+| `serviceKey`, `authorizationKey` | an ExpressRoute circuit and its authorizations |
+| `activationKey` | an ExpressRoute Direct port, a VPN site |
+| `keys`, `primaryKey`, `secondaryKey` | a `listKeys` answer (storage accounts, Automation accounts) |
+| `parameters` | Automation runbooks and job schedules, deployments, policy assignments |
+| `publishContentLink`, `draft` | Automation runbooks (signed links to the code) |
+
+The shared secret-name rule (`is_secret_param_name`) already hides
+`sharedKey` (VPN connections, ExpressRoute peerings), `adminPassword` (VMs),
+`serverAppSecret` and `secret` (AKS) and `connectionString` (any
+`*ConnectionString`), so `trace_mask.SECRET_FIELDS` does not list them. A test
+checks that the two lists never repeat each other.
 
 ## URL check
 
@@ -387,9 +418,15 @@ nothing is missing and the result is not called cut. Inside `PagedRows`, the
 
 A long-running Azure call answers 201 or 202. `operation_reference`
 (`_polling.py`) reads the poll URL: `Azure-AsyncOperation` when present, else
-`Location`. It checks the URL (the URL check above, plus: one part of the
-path has "operation" in it, such as `operations`, `operationStatuses` or
-`operationResults`) and returns an `OperationReference`:
+`Location`. It checks the URL with `check_poll_url`: the URL check above,
+plus the shape of an operation status URL. The path ends in `<kind>/<id>`,
+where `<kind>` is `operations`, `operationStatuses`, `operationResults` or
+`asyncOperations` (any case) and the id is not empty. Before that comes
+`/subscriptions/<sub>`, optionally `/resourceGroups/<group>`, then optionally
+`/providers/<namespace>` and `/locations/<location>`. No path part may be
+empty. Any other URL, such as a VM read or a Log Analytics query, is refused
+before MEHO sends a token. `azure.operation.status` runs the same check on the
+reference a caller passes back. It returns an `OperationReference`:
 
 ```json
 {"poll_url": "...", "poll_kind": "azure-asyncoperation", "resource_id": "...",
@@ -666,7 +703,7 @@ the paging fields of `PagedRows.as_dict()` (`truncated`, `omission`,
   with `values` (not `value`) and no next page, so this read is one GET
   without paging fields. Rows and patch versions are sorted by version
   number, so `1.29.10` comes after `1.29.9`. A cluster version that is in no
-  row's `patch_versions` is no longer offered in the region, and its support
+  row's `patch_versions` is not offered in the region any more, and its support
   ends after a short grace period. A minor version in no row is out of
   regular support. A row whose `support_plans` holds only
   `AKSLongTermSupport` is supported only for clusters on the long-term
@@ -709,7 +746,7 @@ proves this too.
 ### Untrusted text
 
 Cluster, pool and resource group names, versions and add-on names are text
-from Azure. They are copied as data and never used to build a request: the
+from Azure. They are copied as data, and MEHO never builds a request from them: the
 paths take only the caller's checked parameters. The guidance of every
 operation tells the AI to treat this text as data, never as instructions.
 
@@ -869,9 +906,8 @@ maintenance, their jobs and their schedules. Every operation is a read
 Files: `automation.py` (group text, guidance for the AI, operation table, and
 `AutomationOps`, a class whose methods `AzureConnector` takes over as one of
 its base classes), `automation_reads.py` (name checks, row shapes and the
-operation bodies), `automation_schemas.py` (name rules, parameter and
-response schemas), `automation_trace.py` (what the trace keeps of an
-answer). The paths are in the `automation` section of `_paths.py`.
+operation bodies) and `automation_schemas.py` (name rules, parameter and
+response schemas). The paths are in the `automation` section of `_paths.py`.
 
 ### Operations
 
@@ -914,11 +950,10 @@ secrets. No operation reads them:
   `azure.automation.job.list` has none either.
 - The trace (the flight recorder's record of each call) leaves these fields
   out too. Its shared filter finds secrets by their shape only, and a
-  parameter value or a signed link can have any shape. So every Automation
-  list is read through `TraceMaskingCaller` (`automation_trace.py`): the
-  trace gets Azure's answer with `parameters`, `publishContentLink` and
-  `draft` in each row replaced by a fixed text. A test switches the recorder
-  on and checks the spans.
+  parameter value or a signed link can have any shape. So the connector's
+  [trace mask](#trace-mask) replaces `parameters`, `publishContentLink` and
+  `draft` with a fixed text, like the key fields of every other family. A
+  test switches the recorder on and checks the spans.
 
 Names, descriptions, `last_modified_by` and `started_by` are text from Azure.
 MEHO copies them as data and never puts them into a path or a filter. The
@@ -1643,8 +1678,8 @@ The result:
  "omissions": {"count": 1, "items": [{"kind": "subscriptions_denied", "count": 1, "message": "..."}]}}
 ```
 
-`complete` is true only when every requested subscription was read in full
-and nothing is missing. The omission kinds:
+`complete` is true only when every requested subscription was read to the
+end and nothing is missing. The omission kinds:
 
 | Kind | Meaning |
 |---|---|
@@ -1955,14 +1990,11 @@ such as `(` is written as a `%` code (`%28`), so it stays part of the name.
 **Secrets.** Every row is built from a fixed list of fields; nothing else
 from Azure's answer is passed on. An ExpressRoute circuit's answer holds its
 service key, its authorization keys and the BGP keys of its peerings; none
-of them reaches a result. Because the flight recorder would otherwise keep
-Azure's raw answer in the trace, `azure.network.expressroute.list` carries
-the tag `keys-withheld`: its `keys` word is a secret word for the flight
-recorder, so the trace of this call keeps no body. The same tag makes the
-dispatcher keep Azure's error text out of this operation's error result
-(`operations/_vendor_text.py`); the error code, the HTTP status and the hint
-stay. A gateway's answer no longer holds the RADIUS secret (Microsoft removed
-it from the list answer), so `azure.network.gateway.list` needs no such tag. The description of a
+of them reaches a result. The flight recorder keeps Azure's answer in the
+trace with these keys masked by the connector's [trace mask](#trace-mask),
+so the error text of `azure.network.expressroute.list` stays visible like
+that of every other read. A gateway's list answer holds no RADIUS secret
+(Microsoft keeps it out of the list answer). The description of a
 security rule is text from Azure; it is filtered with `clean_azure_text`
 like Azure's error text.
 
@@ -2116,9 +2148,9 @@ list can pass 50 rows, with the real reducer and `result_query`.
 ### Untrusted text
 
 Names, display names, alert titles, affected resource names and callers are
-text from Azure. Some of it can be chosen by an attacker (for example a
-resource name in an alert). It is copied as data and never used to build a
-request, and the guidance of every operation tells the AI to treat it as
+text from Azure. Some of it can be chosen by anyone who can name a resource
+(for example a resource name in an alert). It is copied as data, and MEHO
+never builds a request from it, and the guidance of every operation tells the AI to treat it as
 data, never as instructions.
 
 ### Spec path check

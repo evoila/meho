@@ -729,9 +729,9 @@ async def test_inline_divergent_product_with_handrolled_impl_fails_closed() -> N
     G0.27 / T3 (#1817) — the hole #1851 closes. The
     ``meho_connector_ingest`` tool calls
     :meth:`IngestionPipelineService.ingest` directly, never the REST 422
-    guard. Before #1851, ``--product vcf-logs --impl-id vrli-rest`` (where
-    ``VcfLogsConnector`` is registered under the canonical ``vrli``)
-    persisted rows under ``vcf-logs`` with no exception: the auto-register
+    guard. Before #1851, ``--product container-registry --impl-id harbor-rest``
+    (where ``HarborConnector`` is registered under the canonical ``harbor``)
+    persisted rows under ``container-registry`` with no exception: the auto-register
     deferral branch returns ``False`` without reaching
     ``register_connector_v2``'s #1816 hard-fail. Moving the round-trip
     enforcement into the service layer makes this tool fail closed —
@@ -743,18 +743,18 @@ async def test_inline_divergent_product_with_handrolled_impl_fails_closed() -> N
     is exercised on the production path the MCP tool actually takes; the
     guard fires before any spec fetch or DB write, so no DB is needed.
     """
-    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+    from meho_backplane.connectors.harbor.connector import HarborConnector
 
     # Register the hand-coded class only if the eager-import / a prior
     # test in this process hasn't already placed it (the autouse registry
     # isolation snapshots/restores ``_REGISTRY_V2`` contents, so the key
     # may already be present) — re-registering the same triple raises.
-    if ("vrli", "9.0", "vrli-rest") not in all_connectors_v2():
+    if ("harbor", "2.x", "harbor-rest") not in all_connectors_v2():
         register_connector_v2(
-            product="vrli",
-            version="9.0",
-            impl_id="vrli-rest",
-            cls=VcfLogsConnector,
+            product="harbor",
+            version="2.x",
+            impl_id="harbor-rest",
+            cls=HarborConnector,
         )
     op = build_operator(TenantRole.TENANT_ADMIN)
 
@@ -762,21 +762,21 @@ async def test_inline_divergent_product_with_handrolled_impl_fails_closed() -> N
         await ci_mod._ingest_handler(
             op,
             {
-                "product": "vcf-logs",  # diverges from the parser-derived "vrli"
-                "version": "9.0",
-                "impl_id": "vrli-rest",
-                "specs": [{"uri": "https://example.test/vrli.yaml"}],
+                "product": "container-registry",  # diverges from the derived "harbor"
+                "version": "2.x",
+                "impl_id": "harbor-rest",
+                "specs": [{"uri": "https://example.test/harbor.yaml"}],
                 "tenant_id": str(OPERATOR_TENANT_ID),
             },
         )
     data = caught.value.data
     assert data is not None
     assert data["kind"] == "product_impl_id_mismatch"
-    assert data["product"] == "vcf-logs"
-    assert data["derived_product"] == "vrli"
+    assert data["product"] == "container-registry"
+    assert data["derived_product"] == "harbor"
     # The message names both spellings so the driving agent can self-correct.
-    assert "vcf-logs" in str(caught.value)
-    assert "vrli" in str(caught.value)
+    assert "container-registry" in str(caught.value)
+    assert "harbor" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------
@@ -969,6 +969,9 @@ async def test_async_returns_handle_before_pipeline_completes(
     assert running["status"] == "running"
     assert running["ingestion"] is None
     assert running["product"] == "sddc-manager"
+    # The stub replaces the whole pipeline, so no step is reported past parse.
+    assert running["phase"] == "parse"
+    assert running["phase_started_at"] == running["started_at"]
 
     # Release the gate; the background task completes and the job flips
     # to ``succeeded`` carrying the final counts (AC #2).
@@ -1059,6 +1062,31 @@ async def test_async_foreign_tenant_denied_eagerly_no_job_no_task() -> None:
     # there is nothing to poll and nothing running. (The autouse
     # ``_isolated_job_registry`` fixture guarantees the registry
     # started this test empty.)
+    assert get_job_registry()._jobs == {}
+    assert ci_mod._background_tasks == set()
+
+
+@pytest.mark.parametrize("run_async", [False, True], ids=["inline", "async"])
+async def test_builtin_scope_needs_platform_admin_on_both_paths(run_async: bool) -> None:
+    """An omitted ``tenant_id`` is the built-in scope, which needs ``platform_admin``.
+
+    A tenant_admin without it gets the -32602 denial before any job row
+    or pipeline task exists, on the inline and the async path alike.
+    """
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    with pytest.raises(McpInvalidParamsError, match="requires platform_admin") as caught:
+        await ci_mod._ingest_handler(
+            op,
+            {
+                "product": "scopedenied",
+                "version": "1.0",
+                "impl_id": "scopedenied-rest",
+                "specs": [{"uri": "docs:never-fetched/spec.yaml"}],
+                "async": run_async,
+            },
+        )
+    assert str(caught.value).startswith("built-in connector ingest requires platform_admin")
     assert get_job_registry()._jobs == {}
     assert ci_mod._background_tasks == set()
 

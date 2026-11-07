@@ -56,6 +56,7 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.settings import get_settings
+from tests._ssh_fakes import FakeSshConnection
 
 # ---------------------------------------------------------------------------
 # Environment + registry fixtures
@@ -265,22 +266,19 @@ def test_parse_os_release_returns_none_on_no_id() -> None:
 
 
 @pytest.fixture
-def _mock_ssh_conn() -> MagicMock:
-    """Build a :class:`MagicMock` standing in for an asyncssh SSH connection.
+def _mock_ssh_conn() -> FakeSshConnection:
+    """Build a fake standing in for an asyncssh SSH connection.
 
     Tests that exercise :meth:`_remote_bash_with_sudo` use this stub
-    to bypass the real ``asyncssh.connect`` plumbing. ``conn.run`` is
-    the load-bearing method -- the test assertions read its call args
-    to prove the password never lands in argv and only in stdin.
+    to stand in for the real ``asyncssh.connect`` plumbing. Its recorded
+    ``calls`` are load-bearing -- the test assertions read them to
+    prove the password never lands in argv and only in stdin.
     """
-    conn = MagicMock()
-    conn.is_closed.return_value = False
-    conn.run = AsyncMock(return_value=_completed_process(stdout="", exit_status=0))
-    return conn
+    return FakeSshConnection(stdout="", exit_status=0)
 
 
 async def test_remote_bash_with_sudo_argv_holds_byte_count_streams_password_via_stdin(
-    _mock_ssh_conn: MagicMock,
+    _mock_ssh_conn: FakeSshConnection,
 ) -> None:
     """argv is boilerplate + script byte count; password is on stdin, never argv."""
     connector = Bind9Connector()
@@ -293,36 +291,31 @@ async def test_remote_bash_with_sudo_argv_holds_byte_count_streams_password_via_
         )
     assert result.exit_status == 0
 
-    # ``conn.run`` was called with the rendered cmd — the only caller-
+    # The command was run with the rendered cmd — the only caller-
     # derived interpolation is ``len(script.encode("utf-8"))``, an
     # integer; ``script`` and ``sudo_password`` are not interpolated.
-    args, kwargs = _mock_ssh_conn.run.call_args
+    (cmd, stdin_payload) = _mock_ssh_conn.calls[-1]
     expected_cmd = _build_sudo_bash_remote_cmd(len(script.encode("utf-8")))
-    assert args[0] == expected_cmd
+    assert cmd == expected_cmd
     # Spot-check the safety-critical fragments of the rendered shape.
-    assert args[0].startswith("set -e; umask 077; f=$(mktemp); ")
-    assert f"head -c {len(script.encode('utf-8'))} > " in args[0]
-    assert args[0].endswith('sudo -S -p "" bash "$f"')
+    assert cmd.startswith("set -e; umask 077; f=$(mktemp); ")
+    assert f"head -c {len(script.encode('utf-8'))} > " in cmd
+    assert cmd.endswith('sudo -S -p "" bash "$f"')
 
     # The password must not appear anywhere in the constructed argv.
-    assert "super-secret-password" not in args[0]
+    assert "super-secret-password" not in cmd
     # The script body must not appear in the argv either.
-    assert "echo body-of-script" not in args[0]
+    assert "echo body-of-script" not in cmd
 
     # The stdin payload — script bytes first (so ``head -c N`` reads
     # exactly the script, unbuffered), then the password line. EOF
     # immediately after the password's newline so sudo's stdio buffer
     # has nothing past the password line to swallow (#697 fix).
-    stdin_payload = kwargs["input"]
     assert stdin_payload == "echo body-of-scriptsuper-secret-password\n"
     # Reassert by region: first N bytes == script, remainder == password\n.
     n = len(script.encode("utf-8"))
     assert stdin_payload[:n] == script
     assert stdin_payload[n:] == "super-secret-password\n"
-
-    # ``check=False`` -- the helper never raises ProcessError on
-    # non-zero exit; callers decide.
-    assert kwargs["check"] is False
 
 
 @pytest.mark.parametrize(
@@ -367,7 +360,7 @@ async def test_remote_bash_with_sudo_rejects_multiline_password(
 
 
 async def test_remote_bash_with_sudo_does_not_log_password(
-    _mock_ssh_conn: MagicMock,
+    _mock_ssh_conn: FakeSshConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The structured log event records cmd_len/exit_code, not the password."""
@@ -397,7 +390,7 @@ async def test_remote_bash_with_sudo_does_not_log_password(
 
 
 async def test_remote_bash_with_sudo_does_not_log_script_body(
-    _mock_ssh_conn: MagicMock,
+    _mock_ssh_conn: FakeSshConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The script body is not logged either -- only its length goes into the event."""

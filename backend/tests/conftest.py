@@ -199,9 +199,13 @@ def _default_database_url(
     # this conftest is loaded before any meho_backplane modules,
     # and importing the engine module here means it gets imported
     # once at fixture-resolution time per test.
+    import asyncio
     import shutil
 
-    from meho_backplane.db.engine import dispose_engine, reset_engine_for_testing
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from meho_backplane.db import engine as engine_module
+    from meho_backplane.db.engine import reset_engine_for_testing
 
     db_path = tmp_path / "default.db"
     url = f"sqlite+aiosqlite:///{db_path}"
@@ -218,26 +222,50 @@ def _default_database_url(
     # ``DATABASE_URL`` win via last-write.
     monkeypatch.setenv("DATABASE_URL", url)
 
+    # Keep a reference to every engine the app makes during the test. Many
+    # test files call ``reset_engine_for_testing()`` in their own teardown,
+    # which runs before this one and drops the cached engine without closing
+    # it. Its pooled aiosqlite connections were then closed only by garbage
+    # collection, later, during another test and after their event loop was
+    # closed: aiosqlite then raised "Event loop is closed" in its worker
+    # thread. Closing every engine here, while a loop runs, prevents that.
+    made_engines: list[AsyncEngine] = []
+    make_engine = engine_module.create_engine_for_url
+
+    def _record_engine(url: str, *, pool_size: int, pool_timeout: float) -> AsyncEngine:
+        made = make_engine(url, pool_size=pool_size, pool_timeout=pool_timeout)
+        made_engines.append(made)
+        return made
+
+    monkeypatch.setattr(engine_module, "create_engine_for_url", _record_engine)
+
     get_settings.cache_clear()
     reset_engine_for_testing()
     yield
-    # Tests that constructed an engine via this URL leave a cached
-    # AsyncEngine pointing at a tmp file that pytest will reap;
-    # disposing here closes the asyncpg/aiosqlite pool cleanly so the
-    # next test gets a fresh engine bound to its own tmp DB.
-    try:
-        # Best-effort dispose; pytest-asyncio's event loop may already
-        # be torn down by the time we get here, in which case the
-        # cache reset alone is sufficient.
-        import asyncio
 
-        loop = asyncio.new_event_loop()
+    to_close = list(made_engines)
+    cached = engine_module._engine
+    if cached is not None and cached not in to_close:
+        to_close.append(cached)
+
+    async def _close_engines() -> None:
+        for made in to_close:
+            await made.dispose()
+
+    # Make a loop only when there is an engine to close: some tests replace
+    # ``socket.socket`` until their own teardown, and a new loop opens a
+    # socket pair. The test's own event loop may already be closed here, so
+    # the engines are closed on a new loop. aiosqlite closes a connection on
+    # whatever loop is running, so this works for the pools of every test.
+    if to_close:
         try:
-            loop.run_until_complete(dispose_engine())
-        finally:
-            loop.close()
-    except Exception:
-        pass
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_close_engines())
+            finally:
+                loop.close()
+        except Exception as exc:
+            warnings.warn(f"closing the test database engines failed: {exc!r}", stacklevel=1)
     reset_engine_for_testing()
     get_settings.cache_clear()
 
@@ -772,6 +800,7 @@ def _isolate_global_registries() -> Iterator[None]:
     ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``,
     ``operations.typed_register._TYPED_OP_REGISTRARS``,
     ``operations._preview._PREVIEW_BUILDERS`` / ``_PERMISSION_PREFLIGHTS``,
+    ``operations._park_check._PARK_CHECKS``,
     and the dispatcher's per-process caches
     ``operations._handler_resolve._HANDLER_CACHE`` /
     ``_CONNECTOR_INSTANCE_CACHE``. None had a process-wide per-test
@@ -813,6 +842,7 @@ def _isolate_global_registries() -> Iterator[None]:
     from meho_backplane.connectors import registry as conn_reg
     from meho_backplane.mcp import registry as mcp_reg
     from meho_backplane.operations import _handler_resolve as handler_resolve
+    from meho_backplane.operations import _park_check as park_check_reg
     from meho_backplane.operations import _preview as preview_reg
     from meho_backplane.operations import dispatcher, set_default_reducer
     from meho_backplane.operations import typed_register as typed_reg
@@ -838,6 +868,7 @@ def _isolate_global_registries() -> Iterator[None]:
     # + restore them with the other process-global registries.
     preview_builders = dict(preview_reg._PREVIEW_BUILDERS)
     permission_preflights = dict(preview_reg._PERMISSION_PREFLIGHTS)
+    park_checks = dict(park_check_reg._PARK_CHECKS)
     default_reducer = dispatcher._DEFAULT_REDUCER
     try:
         yield
@@ -859,6 +890,8 @@ def _isolate_global_registries() -> Iterator[None]:
         preview_reg._PREVIEW_BUILDERS.update(preview_builders)
         preview_reg._PERMISSION_PREFLIGHTS.clear()
         preview_reg._PERMISSION_PREFLIGHTS.update(permission_preflights)
+        park_check_reg._PARK_CHECKS.clear()
+        park_check_reg._PARK_CHECKS.update(park_checks)
         set_default_reducer(default_reducer)
 
 
@@ -1283,3 +1316,18 @@ def result_reducer_cls() -> type[Any]:
     from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 
     return JsonFluxReducer
+
+
+@pytest.fixture
+def person_token_writes_run_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a person's token call run a non-safe op at once, as before #3980.
+
+    Every MCP and REST call comes with a token, so since #3980 a person's
+    ``caution`` or ``dangerous`` op waits for approval. A suite that checks
+    the shape of an executed write uses this fixture to skip that wait.
+    ``destructive`` and ``requires_approval`` ops still wait. The token rule
+    itself is pinned in ``test_operations_dispatcher.py``.
+    """
+    from meho_backplane.operations import _validate
+
+    monkeypatch.setattr(_validate, "_person_park_reason", lambda _operator, _descriptor: None)

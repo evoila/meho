@@ -41,8 +41,8 @@ This op inherits the three T1 foundations verbatim:
   verification is off by design, so the cert is data, not a failure.
 
 ``safety_level="safe"`` + ``requires_approval=False``: a read-only
-handshake that sends no application bytes, so the probe allowlist is the
-sole floor (same posture as ``net.tcp_check``).
+handshake that sends no application bytes; the allow-list limits where
+checks can connect (same as ``net.tcp_check``).
 """
 
 from __future__ import annotations
@@ -629,7 +629,7 @@ async def register_net_tls_inspect_operation(
     natural key as the keystone
     (``product="net", version="1.x", impl_id="net-probe"``), so both ops
     share the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``safe``
-    + ``requires_approval=False`` — the probe allowlist is the only floor.
+    + ``requires_approval=False`` — the allow-list limits where checks can connect.
     """
     await register_typed_operation(
         product="net",

@@ -103,7 +103,7 @@ unconfigured, or delivery-failed send is the **product**, not an error
 
 | reason | trigger |
 |---|---|
-| `not_in_recipient_allowlist` | a recipient failed the floor (incl. empty allowlist / unparseable address) |
+| `not_in_recipient_allowlist` | a recipient failed the floor (incl. empty allowlist / unparseable address / a local part outside letters, digits and `. _ + -`) |
 | `smtp_unconfigured` | `MAIL_SMTP_HOST` or `MAIL_FROM` unset |
 | `smtp_connect_error` | `SMTPConnectError` or socket-level `OSError` (refused / DNS / timeout) |
 | `smtp_auth_requires_tls` | a username is configured but the channel is still cleartext |
@@ -138,9 +138,24 @@ all in `Settings` (`settings.py`, env-mapped in `get_settings`):
 accepted) naming the **entire** permitted recipient space. Matching is
 case-insensitive on the whole address; a domain entry does **not**
 match subdomains. An address the parser cannot positively read as
-`local@domain` is refused — which also makes SMTP envelope injection
-(CR/LF in a recipient) structurally impossible past the gate. A
-*subject* carrying a line break is rejected one layer earlier, by
+`local@domain` is refused — which also keeps a line break (CR/LF in a
+recipient) out of the envelope.
+
+**Plain local part.** A recipient's local part (the part before the
+`@`) may hold only letters, digits and `. _ + -`. Any other character
+(`%`, `!`, `<`, `>`, `=`, quotes, ...) refuses the recipient in
+`allowlist._normalise_recipient`, so the rule holds for the instance
+floor, the per-tenant list and every caller of `send_email`, including
+the checks notifier. `mail.send`'s parameter schema applies the same
+rule one layer earlier (`ops._PLAIN_RECIPIENT_PATTERN`), so a
+dispatched call gets `invalid_params`. The string the floor checks and
+the string the relay receives in `RCPT TO` are therefore the same plain
+address. Set the relay to the same rule: on Postfix, `allow_percent_hack
+= no` and `swap_bangpath = no` make the relay refuse `%` and `!` in a
+local part too. A listed **full address** must itself be a plain
+address, or it can never match.
+
+A *subject* carrying a line break is rejected one layer earlier, by
 `mail.send`'s parameter schema (`ops._SINGLE_LINE_PATTERN`), so the
 dispatch returns the structured validation error (`status="error"`,
 `extras["error_code"] == "invalid_params"`). The pattern excludes every
@@ -170,17 +185,15 @@ diagnostic.
 ## Per-tenant recipient allowlist (#3499)
 
 `MAIL_RECIPIENT_ALLOWLIST` is deployment-level (one MTA, one floor). On a
-**shared** instance that single floor cannot be narrowed per tenant, so an
-approved `mail.send` in one tenant could deliver to the recipients another
-tenant configured — the Envision-stand threat (meho-internal#320): an untrusted
-visitor tenant's approved send reaching real evoila mailboxes / a live Teams
-channel. #3499 adds a **per-tenant narrowing** override on top of the instance
-floor.
+**shared** instance, MEHO also keeps a **per-tenant narrowing** override on
+top of the instance floor. With it, an operator can limit the recipients of
+one tenant, or turn its dispatched mail off, without changing other tenants.
 
 **Where it lives.** `tenant.mail_recipient_allowlist` (nullable `Text`,
 migration `0101`) resolved per dispatch by
-`connectors/mail/tenant_policy.py::resolve_tenant_recipient_allowlist` (a
-60s-TTL cache mirroring the flight-recorder resolver). Tri-state on the value:
+`connectors/mail/tenant_policy.py::resolve_tenant_recipient_allowlist` (one
+primary-key read per send, never cached, so a policy change governs the next
+send in every process). Tri-state on the value:
 
 | column | meaning |
 |---|---|
@@ -209,11 +222,14 @@ on doubt"), this resolver fails **closed** — a DB read/parse error resolves to
 deny (empty allowlist), never to inherit. Falling through to the instance floor
 on a read error would defeat the containment the override exists to provide;
 this is a delivery-authorization decision, so doubt reduces exposure. The deny
-is not cached, so a transient error does not pin the tenant to deny for the TTL.
+holds for that one send only, so a transient error does not pin the tenant.
 
 **Operator surface.** Set/clear the override through
 `PATCH /api/v1/tenants/mail-recipient-policy` (tenant_admin) or
-`meho tenants mail-recipient-policy set --allowlist … | --clear`. Full write-path
+`meho tenants mail-recipient-policy set --allowlist … | --clear`. The
+instance settings file can set it too
+(`spec.tenants[].policies.mail_recipient_allowlist`, see
+[`settings.md`](settings.md)). Full write-path
 detail: [`tenant-mail-policy.md`](tenant-mail-policy.md).
 
 ## Safety posture
@@ -252,6 +268,8 @@ events carry host/port/reason only, never the password or body.
 - `backend/src/meho_backplane/connectors/mail/` — package
   (`transport.py`, `allowlist.py`, `ops.py`).
 - `backend/tests/test_connectors_mail.py` — contract coverage.
+- `backend/tests/test_api_v1_tenants_mail_recipient.py` — the per-tenant
+  recipient policy route.
 - Mould: `backend/src/meho_backplane/connectors/net/` +
   [`connectors-net-diagnostics.md`](connectors-net-diagnostics.md).
 - Task #2717; Initiative #2716 (checks alerting delivery); notifier

@@ -141,6 +141,27 @@ working wiring instead of an unresolvable reference:
 {{- end }}
 
 {{/*
+Name of the Kubernetes Secret that holds the API key of the
+OpenAI-compatible model endpoint (#5851). Same order as
+`meho.agentSecretName`:
+
+  1. `agent.openai.secretName` when set.
+  2. `<release>-agent-openai` when `eso.agentOpenai.enabled: true` (the
+     ExternalSecret in templates/externalsecrets.yaml makes that Secret).
+  3. `fail` with a fix when neither is set. Callers guard the call with
+     `if .Values.agent.openai.enabled`.
+*/}}
+{{- define "meho.agentOpenaiSecretName" -}}
+{{- if .Values.agent.openai.secretName -}}
+{{- .Values.agent.openai.secretName -}}
+{{- else if and .Values.eso.agentOpenai .Values.eso.agentOpenai.enabled -}}
+{{- printf "%s-agent-openai" (include "meho.fullname" .) -}}
+{{- else -}}
+{{- fail "agent.openai.enabled=true requires either agent.openai.secretName=<your-secret> (BYO) or eso.agentOpenai.enabled=true (chart-rendered ExternalSecret). The API key comes only from a Secret." -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Resolved Kubernetes Secret name holding the Keycloak Admin client secret
 (G11.2 #803). Same resolution pattern as `meho.agentSecretName`:
 
@@ -156,5 +177,55 @@ Resolved Kubernetes Secret name holding the Keycloak Admin client secret
 {{- printf "%s-keycloak-admin" (include "meho.fullname" .) -}}
 {{- else -}}
 {{- fail "keycloakAdmin.enabled=true requires either keycloakAdmin.clientSecret.secretName=<your-secret> (BYO) or eso.keycloakAdmin.enabled=true (chart-rendered ExternalSecret)." -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The database login of the running backplane (the runtime role), apart
+from the owner login that runs the migrations. With the built-in
+PostgreSQL it is the role `meho_app` and the Secret
+`<release>-core-postgres-meho-app`, both made by the install; the values
+keys stay empty or hold these names. With your own PostgreSQL it is
+`postgres.runtime.role` and `postgres.runtime.credentialsSecret`, both or
+neither (values.schema.json); both empty means one login for everything. The migration container gets the role name as
+DATABASE_RUNTIME_ROLE and grants the role its rights
+(backend/src/meho_backplane/db/runtime_role.py).
+*/}}
+{{- define "meho.postgres.runtimeRole" -}}
+{{- if .Values.corePostgres.enabled -}}
+{{- .Values.postgres.runtime.role | default "meho_app" -}}
+{{- else -}}
+{{- .Values.postgres.runtime.role -}}
+{{- end -}}
+{{- end }}
+
+{{- define "meho.postgres.runtimeSecretName" -}}
+{{- if .Values.corePostgres.enabled -}}
+{{- $want := printf "%s-core-postgres-meho-app" .Release.Name -}}
+{{- /* The PostgreSQL pod mounts the core name only. Another name would leave the core Secret unmade and the pod waiting forever (same check as the built-in Keycloak, _core-keycloak.tpl). */ -}}
+{{- if and .Values.postgres.runtime.credentialsSecret (ne .Values.postgres.runtime.credentialsSecret $want) -}}
+{{- fail (printf "postgres.runtime.credentialsSecret must be empty or %q while corePostgres.enabled is on: the built-in PostgreSQL reads only that Secret." $want) -}}
+{{- end -}}
+{{- $want -}}
+{{- else -}}
+{{- .Values.postgres.runtime.credentialsSecret -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The Secret (key `url`) the backplane container reads DATABASE_URL from:
+the runtime login when there is one, else the owner login.
+*/}}
+{{- define "meho.postgres.backplaneSecretName" -}}
+{{- include "meho.postgres.runtimeSecretName" . | default .Values.postgres.credentialsSecret -}}
+{{- end }}
+
+{{/*
+The DATABASE_RUNTIME_ROLE line of a migration container, or nothing.
+*/}}
+{{- define "meho.postgres.runtimeRoleEnv" -}}
+{{- with include "meho.postgres.runtimeRole" . -}}
+- name: DATABASE_RUNTIME_ROLE
+  value: {{ . | quote }}
 {{- end -}}
 {{- end }}

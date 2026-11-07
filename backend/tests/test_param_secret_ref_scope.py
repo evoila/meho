@@ -499,22 +499,6 @@ async def test_keycloak_password_mount_outside_tenant_is_refused_before_read(
     assert fake.auth.jwt.login_calls == []
 
 
-async def test_vcf_installer_secret_ref_outside_tenant_is_refused_before_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from meho_backplane.connectors.vcf_installer._secret_refs import read_secret_ref
-
-    fake = install_fake_client(monkeypatch, secret={"password": "other-tenant-value"})
-    with pytest.raises(SecretRefScopeError):
-        await read_secret_ref(
-            _operator(),
-            _Target(),
-            {"secret_ref": f"{_OTHER}/depot"},
-            param="depot.password_secret_ref",
-        )
-    assert fake.auth.jwt.login_calls == []
-
-
 async def test_k8s_secret_refs_outside_tenant_are_refused_before_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -530,17 +514,6 @@ async def test_k8s_secret_refs_outside_tenant_are_refused_before_read(
             param="string_data_secret_ref",
         )
     assert exc.value.param == "string_data_secret_ref"
-    assert fake.auth.jwt.login_calls == []
-
-
-async def test_vcf_automation_password_ref_outside_tenant_is_refused_before_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from meho_backplane.connectors.vcf_automation._lookups import read_password
-
-    fake = install_fake_client(monkeypatch, secret={"password": "other-tenant-value"})
-    with pytest.raises(SecretRefScopeError):
-        await read_password(_operator(), _Target(), {"password_secret_ref": f"{_OTHER}/org-admin"})
     assert fake.auth.jwt.login_calls == []
 
 

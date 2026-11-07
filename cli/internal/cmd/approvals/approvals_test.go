@@ -473,7 +473,7 @@ func TestApproveDispatchesDecideAndShow(t *testing.T) {
 	client := newTestClient(t, srv)
 
 	id := mustUUID(t, stubID)
-	detail, err := postDecision(context.Background(), client, id, "approve", "T-test")
+	detail, _, err := postDecision(context.Background(), client, id, "approve", "T-test")
 	if err != nil {
 		t.Fatalf("postDecision: %v", err)
 	}
@@ -520,7 +520,7 @@ func TestRejectDispatchesDecideWithRejectedDecision(t *testing.T) {
 	client := newTestClient(t, srv)
 
 	id := mustUUID(t, stubID)
-	if _, err := postDecision(context.Background(), client, id, "reject", ""); err != nil {
+	if _, _, err := postDecision(context.Background(), client, id, "reject", ""); err != nil {
 		t.Fatalf("postDecision: %v", err)
 	}
 	if seenDecision != "rejected" {
@@ -555,7 +555,7 @@ func TestApproveOmitsReasonWhenEmpty(t *testing.T) {
 	client := newTestClient(t, srv)
 
 	id := mustUUID(t, stubID)
-	if _, err := postDecision(context.Background(), client, id, "approve", ""); err != nil {
+	if _, _, err := postDecision(context.Background(), client, id, "approve", ""); err != nil {
 		t.Fatalf("postDecision: %v", err)
 	}
 	if strings.Contains(string(rawBody), `"reason"`) {
@@ -581,7 +581,7 @@ func TestApproveSurfacesDecide409(t *testing.T) {
 	client := newTestClient(t, srv)
 
 	id := mustUUID(t, stubID)
-	_, err := postDecision(context.Background(), client, id, "approve", "")
+	_, _, err := postDecision(context.Background(), client, id, "approve", "")
 	if err == nil {
 		t.Fatalf("expected error from 409; got nil")
 	}
@@ -662,6 +662,53 @@ func TestPrintDetailRendersOptionalFields(t *testing.T) {
 	for _, banned := range []string{"Acting as:", "Agent run:", "Expires:"} {
 		if strings.Contains(out, banned) {
 			t.Errorf("printDetail render included %q for nil field in:\n%s", banned, out)
+		}
+	}
+}
+
+// TestPrintDetailRendersJobSpecPreview confirms show prints the Job spec a
+// k8s.job.create preview carries, so the approver reads the privileges,
+// the node and the command of the Job (#5259).
+func TestPrintDetailRendersJobSpecPreview(t *testing.T) {
+	d := newApprovalView(t, "pending", "")
+	var effect map[string]interface{}
+	raw := `{
+		"op_class": "credential_write",
+		"preview": {
+			"resource": "job",
+			"name": "node-check",
+			"namespace": "default",
+			"spec": {"template": {"spec": {
+				"nodeName": "node-01",
+				"hostPID": true,
+				"containers": [{
+					"name": "check",
+					"image": "busybox:1.36",
+					"command": ["nsenter", "-t", "1", "--", "uptime"],
+					"securityContext": {"privileged": true},
+					"env": [{"name": "API_TOKEN", "value": "***REDACTED***"}]
+				}]
+			}}}
+		}
+	}`
+	if err := json.Unmarshal([]byte(raw), &effect); err != nil {
+		t.Fatalf("unmarshal sample effect: %v", err)
+	}
+	d.ProposedEffect = effect
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, want := range []string{
+		`"privileged": true`,
+		`"hostPID": true`,
+		`"nodeName": "node-01"`,
+		`"nsenter"`,
+		`"uptime"`,
+		`"value": "***REDACTED***"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDetail render missing %q in:\n%s", want, out)
 		}
 	}
 }
@@ -1172,7 +1219,7 @@ func TestPrintDecisionRendersDelegation(t *testing.T) {
 		Refs:         []string{"#12"},
 	}
 	var buf bytes.Buffer
-	printDecision(&buf, stubID, &d)
+	printDecision(&buf, stubID, &d, nil)
 	out := buf.String()
 	for _, want := range []string{
 		"approval_request " + stubID + " → rejected",
@@ -1200,7 +1247,7 @@ func TestApproveSurfacesDecide422DelegatedReason(t *testing.T) {
 	defer srv.Close()
 	client := newTestClient(t, srv)
 
-	_, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve",
+	_, _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve",
 		"ok\n\nInstructed-by: bob@example.com\nInstruction: \"go\"")
 	var he *httpResponseError
 	if !errors.As(err, &he) || he.statusCode != http.StatusUnprocessableEntity {
@@ -1268,7 +1315,7 @@ func TestPrintDetailOmitsRunWhenNotApproved(t *testing.T) {
 func TestPrintDecisionRendersFailedRun(t *testing.T) {
 	d := failedRunView(t)
 	var buf bytes.Buffer
-	printDecision(&buf, stubID, &d)
+	printDecision(&buf, stubID, &d, nil)
 	for _, want := range []string{"→ approved", "Run:          FAILED", "Error code:   connector_vault_forbidden"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("printDecision render missing %q in:\n%s", want, buf.String())
@@ -1326,7 +1373,7 @@ func TestPrintDetailAndDecisionRenderGuidance(t *testing.T) {
 	cmd, stdout, _ := newCapturingCmd(t)
 	printDetail(cmd, &d)
 	var buf bytes.Buffer
-	printDecision(&buf, stubID, &d)
+	printDecision(&buf, stubID, &d, nil)
 	for name, out := range map[string]string{"show": stdout.String(), "approve": buf.String()} {
 		for _, w := range want {
 			if !strings.Contains(out, w) {
@@ -1345,7 +1392,7 @@ func TestPrintDecisionOkRunHasNoGuidance(t *testing.T) {
 	d.ResultState = &executed
 	d.ResumeOutcome = &api.ApprovalResumeOutcomeView{ResultStatus: &resultStatus}
 	var buf bytes.Buffer
-	printDecision(&buf, stubID, &d)
+	printDecision(&buf, stubID, &d, nil)
 	out := buf.String()
 	if !strings.Contains(out, "Run:          ok") || !strings.Contains(out, "Run result:   ok") {
 		t.Errorf("ok run render changed:\n%s", out)

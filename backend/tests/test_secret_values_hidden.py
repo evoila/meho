@@ -12,6 +12,8 @@
   their name says so (``register_plain_fields``); they stay.
 * ``reveal_secret: true`` returns the raw values to a person, a PEM private
   key included. An agent, or a hosted agent run, is refused with an audit row.
+  A service principal's call waits for a person's approval first, also on a
+  read that would run at once.
 * A call that waits for approval keeps the reveal choice: the approved run
   returns the values the person asked for. The choice is stored with the
   params on the approval request, outside the hash that ties the approval
@@ -97,11 +99,9 @@ _PLAIN_NAMES = (
     "pin",
     "cert",
     "token_value",
-    "secret_key",
     "privkey",
     "pem",
     "tls_key",
-    "psk",
     "pat",
     "otp",
     "seed",
@@ -308,6 +308,25 @@ def test_name_scrub_hides_numbers_only_when_asked() -> None:
 def test_other_ops_hide_secret_named_values_including_numbers() -> None:
     shown = hide_secret_values("demo.thing.list", {"password": 1234, "name": "a"})
     assert shown == {"password": "[REDACTED:param_name]", "name": "a"}
+
+
+def test_other_ops_hide_a_pre_shared_key_and_an_authentication_secret_key() -> None:
+    """A VPN session or a routing peer answer, as a vendor file shapes it."""
+    answer = {
+        "display_name": "site-a",
+        "psk": "planted-psk-1",
+        "passphrases": ["planted-psk-2", "planted-psk-3"],
+        "authentication": {"type": "md5", "secret_key": "planted-key-4", "key_id": 7},
+        "env": [{"value_from": {"secret_key_ref": {"name": "db", "key": "url"}}}],
+    }
+    shown = hide_secret_values("demo.vpn.session.get", answer)
+    assert shown == {
+        "display_name": "site-a",
+        "psk": "[REDACTED:param_name]",
+        "passphrases": "[REDACTED:param_name]",
+        "authentication": {"type": "md5", "secret_key": "[REDACTED:param_name]", "key_id": 7},
+        "env": [{"value_from": {"secret_key_ref": {"name": "db", "key": "url"}}}],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -887,3 +906,95 @@ async def test_reveal_by_an_agent_is_refused_before_the_call_waits_for_approval(
     assert await _approval_requests() == []
     (row,) = await _audit_rows(op_id)
     assert row.payload["result_status"] == "denied"
+
+
+# ---------------------------------------------------------------------------
+# A service principal's reveal waits for a person's approval
+# ---------------------------------------------------------------------------
+
+
+async def test_reveal_by_a_service_principal_waits_for_approval_on_a_read(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A read that runs at once for a person waits when a service login asks for the values.
+
+    Nothing runs and no value comes back until a person approves. The
+    approved run returns the values to the requester.
+    """
+    await _register("vault.kv.read", _planted_secret_handler, stub_embedding_service)
+    service = _operator(PrincipalKind.SERVICE, sub="svc-reader")
+
+    parked = await _read(service, reveal=True)
+
+    assert parked.status == "awaiting_approval", parked.error
+    assert parked.result is None
+    assert [value for value in _planted_values() if value in parked.model_dump_json()] == []
+    (request,) = await _approval_requests()
+    assert request.principal_sub == "svc-reader"
+    assert request.reveal_secret is True
+    assert request.params == {"path": "app/db"}
+    assert all(
+        row.payload.get("result_status") != "ok" for row in await _audit_rows("vault.kv.read")
+    )
+
+    reviewer = _operator(PrincipalKind.USER, sub="reviewer")
+    async with get_sessionmaker()() as session:
+        approved = await approve_request(session, request.id, operator=reviewer)
+        await session.commit()
+    result = await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+
+    assert result.status == "ok", result.error
+    assert result.result["data"]["password"] == _PASSWORD
+    assert result.result["data"]["private_key"] == _PRIVATE_KEY
+
+
+async def test_service_principal_read_without_the_flag_still_runs_at_once(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register("vault.kv.read", _planted_secret_handler, stub_embedding_service)
+
+    result = await _read(_operator(PrincipalKind.SERVICE, sub="svc-reader"), reveal=False)
+
+    assert result.status == "ok", result.error
+    assert set(result.result["data"].values()) == {_HIDDEN}
+    assert await _approval_requests() == []
+
+
+async def test_person_reveal_on_a_read_still_runs_at_once(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register("vault.kv.read", _planted_secret_handler, stub_embedding_service)
+
+    result = await _read(_operator(PrincipalKind.USER), reveal=True)
+
+    assert result.status == "ok", result.error
+    assert result.result["data"]["password"] == _PASSWORD
+    assert await _approval_requests() == []
+
+
+async def test_reveal_by_a_service_principal_on_a_plain_read_waits_too(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Not only a secret read: any operation's reveal waits for a person."""
+    op_id = "vault.device.list_from_package"
+    await _register(op_id, _package_device_list, stub_embedding_service)
+
+    parked = await _read(
+        _operator(PrincipalKind.SERVICE, sub="svc-reader"), reveal=True, op_id=op_id
+    )
+
+    assert parked.status == "awaiting_approval", parked.error
+    assert [value for value in _field_values() if value in parked.model_dump_json()] == []
+    (request,) = await _approval_requests()
+    assert request.reveal_secret is True
+
+
+async def test_agent_reveal_is_still_refused_and_does_not_wait(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register("vault.kv.read", _planted_secret_handler, stub_embedding_service)
+
+    result = await _read(_operator(PrincipalKind.AGENT), reveal=True)
+
+    assert result.status == "denied"
+    assert await _approval_requests() == []

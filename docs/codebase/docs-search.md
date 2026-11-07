@@ -9,7 +9,7 @@
 the vendor corpus. It proxies each query through the backplane to the
 **external** corpus service the ops team runs, presenting a
 deployment-configured corpus service credential (never the caller's
-operator JWT — see the SSRF + credential note below, #290).
+operator JWT — see the destination screen and credential note below).
 
 Routing through the backplane (rather than letting clients hit the
 corpus directly) is what buys three properties in one place:
@@ -29,11 +29,12 @@ corpus directly) is what buys three properties in one place:
   to its backend only when the collection opts in, as a soft scope or as
   filters (see *Scope gates* below).
 
-The same `search_docs` service backs four consumers: the REST route
+The same `search_docs` service backs four main consumers: the REST route
 (T3), the MCP tool `search_docs` (T4, #1523), the CLI verb
 `meho docs search` (T5, #1524), and the synthesis tool `ask_docs` (T7,
-#1526). They share one service so the REQUIRE_FILTERS gate and the
-cited-chunk shape are defined exactly once.
+the docs answer path). The `/ui/corpus` Search mode, the `meho://docs` resource and the
+multi-query fan-out use it too. They share one service so the scope
+check and the cited-chunk shape are defined exactly once.
 
 `ask_docs` returns one grounded, cited answer, `{answer, citations[]}`.
 **Where the answer comes from is chosen per collection** (#3911):
@@ -72,7 +73,7 @@ and the `answer_source`). The REST route calls `run_ask_pipeline` (the thin
 raising wrapper in `meho_backplane.api.v1.ask_docs`), the UI BFF calls
 `run_ask_pipeline_capturing_retrieval` (the seam under its established
 name) so it can fail open on a leg failure, and the MCP handler calls the
-seam directly — the MCP module no longer carries its own copy of the
+seam directly — the MCP module carries no copy of its own of the
 pipeline. `ask_docs` is single-collection only on every face (no
 `collections` fan-out field).
 
@@ -100,21 +101,21 @@ optional overrides (`corpus_url=` / `audience=`); `None` falls back to
 the global `settings.corpus_url` / `settings.corpus_audience` — the
 seam the `corpus-http` backend uses to pass a per-collection endpoint
 (see the router below). The request sends `top_k` for the hit cap (the
-key MEHO.Knowledge's `/search` reads — `limit` was silently ignored,
-#1732). Models the corpus's response behind a small frozen Pydantic
+key the MEHO Knowledge `/search` endpoint reads; it does not read
+`limit`). Models the corpus's response behind a small frozen Pydantic
 adapter (`CorpusChunk` / `CorpusSearchResponse`, `extra="ignore"` so
 additive corpus fields are absorbed silently while a dropped consumed
 field fails loudly).
 
 The adapter speaks **two wire dialects** via validation aliases (#1732):
-the hit list is read from `results` (MEHO.Knowledge) **or** `chunks`, and
-each chunk's text/source-link from `text`/`source_uri` (MEHO.Knowledge)
+the hit list is read from `results` (MEHO Knowledge) **or** `chunks`, and
+each chunk's text/source-link from `text`/`source_uri` (MEHO Knowledge)
 **or** `content`/`source_url`. The consumed names downstream callers read
 stay `chunks` / `content` / `source_url` regardless of dialect. Crucially
 the hit list is **required** (no default) so a 2xx body that names
 *neither* envelope raises `CorpusUnavailable` (→ 503) rather than parsing
-to a silent empty list — the original SEV-2 was a `{results:[…5 hits…]}`
-200 reading back as zero hits.
+to a silent empty list, so a `{results:[…5 hits…]}` 200 never reads back
+as zero hits.
 
 **Page identity, score direction and the upstream link (#3913).** Each
 `CorpusChunk` also keeps six optional fields:
@@ -146,16 +147,17 @@ backend's decision, on search as on the answer call.
 Fail-closed by construction: an unconfigured (no URL), unreachable,
 non-2xx, or malformed-response corpus all collapse to one typed
 `CorpusUnavailable`. The exception carries the upstream HTTP status (when
-the failure was a non-2xx response) but **never** the response body — a
-corpus error page cannot leak through.
+the failure was a non-2xx response) but **never** the response body, so a
+corpus error page never reaches the caller.
 
-**Destination screen + downstream credential (#290).** The corpus URL is
-read from a *tenant-configurable* `backend.ref`, so two controls stop a
-`tenant_admin` from turning it into a credential-capture + SSRF sink:
+**Destination screen + downstream credential.** The corpus URL is read
+from a *tenant-configurable* `backend.ref`, so two controls make sure
+MEHO dials only a screened docs-service host and sends it only the
+deployment's own docs-service token:
 
 - Every dial (search **and** the `corpus_status` readiness probe) requires
   the `https` scheme and screens the resolved host through the shared
-  target SSRF guard (`assert_public_destination_async`, the same guard the
+  target destination check (`assert_public_destination_async`, the same guard the
   connector target dial uses), so a corpus endpoint cannot be pointed at
   `http://`, loopback, RFC 1918 space, or `169.254.169.254`. An on-prem
   corpus on private space is opted in via `MEHO_TARGET_SSRF_ALLOWLIST`. The
@@ -163,19 +165,45 @@ read from a *tenant-configurable* `backend.ref`, so two controls stop a
   (`docs_collections.service`) so a bad endpoint is a 422, never persisted.
 - The bearer presented to the corpus is `settings.corpus_service_token` —
   a deployment-owned, corpus-scoped service credential, **not** the
-  caller's inbound operator JWT. Replaying the operator's Vault-capable
-  bearer to the tenant-configurable URL was the capture vector; the JWT is
-  no longer forwarded. An empty token sends no `Authorization` header (a
+  caller's inbound operator JWT. MEHO never sends the operator's token to
+  the tenant-configurable URL. An empty token sends no `Authorization` header (a
   corpus requiring auth then fails closed). Tradeoff: the corpus's own
   audit attributes the call to the service principal, not the operator;
   MEHO's central `audit_log` is unaffected.
+- **Docs-service hosts named by the deployment.** The token goes only to
+  a host the deployment named: the host of `CORPUS_URL`, or an entry of
+  `CORPUS_ALLOWED_HOSTS` (`corpus_allowed_hosts`, read by
+  `corpus_allowed_hosts()` in `auth/corpus.py`). Every dial (search, ask,
+  read and the readiness probe) checks this first, in
+  `assert_corpus_host_allowed`, before the public-address screen; any
+  other host is `CorpusUnavailable` → 503 and no request is sent. The
+  collection create and update paths run the same check on all three
+  endpoint fields (`endpoint`, `answer_endpoint`, `read_endpoint`), so a
+  collection can only point at a docs service the deployment runs. The
+  match is exact on the host name or IP literal (case and a trailing dot
+  ignored); a name that only resolves to a listed address does not count.
+- **Pinned connection.** Each dial runs over a client built by
+  `_corpus_client`: an httpx client whose transport
+  (`build_pinned_async_transport`, shared with the connector dial path)
+  checks the host again when the TCP connection opens and connects only
+  to an address from that same check. The check is
+  `screen_dial_addresses` (`connectors/_shared/dial_guard.py`), the same
+  one the connector dial path uses, so a name that does not resolve at
+  connect time is refused too: the pre-dial screen lets an unresolved
+  name through, and without this check the transport would look the name
+  up again and connect to whatever it then answered. Only a host listed
+  verbatim on the target allowlist (see *Destination screen* above) is
+  dialed by name. A refused
+  address or an unresolved name surfaces as `CorpusDialBlockedError`, an
+  `httpx.ConnectError`, which `_dial_corpus` maps onto `CorpusUnavailable`
+  like any other failed connect, and no socket is opened.
 
 ### `ask_corpus(...)` (`meho_backplane.auth.corpus`, #3911)
 
 The answer transport, used only for a collection that opted in to its
 backend's grounded answer. It POSTs `{query, top_k}` (plus `audience` when
 set) to the answer endpoint with `?include=hits`, behind the same posture as
-`search_corpus`: the `https` + SSRF destination screen, the deployment's
+`search_corpus`: the `https` + destination screen, the deployment's
 corpus service credential (never the operator JWT), and the response body
 never echoed. It deliberately sends **no** `with_rerank` (ranking policy is
 the backend's). The product / version refinements ride the body only as the
@@ -213,7 +241,7 @@ backend's read endpoint (`backend.ref["read"] = "upstream"`). It POSTs
 `{read_handle, mode, before, after}` to the read endpoint, plus `cursor` and
 `filters` only when given. Nothing else is sent: the backend refuses unknown
 request keys, so there is no `audience` and no `scope` on a read. Same
-posture as `search_corpus`: the `https` + SSRF destination screen, the
+posture as `search_corpus`: the `https` + destination screen, the
 deployment's corpus service credential (never the operator JWT), the
 `CORPUS_TIMEOUT_SECONDS` bound, and the response body never echoed.
 
@@ -251,7 +279,7 @@ string without spaces or control characters, at most 8,192 characters.
 
 The `collection → backend` router that keeps MEHO a backplane, not a
 vector DB: one collection can sit on a managed RAG and another on the
-JWT-forward corpus **behind the same `search_docs`**, and the agent never
+external corpus **behind the same `search_docs`**, and the agent never
 sees which backend answered. Four pieces, modelled on the connector
 registry (`connectors/registry.py`) **minus the version tie-break ladder**
 (a collection binds to exactly one backend by construction, #1548):
@@ -304,9 +332,8 @@ registry (`connectors/registry.py`) **minus the version tie-break ladder**
 The binary-scope gate (G4.6-T3 #1552, the **scope inversion**).
 `collection` is the **mandatory** binary scope — a missing or blank value
 raises `MissingDocsFilterError` (HTTP 422 at the route, `-32602` at the
-MCP face), **unconditionally** (it is no longer gated by
-`settings.corpus_require_filters`, which governed the old product+version
-gate). `product` / `version` demote to **optional refinements** within
+MCP face), **unconditionally**. `settings.corpus_require_filters` still
+exists, but nothing reads it. `product` / `version` demote to **optional refinements** within
 the chosen collection: present, they reach the backend only through the
 scope gates (below), as a soft scope or as `as_filters()`; absent, the
 collection alone scopes the query. Blank-after-strip values are treated
@@ -343,10 +370,12 @@ policies, defined once so they cannot drift per surface:
   *actionable* diagnostic — "identity `<sub>` (tenant `<id>`) is missing
   capability `meho-docs:<key>`" — instead of an opaque denial (T2 #1802; see
   the cross-surface diagnosability note below).
-- **Readiness** — a collection whose registry `status` is not `"ready"`
+- **Readiness** — a disabled collection → `CollectionDisabledError`,
+  mapped to 403 `collection_disabled` (REST; a retry does not help) /
+  `-32602` (MCP). A collection that is still provisioning or rebuilding
   → `CollectionNotReadyError`, mapped to 409 (REST) / `-32603` (MCP,
-  server-side condition). The richer reachability *probe* is T6 (#1555);
-  T3 reads only the `status` column.
+  server-side condition). The gate reads only the `status` column; the
+  readiness probe writes it (see [doc-collections.md](doc-collections.md)).
 
 The checks run resolve → entitle → readiness so the rejection is the most
 specific true one. Returns the frozen `DocCollection` read shape.
@@ -412,7 +441,7 @@ sent, whatever the gates. The cross-collection fan-out sends neither form.
 
 **The soft scope (owner decision D1, 2026-10-04).** On the shared VMware
 collection, product and version are ranking signals, never default hard
-filters (evoila-bosnia/MEHO.Knowledge#512). A product + version filter
+filters. A product + version filter
 derived from the question lost far more answers than it gained: many
 answers sit in version-agnostic articles, advisories and identifier pages
 that a filter drops, a strict filter can return nothing, and a
@@ -431,13 +460,11 @@ vCenter and ESXi are stamped `vsphere`, SDDC Manager `vcf`, Aria
 Operations `vcf-operations`, NSX ALB `avi`, SRM `live-recovery`; versions
 are stamped `MAJOR.MINOR`, `<major>.x` or `n/a`, and most documents (every
 KB article and security advisory among them) carry no version at all.
-evoila-bosnia/MEHO.Knowledge#509 normalises the filters (a version filter
-keeps version-less documents, `vcenter` → `vsphere`, patch versions →
-`MAJOR.MINOR`). The filter gate stays off for the shared collection; it
+The backend normalises the filters (a version filter keeps version-less
+documents, `vcenter` → `vsphere`, patch versions → `MAJOR.MINOR`). The filter gate stays off for the shared collection; it
 is for a collection whose backend applies exact-match filters usefully.
 
-**Why gates at all.** The backend refuses unknown request keys
-(evoila-bosnia/MEHO.Knowledge#496), so `scope` must never reach a backend
+**Why gates at all.** The backend refuses unknown request keys, so `scope` must never reach a backend
 release that does not accept it. With the soft gate off, the request body
 is exactly what it was before the gate existed: `search_corpus` adds the
 `scope` key only when it has a soft scope to send. The backplane must not
@@ -483,7 +510,7 @@ carries `scope_forwarded` as well.
 **Vocabulary.** The tool descriptions tell the agent to use the
 collection's own product tokens (`products` in `list_doc_collections`)
 and to give the release as precisely as it knows it (`9.1.1`, `8.0 U3`,
-`8.0.3.00400`). They no longer ask for `MAJOR.MINOR` only, nor to leave
+`8.0.3.00400`). They do not ask for `MAJOR.MINOR` only, nor to leave
 `version` out for KB, error-message, CVE / security-advisory and
 build-number questions: a soft scope excludes nothing. For the product
 list to be right, the shared `vmware` row's `products` must hold the
@@ -498,8 +525,7 @@ collection's status untouched.
 **When and how to flip it.** Deploy this backplane release first: both
 gates are off, so nothing changes. Turn the soft gate on for the shared
 `vmware` collection only after the backend release that accepts `scope`
-(evoila-bosnia/MEHO.Knowledge#496 + evoila-bosnia/MEHO.Knowledge#509 +
-evoila-bosnia/MEHO.Knowledge#512) is deployed behind it;
+is deployed behind it;
 before that, the backend would refuse the request. Leave `scope_filters`
 off for it. The update replaces the whole backend record, so re-pass
 every key the `ref` already holds:
@@ -708,8 +734,7 @@ acceptance criterion:
   is caught in the handler — both surface as `-32603` (the MCP analogue of
   503). The synthesis model is never relaxed into an ungrounded answer.
 - **`DocsSynthesisError` carries a sub-cause (#1918, #1999).** The
-  structurally-distinct synthesis failures the message string previously
-  buried are split onto `exc.cause`: `SYNTHESIS_CAUSE_PARSE` (output didn't
+  structurally-distinct synthesis failures are split onto `exc.cause`: `SYNTHESIS_CAUSE_PARSE` (output didn't
   parse into the required `{answer, cited_chunk_ids}` shape — non-JSON or
   shape-violating), `SYNTHESIS_CAUSE_TRUNCATED` (the response was cut off at
   the output-token ceiling — `stop_reason == "max_tokens"`; JSON-shaped but
@@ -720,7 +745,7 @@ acceptance criterion:
   threads the model's `stop_reason` out (via `LlmJsonResult`), and on any
   parse failure the parser logs `stop_reason` plus a **bounded** head/tail
   of the raw body (`_RAW_LOG_HEAD_TAIL=200` chars each end) — never the full
-  response, so corpus content cannot leak into logs. The answer leg's
+  response, so corpus content stays out of the logs. The answer leg's
   output-token ceiling was raised (1024 → 2048) so a normal thorough answer
   is not cut off at the boundary.
 
@@ -932,8 +957,8 @@ and the MCP dispatcher leaves those keys out of the full-detail broadcast
 params.
 
 **Size.** The backend caps each reply (about 40,000 characters, with a
-`next` cursor beyond it). MEHO adds no cap of its own until the delivery
-budgets of #3641 land; then a reply's text follows them.
+`next` cursor beyond it). MEHO adds no cap of its own on `read_docs`
+text.
 
 ### `classify_answer_error(exc, *, llm_unavailable_leg=LEG_MODEL)` (`meho_backplane.docs_search.answer_errors`, #1918)
 
@@ -943,8 +968,7 @@ resolution of the output) — each with its own typed failure. Before #1918
 all four collapsed to one opaque `-32603` `"internal error: <ClassName>"`
 at the MCP dispatcher's generic catch, so a consumer could not tell a
 config gap (no `ANTHROPIC_API_KEY`) from a backend outage (corpus down)
-from a model-output bug (malformed synthesis) — and mis-diagnosed
-(`claude-rdc-hetzner-dc#1407` gap 2). This module is the **one**
+from a model-output bug (malformed synthesis). This module is the **one**
 framework-agnostic place that maps a raised leg exception onto a
 structured envelope naming *which* leg failed.
 
@@ -996,8 +1020,8 @@ structured envelope naming *which* leg failed.
 ### `resolve_citation_link(source_url, *, title, document_id)` (`meho_backplane.docs_search.citation_links`, #1919)
 
 A citation's `source_url` is, for the GCS-backed vendor corpus, a **raw
-object path** — `gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html`
-or `gs://.../community/williamlam/blog/.../post.md`. A browser has no
+object path** — `gs://<bucket>/kb/broadcom-kb/articles/41/414551.html`
+or `gs://<bucket>/community/<author>/blog/.../post.md`. A browser has no
 handler for the `gs://` scheme, so rendering it as an `href` is a dead link
 — yet the source identity is in the path (a Broadcom KB article id, a named
 community post). This resolver maps each `source_url` to a `CitationLink`
@@ -1069,8 +1093,8 @@ MEHO ref) fallback**:
   resolvable through MEHO, and **never null** (so a chunk always carries a
   usable reference). MEHO owns the reference→object mapping internally.
 
-The raw corpus object path (`gs://meho-knowledge-.../...`) is **never**
-returned — that leak is exactly what this closes. Pure Option B (an opaque
+The raw corpus object path (`gs://<bucket>/...`) is **never**
+returned. Pure Option B (an opaque
 ref for *every* chunk) was rejected: it would drop the clickable KB/web URL
 the resolver already derives. A consequence of Option A: because the wire
 `source_url` for a KB chunk is now the canonical `https://knowledge.broadcom.com/...`
@@ -1086,7 +1110,7 @@ The REST face. `operator` role minimum (`read_only` → 403). Validates
 the `collection` scope first (422 before any audit binding), binds the
 audit contextvars (including `audit_collection`), runs the shared
 `resolve_entitled_ready_collection` gate (unknown → 422, not entitled →
-403, not ready → 409), then calls the service. Takes a
+403, disabled → 403, not ready → 409), then calls the service. Takes a
 `Depends(get_session)` DB session for the resolve.
 
 `SearchDocsResponse` is `{chunks: list[DocsChunk], grounded: bool}`. The
@@ -1110,9 +1134,9 @@ and there is no fixed cutoff. Its direction is the chunk's `score_kind`
 relevance-judged: a query that retrieves topically-irrelevant chunks at
 high scores still reports `grounded=True` (out-of-corpus scores have been
 observed *higher* than in-corpus ones, so no absolute floor separates them).
-Catching that case needs a calibrated per-collection score floor, deferred as
-the Option-A follow-on (evoila-bosnia/meho-internal#133); it will refine
-`retrieval_is_grounded` in the one place both surfaces read.
+Catching that case needs a calibrated per-collection score floor, which
+MEHO does not have yet; it would refine `retrieval_is_grounded` in the
+one place both surfaces read.
 
 ### `POST /api/v1/ask_docs` (`meho_backplane.api.v1.ask_docs`, T2 #1917)
 
@@ -1175,7 +1199,8 @@ banner (best effort: if that search also fails, the banner stands alone).
 ### `meho docs search` (`cli/internal/cmd/docs`, T5 / T3 #1552)
 
 The operator-facing CLI verb. `meho docs search <query> --collection <c>
-[--product <p>] [--version <v>] [--limit N] [--json]` POSTs to
+[--product <p>] [--version <v>] [--limit N] [--json]` (`--collection`
+can be repeated, or be `all`, for a search across collections) POSTs to
 `/api/v1/search_docs` via the shared generated authed client (bearer +
 lazy 401-refresh), fails fast on a missing `--collection` before the
 round-trip (`--product` / `--version` are optional refinements), maps
@@ -1205,10 +1230,8 @@ any network call. That gate had **no counterpart on the REST route**:
 `POST /api/v1/search_docs` never checks the bare `meho-docs` capability
 — only the per-collection `meho-docs:<collection>` one (see
 `_resolve_collection_or_http_error` → `resolve_entitled_ready_collection`).
-So the two surfaces diverged — a tenant entitled to a collection via
-REST could still hit `addon_not_provisioned` on the CLI, and a CLI-shaped
-verification probe mis-reported a contract the REST endpoint implemented
-correctly. #2109 recorded the operator decision (option A): reconcile to
+The two surfaces must give the same answer for a tenant entitled to a
+collection. The operator decision (option A) is to reconcile to
 one server-gated op. The client-side pre-check (the `Capability` const,
 `tenantHasDocsCapability`, `capabilitiesFromJWT`, `errNotProvisioned`,
 and the `provisioned` / `Provisioned` plumbing) is gone; the backplane
@@ -1228,11 +1251,11 @@ provisioned the `meho-docs` add-on never sees the tool in `tools/list`
 (`all_tools_for`) and again at call time (`handle_tools_call`).
 
 The `inputSchema` is strict JSON Schema 2020-12: `additionalProperties:
-false`, required `[query, collection]` (product/version demoted to
-optional). That `required` list is the **first** line of the
-collection-scope defence — a schema-validating client never reaches the
-service-side `build_docs_scope` check. When a non-validating client does
-reach it, `MissingDocsFilterError` maps to `McpInvalidParamsError` →
+false`, required `[query]`, plus one scope: `collection`, or
+`collections` for a search across several collections (product/version
+optional). A call with no scope passes the schema check; the
+service-side `build_docs_scope` check then raises
+`MissingDocsFilterError`, which maps to `McpInvalidParamsError` →
 JSON-RPC `-32602` (the MCP analogue of a 422). The handler then runs the
 shared `resolve_entitled_ready_collection` gate: an unknown / not-entitled
 collection maps to `-32602` (the per-collection entitlement is enforced at
@@ -1262,7 +1285,7 @@ better, so an agent does not take a distance for a similarity.
 The synthesis sibling, registered alongside `search_docs` in the **same**
 module and carrying the **same** `required_capability="meho-docs"` gate,
 the same `operator` role minimum, the same per-collection entitlement, and
-the same strict `inputSchema` (`additionalProperties: false`, required
+a strict `inputSchema` (`additionalProperties: false`, required
 `[query, collection]`, product/version optional, `limit` default 10 / cap
 50). It is absent from `tools/list` and 403-class on `tools/call` for an
 unprovisioned tenant exactly like `search_docs`.
@@ -1270,14 +1293,14 @@ unprovisioned tenant exactly like `search_docs`.
 The handler answers through the one answer seam (`answer_docs_question`,
 #3911) — the backend's answer for an opted-in collection, else the
 **expand → retrieve-per-variant → RRF → synthesize** pipeline (#1916); the
-module no longer carries its own copy of the pipeline. A leg failure is a
+module carries no copy of its own of the pipeline. A leg failure is a
 structured `-32603` whose `error.data` is the #1918 envelope (plus
 `upstream_status` / `retry_after` on an upstream failure). On the upstream
 path the `answer` text itself is wrapped in the untrusted envelope too (it
-was composed by an external model over untrusted corpus text, and that
-model's prompt has no injection guard yet). The description says the answer
-is composed by the collection's backend when it offers an answer endpoint
-and that `limit` may be capped by the backend. It mirrors `search_docs`'s
+was composed by an external model over untrusted corpus text, outside
+MEHO's own prompt guard). The description says that citation text, and
+an answer composed by the collection's own backend, is untrusted
+reference data. It mirrors `search_docs`'s
 error arms plus the expand + synthesis arms: `build_docs_scope` + the shared gate enforce the collection
 scope (`MissingDocsFilterError` / unknown / not-entitled → `-32602`);
 `CorpusUnavailable` from retrieval and a not-ready collection bubble to
@@ -1358,7 +1381,11 @@ oracle.
    still produces an attributable row.
 4. `resolve_entitled_ready_collection(session, operator, collection_key)`
    resolves + entitles + readiness-checks the collection: unknown → 422,
-   not entitled → 403, not ready → 409.
+   not entitled → 403, disabled → 403, not ready → 409. Before it, when
+   `target` is given, `apply_target_default` resolves the target: an
+   unknown target gives 404 `no_target`, an alias that matches several
+   targets gives 409 `ambiguous_target`, and a refused agent gives 403
+   `denied`.
 5. `search_docs(..., collection=...)` routes to the collection's backend
    and returns the cited chunks. `CorpusUnavailable` → HTTP 503
    (fail-closed; never an empty 200).
@@ -1371,25 +1398,32 @@ oracle.
 (`credential_read` / `credential_mint` / `credential_write` /
 `audit_query`), so `redact_payload` publishes the **full** payload to
 the per-tenant broadcast feed. That is safe here because the bound
-payload is only the query *hash*, the binary product/version scope, and
-the hit count — the **raw query is never bound**. (Contrast
+payload is only the query *hash*, the binary product/version scope, the
+`collection`, `target` and `scope_source` values, and the hit count —
+the **raw query is never bound**. (Contrast
 `retrieve/eval`, which binds `op_class="audit_query"` to force
 aggregate-only broadcast precisely because its payload could carry
-operator-sensitive query intent.) `meho.docs.search` ends in `.search`,
-which `classify_op` would also map to `read` — the explicit override
-just makes the op name canonical for `query_audit` filtering.
+operator-sensitive query intent.) `classify_op` maps `meho.docs.search`
+to `other`; the explicit `op_class="read"` is what makes the row a
+read.
 
 ## Dependencies
 
 - `meho_backplane.auth.corpus` — the T2 federation transport.
-- `meho_backplane.auth.operator.Operator` — carries `raw_jwt` (forwarded
-  to the corpus) and `tenant_id` (the tenant boundary).
+- `meho_backplane.auth.operator.Operator` — carries `sub` (for the audit
+  row and the read caller id), `tenant_id` (the tenant boundary) and
+  `capabilities`. The corpus gets the deployment's
+  `CORPUS_SERVICE_TOKEN`, never the operator's token.
 - `meho_backplane.auth.rbac.require_role` — the OPERATOR gate.
 - `meho_backplane.audit` (`AuditMiddleware`) — lifts the `audit_*`
   contextvars into the `audit_log` row.
 - `meho_backplane.settings` — `corpus_url` / `corpus_audience` /
-  `corpus_timeout_seconds` / `corpus_answer_timeout_seconds` (#3911) /
-  `corpus_require_filters` (`CORPUS_*` env vars).
+  `corpus_service_token` / `corpus_allowed_hosts` /
+  `corpus_timeout_seconds` (default 10) / `corpus_answer_timeout_seconds`
+  (default 60) / `docs_debug_log_query_text`, and
+  `ui_session_encryption_key` for reads (`CORPUS_*` env vars, plus
+  `DOCS_DEBUG_LOG_QUERY_TEXT` and `UI_SESSION_ENCRYPTION_KEY`).
+  `corpus_require_filters` still exists, but nothing reads it.
 
 ## Cross-surface entitlement contract + diagnosability (T2 #1802)
 
@@ -1402,11 +1436,10 @@ off the `Operator`: `tenant_id` (scopes the tenant-first resolve) and
 **same constructor** via `verify_jwt_for_audience` → the chassis JWT chain,
 which lifts `tenant_id` from `jwt_tenant_claim_name` and `capabilities` from
 `jwt_capabilities_claim_name` — identical claim derivation, no per-surface
-divergence. (The UI `UISessionContext.tenant_id` from the session row is
-used only for the page-header chip + `operator_sub` display; the
-entitlement path reconstructs a full token-derived `Operator` via
-`verify_access_token_with_refresh`, so the check never mixes a session-row
-`tenant_id` with token capabilities.)
+divergence. (The UI passes the session's current tenant
+(`UISessionContext.tenant_id`) to `verify_access_token_with_refresh`, like
+the `Meho-Tenant` header on REST, and the chain checks it against the
+token. The capabilities always come from the token.)
 
 The **one deliberate divergence** is the *audience* each surface validates
 the token for: REST and the UI BFF both use `settings.keycloak_audience`
@@ -1487,8 +1520,7 @@ one `docs_query_text` record with `source="expansion"` and the variants it
 retrieved on (the operator's question first). The upstream answer path
 (#3911) does not log query text yet, even with the flag on: the backend
 does not return its rewritten query. Once the MEHO Knowledge service
-returns it (evoila-bosnia/MEHO.Knowledge#513), that query goes through the
-same helper with `source="upstream_rewrite"`. The record is debug
+returns it, that query goes through the same helper with `source="upstream_rewrite"`. The record is debug
 severity, but the backplane's log floor is INFO (`configure_logging`), so
 it is written through a logger of its own with a DEBUG floor: the flag,
 not the process log level, decides whether it appears. Turn it on only
@@ -1519,7 +1551,7 @@ third party's KB article can carry planted instructions. Every LLM-facing
 read boundary wraps it in the positional
 `<<UNTRUSTED_AGENT_TEXT … END_UNTRUSTED_AGENT_TEXT>>` envelope
 (`meho_backplane.untrusted_text.wrap_untrusted_text`), matching the kb /
-memory surfaces (evoila-bosnia/meho-internal#154, extended here by #304):
+memory surfaces:
 
 - `search_docs` payload — `_search_chunk_payload` (`mcp/tools/docs.py`).
 - `ask_docs` citations — `_citation_payload` (`mcp/tools/docs.py`).
@@ -1533,13 +1565,15 @@ memory surfaces (evoila-bosnia/meho-internal#154, extended here by #304):
   matching provenance advisory.
 - `meho://docs/...` resource — `_docs_chunk_handler`
   (`mcp/resources/docs.py`).
+- `read_docs` reply `text` — `_read_docs_handler` (`mcp/tools/docs.py`).
+  A link-only reply has no text.
 
 The wrap is applied only at these boundaries, **never** at the shared
 `_project_chunk` projection (`docs_search/service.py`) — that projection
 also feeds non-LLM sinks (the CLI `meho docs search` and REST faces render
 to a human/HTTP caller), which must not inherit the envelope. The guard is
 structural (delimit + label), not content-based: no filtering, scoring, or
-injection detection. See `docs/codebase/untrusted-text-envelope.md`.
+detection of planted instructions. See `docs/codebase/untrusted-text-envelope.md`.
 
 ## Known issues / boundaries
 
@@ -1593,7 +1627,8 @@ injection detection. See `docs/codebase/untrusted-text-envelope.md`.
   multi-query retrieve + RRF merge: `retrieve_multi_query` in
   `backend/src/meho_backplane/docs_search/fanout.py`.
 - Synthesis (`ask_docs`): `backend/src/meho_backplane/docs_search/synthesis.py`.
-- MCP tools (`search_docs` + `ask_docs`): `backend/src/meho_backplane/mcp/tools/docs.py`.
+- MCP tools (`search_docs` + `ask_docs` + `read_docs`): `backend/src/meho_backplane/mcp/tools/docs.py`;
+  `list_doc_collections`: `backend/src/meho_backplane/mcp/tools/doc_collections.py`.
 - Fail-closed LLM client precedent (#1386):
   `backend/src/meho_backplane/operations/ingest/anthropic_client.py`.
 - MCP resource: `backend/src/meho_backplane/mcp/resources/docs.py`.

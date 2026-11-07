@@ -107,6 +107,17 @@ from tests.test_operations_dispatcher import _make_operator
 # ---------------------------------------------------------------------------
 
 
+def _web_operator(sub: str) -> Any:
+    """A person in the web interface: a ``caution`` write runs at once.
+
+    With a token (the command line, MCP, REST) the same write waits for an
+    approval click (#3980).
+    """
+    return _make_operator(sub=sub, tenant_id=_OPERATOR_TENANT_ID).model_copy(
+        update={"web_session": True}
+    )
+
+
 def _docker_socket_present() -> bool:
     return Path("/var/run/docker.sock").exists() or os.environ.get("DOCKER_HOST") is not None
 
@@ -911,7 +922,7 @@ async def test_dispatch_record_add_against_bind9_writes_state_before_after(
     """``bind9.record.add`` writes a record and the audit row carries
     ``state_before`` / ``state_after`` summaries.
     """
-    operator = _make_operator(sub="op-record-add", tenant_id=_OPERATOR_TENANT_ID)
+    operator = _web_operator("op-record-add")
     result = await dispatch(
         operator=operator,
         connector_id="bind9-ssh-9.x",
@@ -937,6 +948,48 @@ async def test_dispatch_record_add_against_bind9_writes_state_before_after(
 
 
 @pytest.mark.asyncio
+async def test_read_after_record_add_row_has_no_state_before_after(
+    bind9_e2e: _Bind9Target,
+) -> None:
+    """A read dispatched right after ``bind9.record.add`` in the same context
+    gets its own audit row only: the add's ``audit_state_*`` binds do not
+    reach it (#5211).
+    """
+    operator = _web_operator("op-record-add-then-get")
+    added = await dispatch(
+        operator=operator,
+        connector_id="bind9-ssh-9.x",
+        op_id="bind9.record.add",
+        target=bind9_e2e,
+        params={
+            "fqdn": "scoped-e2e.evba.lab",
+            "ip": "10.5.50.43",
+            "type": "A",
+            "zone": "evba.lab",
+        },
+    )
+    assert added.status == "ok", added.error
+    read = await dispatch(
+        operator=operator,
+        connector_id="bind9-ssh-9.x",
+        op_id="bind9.record.get",
+        target=bind9_e2e,
+        params={"fqdn": "scoped-e2e.evba.lab", "type": "A"},
+    )
+    assert read.status == "ok", read.error
+
+    await _assert_audit_row(
+        "bind9.record.add",
+        operator_sub="op-record-add-then-get",
+        expect_state_before=True,
+        expect_state_after=True,
+    )
+    payload = await _assert_audit_row("bind9.record.get", operator_sub="op-record-add-then-get")
+    assert "state_before" not in payload
+    assert "state_after" not in payload
+
+
+@pytest.mark.asyncio
 async def test_governed_record_remove_gate_holds_against_real_bind9(
     bind9_e2e: _Bind9Target,
 ) -> None:
@@ -951,7 +1004,7 @@ async def test_governed_record_remove_gate_holds_against_real_bind9(
     ``test_connectors_bind9_record_remove.py``.
     """
     # Add a record first so there's something a bypass could have cleared.
-    add_op = _make_operator(sub="op-record-remove-add", tenant_id=_OPERATOR_TENANT_ID)
+    add_op = _web_operator("op-record-remove-add")
     add_result = await dispatch(
         operator=add_op,
         connector_id="bind9-ssh-9.x",
@@ -1090,7 +1143,7 @@ async def test_dispatch_config_backup_creates_archive(
     bind9_e2e: _Bind9Target,
 ) -> None:
     """``bind9.config.backup`` produces a tar.gz + records state_after."""
-    operator = _make_operator(sub="op-backup", tenant_id=_OPERATOR_TENANT_ID)
+    operator = _web_operator("op-backup")
     result = await dispatch(
         operator=operator,
         connector_id="bind9-ssh-9.x",
@@ -1118,7 +1171,7 @@ async def test_dispatch_config_reload_returns_ok(
     """``bind9.config.reload`` succeeds + carries state_before / state_after
     (the rndc-status snapshots).
     """
-    operator = _make_operator(sub="op-reload", tenant_id=_OPERATOR_TENANT_ID)
+    operator = _web_operator("op-reload")
     result = await dispatch(
         operator=operator,
         connector_id="bind9-ssh-9.x",
@@ -1155,7 +1208,7 @@ async def test_agent_meta_tool_flow_search_then_call_record_add(
     every bind9 op is reachable via the agent surface without per-op
     MCP tool registration (CLAUDE.md postulate 5).
     """
-    operator = _make_operator(sub="op-agent-flow", tenant_id=_OPERATOR_TENANT_ID)
+    operator = _web_operator("op-agent-flow")
     search_result = await search_operations(
         operator,
         {

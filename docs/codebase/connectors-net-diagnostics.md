@@ -25,7 +25,8 @@ Each op queues a registrar in `__init__.py` via
 `ops.register_net_typed_operations`; `net.tls_inspect` →
 `tls.register_net_tls_inspect_operation`; `net.http_probe` →
 `http_probe.register_net_http_probe_operations`; `net.ntp_check` →
-`ntp.register_net_ntp_check_operation`; `net.ssh_keyscan` →
+`ntp.register_net_ntp_check_operation`; `net.ping` / `net.trace` /
+`net.path_mtu` share `icmp.register_net_icmp_operations`; `net.ssh_keyscan` →
 `ssh_keyscan.register_net_ssh_keyscan_operation`). Siblings therefore extend the
 package by adding (at most) a module and one registrar-queue line rather
 than contending for a single registrar function — which also keeps
@@ -50,6 +51,15 @@ The op is registered under the natural key
 `parse_connector_id` back to `("net", "1.x", "net-probe")`.
 `safety_level="safe"` + `requires_approval=False` make it
 agent-auto-runnable and ungated.
+
+**The nine `net.*` ops need no approval.** Their address fields (`host`,
+`url`, and the `resolver` of `net.dns_lookup`) carry no
+`x-meho-caller-address` marker, so the caller-address floor
+(`docs/codebase/spec-ingestion.md`, "Caller-address floor") does not
+apply to them. The probe allowlist below is their guard. So a Sensor can
+run them. The contract check lists these fields in
+`NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`) with
+this reason.
 
 ## `net.dns_lookup` — full `dig` parity (#2409)
 
@@ -111,9 +121,9 @@ system resolver config with no chosen resolver maps to
 
 That opposite default is why the two do not share a parser: reusing the
 SSRF guard verbatim would carry its permissive-when-unset default into a
-surface where unset must mean closed. Because `net.*` ops are
-`safety_level="safe"` (agent-auto-runnable), this allowlist is the
-**sole floor** on a network-vantage recon primitive.
+surface where unset must mean closed. The `net.*` network checks are
+`safety_level="safe"` (an agent can run them), so the allow-list limits
+where checks can connect.
 
 Matching:
 
@@ -280,8 +290,9 @@ It reuses the same three foundations plus two probe-specific rules:
    it is followed**. A redirect to a non-allowlisted host (e.g. a
    cloud-metadata / credential host) halts the walk with
    `{"reachable": true, "reason": "blocked_redirect",
-   "blocked_redirect": "<host>"}` and is **never dialed** — the concern
-   noted at `adapters/http.py:260`. The redirect count is bounded
+   "blocked_redirect": "<host>"}` and is **never dialed** — the same
+   concern `_SameOriginRedirectClient` in `connectors/adapters/http.py`
+   handles for target-coupled dispatch. The redirect count is bounded
    (`_MAX_REDIRECTS`) and the whole walk runs under one
    `asyncio.wait_for(timeout)` ceiling. This mid-chain refusal stays a
    `status="ok"` observation — the #2784 carve-out; only the **initial**
@@ -456,7 +467,7 @@ whose Vault secret pins no `known_hosts` value refuses to connect at all
 this op the only way to obtain that pin was to run `ssh-keyscan` on an
 operator shell with direct reach to the target — an out-of-band,
 ungoverned step, and the operator-helper gap #3532 tracks. This op mints
-the pin **through the backplane**, on the same policy / audit / broadcast
+the pin **through the backplane**, on the same policy / audit
 dispatch path every operation uses, so bootstrapping a target's host-key
 trust never leaves the governed path.
 
@@ -524,7 +535,7 @@ audit-visible via `raw_payload`.
 
 It shares the `net-probe-1.x` identity, and is `safety_level="safe"` +
 `requires_approval=False`: a read-only handshake that offers no credential
-and sends no application data, so the probe allowlist is the sole floor.
+and sends no application data; the allow-list limits where checks can connect.
 
 ## `net.tls_inspect` — full presented certificate chain (T2, #2407)
 
@@ -535,9 +546,12 @@ inspects; it never verifies (self-signed appliances are the point), so a
 self-signed / expired / hostname-mismatched cert is **reported**, never
 rejected.
 
-Why pyOpenSSL and not stdlib `ssl`: on the `requires-python` floor (3.12)
-`ssl.SSLSocket.getpeercert` returns only the **leaf**; the full-chain
-`ssl.SSLSocket.get_unverified_chain` is 3.13+. pyOpenSSL's
+Why pyOpenSSL and not stdlib `ssl`: the op was built when the
+`requires-python` floor was 3.12, where `ssl.SSLSocket.getpeercert`
+returns only the **leaf**; the full-chain
+`ssl.SSLSocket.get_unverified_chain` is 3.13+. The floor is now 3.14
+(`backend/pyproject.toml`), so the stdlib call is always there, but the op
+still uses pyOpenSSL (a note next to the `pyopenssl` pin says so). pyOpenSSL's
 `Connection.get_peer_cert_chain(as_cryptography=True)` (the
 `as_cryptography` kwarg landed in pyOpenSSL 24.3) returns the whole
 presented chain as `cryptography.x509.Certificate` objects directly, so
@@ -559,7 +573,8 @@ Control flow (`connectors/net/tls.py`):
    clamped timeout, so a stalled peer cannot pin the worker thread.
 4. Each presented cert is flattened to
    `{subject, issuer, san, not_before, not_after, days_to_expiry, serial,
-   self_signed, pem}` (leaf-first). `serial` is stringified (a serial is a
+   self_signed, fingerprint_sha256, pem}` (leaf-first). `fingerprint_sha256`
+   is the hex SHA-256 of the certificate. `serial` is stringified (a serial is a
    large integer a JSON number consumer would truncate); timestamps use
    the tz-aware `not_valid_*_utc` accessors. `days_to_expiry` is
    `(not_valid_after_utc - now) / 86400` as a float (negative once
@@ -775,19 +790,27 @@ the whole family classified `read` without polluting `_READ_SUFFIXES`
 with underscore-bearing entries that would over-match unrelated
 connectors' ops.
 
+The dispatcher stores this class on the audit row as `op_class`
+(`operations/_audit.py`, `descriptor_op_class`). A dispatch publishes no
+broadcast event; the class feeds the audit row, the announce gate, and the
+target activity warning.
+
 ## Key types / control flow
 
 - `connectors/net/__init__.py` — queues each op registrar
   (`register_net_typed_operations`, `register_net_tls_inspect_operation`,
-  `register_net_http_probe_operations`) onto the lifespan registrar list
+  `register_net_http_probe_operations`, `register_net_ntp_check_operation`,
+  `register_net_icmp_operations`, `register_net_ssh_keyscan_operation`)
+  onto the lifespan registrar list
   via `register_typed_op_registrar` (auto-imported by the
   `_eager_import_connectors` package walk).
 - `connectors/net/ops.py` — the `net_tcp_check` and `net_dns_lookup`
   handlers, their parameter / response schemas, the shared registrar
   (`register_net_typed_operations` upserts both ops), and the shared
   timeout bounds/clamp (`_DEFAULT_TIMEOUT_SECONDS` /
-  `_MAX_TIMEOUT_SECONDS` / `_clamp_timeout`) reused by `tls.py`
-  (package-internal import; `ops` never imports `tls`, so no cycle).
+  `_MAX_TIMEOUT_SECONDS` / `_clamp_timeout`) reused by `tls.py`, `ntp.py`,
+  and `ssh_keyscan.py` (package-internal import; `ops` imports none of
+  them, so no cycle). `http_probe.py` and `icmp.py` keep their own bounds.
 - `connectors/net/tls.py` — `net_tls_inspect` handler, its schemas, the
   cert-flattening / hostname-match / chain helpers, and its registrar.
 - `connectors/net/http_probe.py` — `net_http_probe` handler, its
@@ -828,7 +851,8 @@ connectors' ops.
 Dispatch path: `dispatch(connector_id="net-probe-1.x",
 op_id="net.tcp_check", target=None, params=...)` → param-schema
 validation → module-level handler (`connector_instance=None`) → redact →
-audit (`raw_payload` = handler return) → broadcast (`read` class). A
+audit (`raw_payload` = handler return, `op_class` = `read`). No broadcast
+event is published. A
 handler that raises `ProbeNotAllowedError` short-circuits into the
 dispatcher's `connector_probe_refused` arm instead, which writes an error
 audit row carrying the structured envelope in `payload.error`.

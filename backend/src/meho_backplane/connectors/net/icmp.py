@@ -48,8 +48,8 @@ returns its structured ``available=false`` / ``completed=false`` result
 rather than raising.
 
 ``safety_level="safe"`` + ``requires_approval=False`` (same posture as
-the rest of the cohort): read-only path probes, so the probe allowlist
-is the sole floor.
+the rest of the cohort): read-only path probes; the allow-list limits
+where checks can connect.
 """
 
 from __future__ import annotations
@@ -761,7 +761,7 @@ async def register_net_icmp_operations(
     shared synthetic natural key
     (``product="net", version="1.x", impl_id="net-probe"``) so they carry
     the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``safe`` +
-    ``requires_approval=False`` — the probe allowlist is the only floor.
+    ``requires_approval=False`` — the allow-list limits where checks can connect.
     """
     await register_typed_operation(
         product="net",

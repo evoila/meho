@@ -8,9 +8,7 @@ skip/None semantics against synthetic shelves in ``tmp_path``, the
 OpenAPI ``METHOD:/path`` extraction through the real ingest parser,
 and the reconcile assert's actionable-diff failure shape. The
 shelf-gated demonstration lane lives in
-``tests/test_spec_shelf_example_lane.py``; the vcenter delegation pins
-at the end of this module prove the #2980 generalisation kept
-:mod:`tests.acceptance._vcenter_spec` behavior-identical.
+``tests/test_spec_shelf_example_lane.py``.
 """
 
 from __future__ import annotations
@@ -21,17 +19,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests import _spec_shelf
-from tests.acceptance import _vcenter_spec
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-_ALL_RESOLVER_ENV_VARS = (
-    _spec_shelf.SHELF_ENV_VAR,
-    "MEHO_VCENTER_OPENAPI_VCENTER",
-    "MEHO_VCENTER_OPENAPI_VI_JSON",
-    "MEHO_VCENTER_OPENAPI",
-)
+_ALL_RESOLVER_ENV_VARS = (_spec_shelf.SHELF_ENV_VAR,)
 
 
 @pytest.fixture
@@ -172,38 +164,3 @@ def test_assert_fails_on_empty_declared_set() -> None:
             set(), {"GET:/vcenter/vm"}, spec_label="vcenter-9.0/vcenter.yaml"
         )
     assert "declared no op_ids" in str(excinfo.value)
-
-
-# ---------------------------------------------------------------------------
-# Vcenter delegation pins — #2980 kept _vcenter_spec behavior-identical
-# ---------------------------------------------------------------------------
-
-
-def test_vcenter_resolvers_delegate_to_the_generic_shelf_root(
-    clean_resolver_env: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    vcenter_yaml = _make_shelf(tmp_path, "vcenter-9.0", "vcenter.yaml")
-    vi_json = _make_shelf(tmp_path / "vi", "vcenter-9.0", "vi-json.yaml")
-    clean_resolver_env.setenv(_spec_shelf.SHELF_ENV_VAR, str(tmp_path))
-    assert _vcenter_spec.resolve_vcenter_yaml() == vcenter_yaml
-    assert _vcenter_spec.resolve_vi_json_yaml() is None  # vi-json not on this shelf
-    clean_resolver_env.setenv(_spec_shelf.SHELF_ENV_VAR, str(tmp_path / "vi"))
-    assert _vcenter_spec.resolve_vi_json_yaml() == vi_json
-
-
-def test_vcenter_explicit_env_vars_still_beat_the_shelf_root(
-    clean_resolver_env: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _make_shelf(tmp_path, "vcenter-9.0", "vcenter.yaml")
-    explicit = tmp_path / "explicit-vcenter.yaml"
-    explicit.write_text("{}", encoding="utf-8")
-    clean_resolver_env.setenv(_spec_shelf.SHELF_ENV_VAR, str(tmp_path))
-    clean_resolver_env.setenv("MEHO_VCENTER_OPENAPI_VCENTER", str(explicit))
-    assert _vcenter_spec.resolve_vcenter_yaml() == explicit
-
-
-def test_vcenter_resolvers_return_none_when_nothing_is_configured(
-    clean_resolver_env: pytest.MonkeyPatch,
-) -> None:
-    assert _vcenter_spec.resolve_vcenter_yaml() is None
-    assert _vcenter_spec.resolve_vi_json_yaml() is None

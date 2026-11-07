@@ -232,12 +232,18 @@ def test_non_platform_admin_foreign_tenant_still_rejected() -> None:
     )
 
 
-@pytest.mark.parametrize("platform_admin", [False, True])
-def test_omitted_tenant_keeps_builtin_rule(platform_admin: bool) -> None:
-    """``None`` is the built-in scope: tenant_admin passes, a lower role does not."""
-    IngestionPipelineService(_operator(platform_admin=platform_admin)).authorize_scope(None)
-    lower = _operator(platform_admin=platform_admin, role=TenantRole.OPERATOR)
-    with pytest.raises(PermissionError, match="built-in connector ingest requires tenant_admin"):
+def test_omitted_tenant_is_builtin_scope_for_platform_admin() -> None:
+    """``None`` is the built-in scope: a platform_admin may write it."""
+    IngestionPipelineService(_operator(platform_admin=True)).authorize_scope(None)
+
+
+@pytest.mark.parametrize("role", [TenantRole.TENANT_ADMIN, TenantRole.OPERATOR])
+def test_omitted_tenant_needs_platform_admin(role: TenantRole) -> None:
+    """A built-in connector's rows are shared by every tenant, so a tenant_admin
+    without ``platform_admin`` may not ingest into that scope, and neither may a
+    lower role."""
+    lower = _operator(platform_admin=False, role=role)
+    with pytest.raises(PermissionError, match="built-in connector ingest requires platform_admin"):
         IngestionPipelineService(lower).authorize_scope(None)
 
 
@@ -292,6 +298,26 @@ async def test_non_platform_admin_foreign_ingest_rejected_without_writes(
         await _ingest(service, tenant_id=uuid.uuid4())
 
     assert await _descriptor_tenants() == []
+    assert await _cross_tenant_audit_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_tenant_admin_builtin_ingest_rejected_without_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tenant_admin without ``platform_admin`` may not ingest into the built-in scope.
+
+    The gate runs before any spec parse or row write, so an existing
+    built-in connector keeps its rows as they are.
+    """
+    await _ingest(_service(_operator(platform_admin=True), monkeypatch), tenant_id=None)
+    assert await _descriptor_tenants() == [None]
+
+    service = _service(_operator(platform_admin=False), monkeypatch)
+    with pytest.raises(PermissionError, match="requires platform_admin"):
+        await _ingest(service, tenant_id=None)
+
+    assert await _descriptor_tenants() == [None]
     assert await _cross_tenant_audit_rows() == []
 
 

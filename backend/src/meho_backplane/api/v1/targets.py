@@ -11,7 +11,17 @@
 * ``POST /api/v1/targets/{name}/probe``   — invoke connector probe. ``operator`` role.
 * ``POST /api/v1/targets``                — create. ``tenant_admin`` role.
 * ``PATCH /api/v1/targets/{name}``        — update (partial). ``tenant_admin`` role.
+  On both, the Vault login role keys of ``extras`` (``vault_role``,
+  ``vault_mount``) need ``platform_admin``; see
+  :mod:`meho_backplane.targets.vault_login_extras`.
 * ``DELETE /api/v1/targets/{name}``       — soft-delete. ``tenant_admin`` role.
+
+The three writes (``POST``, ``PATCH``, ``DELETE``) are for people only.
+A service or runner login with ``tenant_admin`` gets 403
+``human_principal_required``; an agent login, capped at ``operator``, gets
+403 ``insufficient_role``. A machine login registers and removes targets
+with the ``targets.register`` and ``targets.remove`` operations, which go
+through the approval check (:mod:`meho_backplane.connectors.targets.ops`).
 
 All routes are tenant-scoped via ``operator.tenant_id`` extracted from the
 JWT by :func:`~meho_backplane.middleware.verify_jwt_and_bind`. Cross-tenant
@@ -21,7 +31,7 @@ Alias resolution
 ----------------
 
 ``GET``, ``PATCH``, ``POST .../probe`` and ``DELETE`` on ``/{name}`` pass the
-caller-supplied value to :func:`_resolve_route_target`. It calls
+caller-supplied value to :func:`resolve_route_target`. It calls
 :func:`~meho_backplane.targets.resolver.resolve_target` (exact name → alias
 element-equality → near-miss 404) and, when that finds nothing and the value
 is a UUID, looks the target up by id. Callers can address a target by its
@@ -33,7 +43,7 @@ Audit enrichment
 
 Routes that call ``resolve_target`` get the resolved target's id bound
 into structlog contextvars at the resolver's single exit point (an id
-lookup in :func:`_resolve_route_target` binds the same keys);
+lookup in :func:`resolve_route_target` binds the same keys);
 :class:`~meho_backplane.audit.AuditMiddleware` reads ``target_id`` via
 :func:`~meho_backplane.audit._resolve_target_id` and writes it to
 ``audit_log.target_id``. ``create_target`` does not call
@@ -143,10 +153,16 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import object_session
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
+from meho_backplane.connectors._shared.gsm_creds import (
+    ALLOWED_PROJECTS_SETTING,
+    gsm_project_of,
+    is_gsm_project_allowed,
+)
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
@@ -157,6 +173,7 @@ from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
+from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
@@ -182,8 +199,15 @@ from meho_backplane.targets.secret_field_map import (
     check_secret_field_map_sources,
     merge_secret_field_map,
 )
+from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
-__all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
+__all__ = [
+    "count_graph_node_refs",
+    "probe_and_store_fingerprint",
+    "resolve_route_target",
+    "router",
+    "soft_delete_target",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -194,6 +218,30 @@ router = APIRouter(prefix="/api/v1/targets", tags=["targets"])
 #: :mod:`meho_backplane.api.v1.retrieve`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: The 403 text a machine login gets on a target write.
+MACHINE_TARGET_WRITE_REMEDIATION: Final[str] = (
+    "target writes on REST are for people. A machine login (agent, service "
+    "or runner) registers a target with call_operation(connector_id="
+    "'targets-registry-1.x', op_id='targets.register') and removes one with "
+    "op_id='targets.remove'; MEHO checks both against the approval rules. A "
+    "person changes a target in the operator console or with the meho CLI."
+)
+
+
+def _require_admin_person(operator: Operator = _require_admin) -> Operator:
+    """The gate of ``POST``, ``PATCH`` and ``DELETE``: ``tenant_admin``, then a person.
+
+    The role check runs first, so a login with a lower role (also an
+    agent, whose role MEHO caps at ``operator``) gets ``insufficient_role``.
+    A machine login with ``tenant_admin`` then gets 403
+    ``human_principal_required``.
+    """
+    ensure_human_principal(operator, remediation=MACHINE_TARGET_WRITE_REMEDIATION)
+    return operator
+
+
+_require_admin_person_dep = Depends(_require_admin_person)
 
 #: Canonical op id for the discover route's audit row + broadcast.
 #: ``.discover`` is not one of the broadcast classifier's read/write
@@ -418,7 +466,7 @@ def _to_full(t: TargetORM) -> Target:
 _NO_TARGET_BY_ID_MESSAGE: Final[str] = "No target has this name, alias or id."
 
 
-async def _resolve_route_target(
+async def resolve_route_target(
     session: AsyncSession, tenant_id: uuid.UUID, value: str
 ) -> TargetORM:
     """Find one target for the describe, update, probe and delete routes.
@@ -672,8 +720,8 @@ def _audit_flight_recorder_capture_write(
     off *t* (``t.flight_recorder_capture``), folds the tri-state before/after
     into this request's ``audit_log`` payload (via ``audit_*`` contextvars the
     :class:`~meho_backplane.audit.AuditMiddleware` reads) + a WARN, and evicts
-    the resolver's per-target cache so the flip takes effect on the next
-    dispatch. Called by ``create_target`` (a non-inherit initial value) and
+    the resolver's per-target cache, now and after the commit, so the flip
+    takes effect on the next dispatch. Called by ``create_target`` (a non-inherit initial value) and
     ``update_target`` (the override sent AND changed).
     """
     after = t.flight_recorder_capture
@@ -692,9 +740,13 @@ def _audit_flight_recorder_capture_write(
         flight_recorder_capture_after=_fr_capture_audit_value(after),
     )
     # Evict the resolver's per-target override cache so the change is visible on
-    # the next dispatch instead of waiting out the 60s TTL. Harmless no-op on a
-    # freshly-created target id (not yet cached).
-    invalidate_target_override_cache(t.id)
+    # the next dispatch instead of waiting out the 60s TTL: now, and again after
+    # the request's session commits, so a read between the two cannot keep the
+    # old override. Harmless no-op on a freshly-created target id (not yet cached).
+    target_id = t.id
+    clear_now_and_after_commit(
+        object_session(t), lambda: invalidate_target_override_cache(target_id)
+    )
 
 
 def _registered_products() -> set[str]:
@@ -981,6 +1033,19 @@ def _tenant_prefix_or_empty(operator: Operator) -> str:
     return rendered_tenant_prefix(operator, template=template).strip().strip("/")
 
 
+def _resolve_store(secret_ref: str) -> tuple[str, str]:
+    """Split *secret_ref* into ``(kind, store_ref)`` as the dispatch-time read does.
+
+    Surrounding whitespace is cut before the scheme is read, as the
+    dispatch-time read cuts it, so a leading blank cannot hide the scheme.
+    A schemeless ref resolves through the deploy default
+    (``CREDENTIAL_BACKEND``).
+    """
+    return split_credential_ref(
+        secret_ref.strip(), default_backend=get_settings().credential_backend
+    )
+
+
 def _vault_kv_candidate(secret_ref: str) -> str | None:
     """Return the normalised ``<mount>/<path>`` the Vault read of *secret_ref* addresses.
 
@@ -989,16 +1054,58 @@ def _vault_kv_candidate(secret_ref: str) -> str | None:
     tenant-subtree convention does not apply there. The path is the
     scheme-stripped store ref, the same one the dispatch-time read sends
     to Vault, so a ``vault:`` scheme on the ref cannot hide a ``.`` or
-    ``..`` in the first segment. Surrounding whitespace is cut before the
-    scheme is read, as the dispatch-time read cuts it, so a leading blank
-    cannot hide the scheme either.
+    ``..`` in the first segment.
     """
-    kind, store_ref = split_credential_ref(
-        secret_ref.strip(), default_backend=get_settings().credential_backend
-    )
+    kind, store_ref = _resolve_store(secret_ref)
     if kind != "vault":
         return None
     return f"{DEFAULT_KV_MOUNT}/{store_ref.strip('/')}"
+
+
+def _build_secret_ref_project_not_allowed_detail(
+    *, secret_ref: str, project: str
+) -> dict[str, object]:
+    """Build the structured 422 detail for a ``gsm:`` ref in a project not allowed.
+
+    Same shape convention as :func:`_build_secret_ref_outside_tenant_scope_detail`:
+    a stable snake_case ``kind``, the offending value, the project it
+    names, the setting that lists the allowed projects, and a human
+    ``message`` with the remediation. Pure builder, no I/O.
+    """
+    return {
+        "kind": "secret_ref_project_not_allowed",
+        "secret_ref": secret_ref,
+        "project": project,
+        "setting": ALLOWED_PROJECTS_SETTING,
+        "message": (
+            f"secret_ref={secret_ref!r} names the Google Cloud project {project!r}, "
+            f"which {ALLOWED_PROJECTS_SETTING} does not list. MEHO reads a target's "
+            f"Google Secret Manager login only from a listed project, so this "
+            f"target could never dispatch. List the project in "
+            f"{ALLOWED_PROJECTS_SETTING} (comma-separated project ids) and restart "
+            f"the backplane, or point secret_ref at a secret in a listed project. "
+            f"See docs/codebase/connectors-vault-tenant-scope.md for the rule and "
+            f"docs/codebase/error-message-shape.md for the error convention."
+        ),
+    }
+
+
+def _enforce_gsm_project_allowed(secret_ref: str, store_ref: str) -> None:
+    """Reject a ``gsm:`` ``secret_ref`` whose project is not in the allowed list.
+
+    The dispatch-time read of a target's ``gsm:`` login runs the same check
+    (:func:`~meho_backplane.connectors._shared.gsm_creds.check_gsm_target_ref`),
+    so a target that would be refused at every read is refused when it is
+    saved instead. Raises a structured 422
+    (``kind="secret_ref_project_not_allowed"``) on violation.
+    """
+    project = gsm_project_of(store_ref)
+    if is_gsm_project_allowed(project):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=_build_secret_ref_project_not_allowed_detail(secret_ref=secret_ref, project=project),
+    )
 
 
 def _enforce_secret_ref_tenant_scope(
@@ -1050,21 +1157,24 @@ def _enforce_secret_ref_tenant_scope(
     unconfigured target fails dispatch with the existing actionable
     "no secret_ref configured" error, not a Vault denial.
 
-    The check only applies to refs that resolve through the **Vault**
-    credential backend. #2585 (Initiative #2592): the constraint is a
-    Vault KV path convention, so a ref bound to another store — a
-    ``gsm:<project>/<secret>`` ref, or any ref on a
-    ``CREDENTIAL_BACKEND=gsm`` deploy — has no Vault subtree to enforce
-    and is passed through untouched. Backend resolution reuses
-    :func:`~meho_backplane.connectors._shared.credential_backend.split_credential_ref`
-    with the deploy default (:func:`_vault_kv_candidate`), so the
-    write-time gate's *applicability* and the path it checks track the
-    same backend and path dispatch resolves at read time
-    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`).
+    The tenant-subtree rule only applies to refs that resolve through the
+    **Vault** backend (#2585: it is a Vault KV path convention). A ref
+    that resolves through **Google Secret Manager** (``gsm:`` scheme, or
+    any ref on a ``CREDENTIAL_BACKEND=gsm`` deploy) must instead name a
+    project listed in ``GSM_PARAM_ALLOWED_PROJECTS``
+    (:func:`_enforce_gsm_project_allowed`), as the dispatch-time read
+    requires. :func:`_resolve_store` splits the ref the way dispatch does
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`),
+    so the gate checks the same backend and path.
 
-    Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"``)
-    on violation; returns ``None`` otherwise.
+    Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"`` or
+    ``kind="secret_ref_project_not_allowed"``) on violation; returns
+    ``None`` otherwise.
     """
+    kind, store_ref = _resolve_store(secret_ref)
+    if kind == "gsm":
+        _enforce_gsm_project_allowed(secret_ref, store_ref)
+        return
     candidate = _vault_kv_candidate(secret_ref)
     if candidate is None:
         return
@@ -1256,11 +1366,11 @@ async def describe_target(
 ) -> Target:
     """Describe a target by name, alias or id.
 
-    Uses :func:`_resolve_route_target`: exact name, then alias, then
+    Uses :func:`resolve_route_target`: exact name, then alias, then
     id (only when the value is a UUID). Returns 404 with near-misses
     when nothing matches.
     """
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     return _to_full(t)
 
 
@@ -1322,9 +1432,29 @@ async def probe_target(
 
     No error branch writes to the DB row, so the column always
     reflects the *last successful* probe. The path value is a name,
-    an alias or an id (:func:`_resolve_route_target`); no match is 404.
+    an alias or an id (:func:`resolve_route_target`); no match is 404.
+    The work is done by :func:`probe_and_store_fingerprint`, which the
+    ``targets.probe`` operation calls too.
     """
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
+    fp = await probe_and_store_fingerprint(session, t, operator=operator)
+    return fp
+
+
+async def probe_and_store_fingerprint(
+    session: AsyncSession, t: TargetORM, *, operator: Operator
+) -> FingerprintResult:
+    """Detect a target's product and version and store it on the target row.
+
+    The one code path behind ``POST /api/v1/targets/{name}/probe`` and the
+    ``targets.probe`` operation. *t* is the target row, found with
+    :func:`resolve_route_target`. The caller finds the row first, so the
+    operation can check MEHO's policy for that target before the system
+    is contacted. Returns the detected fingerprint. Raises
+    :class:`HTTPException` with the status codes :func:`probe_target`
+    lists. The caller owns the transaction: this function only
+    ``flush``-es.
+    """
     cls, label, exception_message = resolve_connector_or_label(t)
     if label == "no_connector":
         raise HTTPException(
@@ -1398,10 +1528,38 @@ def _resolve_create_secret_ref(body: TargetCreate, operator: Operator) -> str | 
     return body.secret_ref
 
 
+def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
+    """Run the write-time validators for a target POST; return the product token.
+
+    Mirrors :func:`_validate_update_body_fields`. Three checks, all raising
+    before any row is built:
+
+    * **product** — G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the
+      incoming product token against the registered set so a value copied
+      straight out of ``meho connector list`` is accept-equivalent here.
+      Every connector registers under the short, dispatch-canonical token
+      the listing emits, so the token is stored as-is (the write-time alias
+      bridge was retired by #1817). See
+      :func:`_canonicalise_and_validate_product`.
+    * **preferred_impl_id** — G0.15-T6 (#1215). Reject an unknown
+      ``preferred_impl_id`` at write time (the validated product token
+      scopes the valid set). See :func:`_validate_preferred_impl_id`.
+    * **extras** — the Vault login role keys (``vault_role`` /
+      ``vault_mount``) need a platform admin. See
+      :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
+    """
+    product = _canonicalise_and_validate_product(body.product)
+    _validate_preferred_impl_id(body.preferred_impl_id, product)
+    enforce_vault_login_extras_platform_admin(
+        operator, before=None, after=body.extras, target_name=body.name
+    )
+    return product
+
+
 @router.post("", response_model=Target, status_code=201)
 async def create_target(
     body: TargetCreate,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
     """Create a new target in the requesting tenant.
@@ -1435,17 +1593,9 @@ async def create_target(
     per-tenant default (#1723) and always passes; no-op when the guard
     is disabled. See :func:`_enforce_secret_ref_tenant_scope`.
     """
-    # G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the incoming product
-    # token against the registered set so a value copied straight out of
-    # ``meho connector list`` is accept-equivalent here. Every connector
-    # now registers under the short, dispatch-canonical token the listing
-    # emits, so the token is stored as-is (the write-time alias bridge was
-    # retired by #1817). See :func:`_canonicalise_and_validate_product`.
-    product = _canonicalise_and_validate_product(body.product)
-    # G0.15-T6 (#1215). Reject an unknown ``preferred_impl_id`` at write
-    # time (the validated product token scopes the valid set). See
-    # :func:`_validate_preferred_impl_id`.
-    _validate_preferred_impl_id(body.preferred_impl_id, product)
+    # Write-time validators (product / impl-id / Vault login role keys) all
+    # raise before the row is built. See :func:`_validate_create_body_fields`.
+    product = _validate_create_body_fields(body, operator)
     now = datetime.now(UTC)
     create_fields = body.model_dump()
     # Persist the validated product token so the stored row matches the
@@ -1574,7 +1724,7 @@ def _validate_update_body_fields(
 
     Extracted from :func:`update_target` so the handler stays within the
     function-size budget while the validation phase reads as one unit.
-    Four checks, all raising *before* the row is mutated:
+    Five checks, all raising *before* the row is mutated:
 
     * **product** — G0.14-T4 (#1145) / G0.18-T2 (#1355). Reject
       ``{"product": null}`` and validate a changed product against the
@@ -1594,11 +1744,19 @@ def _validate_update_body_fields(
       stored map (``null`` entry removes, ``null`` map clears) and
       ``updates`` is rewritten to the merged result; a merged map above
       the entry limit is a 422. See :func:`merge_secret_field_map`.
+    * **extras** — a sent ``extras`` that adds, changes or removes the
+      Vault login role or auth mount (``vault_role`` / ``vault_mount``)
+      is a 403 unless the operator is a platform admin. See
+      :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)
+    if "extras" in updates:
+        enforce_vault_login_extras_platform_admin(
+            operator, before=t.extras, after=updates["extras"], target_name=t.name
+        )
     if "secret_field_map" in updates:
         updates["secret_field_map"] = merge_secret_field_map(
             t.secret_field_map, updates["secret_field_map"]
@@ -1609,7 +1767,7 @@ def _validate_update_body_fields(
 async def update_target(
     name: str,
     body: TargetUpdate,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
     """Partially update a target.
@@ -1624,15 +1782,14 @@ async def update_target(
     diagnostic at PATCH time that they would see at probe time.
     ``updated_at`` is always refreshed on a successful write.
 
-    #2091. An explicit non-null ``secret_ref`` outside the operator's
-    tenant subtree is rejected with a structured 422
-    (``kind="secret_ref_outside_tenant_scope"``) — the same write-time
-    gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
-    PATCH not sending the field are untouched; no-op when the guard is
-    disabled. See :func:`_enforce_secret_ref_tenant_scope`. The path
-    value is a name, an alias or an id (:func:`_resolve_route_target`).
+    #2091. An explicit non-null ``secret_ref`` outside the operator's tenant subtree
+    is rejected with a structured 422 (``kind="secret_ref_outside_tenant_scope"``) — the
+    same write-time gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
+    PATCH not sending the field are untouched; no-op when the guard is disabled. See
+    :func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an
+    id (:func:`resolve_route_target`).
     """
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     updates = body.model_dump(exclude_unset=True)
     # T1 (#1780). Snapshot the pre-patch TLS-verification state *before*
     # the ``setattr`` loop below mutates the row, so the audit fold-in
@@ -1771,7 +1928,7 @@ async def update_target(
 async def delete_target(
     name: str,
     force: bool = Query(default=False),
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """Soft-delete a target.
@@ -1803,7 +1960,7 @@ async def delete_target(
     queries can filter by op id prefix).
 
     The path value is a name, an alias or an id (see
-    :func:`_resolve_route_target`). Re-deletes collapse to 404 —
+    :func:`resolve_route_target`). Re-deletes collapse to 404 —
     every lookup step filters ``deleted_at IS NULL``, so the row no
     longer resolves once the first DELETE flushes.
 
@@ -1814,7 +1971,7 @@ async def delete_target(
         audit_op_id=_DELETE_OP_ID,
         audit_op_class="write",
     )
-    t = await _resolve_route_target(session, operator.tenant_id, name)
+    t = await resolve_route_target(session, operator.tenant_id, name)
     await soft_delete_target(session, t, operator=operator, force=force)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

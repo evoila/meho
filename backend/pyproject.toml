@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
 dependencies = [
-    "fastapi>=0.141.1,<0.147",
+    "fastapi>=0.141.1,<0.163",
     "uvicorn[standard]>=0.52.3",
     "pydantic[email]>=2.13.4",
     "structlog>=26.1.0",
@@ -78,7 +78,7 @@ dependencies = [
     # by :mod:`meho_backplane.redaction.presidio` so a Tier-1-only
     # policy never imports them at runtime (the dep is still installed
     # but stays untouched until a policy with a ``tier2`` block fires).
-    "presidio-analyzer==2.2.364",
+    "presidio-analyzer==2.2.366",
     "presidio-anonymizer==2.2.362",
     # G3.11-T1 (#1221) — GitHub App authentication mints a 10-minute
     # RS256 JWT (claims iat/exp/iss) and exchanges it for an
@@ -186,6 +186,14 @@ build = [
 ]
 
 [tool.uv]
+# Take a new package version only when it is at least 7 days old. A
+# release that carries harmful code is usually found and removed within a
+# few days, so the wait skips it. The urgent-fix path is in
+# docs/codebase/devops.md ("Dependencies wait 7 days"). Keep this line
+# first in the section: the Semgrep rule reads the section only up to
+# the first square bracket, and the comment below has one.
+exclude-newer = "7 days"
+
 # Transitive-version floors the resolver MUST honour without promoting the
 # packages to first-class runtime dependencies. ``constraint-dependencies``
 # bounds a version wherever it appears in the graph but — unlike a

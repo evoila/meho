@@ -230,12 +230,7 @@ async def write_mcp_audit_row(
     if operator.name is not None:
         payload.setdefault("principal_name", operator.name)
     if operator.email is not None:
-        # ``EmailStr`` is a ``str`` subclass; coerce to plain ``str`` so
-        # the JSON encoder doesn't have to special-case the pydantic
-        # type and so a payload round-tripped through ``json.dumps`` /
-        # ``json.loads`` (the JSON column on portable dialects) keeps a
-        # stable type identity.
-        payload.setdefault("principal_email", str(operator.email))
+        payload.setdefault("principal_email", operator.email)
 
     # G0.15-T3 #1212 — finding 5: hoist ``target_name`` from the
     # contextvar the targets resolver binds at its single exit point.

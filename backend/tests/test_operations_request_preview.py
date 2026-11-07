@@ -189,6 +189,7 @@ class _RecordingHttpConnector(HttpConnector):
     """
 
     product = "gh"
+    accepts_ingested_operations = True
     version = "3"
     impl_id = "gh-rest"
     supported_version_range = ">=3,<4"
@@ -1490,16 +1491,44 @@ async def _preview_then_call(
 
 
 @pytest.mark.asyncio
-async def test_preview_caution_op_runs_at_once_for_a_person(
+async def test_preview_caution_op_runs_at_once_for_a_person_in_the_web_interface(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
 ) -> None:
-    """A ``caution`` op without approval previews ``auto-execute`` for a person.
+    """A ``caution`` op without approval previews ``auto-execute`` in the web interface.
 
     The lab case (#4923): a disk move rated ``caution`` with no approval
     would run at once from a person's seat, and the preview said nothing.
-    Now it says so, and the dispatcher then does exactly that.
+    Now it says so, and the dispatcher then does exactly that. Since #3980
+    only the web interface runs it at once.
     """
+    connector = await _seed_ingested_write(
+        session=session,
+        stub_embedding_service=stub_embedding_service,
+        safety_level="caution",
+        requires_approval=False,
+    )
+
+    envelope, result = await _preview_then_call(
+        operator=_make_operator().model_copy(update={"web_session": True}),
+        target=_FakeTarget(name="gh-prod"),
+    )
+
+    assert envelope["status"] == "ok"
+    assert envelope["safety_level"] == "caution"
+    assert envelope["requires_approval"] is False
+    assert envelope["policy_verdict"] == "auto-execute"
+    assert envelope["policy_reason"] is None
+    assert result.status == "ok", result.error
+    assert len(connector.calls) == 1  # the call sent it; the preview did not
+
+
+@pytest.mark.asyncio
+async def test_preview_caution_op_waits_for_a_person_with_a_token(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """The same ``caution`` op previews ``needs-approval`` for a token call (#3980)."""
     connector = await _seed_ingested_write(
         session=session,
         stub_embedding_service=stub_embedding_service,
@@ -1511,13 +1540,10 @@ async def test_preview_caution_op_runs_at_once_for_a_person(
         operator=_make_operator(), target=_FakeTarget(name="gh-prod")
     )
 
-    assert envelope["status"] == "ok"
-    assert envelope["safety_level"] == "caution"
-    assert envelope["requires_approval"] is False
-    assert envelope["policy_verdict"] == "auto-execute"
-    assert envelope["policy_reason"] is None
-    assert result.status == "ok", result.error
-    assert len(connector.calls) == 1  # the call sent it; the preview did not
+    assert envelope["policy_verdict"] == "needs-approval"
+    assert "token" in (envelope["policy_reason"] or "")
+    assert result.status == "awaiting_approval", result.error
+    assert connector.calls == []
 
 
 @pytest.mark.asyncio
@@ -1556,7 +1582,9 @@ async def test_preview_dangerous_op_with_approval_waits_for_a_person(
     ("safety_level", "grant_verdict", "expected_verdict", "expected_status"),
     [
         pytest.param("caution", None, "needs-approval", "awaiting_approval", id="caution-default"),
-        pytest.param("dangerous", None, "deny", "denied", id="dangerous-default"),
+        pytest.param(
+            "dangerous", None, "needs-approval", "awaiting_approval", id="dangerous-default"
+        ),
         pytest.param("safe", None, "auto-execute", "ok", id="safe-default"),
         pytest.param("caution", "deny", "deny", "denied", id="caution-denied-by-grant"),
     ],
@@ -1572,8 +1600,8 @@ async def test_preview_verdict_for_an_agent_follows_its_grants(
     """For an agent the preview verdict is the agent's own gate result (#4923).
 
     Without a grant row the agent gets the safety-level default (a ``safe``
-    op runs at once, a ``caution`` op waits, a ``dangerous`` op is
-    refused); a deny grant row refuses an op the default would park. In
+    op runs at once, a ``caution`` or ``dangerous`` op waits, #3980); a
+    deny grant row refuses an op the default would park. In
     every case the dispatcher then does the same thing with the identical
     arguments, so a preview never lies about a call.
     """

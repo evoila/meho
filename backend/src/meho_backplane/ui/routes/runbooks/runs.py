@@ -12,7 +12,7 @@ this module adds the "Runs" tab: list the runs you own (or, for a
 
 This is a pure UI/BFF build over the in-process
 :class:`~meho_backplane.runbooks.run_service.RunbookRunService` -- the
-``require_ui_session`` gate + a direct service call, never the Bearer
+``require_ui_operator`` gate + a direct service call, never the Bearer
 ``/api/v1`` surface (the same posture the read surface uses calling
 :class:`~meho_backplane.runbooks.service.RunbookTemplateService` in
 process). The REST run routes (G12.3-T5 #1311,
@@ -62,10 +62,11 @@ Same two-layer posture as the read surface and the REST run routes:
   operator privileges on any hiccup, which only ever *narrows* what the
   caller sees (their own runs), never widens it. The service is the
   authority: even a forged ``?assignee=`` is ignored for a non-admin.
-* The **start** write has no role gate beyond the operator-session floor
-  (matching REST ``start_run``'s ``operator`` floor) -- the service
-  auto-assigns ``operator_sub`` as ``assigned_to`` and refuses to start a
-  run for any other principal.
+* The **start** write sits on the ``require_ui_operator`` role floor
+  (matching REST ``start_run``'s ``operator`` floor; ``read_only`` gets
+  403 before a run row exists) -- the service auto-assigns
+  ``operator_sub`` as ``assigned_to`` and refuses to start a run for any
+  other principal.
 
 CSRF
 ----
@@ -121,7 +122,10 @@ from meho_backplane.runbooks.service import (
     RunbookTemplateService,
     TemplateNotFoundError,
 )
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import (
+    UISessionContext,
+    require_ui_operator,
+)
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.runbooks.editor import set_csrf_cookie
@@ -168,10 +172,10 @@ _MAX_WORK_REF_LENGTH: Final[int] = 512
 #: context is small; this guards the JSON parser against an unbounded paste.
 _MAX_PARAMS_JSON_LENGTH: Final[int] = 16_384
 
-#: Module-level ``Depends`` closure for the operator-session gate (B008
-#: idiom -- no call in a default arg). Matches the read surface's
-#: ``_require_session``.
-_require_session = Depends(require_ui_session)
+#: Module-level ``Depends`` closure (B008 idiom -- no call in a default
+#: arg). The ``operator`` role floor of the runs list, the start modal and
+#: the start POST, the same floor as the REST run routes.
+_require_operator = Depends(require_ui_operator)
 
 
 async def _list_run_summaries(
@@ -447,7 +451,7 @@ def register_runs_routes(router: APIRouter) -> None:
     @router.get("/ui/runbooks/runs", response_class=HTMLResponse)
     async def runbooks_runs(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         assignee: str | None = Query(default=None, max_length=_MAX_ASSIGNEE_LENGTH),
         status: Annotated[_RunStateFilter | None, EMPTY_STR_TO_NONE, Query()] = None,
     ) -> HTMLResponse:
@@ -456,14 +460,14 @@ def register_runs_routes(router: APIRouter) -> None:
     @router.get("/ui/runbooks/runs/start", response_class=HTMLResponse)
     async def runbooks_runs_start_modal(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         return await _render_start_modal(request, session)
 
     @router.post("/ui/runbooks/runs", response_class=HTMLResponse)
     async def runbooks_runs_start(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
         template_slug: str = Form(default="", max_length=_MAX_SLUG_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         params: str = Form(default="", max_length=_MAX_PARAMS_JSON_LENGTH),

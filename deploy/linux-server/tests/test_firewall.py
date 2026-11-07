@@ -32,6 +32,9 @@ FIREWALL_VERIFY = "nft list table inet meho"
 FIREWALLD_OFF = "systemctl disable --now firewalld.service"
 RKE2_START = "systemctl enable --now --no-block rke2-server.service"
 
+# The drop rules of CIS Ubuntu 24.04 rule 4.3.6 for a loopback source address.
+LOOPBACK_DROPS = ["ip saddr 127.0.0.0/8 drop", "ip6 saddr ::1 drop"]
+
 # An admin at 10.0.50.9, inside the admin network 10.0.50.0/24.
 ADMIN_SESSION = "10.0.50.9 50022 10.0.0.5 22"
 ADMIN_NETWORK = ("--admin-network", "10.0.50.0/24")
@@ -135,7 +138,7 @@ class RulesFileTests(FirewallTestCase):
         self.assertEqual(
             [
                 "# The machine itself and its pods.",
-                'iifname "lo" accept',
+                'iif "lo" accept',
                 'iifname "cali*" accept',
                 'iifname "flannel*" accept',
             ],
@@ -150,18 +153,52 @@ class RulesFileTests(FirewallTestCase):
         self.assert_succeeds(result)
         self.assertIn("ip saddr { 172.30.0.0/16, 172.31.0.0/20 } drop", self.host_text(RULES))
 
-    def test_the_appliance_chains_let_every_packet_pass_on_form_2(self) -> None:
+    def test_the_appliance_chains_drop_only_loopback_sources_on_form_2(self) -> None:
         self.assert_succeeds(self.machine.run(*ADMIN_NETWORK))
 
         rules = self.host_text(RULES)
-        for hook in ("input", "forward", "output"):
+        drops = {"input": LOOPBACK_DROPS, "forward": [], "output": []}
+        for hook, expected in drops.items():
             with self.subTest(chain=hook):
                 lines = chain_rules(rules, hook)
                 self.assertEqual(
                     f"type filter hook {hook} priority filter; policy accept;", lines[0]
                 )
-                self.assertEqual([], [line for line in lines[1:] if "drop" in line])
+                self.assertEqual(expected, [line for line in lines[1:] if "drop" in line])
                 self.assertEqual("counter", lines[-1])
+
+    def test_a_loopback_source_from_a_network_card_is_dropped(self) -> None:
+        self.assert_succeeds(self.machine.run(*ADMIN_NETWORK))
+
+        rules = self.host_text(RULES)
+        for chain in ("prerouting", "input"):
+            with self.subTest(chain=chain):
+                lines = chain_rules(rules, chain)
+                # After the machine's own interfaces, so lo still passes.
+                after_interfaces = lines.index('iifname "flannel*" accept') + 1
+                self.assertEqual('iif "lo" accept', lines[1])
+                self.assertLessEqual(after_interfaces, lines.index(LOOPBACK_DROPS[0]))
+                start = lines.index(LOOPBACK_DROPS[0])
+                self.assertEqual(LOOPBACK_DROPS, lines[start : start + len(LOOPBACK_DROPS)])
+
+    def test_the_cis_loopback_rules_come_before_the_first_set_of_the_input_chain(self) -> None:
+        # The check of CIS rule 4.3.6 reads the chain input only up to the
+        # first line with a closing brace. test_firewall_nft.py runs it on
+        # the real output of nft.
+        self.assert_succeeds(self.machine.run(*ADMIN_NETWORK))
+
+        lines = chain_rules(self.host_text(RULES), "input")
+        first_set = next(index for index, line in enumerate(lines) if "}" in line)
+        for rule in ('iif "lo" accept', *LOOPBACK_DROPS):
+            with self.subTest(rule=rule):
+                self.assertLess(lines.index(rule), first_set)
+
+    def test_the_output_chain_accepts_traffic_to_this_machine_after_the_nat(self) -> None:
+        self.assert_succeeds(self.machine.run(*ADMIN_NETWORK))
+
+        lines = chain_rules(self.host_text(RULES), "output")
+        self.assertIn("fib daddr type local accept", lines)
+        self.assertLess(lines.index("fib daddr type local accept"), lines.index("counter"))
 
     def test_the_input_chain_accepts_what_the_chain_prerouting_accepts(self) -> None:
         self.assert_succeeds(self.machine.run(*ADMIN_NETWORK))
@@ -536,6 +573,8 @@ class PortListTests(FirewallTestCase):
                 2380/tcp closed
                 2381/tcp closed
                 9099/tcp closed
+                8081/tcp closed
+                9091/tcp closed
                 30000-32767/tcp closed
                 8472/udp closed
                 """),

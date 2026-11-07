@@ -212,6 +212,11 @@ class DecryptedSession:
     Fernet encrypt path).
 
     The cookie value the browser holds is ``str(self.id)``.
+
+    ``tenant_id`` is the session's current tenant (#5240).
+    ``tenant_chosen`` is ``False`` while a person with several tenants
+    has not picked one yet; ``can_switch_tenant`` tells the sidebar to
+    show the tenant switch.
     """
 
     id: uuid.UUID
@@ -222,6 +227,8 @@ class DecryptedSession:
     access_token: str
     refresh_token: str
     last_seen_at: datetime
+    tenant_chosen: bool = True
+    can_switch_tenant: bool = False
 
 
 @dataclass(frozen=True)
@@ -347,6 +354,8 @@ async def create_session(
     access_token: str,
     refresh_token: str,
     lifetime: timedelta,
+    tenant_chosen: bool = True,
+    can_switch_tenant: bool = False,
 ) -> DecryptedSession:
     """Insert a fresh ``web_session`` row and return its decrypted view.
 
@@ -384,13 +393,30 @@ async def create_session(
         the lifetime from the access-token's ``exp`` claim minus
         clock-skew margin so the session expires no later than the
         token it represents.
+    tenant_chosen
+        ``False`` when the person has several tenants and must pick one
+        first (#5240). The web interface then shows only the picker.
+    can_switch_tenant
+        ``True`` when the person has more than one tenant or is a
+        platform admin; the sidebar then shows the tenant switch.
 
     Returns
     -------
     DecryptedSession
         Plaintext view of the inserted row -- the caller uses
         ``str(result.id)`` as the ``meho_session`` cookie value.
+
+    The caller verified the access token through the JWT chain right
+    before this call, so creation also records the validation instant
+    for the read path's drift-gated revalidation
+    (:func:`~meho_backplane.ui.auth.revalidation.mark_session_validated`).
+    Without that record the first read of the new session would check
+    the token again.
     """
+    # Imported here: the revalidation module imports the refresh module,
+    # which imports this module.
+    from meho_backplane.ui.auth.revalidation import mark_session_validated
+
     now = datetime.now(UTC)
     expires_at = now + lifetime
     row = WebSession(
@@ -403,9 +429,12 @@ async def create_session(
         refresh_token=_encrypt(refresh_token),
         last_seen_at=now,
         revoked_at=None,
+        tenant_chosen=tenant_chosen,
+        can_switch_tenant=can_switch_tenant,
     )
     session.add(row)
     await session.flush()
+    mark_session_validated(row.id)
     return DecryptedSession(
         id=row.id,
         operator_sub=row.operator_sub,
@@ -415,6 +444,8 @@ async def create_session(
         access_token=access_token,
         refresh_token=refresh_token,
         last_seen_at=row.last_seen_at,
+        tenant_chosen=row.tenant_chosen,
+        can_switch_tenant=row.can_switch_tenant,
     )
 
 
@@ -487,6 +518,8 @@ async def load_session(
         access_token=access_plaintext,
         refresh_token=refresh_plaintext,
         last_seen_at=row.last_seen_at,
+        tenant_chosen=row.tenant_chosen,
+        can_switch_tenant=row.can_switch_tenant,
     )
 
 
@@ -541,6 +574,8 @@ async def load_session_for_update(
         access_token=_decrypt(row.access_token),
         refresh_token=_decrypt(row.refresh_token),
         last_seen_at=row.last_seen_at,
+        tenant_chosen=row.tenant_chosen,
+        can_switch_tenant=row.can_switch_tenant,
     )
 
 
@@ -576,24 +611,26 @@ async def list_active_sessions(
     session: AsyncSession,
     *,
     operator_sub: str,
-    tenant_id: uuid.UUID,
 ) -> list[ActiveSessionRow]:
-    """Return one operator's active sessions for the Account surface.
+    """Return one person's active sessions, in every tenant, for the Account page.
 
-    Backs the operator-console Account page's active-session list
-    (G10.11-T1 #1892). Filters to the **calling operator's own** rows:
-    ``operator_sub`` AND ``tenant_id`` both match, ``revoked_at IS NULL``,
-    and ``expires_at > now()`` -- the same liveness predicate
-    :func:`load_session` applies, so the list shows exactly the sessions
-    that would still authenticate. Ordered ``last_seen_at DESC`` so the
-    most-recently-active device sorts first.
+    Backs the operator-console Account page's active-session list. Filters
+    to the **calling person's own** rows: ``operator_sub`` matches,
+    ``revoked_at IS NULL``, and ``expires_at > now()`` -- the same liveness
+    predicate :func:`load_session` applies, so the list shows exactly the
+    sessions that would still authenticate. Ordered ``last_seen_at DESC``
+    so the most-recently-active device sorts first.
 
-    The ``(operator_sub, tenant_id)`` pair is supplied by the caller from
-    the **validated** :class:`UISessionContext`, never from a client form
-    field -- the listing must never be steerable to another operator's
-    sessions. The ``operator_sub`` filter rides
-    ``web_session_operator_sub_idx`` (the index the model was given
-    specifically for this surface).
+    The list is not limited to the current tenant. A tenant switch
+    changes the tenant on the same row, and :func:`load_session` accepts
+    a session in any tenant, so a session of the same person in another
+    tenant is still that person's device. Each row carries its
+    ``tenant_id`` so the page can show it.
+
+    ``operator_sub`` is supplied by the caller from the **validated**
+    :class:`UISessionContext`, never from a client form field -- the
+    listing must never be steerable to another person's sessions. The
+    filter rides ``web_session_operator_sub_idx``.
 
     Returns :class:`ActiveSessionRow` projections (timestamps + identity
     only) -- the Fernet-encrypted token columns are never read.
@@ -609,7 +646,6 @@ async def list_active_sessions(
         select(WebSession)
         .where(
             WebSession.operator_sub == operator_sub,
-            WebSession.tenant_id == tenant_id,
             WebSession.revoked_at.is_(None),
         )
         .order_by(WebSession.last_seen_at.desc())
@@ -635,18 +671,18 @@ async def revoke_other_sessions(
     session: AsyncSession,
     *,
     operator_sub: str,
-    tenant_id: uuid.UUID,
     keep_session_id: uuid.UUID,
 ) -> int:
-    """Soft-delete every active session for this operator except *keep_session_id*.
+    """Soft-delete every active session of this person except *keep_session_id*.
 
-    Backs the Account page's "revoke all other sessions" action
-    (G10.11-T1 #1892): the operator kills every device but the one they
-    are currently using. Scoped to the caller's own ``operator_sub`` AND
-    ``tenant_id`` (supplied from the validated session context, never a
-    form field) so the action can never touch another operator's rows.
-    The current session (``keep_session_id``) is excluded so the
-    operator is **not** logged out by this action.
+    Backs the Account page's "revoke all other sessions" action: the
+    person signs out every device but the one they are using now. Scoped
+    to the caller's own ``operator_sub`` (supplied from the validated
+    session context, never a form field), in **every tenant**: a session
+    that switched to another tenant is the same row and still opens the
+    console, so it is signed out too. The action never touches another
+    person's rows. The current session (``keep_session_id``) is excluded
+    so the person is **not** logged out by this action.
 
     Idempotent and additive: already-revoked rows are skipped
     (``revoked_at IS NULL`` filter), so re-running revokes nothing new.
@@ -657,7 +693,6 @@ async def revoke_other_sessions(
     result = await session.execute(
         select(WebSession).where(
             WebSession.operator_sub == operator_sub,
-            WebSession.tenant_id == tenant_id,
             WebSession.revoked_at.is_(None),
             WebSession.id != keep_session_id,
         )
@@ -891,6 +926,8 @@ async def _apply_rotation(
         access_token=new_access_token,
         refresh_token=new_refresh_token,
         last_seen_at=row.last_seen_at,
+        tenant_chosen=row.tenant_chosen,
+        can_switch_tenant=row.can_switch_tenant,
     )
 
 

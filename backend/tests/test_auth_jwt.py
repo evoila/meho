@@ -41,6 +41,7 @@ import pytest
 import respx
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -604,29 +605,118 @@ async def test_readiness_probe_fails_when_jwks_malformed() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_malformed_email_claim_returns_401() -> None:
-    """B1 regression: a signature-valid JWT carrying a malformed ``email``
-    claim must reject as 401 ``invalid_token`` — never as a 500.
+def _whoami(token: str, key: Any) -> httpx.Response:
+    """Call ``/whoami`` with *token*, the JWKS serving *key*'s public half."""
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        return client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
 
-    The Operator model uses pydantic's ``EmailStr`` validator; if the
-    Keycloak realm is misconfigured and emits ``"not-an-email"``,
-    pydantic raises ``ValidationError`` during ``Operator(...)``
-    construction. The dependency must catch that and return 401, not
-    propagate the exception as an unhandled 500.
+
+def test_malformed_email_claim_is_dropped_and_logged() -> None:
+    """B1 regression, revised by #5561: a signature-valid JWT carrying a
+    malformed ``email`` claim must never answer 500.
+
+    The email is soft identity, so the token stays valid: the address is
+    dropped (``None``) and an ``email_claim_dropped`` warning names the
+    reason. The address itself is not logged.
     """
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(key, sub="op-evil", email="not-an-email")
 
-    with respx.mock as mock_router:
-        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
-        client = TestClient(_build_app())
-        response = client.get(
-            "/whoami",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+    with capture_logs() as logs:
+        response = _whoami(token, key)
+
+    assert response.status_code == 200
+    assert response.json()["email"] is None
+    dropped = [e for e in logs if e["event"] == "email_claim_dropped"]
+    assert dropped == [
+        {
+            "event": "email_claim_dropped",
+            "log_level": "warning",
+            "claim_name": "email",
+            "reason": "no_at_sign",
+            "sub": "op-evil",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        "admin@corp.local",
+        "admin@example.test",
+        "admin@localhost",
+        "admin@corp.internal",
+        "Admin@Example.COM",
+    ],
+)
+def test_email_on_reserved_domain_is_accepted(email: str) -> None:
+    """#5561: an address on a reserved domain logs in, and is kept as sent.
+
+    ``email-validator`` refuses ``.local`` / ``.test`` / ``localhost``
+    because mail cannot be delivered there; MEHO never mails this address,
+    so a directory using such a domain must not lock people out.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-local", email=email)
+
+    with capture_logs() as logs:
+        response = _whoami(token, key)
+
+    assert response.status_code == 200
+    assert response.json()["email"] == email
+    assert not [e for e in logs if e["event"] == "email_claim_dropped"]
+
+
+@pytest.mark.parametrize(
+    ("email", "reason"),
+    [
+        (123, "non_string"),
+        (["a@b.c"], "non_string"),
+        ("", "no_at_sign"),
+        ("@corp.local", "empty_part"),
+        ("admin@", "empty_part"),
+        ("ad min@corp.local", "whitespace_or_control"),
+        ("admin@corp.local\n", "whitespace_or_control"),
+        ("a" * 310 + "@corp.local", "too_long"),
+    ],
+)
+def test_unusable_email_claim_is_dropped_with_reason(email: Any, reason: str) -> None:
+    """Each malformed shape is dropped with its own reason; the login works."""
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-odd", extra_claims={"email": email})
+
+    with capture_logs() as logs:
+        response = _whoami(token, key)
+
+    assert response.status_code == 200
+    assert response.json()["email"] is None
+    assert [e["reason"] for e in logs if e["event"] == "email_claim_dropped"] == [reason]
+
+
+def test_operator_validation_failure_is_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#5561: the ``invalid_token`` fallback names the failing fields in the
+    log, so on-call can find the cause without the code at hand.
+    """
+    monkeypatch.setattr("meho_backplane.auth.jwt._extract_azp", lambda _claims: 42)
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-bad")
+
+    with capture_logs() as logs:
+        response = _whoami(token, key)
 
     assert response.status_code == 401
     assert response.json() == {"detail": "invalid_token"}
+    failed = [e for e in logs if e["event"] == "operator_validation_failed"]
+    assert failed == [
+        {
+            "event": "operator_validation_failed",
+            "log_level": "warning",
+            "fields": ["azp"],
+            "sub": "op-bad",
+        }
+    ]
 
 
 def test_operator_repr_does_not_leak_raw_jwt() -> None:

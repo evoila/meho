@@ -82,6 +82,15 @@ from meho_backplane.ui.routes.broadcast.feed import (
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
 # ---------------------------------------------------------------------------
@@ -279,7 +288,9 @@ def test_feed_page_wires_sse_extension_to_ui_bridge() -> None:
         response = client.get("/ui/broadcast")
     body = response.text
     assert 'hx-ext="sse"' in body
-    assert 'sse-connect="/ui/broadcast/stream"' in body
+    # The page's tenant marker rides the stream URL (#5240): the browser's
+    # EventSource can send no header.
+    assert f'sse-connect="/ui/broadcast/stream?meho_tenant={_TENANT_A}"' in body
     assert 'sse-swap="broadcast"' in body
     # The surface JS that holds the Alpine controller is loaded.
     assert "/ui/static/src/app/broadcast-feed.js" in body

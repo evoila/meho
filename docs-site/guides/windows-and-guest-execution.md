@@ -3,9 +3,11 @@
 MEHO governs the Windows half of a datacenter — Windows Server, Active
 Directory, DNS, failover clustering, SQL Server, and Hyper-V — through
 the same **discover → list groups → search → preview → call** ladder you
-learned in [Run your first operations](first-operations.md). It also
-governs a harder thing: running a program *inside* a virtual machine's
-guest OS, with a human approving the risky ones. This guide covers both.
+learned in [Run your first operations](first-operations.md). With
+evoila's enterprise pack it also governs a harder thing: running a
+program *inside* a virtual machine's guest OS, with a human approving the
+risky ones. This guide covers the Windows connectors in full and the
+in-guest path in short.
 
 These connectors are recent additions. The honest status is **shipped**:
 each one is registered, has a live operation surface, and rides the full
@@ -45,8 +47,9 @@ by its `connector_id`, exactly as in the first-operations ladder.
 **Windows Server (`winsrv`).** System facts, service start/stop/restart,
 Windows feature install and removal, reboot and shutdown, local users,
 disk / iSCSI-initiator storage, and the server's NTP time source. The
-reboot, shutdown, feature-removal, local-user-delete and time-source
-operations wait for a person to approve them; everything else is a read or
+reboot, shutdown, feature-removal, local-user-delete, time-source and
+iSCSI-connect (`winsrv.storage.iscsi.connect`) operations wait for a
+person to approve them; everything else is a read or
 a recoverable write.
 
 **Active Directory (`msad`).** Domain, forest, and DC topology reads, AD
@@ -58,6 +61,10 @@ controller — the AD cmdlets contact the local directory. Object deletes
 there are a read of the password rules and the join limit, and changes that
 wait for a person to approve them: create a group, set the password rules,
 set the join limit, and let a group create computers in an OU (and undo it).
+For passwords there is a read of when an account's password was last set
+and when it expires (`msad.user.password-expiry`), and
+`msad.user.set-password`, which sets a user's password from the secret
+store and enables the account. It waits for a person to approve it.
 
 **Windows DNS (`windns`).** Read the zones on an AD-integrated DNS server,
 read records, add A and CNAME records, and remove a record set. The
@@ -88,7 +95,10 @@ healthy before a cutover or planned failover.
 It reads a Hyper-V host's inventory, VM configuration (including the
 firmware generation and secure-boot state a target needs), virtual-disk
 format and differencing chains, and checkpoints — the inputs a migration
-plan is built from — plus a guarded `Export-VM` that seeds the migration.
+plan is built from. It can also create a checkpoint, start or stop a VM,
+and run `Export-VM` to seed the migration (all `caution`). Reverting or
+deleting a checkpoint is `dangerous` and waits for a person to approve
+it.
 It manages the *source* estate so you can plan and stage the move; it does
 not build new VMs on Hyper-V. Cluster-wide views of a Hyper-V cluster's
 nodes are the `wsfc` connector's job on the same hosts, not duplicated
@@ -115,8 +125,12 @@ Start-Service sshd; Set-Service -Name sshd -StartupType Automatic
 
 The credential is an ordinary SSH secret in your store: a `username` with
 either a `password` or an `ssh_private_key` field (key auth is preferred
-when the key is present). Nothing else is needed — the connector reads the
-one SSH secret and constructs each command locally.
+when the key is present). The secret must also pin the host key: add a
+`known_hosts` field with OpenSSH `known_hosts` lines for the host. You can
+set `known_hosts_insecure: true` instead, but MEHO then logs a warning on
+every connect. A secret with neither field fails before MEHO connects.
+The connector reads the one SSH secret and constructs each command
+locally.
 
 ```yaml
 targets:
@@ -131,9 +145,10 @@ meho targets import targets.yaml
 meho targets probe win-fs01
 ```
 
-A green probe reports `vendor: microsoft` and the product it observed
-(for example `windows-server`, `active-directory`, or `hyper-v`), which
-is how the resolver later matches the target to its connector.
+A green probe reports `vendor: microsoft`, the product it observed (for
+example `windows-server`, `active-directory`, or `hyper-v`) and the
+version. The resolver picks the connector from the target's `product`
+token (`winsrv`, `msad`, …) and the probed version.
 
 ### SQL Server over TDS
 
@@ -157,8 +172,8 @@ describes for every other credential.
 ### In-guest execution: the VM's own target
 
 Running a program inside a guest (below) does not need a new target. It
-runs against the **VMware target** the VM lives on, through the
-`vmware-rest-9.0` connector, and reads the guest-OS login from that
+runs against the **vCenter target** the VM lives on, through the vSphere
+connector of the enterprise pack, and reads the guest-OS login from that
 target's secret as `guest_username` / `guest_password`. The guest
 credential is resolved at dispatch time and never travels in an operation
 parameter.
@@ -178,14 +193,16 @@ the discipline is what makes it safe to hand to an agent:
   their type first. A value that tries to break out of the string cannot.
 - **No credential material is ever in the script.** The encoded command
   is visible to a privileged observer on the remote host, so the transport
-  forbids any secret in the script body. The SSH login is the only secret,
-  and it stays in the transport, never in a command.
+  forbids any secret in the script body. The SSH login stays in the
+  transport. A value an operation reads from the secret store
+  (`msad.user.set-password`) goes to PowerShell on standard input, never
+  into the script.
 
-That last rule has one honest consequence: operations that would need a
-secret *in* the command are deliberately absent. `winsrv` creates a local
-user without a password (set it out of band afterwards); `msad` creates a
-disabled, passwordless account you enable once a password is set out of
-band. There is no password-reset operation on the estate.
+That last rule has one honest consequence: `winsrv` creates a local user
+without a password (set it out of band afterwards). `msad` creates a
+disabled, passwordless account. Set its password with
+`msad.user.set-password`: you pass `password_ref`, a reference into the
+secret store, never the password itself.
 
 Windows Server ships PowerShell 5.1, not PowerShell 7, so these connectors
 target 5.1 explicitly — the cmdlet surface is stable across Windows Server
@@ -194,11 +211,12 @@ target 5.1 explicitly — the cmdlet surface is stable across Windows Server
 !!! note "How preview behaves for these operations"
 
     `preview_operation` returns the literal request a spec-ingested
-    operation would send. These connectors are typed, so their `safe`
-    reads and `caution` writes have no single such request, and preview
+    operation would send. These connectors are typed, so an operation
+    that runs without approval has no single such request, and preview
     answers `status: "unavailable"` — the expected result, not a failure.
 
-    The governed tiers *are* previewable. A `dangerous`-with-approval or
+    The governed tiers *are* previewable. Every operation that waits for
+    approval (also a `caution` one such as `winsrv.time.set`) and every
     `destructive` operation returns a synthetic preview carrying the same
     redacted proposed-effect the approval park shows the approver —
     resolved with nothing sent, no park, and no audit row — so you can
@@ -207,7 +225,8 @@ target 5.1 explicitly — the cmdlet surface is stable across Windows Server
     `windns.record.remove` is previewable too; the exact record set it
     would remove is enumerated when it parks for approval.
 
-    One operation here stays `unavailable` on purpose: `guest.program.run`.
+    A credential operation such as `msad.user.set-password` stays
+    `unavailable`. So does `guest.program.run`.
     Because its `arguments` and `env` can carry a secret, it is treated as
     a credential-class write and does not synthesize a preview — the
     approver sees its redacted summary (program path, argument size,
@@ -222,7 +241,7 @@ ladder:
 | Tier | Behavior | Estate examples |
 |---|---|---|
 | `safe` | Read-class; executes under default-allow. | `winsrv.service.list`, `msad.user.get`, `wsfc.cluster.get`, `mssql.databases.list`, `hyperv.vms.list` |
-| `caution` | Recoverable write; subject to policy. | `winsrv.service.restart`, `msad.group.add-member`, `wsfc.groups.move`, `mssql.backup.database`, `hyperv.export.vm` |
+| `caution` | Recoverable write. Runs at once in the web interface; waits for approval when it comes with a token or from an agent. | `winsrv.service.restart`, `msad.group.add-member`, `wsfc.groups.move`, `mssql.backup.database`, `hyperv.export.vm` |
 | `dangerous` + approval | Disruptive or destructive; **parks for a human** before it runs. | `winsrv.power.reboot`, `winsrv.feature.remove`, `msad.user.delete`, `wsfc.nodes.evict`, `wsfc.groups.offline`, `mssql.databases.drop`, `mssql.backup.restore`, `hyperv.checkpoints.revert` |
 | `destructive` + approval | Permanent delete. You must preview it first and pass the preview hash to the call. The call then waits for approval, and the approval request shows what will be deleted. | `windns.record.remove` |
 
@@ -246,65 +265,26 @@ The park stores a redaction-safe summary of what the operation would do —
 the target and parameters for a `dangerous` operation, and for a
 `destructive` one the exact record set that would be removed. Approval is
 a human decision: there is no path for an agent to approve its own parked
-call. The full mechanics — the four-eyes rule and the audited single-
-operator break-glass — are the
+call. The full mechanics — what waits, who may approve, and how a single
+operator approves their own change — are the
 [approvals and break-glass guide](approvals-and-break-glass.md).
 
 ## Run a program inside a guest
 
 Sometimes the governed operation you need is "run this program inside that
 VM" — promote a domain controller, form a cluster, verify a service on a
-first-boot appliance that has no network route back to MEHO. MEHO governs
-this through `vmware.composite.vm.guest.program.run` on the
-`vmware-rest-9.0` connector, so it replaces the out-of-band
-`govc guest.run` / SSH-into-the-guest habit with something audited.
+first-boot appliance that has no network route back to MEHO. The vSphere
+connector of evoila's enterprise pack governs this with a guest-operations
+family on the VM's vCenter target: list guest processes, read a guest file
+or environment variable, show the guest network state, write a guest file,
+and run a program. It rides VMware Tools guest operations, so it needs no
+new network path to the guest.
 
-It rides **VMware Tools guest operations** — vCenter to ESXi to the Tools
-agent inside the guest — so it needs no new network path to the guest and
-works even for a VM with no route back to MEHO. There is a read family
-alongside it, all on the same connector:
-
-| Operation | What it does | Tier |
-|---|---|---|
-| `vmware.composite.vm.guest.process.list` | List running guest processes | `safe` |
-| `vmware.composite.vm.guest.file.read` | Read a guest file (metadata; opt-in byte fetch via `fetch_content`, capped/refused over `max_inline_bytes`) | `caution` (byte fetch reads as the in-guest login; auto-parks for agents/service) |
-| `vmware.composite.vm.guest.env.read` | Read a guest environment variable | `safe` |
-| `vmware.composite.vm.guest.net.show` | Guest NIC / IP state (Tools-reported, no guest login) | `safe` |
-| `vmware.composite.vm.guest.file.write` | Write a guest file | `dangerous` + approval |
-| `vmware.composite.vm.guest.program.run` | Run a program in the guest | `dangerous` + approval |
-
-`program.run` runs against the VM's VMware target. It takes an explicit
-`program_path`, optional `arguments` and `env`, and a `wait` flag; with
-`wait: true` it polls for the exit code and start/end times instead of
-returning the moment the process starts.
-
-```bash
-meho operation call vmware-rest-9.0 vmware.composite.vm.guest.program.run \
-  --target lab-vcenter \
-  --params '{"vm": "<vm-name-or-id>", "program_path": "C:\\Windows\\System32\\cmd.exe",
-             "arguments": "/c ipconfig /all", "wait": true}'
-```
-
-### What makes it governed
-
-- **It parks for a human.** The operation is `dangerous` +
-  `requires_approval`. Calling it stores a durable approval request and
-  returns `awaiting_approval`; a human approves or rejects on the console
-  or CLI, never from an agent. The policy gate runs *first* — a parked or
-  denied call resolves no guest credential and starts nothing.
-- **The guest login never travels in a parameter.** It is read from the
-  VM target's secret at dispatch time and lives only in the request to
-  the Tools agent — never in a parameter, a result, an audit row, or a log.
-- **The decision surfaces are kept clean.** The approval park preview
-  shows the VM, the program path, the working directory, the `wait` flag,
-  the *byte size* of `arguments`, and the *names* of `env` variables —
-  never their values. The policy gate, the operation result, and the
-  broadcast feed are the same: values are held back so a reviewer's
-  decision is made on structure, not secrets.
-- **The whole call is audited synchronously.** The operation does not
-  return success until an append-only audit row commits, naming the
-  operation, the VM, and the outcome. Raw parameters are stored as a hash,
-  never in the clear.
+The write operations park for a human like every other `dangerous`
+operation in this guide. The guest login is read from the VM target's
+secret at dispatch time and never travels in a parameter, a result, an
+audit row, or a log. The approval preview shows the program path and the
+*names* of environment variables, never their values.
 
 !!! warning "Do not put a bare secret in `arguments` or `env`"
 
@@ -314,17 +294,11 @@ meho operation call vmware-rest-9.0 vmware.composite.vm.guest.program.run \
     [flight recorder](flight-recorder.md) records the underlying vendor
     request. So a password typed straight into `arguments` or `env` is
     retained on those surfaces. Where a program needs a secret, pass the
-    *name* of an environment variable and stage the value guest-side (a
-    file the guest user reads, a templated env file), the same way the
-    guest login itself is resolved from the secret store rather than a
-    parameter.
+    *name* of an environment variable and stage the value guest-side.
 
-Capturing a program's output is a two-step compose, by design:
-`program.run` cannot capture stdout on its own, so redirect the output to
-a file in `arguments`, then read it back with `guest.file.read`
-(`fetch_content=true` to pull the bytes inline; large output returns a
-`result_query` handle). Keeping capture out of the single operation keeps
-its blast radius and audited surface small.
+The operation ids, parameters and worked example ship with the enterprise
+pack's documentation. The public image answers an in-guest call with
+"unknown connector".
 
 ## Honest limits
 
@@ -332,10 +306,11 @@ its blast radius and audited surface small.
   prompt — there is deliberately no raw-T-SQL operation. A read-only,
   guarded-SELECT operation could be added later if a concrete need
   appears; it is not shipped.
-- **No password provisioning over the estate transport.** Local and
-  domain accounts are created passwordless (and, in AD, disabled); set the
-  password out of band. There is no password-reset operation. This falls
-  out of the "no secret in the command" rule and is intentional.
+- **Passwords come from the secret store, never the command.** Local and
+  domain accounts are created passwordless (and, in AD, disabled). Set an
+  AD user's password with `msad.user.set-password` (from the secret
+  store, after approval); set a local user's password out of band. This
+  follows from the "no secret in the command" rule.
 - **SQL encryption is default-posture today.** `mssql` connects to a
   standard instance cleanly; certificate-validated TLS for an instance
   that *forces* encryption is a named future extension, not yet built.
@@ -346,7 +321,8 @@ its blast radius and audited surface small.
   to plan and seed a migration onto VMware; it does not create or delete
   VMs on Hyper-V, and `Export-VM` is a guarded, long-running seed, not a
   routine verb.
-- **In-guest execution needs VMware Tools.** A guest without Tools has no
+- **In-guest execution needs the enterprise pack and VMware Tools.** The
+  public image has no vSphere connector. A guest without Tools has no
   guest-operations channel at all; reaching one would be separate future
   work.
 - **Live-hardware validation is still landing.** These connectors are

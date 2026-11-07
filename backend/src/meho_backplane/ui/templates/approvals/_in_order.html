@@ -18,11 +18,26 @@
   Every form here carries the CSRF token minted for this render; the route
   re-sets the cookie on the same response.
 
+  Every form also carries one hidden ``step_id`` per step in the list. The
+  POST approves nothing when the change ticket has a pending request that is
+  not among them; it renders the list again with those steps in ``unseen``
+  (shown in a banner and marked "new" on their rows), and a fresh Start.
+
+  "May I approve this?" sign (#3329): each pending step shows whether this
+  person may approve it (``right``, the same service checks as the approve).
+  When a step the run has not reached says no, ``next_refused`` names where
+  the run will stop. A step approved in this run as a self-approval carries
+  the confirmation line (``self_approval``); the done banner counts them.
+  No new gate: the approval of each step checks again.
+
   Context:
-    work_ref, steps (list of {step, request, safety_level, outcome, detail}),
+    work_ref, steps (list of {step, request, safety_level, outcome, detail,
+    right (ApproveRight | None), self_approval (str | None)}),
     total, pending, started, warnings, waiting, waiting_context, stopped,
-    sign_in_url (str | None), approved_now, reason, csrf_token,
-    status_pill_class, result_state_pill
+    next_refused (a step | None), unseen (list of steps),
+    sign_in_url (str | None), approved_now,
+    self_approved_now, reason, csrf_token, status_pill_class,
+    result_state_pill
 -#}
 {% from "_icons.html" import icon %}
 {%- set outcome_badge = {
@@ -63,6 +78,17 @@
       </div>
     {% endfor %}
 
+    {% set unseen_ids = unseen | map(attribute="request.id") | list %}
+    {% if unseen %}
+      <div role="alert" class="alert alert-warning mt-3 items-start text-sm" data-approval-in-order-unseen>
+        <div>
+          <p class="font-semibold">New steps joined this change ticket after the list was shown. MEHO approved nothing.</p>
+          <p class="[overflow-wrap:anywhere]">New: {% for u in unseen %}step {{ u.step }} ({{ u.request.op_id }}){{ ", " if not loop.last else "" }}{% endfor %}.
+            Check the list below, then start again.</p>
+        </div>
+      </div>
+    {% endif %}
+
     {% if stopped %}
       <div role="alert" class="alert alert-error mt-3 items-start text-sm" data-approval-in-order-stopped="{{ stopped.step }}">
         <div>
@@ -82,6 +108,9 @@
       <div role="status" class="alert alert-success mt-3 text-sm" data-approval-in-order-done>
         {% if approved_now %}
           Done. Approved {{ approved_now }} step{{ "s" if approved_now > 1 else "" }} in order.
+          {% if self_approved_now %}
+            <span data-testid="approval-self-approved-count">{{ self_approved_now }} of them {{ "were" if self_approved_now > 1 else "was" }} your own change. The audit log records {{ "them" if self_approved_now > 1 else "it" }} as a self-approval.</span>
+          {% endif %}
         {% else %}
           Nothing to approve. Every step already ran OK.
         {% endif %}
@@ -94,13 +123,25 @@
           <div class="min-w-0 space-y-1">
             <div class="flex flex-wrap items-center gap-2">
               <span class="text-xs font-semibold">Step {{ s.step }}</span>
+              {% if s.request.id in unseen_ids %}
+                <span class="badge badge-sm badge-warning" data-approval-in-order-new>new</span>
+              {% endif %}
               <span class="truncate font-mono text-sm">{{ s.request.op_id }}</span>
               {% if s.safety_level %}
                 <span class="badge badge-sm {{ 'badge-error' if s.safety_level in ('dangerous', 'destructive') else 'badge-ghost' }}">{{ s.safety_level }}</span>
               {% endif %}
+              {% if s.request.reveal_secret %}
+                <span class="badge badge-sm badge-error" data-approval-in-order-reveal-secret title="The approved run returns the hidden values to the requester">returns hidden values</span>
+              {% endif %}
             </div>
             {% if s.detail %}
               <p class="text-xs text-base-content/60 [overflow-wrap:anywhere]">{{ s.detail }}</p>
+            {% endif %}
+            {% if s.self_approval %}
+              <p class="text-xs font-semibold [overflow-wrap:anywhere]" data-testid="approval-self-approved">{{ s.self_approval }}</p>
+            {% endif %}
+            {% if s.right %}
+              <p class="text-xs [overflow-wrap:anywhere]{{ '' if s.right.may_approve else ' text-error' }}" data-approve-right="{{ 'yes' if s.right.may_approve else 'no' }}" data-approve-reason="{{ s.right.reason }}">{{ s.right.message }}</p>
             {% endif %}
           </div>
           {% if s.outcome in outcome_badge %}
@@ -137,6 +178,9 @@
             <p class="mt-1 font-semibold">What else is affected</p>
             <pre class="whitespace-pre-wrap text-xs">{{ waiting_context.blast_radius | tojson(indent=2) }}</pre>
           {% endif %}
+          {% if waiting.right and waiting.right.self_approval %}
+            <p class="mt-1 font-semibold" data-approval-confirm="self-approval">This is your own change: the audit log records a self-approval.</p>
+          {% endif %}
           <button
             type="button"
             class="link mt-1 text-xs"
@@ -149,6 +193,16 @@
     {% endif %}
 
     {% if (not started and pending) or waiting %}
+      {% if next_refused %}
+        {#- #3329: a step ahead says no. The run will stop there; the steps
+            before it can still go. The approval checks again at that step. -#}
+        <div role="note" class="alert alert-warning mt-4 items-start text-sm" data-approval-in-order-refused="{{ next_refused.step }}">
+          <div>
+            <p class="font-semibold">You cannot approve step {{ next_refused.step }} of {{ total }} ({{ next_refused.request.op_id }}). The run will stop there.</p>
+            <p class="[overflow-wrap:anywhere]">{{ next_refused.right.message }}</p>
+          </div>
+        </div>
+      {% endif %}
       <form
         class="modal-action mt-4 flex-col items-stretch gap-3"
         hx-post="/ui/approvals/in-order"
@@ -158,6 +212,9 @@
         hx-disabled-elt="find button"
       >
         <input type="hidden" name="work_ref" value="{{ work_ref }}" />
+        {% for s in steps %}
+          <input type="hidden" name="step_id" value="{{ s.request.id }}" />
+        {% endfor %}
         {% if waiting %}
           <input type="hidden" name="confirm_id" value="{{ waiting.request.id }}" />
           <input type="hidden" name="reason" value="{{ reason }}" />

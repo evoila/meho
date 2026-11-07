@@ -1,10 +1,19 @@
 # Keycloak realm setup
 
-MEHO does not ship an identity provider — it validates tokens issued
-by **your** Keycloak. This page configures a realm so that both
-`meho login` (the CLI's device-code flow) and MCP clients (browser
-OAuth) can authenticate. It is the promoted, outsider-readable version
-of the recipe MEHO's own labs deploy from.
+MEHO always ships with a built-in Keycloak. Set
+`coreKeycloak.enabled: true` in the Helm values and the chart makes
+the realm `meho` at install, with everything on this page. You can
+then skip to [Company login](login/index.md).
+
+This page configures a realm so that `meho login` (the CLI's
+device-code flow), the web UI and MCP clients (browser OAuth) can
+authenticate. It is the promoted, outsider-readable version of the
+recipe MEHO's own labs deploy from.
+
+A person gets their tenant and role from **their group only**. No
+login client carries a fixed tenant or role. To connect your company
+accounts (Active Directory, Entra ID, …) to the groups, follow
+[Company login](login/index.md) after this page.
 
 **Where this fits:** you arrived from
 [the install trail, Step 4](index.md#step-4-set-up-the-keycloak-realm).
@@ -15,18 +24,22 @@ the end, then return to the trail.
 
 | Object | Kind | Used by |
 |---|---|---|
-| `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`keycloak.audience` in the chart values). |
+| `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`config.keycloakAudience` in the chart values). |
 | `meho-cli` | **Public** client, device-code grant | `meho login` |
 | `meho-cli-approve` | **Public** client, authorization-code + PKCE on a loopback address only, with its own login flow | The fresh sign-in of `meho approvals approve`. Only its tokens can approve on the command line. |
 | `meho approval sign-in` | Login flow, bound to `meho-cli-approve` | Always asks for the password (and the one-time code, when the person has one) |
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
-| 8 protocol mappers | On the public clients (`meho-cli-approve` without `meho-mcp-audience`) | Make issued tokens carry the claims the backplane validates |
-| 4 default client scopes | On the public clients | Including the `basic` scope that carries the mandatory `sub` claim |
+| `meho-web` | Confidential client, authorization-code + PKCE | The MEHO web UI. Redirect URI `https://<host>/ui/auth/callback`. |
+| `meho-admin`, `meho-check-runner` | Confidential service clients | MEHO manages clients and users in the realm (`meho-admin`), and runs scheduled checks (`meho-check-runner`) |
+| 8 protocol mappers | On the login clients (`meho-cli-approve` without `meho-mcp-audience`) | Make issued tokens carry the claims the backplane validates |
+| 4 default client scopes | On the login clients | Including the `basic` scope that carries the mandatory `sub` claim |
 | `mcp:read`, `mcp:execute`, `mcp:admin` | Client scopes, optional on `meho-mcp` | The scopes MEHO's MCP clients ask for at login |
-| `offline_access` | Built-in client scope, optional on both public clients | The long login that renews itself |
+| `offline_access` | Built-in client scope, optional on `meho-cli` and `meho-mcp` | The long login that renews itself |
 | `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers` | Top-level groups with attributes | Give each person their tenant and their role |
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
 | A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
+| A user in `MEHO-SA-Operators` | Realm user | A second person, so a change the first admin asks for can be approved |
+| A user of realm `master` with every role of the client `meho-realm` except `impersonation` | `master` user (not in realm `meho`) | The console admin: administers realm `meho` in the Keycloak admin console. MEHO refuses its tokens. |
 
 !!! tip "There is an automation for this"
 
@@ -39,6 +52,16 @@ the end, then return to the trail.
     manual reference path (and what the helper encodes); use the helper
     once you have an admin credential wired up, use this page to
     understand or verify what it did.
+
+    Use the helper only for a **new realm**. On a realm that already
+    works, update the sign-in clients one setting at a time, for
+    example with the operation `keycloak.client.update` or in the admin
+    console. The helper sets its values again on every run: it
+    overwrites the redirect URIs, web origins and flow switches of the
+    three clients, and the eight mappers, also `tenant-id` and
+    `tenant-role`. If you do run it on an existing realm, run it with
+    `--dry-run` first: it reads the realm and prints each change, with
+    the old and the new value, and changes nothing.
 
 ## Step 1 — Trust the deployment's CA on your workstation
 
@@ -70,7 +93,7 @@ In the realm that hosts `meho-backplane`, create a client with:
 | Client ID | `meho-cli` (suggested — any identifier works) | Must match `config.keycloakCliClientId` in your chart values. |
 | Client authentication | **Off** (public client) | The CLI has nowhere to store a secret; the device grant against a confidential client fails with `unauthorized_client`. |
 | Standard flow | **On** | Older `meho` CLI versions open the approval sign-in on this client. The current CLI uses `meho-cli-approve` (below). `meho login` uses the device flow. |
-| PKCE method (Advanced → Proof Key for Code Exchange) | `S256` | The CLI sends a PKCE challenge with the browser sign-in. |
+| PKCE method (Advanced → Proof Key for Code Exchange) | (none), or `S256` once every person runs CLI 0.44.0 or later | From CLI 0.44.0, `meho login` sends PKCE (`S256`) at the device login. Older CLI versions send none, and Keycloak checks PKCE at the device login too, so a required method refuses their `meho login`. The browser sign-in of older CLI versions sends a challenge, and Keycloak accepts it. |
 | Direct access grants | Off | Password grant is out of scope by design. |
 | Implicit flow | Off | Deprecated by OAuth 2.1. |
 | Service accounts roles | Off | Public clients cannot hold credentials. |
@@ -151,20 +174,37 @@ Create flow**:
 People who sign in with a company login see its button on the form and
 click it.
 
-**On an existing realm.** `meho admin keycloak bootstrap-clients` creates
-`meho-cli-approve` and its login flow when you run it again, and sets
-the two token settings above on an existing `meho-cli-approve`. A run
-that stopped half-way leaves a flow with missing steps; the next run
-finishes it. A flow `meho approval sign-in` with other steps than the
-ones above is left as it is, and the client is not bound to it: fix the
-flow by hand, then run the command again. The
+**On an existing realm.** Create `meho-cli-approve` by hand as above,
+or with the operation `keycloak.client.create`, and set the two token
+settings on an existing `meho-cli-approve` with
+`keycloak.client.update`. Add its login flow as the next section says.
+Do not
+run `meho admin keycloak bootstrap-clients` for this: on an existing
+realm it also rewrites the `meho-cli` and `meho-mcp` clients and their
+tenant and role mappers. Use it only for a new realm. On a new realm,
+a run that stopped half-way leaves a flow with missing steps; the next
+run finishes it. A flow `meho approval sign-in` with other steps than
+the ones above is left as it is, and the client is not bound to it. The
 Keycloak that ships with the MEHO chart creates the client on the next
 upgrade (the realm finishing job adds a client that is missing, and sets
 the two token settings on an existing one). The job makes
 the login flow only when its account `meho-admin` has the
 `manage-realm` role, which it has when the company login is on.
-Otherwise create the flow by hand as above. Until the client exists,
-approve in the web interface.
+Otherwise add the flow through MEHO (see
+[Add the approval flow to a running realm through MEHO](#add-the-approval-flow-to-a-running-realm-through-meho))
+or by hand as above.
+
+**Bind the flow before people approve on the command line.** A
+command-line approval must always sign in through `meho approval
+sign-in`, also on a realm that was made before this flow existed. So on
+an upgraded install, add the flow and bind it to `meho-cli-approve`
+first, with the operation above or by hand. Until the client exists and
+uses this flow, approve in the web interface. This matters most on a
+realm whose login goes straight to a company login: the approval flow
+does not use that login, so the person always types the password (and
+the code) at Keycloak. Check the binding with
+`keycloak.client.get` (`authenticationFlowBindingOverrides.browser` must
+name the flow) and the realm's login with `keycloak.identity_provider.list`.
 
 Two backplane settings control the check:
 
@@ -187,6 +227,45 @@ flow of the approval client must ask for the code at every sign-in:
 
 MEHO then records such an approval as a one-time code approval. The
 sign-in must still be recent: an `acr` value alone never approves.
+
+#### Add the approval flow to a running realm through MEHO
+
+The operation `keycloak.authflow.ensure_approval_flow` adds the flow
+`meho approval sign-in` to the realm of a Keycloak target (its managed
+realm) and makes it the browser flow of `meho-cli-approve`. It waits
+for approval
+([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)).
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
+  --target <keycloak-target>
+```
+
+- The flow is missing: MEHO makes it with the steps above and binds it.
+- The flow is there with the same steps: MEHO changes nothing. When the
+  client already uses it, the result says `flow_created: false` and
+  `binding_changed: false`. So the call is safe to run twice.
+- The flow is there with other steps: MEHO stops, changes nothing, and
+  names the first difference. Fix the flow by hand, then run it again.
+- `meho-cli-approve` is missing: MEHO stops before it changes anything.
+  Create the client first.
+
+MEHO reads the client back after the change. `browser_flow_id` in the
+result is the flow the client now uses. Its other settings stay as they
+were.
+
+To check how people sign in to the realm through an outside login (a
+company login, for example), list the realm's identity providers:
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.identity_provider.list \
+  --target <keycloak-target>
+```
+
+Each row has the alias, the type, whether it is on, whether it is hidden
+on the login page, and `redirect_flows`: the login flows that send people
+straight to it. The approval flow must not be in `redirect_flows`. The
+list never shows the provider's secret.
 
 ## Step 3 — Add the protocol mappers
 
@@ -297,6 +376,34 @@ five groups for you. On a later run, pass the same `--tenant-id`:
 without it, the command writes the all-zero UUID to the five groups.
 `--tenant-name` sets the short name in `meho_tenant` (default `main`).
 
+### Who may approve their own changes
+
+A person in **`MEHO-SA-Operators`** may approve their own changes, on
+purpose: with a click in the web interface, or on the command line after
+a fresh sign-in. They may also approve other people's `dangerous` and
+`destructive` changes. The rules for every group are in
+[Approvals and break-glass](../guides/approvals-and-break-glass.md#who-may-approve).
+
+To make a person a MEHO-SA-Operator:
+
+1. In the Keycloak admin console, open the person: **Users** → the
+   person → **Groups**.
+2. Leave their current role group (a person is in exactly one of the
+   five groups) and join **`MEHO-SA-Operators`**. With `bootstrap-clients`
+   the group already exists.
+3. The person signs in again. MEHO reads the group from the new login
+   token; an older token still has the old group.
+
+With a company login, put the person in the company group that your
+setup maps to `MEHO-SA-Operators` instead
+([Company login](login/index.md)). The design of the five groups is in
+the [login groups decision record](https://github.com/evoila/meho/blob/main/docs/decisions/login-role-groups.md)
+([#3959](https://github.com/evoila/meho/issues/3959)).
+
+Keep at least one person in `MEHO-SA-Operators`. A person in
+`MEHO-Admins` may approve other people's `dangerous` and `destructive`
+changes, but not their own.
+
 ### More than one tenant
 
 A person can be in role groups of several tenants, one group per
@@ -316,6 +423,16 @@ The token of a person in `MEHO-Readers` and `MEHO-lab-b-Operators`
 lists both tenants in `meho_tenants`. A site with one tenant gets a
 list with one entry, and nothing else changes. The design is in the
 [decision record](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-several-tenants-per-person.md).
+The steps for an admin, from the new tenant to the switch between
+tenants, are in [One person in several tenants](../guides/several-tenants.md).
+
+Also create the group **`MEHO-Platform-Admins`** at the top level, with
+one attribute: `platform_admin` = `true`. It gives no tenant and no
+role. Only the platform admin (usually the first admin) is in it, on
+top of one of the five groups.
+
+To fill the groups from your company directory instead of by hand, see
+[Company login](login/index.md).
 
 ## Step 6 — Create an operator user
 
@@ -325,10 +442,129 @@ one. Create at least one user with:
 
 - a password (whatever your realm policy requires), and
 - membership in the **`MEHO-Admins`** group, so the user gets the
-  `tenant_admin` role.
+  `tenant_admin` role, and in **`MEHO-Platform-Admins`**.
+
+Create a second person in **`MEHO-SA-Operators`**. A `dangerous` or
+`destructive` change waits until a MEHO-SA-Operator or an admin approves
+it, and an admin cannot approve their own. So the first admin needs this
+second person to approve their risky changes. The MEHO-SA-Operator may
+also approve their own changes (see
+[Who may approve their own changes](#who-may-approve-their-own-changes)).
 
 The user's email does not need to be verified for device-code login to
 complete.
+
+## The console admin
+
+The built-in Keycloak makes a third user at install: the console
+admin, default name `console-admin` (values key
+`coreKeycloak.firstLogin.consoleAdminUsername`). It administers realm
+`meho` in the Keycloak admin console. Use it for the recipes
+[Local users](login/local-users.md) and [AD / LDAP](login/ad-ldap.md).
+A company login through OpenID Connect (Entra ID, authentik, your own
+Keycloak) is set up with Helm values instead.
+
+The console admin is a user of realm `master`, not of realm `meho`. It
+holds every role of the client `meho-realm` except `impersonation`:
+the client Keycloak makes in `master` to administer realm `meho`. That
+gives it the powers of `realm-admin` over realm `meho`, but it cannot log
+in as a person of realm `meho` directly. It can still reset a person's
+password and then log in as that person. So treat it as a full admin of
+realm `meho`, and give it only to people you trust with that. At its
+first login it sets a new password and an
+authenticator code, because realm `master` does not ask for a code by
+default. It lives in `master` for a reason:
+`meho-admin` has `manage-users` in realm `meho`, so it can reset the
+password of any user there and take the account over. It cannot see
+users of realm `master`. MEHO refuses the console admin's tokens, because
+they do not come from realm `meho`.
+
+1. Route the admin console: set `coreKeycloak.ingress.exposeAdmin: true`
+   and run `helm upgrade`. This routes `/auth/admin` and
+   `/auth/realms/master`. A port-forward alone is not enough: Keycloak
+   sends the console to its public address `https://<host>/auth`, so the
+   console's calls go through the ingress anyway.
+2. Read the user name and the temporary password from the Secret. Read
+   the name from the Secret, not from your values: the Secret keeps the
+   name of the first run.
+
+    ```bash
+    kubectl -n <namespace> get secret <release>-core-console-admin \
+      -o jsonpath='{.data.username}' | base64 -d; echo
+    kubectl -n <namespace> get secret <release>-core-console-admin \
+      -o jsonpath='{.data.password}' | base64 -d; echo
+    ```
+
+3. Open `https://<host>/auth/admin/master/console/#/meho` and log in
+   with that name. Keycloak asks for a new password, a name and an
+   email. Then pick realm `meho` in the realm list, if the console does
+   not show it already.
+4. When you are done, set `exposeAdmin` back to `false` if you do not
+   want the console on the internet.
+
+Only the first run of the bootstrap Job can make the console admin. That
+run uses the temporary first-start account, which is a `master` admin.
+Later runs use `meho-admin`, which cannot make users in realm `master`:
+they make nothing and only say in the log whether the Secret exists.
+
+Two names are refused:
+
+- A name that starts with `service-account-`. Keycloak uses that prefix
+  for its service accounts. This holds for all three users: the first
+  admin, the approver and the console admin.
+- A name a `master` user already has, when the Secret does not exist
+  yet. That user was not made by this install. The Job fails and asks
+  you to set `coreKeycloak.firstLogin.consoleAdminUsername` to another
+  name.
+
+### Console admin on an older install
+
+An install made before the console admin existed has no console admin,
+and the bootstrap Job cannot make one: the temporary first-start account
+was removed on the first run, and `meho-admin` cannot make users in realm
+`master`. The Job does not fail. It says in its log that there is no
+console admin and points here. Make one once by hand
+([Keycloak: recovering the admin account](https://www.keycloak.org/server/bootstrap-admin-recovery)):
+
+1. Make a temporary admin in realm `master`. Skip this if you already
+   have a `master` admin. In the running Keycloak pod, which already has
+   the database settings (port 9001, because the server uses 9000):
+
+    ```bash
+    kubectl -n <namespace> exec -it <release>-keycloak-0 -- \
+      /opt/keycloak/bin/kc.sh bootstrap-admin user \
+      --username temp-admin --http-management-port 9001
+    ```
+
+    It asks for a password. This starts a second Java process in the
+    pod, so the pod needs some spare memory.
+
+2. With `exposeAdmin: true` (see above), open
+   `https://<host>/auth/admin/master/console/` and log in as `temp-admin`.
+3. Stay in realm `master`. **Users → Add user**, user name
+   `console-admin` (any name that does not start with
+   `service-account-`), **Create**.
+4. **Credentials → Set password**. Turn **Temporary** on, so the user
+   picks a new password at the first login. On **Details → Required user
+   actions**, add **Configure OTP**, so the user also sets up an
+   authenticator code. **Save**.
+5. **Role mapping → Assign role → Filter by clients**, search for
+   `meho-realm`, select all of its roles except `impersonation`,
+   **Assign**.
+6. Optional: keep the login in a Secret, as a new install does:
+
+    ```bash
+    kubectl -n <namespace> create secret generic <release>-core-console-admin \
+      --from-literal=username=console-admin \
+      --from-literal=password='<the temporary password>'
+    ```
+
+    The next `helm upgrade` then prints `console admin: kept`.
+
+7. **Users → temp-admin → Delete.** Skip this if you used an existing
+   `master` admin.
+
+Then log in as in [The console admin](#the-console-admin).
 
 ## The MCP client (`meho-mcp`)
 
@@ -376,8 +612,9 @@ If the realm does not offer `offline_access` to `meho-cli` (an older
 realm), `meho login` logs in without it. It prints one line: the login
 ends after a short time without use, and how to fix the realm. MEHO's
 built-in login setup gets the scope at the next upgrade. On your own
-Keycloak, assign it as described in Step 2, or run
-`meho admin keycloak bootstrap-clients`.
+Keycloak, assign it as described in Step 2, in the admin console. Do
+not run `meho admin keycloak bootstrap-clients` on a realm that already
+works: it also rewrites the other sign-in clients and their mappers.
 
 ### How long an MCP login lasts
 
@@ -443,8 +680,9 @@ link starts a console login with `prompt=login` and `max_age=0`, so
 Keycloak asks for the password (and the code, or a passkey) also in a
 browser it remembers. The person then opens the request again and
 approves. Deny needs no new sign-in. For this check the `meho-web` client
-needs the `basic` and `acr` default scopes: the realm file and
-`meho admin keycloak bootstrap-clients` set them.
+needs the `basic` and `acr` default scopes. The realm file of the
+built-in Keycloak sets them. `meho admin keycloak bootstrap-clients` does
+not touch `meho-web`: on your own Keycloak, assign them by hand.
 
 **Why the console has no long login.** The console does not ask for
 `offline_access`:
@@ -480,7 +718,7 @@ separation of duties you can instead grant a dedicated approver the
 role. A principal provisioned as `read_only` role **plus**
 `approver=true` may approve and reject parked requests but is refused
 `call_operation`: "approve, but never operate." (See
-[Approvals and break-glass](../guides/approvals-and-break-glass.md#a-third-path-a-segregated-approver).)
+[Approvals and break-glass](../guides/approvals-and-break-glass.md#a-segregated-approver).)
 
 The claim is fail-closed — absent or malformed means *not* an approver.
 To make a person an approver, put them in the **`MEHO-Approvers`**
@@ -516,9 +754,13 @@ set them once (see [A realm that already runs](#a-realm-that-already-runs)).
 | Realm settings → **Login** | Remember me | On |
 | Realm settings → **Sessions** | SSO Session Idle Remember Me | 30 days |
 | Realm settings → **Sessions** | SSO Session Max Remember Me | 30 days |
-| Authentication → Policies → **Webauthn Passwordless Policy** | Enable Passkeys | On |
+| Realm settings → **Login** → Login screen customization | Enable Passkeys | On |
 | Authentication → Policies → **Webauthn Passwordless Policy** | User verification requirement | Required (the device asks for a PIN or a fingerprint) |
-| Authentication → Policies → **Webauthn Passwordless Policy** | Require discoverable credential | Yes |
+| Authentication → Policies → **Webauthn Passwordless Policy** | Discoverable credential | Required |
+
+Keycloak 26.7 replaced the old setting **Require discoverable credential**
+(Yes or No) with **Discoverable credential**. Leave the old one at
+**Not specified**.
 
 ### What stays strict
 
@@ -538,7 +780,7 @@ set them once (see [A realm that already runs](#a-realm-that-already-runs)).
   [The web console session](#the-web-console-session)). Deny needs no new
   sign-in.
 - **The console keeps its own limit.** MEHO ends a console session after
-  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (12 hours by default). The longer
+  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (10 hours by default). The longer
   Keycloak login does not make it longer. After that limit the console
   sends the person to the login page. In a remembered browser, that login
   asks nothing, and the new session can read and deny, but not approve
@@ -594,7 +836,7 @@ already runs gets these settings once, in one of two ways:
       "ssoSessionMaxLifespanRememberMe": 2592000,
       "webAuthnPolicyPasswordlessPasskeysEnabled": true,
       "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
-      "webAuthnPolicyPasswordlessRequireResidentKey": "Yes"
+      "webAuthnPolicyPasswordlessResidentKey": "required"
     }
     ```
 
@@ -605,15 +847,77 @@ already runs gets these settings once, in one of two ways:
 - **By hand**, in the Keycloak admin console, with the table above.
 
 **A realm made before Keycloak 26.4.** Keycloak 26.4 added a step to the
-browser flow of new realms: **Condition - credential**, in the sub-flow
-**Browser - Conditional 2FA**. It skips the one-time code after a passkey
-login. An upgrade does not add it to an older realm. Without it, a passkey
-login still asks for the code. Check the browser flow under
-**Authentication**. If the step is missing, add it as Keycloak's
-[passkeys guide](https://www.keycloak.org/docs/latest/server_admin/index.html#passkeys_server_administration_guide)
-shows: a **Condition - credential** step, **Required**, for the credential
-type `webauthn-passwordless`. The built-in Keycloak of the chart started
-with a newer version, so its realm has the step.
+browser flow of new realms: **Condition - credential**. It skips the
+one-time code after a passkey login. An upgrade does not add it to an older
+realm. The built-in Keycloak of the chart started with a newer version, so
+its realm has the step. Without the step, a passkey replaces the password,
+but a person with a one-time code still types the code.
+
+MEHO adds the step with one operation. It waits for approval
+([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
+because it changes how every person of the realm logs in:
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.authflow.ensure_passkey_code_skip \
+  --target <keycloak-target>
+```
+
+- **The step is there** (a realm made on 26.4 or newer): MEHO changes
+  nothing. The result says `changed: false`. So the call is safe to run
+  twice.
+- **The realm uses the built-in `browser` flow without the step:** MEHO
+  copies `browser` as `browser with passkeys`, adds **Condition -
+  credential** to the copy (the settings in step 3 below), and makes the
+  copy the realm's browser flow. Then it reads the flow and the realm back.
+  `browser_flow` in the result is the flow the realm now uses.
+- **A copy `browser with passkeys` is there from a run that stopped
+  half-way:** MEHO finishes it, when its other steps match `browser`,
+  settings included. Otherwise it stops, changes nothing more, and names
+  the difference.
+  Delete or rename that copy, then run again.
+- **The realm uses its own flow**, or the flow has no conditional one-time
+  code sub-flow: MEHO stops and changes nothing. Do the steps below by
+  hand.
+
+The Keycloak server must run 26.4 or newer.
+
+**The way back:** make `browser` the realm's browser flow again:
+
+```bash
+meho operation call keycloak-admin-26.x keycloak.realm.update \
+  --target <keycloak-target> --params '{"representation": {"browserFlow": "browser"}}'
+```
+
+The copy then has no effect, and you can delete it.
+
+To do it by hand in the Keycloak admin console:
+
+1. **Check.** Open **Authentication → Flows** and the flow that is bound
+   as the browser flow (usually `browser`). In the sub-flow whose name
+   starts with **Browser - Conditional**, look for **Condition -
+   credential**. When it is there, you are done.
+2. **Copy the flow.** Keycloak does not let you add a step to its built-in
+   `browser` flow. So open `browser`, choose **Duplicate**, and give the
+   copy a name, for example `browser with passkeys`. When the realm already
+   uses its own copy of the flow, change that copy and skip this step.
+3. **Add the step.** In the copy's **Browser - Conditional ...** sub-flow,
+   add the condition **Condition - credential**. Set it to **Required**
+   and move it right after **Condition - user configured**. Open its
+   settings (the **Settings** icon) and set:
+    - **Credentials**: `webauthn-passwordless`
+    - **Included**: off
+
+    With **Included** off, the condition is true only when no passkey was
+    used. So the one-time code runs after a password login, and not after
+    a passkey login.
+
+4. **Use the copy.** In the copy's menu, choose **Bind flow** and pick
+   **Browser Flow**.
+5. **Test.** Log in with a passkey: Keycloak asks no one-time code. Log in
+   with the password: Keycloak still asks for the code.
+
+By hand, the way back is the same: bind `browser` as the **Browser Flow**
+again.
 
 ## Wire it into Helm
 
@@ -682,18 +986,19 @@ usually appear:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `unauthorized_client` at login start | The client is confidential, or the device grant is off | Step 2 — public client, device grant **On**. |
+| `meho login` fails at once with `invalid_request` and "Missing parameter: code_challenge_method" | The login client (`meho-cli`) requires a PKCE method, and the CLI is older than 0.44.0. Those versions send no PKCE at the device login, and Keycloak checks PKCE there too. A realm made with MEHO 0.40.0, 0.41.0, 0.42.0 or 0.43.0 (the built-in Keycloak, or `meho admin keycloak bootstrap-clients`) set `S256` on it. | Update the CLI to 0.44.0 or later. Or clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation `keycloak.client.update` and the representation `{"attributes": {"pkce.code.challenge.method": ""}}` (an empty value removes the attribute). Step 2. |
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
-| Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, or re-run `meho admin keycloak bootstrap-clients`, which replaces it. |
+| Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, and add the User Attribute mapper of Step 3 in the admin console. On an existing realm, do not run `meho admin keycloak bootstrap-clients` for this: it rewrites all the mappers and clients. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
 | `meho approvals approve` fails with `fresh_sign_in_required` right after you signed in again | The access token has no `auth_time` or no `acr` (the `basic` or `acr` scope is missing), or it was not made for the approval client (the chart's `config.keycloakCliApproveClientId` does not name the client), or the client does not use its own login flow | Step 4 — assign `basic` and `acr` to `meho-cli-approve`; check the client ID and its login flow in Step 2. Or approve in the web interface. |
 | The console shows **Sign in to approve** right after you signed in with your password | The access token of `meho-web` has no `auth_time` or no `acr` (the `basic` or `acr` scope is missing on `meho-web`), or `FRESH_SIGN_IN_MAX_AGE_SECONDS` is very short | Step 4 — assign `basic` and `acr` to `meho-web` as default scopes, then sign in again. |
-| The browser shows "Client not found" or "Invalid parameter: redirect_uri" during `meho approvals approve` | `meho-cli-approve` is missing, or `http://127.0.0.1:*` is not one of its redirect URIs | Step 2 — create it, or re-run `meho admin keycloak bootstrap-clients`. |
+| The browser shows "Client not found" or "Invalid parameter: redirect_uri" during `meho approvals approve` | `meho-cli-approve` is missing, or `http://127.0.0.1:*` is not one of its redirect URIs | Step 2 — create it, or add the redirect URI with `keycloak.client.update`. Use `meho admin keycloak bootstrap-clients` only on a new realm. |
 | `meho login` times out before you can approve | An ambient wrapper timeout (CI step, IDE task) shorter than the approval wait | Run `meho login` in a real terminal, or raise the wrapper timeout. |
-| MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer: `offline_access`, `mcp:read`, `mcp:execute` or `mcp:admin` | Create the scope if it is missing, then assign it as an **optional** scope on `meho-mcp` (see the MCP client table above). Or re-run `meho admin keycloak bootstrap-clients`. |
+| MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer: `offline_access`, `mcp:read`, `mcp:execute` or `mcp:admin` | Create the scope if it is missing (for example with `keycloak.client_scope.create`), then assign it as an **optional** scope on `meho-mcp` (see the MCP client table above). On a new realm, `meho admin keycloak bootstrap-clients` does both. |
 | `x509: certificate signed by unknown authority` | Workstation OS trust store missing your CA | Step 1 / [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store). |
 
-A fuller, client-by-client troubleshooting page ships with the
-[Connect clients](../clients/index.md) section. Until then, the
+The client-by-client troubleshooting page is
+[Connect clients: troubleshooting](../clients/troubleshooting.md). The
 in-repo
 [auth onramp recipe](https://github.com/evoila/meho/blob/main/deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp)
 carries the deepest version of this matrix, including advanced

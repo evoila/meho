@@ -38,7 +38,7 @@
           "health"
         ],
         "summary": "Ready",
-        "description": "Readiness probe with deploy-time feature-gate visibility.\n\nThe body depends on the opt-in ``METRICS_AUTH_TOKEN`` guard (#3499,\n#3594). When the token is unset, every caller gets the full body. When\nit is set, only a caller with the matching bearer token gets the\n``features`` block; every other caller (for example a kubelet\nreadiness probe, which cannot send a header from a Secret) gets just\n``status`` + ``checks`` with the same 200 / 503 status code. ``/ready``\nnever answers 401. See\n:func:`~meho_backplane.metrics_access.has_metrics_access`.\n\nReturns 200 with\n``{\"status\": \"ready\", \"checks\": [...], \"sandbox_mode\": \"off\",\n\"features\": {...}}`` when\nat least one probe is registered and every probe reports ``ok``.\nReturns 503 with\n``{\"status\": \"not_ready\", \"checks\": [...], \"sandbox_mode\": \"off\",\n\"features\": {...}}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.\n\nThe ``features`` block (G0.14-T7 #1148) enumerates the four gated\nfeatures and their configured-vs-missing-env state. It is emitted\non **both** branches \u2014 the operator's \"is this deploy correctly\nwired?\" question is independent of the probe-registry verdict.\nSee :func:`meho_backplane.features.build_features_block` for the\nblock's shape and the audit table in\n``docs/codebase/error-message-shape.md`` for why this surface\nexists (signals 16, 17).\n\n``sandbox_mode`` (#4622) sits at the top level, for every caller, on\npurpose: when the metrics token is set, ``features`` is hidden from a\ncaller without it, and the mode must be readable on every instance.",
+        "description": "Readiness probe with deploy-time feature-gate visibility.\n\nThe verdict comes from :func:`readiness_snapshot` with the default\nwindow (:data:`DEFAULT_READINESS_TTL_S`): the probes run at most once\nper window, and every call inside it reads the cached verdict. The\nprobes do live network calls, and ``/ready`` needs no login, so a\ncaller must not be able to make them run on every call.\n``sandbox_mode`` and ``features`` are added per call, never cached.\n\nThe body depends on the opt-in ``METRICS_AUTH_TOKEN`` guard (#3499,\n#3594). When the token is unset, every caller gets the full body. When\nit is set, only a caller with the matching bearer token gets the\n``features`` block; every other caller (for example a kubelet\nreadiness probe, which cannot send a header from a Secret) gets just\n``status`` + ``checks`` with the same 200 / 503 status code. ``/ready``\nnever answers 401. See\n:func:`~meho_backplane.metrics_access.has_metrics_access`.\n\nReturns 200 with\n``{\"status\": \"ready\", \"checks\": [...], \"sandbox_mode\": \"off\",\n\"features\": {...}}`` when\nat least one probe is registered and every probe reports ``ok``.\nReturns 503 with\n``{\"status\": \"not_ready\", \"checks\": [...], \"sandbox_mode\": \"off\",\n\"features\": {...}}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.\n\nThe ``features`` block (G0.14-T7 #1148) enumerates the four gated\nfeatures and their configured-vs-missing-env state. It is emitted\non **both** branches \u2014 the operator's \"is this deploy correctly\nwired?\" question is independent of the probe-registry verdict.\nSee :func:`meho_backplane.features.build_features_block` for the\nblock's shape and the audit table in\n``docs/codebase/error-message-shape.md`` for why this surface\nexists (signals 16, 17).\n\n``sandbox_mode`` (#4622) sits at the top level, for every caller, on\npurpose: when the metrics token is set, ``features`` is hidden from a\ncaller without it, and the mode must be readable on every instance.\n\nOnce the pod got its stop signal (#5024), ``/ready`` answers 503 with\n``{\"status\": \"draining\", \"checks\": []}`` and runs no probe, so no new\ntraffic is sent to a pod that is stopping.",
         "operationId": "ready_ready_get",
         "responses": {
           "200": {
@@ -871,7 +871,7 @@
           "docs"
         ],
         "summary": "Probe Collection Endpoint",
-        "description": "Probe a collection's backend and persist its liveness on success.\n\nResolves the collection tenant-first, reads its backend's typed\nreadiness (forwarding the operator JWT under the operator identity),\nand on success persists ``readiness`` / ``doc_count`` /\n``last_ingested_at`` + the ``status`` transition onto the row. A\nfailed probe is mapped to 503 and leaves the row unchanged: the\n``get_session`` transaction rolls back on the raise, so nothing the\nservice flushed survives.",
+        "description": "Probe a collection's backend and persist its liveness on success.\n\nResolves the collection tenant-first, reads its backend's typed\nreadiness (forwarding the operator JWT under the operator identity),\nand on success persists ``readiness`` / ``doc_count`` /\n``last_ingested_at`` + the ``status`` transition onto the row. A\nfailed probe is mapped to 503 and leaves the row unchanged: the\n``get_session`` transaction rolls back on the raise, so nothing the\nservice flushed survives. Probing a global row needs ``platform_admin``\n(403 ``global_collection_update_forbidden``), because the probe writes\nthe row's status for every tenant.",
         "operationId": "probe_collection_endpoint_api_v1_doc_collections__collection_key__probe_post",
         "parameters": [
           {
@@ -905,6 +905,9 @@
               }
             }
           },
+          "403": {
+            "description": "The resolved collection is a global (``tenant_id IS NULL``) platform-catalogue row and the operator lacks ``platform_admin`` (structured ``detail.error='global_collection_update_forbidden'``); the row is not changed."
+          },
           "404": {
             "description": "No collection with this key is visible to the tenant."
           },
@@ -933,7 +936,7 @@
           "docs"
         ],
         "summary": "Enable Collection Endpoint",
-        "description": "Return a disabled collection to service (\u2192 ``provisioning``).\n\nIdempotent: re-enabling an already-live collection writes nothing and\nreturns 204. A forbidden source state raises 409 via the lifecycle\nguard. A follow-up probe promotes the re-enabled collection to\n``ready`` once its index confirms.",
+        "description": "Return a disabled collection to service (\u2192 ``provisioning``).\n\nIdempotent: re-enabling an already-live collection writes nothing and\nreturns 204. A forbidden source state raises 409 via the lifecycle\nguard. A follow-up probe promotes the re-enabled collection to\n``ready`` once its index confirms. Enabling a global row needs\n``platform_admin`` (403 ``global_collection_update_forbidden``).",
         "operationId": "enable_collection_endpoint_api_v1_doc_collections__collection_key__enable_post",
         "parameters": [
           {
@@ -960,6 +963,9 @@
           "204": {
             "description": "Successful Response"
           },
+          "403": {
+            "description": "The resolved collection is a global (``tenant_id IS NULL``) platform-catalogue row and the operator lacks ``platform_admin`` (structured ``detail.error='global_collection_update_forbidden'``); the row is not changed."
+          },
           "404": {
             "description": "No collection with this key is visible to the tenant."
           },
@@ -985,7 +991,7 @@
           "docs"
         ],
         "summary": "Disable Collection Endpoint",
-        "description": "Hide a collection from search (\u2192 ``disabled``).\n\nIdempotent and lifecycle-guarded \u2014 same shape as the enable handler.\nA disabled collection fails ``search_docs`` typed with a **terminal**\nrejection (REST 403 ``detail.error='collection_disabled'`` / MCP\n``-32602``), distinct from the retryable 409 a ``provisioning`` /\n``rebuilding`` collection returns, via the shared\n:func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`\ngate \u2014 never an empty result.",
+        "description": "Hide a collection from search (\u2192 ``disabled``).\n\nIdempotent and lifecycle-guarded \u2014 same shape as the enable handler.\nA disabled collection fails ``search_docs`` typed with a **terminal**\nrejection (REST 403 ``detail.error='collection_disabled'`` / MCP\n``-32602``), distinct from the retryable 409 a ``provisioning`` /\n``rebuilding`` collection returns, via the shared\n:func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`\ngate \u2014 never an empty result. Disabling a global row needs\n``platform_admin`` (403 ``global_collection_update_forbidden``).",
         "operationId": "disable_collection_endpoint_api_v1_doc_collections__collection_key__disable_post",
         "parameters": [
           {
@@ -1011,6 +1017,9 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "403": {
+            "description": "The resolved collection is a global (``tenant_id IS NULL``) platform-catalogue row and the operator lacks ``platform_admin`` (structured ``detail.error='global_collection_update_forbidden'``); the row is not changed."
           },
           "404": {
             "description": "No collection with this key is visible to the tenant."
@@ -1228,7 +1237,7 @@
           "targets"
         ],
         "summary": "Describe Target",
-        "description": "Describe a target by name, alias or id.\n\nUses :func:`_resolve_route_target`: exact name, then alias, then\nid (only when the value is a UUID). Returns 404 with near-misses\nwhen nothing matches.",
+        "description": "Describe a target by name, alias or id.\n\nUses :func:`resolve_route_target`: exact name, then alias, then\nid (only when the value is a UUID). Returns 404 with near-misses\nwhen nothing matches.",
         "operationId": "describe_target_api_v1_targets__name__get",
         "parameters": [
           {
@@ -1279,7 +1288,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's\ntenant subtree is rejected with a structured 422\n(``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the same write-time\ngate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is\ndisabled. See :func:`_enforce_secret_ref_tenant_scope`. The path\nvalue is a name, an alias or an id (:func:`_resolve_route_target`).",
+        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's tenant subtree\nis rejected with a structured 422 (``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the\nsame write-time gate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is disabled. See\n:func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an\nid (:func:`resolve_route_target`).",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {
@@ -1340,7 +1349,7 @@
           "targets"
         ],
         "summary": "Delete Target",
-        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho_connector_edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nThe path value is a name, an alias or an id (see\n:func:`_resolve_route_target`). Re-deletes collapse to 404 \u2014\nevery lookup step filters ``deleted_at IS NULL``, so the row no\nlonger resolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE, by name or\nby id, returns the standard 404).",
+        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho_connector_edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nThe path value is a name, an alias or an id (see\n:func:`resolve_route_target`). Re-deletes collapse to 404 \u2014\nevery lookup step filters ``deleted_at IS NULL``, so the row no\nlonger resolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE, by name or\nby id, returns the standard 404).",
         "operationId": "delete_target_api_v1_targets__name__delete",
         "parameters": [
           {
@@ -1434,7 +1443,7 @@
           "targets"
         ],
         "summary": "Probe Target",
-        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target.\nConnector selection uses\n:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`\nso this route and the dispatcher consult the same v2 registry\nthrough the same tie-break ladder (G0.14-T1 #1142). Returns:\n\n* **501** when the resolver reports ``no_connector``. ``detail``\n  carries the resolver's exception message naming the target's\n  product slug + the absence of a matching candidate.\n* **409** when the resolver reports ``ambiguous_connector``.\n  ``detail`` carries the resolver's exception message naming the\n  candidate set and the remediation step (set\n  ``target.preferred_impl_id`` to one of them).\n* **500** with the structured ``fingerprint_failed`` envelope from\n  :func:`_build_fingerprint_failed_detail` when the resolved\n  connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors\n  the dispatcher's ``connector_error`` envelope at the route\n  boundary so probe + dispatch agree on the shape of a connector\n  failure \u2014 sub-signal A of ``claude-rdc-hetzner-dc#753``).\n\nNo error branch writes to the DB row, so the column always\nreflects the *last successful* probe. The path value is a name,\nan alias or an id (:func:`_resolve_route_target`); no match is 404.",
+        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target.\nConnector selection uses\n:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`\nso this route and the dispatcher consult the same v2 registry\nthrough the same tie-break ladder (G0.14-T1 #1142). Returns:\n\n* **501** when the resolver reports ``no_connector``. ``detail``\n  carries the resolver's exception message naming the target's\n  product slug + the absence of a matching candidate.\n* **409** when the resolver reports ``ambiguous_connector``.\n  ``detail`` carries the resolver's exception message naming the\n  candidate set and the remediation step (set\n  ``target.preferred_impl_id`` to one of them).\n* **500** with the structured ``fingerprint_failed`` envelope from\n  :func:`_build_fingerprint_failed_detail` when the resolved\n  connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors\n  the dispatcher's ``connector_error`` envelope at the route\n  boundary so probe + dispatch agree on the shape of a connector\n  failure \u2014 sub-signal A of ``claude-rdc-hetzner-dc#753``).\n\nNo error branch writes to the DB row, so the column always\nreflects the *last successful* probe. The path value is a name,\nan alias or an id (:func:`resolve_route_target`); no match is 404.\nThe work is done by :func:`probe_and_store_fingerprint`, which the\n``targets.probe`` operation calls too.",
         "operationId": "probe_target_api_v1_targets__name__probe_post",
         "parameters": [
           {
@@ -1583,7 +1592,7 @@
           "tenants"
         ],
         "summary": "Update Mail Recipient Policy",
-        "description": "Set or clear the caller's per-tenant mail-recipient allowlist (#3499).\n\nTenant-scoped to ``operator.tenant_id`` (no cross-tenant write is\nexpressible -- no tenant id is accepted in the path or body).\n``tenant_admin`` only. Applies the field only when present in the body; an\napplied change is folded into this request's ``audit_log`` row (field / old\n/ new, ``None`` -> ``inherit`` sentinel) and evicts the resolver's\nper-tenant cache so the new value governs the next dispatched ``mail.send``\nwithout a restart.",
+        "description": "Set or clear the caller's per-tenant mail-recipient allowlist (#3499).\n\nTenant-scoped to ``operator.tenant_id`` (no cross-tenant write is\nexpressible -- no tenant id is accepted in the path or body).\n``tenant_admin`` only. Applies the field only when present in the body; an\napplied change is folded into this request's ``audit_log`` row (field / old\n/ new, ``None`` -> ``inherit`` sentinel). The resolver reads the committed\ncolumn on every send, so the new value governs the next dispatched\n``mail.send`` in every process as soon as this request commits.",
         "operationId": "update_mail_recipient_policy_api_v1_tenants_mail_recipient_policy_patch",
         "parameters": [
           {
@@ -1614,6 +1623,278 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TenantMailRecipientPolicy"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tenants/model-prices": {
+      "get": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Get Model Prices",
+        "description": "Read the caller's tenant prices for agent models MEHO does not know (#5853).",
+        "operationId": "get_model_prices_api_v1_tenants_model_prices_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantModelPrices"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Update Model Price",
+        "description": "Set or remove the caller's tenant price for one agent model (#5853).\n\nA run on a model that is not in MEHO's own price table uses this price\nfor its cost, and the cost counts against the spend limits like any\nother run. A model MEHO already has a price for is refused (422): MEHO's\nprice always wins. Tenant-scoped and ``tenant_admin`` only, like the other\npolicies here. The tenant row is locked for the change, so two changes at\nonce do not lose one of them.",
+        "operationId": "update_model_price_api_v1_tenants_model_prices_patch",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantModelPriceUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantModelPrices"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settings/export": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Export",
+        "description": "Build ``meho-settings.yaml`` from the live state.\n\nA ``tenant_admin`` gets their own tenant. A ``platform_admin`` who is a\nperson gets every tenant, or the one named by ``tenant_id``. A machine\nprincipal gets its own tenant, with or without the platform-admin claim\n(the same rule as :func:`authorize_tenant_scope`). 409\n``settings_export_refused`` when stored data holds a secret; ``mistakes``\nnames each path.",
+        "operationId": "export_api_v1_settings_export_get",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/yaml": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settings/import": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Import Settings",
+        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing.",
+        "operationId": "import_settings_api_v1_settings_import_post",
+        "parameters": [
+          {
+            "name": "preview",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Preview"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsImportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "The meho-settings.yaml file, as sent (YAML; JSON is valid YAML).",
+          "content": {
+            "application/yaml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settings/history": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "History",
+        "description": "The settings revisions the caller may see, newest first.",
+        "operationId": "history_api_v1_settings_history_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SettingsRevision"
+                  },
+                  "title": "Response History Api V1 Settings History Get"
                 }
               }
             }
@@ -4408,7 +4689,7 @@
             }
           },
           "403": {
-            "description": "The body's ``tenant_id`` is neither omitted/null (built-in / global scope) nor the caller's own tenant UUID, and the caller does not hold platform_admin. Rejected synchronously on both the sync and async branches; no job row is created.",
+            "description": "The body's ``tenant_id`` is omitted/null (built-in / global scope, whose rows every tenant shares) or names another tenant, and the caller does not hold platform_admin. Rejected synchronously on both the sync and async branches; no job row is created.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4940,7 +5221,7 @@
           "connectors"
         ],
         "summary": "Enable Reads Endpoint",
-        "description": "Bulk-enable every read-class (GET/HEAD) ingested op (G0.25-T7 #1749).\n\nFlips ``is_enabled=true`` on every ingested operation whose HTTP\nmethod is GET or HEAD in one pass, leaving every write-shaped verb\n(POST / PUT / PATCH / DELETE) and every typed / composite op\ndefault-deny \u2014 writes keep their per-op / composite curation by\ndesign. The point is broad governed *read* coverage on big\ningested surfaces without a per-op death-march; the governance\nboundary (writes route through a hand-authored composite or\ncommand-template) is untouched.\n\nReturns 200 with an :class:`EnableReadsResponse` carrying the\n``ops_enabled`` count (not the 204 the enable / disable\ntransitions return) so the operator and the generated Go client\nsee how many ops flipped. Idempotent: a re-call once the reads are\nenabled flips nothing, writes no audit row, and returns\n``ops_enabled=0``. Unlike ``enable``, this does not move any\ngroup's ``review_status`` \u2014 it is a per-op flip, so there is no\nstate-machine guard (no transition 409). Unknown / cross-tenant\nconnector \u2192 404 (the deliberate conflation). Resolution shares\n:meth:`ReviewService._resolve_existing_scope` with\n``GET /{id}/review``, so a built-in-only label enables its reads\n(the #1135 global fallback, not a 404) and a label that maps to\n**both** a tenant row and a built-in row \u2192 409\n``connector_scope_ambiguous`` with the candidate list instead of a\nsilent flip (G0.26-T1 #1801). One ``meho_connector_enable_reads``\naudit row is written when at least one op flips.\n\nTenant scoping (#1699 contract): no ``tenant_id`` parameter \u2014 the\nscope is always the calling operator's tenant from the JWT. The\nMCP sibling ``meho_connector_enable_reads`` accepts an optional\n``tenant_id`` for the built-in / global scope (tenant_admin only).\n\nThe optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)\nresolves the ambiguous-scope 409 directly: ``prefer=tenant`` applies\nto the operator's tenant row, ``prefer=builtin`` to the built-in row\n(the built-in scope is re-checked against the ``tenant_admin`` gate\nin the service resolver). Omitted \u2192 the fail-loud default.",
+        "description": "Bulk-enable every read-class (GET/HEAD) ingested op (G0.25-T7 #1749).\n\nFlips ``is_enabled=true`` on every ingested operation whose HTTP\nmethod is GET or HEAD in one pass, leaving every write-shaped verb\n(POST / PUT / PATCH / DELETE) and every typed / composite op\ndefault-deny \u2014 writes keep their per-op / composite curation by\ndesign. The point is broad governed *read* coverage on big\ningested surfaces without a per-op death-march; the governance\nboundary (writes route through a hand-authored composite or\ncommand-template) is untouched.\n\nReturns 200 with an :class:`EnableReadsResponse` carrying the\n``ops_enabled`` count (not the 204 the enable / disable\ntransitions return) so the operator and the generated Go client\nsee how many ops flipped. Idempotent: a re-call once the reads are\nenabled flips nothing, writes no audit row, and returns\n``ops_enabled=0``. Unlike ``enable``, this does not move any\ngroup's ``review_status`` \u2014 it is a per-op flip, so there is no\nstate-machine guard (no transition 409). Unknown / cross-tenant\nconnector \u2192 404 (the deliberate conflation). Resolution shares\n:meth:`ReviewService._resolve_existing_scope` with\n``GET /{id}/review``, so a built-in-only label enables its reads\n(the #1135 global fallback, not a 404) and a label that maps to\n**both** a tenant row and a built-in row \u2192 409\n``connector_scope_ambiguous`` with the candidate list instead of a\nsilent flip (G0.26-T1 #1801). One ``meho_connector_enable_reads``\naudit row is written when at least one op flips.\n\nTenant scoping (#1699 contract): no ``tenant_id`` parameter \u2014 the\nscope is always the calling operator's tenant from the JWT. The\nMCP sibling ``meho_connector_enable_reads`` accepts an optional\n``tenant_id`` for the built-in / global scope (platform_admin only).\n\nThe optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)\nresolves the ambiguous-scope 409 directly: ``prefer=tenant`` applies\nto the operator's tenant row, ``prefer=builtin`` to the built-in row\n(the built-in scope is re-checked against the ``tenant_admin`` gate\nin the service resolver). Omitted \u2192 the fail-loud default.",
         "operationId": "enable_reads_endpoint_api_v1_connectors__connector_id__enable_reads_post",
         "parameters": [
           {
@@ -5056,7 +5337,7 @@
           "connectors"
         ],
         "summary": "Delete Endpoint",
-        "description": "Delete *connector_id* \u2014 rows under the operator's tenant + the ingest shim.\n\nG0.25-T2 (#1700): clean-up surface for the zero-op registry stubs\naborted ingests leave behind, and for removing an unwanted\ningested connector outright. Removes the connector's\n``endpoint_descriptor`` + ``operation_group`` rows and writes one\n``meho_connector_delete`` audit row in the same transaction; when\nno rows remain for the triple under any scope, the\nauto-registered ``GenericRestConnector`` shim is also popped from\nthe v2 registry (hand-coded connector classes are never\nderegistered). A zero-op stub \u2014 registered class, no rows \u2014 is\ndeletable here too: that delete is registry-only.\n\nTenant scoping (#1699 contract): this route exposes **no**\n``tenant_id`` parameter \u2014 the delete scope is always the calling\noperator's tenant from the JWT. Built-in / global connectors\n(``tenant_id IS NULL`` rows) are deleted via the MCP sibling\n``meho_connector_delete`` with ``tenant_id`` omitted\n(tenant_admin only). Unknown ids, cross-tenant probes, and rows\nvisible only under a scope this route cannot name all collapse\ninto the same 404 the other connector routes use; a repeat\nDELETE therefore returns 404 once the first one landed.\n\nA connector that something still uses is not deleted (#5027): the\nroute answers ``409`` with the ``connector_in_use`` detail, which\nlists each sensor, runbook template, hosted agent, schedule, waiting\napproval or queued operation run (kind, id, name, operation).\n\nA connector that still has enabled operations is deleted anyway \u2014\nthe advisory is deliberate, not an error: it surfaces as the\n``connector_delete_enabled_ops`` structured log event plus the\naudit payload's ``enabled_operations_deleted`` count. The wire\nresponse stays ``204 No Content`` per the task contract, so the\nstructured warning body lives on the MCP sibling (the\n``edit_op`` 200-promotion precedent from #1630 remains available\nif a REST wire home is ever needed). Re-ingesting the same triple\nafterwards re-registers the connector from scratch.",
+        "description": "Delete *connector_id* \u2014 rows under the operator's tenant + the ingest shim.\n\nG0.25-T2 (#1700): clean-up surface for the zero-op registry stubs\naborted ingests leave behind, and for removing an unwanted\ningested connector outright. Removes the connector's\n``endpoint_descriptor`` + ``operation_group`` rows and writes one\n``meho_connector_delete`` audit row in the same transaction; when\nno rows remain for the triple under any scope, the\nauto-registered ``GenericRestConnector`` shim is also popped from\nthe v2 registry (hand-coded connector classes are never\nderegistered). A zero-op stub \u2014 registered class, no rows \u2014 is\ndeletable here too: that delete is registry-only.\n\nTenant scoping (#1699 contract): this route exposes **no**\n``tenant_id`` parameter \u2014 the delete scope is always the calling\noperator's tenant from the JWT. Built-in / global connectors\n(``tenant_id IS NULL`` rows) are deleted via the MCP sibling\n``meho_connector_delete`` with ``tenant_id`` omitted, which needs\n``platform_admin`` because every tenant shares those rows. Unknown\nids, cross-tenant probes, and rows\nvisible only under a scope this route cannot name all collapse\ninto the same 404 the other connector routes use; a repeat\nDELETE therefore returns 404 once the first one landed.\n\nA connector that something still uses is not deleted (#5027): the\nroute answers ``409`` with the ``connector_in_use`` detail, which\nlists each sensor, runbook template, hosted agent, schedule, waiting\napproval or queued operation run (kind, id, name, operation).\n\nA connector that still has enabled operations is deleted anyway \u2014\nthe advisory is deliberate, not an error: it surfaces as the\n``connector_delete_enabled_ops`` structured log event plus the\naudit payload's ``enabled_operations_deleted`` count. The wire\nresponse stays ``204 No Content`` per the task contract, so the\nstructured warning body lives on the MCP sibling (the\n``edit_op`` 200-promotion precedent from #1630 remains available\nif a REST wire home is ever needed). Re-ingesting the same triple\nafterwards re-registers the connector from scratch.",
         "operationId": "delete_endpoint_api_v1_connectors__connector_id__delete",
         "parameters": [
           {
@@ -5395,7 +5676,7 @@
           "knowledge"
         ],
         "summary": "List Kb",
-        "description": "List kb entries for the operator's tenant, slug-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler;\n``operator`` and ``tenant_admin`` both pass.\n\n``q`` is the canonical free-text filter param across the kb /\nmemory / operations-search list surfaces (#1854); ``filter`` is its\ndeprecated alias, kept working for back-compat. The resolved value\nis forwarded to :meth:`KbService.list_entries` as a SQL ``LIKE``\npattern; the operator is the trust boundary for pattern shape.\nSupplying both ``q`` and ``filter`` with different values is a 422\nrather than a silent pick. ``limit`` is capped at 500 (the\nsubstrate's :data:`DEFAULT_LIST_LIMIT` is 100; the API surface\nallows higher explicit values so a one-shot dump of a 200-entry\ncorpus completes in one round trip).\n\nBinds ``audit_op_id=\"kb.list\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call so a handler exception still produces an\naudit row classified under the canonical op id.",
+        "description": "List kb entries for the operator's tenant, slug-sorted by default.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler;\n``operator`` and ``tenant_admin`` both pass.\n\n``q`` is the canonical free-text filter param across the kb /\nmemory / operations-search list surfaces (#1854); ``filter`` is its\ndeprecated alias, kept working for back-compat. The resolved value\nis forwarded to :meth:`KbService.list_entries` as a SQL ``LIKE``\npattern; the operator is the trust boundary for pattern shape.\nSupplying both ``q`` and ``filter`` with different values is a 422\nrather than a silent pick. ``limit`` is capped at 500 (the\nsubstrate's :data:`DEFAULT_LIST_LIMIT` is 100; the API surface\nallows higher explicit values so a one-shot dump of a 200-entry\ncorpus completes in one round trip). ``order=\"newest\"`` sorts by\n``updated_at``, newest first, for \"what changed lately\" reads such\nas the Claude Code plugin's session-start digest (#5679).\n\nBinds ``audit_op_id=\"kb.list\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call so a handler exception still produces an\naudit row classified under the canonical op id.",
         "operationId": "list_kb_api_v1_kb_get",
         "parameters": [
           {
@@ -5448,6 +5729,22 @@
               "default": 0,
               "title": "Offset"
             }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "slug",
+                "newest"
+              ],
+              "type": "string",
+              "description": "Row order. 'slug' (default) sorts A to Z by slug; 'newest' lists the most recently updated entry first.",
+              "default": "slug",
+              "title": "Order"
+            },
+            "description": "Row order. 'slug' (default) sorts A to Z by slug; 'newest' lists the most recently updated entry first."
           },
           {
             "name": "authorization",
@@ -9992,7 +10289,7 @@
           "sensors"
         ],
         "summary": "Create Sensor",
-        "description": "Create one sensor under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\nsensor is created under that tenant (cross-tenant admin); when null,\nunder ``operator.tenant_id``. The safe-only guard refuses a non-safe or\nunknown op with 422; a duplicate name returns 409.",
+        "description": "Create one sensor under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\nsensor is created under that tenant (cross-tenant admin); when null,\nunder ``operator.tenant_id``. The safe-only guard refuses a non-safe or\nunknown op with 422; a duplicate name returns 409. A connector that does\nnot fit the target's product and version is refused with 422\n``sensor_connector_mismatch`` unless the body sets ``force``.",
         "operationId": "create_sensor_api_v1_sensors_post",
         "parameters": [
           {
@@ -10084,6 +10381,79 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Edit Sensor",
+        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).",
+        "operationId": "edit_sensor_api_v1_sensors__sensor_id__patch",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SensorUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorRead"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -10450,6 +10820,79 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Edit Dashboard",
+        "description": "Change members, name or mail settings of one Dashboard; keep its id.\n\n``tenant_admin`` only. Only the fields in the body change. An added\nsensor that is not in the tenant is 422 ``sensor_not_found``; more than\nthe member limit is 422 ``dashboard_edit_invalid``; a name that is taken\nis 409. A cross-tenant / absent id is 404 ``dashboard_not_found``. The\naudit row of the request carries ``before`` and ``after`` with the\nchanged fields.",
+        "operationId": "edit_dashboard_api_v1_checks_dashboards__dashboard_id__patch",
+        "parameters": [
+          {
+            "name": "dashboard_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Dashboard Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DashboardUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardDetail"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -11108,7 +11551,7 @@
           "service-principal-grants"
         ],
         "summary": "Create Grant",
-        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. Audited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
+        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. A grant lets the service principal run\nthe op with no approval, so the caller needs the op's role floor\n(``targets.register`` and the ``topology.*`` writes need\n``tenant_admin``); below it the answer is 403 ``role_floor_required``.\nAudited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
         "operationId": "create_grant_api_v1_service_principals_grants_post",
         "parameters": [
           {
@@ -12490,6 +12933,81 @@
                   "type": "string"
                 }
               }
+            }
+          }
+        }
+      }
+    },
+    "/ui/tenant": {
+      "get": {
+        "tags": [
+          "ui-tenant"
+        ],
+        "summary": "Ui Tenant Picker",
+        "description": "``GET /ui/tenant``: choose the tenant to work in.",
+        "operationId": "ui_tenant_picker_ui_tenant_get",
+        "parameters": [
+          {
+            "name": "notice",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Notice"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/tenant/switch": {
+      "post": {
+        "tags": [
+          "ui-tenant"
+        ],
+        "summary": "Ui Tenant Switch",
+        "description": "``POST /ui/tenant/switch``: work in another tenant.",
+        "operationId": "ui_tenant_switch_ui_tenant_switch_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "Switched. Opens the dashboard."
+          },
+          "403": {
+            "description": "The token does not allow this tenant. Nothing changed.",
+            "content": {
+              "text/html": {}
             }
           }
         }
@@ -15804,17 +16322,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -15982,17 +16489,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -16247,17 +16743,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -21166,7 +21651,7 @@
           "ui-operations"
         ],
         "summary": "Operations Preview",
-        "description": "Render the read-only request **preview** fragment (no dispatch).\n\nCSRF-gated by the ``ui/csrf.py`` middleware (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated. Resolves the same op +\ntarget + params a real dispatch would and renders the literal\nwould-be HTTP request -- ``method`` / ``resolved_path`` / ``query``\n/ ``redacted_body`` -- WITHOUT sending it and WITHOUT writing an\naudit row. Operator-input faults land inside the rendered envelope\n(``status=\"error\"`` / ``\"unavailable\"``); a missing target name\nsurfaces as an inline ``400`` form error.",
+        "description": "Render the read-only request **preview** fragment (no dispatch).\n\nCSRF-gated by the ``ui/csrf.py`` middleware (a ``POST`` under\n``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403,\nlike on REST). Resolves the same op +\ntarget + params a real dispatch would and renders the literal\nwould-be HTTP request -- ``method`` / ``resolved_path`` / ``query``\n/ ``redacted_body`` -- WITHOUT sending it and WITHOUT writing an\naudit row. Operator-input faults land inside the rendered envelope\n(``status=\"error\"`` / ``\"unavailable\"``); a missing target name\nsurfaces as an inline ``400`` form error.",
         "operationId": "operations_preview_ui_operations_preview_post",
         "requestBody": {
           "content": {
@@ -21252,7 +21737,7 @@
           "ui-operations"
         ],
         "summary": "Operations Call",
-        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated; calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
+        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403\nbefore anything is dispatched or queued, like on REST); calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
         "operationId": "operations_call_ui_operations_call_post",
         "requestBody": {
           "content": {
@@ -22577,7 +23062,7 @@
           "ui-account"
         ],
         "summary": "Ui Account Revoke Session",
-        "description": "``POST /ui/account/sessions/revoke`` -- the id is a form field.",
+        "description": "``POST /ui/account/sessions/revoke`` -- the session ref is a form field.",
         "operationId": "ui_account_revoke_session_ui_account_sessions_revoke_post",
         "requestBody": {
           "content": {
@@ -22600,7 +23085,7 @@
             }
           },
           "404": {
-            "description": "The session_id form field is missing or malformed, the session does not exist, or it belongs to another operator / tenant. Collapsed to 404 so another operator's session id is never confirmed.",
+            "description": "The session_ref form field is missing, or it names none of the caller's own active sessions.",
             "content": {
               "text/html": {}
             }
@@ -22997,7 +23482,7 @@
           "ui-vault-writes"
         ],
         "summary": "Vault Put",
-        "description": "Dispatch ``vault.kv.put`` in-process; render the result inline.\n\nCSRF-gated (a ``POST`` under ``/ui/``) + ``require_ui_session``-gated.\n``data`` is the operator-supplied secret key/value JSON object;\n``cas`` rides in ``params`` ONLY when the operator set it (the CLI\n``Changed(\"cas\")`` rule). The BFF logs no secret material.",
+        "description": "Dispatch ``vault.kv.put`` in-process; render the result inline.\n\nCSRF-gated (a ``POST`` under ``/ui/``) + ``require_ui_operator``-gated\n(``read_only`` gets 403 before any dispatch). ``data`` is the\noperator-supplied secret key/value JSON object;\n``cas`` rides in ``params`` ONLY when the operator set it (the CLI\n``Changed(\"cas\")`` rule). The BFF logs no secret material.",
         "operationId": "vault_put_ui_vault_put_post",
         "requestBody": {
           "content": {
@@ -23038,7 +23523,7 @@
           "ui-vault-writes"
         ],
         "summary": "Vault Delete",
-        "description": "Dispatch ``vault.kv.delete`` in-process; render the result inline.\n\nCSRF-gated + ``require_ui_session``-gated. ``versions`` is the\ncomma-separated list of version numbers to soft-delete.",
+        "description": "Dispatch ``vault.kv.delete`` in-process; render the result inline.\n\nCSRF-gated + ``require_ui_operator``-gated. ``versions`` is the\ncomma-separated list of version numbers to soft-delete.",
         "operationId": "vault_delete_ui_vault_delete_post",
         "requestBody": {
           "content": {
@@ -23079,7 +23564,7 @@
           "ui-vault-writes"
         ],
         "summary": "Vault Move",
-        "description": "Dispatch ``secret.move`` in-process; render the value-free result.\n\nCSRF-gated + ``require_ui_session``-gated. Dispatches the SEPARATE\n``secret-broker-1.x`` connector with ``from`` / ``to`` references (+\noptional reason). VALUE-FREE: no value field is accepted, dispatched,\nlogged, or rendered -- only the ``{status, value_sha256, length}``\nconfirmation surfaces.",
+        "description": "Dispatch ``secret.move`` in-process; render the value-free result.\n\nCSRF-gated + ``require_ui_operator``-gated. Dispatches the SEPARATE\n``secret-broker-1.x`` connector with ``from`` / ``to`` references (+\noptional reason). VALUE-FREE: no value field is accepted, dispatched,\nlogged, or rendered -- only the ``{status, value_fingerprint, length}``\nconfirmation surfaces.",
         "operationId": "vault_move_ui_vault_move_post",
         "requestBody": {
           "content": {
@@ -23660,6 +24145,25 @@
         "title": "AgentGrantRead",
         "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM\nrow. Exposes ``expires_at`` so callers can distinguish permanent\ngrants from elevations.\n\n``principal_name`` is the granted principal's operator-facing\nhandle, resolved alongside ``principal_sub`` (#3337) from the agent\nprincipal registry \u2014 ``principal_sub`` names a registered\n:class:`~meho_backplane.db.models.AgentPrincipal` by its\n``keycloak_client_id`` (the grant service enforces this at write\ntime, #2489), so the row's ``name`` is joinable render-time. Not an\nORM column: it is populated by :class:`AgentGrantService` on the read\npaths and is ``None`` on the write paths and whenever the sub names\nno live principal (a revoked/deleted handle) \u2014 the surface then fails\nopen to the raw ``principal_sub``. Additive; a client that ignores it\nis unaffected. Display name (handle) only \u2014 no other profile field."
       },
+      "AgentModelSpend": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "spend_counted": {
+            "type": "boolean",
+            "title": "Spend Counted"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model",
+          "spend_counted"
+        ],
+        "title": "AgentModelSpend",
+        "description": "Whether the spend limits count the cost of the default agent model (#5771).\n\n``model`` is ``AGENT_DEFAULT_MODEL``. ``spend_counted`` is ``False``\nwhen MEHO has no price for that model: a run on it then costs 0, so\nthe spend limit per login does not limit it."
+      },
       "AgentModelTier": {
         "type": "string",
         "enum": [
@@ -23865,6 +24369,30 @@
             "nullable": true,
             "title": "Identity Act",
             "description": "The agent that acts for identity_sub on a direct run. Null when the agent is itself the subject."
+          },
+          "input_tokens": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Input Tokens",
+            "description": "Input tokens the model read and did not take from its prompt cache. Null until the run has succeeded."
+          },
+          "output_tokens": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Output Tokens",
+            "description": "Tokens the model wrote. Null until the run has succeeded."
+          },
+          "cache_read_tokens": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Cache Read Tokens",
+            "description": "Input tokens read from the model's prompt cache; 0 when the provider reports no cache. Null until the run has succeeded."
+          },
+          "cache_write_tokens": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Cache Write Tokens",
+            "description": "Input tokens written to the model's prompt cache; 0 when the provider reports no cache. Null until the run has succeeded."
           }
         },
         "type": "object",
@@ -24089,6 +24617,11 @@
             "type": "object",
             "title": "Proposed Effect"
           },
+          "reveal_secret": {
+            "type": "boolean",
+            "title": "Reveal Secret",
+            "default": false
+          },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
           },
@@ -24160,6 +24693,16 @@
           "delegation": {
             "$ref": "#/components/schemas/DelegationView",
             "nullable": true
+          },
+          "may_approve": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "May Approve"
+          },
+          "may_approve_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "May Approve Reason"
           }
         },
         "type": "object",
@@ -24558,7 +25101,7 @@
           "since"
         ],
         "title": "AuditClassCounts",
-        "description": "200 body for ``POST /api/v1/audit/class-counts`` (#3747).\n\n``counts`` has one key per event class (``operation_execution``,\n``policy_decision``, ``approval_decision``, ``security_event``,\n``legacy_request``), ``0`` when a class has no rows. Old rows count\nas ``legacy_request``; they are never reclassified. ``total`` is the\nsum. ``since`` is the start of the counted window: the request's\n``since``, or 24 hours ago when the request set none."
+        "description": "200 body for ``POST /api/v1/audit/class-counts`` (#3747).\n\n``counts`` has one key per event class (``operation_execution``,\n``policy_decision``, ``approval_decision``, ``security_event``,\n``config_change``, ``legacy_request``), ``0`` when a class has no rows. Old rows count\nas ``legacy_request``; they are never reclassified. ``total`` is the\nsum. ``since`` is the start of the counted window: the request's\n``since``, or 24 hours ago when the request set none."
       },
       "AuditClassCountsRequest": {
         "properties": {
@@ -24748,6 +25291,16 @@
             "type": "boolean",
             "title": "Sandbox Mode"
           },
+          "actor_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Sub"
+          },
+          "actor_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Name"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -24782,7 +25335,7 @@
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
-        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``actor_sub`` \u2190 ``audit_log.actor_sub`` (#5773): the agent that acted\n  for the person in ``principal_sub``, in a run the person started.\n  ``None`` when nobody acted for another login.\n* ``actor_name`` \u2014 the agent's name, read from ``actor_sub``\n  (``agent:<name>``). ``None`` when ``actor_sub`` is not of that form.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
       },
       "AuditEventClass": {
         "type": "string",
@@ -24791,10 +25344,11 @@
           "policy_decision",
           "approval_decision",
           "security_event",
+          "config_change",
           "legacy_request"
         ],
         "title": "AuditEventClass",
-        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;\n  with it on they write a decision or execution class, or no row\n  (#3757, :mod:`meho_backplane.audit_cutover`)."
+        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire, or its sender withdrew\n  it (#5717). The operation did not run on any of these rows.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain.\n* :attr:`CONFIG_CHANGE` -- an operator changed the settings of\n  operations, and none of them ran. Two writers: an edit of one\n  operation with ``meho_connector_edit_op`` (turned it on or off, or\n  changed its risk level, approval rule, description or guidance,\n  #5791), and a tenant's own on or off switch with\n  ``meho_connector_tenant_setting``, for one operation or a whole\n  group (#5864). The row's ``payload[\"op_id\"]`` names the edited\n  operation; a group switch names ``payload[\"group_key\"]`` instead.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;\n  with it on they write a decision or execution class, or no row\n  (#3757, :mod:`meho_backplane.audit_cutover`)."
       },
       "AuditQueryRequest": {
         "properties": {
@@ -25472,6 +26026,13 @@
             "type": "string",
             "title": "Confirm Id",
             "default": ""
+          },
+          "step_id": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Step Id"
           }
         },
         "type": "object",
@@ -26108,9 +26669,9 @@
       },
       "Body_ui_account_revoke_session_ui_account_sessions_revoke_post": {
         "properties": {
-          "session_id": {
+          "session_ref": {
             "type": "string",
-            "title": "Session Id",
+            "title": "Session Ref",
             "default": ""
           }
         },
@@ -28878,7 +29439,7 @@
           "name"
         ],
         "title": "DashboardCreate",
-        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification config,\nset at create only like membership. Omitting ``notify_email`` leaves\nnotifications off for this Dashboard. Since #2764 it carries **one or more**\ncomma-separated recipients: each entry is validated individually with\npydantic's ``EmailStr`` (``email-validator``), so a single malformed entry\nis a boundary 422 naming it rather than a delivery failure discovered hours\nlater on the first transition. The normalised, comma-joined form is what\npersists (the existing ``text`` column from migration ``0068``, no new\nmigration), and a lone address is stored and read back unchanged.\n\n``investigator_prompt`` is the #2721 operator context appended to the\ndiagnose-only investigator's briefing. Bounded at\n``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422\n(``string_too_long`` with the limit in ``ctx``) rather than a truncation\nthe operator never learns about."
+        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership, name and mail settings can be changed later with\n``PATCH`` (:mod:`meho_backplane.checks.dashboard_edit`). An empty\n``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification\nconfig. Omitting ``notify_email`` leaves notifications off for this\nDashboard. Since #2764 it carries **one or more** comma-separated\nrecipients: each entry is validated individually with pydantic's\n``EmailStr`` (``email-validator``), so a single malformed entry is a\nboundary 422 naming it rather than a delivery failure discovered hours\nlater on the first transition. The normalised, comma-joined form is\nwhat persists (the existing ``text`` column from migration ``0068``,\nno new migration), and a lone address is stored and read back\nunchanged.\n\n``investigator_prompt`` is the #2721 operator context appended to the\ndiagnose-only investigator's briefing. Bounded at\n``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422\n(``string_too_long`` with the limit in ``ctx``) rather than a truncation\nthe operator never learns about."
       },
       "DashboardDetail": {
         "properties": {
@@ -29214,6 +29775,55 @@
         "title": "DashboardRead",
         "description": "Response shape for one Dashboard row on the list surface.\n\nCarries the rolled-up ``state`` (evaluated on read) and the\n``member_count`` so the list answers \"is everything OK?\" per Dashboard\nwithout a detail fetch. ``last_rollup_state`` is the memo column (always\nNULL until #2507 writes it). ``frozen=True`` so a handler cannot mutate\nthe row after returning it."
       },
+      "DashboardUpdate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Name"
+          },
+          "add_sensor_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "nullable": true,
+            "title": "Add Sensor Ids"
+          },
+          "remove_sensor_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "nullable": true,
+            "title": "Remove Sensor Ids"
+          },
+          "notify_email": {
+            "type": "string",
+            "nullable": true,
+            "title": "Notify Email"
+          },
+          "notify_min_state": {
+            "type": "string",
+            "enum": [
+              "degraded",
+              "critical"
+            ],
+            "nullable": true,
+            "title": "Notify Min State"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DashboardUpdate",
+        "description": "Request body for ``PATCH /api/v1/checks/dashboards/{dashboard_id}``.\n\nEvery field is optional; at least one must be set. A field that is left\nout, or sent as ``null``, keeps its value.\n\n* ``add_sensor_ids`` / ``remove_sensor_ids`` -- Sensors to add to or\n  remove from the members. One id cannot be in both lists.\n* ``notify_email`` -- one or more comma-separated recipients. An empty\n  string turns mail off.\n* ``notify_min_state`` -- the state a change must reach before mail is\n  sent."
+      },
       "DbStatus": {
         "properties": {
           "migrated": {
@@ -29320,6 +29930,16 @@
             "type": "string",
             "nullable": true,
             "title": "Dispatch Error"
+          },
+          "self_approved": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Self Approved"
+          },
+          "approval_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Approval Rule"
           }
         },
         "type": "object",
@@ -29329,7 +29949,7 @@
           "reason"
         ],
         "title": "DecideResponseBody",
-        "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated whenever ``/decide`` attempted\nthe approved op's re-dispatch \u2014 for **every** approved request now, not\nonly direct operator ops (#2293). ``dispatch_status`` is ``\"ok\"`` when\n``/decide`` won the exactly-one-resumer claim and executed (the direct\nop, or the run-bound fallback when the in-process waiter was gone), or\n``\"already_resumed\"`` when the in-process agent waiter won the claim\nfirst (the run-bound waiter-alive case) \u2014 a benign \"executed elsewhere\"\nthat keeps the approver from double-dispatching. They stay ``None``\nonly on a rejection.\n\n``decided_by`` names the effective authenticated user (the reviewer's\nstable ``sub``) whose credential made this decision, so a CLI / console\ncan show *who* decided without a second lookup (#3290). Additive and\noptional \u2014 a client that ignores it is unaffected.\n\n``decided_by_name`` carries the reviewer's human display name alongside\n``decided_by`` (#3300), from the deciding operator's JWT ``name`` claim,\nso a client renders *who* without resolving the GUID itself. ``None``\nwhen the token carried no name \u2014 the client fails open to ``decided_by``.\nDisplay name only: no email or other profile field is added here."
+        "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated whenever ``/decide`` attempted\nthe approved op's re-dispatch \u2014 for **every** approved request now, not\nonly direct operator ops (#2293). ``dispatch_status`` is ``\"ok\"`` when\n``/decide`` won the exactly-one-resumer claim and executed (the direct\nop, or the run-bound fallback when the in-process waiter was gone), or\n``\"already_resumed\"`` when the in-process agent waiter won the claim\nfirst (the run-bound waiter-alive case) \u2014 a benign \"executed elsewhere\"\nthat keeps the approver from double-dispatching. They stay ``None``\nonly on a rejection.\n\n``decided_by`` names the effective authenticated user (the reviewer's\nstable ``sub``) whose credential made this decision, so a CLI / console\ncan show *who* decided without a second lookup (#3290). Additive and\noptional \u2014 a client that ignores it is unaffected.\n\n``decided_by_name`` carries the reviewer's human display name alongside\n``decided_by`` (#3300), from the deciding operator's JWT ``name`` claim,\nso a client renders *who* without resolving the GUID itself. ``None``\nwhen the token carried no name \u2014 the client fails open to ``decided_by``.\nDisplay name only: no email or other profile field is added here.\n\n``self_approved`` and ``approval_rule`` (#3329) are the same values the\n``approval.decision`` audit row records: whether the person approved\ntheir own change, and the rule that allowed the approval\n(``sa_operator_self_approval``, ``break_glass_self_approval``,\n``sa_operator_or_admin`` or ``reviewer``). The command line prints a\nself-approval line from them. Both are ``None`` on a rejection."
       },
       "DeclareCapabilitiesRequest": {
         "properties": {
@@ -31279,6 +31899,10 @@
           "operation_catalog": {
             "$ref": "#/components/schemas/OperationCatalogStatus",
             "nullable": true
+          },
+          "agent_model_spend": {
+            "$ref": "#/components/schemas/AgentModelSpend",
+            "nullable": true
           }
         },
         "type": "object",
@@ -31289,7 +31913,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them.\n\n``connector_packages`` (#5036) lists the connector packages this image\ncarries, the same list ``GET /version`` shows. It is empty for the\nplain public image.\n\n``operation_catalog`` (#5019) names the release that wrote the shared\noperation rows and says whether it is this pod's release\n(:class:`OperationCatalogStatus`). The ``None`` default keeps older\nresponse decoders working; the handler always fills it."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them.\n\n``connector_packages`` (#5036) lists the connector packages this image\ncarries, the same list ``GET /version`` shows. It is empty for the\nplain public image.\n\n``operation_catalog`` (#5019) names the release that wrote the shared\noperation rows and says whether it is this pod's release\n(:class:`OperationCatalogStatus`). The ``None`` default keeps older\nresponse decoders working; the handler always fills it.\n\n``agent_model_spend`` (#5771) says whether the spend limits count the\ncost of runs on the default agent model (:class:`AgentModelSpend`).\nThe ``None`` default keeps older response decoders working; the\nhandler always fills it."
       },
       "InCompare": {
         "properties": {
@@ -31416,6 +32040,22 @@
             "nullable": true,
             "title": "Ended At"
           },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "parse",
+              "register",
+              "grouping"
+            ],
+            "title": "Phase",
+            "description": "The step the job is on: parse (read and check the API files), register (write the operations), grouping (the language model groups the operations). A finished job keeps the step it ended in."
+          },
+          "phase_started_at": {
+            "type": "number",
+            "format": "double",
+            "title": "Phase Started At",
+            "description": "When the current step started (epoch seconds)."
+          },
           "ingestion": {
             "$ref": "#/components/schemas/IngestionResultModel",
             "nullable": true
@@ -31439,10 +32079,12 @@
         "required": [
           "job_id",
           "status",
-          "started_at"
+          "started_at",
+          "phase",
+          "phase_started_at"
         ],
         "title": "IngestJobStatusResponse",
-        "description": "Response body for ``GET /api/v1/connectors/ingest/jobs/{job_id}``.\n\nMirrors the in-memory\n:class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,\nprojecting it into a Pydantic-typed shape the route returns.\nThree field clusters:\n\n* **Identity** -- ``job_id`` + the originator's request descriptors\n  (``catalog_entry`` / ``product`` / ``version`` / ``impl_id`` /\n  ``spec_uris``). Echo so the polling caller doesn't need to\n  correlate against their own state.\n* **Lifecycle** -- ``status`` + ``started_at`` + optional\n  ``ended_at``. Status moves ``running`` \u2192 one of ``succeeded`` /\n  ``degraded`` / ``failed`` exactly once.\n* **Result vs error** -- keyed on status. ``succeeded`` populates\n  ``ingestion`` (with optional ``grouping``) and leaves ``error``\n  ``None``; ``failed`` populates ``error`` / ``error_class`` and\n  leaves ``ingestion`` ``None`` (the pipeline raised, no result).\n  ``degraded`` populates **both** \u2014 the pipeline returned a result\n  (so ``ingestion`` carries the counts that landed) but a\n  postcondition found it non-dispatchable (so ``error`` /\n  ``error_class`` carry the reason). ``running`` leaves them ``None``\n  so polling clients branch on ``status`` rather than presence.\n\n``error`` is the capped message; ``error_class`` is the structured\ndiscriminator -- the Python exception class name for ``failed``\n(``VersionMismatchError`` vs ``LlmClientUnavailable``), or the fixed\n``ingested_not_dispatchable`` token for ``degraded`` -- so agents\nbranch without parsing prose. The structured 422 envelopes the\nsynchronous ingest path used to return (the error-shape convention's\nclassifier + ``detail`` body) are NOT available off the request\nthread; the polling response is the new error surface for the async\npath."
+        "description": "Response body for ``GET /api/v1/connectors/ingest/jobs/{job_id}``.\n\nMirrors the in-memory\n:class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,\nprojecting it into a Pydantic-typed shape the route returns.\nThree field clusters:\n\n* **Identity** -- ``job_id`` + the originator's request descriptors\n  (``catalog_entry`` / ``product`` / ``version`` / ``impl_id`` /\n  ``spec_uris``). Echo so the polling caller doesn't need to\n  correlate against their own state.\n* **Lifecycle** -- ``status`` + ``started_at`` + optional\n  ``ended_at``. Status moves ``running`` \u2192 one of ``succeeded`` /\n  ``degraded`` / ``failed`` exactly once. ``phase`` is the step the\n  job is on (``parse`` \u2192 ``register`` \u2192 ``grouping``) and\n  ``phase_started_at`` is when that step started (#5786), so a slow\n  import can be told from a stuck one. A finished job keeps the step\n  it ended in.\n* **Result vs error** -- keyed on status. ``succeeded`` populates\n  ``ingestion`` (with optional ``grouping``) and leaves ``error``\n  ``None``; ``failed`` populates ``error`` / ``error_class`` and\n  leaves ``ingestion`` ``None`` (the pipeline raised, no result).\n  ``degraded`` populates **both** \u2014 the pipeline returned a result\n  (so ``ingestion`` carries the counts that landed) but a\n  postcondition found it non-dispatchable (so ``error`` /\n  ``error_class`` carry the reason). ``running`` leaves them ``None``\n  so polling clients branch on ``status`` rather than presence.\n\n``error`` is the capped message; ``error_class`` is the structured\ndiscriminator -- the Python exception class name for ``failed``\n(``VersionMismatchError`` vs ``LlmClientUnavailable``), or the fixed\n``ingested_not_dispatchable`` token for ``degraded`` -- so agents\nbranch without parsing prose. The structured 422 envelopes the\nsynchronous ingest path used to return (the error-shape convention's\nclassifier + ``detail`` body) are NOT available off the request\nthread; the polling response is the new error surface for the async\npath."
       },
       "IngestKbRequest": {
         "properties": {
@@ -31516,7 +32158,7 @@
             "format": "uuid",
             "nullable": true,
             "title": "Tenant Id",
-            "description": "Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) \u2014 the same omit-equals-global semantics as the MCP tool meho_connector_ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403 unless the caller holds platform_admin, which may ingest into another tenant when it names that tenant here (the write is audited)."
+            "description": "Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) \u2014 the same omit-equals-global semantics as the MCP tool meho_connector_ingest (platform_admin only: the rows are shared by every tenant). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403 unless the caller holds platform_admin, which may ingest into another tenant when it names that tenant here (the write is audited)."
           },
           "spec_info_versions_compatible": {
             "items": {
@@ -32220,6 +32862,73 @@
         "title": "MemorySearchResponse",
         "description": "Response for ``/api/v1/memory/search`` -- the same hits ``search_memory`` returns.\n\n``hits`` is the only field. Each hit is bounded evidence (#3751): a\nshort snippet, provenance, and the selected-read ``locator``, never the\nfull body. The MCP tool also wraps each snippet in the untrusted-text\nenvelope and adds its ``delivery`` fields; this REST face serves the\nplain snippet for the CLI table. There is deliberately no total or\ncount: \"no match\" and \"only rows you may not see\" both return\n``{\"hits\": []}``."
       },
+      "ModelPrice": {
+        "properties": {
+          "input_per_million": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 100000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,6}0*$"
+              }
+            ],
+            "title": "Input Per Million"
+          },
+          "output_per_million": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 100000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,6}0*$"
+              }
+            ],
+            "title": "Output Per Million"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "input_per_million",
+          "output_per_million"
+        ],
+        "title": "ModelPrice",
+        "description": "Price of one model, in USD per million tokens."
+      },
+      "ModelPriceEntry": {
+        "properties": {
+          "input_per_million": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,6}0*$",
+            "title": "Input Per Million"
+          },
+          "output_per_million": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,6}0*$",
+            "title": "Output Per Million"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "input_per_million",
+          "output_per_million",
+          "model"
+        ],
+        "title": "ModelPriceEntry",
+        "description": "One row of the tenant's model prices."
+      },
       "MyRecentPage": {
         "properties": {
           "items": {
@@ -32901,7 +33610,7 @@
           "tenant_role"
         ],
         "title": "OperatorIdentity",
-        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns.\n\n``tenants`` (#5239) lists every tenant of the person, with the role\nin each, when the token carries a tenant list (empty otherwise). A\nlogin with several tenants that chose none gets ``tenant_id`` and\n``tenant_role`` as ``None``: the status answer then only lists the\ntenants."
+        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns.\n\n``tenants`` (#5239) lists every tenant of the person, with the role\nin each, when the token carries a tenant list (empty otherwise). A\nlogin with several tenants that chose none gets ``tenant_id`` and\n``tenant_role`` as ``None``: the status answer then only lists the\ntenants.\n\nInside an agent run that a person started (an agent is bound as the\nactor), no role in ``tenants`` is higher than ``tenant_role``, the\nrole of the run that every check uses (#5773). The person's own\nlogin groups may give a higher role, but the agent never gets it."
       },
       "OrderBy": {
         "properties": {
@@ -33983,6 +34692,16 @@
             "type": "boolean",
             "title": "Sandbox Mode"
           },
+          "actor_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Sub"
+          },
+          "actor_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Name"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -34038,7 +34757,7 @@
             "type": "object",
             "nullable": true,
             "title": "Params",
-            "description": "The original params, unchanged. Leave out to use the params MEHO stored with the request. Required for a credential write, whose params MEHO keeps only until the first run. Params that do not match the approved ones are refused (409)."
+            "description": "The original params, unchanged. Leave out to use the params MEHO stored with the request. Required for a credential write, and for a call whose params hold a password or a licence key: MEHO keeps those params only until the first run. Params that do not match the approved ones are refused (409)."
           }
         },
         "additionalProperties": false,
@@ -35661,6 +36380,37 @@
         "title": "SensorCadenceKind",
         "description": "Closed enum of the two cadence shapes a :class:`Sensor` may carry.\n\nInitiative #2416 (parent goal #221), Task #2503. One ``sensor`` row\ncarries exactly one cadence, selected by this discriminator; the\ninvariant is enforced by the DB-side ``ck_sensor_cadence_fields``\nCHECK that pairs each kind with its mandatory column (mirroring\n:class:`ScheduledTriggerKind`).\n\nMembers:\n\n* :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The\n  sub-minute path #2505's interval-tick loop drives.\n* :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The\n  >=1-minute path #2505 rides on #804's durable scheduler discipline.\n\nClosed enum: widening it is a coordinated DB + model change so the\nenum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration\n``0064``'s frozen tuple cannot drift."
       },
+      "SensorConnectorFit": {
+        "properties": {
+          "target_product": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Product"
+          },
+          "target_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Version"
+          },
+          "warning": {
+            "type": "string",
+            "nullable": true,
+            "title": "Warning"
+          },
+          "matching_connector_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Matching Connector Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_product",
+          "target_version"
+        ],
+        "title": "SensorConnectorFit",
+        "description": "How a Sensor's connector fits its target, checked each time it is read.\n\nMEHO reads the target's detected product and version (the last probe,\nelse the version an operator set) and checks it against the version\nrange the connector declares, with the same match the dispatcher uses\nto pick a connector for a target. ``warning`` is ``None`` when the\nconnector fits, or when MEHO cannot tell (no known product or version,\nor a connector MEHO does not know). Otherwise it says in plain words\nwhat does not match, and ``matching_connector_id`` names the connector\nthat fits the target, when there is one."
+      },
       "SensorCreate": {
         "properties": {
           "name": {
@@ -35752,6 +36502,11 @@
             "format": "uuid",
             "nullable": true,
             "title": "Tenant Id"
+          },
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -35938,6 +36693,10 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "connector_fit": {
+            "$ref": "#/components/schemas/SensorConnectorFit",
+            "nullable": true
           }
         },
         "type": "object",
@@ -36096,6 +36855,74 @@
         ],
         "title": "SensorStatus",
         "description": "Closed lifecycle status of a :class:`Sensor`.\n\n``ScheduledTriggerStatus`` minus the trigger-only terminal states:\na sensor is either eligible for evaluation (:attr:`ACTIVE`) or held\n(:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is\nnot accepted at create; #2505 parks a row to ``paused`` (plus a\n``status_reason``) when it hits an unparseable persisted cadence, and\n#2506's rollup derives ``skip`` for paused rows."
+      },
+      "SensorUpdate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Name"
+          },
+          "connector_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Op Id"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Params"
+          },
+          "assertion": {
+            "$ref": "#/components/schemas/AssertionSpec",
+            "nullable": true
+          },
+          "cadence_kind": {
+            "$ref": "#/components/schemas/SensorCadenceKind",
+            "nullable": true
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "maximum": 86400.0,
+            "minimum": 5.0,
+            "nullable": true,
+            "title": "Interval Seconds"
+          },
+          "cron_expr": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Timezone"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SensorSeverity",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SensorUpdate",
+        "description": "Request body for ``PATCH /api/v1/sensors/{sensor_id}``.\n\nEvery field is optional. A field that is left out, or sent as ``null``,\nkeeps its value. At least one field must be set.\n\nTo change the cadence kind, send ``cadence_kind`` with its matching\nfield: ``interval_seconds`` for ``interval``, ``cron_expr`` (and\noptionally ``timezone``) for ``cron``. The field of the old kind is\ncleared."
       },
       "ServiceGrantCreate": {
         "properties": {
@@ -36356,6 +37183,128 @@
         ],
         "title": "ServiceReadScopeSet",
         "description": "Body for ``PUT /api/v1/service-principals/read-scopes/{principal_sub}``.\n\nReplaces the whole scope. At least one entry: a scope with no entry\nwould refuse every read, which is a job for revoking the principal."
+      },
+      "SettingsImportResponse": {
+        "properties": {
+          "preview": {
+            "type": "boolean",
+            "title": "Preview"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "mistakes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Mistakes"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "diff": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Diff"
+          },
+          "applied": {
+            "type": "boolean",
+            "title": "Applied",
+            "default": false
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Revision Id"
+          },
+          "failed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Failed",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "preview",
+          "ok",
+          "mistakes",
+          "warnings",
+          "diff"
+        ],
+        "title": "SettingsImportResponse",
+        "description": "The preview and the apply answer: plain JSON, the mistakes and the diff.\n\n``diff`` has one entry per section (``tenants``, ``policies``,\n``conventions``, ``targets``), each with ``added``, ``changed`` (``before``\nand ``after``) and ``not_in_file`` lists. It is ``null`` when the file has\nmistakes. On an apply, ``diff`` is what actually changed, ``failed`` lists\nthe items that could not be written (the rest were), and ``revision_id`` is\nthe new revision (``null`` when nothing changed)."
+      },
+      "SettingsRevision": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "actor_sub": {
+            "type": "string",
+            "title": "Actor Sub"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Audit Id"
+          },
+          "file_sha256": {
+            "type": "string",
+            "title": "File Sha256"
+          },
+          "api_version": {
+            "type": "string",
+            "title": "Api Version"
+          },
+          "exported_from": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Exported From"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Summary"
+          },
+          "diff": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Diff"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "actor_sub",
+          "audit_id",
+          "file_sha256",
+          "api_version",
+          "exported_from",
+          "summary",
+          "diff"
+        ],
+        "title": "SettingsRevision",
+        "description": "One ``instance_settings_revision`` row, with its diff worked out on read."
       },
       "ShowTemplateResponse": {
         "properties": {
@@ -37107,16 +38056,12 @@
               "azure",
               "bind9",
               "entra",
-              "fleet",
+              "freeipa",
               "gcloud",
               "gh",
               "harbor",
-              "hcx",
               "hetzner",
-              "holodeck",
               "hyperv",
-              "idb",
-              "installer",
               "k8s",
               "keycloak",
               "linux",
@@ -37124,7 +38069,6 @@
               "mongodb",
               "msad",
               "mssql",
-              "nsx",
               "pfsense",
               "phpipam",
               "postgres",
@@ -37132,18 +38076,8 @@
               "proxmox",
               "rabbitmq",
               "rke2",
-              "salt",
-              "sddc",
-              "srm",
               "tempo",
               "vault",
-              "vcd",
-              "vcfa",
-              "vmware",
-              "vr",
-              "vrli",
-              "vro",
-              "vrops",
               "windns",
               "winsrv",
               "wsfc"
@@ -37761,6 +38695,52 @@
         "type": "object",
         "title": "TenantMailRecipientPolicyUpdate",
         "description": "``PATCH /api/v1/tenants/mail-recipient-policy`` body (#3499).\n\nThe single field is optional-partial (``model_dump(exclude_unset=True)`` in\nthe handler keys off ``model_fields_set``, so a JSON ``null`` is\ndistinguished from an absent key). ``extra='forbid'`` rejects unknown keys\nwith a 422.\n\n* absent = leave the column unchanged.\n* ``null`` = clear back to **inherit** (the instance floor alone governs the\n  tenant's ``mail.send``).\n* ``\"\"`` = **deny** (an empty tenant allowlist refuses every dispatched\n  send) -- the shared-instance containment lever.\n* a comma-separated address/domain string = the tenant's own recipient\n  space. Validated with the same grammar as the instance floor\n  (:func:`~meho_backplane.connectors.mail.allowlist.parse_recipient_allowlist`),\n  so a malformed entry (whitespace, ``foo@``, bare ``@``, ...) is a 422 at\n  write time rather than a silent inert allowlist at dispatch time."
+      },
+      "TenantModelPriceUpdate": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[\\w.:/@+-]+$",
+            "title": "Model"
+          },
+          "price": {
+            "$ref": "#/components/schemas/ModelPrice",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "model",
+          "price"
+        ],
+        "title": "TenantModelPriceUpdate",
+        "description": "``PATCH /api/v1/tenants/model-prices`` body: set or remove one price.\n\n``model`` is the model id as an agent run shows it: ``provider:model``\n(``openai:qwen3``) or the model name alone (``qwen3``). ``price`` sets the\nprice; ``null`` removes it. Both keys are required."
+      },
+      "TenantModelPrices": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "prices": {
+            "items": {
+              "$ref": "#/components/schemas/ModelPriceEntry"
+            },
+            "type": "array",
+            "title": "Prices"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "prices"
+        ],
+        "title": "TenantModelPrices",
+        "description": "The tenant's prices for agent models MEHO does not know (#5853)."
       },
       "TenantOperationSettingItem": {
         "properties": {
@@ -38503,6 +39483,16 @@
             "type": "string",
             "nullable": true,
             "title": "Tenant Name"
+          },
+          "tenant_chosen": {
+            "type": "boolean",
+            "title": "Tenant Chosen",
+            "default": true
+          },
+          "can_switch_tenant": {
+            "type": "boolean",
+            "title": "Can Switch Tenant",
+            "default": false
           }
         },
         "type": "object",
@@ -38512,7 +39502,7 @@
           "tenant_id"
         ],
         "title": "UISessionContext",
-        "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims).\n\n``tenant_slug`` / ``tenant_name`` are populated by the middleware\nfrom a same-request lookup against the ``tenant`` table (keyed on\n:attr:`tenant_id`). The fields are surfaced into every UI template\nby the chassis context processor so the page header's tenant chip\nrenders the operator-readable name without each route having to\nre-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the\ntenant row was deleted between session-creation and the request\n(an ops anomaly; the operator still authenticates fine, the chip\njust falls back to the tenant UUID)."
+        "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims).\n\n``tenant_slug`` / ``tenant_name`` are populated by the middleware\nfrom a same-request lookup against the ``tenant`` table (keyed on\n:attr:`tenant_id`). The fields are surfaced into every UI template\nby the chassis context processor so the page header's tenant chip\nrenders the operator-readable name without each route having to\nre-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the\ntenant row was deleted between session-creation and the request\n(an ops anomaly; the operator still authenticates fine, the chip\njust falls back to the tenant UUID).\n\n``tenant_id`` is the session's current tenant (#5240).\n``tenant_chosen`` is ``False`` while a person with several tenants\nhas not picked one; the middleware then lets the request reach only\nthe tenant picker. ``can_switch_tenant`` makes the sidebar tenant box\na switch."
       },
       "UsageReport": {
         "properties": {
@@ -39112,6 +40102,10 @@
     {
       "name": "service-principal-read-scopes",
       "x-maturity": "ga"
+    },
+    {
+      "name": "settings",
+      "x-maturity": "beta"
     },
     {
       "name": "targets",

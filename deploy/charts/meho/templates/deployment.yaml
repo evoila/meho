@@ -1,3 +1,14 @@
+{{- /*
+  An upgrade with --reuse-values from a release older than these keys has no
+  shutdown or updateStrategy value. Fall back to the chart defaults then.
+  hasKey (not default) keeps an explicit 0.
+*/}}
+{{- $sd := .Values.shutdown | default dict }}
+{{- $preStopSleep := 5 }}
+{{- if hasKey $sd "preStopSleepSeconds" }}{{ $preStopSleep = $sd.preStopSleepSeconds }}{{ end }}
+{{- $drain := 60 }}
+{{- if hasKey $sd "drainSeconds" }}{{ $drain = $sd.drainSeconds }}{{ end }}
+{{- $strategy := .Values.updateStrategy | default (dict "type" "Recreate") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,6 +17,10 @@ metadata:
     {{- include "meho.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # Recreate by default (#5024): the old pod has stopped before the new one
+  # starts, so old and new code never share the database.
+  strategy:
+    {{- toYaml $strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "meho.selectorLabels" . | nindent 6 }}
@@ -22,6 +37,12 @@ spec:
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.metricsAuth.enabled (not .Values.metricsAuth.existingSecret) }}
+        # Roll the pod when the chart-made metrics token changes, so the
+        # token the pod checks is the one the Secret holds. On a cluster
+        # `lookup` keeps the value and the checksum stays stable.
+        checksum/metrics-auth: {{ include (print $.Template.BasePath "/metrics-auth-secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -32,13 +53,16 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "meho.serviceAccountName" . }}
+      # The pre-stop wait, the drain and 30 seconds for the rest of the
+      # shutdown (#5024). Kubernetes kills the pod when this time is over.
+      terminationGracePeriodSeconds: {{ add $preStopSleep $drain 30 }}
       automountServiceAccountToken: false
       {{- with include "meho.core.imagePullSecrets" . }}
       imagePullSecrets:
         {{- . | nindent 8 }}
       {{- end }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
         {{- /*
         Optional unprivileged-ICMP-ping knob for the net.ping diagnostic
         (Initiative #2405). Default-off: when empty, NO sysctl is rendered
@@ -61,8 +85,10 @@ spec:
         # runner waits for the database (`MIGRATION_DB_WAIT_SECONDS`,
         # default 300 s) and holds a PostgreSQL advisory lock while it
         # migrates, so a second replica waits and then changes nothing. A
-        # failed migration keeps the pod out of Ready: `helm --wait` fails
-        # and, on upgrade, the old pods keep serving. An older image after
+        # failed migration keeps the pod out of Ready: `helm --wait` fails.
+        # With the default Recreate strategy the old pod has already stopped,
+        # so MEHO is down until `helm rollback` (docs/acceptance/rollback.md).
+        # An older image after
         # `helm rollback` leaves a newer schema alone (rollback contract,
         # docs/codebase/migrations.md). Same container as the Job: image
         # and digest pin, command, environment, security context, volumes
@@ -78,8 +104,11 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.credentialsSecret }}
+                  name: {{ include "meho.databaseSecretName" . }}
                   key: url
+            {{- with include "meho.postgres.runtimeRoleEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -125,11 +154,33 @@ spec:
             # container (the image build does not know its chart release).
             - name: CHART_VERSION
               value: {{ .Chart.Version | quote }}
+            # How long running operations may take to finish after the stop
+            # signal (#5024). uvicorn reads its own limit for open requests
+            # from UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN; both get the same value.
+            - name: SHUTDOWN_DRAIN_SECONDS
+              value: {{ $drain | quote }}
+            - name: UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN
+              value: {{ $drain | quote }}
+            {{- /*
+            The running backplane logs in with its own, narrower login when
+            the install has one (`meho.postgres.backplaneSecretName`); the
+            migration above keeps the owner login.
+            */}}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.credentialsSecret }}
+                  name: {{ include "meho.postgres.backplaneSecretName" . }}
                   key: url
+            {{- if .Values.metricsAuth.enabled }}
+            # The metrics token (`metricsAuth`): `/metrics` and the
+            # `features` block of `/ready` answer only a caller that sends
+            # it. `secretKeyRef` only, never plaintext.
+            - name: METRICS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "meho.metricsAuthSecretName" . | quote }}
+                  key: {{ .Values.metricsAuth.secretKey | quote }}
+            {{- end }}
             {{- if .Values.broadcast.enabled }}
             # BROADCAST_REDIS_URL points the backplane at the in-cluster
             # broadcast store. The name must match the env var the
@@ -193,6 +244,29 @@ spec:
                   name: {{ include "meho.agentSecretName" . | quote }}
                   key: {{ .Values.agent.secretKey | quote }}
             {{- end }}
+            {{- with .Values.agent.modelBackend }}
+            # #5851 — which model backend every agent run uses. Plain config.
+            - name: AGENT_MODEL_BACKEND
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.agent.openai.enabled }}
+            # #5851 — an OpenAI-compatible model endpoint. The key is
+            # `secretKeyRef` only, never plaintext; the base URL and the model
+            # are plain config and render only when set.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "meho.agentOpenaiSecretName" . | quote }}
+                  key: {{ .Values.agent.openai.secretKey | quote }}
+            {{- with .Values.agent.openai.baseUrl }}
+            - name: OPENAI_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.agent.openai.defaultModel }}
+            - name: OPENAI_DEFAULT_MODEL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- if or .Values.keycloakAdmin.enabled .Values.coreKeycloak.enabled }}
             {{- /* With the built-in Keycloak on, all three point at its meho-admin client through the Service (#4591). */}}
             {{- $kc := include "meho.keycloakSettings" . | fromYaml }}
@@ -241,12 +315,23 @@ spec:
                   name: {{ .Values.uiConsole.secretName | quote }}
                   key: {{ .Values.uiConsole.sessionEncryptionKey | quote }}
             {{- end }}
-            {{- if .Values.approvalHandoff.enabled }}
+            {{- /* On by default with a built-in part, from the Secret the install makes (#4047). */}}
+            {{- $handoff := include "meho.approvalHandoff" . | fromYaml }}
+            {{- if $handoff.enabled }}
             - name: APPROVAL_HANDOFF_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.approvalHandoff.secretName | quote }}
-                  key: {{ .Values.approvalHandoff.secretKey | quote }}
+                  name: {{ $handoff.secretName | quote }}
+                  key: {{ $handoff.secretKey | quote }}
+            {{- end }}
+            {{- /* The key of the params hashes and value fingerprints, kept when the database password changes. */}}
+            {{- $hashKey := include "meho.paramsHashKey" . | fromYaml }}
+            {{- if $hashKey.secretName }}
+            - name: PARAMS_HASH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $hashKey.secretName | quote }}
+                  key: {{ $hashKey.secretKey | quote }}
             {{- end }}
             {{- if .Values.checkRunner.enabled }}
             # #2642 — the in-process check-runner's service-principal
@@ -287,11 +372,12 @@ spec:
           # `startupProbe` gates liveness/readiness until first boot succeeds
           # (Issue #2393). First boot runs the full typed-op catalog
           # registration plus the fastembed model preload before the app binds
-          # :8000 — ~2-3 min, longer on a cold install that downloads model
-          # weights into an empty cache PVC. Without this probe the kubelet
+          # :8000. On an empty database every operation also gets its
+          # embedding: about 5 min at the 1-CPU limit (#4102), and since #5019
+          # a stopped start keeps none of it. Without this probe the kubelet
           # starts liveness-checking mid-registration and CrashLoopBackOffs a
           # slow-but-healthy pod. The default budget is
-          # `failureThreshold × periodSeconds` = 30 × 10s = 300s (5 min); the
+          # `failureThreshold × periodSeconds` = 90 × 10s = 900s (15 min); the
           # kubelet disables liveness/readiness until it passes, then the
           # short-delay liveness probe takes over for fast hang detection. The
           # `with` guard lets an operator opt out on a fast cluster by clearing
@@ -304,6 +390,16 @@ spec:
             {{- toYaml .Values.probes.liveness | nindent 12 }}
           readinessProbe:
             {{- toYaml .Values.probes.readiness | nindent 12 }}
+          {{- if gt (int $preStopSleep) 0 }}
+          # Keep serving for a few seconds after Kubernetes decided to stop
+          # the pod, so the Service and the ingress stop sending it requests
+          # before it closes (#5024). Without it, a request can still reach
+          # the closing pod and the caller gets a short 502.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ $preStopSleep | quote }}]
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
@@ -320,6 +416,14 @@ spec:
             # in that mode).
             - name: fastembed-cache
               mountPath: {{ .Values.retrieval.modelCache.mountPath | quote }}
+            {{- end }}
+            {{- if .Values.coreVault.enabled }}
+            # The scheduler's OpenBao token (#4047). VAULT_SCHEDULER_TOKEN_FILE
+            # in the ConfigMap points here; the backplane reads the file at
+            # every use, so a token the setup Job makes later needs no restart.
+            - name: vault-scheduler
+              mountPath: /var/run/meho/vault-scheduler
+              readOnly: true
             {{- end }}
             {{- with .Values.extraVolumeMounts }}
             # Operator-supplied extra VolumeMounts. Paired with
@@ -338,6 +442,17 @@ spec:
         - name: fastembed-cache
           persistentVolumeClaim:
             claimName: {{ include "meho.fullname" . }}-fastembed-cache
+        {{- end }}
+        {{- if .Values.coreVault.enabled }}
+        # Made by the OpenBao setup Job, which may finish after the pod
+        # starts; `optional` lets the pod start without it.
+        - name: vault-scheduler
+          secret:
+            secretName: {{ printf "%s-core-vault-scheduler" .Release.Name | quote }}
+            optional: true
+            items:
+              - key: token
+                path: token
         {{- end }}
         {{- with .Values.extraVolumes }}
         # Operator-supplied extra Volumes (full Volume shape). Most common

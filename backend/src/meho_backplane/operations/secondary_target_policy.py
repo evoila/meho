@@ -8,7 +8,9 @@ Some operations write to a second target the caller names in the params.
 token through ``vault.kv.patch`` / ``vault.kv.put`` on the caller-named
 ``vault_target``. The handler calls those Vault handlers directly, so the
 dispatcher's policy gate never sees that write. This module is the one
-place that checks MEHO policy for it.
+place that checks MEHO policy for it. A targetless operation whose only
+target is named in the params uses it the same way: ``targets.probe``
+checks its own op on the target it found.
 
 Who is checked
 ==============
@@ -57,6 +59,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SecondaryTargetWrite",
+    "approved_requester_sub",
     "bind_approved_requester",
     "requester_policy_preflight",
     "secondary_target_refusal",
@@ -195,6 +198,16 @@ def bind_approved_requester(request: ApprovalRequest) -> Iterator[None]:
         yield
     finally:
         _approved_requester_var.reset(token)
+
+
+def approved_requester_sub() -> str | None:
+    """The ``sub`` of the requester bound by :func:`bind_approved_requester`, else ``None``.
+
+    The dispatcher reads it on the approved resume path to tell the
+    requester's own re-run of a failed call from a reviewer's run.
+    """
+    requester = _approved_requester_var.get()
+    return None if requester is None else requester.sub
 
 
 def _requester_operator(requester: _Requester, subject: Mapping[str, Any]) -> Operator:

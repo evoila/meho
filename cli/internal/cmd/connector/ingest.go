@@ -112,7 +112,8 @@ func newIngestCmd() *cobra.Command {
 			"--tenant-id selects the write scope for the ingested rows and\n" +
 			"combines with either mode. Omit it (the default) to ingest under\n" +
 			"the built-in / global scope (tenant_id IS NULL, visible to every\n" +
-			"tenant) — the request then leaves tenant_id unset, the\n" +
+			"tenant; needs platform_admin, because every tenant shares those\n" +
+			"rows) — the request then leaves tenant_id unset, the\n" +
 			"omit-equals-global semantics the REST and MCP surfaces share.\n" +
 			"Pass your OWN tenant UUID for a tenant-curated ingest; the\n" +
 			"backplane rejects any other tenant's UUID with HTTP 403. A\n" +
@@ -170,7 +171,7 @@ func newIngestCmd() *cobra.Command {
 			"mutually exclusive with --product/--version/--impl/--spec")
 	cmd.Flags().StringVar(&tenantID, "tenant-id", "",
 		"write scope for the ingested rows (works with both modes): omit for the built-in / "+
-			"global scope (tenant_id left unset — visible to every tenant); pass your own "+
+			"global scope (tenant_id left unset — visible to every tenant; needs platform_admin); pass your own "+
 			"tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 "+
 			"unless you hold platform_admin)")
 	cmd.Flags().StringVar(&authScheme, "auth-scheme", "",
@@ -513,7 +514,7 @@ func runIngestAsync(
 	fmt.Fprintf(cmd.ErrOrStderr(),
 		"ingest accepted (HTTP 202) — job_id=%s; polling %s every %s until the job completes\n",
 		handle.JobId, handle.PollUrl, interval)
-	st, err := pollIngestJob(cmd.Context(), authed, handle.JobId, interval)
+	st, err := pollIngestJob(cmd.Context(), authed, handle.JobId, interval, cmd.ErrOrStderr())
 	if err != nil {
 		return renderIngestWaitError(cmd, backplaneURL, handle, err, opts.JSONOut)
 	}
@@ -637,12 +638,18 @@ func renderIngestTerminal(
 // classification, because every poll-phase failure message must
 // carry the "job keeps running server-side, don't re-run ingest"
 // guidance.
+//
+// Each time the running job moves to a new phase, one line goes to
+// progress (stderr), so a long wait shows which step runs and since
+// when.
 func pollIngestJob(
 	ctx context.Context,
 	authed *api.AuthedClient,
 	jobID uuid.UUID,
 	interval time.Duration,
+	progress io.Writer,
 ) (*api.IngestJobStatusResponse, error) {
+	var lastPhase api.IngestJobStatusResponsePhase
 	for {
 		resp, err := retryOn401(ctx, authed,
 			func(ctx context.Context) (*api.GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error) {
@@ -665,6 +672,10 @@ func pollIngestJob(
 		}
 		if resp.JSON200.Status != api.IngestJobStatusResponseStatusRunning {
 			return resp.JSON200, nil
+		}
+		if resp.JSON200.Phase != "" && resp.JSON200.Phase != lastPhase {
+			lastPhase = resp.JSON200.Phase
+			fmt.Fprintf(progress, "ingest job phase: %s\n", ingestJobPhase(resp.JSON200))
 		}
 		if serr := sleepCtx(ctx, interval); serr != nil {
 			return nil, serr

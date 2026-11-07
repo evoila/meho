@@ -8,7 +8,7 @@ chart under ``deploy/``, the Go CLI under ``cli/``, the workflows under
 ``.github/``, the docs, the examples. A pull request that changes no file
 under ``backend/`` can still break them.
 
-CI skips the five unit shards on such a pull request (#5296). It runs only
+CI skips the six unit shards on such a pull request (#5296). It runs only
 the files in ``OUTSIDE_BACKEND_TESTS``, in the job
 ``python-outside-backend`` of ``.github/workflows/ci.yml``. The merge queue
 always runs every test.
@@ -49,7 +49,9 @@ BACKEND_DIR = TESTS_DIR.parent
 
 # Paths are relative to backend/, sorted.
 OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
+    "tests/test_agent_toolset_working_surface.py",
     "tests/test_api_v1_operations_preview_response.py",
+    "tests/test_api_v1_settings.py",
     "tests/test_chart_approval_handoff.py",
     "tests/test_chart_bring_your_own_render.py",
     "tests/test_chart_broadcast_hardening.py",
@@ -58,6 +60,8 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_core_openbao.py",
     "tests/test_chart_core_postgres.py",
     "tests/test_chart_core_secrets.py",
+    "tests/test_chart_core_wiring.py",
+    "tests/test_chart_dispatch_limits.py",
     "tests/test_chart_image_digest_pin.py",
     "tests/test_chart_image_registry.py",
     "tests/test_chart_mcp_resource_uri.py",
@@ -65,7 +69,10 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_migrate_job_no_sa.py",
     "tests/test_chart_network_policy_extra_egress.py",
     "tests/test_chart_observability_scrape.py",
+    "tests/test_chart_openai_endpoint.py",
     "tests/test_chart_result_cache.py",
+    "tests/test_chart_runtime_database_login.py",
+    "tests/test_chart_safe_updates.py",
     "tests/test_chart_sandbox_mode.py",
     "tests/test_chart_vault_addr_optional.py",
     "tests/test_ci_backend_python_skip.py",
@@ -79,6 +86,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_merge_queue_cleanup.py",
     "tests/test_ci_merge_queue_watchdog.py",
     "tests/test_ci_run_eval_gate.py",
+    "tests/test_ci_spec_shelf_lists.py",
     "tests/test_connector_kit.py",
     "tests/test_connector_overlay_build.py",
     "tests/test_connector_overlay_review.py",
@@ -101,6 +109,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_operations_meta_tools.py",
     "tests/test_proxy_headers.py",
     "tests/test_reference_docs_drift.py",
+    "tests/test_shared_lists_only_shrink.py",
     "tests/test_soak_harness_driver.py",
     "tests/test_soak_harness_host_detach_from_vds.py",
     "tests/test_vault_tenant_admin_policy_doc.py",

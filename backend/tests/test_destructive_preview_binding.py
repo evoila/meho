@@ -59,6 +59,7 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.approval_queue import (
+    ApprovalGroupForbiddenError,
     PreviewBindingMissingError,
     approve_request,
     create_pending_request,
@@ -153,6 +154,7 @@ class _RecordingHttpConnector(HttpConnector):
     """Connector whose transport records calls instead of sending (no egress)."""
 
     product = "gh"
+    accepts_ingested_operations = True
     version = "3"
     impl_id = "gh-rest"
     supported_version_range = ">=3,<4"
@@ -630,7 +632,8 @@ async def test_full_park_approve_resume_honours_bound_hash(embedding: list[float
     assert effect["blast_radius"]["irreversibility"] == "permanent"
 
     # 4) A different operator approves (four-eyes) — the binding re-verifies.
-    approver = _operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
@@ -676,7 +679,9 @@ async def test_approve_refuses_destructive_row_without_binding(embedding: list[f
         await s.commit()
         request_id = request.id
 
-    approver = _operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         with pytest.raises(PreviewBindingMissingError):
             await approve_request(s, request_id, operator=approver, params=None)
@@ -700,8 +705,91 @@ async def test_approve_allows_non_destructive_row_without_binding(embedding: lis
         await s.commit()
         request_id = request.id
 
-    approver = _operator(sub="op-approver")
+    # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
+
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
     async with get_sessionmaker()() as s:
         approved = await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
     assert approved.status == "approved"
+
+
+# ---------------------------------------------------------------------------
+# #3980 — an agent's destructive request waits for a person, after the
+# preview check, and the group rules decide who may approve it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_destructive_without_preview_hash_is_refused(embedding: list[float]) -> None:
+    """An agent's ``destructive`` request still needs the preview hash before it can wait."""
+    connector = _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _insert_destructive_descriptor(embedding=embedding)
+
+    result = await dispatch(
+        operator=_operator(sub="agent:deleter", principal_kind=PrincipalKind.AGENT),
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_ID,
+        target=_FakeTarget(),
+        params=_PARAMS,
+    )
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "preview_binding_required"
+    assert connector.calls == []
+    assert await _approval_row_count() == 0
+
+
+async def _agent_parks_destructive(embedding: list[float]) -> tuple[_RecordingHttpConnector, UUID]:
+    connector = _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+    agent = _operator(sub="agent:deleter", principal_kind=PrincipalKind.AGENT)
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(agent, args)
+    assert preview["status"] == "ok"
+    call = await call_operation(agent, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    assert connector.calls == []
+    return connector, UUID(call["extras"]["approval_request_id"])
+
+
+@pytest.mark.asyncio
+async def test_agent_destructive_waits_and_sa_operator_web_click_runs_it(
+    embedding: list[float],
+) -> None:
+    """An agent's ``destructive`` request waits; a MEHO-SA-Operator's web click runs it."""
+    connector, request_id = await _agent_parks_destructive(embedding)
+
+    approver = _operator(sub="op-sa").model_copy(
+        update={"self_approver": True, "web_session": True}
+    )
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    assert approved.status == "approved"
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        result = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert result.status == "ok"
+    assert connector.calls == [{"verb": "DELETE", "path": "/vms/vm-42"}]
+
+
+@pytest.mark.asyncio
+async def test_agent_destructive_approval_by_meho_operator_is_refused(
+    embedding: list[float],
+) -> None:
+    """A MEHO-Operator (no SA group, not an admin) may not approve the agent's delete."""
+    connector, request_id = await _agent_parks_destructive(embedding)
+
+    approver = _operator(sub="op-plain").model_copy(update={"web_session": True})
+    async with get_sessionmaker()() as s:
+        with pytest.raises(ApprovalGroupForbiddenError):
+            await approve_request(s, request_id, operator=approver, params=None)
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert row.status == "pending"
+    assert connector.calls == []

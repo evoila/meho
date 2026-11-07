@@ -13,8 +13,8 @@ by checking, in priority order:
 1. The explicit ``MEHO_CONSUMER_KB_DIR`` env var. CI sets this from
    the runner's checkout of the consumer repo's ``kb/`` subdirectory.
 2. The directory pointed at by ``MEHO_CONSUMER_DOCS_ROOT`` (the same
-   env var the G0.7 vSphere canary consumes -- see
-   :mod:`tests.acceptance._vcenter_spec`) which is expected to
+   env var the spec-shelf lanes consume -- see
+   :mod:`tests._spec_shelf`) which is expected to
    contain a ``kb/`` subdirectory. Local-dev convenience for the
    maintainer who has the consumer repo cloned at a known sibling
    path with both the spec shelf and the kb/ directory in one tree.

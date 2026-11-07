@@ -439,10 +439,13 @@ ISSUE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "required": ["status", "number", "id", "node_id", "html_url", "title", "labels", "assignees"],
     "properties": {
         "status": {"type": "string", "enum": ["created"], "description": "Always 'created'."},
-        "number": {"type": "integer", "description": "The number of the new issue."},
+        "number": {
+            "type": "integer",
+            "description": "Number; pass it as sub_issue_number to gh.composite.sub_issue_add.",
+        },
         "id": {
             "type": "integer",
-            "description": "Database id; pass it as sub_issue_id to gh.composite.sub_issue_add.",
+            "description": "The database id of the new issue.",
         },
         "node_id": {
             "type": "string",
@@ -468,9 +471,10 @@ ISSUE_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "preconditions": (
         "Search first with gh.composite.issue_search, so you do not file the same issue "
-        "twice. The connector's identity needs write access to issues in the repository. "
-        "The call waits until an approver accepts it. Labels and assignees need push "
-        "access; without it GitHub drops them without an error."
+        "twice. owner and repo must be the target's own repository; another repository "
+        "is refused. The connector's identity needs write access to issues there. The "
+        "call runs at once, with no approval. Labels and assignees need push access; "
+        "without it GitHub drops them without an error."
     ),
     "parameter_hints": {
         "labels": "Use labels that already exist in the repository.",
@@ -481,7 +485,7 @@ ISSUE_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "next_step": (
         "Report number and html_url. To put the issue under a parent, call "
-        "gh.composite.sub_issue_add with sub_issue_id=id. To add it to a board, call "
+        "gh.composite.sub_issue_add with sub_issue_number=number. To add it to a board, call "
         "gh.composite.project_item_add with content_id=node_id. Compare labels and "
         "assignees with what you asked for; GitHub may have dropped some."
     ),
@@ -539,8 +543,9 @@ ISSUE_COMMENT_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "preconditions": (
         "Read the issue first with gh.composite.issue_view, so the comment fits the "
-        "discussion. The connector's identity needs write access to issues in the "
-        "repository. The call waits until an approver accepts it."
+        "discussion. owner and repo must be the target's own repository; another "
+        "repository is refused. The connector's identity needs write access to issues "
+        "there. The call runs at once, with no approval."
     ),
     "output_shape": "{status: 'commented', issue_number, comment_id, html_url, created_at}.",
     "next_step": (

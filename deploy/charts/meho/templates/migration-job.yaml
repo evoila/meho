@@ -103,7 +103,7 @@ spec:
         {{- . | nindent 8 }}
       {{- end }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
       containers:
         - name: migrate
           # Same image as the backplane Deployment — the migration runner
@@ -132,8 +132,11 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.credentialsSecret }}
+                  name: {{ include "meho.databaseSecretName" . }}
                   key: url
+            {{- with include "meho.postgres.runtimeRoleEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             # Operator-supplied extra env vars (full EnvVar shape).
             # Shared with the backplane Deployment so e.g. `SSL_CERT_FILE`

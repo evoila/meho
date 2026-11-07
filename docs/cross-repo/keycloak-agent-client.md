@@ -284,9 +284,9 @@ manage their own sub-principals:
 - [`mcp-client-setup.md`](mcp-client-setup.md) — MCP browser-flow client
   provisioning (for human-facing MCP sessions, not agent clients)
 - [`../codebase/approvals.md`](../codebase/approvals.md) §
-  "Single-operator tenants: use an agent-requester, not break-glass" —
-  why an `agent:<name>` principal (a distinct `sub`) is the four-eyes
-  answer for single-operator tenants, instead of the
+  "Single-operator tenants" — a single operator in MEHO-SA-Operators
+  approves their own change; an `agent:<name>` principal (a distinct
+  `sub`) as the requester is the other way, instead of the
   `APPROVAL_ALLOW_SELF_APPROVAL` break-glass
 - Issue [#815](https://github.com/evoila/meho/issues/815) — G11.2-T1
   implementation

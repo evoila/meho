@@ -30,15 +30,23 @@ which is why this is the first guide.
 |---|---|---|
 | **CLI — `meho targets import`** | Bulk-import from a `targets.yaml` file you keep in version control. | The canonical path. Your target registry becomes a reviewable, re-runnable file. |
 | **Operator console — `/ui/connectors`** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
-| **REST — `POST /api/v1/targets`** | The API the other two paths call. | Automation that already speaks REST. |
+| **REST — `POST /api/v1/targets`** | The API the other two paths call. | Scripts that a person runs with their own login. |
 
-**There are no MCP tools for registering targets or staging secrets —
-deliberately.** Registration is an operator-trust decision, so it
-lives on the operator surfaces above; agents get the read-only
-`list_targets` tool and consume whatever you registered. This is also
-why the CLI is worth installing before your first agent session. If
-that boundary ever moves, the change will be tracked on the
-[feature-maturity index](../reference/maturity.md).
+Create, edit and delete on REST are for people only. A service login
+gets `403 human_principal_required`, also with the **tenant_admin**
+role. It registers a target with the `targets.register` operation and
+removes one with `targets.remove` (connector `targets-registry-1.x`).
+MEHO checks both against the approval rules.
+
+**Register targets on the operator surfaces above.** Registration is an
+operator-trust decision. For agents, the default MCP tools only read
+targets (`list_targets`). A session that asked for the `mcp:admin`
+scope also has `meho_targets_register` (tenant_admin only). Through
+`call_operation`, the connector `targets-registry-1.x` offers
+`targets.register`, `targets.remove` and `targets.probe`; an agent's
+register waits for a person's approval, and `targets.remove` always
+waits for one. MEHO has no MCP tool to stage a secret. This is also why
+the CLI is worth installing before your first agent session.
 
 ## Write a `targets.yaml`
 
@@ -56,7 +64,7 @@ targets:
 
   - name: lab-vcenter
     product: vmware
-    host: 10.20.0.15                # reached by IP...
+    host: 192.0.2.15                # reached by IP...
     tls_server_name: vc01.lab.example.com   # ...but the cert's SAN is the FQDN
     tls_ca_pin: |
       -----BEGIN CERTIFICATE-----
@@ -65,17 +73,23 @@ targets:
     notes: vCenter reached by IP; SNI + cert verification pinned to the SAN name.
 ```
 
+The `vmware` entry needs a VMware connector package. Without one, MEHO
+refuses `product: vmware` with 422 `unknown_product`.
+
 Mapping rules the importer applies:
 
 - **Recognised top-level keys** map 1:1 to real columns: `name`,
   `aliases`, `product`, `host`, `port`, `fqdn`, `secret_ref`,
   `auth_model`, `vpn_required`, `notes`, `preferred_impl_id`,
   `verify_tls`, `tls_ca_pin`, `tls_server_name`, `secret_field_map`,
-  `extras`.
+  `version` (a quoted string, for example `version: "9.0"`),
+  `flight_recorder_capture`, `extras`.
 - **`name`, `product`, and `host` are required** and validated
   locally before any HTTP request.
 - **Unknown keys are not errors** — they spill into the target's
-  `extras` JSON column, so you can carry your own annotations.
+  `extras` JSON column, and the importer prints a warning for each one.
+  To carry your own annotations without the warning, put them under an
+  `extras:` block.
 - **`fingerprint` is server-managed** and dropped with a warning; the
   probe verb is its only writer.
 - `verify_tls: false` and `tls_ca_pin` are mutually exclusive (422):
@@ -195,6 +209,16 @@ the connector expects on Vault. A kubeconfig ref looks like
 On a GSM deploy, set `secret_ref` explicitly in the YAML (the
 server-derived default is the Vault layout).
 
+MEHO reads a `gsm:` secret only from a Google Cloud project listed in
+the setting `GSM_PARAM_ALLOWED_PROJECTS` (comma-separated project ids,
+set through the chart's `extraEnv`). The list is empty by default, so
+list your projects before you register targets. A target whose
+`secret_ref` names a project that is not listed is refused at
+registration (422 `secret_ref_project_not_allowed`), and a stored
+target in such a project fails every dispatch with
+`connector_error: GcpSecretManagerReadError` until the project is
+listed. The same list applies to `gsm:` refs in operation parameters.
+
 ### Targets that need no credential
 
 Some products need no login, for example a Prometheus that you reach
@@ -292,6 +316,8 @@ Real failure modes, with the errors they actually produce:
 | 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. |
 | 422 `unknown_product`, listing `valid_products` | The `product` token isn't one a registered connector advertises. Product tokens are exact — `k8s`, not `kubernetes`. | Pick a token from the error's `valid_products` list. |
 | 422 `secret_ref_outside_tenant_scope` | You supplied a Vault ref outside `tenants/<tenant-id>/…`. It would fail with "permission denied" at every dispatch. | Use the `expected_secret_ref` the error names — or omit `secret_ref` and take the server default. |
+| 422 `secret_ref_project_not_allowed` | You supplied a `gsm:` ref in a Google Cloud project that `GSM_PARAM_ALLOWED_PROJECTS` does not list. MEHO would refuse every read of it. | List the project in `GSM_PARAM_ALLOWED_PROJECTS` and upgrade the release — or point `secret_ref` at a secret in a listed project. |
+| Dispatch fails, `connector_error: GcpSecretManagerReadError` — *"…in the Google Cloud project '…', which GSM_PARAM_ALLOWED_PROJECTS does not list…"* | The target's `gsm:` login names a project that is not on the list (for example a target registered before the list was set). Nothing was read from Google. | List the project in `GSM_PARAM_ALLOWED_PROJECTS` and upgrade the release. |
 | Probe exits with 501 — *"no connector registered for product=…"* | The target row is fine; no connector serves that product on this backplane version. Any cached fingerprint is left untouched. | Check the [connector catalog](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-catalog.md) for your version; for spec-ingested (generic) connectors, ingest one first. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…has a KV-v2 API-path-shaped secret_ref…"* | Your ref embeds the mount or a `data/` segment (`secret/data/…`). | Store the logical path only: `tenants/<tenant-id>/<name>`. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…is missing required field '…'"* | The secret exists but doesn't carry the field the connector needs (`username`/`password`, or `kubeconfig` for Kubernetes). | Re-stage the secret with the connector's field names. |
@@ -299,7 +325,7 @@ Real failure modes, with the errors they actually produce:
 | Dispatch fails, `connector_auth_failed` (HTTP 401 at session establish) | The credential resolved but the vendor rejected it — usually a password rotated upstream while the store copy lagged. | Re-stage the current credential at the same path, then retry. |
 | Dispatch fails TLS: `extras.error_code` is `connector_tls_verify_failed` and `extras.exception_message` contains *"IP address mismatch"* (CPython `ssl` text relayed verbatim, not a MEHO string — MEHO's own summary says the chain "is not trusted") | You reach the appliance by IP but its certificate only names the FQDN. | Set `tls_server_name: <cert-fqdn>` on the target and re-import with `--update`. |
 | Probe shows `reachable: false` / `auth_failed` on a GSM deploy with per-operator Workload Identity Federation | Probes run under a system placeholder identity that cannot complete the per-operator token exchange, so credentialed-target probes cannot read the secret on that configuration. Reachability of *uncredentialed* endpoints still probes fine. | Known limitation — documented in [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md); verify credentialed dispatch with a real operation call instead. |
-| Registration accepted, but *every* dispatch fails with a `no_connector` error naming the wrong thing | A `product` no connector implementation actually serves can slip through registration in some cases; the dispatch-time error then misattributes the cause. | Known issue, tracked in [evoila/meho#2701](https://github.com/evoila/meho/issues/2701). Re-check the target's `product` against the connector catalog. |
+| Dispatch fails with `no_connector: no implementation for product='…' version='…'` | No connector implementation matches the target's product and version. | Check the target's `product` and `version` against the connector catalog. Probe the target, or set its `version`. |
 
 !!! tip "Prove the secret is readable — without printing it"
 

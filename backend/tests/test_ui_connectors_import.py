@@ -29,6 +29,7 @@ product the imported entries POST.
 from __future__ import annotations
 
 import asyncio
+import io
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -38,7 +39,7 @@ from typing import Any
 import pytest
 import respx
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
@@ -64,6 +65,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.connectors.import_router import _YAML_MAX_BYTES, _resolve_yaml_text
 from meho_backplane.ui.routes.connectors.import_view import ImportParseError, build_plan
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import AUDIENCE as _DEFAULT_AUDIENCE
@@ -785,3 +787,22 @@ def test_preview_classification_scoped_to_caller_tenant() -> None:
     assert response.status_code == 200, response.text
     # Tenant A has no ``delta`` -> the entry classifies as CREATE.
     assert 'data-action="CREATE"' in response.text
+
+
+# ---------------------------------------------------------------------------
+# _resolve_yaml_text — upload size cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_yaml_upload_under_cap_is_read() -> None:
+    upload = UploadFile(file=io.BytesIO(b"targets: []\n"), filename="targets.yaml")
+    assert await _resolve_yaml_text(None, upload) == "targets: []\n"
+
+
+@pytest.mark.asyncio
+async def test_yaml_upload_over_cap_is_refused_with_413() -> None:
+    upload = UploadFile(file=io.BytesIO(b"x" * (_YAML_MAX_BYTES + 1)), filename="targets.yaml")
+    with pytest.raises(HTTPException) as exc_info:
+        await _resolve_yaml_text(None, upload)
+    assert exc_info.value.status_code == 413

@@ -1,50 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Per-entity capacity sensing on ``vmware.composite.datastore.usage`` (#2758).
+"""Per-entity capacity sensing survives the result reduction (#2758).
 
-Initiative #2780 (checks reliability & evidence). The v0.26.0 ops report
-could not assert on a single datastore's free/capacity: the op returned a
-sampled envelope with no way to narrow to one entity. The exact-match
-``filter_names`` param already existed (#524) but two things were unproven:
+A Sensor pins an operation, its params and an assertion, for example
+"``$.volumes[0].free_space`` below 100 GiB is critical". The sensor runner
+calls ``dispatch``, the dispatcher runs the JSONFlux reducer on the result,
+and the runner feeds the reduced result to ``evaluate_assertion``. Two things
+must hold, or the assertion never sees its value:
 
-* that a **one-name** ``filter_names`` result returns **inline** (unsampled)
-  under the dispatcher's default JSONFlux thresholds, so a Sensor can select
-  ``$.datastores[0].free_space`` and threshold it; and
-* that a realistic **VM-dense** datastore does not blow the single row past
-  the 4096-byte byte threshold via the unbounded ``vm_names`` enrichment,
-  which would collapse ``{"datastores": [row]}`` to a sampled envelope and
+* a **one-entity** result (an exact-name filter) returns **inline** under the
+  reducer's default thresholds, not as a sampled envelope with a result
+  handle; and
+* an entity with many members (a volume that holds hundreds of VMs) does not
+  push its one row past the 4096-byte threshold through an unbounded name
+  list. That would collapse ``{"volumes": [row]}`` to a sampled envelope and
   strip the sensor's selector.
 
-These tests compose the three real components the sensor dispatch+evaluate
-path chains (``runner.py`` calls ``dispatch`` -> the dispatcher runs the
-JSONFlux reducer -> the runner feeds ``result.result`` to
-``evaluate_assertion``): the real composite handler, a real
-``JsonFluxReducer()`` (the same default 50-row / 4096-byte instance
-installed at ``main.py``), and the real ``evaluate_assertion``. They are
-deterministic (no vcsim, no DB) so the regression is pinned in CI's unit
-sweep, not gated on a live upstream.
+These tests chain the real components of that path: a capacity operation
+that the test declares itself (the public tree holds no VMware connector),
+a real ``JsonFluxReducer()`` with the default thresholds ``main.py`` installs,
+and the real ``evaluate_assertion``. They need no database and no live
+system, so the regression stays pinned in the unit sweep.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
-from uuid import UUID
 
 import msgspec
 import pytest
 
-from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.checks import AssertionSpec, evaluate_assertion
-from meho_backplane.connectors.vmware_rest.composites._read import (
-    datastore_usage_composite,
-)
-from meho_backplane.connectors.vmware_rest.composites.schemas import (
-    DATASTORE_USAGE_MAX_VM_NAMES,
-    DATASTORE_USAGE_PARAMETER_SCHEMA,
-    DATASTORE_USAGE_RESPONSE_SCHEMA,
-)
 from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 
@@ -58,13 +47,50 @@ _GIB = 1024**3
 #: ``main.py``). A single row serialising past this collapses to an envelope.
 _BYTE_THRESHOLD = 4096
 
-#: A per-datastore free-space threshold: degrade below 500 GiB, crit below 100.
+#: The cap on ``member_names`` in one row. The count stays exact; the names
+#: are a bounded sample, so one row always fits under the byte threshold.
+MAX_MEMBER_NAMES = 20
+
+#: A per-volume free-space threshold: degrade below 500 GiB, crit below 100.
 _FREE_SPACE_COMPARE: dict[str, Any] = {
     "type": "threshold",
     "op": "lt",
     "degraded": float(500 * _GIB),
     "critical": float(100 * _GIB),
 }
+
+#: A critical-below-100-GiB free-space compare used by the dense-row guards.
+_CRIT_ONLY_COMPARE: dict[str, Any] = {
+    "type": "threshold",
+    "op": "lt",
+    "critical": float(100 * _GIB),
+}
+
+
+async def volume_usage(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """The synthetic capacity read: one row per volume of *target*.
+
+    Has the shape of a typed op handler. ``filter_names`` narrows the rows to
+    the named volumes. ``member_count`` is the exact total; ``member_names``
+    is capped to :data:`MAX_MEMBER_NAMES`.
+    """
+    names = params.get("filter_names")
+    rows = []
+    for volume in target.volumes:
+        if names is not None and volume["name"] not in names:
+            continue
+        members = volume["members"]
+        rows.append(
+            {
+                "id": volume["id"],
+                "name": volume["name"],
+                "capacity": volume["capacity"],
+                "free_space": volume["free_space"],
+                "member_count": len(members),
+                "member_names": members[:MAX_MEMBER_NAMES],
+            }
+        )
+    return {"volumes": rows}
 
 
 def _reducer() -> JsonFluxReducer:
@@ -88,129 +114,25 @@ def _reducer() -> JsonFluxReducer:
     )
 
 
-def _make_operator() -> Operator:
-    """Synthetic operator for the composite-handler call."""
-    return Operator(
-        sub="op-2758",
-        name="Per-entity Sensor Test",
-        email=None,
-        raw_jwt="<test-raw-jwt>",
-        tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
-        tenant_role=TenantRole.OPERATOR,
-    )
+def _target(*volumes: dict[str, Any]) -> Any:
+    """A target that carries the canned volumes the synthetic op reads."""
+    return SimpleNamespace(name="capacity-sensor-target", volumes=list(volumes))
 
 
-class _SequenceConnector:
-    """Minimal ``VmwareRestConnector`` stand-in serving canned sub-ops in order.
-
-    ``datastore.usage`` issues GET sub-ops (list datastores -> per-DS detail ->
-    global VM listing) plus one vmomi ``RetrievePropertiesEx`` POST reading the
-    authoritative ``VirtualMachine.datastore`` placement (#2975), each routed
-    through ``_read_sub_op``. This double serves the responses sequentially and
-    records each GET call's ``(path, query)`` so a test can assert the
-    ``filter.names`` narrowing flowed to the listing.
-    """
-
-    def __init__(self, responses: list[Any]) -> None:
-        self._responses = responses
-        self._index = 0
-        self.calls: list[dict[str, Any]] = []
-
-    def _next(self) -> Any:
-        payload = self._responses[self._index]
-        self._index += 1
-        return payload
-
-    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
-        del target, operator
-        return f"/api{path}"
-
-    async def adapt_op_query(
-        self, target: Any, query: dict[str, Any] | None, operator: Operator
-    ) -> dict[str, Any] | None:
-        del target, operator
-        return query
-
-    async def _get_json(
-        self,
-        target: Any,
-        path: str,
-        *,
-        operator: Operator,
-        params: dict[str, Any] | None = None,
-    ) -> Any:
-        del target, operator
-        self.calls.append({"path": path, "query": params})
-        return self._next()
-
-    async def _post_vmomi_json(
-        self,
-        target: Any,
-        path: str,
-        *,
-        operator: Operator,
-        json: dict[str, Any] | None = None,
-        promote_managed_object_not_found: bool = False,
-        session_used: Any = None,
-        session_token: str | None = None,
-    ) -> Any:
-        del target, path, operator, json, promote_managed_object_not_found
-        del session_used, session_token
-        return self._next()
-
-
-def _placement_on_one_datastore(vm_moids: list[str], ds_moid: str) -> dict[str, Any]:
-    """A ``RetrieveResult`` pinning every VM to a single datastore (boxed MoRefs)."""
+def _volume(name: str, *, capacity: int, free_space: int, members: list[str]) -> dict[str, Any]:
     return {
-        "objects": [
-            {
-                "obj": {"type": "VirtualMachine", "value": vm},
-                "propSet": [
-                    {
-                        "name": "datastore",
-                        "val": {
-                            "_typeName": "ArrayOfManagedObjectReference",
-                            "_value": [
-                                {
-                                    "_typeName": "ManagedObjectReference",
-                                    "type": "Datastore",
-                                    "value": ds_moid,
-                                }
-                            ],
-                        },
-                    }
-                ],
-            }
-            for vm in vm_moids
-        ]
+        "id": f"volume-{name}",
+        "name": name,
+        "capacity": capacity,
+        "free_space": free_space,
+        "members": members,
     }
 
 
-async def _usage_one_datastore(
-    *,
-    name: str,
-    capacity: int,
-    free_space: int,
-    vm_names: list[str],
-) -> tuple[dict[str, Any], _SequenceConnector]:
-    """Run the real handler for a single filtered datastore, return (payload, conn)."""
-    listing = [{"datastore": "datastore-42", "name": name, "type": "vSAN"}]
-    detail = {"capacity": capacity, "free_space": free_space, "type": "vSAN"}
-    # Global VM inventory (moid + name), then vim placement pinning every VM to
-    # this datastore -- the authoritative scoping the composite joins on (#2975).
-    vm_moids = [f"vm-{i}" for i in range(len(vm_names))]
-    global_vms = [
-        {"vm": moid, "name": vm_name} for moid, vm_name in zip(vm_moids, vm_names, strict=True)
-    ]
-    placement = _placement_on_one_datastore(vm_moids, "datastore-42")
-    conn = _SequenceConnector([listing, detail, global_vms, placement])
-    payload = await datastore_usage_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"filter_names": [name]},
-        connector=conn,  # type: ignore[arg-type]
+def _free_space_spec(compare: dict[str, Any]) -> AssertionSpec:
+    return AssertionSpec.model_validate(
+        {"select": {"path": "$.volumes[0].free_space"}, "compare": compare}
     )
-    return payload, conn
 
 
 @pytest.mark.parametrize(
@@ -225,34 +147,31 @@ async def _usage_one_datastore(
 async def test_one_name_filter_returns_inline_and_sensor_bands(
     free_space: int, expected_state: str
 ) -> None:
-    """AC#1: one-name filter_names -> inline row; a free_space Sensor bands right.
+    """One-name filter -> one inline row; a free_space Sensor bands right.
 
     The filtered result arrives inline (no ``{row_count, ..., source_key}``
     envelope) under the default reducer thresholds, so
-    ``$.datastores[0].free_space`` under a ``ThresholdCompare`` evaluates
-    through the real ``evaluate_assertion`` to the expected band.
+    ``$.volumes[0].free_space`` under a ``ThresholdCompare`` evaluates through
+    the real ``evaluate_assertion`` to the expected band.
     """
     capacity = 20 * 1024 * _GIB
-    raw, conn = await _usage_one_datastore(
-        name="vsan-prod-01",
-        capacity=capacity,
-        free_space=free_space,
-        vm_names=["vm-a", "vm-b"],
+    target = _target(
+        _volume("other-01", capacity=capacity, free_space=10 * _GIB, members=["vm-z"]),
+        _volume("prod-01", capacity=capacity, free_space=free_space, members=["vm-a", "vm-b"]),
     )
 
-    # The one name narrowed the listing sub-op (forwarded as filter.names).
-    assert conn.calls[0]["query"] == {"filter.names": ["vsan-prod-01"]}
-    # Exactly one row, full aggregated shape.
+    raw = await volume_usage(target, {"filter_names": ["prod-01"]})
+
+    # Exactly the one named row, full aggregated shape.
     assert raw == {
-        "datastores": [
+        "volumes": [
             {
-                "id": "datastore-42",
-                "name": "vsan-prod-01",
-                "type": "vSAN",
+                "id": "volume-prod-01",
+                "name": "prod-01",
                 "capacity": capacity,
                 "free_space": free_space,
-                "vm_count": 2,
-                "vm_names": ["vm-a", "vm-b"],
+                "member_count": 2,
+                "member_names": ["vm-a", "vm-b"],
             }
         ]
     }
@@ -264,43 +183,31 @@ async def test_one_name_filter_returns_inline_and_sensor_bands(
     assert "row_count" not in reduced
     assert "source_key" not in reduced
 
-    spec = AssertionSpec.model_validate(
-        {"select": {"path": "$.datastores[0].free_space"}, "compare": _FREE_SPACE_COMPARE}
-    )
-    outcome = evaluate_assertion(spec, reduced, now=NOW)
+    outcome = evaluate_assertion(_free_space_spec(_FREE_SPACE_COMPARE), reduced, now=NOW)
     assert outcome.state == expected_state
     assert outcome.value == free_space
 
 
-#: A critical-below-100-GiB free-space compare used by the dense-row guards.
-_CRIT_ONLY_COMPARE: dict[str, Any] = {
-    "type": "threshold",
-    "op": "lt",
-    "critical": float(100 * _GIB),
-}
-
-
 @pytest.mark.asyncio
-async def test_vm_dense_row_capped_stays_inline_and_assertable() -> None:
-    """AC#2 guard: a VM-dense datastore's one-name result stays inline + assertable.
+async def test_member_dense_row_capped_stays_inline_and_assertable() -> None:
+    """A member-dense volume's one-name result stays inline and assertable.
 
-    ``vm_count`` stays the exact total; ``vm_names`` is bounded to the sample
-    cap, so the single-row payload serialises under the reducer byte threshold,
-    the real reducer passes it through inline, and ``$.datastores[0].free_space``
-    is still selectable and thresholdable (#2758).
+    ``member_count`` stays the exact total; ``member_names`` is bounded to the
+    cap, so the single-row payload serialises under the reducer byte
+    threshold, the real reducer passes it through inline, and
+    ``$.volumes[0].free_space`` is still selectable and thresholdable.
     """
     dense_names = [f"prod-workload-vm-{i:04d}" for i in range(300)]
-    raw, _ = await _usage_one_datastore(
-        name="vsan-dense-01",
-        capacity=50 * 1024 * _GIB,
-        free_space=40 * _GIB,
-        vm_names=dense_names,
+    target = _target(
+        _volume("dense-01", capacity=50 * 1024 * _GIB, free_space=40 * _GIB, members=dense_names)
     )
-    row = raw["datastores"][0]
 
-    # vm_count is the exact total; vm_names is the bounded sample (truncated).
-    assert row["vm_count"] == 300
-    assert row["vm_names"] == dense_names[:DATASTORE_USAGE_MAX_VM_NAMES]
+    raw = await volume_usage(target, {"filter_names": ["dense-01"]})
+    row = raw["volumes"][0]
+
+    # The count is the exact total; the names are the bounded sample.
+    assert row["member_count"] == 300
+    assert row["member_names"] == dense_names[:MAX_MEMBER_NAMES]
 
     # Under the byte threshold, so the real reducer passes it through inline.
     assert len(msgspec.json.encode(raw)) <= _BYTE_THRESHOLD
@@ -308,32 +215,29 @@ async def test_vm_dense_row_capped_stays_inline_and_assertable() -> None:
     assert handle is None
     assert reduced == raw
 
-    spec = AssertionSpec.model_validate(
-        {"select": {"path": "$.datastores[0].free_space"}, "compare": _CRIT_ONLY_COMPARE}
-    )
-    assert evaluate_assertion(spec, reduced, now=NOW).state == "critical"
+    outcome = evaluate_assertion(_free_space_spec(_CRIT_ONLY_COMPARE), reduced, now=NOW)
+    assert outcome.state == "critical"
 
 
 @pytest.mark.asyncio
 async def test_uncapped_dense_row_would_collapse_and_lose_selector() -> None:
     """Why the cap is load-bearing: an unbounded single row blows the threshold.
 
-    A datastore row carrying its full (unbounded) ``vm_names`` list serialises
-    past the reducer byte threshold, so the reducer collapses
-    ``{"datastores": [row]}`` to a sampled envelope and
-    ``$.datastores[0].free_space`` is no longer selectable (evaluates
-    ``unknown``) -- the exact failure the cap prevents (#2758).
+    A volume row carrying its full (unbounded) ``member_names`` list
+    serialises past the reducer byte threshold, so the reducer collapses
+    ``{"volumes": [row]}`` to a sampled envelope and
+    ``$.volumes[0].free_space`` is no longer selectable (evaluates
+    ``unknown``) -- the exact failure the cap prevents.
     """
     uncapped: dict[str, Any] = {
-        "datastores": [
+        "volumes": [
             {
-                "id": "datastore-42",
-                "name": "vsan-dense-01",
-                "type": "vSAN",
+                "id": "volume-dense-01",
+                "name": "dense-01",
                 "capacity": 50 * 1024 * _GIB,
                 "free_space": 40 * _GIB,
-                "vm_count": 300,
-                "vm_names": [f"prod-workload-vm-{i:04d}" for i in range(300)],
+                "member_count": 300,
+                "member_names": [f"prod-workload-vm-{i:04d}" for i in range(300)],
             }
         ]
     }
@@ -343,21 +247,5 @@ async def test_uncapped_dense_row_would_collapse_and_lose_selector() -> None:
     assert handle is not None
     assert "row_count" in envelope
 
-    spec = AssertionSpec.model_validate(
-        {"select": {"path": "$.datastores[0].free_space"}, "compare": _CRIT_ONLY_COMPARE}
-    )
-    assert evaluate_assertion(spec, envelope, now=NOW).state == "unknown"
-
-
-def test_response_schema_maxitems_matches_cap_constant() -> None:
-    """The declared response-schema bound is the single source the handler caps to."""
-    vm_names_schema = DATASTORE_USAGE_RESPONSE_SCHEMA["properties"]["datastores"]["items"][
-        "properties"
-    ]["vm_names"]
-    assert vm_names_schema["maxItems"] == DATASTORE_USAGE_MAX_VM_NAMES
-
-
-def test_param_surface_stays_filter_names_only() -> None:
-    """AC#4: no new params -- the op's parameter surface is filter_names-only."""
-    assert list(DATASTORE_USAGE_PARAMETER_SCHEMA["properties"]) == ["filter_names"]
-    assert DATASTORE_USAGE_PARAMETER_SCHEMA["additionalProperties"] is False
+    outcome = evaluate_assertion(_free_space_spec(_CRIT_ONLY_COMPARE), envelope, now=NOW)
+    assert outcome.state == "unknown"

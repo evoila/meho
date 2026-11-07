@@ -100,7 +100,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 from typing import TYPE_CHECKING, Any
 
 from kubernetes_asyncio import client
@@ -115,6 +114,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_KUBECONFIG_DATA_KEY",
     "DEFAULT_STAGE_FIELD",
+    "OPS",
     "SECRET_READ_OPS",
     "KubernetesSecretDataError",
     "k8s_secret_read_to_ref",
@@ -202,6 +202,7 @@ async def k8s_secret_read_to_ref(
     from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
     from meho_backplane.connectors.vault.ops import vault_kv_put
     from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+    from meho_backplane.operations._validate import compute_value_fingerprint
 
     api_client = await connector._get_api_client(target, operator)
     core_v1 = client.CoreV1Api(api_client)
@@ -226,7 +227,7 @@ async def k8s_secret_read_to_ref(
         "name": name,
         "namespace": namespace,
         "data_key": data_key,
-        "value_sha256": hashlib.sha256(value_bytes).hexdigest(),
+        "value_fingerprint": compute_value_fingerprint(value_bytes),
         "length": len(value_bytes),
     }
 
@@ -293,7 +294,13 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "name": {"type": "string"},
         "namespace": {"type": "string"},
         "data_key": {"type": "string"},
-        "value_sha256": {"type": "string"},
+        "value_fingerprint": {
+            "type": "string",
+            "description": (
+                "Keyed fingerprint of the staged kubeconfig (HMAC-SHA256 under "
+                "the server key, 64 hex characters), never the value."
+            ),
+        },
         "length": {"type": "integer"},
     },
     "required": [
@@ -303,7 +310,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "name",
         "namespace",
         "data_key",
-        "value_sha256",
+        "value_fingerprint",
         "length",
     ],
     "additionalProperties": False,
@@ -329,8 +336,8 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
     },
     "output_shape": (
         "{secret_ref, field, registered_as, name, namespace, data_key, "
-        "value_sha256, length} — the kubeconfig itself is NEVER in the result; "
-        "only its SHA-256 + byte length as provenance."
+        "value_fingerprint, length} — the kubeconfig itself is NEVER in the "
+        "result; only its keyed fingerprint + byte length as provenance."
     ),
 }
 
@@ -363,3 +370,6 @@ SECRET_READ_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = SECRET_READ_OPS

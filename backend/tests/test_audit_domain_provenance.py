@@ -192,6 +192,7 @@ async def test_count_event_classes_counts_every_class_and_keeps_legacy(
         "policy_decision": 1,
         "approval_decision": 1,
         "security_event": 0,
+        "config_change": 0,
         "legacy_request": 1,
     }
 

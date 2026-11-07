@@ -39,9 +39,11 @@ Filter coverage
   ``op_id``. The OR-shaped predicate keeps the substrate honest across both
   write paths.
 * ``result_status`` (one of ``"ok"`` / ``"pending"`` / ``"error"`` /
-  ``"denied"``) maps to ``status_code`` ranges that mirror
+  ``"denied"`` / ``"withdrawn"``). Most values map to ``status_code`` ranges that mirror
   :func:`~meho_backplane.audit._classify_http_status` (``"pending"`` is
-  the G11.2-T3/T4 202 "awaiting approval" synthetic code).
+  the G11.2-T3/T4 202 "awaiting approval" synthetic code). ``"withdrawn"``
+  is the ``approval.withdraw`` row: the sender took its request back
+  (#5717). It is never ``"ok"``, because the operation never ran.
 * ``agent_session_id`` is a real column (G8.2-T1 #1009, migration ``0014``).
   The filter narrows to ``audit_log.agent_session_id = :agent_session_id``;
   the column is also surfaced on every returned ``AuditEntry`` and drives the
@@ -364,6 +366,27 @@ def _has_trace_predicate(*, tenant_id: uuid.UUID) -> sa.ColumnElement[bool]:
     )
 
 
+#: ``method`` / ``path`` of the row that
+#: :func:`~meho_backplane.operations.approval_queue.withdraw_request` writes
+#: when the sender takes its request back (#5717).
+_WITHDRAW_METHOD: Final[str] = "APPROVAL"
+_WITHDRAW_PATH: Final[str] = "approval.withdraw"
+
+
+def _is_withdraw_predicate() -> sa.ColumnElement[bool]:
+    """``TRUE`` for an ``approval.withdraw`` row (#5717)."""
+    return sa.and_(AuditLog.method == _WITHDRAW_METHOD, AuditLog.path == _WITHDRAW_PATH)
+
+
+def is_withdraw_row(row: AuditLog) -> bool:
+    """``True`` for an ``approval.withdraw`` row (#5717).
+
+    The Python twin of :func:`_is_withdraw_predicate`. The console audit
+    drawer uses it too, so the list and the drawer follow one rule.
+    """
+    return row.method == _WITHDRAW_METHOD and row.path == _WITHDRAW_PATH
+
+
 def _result_status_predicate(result_status: str) -> sa.ColumnElement[bool]:
     """Translate the broadcast-shape result_status to a status_code predicate.
 
@@ -376,11 +399,15 @@ def _result_status_predicate(result_status: str) -> sa.ColumnElement[bool]:
     if result_status == "ok":
         # 202 is the pending synthetic code (G11.2-T3/T4) — a 2xx, but
         # semantically "awaiting approval", not "ok". Exclude it so the
-        # ``ok`` filter and the ``pending`` filter partition cleanly.
+        # ``ok`` filter and the ``pending`` filter partition cleanly. A
+        # withdraw row is a 200 too, but the operation never ran (#5717).
         return sa.and_(
             AuditLog.status_code < 400,
             AuditLog.status_code != 202,
+            sa.not_(_is_withdraw_predicate()),
         )
+    if result_status == "withdrawn":
+        return _is_withdraw_predicate()
     if result_status == "pending":
         return AuditLog.status_code == 202
     if result_status == "denied":
@@ -451,19 +478,36 @@ def _build_audit_entry(
         payload=payload,
         op_id=op_id,
         op_class=op_class,
-        result_status=_derive_result_status(row.status_code),
+        result_status=_derive_result_status(row),
         parent_audit_id=row.parent_audit_id,
         agent_session_id=row.agent_session_id,
         work_ref=row.work_ref,
         policy_decision=row.policy_decision,
         event_class=row.event_class,
         sandbox_mode=row.sandbox_mode,
+        actor_sub=row.actor_sub,
+        actor_name=_actor_name(row.actor_sub),
         broadcast_event_id=None,
     )
 
 
-def _derive_result_status(status_code: int) -> str:
-    """Map a stored ``status_code`` back to the broadcast-shape result_status.
+#: An agent's login id is ``agent:<name>`` (``auth/agent_principals.py``).
+_AGENT_ACTOR_PREFIX = "agent:"
+
+
+def _actor_name(actor_sub: str | None) -> str | None:
+    """The agent's name from *actor_sub* (``agent:<name>``), else ``None``."""
+    if actor_sub is None or not actor_sub.startswith(_AGENT_ACTOR_PREFIX):
+        return None
+    return actor_sub.removeprefix(_AGENT_ACTOR_PREFIX) or None
+
+
+def _derive_result_status(row: AuditLog) -> str:
+    """Map a stored row back to the broadcast-shape result_status.
+
+    An ``approval.withdraw`` row is ``withdrawn`` (#5717): the sender took
+    its request back and the operation never ran. Every other row maps by
+    its ``status_code``.
 
     Audit rows do not carry the handler-exception bit, so the post-fact
     derivation collapses to: 401/403 → denied, 202 → pending (the
@@ -474,6 +518,9 @@ def _derive_result_status(status_code: int) -> str:
     side, so the read path must derive the same rather than collapsing
     202 (a 2xx) to ``ok``.
     """
+    if is_withdraw_row(row):
+        return "withdrawn"
+    status_code = row.status_code
     if status_code in (401, 403):
         return "denied"
     if status_code == 202:

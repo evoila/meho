@@ -429,8 +429,8 @@ meho targets import infra/targets.yaml --update --dry-run
 The Python integration test
 [`backend/tests/test_api_v1_targets_import.py`](../../backend/tests/test_api_v1_targets_import.py)
 pins this round-trip against a SHA-pinned snapshot of the
-consumer's real `targets.yaml`; the snapshot lives at
-`backend/tests/fixtures/rdc-hetzner-dc-targets.yaml`.
+consumer's real `targets.yaml`; the snapshot lives in
+`backend/tests/fixtures/`.
 
 ## Status
 

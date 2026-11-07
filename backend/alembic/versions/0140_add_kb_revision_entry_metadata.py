@@ -3,8 +3,8 @@
 
 """Keep the entry metadata on each kb revision.
 
-Revision ID: 0139
-Revises: 0138
+Revision ID: 0140
+Revises: 0139
 Create Date: 2026-11-07
 
 A kb revision kept the body but not the metadata (the header). A change
@@ -30,8 +30,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0139"
-down_revision: str | None = "0138"
+revision: str = "0140"
+down_revision: str | None = "0139"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

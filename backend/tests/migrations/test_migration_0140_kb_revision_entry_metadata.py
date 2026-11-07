@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0139_add_kb_revision_entry_metadata``.
+"""Tests for Alembic migration ``0140_add_kb_revision_entry_metadata``.
 
 The migration adds the nullable ``entry_metadata`` column to
 ``kb_revision``. The tests check that:
@@ -32,14 +32,14 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0139"
-_DOWN_REVISION = "0138"
+_REVISION = "0140"
+_DOWN_REVISION = "0139"
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0139.db"
+    db_path = tmp_path / "migration_0140.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

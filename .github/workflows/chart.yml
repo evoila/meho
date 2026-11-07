@@ -2154,7 +2154,19 @@ jobs:
             echo "::error::the upgrade with a broken readiness probe succeeded; the drill injected no failure"
             exit 1
           fi
-          echo ">> the upgrade failed, as planned"
+          # Guard against a failure for another reason (for example a
+          # manifest the cluster refuses): the candidate's pods must have
+          # been made, so the broken probe is what failed the upgrade.
+          made=$(kubectl -n meho-test get replicasets \
+            -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test -o json \
+            | jq '[.items[].spec.template.spec.containers[] | select(.image == "ghcr.io/evoila/meho:test")] | length')
+          if [ "$made" -eq 0 ]; then
+            reason=$(helm history meho-test --namespace meho-test --kube-as-user meho-installer -o json \
+              | jq -r '[.[] | select(.status == "failed")] | last | .description')
+            echo "::error::the upgrade failed before the candidate's pods were made, so not because of the broken probe: ${reason}"
+            exit 1
+          fi
+          echo ">> the upgrade failed on the broken probe, as planned"
           # Guard against a drill that proves nothing: the hook Job must have
           # moved the database to a newer revision before the rollout failed.
           rev=$(kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \

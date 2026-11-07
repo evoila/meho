@@ -895,6 +895,7 @@ It installs the prior release's published chart and image, then
 upgrades to the chart and image of the chosen commit with a readiness
 path that answers 404, so the hook Job migrates and
 `--rollback-on-failure` rolls the manifests back. It checks that the
+upgrade failed on that probe and not for another reason, that the
 database moved, that Helm rolled back, and that a new prior pod gets
 Ready with the `db` check `db_ahead=true`. Then it rolls forward and
 checks `revision=<head>`. On this event `changes` skips, so the other

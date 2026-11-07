@@ -96,8 +96,8 @@ for each REST request and each MCP tool call or resource read:
 | Any other 4xx (validation failure, not found, conflict), or an MCP handler that rejects its arguments with a plain `McpInvalidParamsError` | Nothing. |
 | Anything else: a MEHO change with no record of its own (create a target, enable a connector, an MCP `write` tool), or one that failed with 5xx, or an MCP handler that raises `McpExecutionFailedError` (the change failed in Keycloak or Vault; REST answers 502 or 503 for the same failure) | One `operation_execution` row. |
 
-A request with no row also publishes no broadcast event. Every request
-still writes its usage event.
+A request publishes no broadcast event, with or without a row. Every
+request still writes its usage event.
 
 Tool calls made by a hosted agent keep their audit row after the cutover
 (#4234). An agent run has no usage event, so the row is the only record.

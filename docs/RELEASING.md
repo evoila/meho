@@ -334,9 +334,19 @@ git checkout main && git pull
 # exists to prevent). Substitute the PR number:
 REL_SHA=$(gh pr view <phase2-pr#> --repo evoila/meho --json mergeCommit --jq .mergeCommit.oid)
 git merge-base --is-ancestor "$REL_SHA" main || { echo "merge commit not on main — abort"; exit 1; }
-git tag vX.Y.Z "$REL_SHA"   # tag the release-cutting merge commit by SHA, not HEAD
+git tag -a vX.Y.Z -m "MEHO X.Y.Z: <short summary>" "$REL_SHA"   # tag the release-cutting merge commit by SHA, not HEAD
 git push origin vX.Y.Z
 ```
+
+**The tag has a message** (git calls this an annotated tag). Always use
+`git tag -a` with `-m`, never a plain `git tag vX.Y.Z`:
+
+- The message is one line: `MEHO X.Y.Z: <short summary>`. The summary
+  names the main changes in a few words.
+- Why: the git manual says tags with a message are meant for releases.
+  The tag also stores who made it and when.
+- Nothing in the release reads the message. The GitHub Release text
+  still comes from `CHANGELOG.md`.
 
 The push fans out to `cli-release.yml`, `image.yml`, `chart.yml` and
 `docs-site.yml`. `cli-release.yml` then calls `linux-download.yml` for the
@@ -793,7 +803,7 @@ git merge-base --is-ancestor "$RC_SHA" origin/main \
   || { echo "$RC_SHA is no longer on main (force-push or revert) — repeat R3 for the current tip"; exit 1; }
 [ "$(git rev-parse origin/main)" = "$RC_SHA" ] \
   || echo "main moved past the verified candidate: tag $RC_SHA as verified, or repeat R3 for the new tip"
-git tag v1.0.0-rc.N "$RC_SHA"
+git tag -a v1.0.0-rc.N -m "MEHO 1.0.0-rc.N: <short summary>" "$RC_SHA"   # a tag with a message, as in step 4
 git push origin v1.0.0-rc.N
 ```
 

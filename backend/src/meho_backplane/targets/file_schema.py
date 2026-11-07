@@ -38,8 +38,10 @@ from meho_backplane.targets.schemas import SECRET_FIELD_MAP_MAX_ENTRIES, SecretF
 TARGET_RECORD_SCHEMA_VERSION = "1"
 
 #: The name rule of ``check_target_name`` as a pattern: no whitespace, no
-#: control character (Unicode category Cc) and no ``/``.
-_NAME_PATTERN = r"^[^\s/\x00-\x1f\x7f-\x9f]+$"
+#: control character (Unicode category Cc) and no ``/``. In a Python regex
+#: ``$`` also matches before a final line break; the ``(?!\n)`` refuses that,
+#: so ``"node\n"`` fails like it does in the write model.
+_NAME_PATTERN = r"^[^\s/\x00-\x1f\x7f-\x9f]+$(?!\n)"
 
 _HOST_RULE = (
     "An IPv4 address, an IPv6 address or a DNS host name (letters, digits and "
@@ -47,10 +49,15 @@ _HOST_RULE = (
 )
 
 #: A ``tls_ca_pin`` with ``verify_tls: false`` is refused by the write model.
+#: A blank pin (empty or only whitespace) counts as no pin there, so the rule
+#: fires only for a pin with a character that is not whitespace.
 _CA_PIN_NEEDS_VERIFY_TLS: dict[str, Any] = {
     "not": {
         "required": ["tls_ca_pin", "verify_tls"],
-        "properties": {"tls_ca_pin": {"type": "string"}, "verify_tls": {"const": False}},
+        "properties": {
+            "tls_ca_pin": {"type": "string", "pattern": r"\S"},
+            "verify_tls": {"const": False},
+        },
     }
 }
 
@@ -84,7 +91,11 @@ class TargetRecord(BaseModel):
     target's ``extras`` and prints a warning.
     """
 
-    model_config = ConfigDict(extra="allow", json_schema_extra=_CA_PIN_NEEDS_VERIFY_TLS)
+    # The name pattern uses a look-ahead, which the default regex engine of
+    # pydantic does not support. The JSON Schema file gets the pattern as is.
+    model_config = ConfigDict(
+        extra="allow", regex_engine="python-re", json_schema_extra=_CA_PIN_NEEDS_VERIFY_TLS
+    )
 
     name: str = Field(
         min_length=1,
@@ -111,7 +122,10 @@ class TargetRecord(BaseModel):
     verify_tls: bool = True
     tls_ca_pin: str | None = Field(
         default=None,
-        description="A CA certificate bundle in PEM form. Not together with verify_tls: false.",
+        description=(
+            "A CA certificate bundle in PEM form. Not together with verify_tls: false. "
+            "A blank value counts as no pin."
+        ),
     )
     tls_server_name: str | None = Field(default=None, max_length=512)
     secret_field_map: dict[SecretFieldName, SecretFieldName] = Field(

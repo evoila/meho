@@ -95,6 +95,7 @@
   "not": {
     "properties": {
       "tls_ca_pin": {
+        "pattern": "\\S",
         "type": "string"
       },
       "verify_tls": {
@@ -111,7 +112,7 @@
       "description": "Other names of the target. The same rule as for the name.",
       "items": {
         "minLength": 1,
-        "pattern": "^[^\\s/\\x00-\\x1f\\x7f-\\x9f]+$",
+        "pattern": "^[^\\s/\\x00-\\x1f\\x7f-\\x9f]+$(?!\\n)",
         "type": "string"
       },
       "title": "Aliases",
@@ -174,7 +175,7 @@
       "description": "The target's name. No spaces, line breaks, control characters or '/'.",
       "maxLength": 200,
       "minLength": 1,
-      "pattern": "^[^\\s/\\x00-\\x1f\\x7f-\\x9f]+$",
+      "pattern": "^[^\\s/\\x00-\\x1f\\x7f-\\x9f]+$(?!\\n)",
       "title": "Name",
       "type": "string"
     },
@@ -262,7 +263,7 @@
         }
       ],
       "default": null,
-      "description": "A CA certificate bundle in PEM form. Not together with verify_tls: false.",
+      "description": "A CA certificate bundle in PEM form. Not together with verify_tls: false. A blank value counts as no pin.",
       "title": "Tls Ca Pin"
     },
     "tls_server_name": {

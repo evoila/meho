@@ -1,0 +1,49 @@
+# A made-up targets file in the shape the toolkit repos keep. It uses every
+# key of docs/schemas/target-record-v1.schema.json, and one key the schema
+# does not list (sso_realm). It must import without edits.
+targets:
+  - name: lab-vcenter
+    aliases: [lab-vc, vcenter-lab]
+    product: vcenter
+    version: "8.0"
+    host: vc01.lab.example.com
+    port: 443
+    fqdn: vc01.lab.example.com
+    secret_ref: secret/toolkit-lab/vsphere/lab-vcenter
+    auth_model: shared_service_account
+    vpn_required: true
+    verify_tls: true
+    tls_server_name: vc01.lab.example.com
+    sso_realm: lab.example.com
+    notes: "Lab vCenter."
+    fingerprint:
+      vendor: vmware
+      product: vcenter
+      version: "8.0.3"
+      build: "24022515"
+      edition: null
+      reachable: true
+      probed_at: "2026-11-01T09:30:00Z"
+      probe_method: rest
+      extras:
+        api_type: vcenter
+
+  - name: lab-web
+    product: linux
+    host: web-01.lab.example.com
+    secret_ref: secret/toolkit-lab/linux/lab-web
+    secret_field_map:
+      ssh_private_key: private_key
+      username: login
+    flight_recorder_capture: false
+    preferred_impl_id: linux-ssh
+    extras:
+      owner_team: platform
+
+  - name: lab-docs
+    product: k8s
+    version: "1.31"
+    host: k8s-api.lab.example.com
+    port: 6443
+    verify_tls: false
+    notes: "Reached by a self-signed certificate."

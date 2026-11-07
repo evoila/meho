@@ -337,27 +337,21 @@ async def test_ls_namespace_against_k3s_returns_kind_counts(
 
 
 @pytest.mark.asyncio
-async def test_ls_namespace_kind_against_k3s_forwards_to_unknown_op(
+async def test_ls_namespace_kind_against_k3s_raises_when_op_is_not_registered(
     k3s_connector: tuple[KubernetesConnector, _K3sTarget],
 ) -> None:
-    """``k8s.ls /default/pods`` forwards to ``k8s.pod.list``.
+    """``k8s.ls /default/pods`` raises when the list op has no descriptor.
 
-    Pre-T3, this exercised the dispatcher's ``unknown_op`` shape.
-    T3 (#323) registers ``k8s.pod.list``, but registration only runs
-    inside the lifespan-driven
-    :meth:`KubernetesConnector.register_operations`; this test
-    constructs the connector directly, so no descriptor row is written
-    to ``endpoint_descriptor`` and the dispatcher shim still surfaces
-    ``unknown_op`` on the forwarded sub-call. Live registration +
-    end-to-end dispatch is covered by the chassis lifespan tests, not
-    by this module.
+    ``k8s.pod.list`` is registered only inside the lifespan-driven
+    :meth:`KubernetesConnector.register_operations`. This test builds the
+    connector directly, so no descriptor row exists and the forwarded
+    call answers ``unknown_op``. ``k8s.ls`` turns that into a
+    ``ValueError`` so the caller never sees "ok" with no rows. Live
+    registration is covered by the chassis lifespan tests.
     """
     connector, target = k3s_connector
-    result = await connector.k8s_ls(_make_k3d_operator(), target, {"path": "/default/pods"})
-    assert result["forwarded_to"] == "k8s.pod.list"
-    inner = result["result"]
-    assert inner["status"] == "error"
-    assert inner["error"].startswith("unknown_op:")
+    with pytest.raises(ValueError, match="cannot list the kind"):
+        await connector.k8s_ls(_make_k3d_operator(), target, {"path": "/default/pods"})
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,7 @@ __all__ = [
     "FetchMoreDrillIn",
     "FetchMoreNativePagination",
     "FingerprintResult",
+    "LinkHint",
     "NodeHint",
     "NodeKind",
     "OperationResult",
@@ -88,17 +89,22 @@ NodeKind = Literal[
     "vault-role",
     "vault-mount",
     "volume",
+    "dns-record",
 ]
 """Closed enum of node kinds the v0.2 graph supports.
 
 The vocabulary is the auto-discoverable subset agreed in G9.1 (#363) —
 the curated cross-system kinds (e.g. ``"workload"``, ``"deployment"``)
-land in G9.2 once operator annotation flows ship.
+land in G9.2 once operator annotation flows ship. ``dns-record`` is one
+DNS name and the A / AAAA / CNAME records a DNS server holds for it.
 """
 
 
-EdgeKind = Literal["runs-on", "mounts", "routes-through", "belongs-to"]
-"""The four edge kinds high-confidence probes can derive.
+EdgeKind = Literal["runs-on", "mounts", "routes-through", "belongs-to", "resolves-to"]
+"""The edge kinds high-confidence probes can derive.
+
+``resolves-to`` links a ``dns-record`` node to the system its name or
+address points at (see :class:`LinkHint`).
 
 Cross-system semantic edges (``"authenticates-via"``, ``"depends-on"``,
 ``"replicates-to"``, ``"backed-up-by"``) need explicit operator
@@ -577,6 +583,39 @@ class EdgeHint(BaseModel):
         return dict(value)
 
 
+class LinkHint(BaseModel):
+    """A request to link one discovered node to a node another target found.
+
+    A DNS server knows that ``web01.example.com`` points at ``192.0.2.10``,
+    but it does not know which map node that is. The refresh service looks
+    each of ``match_names`` up among the live nodes of the tenant whose kind
+    is in ``to_kinds`` (case does not matter). A name that matches exactly
+    one node gives one ``resolves-to`` edge from ``(from_kind, from_name)``
+    (a node of the same snapshot) to that node. A name that matches no node, or
+    more than one, gives no edge, and the refresh never creates a node for
+    it. The edge belongs to the target that sent the link: its next refresh
+    marks the edge as gone when the link or the far node is gone.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    from_kind: NodeKind
+    from_name: str
+    kind: Literal["resolves-to"] = "resolves-to"
+    to_kinds: tuple[NodeKind, ...]
+    match_names: tuple[str, ...]
+    properties: Mapping[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _freeze_properties(self) -> "LinkHint":
+        object.__setattr__(self, "properties", MappingProxyType(dict(self.properties)))
+        return self
+
+    @field_serializer("properties")
+    def _serialize_properties(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(value)
+
+
 class TopologyHints(BaseModel):
     """Connector-supplied topology snapshot for one target.
 
@@ -589,12 +628,16 @@ class TopologyHints(BaseModel):
     the frozen model is deeply immutable end-to-end, mirroring the
     :attr:`ResultHandle.sample_rows` pattern. A ``list`` argument at
     construction is accepted and converted by Pydantic's validation.
+
+    ``links`` ask the refresh to link snapshot nodes to nodes other
+    targets found (:class:`LinkHint`).
     """
 
     model_config = ConfigDict(frozen=True)
 
     nodes: tuple[NodeHint, ...] = ()
     edges: tuple[EdgeHint, ...] = ()
+    links: tuple[LinkHint, ...] = ()
     discovered_at: datetime
 
 

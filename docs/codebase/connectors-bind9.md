@@ -589,6 +589,46 @@ If the preview fails, the command stops and sends nothing
 (`record.go`, `PreviewAndCall`). The operator guide is
 [`docs/cross-repo/bind9-onboarding.md`](../cross-repo/bind9-onboarding.md).
 
+## Topology map
+
+`Bind9Connector.discover_topology` (code: `bind9/topology.py`, snapshot
+builder: `_shared/dns_topology.py`) puts the A, AAAA and CNAME records on
+the topology map. It runs the reads of `bind9.zone.list` and
+`bind9.zone.read` (`named-checkconf -p`, then `cat` of each zone file)
+with their parsers, not the operations, so no result limit shortens a
+zone. Only reads run; no sudo.
+
+- **Zones.** Type `master` / `primary` / `slave` / `secondary` with a
+  `file`, not reverse (`in-addr.arpa`, `ip6.arpa`). Each view is read
+  on its own; the view is on each record.
+- **Skipped, not failed.** A zone file the SSH user may not read
+  (`Permission denied`) is skipped with reason `not_allowed`; a missing
+  file with `file_missing`; a file that is not a text zone file (for
+  example the `raw` format of a secondary zone) with `not_text`.
+- **Failed.** A failed `named-checkconf -p`, any other `cat` error or an
+  SSH error raises. The refresh then stores nothing, so a failed read
+  never looks like an empty zone.
+- **Nodes.** The DNS server's own `target` node carries `dns_source`,
+  `zones_read` and `zones_skipped` (zone, reason). Each DNS name becomes
+  one `dns-record` node (lower case, no trailing dot) with `source` and
+  `records` (type, value, zone, view). It is linked to the target with
+  `belongs-to`. A CNAME to a name the server also holds gets a
+  `resolves-to` edge to that name. Wildcard names and other record types
+  are left out.
+- **Links.** Each name asks the refresh for a `resolves-to` edge to an
+  existing `vm`, `host` or `node` with the same full name, the same
+  address, or the same first label (`matched_on` on the edge). Only a
+  single match links; no match or several matches link nothing, and no
+  system node is ever created. See `topology.md`, "Links to nodes of
+  other targets".
+- **Time and source.** The map stores when a refresh first and last saw
+  each row; the target that found it is the row's target.
+- **Scheduled refresh.** As for Kubernetes: the scheduled refresh has no
+  person's login, so it cannot read an SSH secret kept in Vault. A
+  refresh that a logged-in operator runs works.
+
+Tests: `tests/test_connectors_dns_topology.py`.
+
 ## Tests
 
 - `backend/tests/test_connectors_bind9.py` -- T1 unit suite. Covers the

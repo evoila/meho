@@ -655,6 +655,44 @@ separately via `resolve_node`.
 A failure anywhere in steps 1–6 raises out of the `session.begin()`
 block, rolling everything back: no half-applied graph, no audit row.
 
+### Links to nodes of other targets (`LinkHint`)
+
+A connector can know a name or an address without knowing the map node
+behind it. A DNS server knows that `web01.example.com` points at
+`192.0.2.10`, but the VM is a node the vCenter target found. For this,
+`TopologyHints` has `links`: one `LinkHint` per request
+(`connectors/schemas.py`). The code is `topology/refresh_links.py`; the
+refresh runs it right after the edge pass (step 5), in the same
+transaction, and adds its counts to the edge counts.
+
+- **Match.** Each name in `match_names` is looked up among the tenant's
+  live nodes whose kind is in `to_kinds`. Case does not matter.
+  Soft-deleted rows, `legacy:` rows and the refreshing target's own rows
+  never match. A name with exactly one match gives one `resolves-to`
+  edge from the link's node (it must be in the same snapshot) to the
+  match. No match, or more than one, gives nothing. A link never creates
+  a node.
+- **Key.** Link edges are keyed by node ids, not names: the far node may
+  share its `(kind, name)` with a node in another scope.
+- **Owner.** The refreshing target owns the `resolves-to` edges from its
+  nodes to nodes it does not own. A later refresh that no longer sends
+  the link, or no longer finds the far node, marks the edge as gone
+  (`last_seen = NULL`, history row). A curated edge is never marked as
+  gone; a refresh that finds it again only records the time. The plain
+  edge pass never sees these edges, because the far node is not in its
+  key map.
+- **Scope cut-over.** Staging reads only `nodes` and `edges`, so the
+  cut-over deletes link edges like any edge no target reported again.
+  The next refresh of the DNS target adds them again.
+
+The bind9 and Windows DNS connectors are the users today
+(`connectors/_shared/dns_topology.py`): one `dns-record` node per DNS
+name, with its A / AAAA / CNAME records and the source, linked to `vm`,
+`host` and `node` rows by full name, by address, and by first label
+(edge property `matched_on`: `name`, `address`, `short-name`). See
+`connectors-bind9.md` and `connectors-windows-dns.md`, "Topology map".
+Tests: `tests/test_topology_refresh_links.py`.
+
 ### Scheduler
 
 `_scheduler_loop` is a forever loop registered as an `asyncio.Task` in

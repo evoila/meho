@@ -206,6 +206,48 @@ fails closed to `ssh_auth_failed`.
    handler through the policy/audit path. Transport/auth failures propagate
    to the dispatcher's `connector_error` branch.
 
+## Topology map
+
+`WindowsDnsConnector.discover_topology` (code: `windows_dns/topology.py`,
+snapshot builder: `_shared/dns_topology.py`) puts the A, AAAA and CNAME
+records on the topology map. The zone list comes from the
+`windns.zone.list` handler. Each zone is read with
+`Get-DnsServerResourceRecord` (the cmdlet of `windns.record.get`) without
+a name, one PowerShell run per zone (timeout 120 seconds). Only reads
+run.
+
+- **Zones.** Forward `Primary` and `Secondary` zones that Windows did not
+  create by itself (`IsAutoCreated`).
+- **Skipped, not failed.** The read stops on an error. When the error is
+  access denied (category `PermissionDenied`, an
+  `UnauthorizedAccessException`, `0x80070005` or the CIM code
+  `AccessDenied`), the zone is skipped with reason `not_allowed`. The
+  script returns the error category only, never the error text.
+- **Failed.** Any other error, a failed zone list or an SSH error raises.
+  The refresh then stores nothing, so a failed read never looks like an
+  empty zone. (`windns.record.get` itself returns an empty list on an
+  error; the map read does not.)
+- **Nodes.** The DNS server's own `target` node carries `dns_source`,
+  `zones_read` and `zones_skipped` (zone, reason). Each DNS name becomes
+  one `dns-record` node (lower case, no trailing dot) with `source` and
+  `records` (type, value, zone). It is linked to the target with
+  `belongs-to`. A CNAME to a name the server also holds gets a
+  `resolves-to` edge to that name. Wildcard names and other record types
+  are left out.
+- **Links.** Each name asks the refresh for a `resolves-to` edge to an
+  existing `vm`, `host` or `node` with the same full name, the same
+  address, or the same first label (`matched_on` on the edge). Only a
+  single match links; no match or several matches link nothing, and no
+  system node is ever created. See `topology.md`, "Links to nodes of
+  other targets".
+- **Time and source.** The map stores when a refresh first and last saw
+  each row; the target that found it is the row's target.
+- **Scheduled refresh.** As for Kubernetes: the scheduled refresh has no
+  person's login, so it cannot read an SSH secret kept in Vault. A
+  refresh that a logged-in operator runs works.
+
+Tests: `tests/test_connectors_dns_topology.py`.
+
 ## Tests
 
 `backend/tests/test_connectors_windows_dns.py` — mirrors the bind9-reads +

@@ -61,6 +61,7 @@ from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
+    TopologyHints,
 )
 from meho_backplane.connectors.windows_dns.ops import WINDOWS_DNS_OPS
 
@@ -363,6 +364,28 @@ class WindowsDnsConnector(SshConnector):
             "hostname": result.extras.get("hostname"),
             "dnsserver_module_present": result.extras.get("dnsserver_module_present"),
         }
+
+    async def discover_topology(
+        self,
+        target: Target,
+        *,
+        operator: Operator | None = None,
+    ) -> TopologyHints:
+        """Put the server's A, AAAA and CNAME records on the topology map.
+
+        The refresh service calls this and forwards the acting operator.
+        Without one (a direct call), the system operator reads the
+        credentials, as for Kubernetes. See
+        :mod:`meho_backplane.connectors.windows_dns.topology` for the reads and
+        the zones that are skipped.
+        """
+        from meho_backplane.connectors._shared.system_operator import (
+            synthesise_system_operator,
+        )
+        from meho_backplane.connectors.windows_dns.topology import discover_windows_dns_topology
+
+        eff_operator = operator if operator is not None else synthesise_system_operator()
+        return await discover_windows_dns_topology(self, target, eff_operator)
 
     async def windows_dns_zone_list(
         self,

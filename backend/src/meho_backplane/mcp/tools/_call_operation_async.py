@@ -39,7 +39,7 @@ from meho_backplane.operations.operation_run_service import (
     get_operation_run_service,
     run_result_visible_to,
 )
-from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME
+from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 from meho_backplane.settings import get_settings
 
 __all__ = ["poll_call", "submit_async_call"]
@@ -198,6 +198,7 @@ async def poll_call(
         # words of the other views, and never invite a second start.
         extras["execution_outcome"] = UNCERTAIN_OUTCOME
         extras["retry"] = False
+        extras["remediation"] = UNCERTAIN_ADVICE
         return _envelope(
             op_id,
             status="error",

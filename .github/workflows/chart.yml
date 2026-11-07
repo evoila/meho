@@ -937,6 +937,11 @@ jobs:
         # anonymous-pull rate-limit that's tripped this repo's other
         # CI lanes (Python lane, image build, Semgrep) on busy days.
         #
+        # Each image is copied into the kind node with `docker save` and
+        # `ctr images import`, without `--all-platforms`. `kind load` imports
+        # all platforms, and the index of a Docker Hub image names layers of
+        # other platforms that Docker's containerd image store does not have.
+        #
         # Each Docker Hub image is pulled for linux/amd64 only. Docker with the
         # containerd image store keeps only the layers of the pulled platform,
         # so a pull of every platform makes `kind load` fail with
@@ -955,11 +960,10 @@ jobs:
           docker pull --platform linux/amd64 valkey/valkey:9.0-alpine
           docker pull --platform linux/amd64 "${pg_repo}@${pg_digest}"
           docker tag "${pg_repo}@${pg_digest}" "${pg_repo}:${pg_tag}"
-          kind load docker-image \
-            ghcr.io/evoila/meho:test \
-            valkey/valkey:9.0-alpine \
-            "${pg_repo}:${pg_tag}" \
-            --name meho-helm-test
+          for img in ghcr.io/evoila/meho:test valkey/valkey:9.0-alpine "${pg_repo}:${pg_tag}"; do
+            docker save "$img" | docker exec --privileged -i meho-helm-test-control-plane \
+              ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
+          done
 
       - name: Create the namespace and a namespace admin (#4099)
         # What a customer's cluster admin does before the install: create
@@ -1686,7 +1690,10 @@ jobs:
             docker tag "${repo}@${digest}" "${repo}:${tag}"
             images+=("${repo}:${tag}")
           done
-          kind load docker-image "${images[@]}" --name meho-helm-test
+          for img in "${images[@]}"; do
+            docker save "$img" | docker exec --privileged -i meho-helm-test-control-plane \
+              ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
+          done
 
       - name: Create the namespace and a namespace admin (#4099)
         # Same as in `helm-test`.

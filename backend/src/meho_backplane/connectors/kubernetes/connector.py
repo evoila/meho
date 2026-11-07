@@ -1298,11 +1298,11 @@ class KubernetesConnector(Connector):
         if len(segments) == 1:
             return await self._k8s_ls_namespace(target, operator, segments[0])
         if len(segments) == 2:
-            return await self._k8s_ls_namespace_kind(target, segments[0], segments[1])
+            return await self._k8s_ls_namespace_kind(target, operator, segments[0], segments[1])
         # Deeper paths aren't a documented v0.2 shape; collapse to the
         # namespace/kind forwarder against the first two segments. The
         # operator gets a useful result rather than an opaque error.
-        return await self._k8s_ls_namespace_kind(target, segments[0], segments[1])
+        return await self._k8s_ls_namespace_kind(target, operator, segments[0], segments[1])
 
     async def _k8s_ls_root(
         self,
@@ -1387,6 +1387,7 @@ class KubernetesConnector(Connector):
     async def _k8s_ls_namespace_kind(
         self,
         target: KubernetesTargetLike,
+        operator: Operator,
         namespace: str,
         kind: str,
     ) -> dict[str, Any]:
@@ -1396,6 +1397,11 @@ class KubernetesConnector(Connector):
         no ``list`` op (``unknown_op``) or any other failed sub-op makes
         this method raise, so the caller sees an error at the top level.
         The ``unknown_op`` message names the kinds that can be listed.
+
+        The caller's ``operator`` goes with the forwarded call. The sub-op
+        then reads the target's credentials under the caller's identity,
+        as a direct call of that sub-op would. A system operator could not:
+        the client cache refuses it and Vault rejects its placeholder token.
 
         ``kind`` is normalised before dispatch: operators type the
         plural form (``pods``, matching ``kubectl get pods``), but the
@@ -1416,7 +1422,7 @@ class KubernetesConnector(Connector):
             # StatefulSets and DaemonSets share one list op with Deployments.
             sub_op_id = "k8s.workload.list"
             sub_params["kind"] = _APPS_WORKLOAD_KINDS[op_kind]
-        sub_result = await self.execute(target, sub_op_id, sub_params)
+        sub_result = await self.execute(target, sub_op_id, sub_params, operator=operator)
         if sub_result.status != "ok":
             # Raising makes the outer answer an error too. A caller that reads
             # only the outer status must not see "ok" with no rows.
@@ -1940,6 +1946,8 @@ class KubernetesConnector(Connector):
         target: KubernetesTargetLike,
         op_id: str,
         params: dict[str, Any],
+        *,
+        operator: Operator | None = None,
     ) -> OperationResult:
         """Dispatcher shim -- delegates to G0.6's ``dispatch``-shaped lookup.
 
@@ -1960,27 +1968,23 @@ class KubernetesConnector(Connector):
            connector convention), and invokes it with
            ``(target, params)``.
 
-        The shim is intentionally **operator-less** -- direct callers
-        (typed-connector internals, composite handlers) don't carry an
-        :class:`~meho_backplane.auth.operator.Operator`, so the full
-        dispatcher path (policy gate, audit, broadcast) doesn't run
-        from this entry point. To match the operator-aware handler
-        signatures the dispatcher now passes ``operator`` to, the shim
-        synthesises a system :class:`Operator` with an empty
-        ``raw_jwt`` (the same shape the fingerprint / probe paths use,
+        The shim does not run the full dispatcher path (policy gate,
+        audit, broadcast). A caller that has an
+        :class:`~meho_backplane.auth.operator.Operator` passes it as
+        ``operator``; the handler then runs under that identity, and the
+        sub-op's credential read works as it does for a direct call of
+        the sub-op. The ``k8s.ls /<ns>/<kind>`` forwarder is such a
+        caller. Without ``operator`` the shim synthesises a system
+        :class:`Operator` with a placeholder ``raw_jwt`` (the shape the
+        fingerprint / probe paths use,
         :func:`~meho_backplane.connectors._shared.system_operator.synthesise_system_operator`).
-        On a cold kubeconfig-cache miss this fails closed with a clear
-        error rather than silently authenticating as a backplane
+        That operator is refused by the client cache and fails closed at
+        the Vault read rather than silently authenticating as a backplane
         identity — the system-call carve-out from
-        :doc:`docs/architecture/connector-auth.md`. The shim's
-        intra-connector callers (the ``k8s.ls /<ns>/<kind>`` forwarder)
-        run *after* the operator-aware op already warmed the
-        ``ApiClient`` cache, so the synthesised operator never reaches
-        the loader in practice; the fail-closed shape is the defensive
-        case. The operator-aware surface is
+        :doc:`docs/architecture/connector-auth.md`. The operator-aware surface is
         ``POST /api/v1/operations/call`` via the G0.6 meta-tools; the
-        pre-G0.6 chassis route was removed by G0.6-T11 (#412). Within
-        the operator-less constraint the shim's contract is:
+        pre-G0.6 chassis route was removed by G0.6-T11 (#412). The
+        shim's contract is:
 
         * Same ``unknown_op`` shape the dispatcher emits.
         * Same ``connector_error`` shape on handler exceptions.
@@ -2063,18 +2067,17 @@ class KubernetesConnector(Connector):
         # Signature introspection mirroring ``dispatch_typed``: the
         # operator-aware handlers (every k8s op after #948) name
         # ``operator`` in their signature so the dispatcher knows to
-        # forward it. The shim is operator-less, so it synthesises a
-        # system operator (empty ``raw_jwt``); the kubeconfig loader's
-        # fail-closed guard surfaces a clear error if the cache misses.
-        # The ``raw``/no-``operator``-named branch stays in place so
-        # the same shim works against an older handler that hasn't
+        # forward it. The caller's operator is forwarded when given;
+        # otherwise a system operator stands in, and the kubeconfig
+        # loader's fail-closed guard surfaces a clear error if the cache
+        # misses. The ``raw``/no-``operator``-named branch stays in place
+        # so the same shim works against an older handler that hasn't
         # been re-shaped.
         param_names = list(inspect.signature(handler).parameters.keys())
+        acting_operator = operator if operator is not None else synthesise_system_operator()
         try:
             if "operator" in param_names:
-                raw = await handler(
-                    operator=synthesise_system_operator(), target=target, params=params
-                )
+                raw = await handler(operator=acting_operator, target=target, params=params)
             else:
                 raw = await handler(target=target, params=params)
         except Exception as exc:
@@ -2164,7 +2167,7 @@ class KubernetesConnector(Connector):
         The fast path is **closed to the synthesised system operator**
         (:func:`~meho_backplane.connectors._shared.system_operator.is_system_operator`),
         as every peer connector's cache is (#1008): a system/operator-less
-        caller — reachable through the operator-less ``k8s.ls`` forwarder —
+        caller — reachable through :meth:`execute` without an ``operator`` —
         always falls through to the fail-closed credential loader and can
         never be served a warm client a real operator primed but it could
         not resolve itself. In production the loader then fails closed at

@@ -48,6 +48,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from kubernetes_asyncio.client.models import (
+    V1CronJob,
+    V1CronJobList,
+    V1CronJobSpec,
+    V1DaemonSet,
+    V1DaemonSetList,
+    V1DaemonSetSpec,
+    V1JobTemplateSpec,
+    V1LabelSelector,
     V1ListMeta,
     V1Namespace,
     V1NamespaceList,
@@ -60,6 +68,10 @@ from kubernetes_asyncio.client.models import (
     V1NodeStatus,
     V1NodeSystemInfo,
     V1ObjectMeta,
+    V1PodTemplateSpec,
+    V1StatefulSet,
+    V1StatefulSetList,
+    V1StatefulSetSpec,
     V1Taint,
 )
 
@@ -719,10 +731,11 @@ async def test_k8s_ls_namespace_kind_forwards_to_the_right_list_op(
     ok = OperationResult(
         status="ok", op_id=sub_op_id, result={"rows": [{"name": "x"}], "total": 1}, duration_ms=1.0
     )
+    operator = _make_operator()
     with patch.object(connector, "execute", AsyncMock(return_value=ok)) as execute:
-        result = await connector.k8s_ls(_make_operator(), _TARGET, {"path": f"/argocd/{path_kind}"})
+        result = await connector.k8s_ls(operator, _TARGET, {"path": f"/argocd/{path_kind}"})
 
-    execute.assert_awaited_once_with(_TARGET, sub_op_id, sub_params)
+    execute.assert_awaited_once_with(_TARGET, sub_op_id, sub_params, operator=operator)
     assert result["forwarded_to"] == sub_op_id
     assert result["result"]["result"]["total"] == 1
 
@@ -741,6 +754,110 @@ async def test_k8s_ls_namespace_kind_raises_when_the_sub_op_fails() -> None:
         pytest.raises(RuntimeError, match=r"k8s\.pod\.list failed: connector_error: Forbidden"),
     ):
         await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd/pods"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path_kind", "api_path", "list_method", "items"),
+    [
+        (
+            "cronjobs",
+            "meho_backplane.connectors.kubernetes.ops_cronjob_list.client.BatchV1Api",
+            "list_namespaced_cron_job",
+            V1CronJobList(
+                items=[
+                    V1CronJob(
+                        metadata=V1ObjectMeta(name="backup", namespace="argocd"),
+                        spec=V1CronJobSpec(schedule="0 3 * * *", job_template=V1JobTemplateSpec()),
+                    )
+                ],
+                metadata=V1ListMeta(),
+            ),
+        ),
+        (
+            "statefulsets",
+            "meho_backplane.connectors.kubernetes.ops_workload_set.client.AppsV1Api",
+            "list_namespaced_stateful_set",
+            V1StatefulSetList(
+                items=[
+                    V1StatefulSet(
+                        metadata=V1ObjectMeta(name="db", namespace="argocd"),
+                        spec=V1StatefulSetSpec(
+                            replicas=2,
+                            selector=V1LabelSelector(match_labels={"app": "db"}),
+                            service_name="db",
+                            template=V1PodTemplateSpec(),
+                        ),
+                    )
+                ],
+                metadata=V1ListMeta(),
+            ),
+        ),
+        (
+            "daemonsets",
+            "meho_backplane.connectors.kubernetes.ops_workload_set.client.AppsV1Api",
+            "list_namespaced_daemon_set",
+            V1DaemonSetList(
+                items=[
+                    V1DaemonSet(
+                        metadata=V1ObjectMeta(name="node-agent", namespace="argocd"),
+                        spec=V1DaemonSetSpec(
+                            selector=V1LabelSelector(match_labels={"app": "agent"}),
+                            template=V1PodTemplateSpec(),
+                        ),
+                    )
+                ],
+                metadata=V1ListMeta(),
+            ),
+        ),
+    ],
+)
+async def test_k8s_ls_namespace_kind_forwards_under_the_callers_operator(
+    path_kind: str, api_path: str, list_method: str, items: Any
+) -> None:
+    """The real forwarding path runs the sub-op under the caller's operator and returns rows.
+
+    The credential loader stands in for Vault: it refuses the system operator,
+    as Vault refuses its placeholder token. So the rows only come back when
+    ``k8s.ls`` hands its own operator to the forwarded call.
+    """
+    from meho_backplane.connectors._shared.system_operator import is_system_operator
+    from meho_backplane.operations import typed_register as tr_module
+    from meho_backplane.operations._handler_resolve import reset_handler_cache
+
+    reset_handler_cache()
+    with patch.object(
+        tr_module,
+        "encode_endpoint_text",
+        AsyncMock(return_value=[0.1] * 384),
+    ):
+        await KubernetesConnector.register_operations()
+
+    seen_operators: list[Operator] = []
+
+    async def _loader(_target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        if is_system_operator(operator):
+            raise RuntimeError("Vault rejects the system operator's placeholder token")
+        seen_operators.append(operator)
+        return _stub_kubeconfig()
+
+    connector = KubernetesConnector(kubeconfig_loader=_loader)
+    operator = _make_operator()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch(api_path) as api_cls,
+    ):
+        setattr(api_cls.return_value, list_method, AsyncMock(return_value=items))
+        result = await connector.k8s_ls(operator, _TARGET, {"path": f"/argocd/{path_kind}"})
+
+    assert seen_operators == [operator]
+    assert result["result"]["status"] == "ok"
+    assert result["result"]["result"]["total"] == 1
+    assert result["result"]["result"]["rows"][0]["namespace"] == "argocd"
 
 
 def test_k8s_ls_listable_kinds_all_have_a_registered_list_op() -> None:

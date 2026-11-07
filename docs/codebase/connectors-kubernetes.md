@@ -1404,7 +1404,11 @@ The `k8s.ls` handler is a thin path parser:
   pays one round-trip per probed kind, not one per row.
 - `/<namespace>/<kind>` -- forwards through
   `KubernetesConnector.execute()` to `k8s.<kind>.list`. The shim is the
-  same dispatcher path direct callers use. `statefulsets` and
+  same dispatcher path direct callers use. The forwarder passes the
+  caller's operator (`execute(..., operator=operator)`), so the sub-op
+  reads the target's credentials under the caller's identity; a system
+  operator could not (the client cache refuses it and Vault rejects its
+  placeholder token). `statefulsets` and
   `daemonsets` go to `k8s.workload.list` with the matching `kind`. A
   kind with no list op, and any sub-op that does not return `ok`, make
   `k8s.ls` raise, so the top-level answer is an error and not `ok` with

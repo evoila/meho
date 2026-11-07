@@ -5,7 +5,8 @@
 
 ``extras`` holds operator-written notes for connectors. MEHO accepts at most
 :data:`EXTRAS_MAX_NODES` values and :data:`EXTRAS_MAX_DEPTH` levels. The walk
-stops at the limit, so the check itself stays cheap on a huge input. A value
+checks the length of each list or map against the values still allowed before
+it reads the children, so the check itself stays cheap on a huge input. A value
 that appears twice counts twice.
 """
 
@@ -21,20 +22,22 @@ EXTRAS_MAX_DEPTH: Final[int] = 8
 
 def check_extras_size[T](value: T) -> T:
     """Return *value*, or raise ``ValueError`` when it is too big or too deep."""
-    count = 0
+    # Values found so far, also those still waiting on the stack.
+    seen = 1
     stack: list[tuple[Any, int]] = [(value, 0)]
     while stack:
         item, depth = stack.pop()
-        count += 1
-        if count > EXTRAS_MAX_NODES:
-            raise ValueError(f"extras may hold at most {EXTRAS_MAX_NODES} values")
         if isinstance(item, dict):
-            children: list[Any] = [*item.keys(), *item.values()]
+            size = 2 * len(item)
         elif isinstance(item, list | tuple):
-            children = list(item)
+            size = len(item)
         else:
             continue
-        if children and depth >= EXTRAS_MAX_DEPTH:
+        if size and depth >= EXTRAS_MAX_DEPTH:
             raise ValueError(f"extras may be at most {EXTRAS_MAX_DEPTH} levels deep")
+        seen += size
+        if seen > EXTRAS_MAX_NODES:
+            raise ValueError(f"extras may hold at most {EXTRAS_MAX_NODES} values")
+        children = [*item.keys(), *item.values()] if isinstance(item, dict) else item
         stack.extend((child, depth + 1) for child in children)
     return value

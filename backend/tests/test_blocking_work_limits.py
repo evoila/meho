@@ -9,7 +9,8 @@ import asyncio
 import socket
 import threading
 import time
-from typing import Any
+import tracemalloc
+from typing import Any, ClassVar
 
 import pytest
 import yaml
@@ -17,7 +18,11 @@ from pydantic import ValidationError
 
 from meho_backplane.connectors.net import tls as net_tls
 from meho_backplane.connectors.net.probe_pool import PROBE_POOL_WORKERS, run_blocking_probe
-from meho_backplane.targets.extras_limits import EXTRAS_MAX_DEPTH, EXTRAS_MAX_NODES
+from meho_backplane.targets.extras_limits import (
+    EXTRAS_MAX_DEPTH,
+    EXTRAS_MAX_NODES,
+    check_extras_size,
+)
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.ui.auth import routes as auth_routes
 from meho_backplane.ui.auth.verifier_store import MAX_PENDING_FLOWS, PKCEVerifierStore
@@ -76,46 +81,94 @@ async def test_probe_pool_returns_the_error_of_the_probe() -> None:
 # --- tls deadline ----------------------------------------------------------
 
 
+class _FakeSocket:
+    """Stand-in for ``socket.socket`` that records how it was made and used."""
+
+    made: ClassVar[list[_FakeSocket]] = []
+    connect_hook: ClassVar[Any] = None
+
+    def __init__(self, family: int, socktype: int, proto: int) -> None:
+        self.family, self.socktype, self.proto = family, socktype, proto
+        self.timeout: float | None = None
+        self.address: Any = None
+        self.closed = False
+        _FakeSocket.made.append(self)
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def connect(self, address: Any) -> None:
+        self.address = address
+        if _FakeSocket.connect_hook is not None:
+            _FakeSocket.connect_hook(self)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def fake_socket(monkeypatch: pytest.MonkeyPatch) -> type[_FakeSocket]:
+    _FakeSocket.made = []
+    _FakeSocket.connect_hook = None
+    monkeypatch.setattr(net_tls.socket, "socket", _FakeSocket)
+    return _FakeSocket
+
+
 def test_tls_connect_shares_one_deadline_across_all_addresses(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, fake_socket: type[_FakeSocket]
 ) -> None:
     addresses = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"192.0.2.{n}", 443)) for n in range(1, 9)
     ]
     monkeypatch.setattr(net_tls.socket, "getaddrinfo", lambda *a, **k: addresses)
-    granted: list[float] = []
 
-    def _slow_connect(_addr: Any, timeout: float) -> None:
-        granted.append(timeout)
-        time.sleep(timeout)
+    def _slow_connect(sock: _FakeSocket) -> None:
+        assert sock.timeout is not None
+        time.sleep(sock.timeout)
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(net_tls.socket, "create_connection", _slow_connect)
+    fake_socket.connect_hook = _slow_connect
     begin = time.monotonic()
     with pytest.raises(TimeoutError):
         net_tls._connect_before_deadline("host.example", 443, time.monotonic() + 0.3)
     assert time.monotonic() - begin < 0.6
+    granted = [sock.timeout for sock in fake_socket.made if sock.timeout is not None]
     assert len(granted) < len(addresses)
     assert max(granted) <= 0.3
+    assert all(sock.closed for sock in fake_socket.made)
 
 
 def test_tls_connect_tries_the_next_address_after_a_refusal(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, fake_socket: type[_FakeSocket]
 ) -> None:
     addresses = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443)),
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.2", 443)),
     ]
     monkeypatch.setattr(net_tls.socket, "getaddrinfo", lambda *a, **k: addresses)
-    sentinel = object()
 
-    def _connect(addr: Any, timeout: float) -> object:
-        if addr[0] == "192.0.2.1":
+    def _connect(sock: _FakeSocket) -> None:
+        if sock.address[0] == "192.0.2.1":
             raise ConnectionRefusedError
-        return sentinel
 
-    monkeypatch.setattr(net_tls.socket, "create_connection", _connect)
-    assert net_tls._connect_before_deadline("host.example", 443, time.monotonic() + 5) is sentinel
+    fake_socket.connect_hook = _connect
+    result = net_tls._connect_before_deadline("host.example", 443, time.monotonic() + 5)
+    first, second = fake_socket.made
+    assert result is second
+    assert first.closed
+    assert not second.closed
+
+
+def test_tls_connect_keeps_the_scope_of_a_link_local_ipv6_address(
+    monkeypatch: pytest.MonkeyPatch, fake_socket: type[_FakeSocket]
+) -> None:
+    sockaddr = ("fe80::1", 443, 0, 3)
+    addresses = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", sockaddr)]
+    monkeypatch.setattr(net_tls.socket, "getaddrinfo", lambda *a, **k: addresses)
+    sock = net_tls._connect_before_deadline("fe80::1%3", 443, time.monotonic() + 5)
+    assert isinstance(sock, _FakeSocket)
+    assert sock.family == socket.AF_INET6
+    assert sock.address == sockaddr
 
 
 # --- YAML aliases ----------------------------------------------------------
@@ -174,6 +227,25 @@ def test_extras_that_repeat_one_object_count_every_copy() -> None:
     repeated = {f"k{n}": shared for n in range(40)}
     with pytest.raises(ValidationError, match="at most"):
         TargetCreate(**_body(repeated))
+
+
+def test_a_very_wide_list_is_refused_without_reading_its_items() -> None:
+    wide = [0] * 200_000
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="at most"):
+            check_extras_size({"items": wide})
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 100_000
+
+
+def test_extras_at_the_limit_are_accepted() -> None:
+    at_limit = [0] * (EXTRAS_MAX_NODES - 1)
+    assert check_extras_size(at_limit) is at_limit
+    with pytest.raises(ValueError, match="at most"):
+        check_extras_size([*at_limit, 0])
 
 
 def test_extras_nested_too_deep_is_refused() -> None:

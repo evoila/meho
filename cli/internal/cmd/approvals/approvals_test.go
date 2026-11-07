@@ -1351,6 +1351,10 @@ func TestPrintDetailAndListRenderUncertainRun(t *testing.T) {
 	d := failedRunView(t)
 	uncertain := api.ApprovalResultStateUncertain
 	d.ResultState = &uncertain
+	// The backplane's summary carries the same advice as guidance; show
+	// says it once.
+	guidance := uncertainAdvice
+	d.ResumeOutcome.Guidance = &guidance
 
 	var buf bytes.Buffer
 	printDecision(&buf, stubID, &d, nil)
@@ -1362,6 +1366,9 @@ func TestPrintDetailAndListRenderUncertainRun(t *testing.T) {
 	}
 	if strings.Contains(out, "FAILED") {
 		t.Errorf("printDecision says FAILED for an uncertain run:\n%s", out)
+	}
+	if n := strings.Count(out, "Do not run it again"); n != 1 {
+		t.Errorf("printDecision gives the advice %d times, want once:\n%s", n, out)
 	}
 
 	var list bytes.Buffer

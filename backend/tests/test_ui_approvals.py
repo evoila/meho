@@ -3567,7 +3567,8 @@ def test_detail_modal_renders_the_uncertain_run() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert 'data-testid="approval-run-uncertain"' in body
-    assert "Do not run it again. Check the target first." in body
+    assert body.count("Do not run it again. Check the target first.") == 1
+    assert 'data-testid="approval-guidance"' not in body
     assert "alert-warning" in body
     assert "did not succeed" not in body
     assert "run failed" not in body

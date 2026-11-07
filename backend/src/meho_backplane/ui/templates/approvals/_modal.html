@@ -309,7 +309,9 @@
                   <dt class="opacity-70">Error code</dt>
                   <dd class="font-mono [overflow-wrap:anywhere]">{{ request.outcome.error_code }}</dd>
                 {% endif %}
-                {% if request.outcome.guidance %}
+                {#- The guidance of an uncertain run is the advice the banner
+                    above already gives (#5025). -#}
+                {% if request.outcome.guidance and request.result_state != "uncertain" %}
                   <dt class="opacity-70">Next step</dt>
                   <dd class="[overflow-wrap:anywhere]" data-testid="approval-guidance">{{ request.outcome.guidance }}</dd>
                 {% endif %}

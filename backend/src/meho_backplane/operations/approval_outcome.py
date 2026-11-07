@@ -17,14 +17,19 @@ the approved change actually landed:
 * ``execution_outcome`` -- ``uncertain`` when MEHO does not know if the
   change happened (#5025), else ``None``.
 * ``guidance`` -- the next step a failed multi-step operation names (#5377),
-  for example "The VM waits on question _vmx1: ...".
+  for example "The VM waits on question _vmx1: ...". For an ``uncertain``
+  run it is MEHO's fixed advice (:data:`UNCERTAIN_ADVICE`): do not run it
+  again, check the target first.
 
 Only these fields leave the envelope. The result body and the free-text
 ``error`` stay on the owner-only ``GET /api/v1/approvals/{id}/result`` read.
 
 ``guidance`` is MEHO's own words, never vendor text. The approval store
 stamps it into ``extras["approval_guidance"]`` when it stores the result
-(:func:`with_approval_guidance`), and the summary reads only that stamp. The
+(:func:`with_approval_guidance`), and the summary reads only that stamp, or
+the fixed advice of an ``uncertain`` run. A timeout, a failed audit write
+and a restart store no stamp, so the advice is the one piece of guidance
+such a run has. The full result's ``remediation`` stays owner-only. The
 stamp is taken from the error answer a multi-step operation wrote itself
 (#3809): the result body's ``status`` is the run's ``error_code``. It is
 never taken from a vendor answer, never for a run that ended ``ok``, and
@@ -50,7 +55,11 @@ from typing import Any
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
-from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
+from meho_backplane.operations.uncertain_outcome import (
+    UNCERTAIN_ADVICE,
+    UNCERTAIN_OUTCOME,
+    envelope_is_uncertain,
+)
 from meho_backplane.redaction.flight_recorder.families import SECRET_OP_CLASSES
 
 __all__ = [
@@ -153,17 +162,22 @@ def resume_outcome_from_envelope(
     approval store wrote it (see :func:`with_approval_guidance`). A missing
     or odd-shaped field reads as ``None`` instead of raising, because the
     column is plain JSON and older rows may differ. ``guidance`` comes only
-    from the stamp, never from the result body.
+    from the stamp, never from the result body. An ``uncertain`` run without
+    a stamp gets MEHO's fixed advice, so every summary says what to do.
     """
     data: Mapping[str, Any] = envelope or {}
     extras = _extras(data)
+    uncertain = envelope_is_uncertain(data)
+    guidance = _str_or_none(extras.get(_GUIDANCE_KEY))
+    if uncertain and guidance is None:
+        guidance = UNCERTAIN_ADVICE
     return ResumeOutcome(
         resumed_at=resumed_at,
         result_status=_str_or_none(data.get("status")),
         error_code=_str_or_none(extras.get("error_code")),
         audit_id=_uuid_or_none(data.get("audit_id")),
-        guidance=_str_or_none(extras.get(_GUIDANCE_KEY)),
-        execution_outcome=UNCERTAIN_OUTCOME if envelope_is_uncertain(data) else None,
+        guidance=guidance,
+        execution_outcome=UNCERTAIN_OUTCOME if uncertain else None,
     )
 
 

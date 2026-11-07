@@ -100,6 +100,43 @@ def test_audit_commit_failed_result_is_uncertain_in_every_view() -> None:
     summary = resume_outcome_from_envelope(envelope)
     assert summary.execution_outcome == "uncertain"
     assert summary.error_code == "audit_commit_failed"
+    assert summary.guidance == UNCERTAIN_ADVICE
+
+
+def test_every_uncertain_summary_carries_the_advice() -> None:
+    """A timeout, a failed audit write and a restart store no guidance stamp.
+
+    Their summary still says what to do: the fixed advice. The full result's
+    ``remediation`` (owner-only) may say more.
+    """
+    timeout = result_connector_timeout(
+        "vm.create", httpx.ReadTimeout("x", request=_REQUEST), 1.0, changes_target=True
+    )
+    for result in (
+        timeout,
+        result_audit_commit_failed("vm.create", 5.0),
+        result_interrupted_by_restart("vm.create"),
+    ):
+        envelope = result.model_dump(mode="json")
+        assert "approval_guidance" not in envelope["extras"]
+        summary = resume_outcome_from_envelope(envelope)
+        assert summary.execution_outcome == "uncertain"
+        assert summary.guidance == UNCERTAIN_ADVICE
+        assert "Do not run it again" in envelope["extras"]["remediation"]
+
+
+def test_uncertain_summary_keeps_a_stored_guidance_stamp() -> None:
+    envelope = {
+        "status": "error",
+        "extras": {
+            "error_code": "result_unknown",
+            "execution_outcome": "uncertain",
+            "approval_guidance": "The VM waits on question _vmx1.",
+        },
+    }
+    summary = resume_outcome_from_envelope(envelope)
+    assert summary.execution_outcome == "uncertain"
+    assert summary.guidance == "The VM waits on question _vmx1."
 
 
 def test_real_error_summary_has_no_execution_outcome() -> None:
@@ -107,6 +144,7 @@ def test_real_error_summary_has_no_execution_outcome() -> None:
         {"status": "error", "extras": {"error_code": "connector_error"}}
     )
     assert summary.execution_outcome is None
+    assert summary.guidance is None
 
 
 def test_uncertain_run_is_not_offered_for_a_re_run() -> None:

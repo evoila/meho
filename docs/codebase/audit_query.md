@@ -25,7 +25,10 @@ class it knows. Nothing is guessed from `method` / `path`.
 |---|---|
 | `operation_execution` | Dispatch rows that ran (`ok` or `error`), the row of a multi-step operation that stopped part-way because a step waits for approval (`awaiting_approval`) or was denied (`denied`, #4275), runbook abort, gateway command mint / result, satellite effect rows, topology / ingest / add-on writes, sweepers and reapers. |
 | `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version), a call of an ingested licence read that MEHO keeps off (`denied`, `payload["error"]["error_code"] = license_read_off`, #5791), the `approval.request` park row, and the `denied` row of a step inside a multi-step operation. |
-| `config_change` | Two settings rows (`method = SERVICE`). The `meho_connector_edit_op` row: an operator turned one operation on or off, or changed or removed its risk level, approval rule, description or guidance (#5791). The `meho_connector_tenant_setting` row: a tenant turned one built-in operation or a whole group on or off for itself, or set it back to the install default (#5864). `payload["op_id"]` names the edited operation (a group switch names `payload["group_key"]`), so a search by op id finds the edit. No operation ran, so a filter on `operation_execution` does not return these rows. The other connector review rows (enable, disable, group edits) stay `operation_execution`. |
+| `config_change` | Two settings rows (`method = SERVICE`). The `meho_connector_edit_op` row: an operator turned one operation on or off, or changed or removed its risk level, approval rule, description or guidance (#5791). The `meho_connector_tenant_setting` row: a tenant turned one built-in operation or a whole group on or off for itself, or set it back to the install default (#5864). `payload["op_id"]` names the edited operation (a group switch names `payload["group_key"]`), so a search by op id finds the edit. No operation ran, so a filter on `operation_execution` does not return these rows. The other connector review rows (enable, disable, group edits) stay `operation_execution`. Edit rows written before migration `0137` keep `operation_execution`; no row is changed. |
+| `approval_decision` | `approval.decision` rows (approve, reject, expire; an approve row's payload names the `approval_rule` that allowed it), the `approval.withdraw` row (the sender took its request back, #5717), and the standing-grant auto-approval row. |
+| `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
+| `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
 
 A call of an ingested op on a connector class that does not accept
 ingested operations also writes a `policy_decision` row (`denied`, code
@@ -43,9 +46,6 @@ agent run that a person started, `agent_grant_denied` means the agent's
 own grant refused the call, and `role_insufficient` means the role did.
 The text names operations, grant patterns, roles and logins only, never a
 secret or the call's arguments.
-| `approval_decision` | `approval.decision` rows (approve, reject, expire), the `approval.withdraw` row (the sender took its request back, #5717), and the standing-grant auto-approval row. |
-| `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
-| `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
 
 ### Results a handler returns: error, wait, deny (#4274, #4275)
 
@@ -444,7 +444,7 @@ tenant-scoping invariant is enforced one layer up.
 | Route | Filter shape | Notes |
 |---|---|---|
 | `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration` (`"24h"` / `"7d"` / ISO-8601). Client-supplied `tenant_id` (or any other unknown field) is rejected with 422 `extra_forbidden` (`AuditQueryRequest.model_config` sets `extra="forbid"`, G0.9-T2 / #729); the route never reads tenant from the body — it always passes `operator.tenant_id` from the JWT to the substrate. | Full-filter surface. |
-| `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. CLI: `meho audit count` (#4983). |
+| `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `has_trace`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. CLI: `meho audit count` (#4983). |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |
@@ -464,11 +464,12 @@ counted — "session rows" are defined by the `agent_session_id` anchor.
 
 Every route binds two audit-override contextvars **before** the substrate
 call — `audit_op_class="audit_query"` (always) plus an `audit_op_id`:
-`"meho.audit.query"` for the four query routes, `"meho_audit_replay"` for
+`"meho.audit.query"` for the five query routes (`query`, `who-touched`,
+`by-work-ref`, `my-recent`, `show`) and `class-counts`, `"meho_audit_replay"` for
 the replay route, and `"meho_audit_trace"` for the flight-recorder trace
 route (so operators can tell replay and trace-read usage apart from
 flat-query usage in `audit_log`). The shared `audit_query` op_class flips
-the broadcast event to aggregate-only (`{op_id, result_status,
+the broadcast event to aggregate-only (`{op_class, result_status,
 row_count}` only, never the request filter or the replayed `ReplayNode`
 tree). The `audit_row_count` contextvar is bound after the substrate
 returns — and on the 413 path before raising — so the broadcast event's
@@ -527,11 +528,12 @@ Error mapping at the router boundary: `DurationParseError` (router-side),
 
 ## MCP tool surface (G8.1-T4 #468)
 
-The agent-facing entry is a single tool — `query_audit` — registered in
+The MCP entry is one tool, `query_audit`, registered in
 `backend/src/meho_backplane/mcp/tools/audit.py` against the G0.5 tool
-registry. The CLAUDE.md narrow-waist postulate (#5) says the agent
-sees exactly one audit tool; the REST per-shape shortcuts
-(`who-touched` / `my-recent` / `show`) collapse into filter
+registry. It is an operator-plane tool (`surface=ToolSurface.OPERATOR`):
+it is listed only for a session with the `mcp:admin` elevation, not on
+the default working surface (see [mcp.md](mcp.md)). The REST per-shape
+shortcuts (`who-touched` / `my-recent` / `show`) collapse into filter
 combinations on `query_audit`.
 
 The handler:
@@ -553,8 +555,8 @@ from the validated JWT (resolved by `verify_mcp_jwt_and_bind`); the
 arguments dict never carries `tenant_id` (rejected by the schema).
 Cross-tenant probes are structurally impossible.
 
-The input schema accepts the same filters as the REST body, including
-`event_class` (#4807). Its `enum` is built from `AuditEventClass` plus
+The input schema accepts the same filters as the REST body, except
+`work_ref` and `has_trace`, and including `event_class` (#4807). Its `enum` is built from `AuditEventClass` plus
 null, so the schema and the substrate cannot drift apart. A test checks
 that every filter the tool's help text names is a property of the
 schema.
@@ -567,11 +569,11 @@ Audit + broadcast contract:
   `"meho.audit.query"`. The asymmetry is the dispatcher's convention
   (HTTP middleware reads a contextvar override; MCP dispatcher uses
   the tool name). Unifying the two op_ids is a v0.2.next surface.
-* `op_class="audit_query"` on the `ToolDefinition` is the declarative
-  contract for the broadcast classifier's aggregate-only redaction
-  per `broadcast/events.py::redact_payload`. T5 (#469) is the
-  end-to-end acceptance gate for the wiring; T4 ships the declarative
-  registration only.
+* `op_class="audit_query"` on the `ToolDefinition` is the class the
+  MCP handler uses: it passes the declared class to
+  `broadcast/events.py::resolve_op_class` (`mcp/handlers.py`), so the
+  audit row and the broadcast event both carry `audit_query`, and the
+  event is aggregate-only.
 
 Error mapping at the tool boundary:
 
@@ -654,36 +656,38 @@ surfaces.
 
 ### `meho_audit_` broadcast-classifier arm
 
-The MCP broadcast path derives `op_class` from `classify_op(op_id)`
-with the **tool name verbatim** — it does not honor
-`ToolDefinition.op_class`. `classify_op` therefore carries a
-`meho_audit_` prefix arm next to the existing `audit.` arm: without
-it, `meho_audit_replay` would fall through to `other` and broadcast
-its full `ReplayNode` tree instead of the aggregate-only view. (The
+The MCP handler takes the tool's declared `op_class` through
+`resolve_op_class(name, defn.op_class)`. `classify_op` also carries a
+`meho_audit_` prefix arm next to the `audit.` arm. When `classify_op`
+says an op id touches the audit log, that class wins over any declared
+class, so a declared class can never turn the `meho_audit_replay`
+broadcast into a full `ReplayNode` tree. (The
 arm was originally the dotted `meho.audit.` prefix for the pre-#2745
 tool name `meho.audit.replay`; the dotted arm is retained because
 `classify_op` re-runs at render time on stored op-ids, so historical
-rows keep their class.) (The literal tool name `query_audit` has the same
-MCP-path classification gap today — a pre-existing G8.1 concern, out
-of scope for #377.)
+rows keep their class.)
 
 ## Dependencies
 
 * `meho_backplane.db.models.AuditLog` — read schema; this package never writes.
 * `meho_backplane.db.models.Target` — denormalization source for `target_name`.
+* `meho_backplane.db.models.Tenant` — join source for `tenant_name`.
+* `meho_backplane.db.models.DispatchTrace` — the `has_trace` filter.
 * `meho_backplane.broadcast.events.classify_op` — op_id → op_class lookup;
   shared with the broadcast publish path so audit-query and broadcast classify
   identically.
 
 Reverse dependencies:
 
-* `meho_backplane.api.v1.audit` (T2 #466) — REST router for the four
-  consumer-facing routes; dispatches every call through `query_audit`.
+* `meho_backplane.api.v1.audit` (T2 #466) — REST router for the seven
+  audit routes. Flat queries go through `query_audit`, replay through
+  `replay_session`, and trace through `flight_recorder.load_trace`.
+  `class-counts` lives in `meho_backplane.api.v1.audit_counts`.
 * `meho_backplane.mcp.tools.audit` (T4 #468, extended G8.2-T6 #1014) —
   the `query_audit` MCP meta-tool plus the `meho_audit_replay` admin
   tool; dispatches flat queries through `query_audit` and replay
   (admin tool + `shape="tree"`) through `replay_session`.
-* T3 #467 (CLI) follows.
+* The `meho audit` CLI (T3 #467), in `cli/internal/cmd/audit/`.
 
 ## BFF (operator UI) audit coverage (G0.15-T7 #1216)
 
@@ -715,8 +719,8 @@ Surface mapping (single source of truth in
 | ``/ui/memory`` (+ subpaths) | memory | ``ui.view.memory`` |
 | ``/ui/topology`` (+ subpaths) | topology | ``ui.view.topology`` |
 
-The ``op_class="ui_view"`` is a new class (the consumer's
-``claude-rdc-hetzner-dc#753`` v0.7.0 closed-loop dogfood "Option B")
+The ``op_class="ui_view"`` is a new class (from a consumer's
+v0.7.0 closed-loop dogfood)
 distinct from the agent path's ``read`` / ``write``. Operators who want
 UI page views in their forensic timeline query
 ``op_class=ui_view``; operators who want to prune them filter them
@@ -835,10 +839,10 @@ parity with the ``/api/v1/*`` chassis path and the MCP transport path.
   example queries).
 * Write paths: `backend/src/meho_backplane/audit.py`,
   `backend/src/meho_backplane/mcp/audit.py`.
-* Op-class classifier: `backend/src/meho_backplane/broadcast/events.py:172`
+* Op-class classifier: `backend/src/meho_backplane/broadcast/events.py`
   (`classify_op`).
-* Schema: `backend/src/meho_backplane/db/models.py:285-372` (`AuditLog`),
-  `backend/src/meho_backplane/db/models.py:602-...` (`Target`).
+* Schema: `backend/src/meho_backplane/db/models.py` (`AuditLog`,
+  `Target`).
 * Migrations: `backend/alembic/versions/0001_create_audit_log.py`,
   `backend/alembic/versions/0002_create_tenant_and_audit_tenant_id.py`,
   `backend/alembic/versions/0004_*` (target_id on audit_log).

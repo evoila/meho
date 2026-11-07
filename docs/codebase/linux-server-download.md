@@ -13,10 +13,11 @@ image, `helm`, the `meho` CLI and the licence texts.
 - `deploy/linux-server/check-download.sh <tar>` checks a built file. It reads
   only the tar and the registries, not the files of the build.
 - `.github/workflows/linux-download.yml` runs both. `cli-release.yml` calls it
-  on every `v*` tag and attaches the file to the GitHub release.
+  on every `v*` tag and attaches the file to the GitHub release. The file
+  is there for testing: the Linux server install is not released for
+  customers yet.
 
-The layout follows the form-2 design (meho-internal
-`docs/design/2026-10-10-install-forms/form-2-linux-server.md`, section 4).
+The layout follows the internal form-2 design note, section 4.
 
 ## The layout
 
@@ -32,7 +33,7 @@ is owned by root (0/0), and only root can change it. `install.sh`,
 | `rke2/rke2.linux-amd64.tar.gz`, `rke2/rke2-images.linux-amd64.tar.zst`, `rke2/sha256sum-amd64.txt` | RKE2 and its images | the RKE2 release; the checksum file is pinned by sha256 and checks the other two |
 | `images/meho-images.linux-amd64.tar.zst` | every image of the chart, with the core on, plus the two images of the storage manifest | the registries, by digest (see below) |
 | `chart/meho-<chart version>.tgz` | the MEHO chart | `oci://ghcr.io/evoila/meho-chart`, checked with `cosign verify` |
-| `chart/values-single-node.yaml` | the values for one node | `deploy/linux-server/values-single-node.yaml`; its full content comes with #4735 |
+| `chart/values-single-node.yaml` | the values for one node | `deploy/linux-server/values-single-node.yaml` |
 | `bin/helm` | Helm v3.16.4, the version the chart's CI uses | `get.helm.sh`, sha256 pinned |
 | `bin/meho` | the Linux amd64 CLI of the same version | the `release` job of `cli-release.yml` |
 | `LICENSES/` | the licence texts and `README.txt`, which names each part, its licence and where its source code is | `LICENSE`, `NOTICE`, `deploy/linux-server/packaging/licenses/` |
@@ -156,11 +157,12 @@ style archive of the same image gave `sha256:f2d5f776…`.
 
 - **The list**: `helm template` of the pulled chart with the core on
   (`render-values.yaml`, then `chart/values-single-node.yaml`), plus the
-  images of `storage/local-path-storage.yaml`. When #4050 adds `images.txt`
-  to the chart, the list can come from that file instead.
+  images of `storage/local-path-storage.yaml`. The chart ships
+  `images.txt` too, but the build does not read it yet; the list could
+  come from that file instead.
 - **The lock**: each image gets one digest. A reference with a digest keeps
-  it. A reference with a tag only (for example `valkey/valkey:9.0-alpine`
-  and `ghcr.io/evoila/meho:v0.36.0`) is resolved once with
+  it. A reference with a tag only (for example
+  `ghcr.io/evoila/meho:v0.36.0`) is resolved once with
   `regctl image digest`. The MEHO image's digest must be the one
   `cosign verify` checked.
 - **The names**: RKE2 needs a name with a tag (`retagImages` and
@@ -304,13 +306,13 @@ MEHO_REGISTRY=registry.example.com MEHO_REGISTRY_USERNAME=robot MEHO_REGISTRY_PA
   each part. Whether a link to the source is enough for the GPL software in
   the images (busybox, and the base Linux of the images) is still open in
   the design.
-- **`images.txt`.** Until #4050 adds it, the image list comes from
-  `helm template`.
+- **`images.txt`.** The chart ships it, but the image list still comes
+  from `helm template`.
 - **The first tag run.** The first tag run, v0.36.0, stopped at the chart
   render, because `render-values.yaml` set the issuer and the chart refuses
-  it with the built-in Keycloak on (#4820). So the release path (the call
-  from `cli-release.yml`, then `publish`) has not finished in CI yet. A
-  manual run on main covers the build and the checks before the next tag.
+  it with the built-in Keycloak on (#4820). Later tag runs finish: the
+  v0.45.0 release has `meho-linux-0.45.0-amd64.tar`, `SHA256SUMS-linux`
+  and its `.cosign.bundle`.
 
 ## Testing
 
@@ -352,8 +354,7 @@ deploy/linux-server/check-download.sh /tmp/download/meho-linux-0.36.0-amd64.tar
 
 ## References
 
-- The form-2 design: meho-internal
-  `docs/design/2026-10-10-install-forms/form-2-linux-server.md`, section 4.
+- The form-2 design: the internal form-2 design note, section 4.
 - RKE2 offline install: <https://docs.rke2.io/install/airgap>.
 - k3s image import (RKE2 v1.37.1 uses k3s at `356c025475bb`):
   <https://github.com/k3s-io/k3s/blob/356c025475bb/pkg/agent/containerd/containerd.go>.

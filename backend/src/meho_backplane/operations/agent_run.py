@@ -81,6 +81,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.events.outbox import publish as publish_event
 from meho_backplane.operations.addon_step_events import AddonStepEventService
+from meho_backplane.operations.identity_budget import TokenUsage
 
 #: Event kind the agent-run terminal-transition emits onto the outbox.
 #: The event drain's subscription matcher (:mod:`meho_backplane.events.matcher`)
@@ -819,6 +820,7 @@ async def succeed_run(
     output: dict[str, object],
     cost: Decimal | None = None,
     turns: int | None = None,
+    usage: TokenUsage | None = None,
 ) -> AgentRun:
     """Transition a run to ``succeeded`` and record its output.
 
@@ -845,6 +847,8 @@ async def succeed_run(
         cost: Computed cost (G11.5/C3). ``None`` in v0.2.
         turns: Model-request turn total to persist. ``None`` leaves the
             column unchanged.
+        usage: The run's token totals (#5853), written to the four token
+            columns. ``None`` leaves them unchanged.
 
     Returns:
         The mutated, flushed row.
@@ -858,6 +862,11 @@ async def succeed_run(
         row.cost = cost
     if turns is not None:
         row.turns = turns
+    if usage is not None:
+        row.input_tokens = usage.input_tokens
+        row.output_tokens = usage.output_tokens
+        row.cache_read_tokens = usage.cache_read_tokens
+        row.cache_write_tokens = usage.cache_write_tokens
     return await transition(session, row, AgentRunStatus.SUCCEEDED)
 
 

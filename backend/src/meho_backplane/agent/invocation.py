@@ -122,7 +122,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.db.models import AgentRunStatus, AgentRunTrigger
 from meho_backplane.operations import agent_run as run_lifecycle
-from meho_backplane.operations import identity_budget
+from meho_backplane.operations import identity_budget, tenant_model_prices
 from meho_backplane.operations._audit import (
     AgentRunAuditMeta,
     agent_run_audit_meta_var,
@@ -260,6 +260,13 @@ class AgentRunStatusView:
     #: definition's ``identity_ref``). ``None`` when the agent is itself
     #: the subject (a scheduled run) and on rows written before #4237.
     identity_act: str | None = None
+    #: Token counts of a succeeded run (#5853). ``input_tokens`` is the
+    #: uncached input; the cached input is in the two cache counts.
+    #: ``None`` while the run is not succeeded, and on older rows.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -861,6 +868,7 @@ class AgentInvoker:
         usage: TokenUsage | None = None,
         turns: int | None = None,
         request_usages: tuple[TokenUsage, ...] = (),
+        charge: bool = True,
     ) -> None:
         """Record a run's terminal state on its durable row, committed.
 
@@ -887,15 +895,19 @@ class AgentInvoker:
            :func:`_split_model_id`) so the
            :data:`~meho_backplane.operations.identity_budget.MODEL_PRICING`
            lookup hits.
-        2. Computes the run's USD cost via
+        2. For a model not in ``MODEL_PRICING``, reads the tenant's own
+           price for it, if a tenant admin set one (#5853,
+           :mod:`~meho_backplane.operations.tenant_model_prices`).
+        3. Computes the run's USD cost via
            :func:`~meho_backplane.operations.identity_budget.compute_run_cost`,
            one request of *request_usages* at a time, so a per-request
            price (Haiku 5.5's long-prompt rate) lands on the right
            request. A runtime that reports no per-request usage gets
            *usage* priced as one request.
-        3. Stamps that cost on ``agent_run.cost`` through the lifecycle
-           ``succeed_run`` / ``fail_run`` helper.
-        4. Applies one increment per active budget bucket (daily +
+        4. Stamps that cost on the ``agent_run`` row through the lifecycle
+           ``succeed_run`` / ``fail_run`` helper; the success path also
+           stores the token counts.
+        5. Applies one increment per active budget bucket (daily +
            weekly + monthly) for the principal via
            :func:`~meho_backplane.operations.identity_budget.apply_consumption`.
 
@@ -904,6 +916,10 @@ class AgentInvoker:
         failed is charged for the calls it made, the same as a run that
         succeeded. When the row is already terminal (an operator cancelled
         it), the transition is skipped and the charge is still applied.
+
+        *charge* ``False`` (a child run, #5853) stores the token counts of
+        *usage* and skips steps 1-3 and 5: no cost and no spend-limit
+        increment, because the parent run already pays for these tokens.
         """
         usages = request_usages or ((usage,) if usage is not None else ())
         sessionmaker = get_sessionmaker()
@@ -913,16 +929,19 @@ class AgentInvoker:
                 return
             tenant_id, principal_sub = row.tenant_id, row.identity_sub
             cost: Decimal | None = None
-            if usages:
+            if usages and charge:
+                tenant_price = await tenant_model_prices.price_for_model(
+                    session, row.tenant_id, row.provider, row.model
+                )
                 cost = identity_budget.compute_run_cost(
-                    usages, _full_model_id(row.provider, row.model)
+                    usages, _full_model_id(row.provider, row.model), fallback=tenant_price
                 )
             try:
                 if error is not None:
                     await run_lifecycle.fail_run(session, row, error=error, cost=cost)
                 else:
                     await run_lifecycle.succeed_run(
-                        session, row, output=output or {}, cost=cost, turns=turns
+                        session, row, output=output or {}, cost=cost, turns=turns, usage=usage
                     )
             except run_lifecycle.IllegalTransitionError:
                 # An operator cancelled the run: keep its status, record the cost.
@@ -960,8 +979,13 @@ class AgentInvoker:
                 return
             cost: Decimal | None = None
             if request_usages:
+                tenant_price = await tenant_model_prices.price_for_model(
+                    session, row.tenant_id, row.provider, row.model
+                )
                 cost = identity_budget.compute_run_cost(
-                    request_usages, _full_model_id(row.provider, row.model)
+                    request_usages,
+                    _full_model_id(row.provider, row.model),
+                    fallback=tenant_price,
                 )
             _record_cost(row, cost)
             if cost is not None:
@@ -1957,6 +1981,7 @@ async def _finalize_child_run(
     *,
     output: object,
     error: str | None,
+    usage: TokenUsage | None = None,
 ) -> None:
     """Close a recorded child ``agent_run`` row to its terminal state.
 
@@ -1972,11 +1997,17 @@ async def _finalize_child_run(
     :class:`~meho_backplane.operations.agent_run.IllegalTransitionError` when a
     terminal state already landed (e.g. an operator cancelled the child
     mid-flight -- the cancel already wrote the terminal row).
+
+    On success the row also stores the child's own token counts (*usage*,
+    #5853), with no cost and no spend-limit increment: the child's tokens are
+    already in the parent run's total, and the parent run pays for them.
     """
     await AgentInvoker._finalize_run(
         run_id,
         output=None if error is not None else _project_output(output),
         error=error,
+        usage=usage,
+        charge=False,
     )
 
 
@@ -2022,6 +2053,10 @@ def _row_to_view(row: AgentRunRow, *, agent_name: str | None = None) -> AgentRun
         agent_name=agent_name,
         identity_sub=row.identity_sub,
         identity_act=row.identity_act,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        cache_read_tokens=row.cache_read_tokens,
+        cache_write_tokens=row.cache_write_tokens,
     )
 
 

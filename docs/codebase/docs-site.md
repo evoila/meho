@@ -5,13 +5,11 @@
 MEHO's published documentation site — <https://evoila.github.io/meho/>
 — is built with MkDocs Material from sources under `docs-site/` and
 versioned with [mike](https://github.com/jimporter/mike) on the
-`gh-pages` branch, which GitHub Pages serves. The scaffold landed with
-task #2670 (initiative #2663). The *Start here* and *Install &
-operate* sections carry real content (#2671: landing page,
-`architecture.md`, and the `install/` trail pages); #2672 (connect
-clients) and #2673 (do-real-work guides) migrate the remaining
-sections. The generated reference section lands with the #2662
-contract snapshots.
+`gh-pages` branch, which GitHub Pages serves. The top-level sections of
+the `nav` in `mkdocs.yml` are *Start here*, *Install & operate*,
+*Connect clients*, *Do real work*, *Extend MEHO*, *Reference* and
+*Project*. *Reference* holds the generated pages under
+`docs-site/reference/`.
 
 The site is the *operator/adopter-facing* documentation. The `docs/`
 tree (this directory's parent) remains the contributor-facing material
@@ -128,7 +126,7 @@ a site that returns 404 (#2741).
 ## References
 
 - Initiative #2663 (information architecture), goal #2661.
-- `docs/RELEASING.md` — the docs site is the fourth tag-published
-  artefact.
+- `docs/RELEASING.md` — the docs site is one of the artefacts a `v*`
+  tag publishes.
 - mkdocs-material versioning guide:
   <https://squidfunk.github.io/mkdocs-material/setup/setting-up-versioning/>

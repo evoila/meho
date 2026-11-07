@@ -55,6 +55,7 @@ type CallResult struct {
 //	  [--params '<json>' | @<file>]            # operation params (object)
 //	  [--work-ref gh:<owner>/<repo>#<n>]       # external change-ticket reference
 //	  [--preview-hash <hash>]                  # destructive-tier binding from `operation preview` (#3197)
+//	  [--async]                                # start in the background, print a run id
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 //
@@ -73,6 +74,7 @@ func newCallCmd() *cobra.Command {
 		workRef           string
 		previewHash       string
 		jsonOut           bool
+		async             bool
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
@@ -100,7 +102,12 @@ func newCallCmd() *cobra.Command {
 			"IDENTICAL (connector_id, op_id, target, params), then pass it here. " +
 			"The dispatcher fail-closes with status=denied / " +
 			"error_code=preview_binding_required when a destructive op is called " +
-			"without a matching hash; it is ignored for every non-destructive op.",
+			"without a matching hash; it is ignored for every non-destructive op.\n\n" +
+			"--async starts the operation in the background and returns at once " +
+			"with a run id. The command does not wait, so a VPN or proxy limit " +
+			"cannot cut the answer. Read the run later, also from another " +
+			"terminal, with `meho operation run-status <run id>` (add --wait to " +
+			"wait for the end).",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -113,6 +120,7 @@ func newCallCmd() *cobra.Command {
 				WorkRef:           workRef,
 				PreviewHash:       previewHash,
 				JSONOut:           jsonOut,
+				Async:             async,
 				BackplaneOverride: backplaneOverride,
 			})
 		},
@@ -127,6 +135,8 @@ func newCallCmd() *cobra.Command {
 		"preview_hash from a prior `meho operation preview` — required for a destructive-tier op (#3197)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the full OperationResult envelope as JSON instead of the human render")
+	cmd.Flags().BoolVar(&async, "async", false,
+		"start the operation in the background and return at once with a run id; read it with `meho operation run-status`")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -140,6 +150,7 @@ type callOptions struct {
 	WorkRef           string
 	PreviewHash       string
 	JSONOut           bool
+	Async             bool
 	BackplaneOverride string
 }
 
@@ -161,10 +172,28 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	result, err := postCall(cmd.Context(), client, opts, params)
+	result, run, err := sendCall(cmd.Context(), client, opts, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if run != nil {
+		return printRunStarted(cmd.OutOrStdout(), run, opts.JSONOut)
+	}
+	return renderCallOutcome(cmd, opts.ConnectorID, opts.OpID, result, opts.JSONOut, result)
+}
+
+// renderCallOutcome prints an OperationResult envelope and returns the
+// exit signal. `meho operation call` and `meho operation run-status`
+// share it, so a stored result looks and exits like a direct call.
+// jsonPayload is what --json prints: the envelope for a call, the whole
+// run for run-status.
+func renderCallOutcome(
+	cmd *cobra.Command,
+	connectorID, opID string,
+	result *CallResult,
+	jsonOut bool,
+	jsonPayload any,
+) error {
 	// awaiting_approval (parked) is a first-class non-error outcome:
 	// the dispatcher has durably written an ApprovalRequest row and
 	// parked the call (G11.7-T1 #1401). Intercept it ahead of the
@@ -174,12 +203,12 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	// extras.approval_request_id, under --json) and exits 0 instead of
 	// rejecting it as an invalid status (exit 4).
 	if result.Status == dispatch.StatusAwaitingApproval {
-		if opts.JSONOut {
-			return output.PrintJSON(cmd.OutOrStdout(), result)
+		if jsonOut {
+			return output.PrintJSON(cmd.OutOrStdout(), jsonPayload)
 		}
 		w := cmd.OutOrStdout()
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n",
-			opts.ConnectorID, opts.OpID, result.Status, result.DurationMs)
+			connectorID, opID, result.Status, result.DurationMs)
 		dispatch.WriteParkedHint(w, result.Extras)
 		// A multi-step operation that stops for approval already has
 		// its own audit row; show its id like every other status (#4833).
@@ -203,14 +232,14 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	case "ok", "error", "denied", dispatch.StatusRateLimited, dispatch.StatusNotFound:
 		// fall through to rendering + exit-code branching below.
 	default:
-		return output.RenderError(cmd.ErrOrStderr(), dispatch.UnknownStatusError(result.Status), opts.JSONOut)
+		return output.RenderError(cmd.ErrOrStderr(), dispatch.UnknownStatusError(result.Status), jsonOut)
 	}
-	if opts.JSONOut {
-		if err := output.PrintJSON(cmd.OutOrStdout(), result); err != nil {
+	if jsonOut {
+		if err := output.PrintJSON(cmd.OutOrStdout(), jsonPayload); err != nil {
 			return err
 		}
 	} else {
-		PrintCallResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, result)
+		PrintCallResult(cmd.OutOrStdout(), connectorID, opID, result)
 	}
 	// "ok" → success (exit 0). "error" / "denied" / "rate_limited" /
 	// "not_found" → exit 1 via errOpError so shell pipelines see the
@@ -219,6 +248,24 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 		return nil
 	}
 	return errOpError
+}
+
+// runAccepted is the HTTP 202 answer of an async call.
+type runAccepted struct {
+	RunID  string `json:"run_id"`
+	Status string `json:"status"`
+	Async  bool   `json:"async"`
+}
+
+// printRunStarted tells the operator the operation started and how to
+// check it. With --json it prints the server's answer as it is.
+func printRunStarted(w io.Writer, run *runAccepted, jsonOut bool) error {
+	if jsonOut {
+		return output.PrintJSON(w, run)
+	}
+	fmt.Fprintf(w, "Started. Run id: %s. Check it with `meho operation run-status %s`.\n",
+		run.RunID, run.RunID)
+	return nil
 }
 
 // errOpError is the sentinel returned when the dispatcher reported
@@ -242,6 +289,20 @@ func postCall(
 	opts callOptions,
 	params map[string]any,
 ) (*CallResult, error) {
+	result, _, err := sendCall(ctx, client, opts, params)
+	return result, err
+}
+
+// sendCall is postCall with async support. With opts.Async the server
+// answers HTTP 202 and a run id, and sendCall returns the run and a nil
+// result. A server that ignores async still answers 200, which is
+// returned as a normal result.
+func sendCall(
+	ctx context.Context,
+	client operationsAPI,
+	opts callOptions,
+	params map[string]any,
+) (*CallResult, *runAccepted, error) {
 	body := api.CallOperationBody{
 		ConnectorId: opts.ConnectorID,
 		OpId:        opts.OpID,
@@ -249,7 +310,7 @@ func postCall(
 	if opts.TargetName != "" {
 		var target api.CallOperationBody_Target
 		if err := target.FromCallOperationBodyTarget0(opts.TargetName); err != nil {
-			return nil, fmt.Errorf("encode target: %w", err)
+			return nil, nil, fmt.Errorf("encode target: %w", err)
 		}
 		body.Target = &target
 	}
@@ -268,28 +329,43 @@ func postCall(
 		h := opts.PreviewHash
 		body.PreviewHash = &h
 	}
+	// Left nil without --async so a bare call keeps the old wire shape.
+	if opts.Async {
+		a := true
+		body.Async = &a
+	}
 	apiParams := &api.PostCallApiV1OperationsCallPostParams{}
 	resp, err := client.PostCallApiV1OperationsCallPostWithResponse(ctx, apiParams, body)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if resp.StatusCode() == http.StatusUnauthorized {
 		if rerr := client.Refresh(ctx); rerr != nil {
-			return nil, rerr
+			return nil, nil, rerr
 		}
 		resp, err = client.PostCallApiV1OperationsCallPostWithResponse(ctx, apiParams, body)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
+	if opts.Async && resp.StatusCode() == http.StatusAccepted {
+		var run runAccepted
+		if err := json.Unmarshal(resp.Body, &run); err != nil {
+			return nil, nil, fmt.Errorf("decode async call response: %w", err)
+		}
+		if run.RunID == "" {
+			return nil, nil, errors.New("decode async call response: no run_id")
+		}
+		return nil, &run, nil
+	}
 	if resp.StatusCode() != http.StatusOK {
-		return nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
+		return nil, nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
 	}
 	var out CallResult
 	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return nil, fmt.Errorf("decode call response: %w", err)
+		return nil, nil, fmt.Errorf("decode call response: %w", err)
 	}
-	return &out, nil
+	return &out, nil, nil
 }
 
 // ResultHandleID returns the handle_id of a result handle, or "" when there is none.

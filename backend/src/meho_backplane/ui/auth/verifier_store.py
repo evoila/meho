@@ -34,6 +34,12 @@ Every :meth:`put` call also drops entries older than
 map's size, runs under the lock, and amortises over the login
 cadence (one drop pass per fresh login -- realistic under any
 operator-facing traffic shape). No background task is needed.
+
+Size limit
+----------
+
+The store holds at most :data:`MAX_PENDING_FLOWS` flows. A new flow at the
+limit drops the oldest one first (insertion order is age order).
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from typing import Final
 
 __all__ = [
     "AUTHORIZATION_FLOW_TTL_SECONDS",
+    "MAX_PENDING_FLOWS",
     "PKCEVerifierStore",
     "PendingFlow",
     "get_verifier_store",
@@ -59,6 +66,10 @@ __all__ = [
 #: we drop it. Tests override to sub-second values to exercise the
 #: expiry path without sleeping.
 AUTHORIZATION_FLOW_TTL_SECONDS: Final[int] = 600
+
+#: Most pending flows the store holds at one time. When a new login
+#: arrives at the limit, the oldest pending flow is dropped.
+MAX_PENDING_FLOWS: Final[int] = 10_000
 
 
 @dataclass(frozen=True)
@@ -134,6 +145,11 @@ class PKCEVerifierStore:
             ]
             for key in stale:
                 del self._flows[key]
+            # A repeated ``state`` replaces its entry: drop it first so it
+            # moves to the newest position.
+            self._flows.pop(state, None)
+            while len(self._flows) >= MAX_PENDING_FLOWS:
+                del self._flows[next(iter(self._flows))]
             self._flows[state] = PendingFlow(
                 code_verifier=code_verifier,
                 return_to=return_to,

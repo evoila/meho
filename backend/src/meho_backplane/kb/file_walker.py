@@ -73,6 +73,14 @@ malformed YAML raises ``yaml.YAMLError`` which the walker re-raises
 as :class:`KbFileParseError` so callers can distinguish parse
 failure from disk-read failure.
 
+Header values are stored as the text the author wrote for dates and
+decimal numbers. Plain YAML would turn ``learned_at: 2026-11-03`` into a
+date object, which the JSON column cannot store, and ``version: 3.10``
+into the number 3.1. The walker reads the header with a loader that keeps
+both as text (``"2026-11-03"``, ``"3.10"``). A header value that still
+cannot be written as JSON fails the file with one short error that names
+the file and the field, in the dry run and in the real run alike.
+
 Out of scope (deferred)
 -----------------------
 
@@ -86,14 +94,17 @@ Out of scope (deferred)
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import frontmatter
 import structlog
 import yaml
+from frontmatter.default_handlers import YAMLHandler
 
 from meho_backplane.kb.schemas import validate_slug
 
@@ -135,6 +146,33 @@ class KbFileRecord:
     slug: str
     body: str
     metadata: dict[str, object]
+
+
+class _HeaderYamlLoader(yaml.SafeLoader):  # type: ignore[misc]
+    """Header loader that keeps dates and decimal numbers as the author's text.
+
+    Stock PyYAML turns an unquoted date into a ``date``, a date with a
+    time into a ``datetime`` and ``3.10`` into the float 3.1. A date
+    cannot be written to the JSON column, and the float loses its last
+    digit. Both constructors return the text of the node instead. The
+    subclass copies the parent's constructor table before it changes it,
+    so ``yaml.SafeLoader`` itself stays as it is.
+    """
+
+
+_HeaderYamlLoader.add_constructor("tag:yaml.org,2002:timestamp", lambda _loader, node: node.value)
+_HeaderYamlLoader.add_constructor("tag:yaml.org,2002:float", lambda _loader, node: node.value)
+
+
+class _HeaderYamlHandler(YAMLHandler):
+    """``python-frontmatter`` handler that reads the header with :class:`_HeaderYamlLoader`."""
+
+    def load(self, fm: str, **kwargs: object) -> Any:
+        kwargs.setdefault("Loader", _HeaderYamlLoader)
+        return yaml.load(fm, **kwargs)
+
+
+_HEADER_HANDLER = _HeaderYamlHandler()
 
 
 class KbFileParseError(ValueError):
@@ -378,11 +416,12 @@ def _build_record(path: Path, rel: str) -> KbFileRecord:
         raise type(exc)(f"could not read {rel}: {exc.strerror or type(exc).__name__}") from exc
 
     try:
-        post = frontmatter.loads(raw)
+        post = frontmatter.loads(raw, handler=_HEADER_HANDLER)
     except yaml.YAMLError as exc:
         raise KbFileParseError(f"front-matter parse error in {rel}: {exc}") from exc
 
     metadata = dict(post.metadata)
+    _assert_header_storable(metadata, rel)
     body = post.content
 
     override = metadata.get("slug")
@@ -398,3 +437,21 @@ def _build_record(path: Path, rel: str) -> KbFileRecord:
         body=body,
         metadata=metadata,
     )
+
+
+def _assert_header_storable(metadata: dict[str, object], rel: str) -> None:
+    """Fail the file when a header field cannot be written to the JSON column.
+
+    The dry run stops before the store step, so without this check it
+    reports a note that the real run cannot store. The check runs in the
+    walker, which both runs use, so both give the same short error.
+    """
+    for key, value in metadata.items():
+        try:
+            json.dumps({key: value}, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise KbFileParseError(
+                f"front-matter field {key!r} in {rel} cannot be stored: "
+                f"value of type {type(value).__name__} is not plain JSON "
+                f"({type(exc).__name__}); write it as text with quotes"
+            ) from exc

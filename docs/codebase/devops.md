@@ -1626,10 +1626,10 @@ helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep -i "addit
 ## Publish workflow (`.github/workflows/chart.yml`)
 
 The chart is packaged, pushed to OCI, and cosign-signed by
-`.github/workflows/chart.yml`. Its `validate`, `publish` and `verify-anonymous-pull` jobs run on `meho-runners-ci`
+`.github/workflows/chart.yml`. Its `publish` and `verify-anonymous-pull` jobs run on `meho-runners-ci`
 (the project's self-hosted runner pool on a dedicated CI cluster,
 introduced by #160 + #167). It shares the
-hardening conventions of `image.yml`: job-level fork-PR guard,
+hardening conventions of `image.yml`: job-level fork-PR guard (the `validate` job runs on GitHub-hosted `ubuntu-24.04`),
 SHA-pinned actions with `# vX.Y.Z` comments, a minimum `permissions:`
 block (the workflow default is `contents: read`; only the `publish` job
 adds `packages: write` and `id-token: write`), per-job
@@ -1883,7 +1883,7 @@ these workflows:
 - **The TruffleHog scanner container image is digest-pinned.** The action shells out to `docker run "${IMAGE}:${VERSION}"`,
   defaulting `VERSION` to the mutable `:latest` tag — so the required
   secret-scan gate would otherwise run whatever `:latest` resolves to at
-  pull time on the self-hosted `meho-runners-ci` pool. `secret-scan.yml`
+  pull time. `secret-scan.yml`
   now sets a job-level `TRUFFLEHOG_VERSION: <ver>@sha256:<digest>` and
   feeds it to both the warm-cache pre-pull and the action's `version`
   input, so both reference the same digest-pinned image. The action's
@@ -2104,6 +2104,26 @@ byte-identical). No escape-hatch label (the coverage lane's
 `ci-coverage-validate`) is needed: the coverage lane runs once a night and
 must be *forced* onto a PR, whereas the unit lane runs on every PR by default,
 so a sharding PR self-validates through its own `pull_request` run.
+
+### Temporary files of a unit run
+
+Every unit test gets its own copy of the migrated SQLite template database
+(about 1 MB) in its `tmp_path`. The suite has about 18,000 tests, so the
+copies of one full run would add up to about 20 GB. The autouse fixture
+`_default_database_url` in `backend/tests/conftest.py` now deletes the copy
+when the test ends. So the size during a run depends on the number of
+workers, not on the number of tests: one template and one live copy per
+worker, plus the other files of the tests that are running. A sample of
+1,052 tests with 4 workers peaked at 75 MB. Pass
+`-o tmp_path_retention_policy=failed` as well: when every test passes,
+pytest then removes the whole temporary folder at the end, so nothing is
+left. The full suite was not measured this way; its peak is an estimate
+from the sample.
+
+The autouse fixture `_reset_structlog_logger_cache` clears the cached bound
+logger of every module-level structlog logger in `meho_backplane` before and
+after each test. Without it, a test that captures log lines can miss a logger
+that an earlier test in the same process used under another setup.
 
 ### Sharded integration lane (#5384)
 
@@ -2680,15 +2700,15 @@ their isolation posture:
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
 | `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
-| `chart.yml` | yes (helm template) | fork guard on the internal-pool PR job; publish/verify jobs are `push`-only |
+| `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-24.04`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
-| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **route**: fork PR → disposable GitHub-hosted runner; the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
-| `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**: fork PR → disposable GitHub-hosted runner (all 3 jobs) |
-| `readme-version-check.yml` | yes (inline shell over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
-| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route**: fork PR → disposable GitHub-hosted runner |
+| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **hosted runner** for every event (#4626); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
+| `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **hosted runner** for every event, all 3 jobs (#4626) |
+| `readme-version-check.yml` | yes (inline shell over PR content) | **hosted runner** for every event (#4626) |
+| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **hosted runner** for every event (#4626) |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
-| `secret-scan.yml` | yes (`docker run` TruffleHog and the gitleaks binary over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
+| `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for every event (#4626) |
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`) |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |
 
@@ -2719,9 +2739,13 @@ their isolation posture:
   ```
 
   Trusted refs (same-repo PR, `push`, `merge_group`) stay on the internal
-  pool unchanged — this deliberately leaves the tuned `merge_group`
-  required-gate paths (e.g. `secret-scan.yml`'s ghcr warm-cache retry,
-  #3307/#3310) untouched and only relocates the untrusted fork-PR path.
+  pool. Only `migration-compat.yml` and `linux-server-test.yml` still use
+  this expression. The other small workflows moved to plain
+  `ubuntu-latest` for every event (#4626 step 2), so they no longer wait
+  for an internal slot: `dependency-license-check.yml`,
+  `secret-scan.yml` (both jobs; the ghcr warm-cache retry of
+  #3307/#3310 stays), `migration-heads.yml`, `plugin-version-check.yml`
+  and `readme-version-check.yml`.
 
 ### Enforcement outside PR-editable YAML
 

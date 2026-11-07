@@ -90,6 +90,7 @@ import asyncio
 import contextlib
 import uuid
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
@@ -97,6 +98,7 @@ from pydantic_ai import ModelRetry, RunContext, Tool
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations._audit import agent_session_id_var
+from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only imports
@@ -114,6 +116,7 @@ __all__ = [
     "ChildAgentResolver",
     "ChildRunFinalizer",
     "ChildRunRecorder",
+    "ChildRunResult",
     "ChildRunner",
     "agent_invoke_depth_var",
     "current_agent_run_id_var",
@@ -213,13 +216,29 @@ class ChildAgentResolver(Protocol):
     ) -> AgentDefinition | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ChildRunResult:
+    """What one child loop returns: its output and its own token counts.
+
+    ``usage`` sums the child's own model requests only (#5853). It is read
+    from the child's messages, not from the shared ``ctx.usage`` total: the
+    parent can run two ``invoke_agent`` calls at the same time, and both add
+    to that shared total. A grand-child's requests are not in it either; the
+    grand-child's own row holds them. ``None`` when the runner has no counts.
+    """
+
+    output: Any
+    usage: TokenUsage | None = None
+
+
 class ChildRunner(Protocol):
     """Drive one child agent loop, threading the parent's usage budget.
 
     Implemented in :mod:`meho_backplane.agent.run` (which owns the framework
     ``Agent`` construction + the ``usage=ctx.usage`` call), so ``pydantic_ai``
-    loop-driving stays confined there. Returns the child's free-text / structured
-    output. Raises :class:`~meho_backplane.agent.run.AgentRunError` when the
+    loop-driving stays confined there. Returns a :class:`ChildRunResult`: the
+    child's free-text / structured output and the child's own token counts.
+    Raises :class:`~meho_backplane.agent.run.AgentRunError` when the
     child loop fails -- including when the shared budget (``usage``) trips the
     :class:`~pydantic_ai.exceptions.UsageLimitExceeded` the framework raises.
     """
@@ -231,7 +250,7 @@ class ChildRunner(Protocol):
         operator: Operator,
         inputs: str,
         usage: RunUsage,
-    ) -> Any: ...
+    ) -> ChildRunResult: ...
 
 
 class ChildRunRecorder(Protocol):
@@ -275,8 +294,11 @@ class ChildRunFinalizer(Protocol):
     (``output=None``). The ``output`` is the child loop's raw result; the
     implementation projects it onto the run row's JSON column (the same
     ``_project_output`` contract the parent run uses), so this seam stays free
-    of the row's storage shape. Mirrors :meth:`AgentInvoker._finalize_run`: load
-    the row fresh, apply ``succeed_run`` / ``fail_run``, and swallow
+    of the row's storage shape. On success ``usage`` carries the child's own
+    token counts (:attr:`ChildRunResult.usage`), stored on the child row
+    without a cost: the parent run already pays for these tokens. Mirrors
+    :meth:`AgentInvoker._finalize_run`: load the row fresh, apply
+    ``succeed_run`` / ``fail_run``, and swallow
     :class:`~meho_backplane.operations.agent_run.IllegalTransitionError` when a
     terminal state already landed (e.g. the row was cancelled mid-flight). When
     no finalizer is wired the child row is simply not finalized -- the in-process
@@ -289,6 +311,7 @@ class ChildRunFinalizer(Protocol):
         *,
         output: Any,
         error: str | None,
+        usage: TokenUsage | None = None,
     ) -> None: ...
 
 
@@ -473,7 +496,7 @@ def make_invoke_agent_tool(
             # carries is enforced against that total, so the whole cascade
             # terminates when the budget trips (UsageLimitExceeded surfaces as
             # AgentRunError from the child_runner).
-            output = await child_runner(
+            child_result = await child_runner(
                 definition=definition,
                 operator=operator,
                 inputs=inputs,
@@ -520,9 +543,11 @@ def make_invoke_agent_tool(
         # Close the recorded child row to ``succeeded`` with its output (the
         # finalizer projects the raw loop output onto the row's JSON column).
         if child_run_id is not None and finalizer is not None:
-            await finalizer(child_run_id, output=output, error=None)
+            await finalizer(
+                child_run_id, output=child_result.output, error=None, usage=child_result.usage
+            )
 
-        return {"agent": definition.name, "output": output}
+        return {"agent": definition.name, "output": child_result.output}
 
     return Tool.from_schema(
         _invoke_agent,

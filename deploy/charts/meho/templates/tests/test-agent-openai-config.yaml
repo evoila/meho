@@ -29,6 +29,11 @@ spec:
   imagePullSecrets:
     {{- . | nindent 4 }}
   {{- end }}
+  # Same Pod security context as the backplane Deployment, so the Pod
+  # starts in a namespace with the restricted Pod Security level.
+  # `global.openshift: true` leaves the user id to OpenShift.
+  securityContext:
+    {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 4 }}
   containers:
     - name: agent-openai-env-check
       image: {{ include "meho.core.image" (dict "image" (dict "repository" "busybox" "tag" "1.37" "digest" "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e") "global" .Values.global) }}

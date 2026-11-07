@@ -282,29 +282,19 @@ def test_base_url_must_be_a_url() -> None:
     assert "agent.openai.baseUrl" in result.stderr
 
 
-def test_helm_test_pod_reads_the_key_from_the_same_secret() -> None:
-    result = subprocess.run(
-        [
-            "helm",
-            "template",
-            "test",
-            str(_CHART_DIR),
-            *_BASE_OVERRIDES,
-            *_enabled(
-                "--set",
-                "agent.openai.secretName=model-creds",
-                "--set",
-                f"agent.openai.baseUrl={_BASE_URL}",
-            ),
-            "--show-only",
-            "templates/tests/test-agent-openai-config.yaml",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+def _helm_test_pod(*extra: str) -> dict[str, Any]:
+    result = _helm_template(
+        *_enabled("--set", "agent.openai.secretName=model-creds", *extra),
+        "--show-only",
+        "templates/tests/test-agent-openai-config.yaml",
     )
     assert result.returncode == 0, result.stderr
-    pod = yaml.safe_load(result.stdout)
+    pod: dict[str, Any] = yaml.safe_load(result.stdout)
+    return pod
+
+
+def test_helm_test_pod_reads_the_key_from_the_same_secret() -> None:
+    pod = _helm_test_pod("--set", f"agent.openai.baseUrl={_BASE_URL}")
     assert pod["metadata"]["annotations"]["helm.sh/hook"] == "test"
     env = {e["name"]: e for e in pod["spec"]["containers"][0]["env"]}
     assert env["OPENAI_API_KEY"]["valueFrom"]["secretKeyRef"] == {
@@ -313,6 +303,28 @@ def test_helm_test_pod_reads_the_key_from_the_same_secret() -> None:
     }
     assert env["OPENAI_BASE_URL"]["value"] == _BASE_URL
     assert "OPENAI_DEFAULT_MODEL" not in env
+
+
+def test_helm_test_pod_runs_as_non_root_with_the_default_seccomp_profile() -> None:
+    spec = _helm_test_pod()["spec"]
+    assert spec["securityContext"] == {
+        "runAsNonRoot": True,
+        "runAsUser": 1001,
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+    assert spec["containers"][0]["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
+        "capabilities": {"drop": ["ALL"]},
+    }
+
+
+def test_helm_test_pod_on_openshift_leaves_the_user_id_out() -> None:
+    spec = _helm_test_pod("--set", "global.openshift=true")["spec"]
+    assert spec["securityContext"] == {
+        "runAsNonRoot": True,
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
 
 
 def test_model_backend_renders_only_when_set() -> None:

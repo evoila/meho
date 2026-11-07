@@ -1965,11 +1965,14 @@ type AuditEntry struct {
 //     it (#5717). The operation did not run on any of these rows.
 //   - :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
 //     refresh-token replay or a broken satellite effect chain.
-//   - :attr:`CONFIG_CHANGE` -- an operator changed the settings of one
-//     operation with “meho_connector_edit_op“: turned it on or off, or
-//     changed its risk level, approval rule, description or guidance
-//     (#5791). The operation did not run. The row's “payload["op_id"]“
-//     names the edited operation.
+//   - :attr:`CONFIG_CHANGE` -- an operator changed the settings of
+//     operations, and none of them ran. Two writers: an edit of one
+//     operation with “meho_connector_edit_op“ (turned it on or off, or
+//     changed its risk level, approval rule, description or guidance,
+//     #5791), and a tenant's own on or off switch with
+//     “meho_connector_tenant_setting“, for one operation or a whole
+//     group (#5864). The row's “payload["op_id"]“ names the edited
+//     operation; a group switch names “payload["group_key"]“ instead.
 //   - :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
 //     row written before migration “0106“ reads as this class; it is never
 //     guessed from “method“ / “path“. The REST and MCP request wrapper
@@ -2007,11 +2010,14 @@ type AuditQueryRequest struct {
 	//   it (#5717). The operation did not run on any of these rows.
 	// * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
 	//   refresh-token replay or a broken satellite effect chain.
-	// * :attr:`CONFIG_CHANGE` -- an operator changed the settings of one
-	//   operation with ``meho_connector_edit_op``: turned it on or off, or
-	//   changed its risk level, approval rule, description or guidance
-	//   (#5791). The operation did not run. The row's ``payload["op_id"]``
-	//   names the edited operation.
+	// * :attr:`CONFIG_CHANGE` -- an operator changed the settings of
+	//   operations, and none of them ran. Two writers: an edit of one
+	//   operation with ``meho_connector_edit_op`` (turned it on or off, or
+	//   changed its risk level, approval rule, description or guidance,
+	//   #5791), and a tenant's own on or off switch with
+	//   ``meho_connector_tenant_setting``, for one operation or a whole
+	//   group (#5864). The row's ``payload["op_id"]`` names the edited
+	//   operation; a group switch names ``payload["group_key"]`` instead.
 	// * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
 	//   row written before migration ``0106`` reads as this class; it is never
 	//   guessed from ``method`` / ``path``. The REST and MCP request wrapper

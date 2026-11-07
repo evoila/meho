@@ -25,7 +25,7 @@ from sqlalchemy import select
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.settings import get_settings
@@ -58,6 +58,31 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     get_settings.cache_clear()
     clear_jwks_cache()
+
+
+_DANGEROUS_OP = "POST:/vcenter/vm/{vm}/power?action=reset"
+
+
+@pytest.fixture(autouse=True)
+async def _descriptors(_settings_env: None) -> None:
+    """The operations the tests list; approve reads each one's risk level."""
+    async with get_sessionmaker()() as session:
+        for op_id, level in (("POST:/vcenter/vm", "caution"), (_DANGEROUS_OP, "dangerous")):
+            session.add(
+                EndpointDescriptor(
+                    product="vmware",
+                    version="9.0",
+                    impl_id="vmware-rest",
+                    op_id=op_id,
+                    method="POST",
+                    source_kind="ingested",
+                    safety_level=level,
+                    requires_approval=False,
+                    parameter_schema={},
+                    tenant_id=None,
+                )
+            )
+        await session.commit()
 
 
 @pytest.fixture
@@ -156,6 +181,26 @@ async def test_approve_writes_an_audit_row_with_the_sign_in(client: TestClient, 
     assert len(approve_rows) == 1
     assert approve_rows[0].payload["run_approval_id"] == run_approval_id
     assert approve_rows[0].payload["approval_auth"]["channel"] == "rest"
+
+
+def test_list_with_a_dangerous_op_needs_the_high_risk_group(client: TestClient, key: Any) -> None:
+    body = {
+        **_BODY,
+        "entries": [*_BODY["entries"], {"connector_id": "vmware-rest-9.0", "op_id": _DANGEROUS_OP}],
+    }
+    created = client.post(_BASE, headers=_service(key), json=body)
+    assert created.status_code == 201, created.text
+    run_approval_id = created.json()["id"]
+    url = f"{_BASE}/{run_approval_id}/approve"
+
+    denied = client.post(url, headers=_person(key))
+    assert denied.status_code == 403
+    assert denied.json()["detail"].startswith("approval_group_required")
+    assert _status(client, key, run_approval_id) == "pending"
+
+    allowed = client.post(url, headers=_person(key, role=TenantRole.TENANT_ADMIN))
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["status"] == "approved"
 
 
 def test_person_cannot_ask_for_a_run_approval(client: TestClient, key: Any) -> None:

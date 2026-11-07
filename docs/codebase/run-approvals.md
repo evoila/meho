@@ -12,7 +12,8 @@ operations one run may use and approve it once.
    The request is `pending`.
 2. **A person approves it in MEHO**, on REST or with
    `meho approvals runs approve <id>`. The CLI shows the list and asks for
-   `yes` first.
+   `yes` first. The same group rule as for one request holds: a list with a
+   `dangerous` operation needs a MEHO-SA-Operator or a tenant admin.
 3. **The add-on reads the result.** It polls
    `GET /api/v1/service-principals/run-approvals/{id}` until the status is
    `approved` (or `revoked`).
@@ -97,7 +98,7 @@ and each write step must be on the list.
 | `POST` | `/api/v1/service-principals/run-approvals` | a service principal; others get 403 `service_principal_required`. 422 for a delete entry, a target kind the tenant does not allow, a bad expiry; 409 when the run already has a live request |
 | `GET` | `/api/v1/service-principals/run-approvals` | approvals access (`operator` role or `approver`); filters `principal_sub`, `status` |
 | `GET` | `.../{id}` | approvals access; 404 across tenants |
-| `POST` | `.../{id}/approve` | a person with approvals access and a fresh approval sign-in, like approving one request: a machine token gets 403 `human_principal_required`, a stored login token gets 401 with the RFC 9470 challenge. 409 when not pending; 403 `role_floor_required` when an entry needs a higher role |
+| `POST` | `.../{id}/approve` | a person with approvals access and a fresh approval sign-in, like approving one request: a machine token gets 403 `human_principal_required`, a stored login token gets 401 with the RFC 9470 challenge. 409 when not pending; 403 `role_floor_required` when an entry needs a higher role; 403 `approval_group_required` when an entry's operation is `dangerous` (or `destructive`) and the person is not a MEHO-SA-Operator or a tenant admin, the same group rule as approving one request ([decision](../decisions/approval-groups-and-self-approval.md)); 422 when MEHO cannot find an entry's operation in the tenant, because its risk level is not known |
 | `POST` | `.../{id}/revoke` | a person with approvals access. Body `{"reason": ...}` (optional). Works on a pending request too (turns it down) |
 | `POST` | `.../{id}/end` | the principal that asked; 404 for anyone else |
 

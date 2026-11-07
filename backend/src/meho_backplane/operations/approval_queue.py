@@ -196,7 +196,9 @@ __all__ = [
     "find_remote_write_approval",
     "get_decision_delegation",
     "get_request",
+    "is_high_risk_level",
     "list_pending",
+    "may_approve_high_risk",
     "parse_delegation",
     "pending_chain_positions",
     "read_approval_result",
@@ -3408,6 +3410,21 @@ def _check_reviewer_role(operator: Operator) -> None:
 _HIGH_RISK_TIERS = frozenset({"dangerous", "destructive"})
 
 
+def is_high_risk_level(level: str | None) -> bool:
+    """True when *level* is ``dangerous`` or ``destructive`` (the group rule applies)."""
+    return level in _HIGH_RISK_TIERS
+
+
+def may_approve_high_risk(operator: Operator) -> bool:
+    """True when *operator* may approve another principal's high-risk change (#3328).
+
+    The groups of ``docs/decisions/approval-groups-and-self-approval.md``:
+    a MEHO-SA-Operator or a tenant admin. Run approvals use the same rule
+    (:meth:`~meho_backplane.operations.run_approvals.RunApprovalService.approve`).
+    """
+    return operator.may_self_approve or operator.tenant_role == TenantRole.TENANT_ADMIN
+
+
 def _request_safety_level(request: ApprovalRequest) -> str | None:
     """Return the risk level the dispatcher stamped on *request*, or ``None``."""
     level = (request.proposed_effect or {}).get("safety_level")
@@ -3515,9 +3532,9 @@ def _check_approver_group(
     if self_rule is not None:
         return self_rule
     level = _request_safety_level(request)
-    if level not in _HIGH_RISK_TIERS:
+    if not is_high_risk_level(level):
         return ApprovalRule.REVIEWER
-    if operator.may_self_approve or operator.tenant_role == TenantRole.TENANT_ADMIN:
+    if may_approve_high_risk(operator):
         return ApprovalRule.SA_OPERATOR_OR_ADMIN
     raise ApprovalGroupForbiddenError(
         request.id,

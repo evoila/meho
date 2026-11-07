@@ -62,6 +62,7 @@ from meho_backplane.operations.run_approval_schemas import (
 from meho_backplane.operations.run_approvals import (
     RunApprovalConflictError,
     RunApprovalError,
+    RunApprovalGroupError,
     RunApprovalNotFoundError,
     RunApprovalRoleFloorError,
     RunApprovalService,
@@ -96,7 +97,7 @@ def _raise(exc: RunApprovalError) -> NoReturn:
         code = http_status.HTTP_404_NOT_FOUND
     elif isinstance(exc, RunApprovalConflictError):
         code = http_status.HTTP_409_CONFLICT
-    elif isinstance(exc, RunApprovalRoleFloorError):
+    elif isinstance(exc, (RunApprovalRoleFloorError, RunApprovalGroupError)):
         code = http_status.HTTP_403_FORBIDDEN
     else:
         code = http_status.HTTP_422_UNPROCESSABLE_CONTENT

@@ -70,6 +70,7 @@ __all__ = [
     "MAX_RUN_APPROVAL_DAYS",
     "RunApprovalConflictError",
     "RunApprovalError",
+    "RunApprovalGroupError",
     "RunApprovalNotFoundError",
     "RunApprovalRoleFloorError",
     "RunApprovalService",
@@ -108,6 +109,10 @@ class RunApprovalConflictError(RunApprovalError):
 
 class RunApprovalRoleFloorError(RunApprovalError):
     """The approver's role is below the role an entry needs (HTTP 403)."""
+
+
+class RunApprovalGroupError(RunApprovalError):
+    """A ``dangerous`` entry needs an approver of the high-risk group (HTTP 403)."""
 
 
 def as_utc(value: datetime) -> datetime:
@@ -191,6 +196,49 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
         f"{reason}. A run approval never covers it: leave it out of the list, "
         "and a person approves each call"
     )
+
+
+async def _check_approver_group(operator: Operator, entries: Sequence[dict[str, object]]) -> None:
+    """Apply the approver-group rule of a single request to the whole list.
+
+    A ``dangerous`` (or ``destructive``) operation of another principal may
+    be approved only by the groups of
+    ``docs/decisions/approval-groups-and-self-approval.md``: a
+    MEHO-SA-Operator or a tenant admin. The same check
+    (:func:`~meho_backplane.operations.approval_queue.may_approve_high_risk`)
+    decides here, on the risk level each entry's operation has now in this
+    tenant. An entry whose operation MEHO cannot find has no known risk
+    level, so the list cannot be approved.
+    """
+    from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
+    from meho_backplane.operations.approval_queue import (
+        _HIGH_RISK_APPROVERS_TEXT,
+        is_high_risk_level,
+        may_approve_high_risk,
+    )
+
+    for index, raw in enumerate(entries):
+        entry = RunApprovalEntry.model_validate(raw)
+        product, version, impl_id = parse_connector_id(entry.connector_id)
+        descriptor = await lookup_descriptor(
+            tenant_id=operator.tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            op_id=entry.op_id,
+        )
+        if descriptor is None:
+            raise RunApprovalValidationError(
+                f"entries[{index}]: operation {entry.op_id!r} of connector "
+                f"{entry.connector_id!r} is not found in this tenant, so its risk level is "
+                "not known; revoke this request and ask again without it"
+            )
+        if is_high_risk_level(descriptor.safety_level) and not may_approve_high_risk(operator):
+            raise RunApprovalGroupError(
+                f"approval_group_required: entries[{index}] ({entry.op_id!r}) is a "
+                f"{descriptor.safety_level} operation. Only {_HIGH_RISK_APPROVERS_TEXT} may "
+                "approve a list with a dangerous or destructive operation"
+            )
 
 
 async def _load(
@@ -322,6 +370,7 @@ class RunApprovalService:
                 denial = role_floor_denial(str(entry["op_id"]), operator.tenant_role)
                 if denial is not None:
                     raise RunApprovalRoleFloorError(f"role_floor_required: {denial}")
+            await _check_approver_group(operator, row.entries)
             row.approved_at = now
             row.approved_by_sub = operator.sub
             await session.commit()

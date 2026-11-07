@@ -45,6 +45,7 @@ from meho_backplane.operations._validate import policy_gate
 from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
 from meho_backplane.operations.run_approvals import (
     RunApprovalConflictError,
+    RunApprovalGroupError,
     RunApprovalNotFoundError,
     RunApprovalRoleFloorError,
     RunApprovalService,
@@ -73,6 +74,44 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     structlog.contextvars.clear_contextvars()
     get_settings.cache_clear()
+
+
+_DANGEROUS_OP = "POST:/vcenter/vm/{vm}/power?action=reset"
+
+
+async def _seed_descriptor(
+    op_id: str,
+    *,
+    safety_level: str = "caution",
+    product: str = "vmware",
+    version: str = "9.0",
+    impl_id: str = "vmware-rest",
+) -> None:
+    async with get_sessionmaker()() as s:
+        s.add(
+            EndpointDescriptor(
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                op_id=op_id,
+                method="POST",
+                source_kind="ingested",
+                safety_level=safety_level,
+                requires_approval=False,
+                parameter_schema={},
+                tenant_id=None,
+            )
+        )
+        await s.commit()
+
+
+@pytest.fixture(autouse=True)
+async def _descriptors(_settings_env: None) -> None:
+    """The operations the tests list; approve reads each one's risk level."""
+    await _seed_descriptor(_WRITE_OP)
+    await _seed_descriptor(_OTHER_OP)
+    await _seed_descriptor(_DANGEROUS_OP, safety_level="dangerous")
+    await _seed_descriptor("targets.register", product="meho", version="", impl_id="")
 
 
 @pytest.fixture
@@ -520,6 +559,102 @@ async def test_approver_needs_the_role_floor_of_every_entry() -> None:
         await RunApprovalService().approve(_person(), read.id)
     admin = _operator(sub="admin", kind=PrincipalKind.USER, role=TenantRole.TENANT_ADMIN)
     assert (await RunApprovalService().approve(admin, read.id)).status == "approved"
+
+
+async def _request_dangerous_list() -> uuid.UUID:
+    read = await RunApprovalService().request(
+        _operator(),
+        RunApprovalCreate(
+            work_ref=_RUN,
+            entries=[
+                RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP),
+                RunApprovalEntry(connector_id=_CONNECTOR, op_id=_DANGEROUS_OP),
+            ],
+            reason="build and reset one VM",
+        ),
+    )
+    return read.id
+
+
+def _approver(*, role: TenantRole, approver: bool = False, sa: bool = False) -> Operator:
+    return Operator(
+        sub="person-approver",
+        name=None,
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=role,
+        principal_kind=PrincipalKind.USER,
+        approver=approver,
+        self_approver=sa,
+    )
+
+
+@pytest.mark.parametrize(
+    "person",
+    [
+        _approver(role=TenantRole.READ_ONLY, approver=True),
+        _approver(role=TenantRole.OPERATOR),
+    ],
+    ids=["approver-flag", "operator"],
+)
+@pytest.mark.asyncio
+async def test_list_with_a_dangerous_op_needs_the_high_risk_group(person: Operator) -> None:
+    approval_id = await _request_dangerous_list()
+
+    with pytest.raises(RunApprovalGroupError, match="approval_group_required: entries\\[1\\]"):
+        await RunApprovalService().approve(person, approval_id)
+    assert (await RunApprovalService().get(_TENANT_A, approval_id)).status == "pending"
+
+
+@pytest.mark.parametrize(
+    "person",
+    [
+        _approver(role=TenantRole.TENANT_ADMIN),
+        _approver(role=TenantRole.OPERATOR, sa=True),
+    ],
+    ids=["tenant-admin", "sa-operator"],
+)
+@pytest.mark.asyncio
+async def test_high_risk_group_approves_a_list_with_a_dangerous_op(person: Operator) -> None:
+    approval_id = await _request_dangerous_list()
+
+    assert (await RunApprovalService().approve(person, approval_id)).status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_approver_flag_approves_a_caution_only_list() -> None:
+    read = await RunApprovalService().request(
+        _operator(),
+        RunApprovalCreate(
+            work_ref=_RUN,
+            entries=[RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP)],
+            reason="build one VM",
+        ),
+    )
+    person = _approver(role=TenantRole.READ_ONLY, approver=True)
+
+    assert (await RunApprovalService().approve(person, read.id)).status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_list_with_an_unknown_op_is_not_approved() -> None:
+    read = await RunApprovalService().request(
+        _operator(),
+        RunApprovalCreate(
+            work_ref=_RUN,
+            entries=[
+                RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP),
+                RunApprovalEntry(connector_id=_CONNECTOR, op_id="POST:/vcenter/not-there"),
+            ],
+            reason="build one VM",
+        ),
+    )
+    admin = _approver(role=TenantRole.TENANT_ADMIN)
+
+    with pytest.raises(RunApprovalValidationError, match=r"entries\[1\].*not found"):
+        await RunApprovalService().approve(admin, read.id)
+    assert (await RunApprovalService().get(_TENANT_A, read.id)).status == "pending"
 
 
 @pytest.mark.parametrize(

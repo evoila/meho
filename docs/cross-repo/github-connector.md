@@ -34,7 +34,7 @@ end to end:
 - **T3** ([#1223](https://github.com/evoila/meho/issues/1223)) —
   `gh/3` catalog entry (post-T8 #1242 canonical form; the upstream
   API label "v3" lives in the catalog row's ``notes`` and in the
-  fingerprint payload); ~700 ops grouped into ~40 tags ingest
+  fingerprint payload); ~700 ops grouped into ~49 tags ingest
   through the G0.7 generic pipeline.
 - **T4** ([#1224](https://github.com/evoila/meho/issues/1224)) —
   first L1 composite `gh.composite.pr_status_summary`.
@@ -76,16 +76,18 @@ substrate into a working agent path.
   [§ Connector identifier conventions](#connector-identifier-conventions)
   below for the full distinction.
 - Read ops — repo metadata, PR / issue / workflow-run reads,
-  commit / check-run reads. ~700 ops ingest under T3's catalog
-  entry once the parser-limitation follow-up below lands; see
+  commit / check-run reads. ~700 ops ingest under the `gh/3`
+  catalog entry; see
   [§ Step 4 — Ingest the catalog](#step-4--ingest-the-catalog).
 - Write ops — `gh.issue.create`, `gh.pr.merge`,
   `gh.workflow_run.dispatch`, `gh.release.create`. Each carries
-  `requires_approval=true` (T5) so a queued approval gates every
-  dispatch.
+  `requires_approval=true` once you run the Step 6 annotation, so a
+  queued approval gates every dispatch.
 - Composite operations — `gh.composite.pr_status_summary` (T4) is
   the first L1 composite; the operator-facing on-ramp uses it as
-  the smoke / verify call.
+  the smoke / verify call. MEHO also ships composites for repos,
+  issues, sub-issues, Projects-v2 boards and git commits; see
+  [`../codebase/connectors-github.md`](../codebase/connectors-github.md).
 - Audit chain — every dispatch through the connector lands an
   `audit_log` row keyed by the operator's Keycloak `sub`, the
   target, the op_id, and the result status (G8 audit-replay tree).
@@ -133,9 +135,8 @@ This runbook assumes:
   `tenant_admin` (`targets import`, `connector ingest`,
   `connector edit-op`, `connector enable`) or `operator`
   (`operation call`, `audit query`, `approvals approve`).
-- **`gh-rest` connector class registered.** Initiative #1220's T1
-  (#1221) has merged into the backplane image you're deploying.
-  Verify with `meho connector list | grep gh-rest` — a row keyed
+- **`gh-rest` connector class registered.** The backplane image
+  ships the `GitHubRestConnector` class. Verify with `meho connector list | grep gh-rest` — a row keyed
   on `gh-rest-3` is what you're looking for (or no row at all if
   the catalog hasn't been ingested yet, which is the common
   first-day state; the class is registered in memory regardless).
@@ -162,11 +163,12 @@ meho connector list | grep gh-rest
 
 # Check 2: probe the target (proves credential chain).
 meho targets probe github-meho
-# Expected: `reachable=true` and an `extras.app_slug` showing the
-# GitHub App name (App path) or `extras.user.login` (PAT path).
+# Expected: `reachable=true`, `extras.installations_count`, and the
+# first installation's `extras.app_slug` / `extras.installation_account`.
 ```
 
-If Check 2 fails with `github_app_not_installed`,
+If Check 2 shows `reachable: false` and `extras.error_code` is
+`github_app_not_installed`,
 `github_jwt_mint_failed`, or
 `github_installation_token_mint_failed`, return to
 [`github-app-credential.md` § Failure modes](./github-app-credential.md#failure-modes)
@@ -176,17 +178,16 @@ and re-walk the corresponding step before continuing.
 
 The target row that
 [`github-app-credential.md` § Step 5](./github-app-credential.md#step-5--register-the-gh-v3-target-with-meho)
-prepared in `targets.yaml` lands via `meho targets import`. There is
-no `meho targets create` verb — the canonical (and only) target-
-provisioning path is the YAML file + `import`:
+prepared in `targets.yaml` lands via `meho targets import`. (`meho targets add <name>`, alias
+`create`, registers one target from flags instead of a file.)
 
 ```bash
 meho targets import targets.yaml
 ```
 
-Re-running `import` is idempotent: rows whose `name` already exists
-update in place rather than re-creating. The output names every row
-that was created vs updated.
+By default `import` stops the whole import when a `name` already
+exists in the tenant, and writes nothing. Pass `--update` to update
+existing rows and create new ones; `--dry-run` prints the plan first.
 
 Verify the row landed:
 
@@ -238,17 +239,18 @@ Expected (abbreviated):
 
 ```json
 {
-  "vendor": "GitHub",
+  "vendor": "github",
   "product": "gh",
   "version": "v3",
   "reachable": true,
   "probed_at": "2026-05-27T14:30:00Z",
-  "probe_method": "GET /app/installations (App) or GET /user (PAT)",
+  "probe_method": "GET /user/installations",
   "extras": {
-    "app_slug": "meho-prod",
-    "installation_count": 1,
+    "installations_count": 1,
+    "installation_id": 987654321,
     "installation_account": "evoila",
     "target_type": "Organization",
+    "app_slug": "meho-prod",
     "permissions": {
       "contents": "read",
       "issues": "read",
@@ -258,6 +260,11 @@ Expected (abbreviated):
   }
 }
 ```
+
+When the target `host` is `api.github.com/repos/<owner>/<repo>`, the
+probe reads that one repo instead (`probe_method` is
+`GET /repos/<owner>/<repo>`) and `extras` shows `repo_full_name`,
+`owner_login`, `default_branch` and the workflow check.
 
 Note the `"version": "v3"` here is the **upstream** API label
 emitted by the connector's `fingerprint()` (it matches github.com's
@@ -296,25 +303,14 @@ Connector is in review_status=staged. Next:
   meho connector enable gh-rest-3 --confirm
 ```
 
-> **Known limitation — live ingest blocked pre-parser-extension.**
-> As of T3's merge, the G0.7 OpenAPI parser only inlines
-> `#/components/schemas/*` and `#/components/parameters/*` refs.
-> The GitHub REST spec uses `#/components/responses/*` refs on
-> every operation, so the live ingest returns
-> `UnsupportedSpecError` (rendered as a structured error
-> envelope). The fix is a sibling parser-scope follow-up that
-> extends
-> [`backend/src/meho_backplane/operations/ingest/refs.py`](../../backend/src/meho_backplane/operations/ingest/refs.py)
-> to inline the `responses` bucket; the catalog test
+> **Note.** The OpenAPI parser inlines `#/components/responses/*`
+> and `#/components/requestBodies/*` refs, which the GitHub REST
+> spec uses on most operations. The live ingest test
 > [`backend/tests/integration/test_operations_ingest_github.py`](../../backend/tests/integration/test_operations_ingest_github.py)
-> is currently `xfail-strict` on the limitation and flips to
-> `xpass` the moment the parser learns the extra ref shape.
-> **Until that follow-up lands, Step 4 returns the parser error
-> and Steps 5–7 are gated on it.** The `gh.composite.*` paths
-> registered in T4 (#1224) come via the typed-op registrar (the
-> `register_operations()` classmethod) and **are** dispatchable
-> independently of the ingest path; if you only need the composite
-> use case, jump to [§ Step 7 — Smoke-test with the composite](#step-7--smoke-test-with-the-composite).
+> runs when `MEHO_GH_INGEST_LIVE=1` is set. The `gh.composite.*`
+> operations read GitHub through the connector session and do not
+> need this ingest; if you only need a composite, jump to
+> [§ Step 7 — Smoke-test with the composite](#step-7--smoke-test-with-the-composite).
 
 The catalog-resolved connector_id is `gh-rest-3` (from
 `<impl_id>-<version>` with the catalog's `version: "3"` — G3.11-T8
@@ -356,14 +352,13 @@ usable for the rest.
 
 ### Step 6 — Annotate write ops for approval
 
-T5 ([#1225](https://github.com/evoila/meho/issues/1225)) ships
-`requires_approval=true` annotations on four write ops in the
-shipped catalog data, but if the operator's tenant ingested a
-fork that carries different write-op coverage (or an older
-snapshot pre-T5), the annotations need re-asserting. Use
-`meho connector edit-op` — there is **no** `meho operation
-annotate` verb; the canonical write-op flag toggle is
-`connector edit-op`:
+A fresh ingest stores the four write ops with
+`requires_approval=false` (the parser gives `POST` / `PUT` the
+`caution` level). Turn approval on after every ingest, either with
+the one-shot script described in
+[`github-write-ops-approval.md`](./github-write-ops-approval.md) or
+with `meho connector edit-op` (there is **no** `meho operation
+annotate` verb):
 
 ```bash
 meho connector edit-op gh-rest-3 'POST:/repos/{owner}/{repo}/issues' \
@@ -402,13 +397,11 @@ without it the CLI asks for `y/yes`.
 ### Step 7 — Smoke-test with the composite
 
 The canonical first dispatch is `gh.composite.pr_status_summary`
-against a known PR. The composite is registered as a typed op
-(T4 #1224) so it works independently of the Step 4 ingest, which
-makes it the right smoke-test target while the parser limitation
-keeps the broader catalog gated.
+against a known PR. The composite makes its three reads through
+the connector session, so it works even without the Step 4 ingest.
 
 ```bash
-meho operation call gh-rest 'gh.composite.pr_status_summary' \
+meho operation call gh-rest-3 'gh.composite.pr_status_summary' \
   --target github-meho \
   --params '{"owner":"evoila","repo":"meho","pull_number":1193}' \
   --json
@@ -418,47 +411,41 @@ Expected (abbreviated):
 
 ```json
 {
-  "pull_request": {
-    "number": 1193,
-    "state": "closed",
-    "title": "docs(changelog): roll [Unreleased] → [0.7.0] - 2026-05-27",
-    "mergeable_state": "clean",
-    "merged_at": "2026-05-27T..."
-  },
-  "checks": {
-    "total": 12,
-    "passed": 12,
-    "failed": 0
-  },
-  "reviews": [
-    {"user": {"login": "..."}, "state": "APPROVED"}
-  ]
+  "pr": {"number": 1193, "state": "closed", "merged_at": "2026-05-27T..."},
+  "checks": {"total_count": 12, "check_runs": ["..."]},
+  "reviews": [{"user": {"login": "..."}, "state": "APPROVED"}],
+  "mergeable": null,
+  "mergeable_state": "unknown",
+  "checks_status": "all_passed",
+  "review_status": "approved"
 }
 ```
 
 A green Step 7 confirms: the credential chain works end to end,
-the typed-op classpath is wired, dispatch lands an audit row,
-and the agent path will resolve `gh.composite.*` ops once the
-ingest path lands the read-op companions.
+the composite is registered, and the dispatch lands an audit row.
 
 To verify the **write-op approval flow**, attempt a write op
 without an approval first; you should see the call enter the
 queue:
 
 ```bash
-meho operation call gh-rest 'POST:/repos/{owner}/{repo}/issues' \
+meho operation call gh-rest-3 'POST:/repos/{owner}/{repo}/issues' \
   --target github-meho \
   --params '{"owner":"evoila","repo":"meho","title":"smoke-test issue","body":"approval flow smoke"}' \
   --json
 ```
 
-Expected response:
+Expected response (abbreviated):
 
 ```json
 {
-  "status": "approval_required",
-  "approval_id": "01J...",
-  "approval_url": "/ui/approvals/01J..."
+  "status": "awaiting_approval",
+  "op_id": "POST:/repos/{owner}/{repo}/issues",
+  "error": "awaiting_approval: 'POST:/repos/{owner}/{repo}/issues' requires approval before execution",
+  "extras": {
+    "error_code": "awaiting_approval",
+    "approval_request_id": "<approval_request_id>"
+  }
 }
 ```
 
@@ -467,12 +454,13 @@ agent / operator separation pattern — see
 [§ Approval-queue flow](#approval-queue-flow) below):
 
 ```bash
-meho approvals show 01J...
-meho approvals approve 01J... --reason "smoke test"
+meho approvals show <approval_request_id>
+meho approvals approve <approval_request_id> --reason "smoke test"
 ```
 
-The original call resumes from the queue once approved; the audit
-log carries both rows.
+MEHO runs the call once it is approved; `meho approvals result
+<approval_request_id>` shows the outcome, and the audit log carries
+the request, decision and run rows.
 
 ## App-vs-PAT credential picker
 
@@ -531,57 +519,54 @@ The four write ops carry `requires_approval=true` (T5
 [#1225](https://github.com/evoila/meho/issues/1225)) so every
 attempt at one of them is gated by the G11.2 approval queue. An
 operator (or an agent acting under operator identity) hits one of
-the four endpoints; the dispatcher writes an `approvals` row,
-returns an `approval_required` envelope, and the call **does not
-reach GitHub** until another operator approves the queue entry.
+the four endpoints; the dispatcher writes an `approval_request` row,
+returns an `awaiting_approval` result, and the call **does not
+reach GitHub** until another operator approves the request.
 
 ### What the agent / operator sees on the call site
 
 ```json
 {
-  "status": "approval_required",
-  "approval_id": "01J5K8A...",
-  "approval_url": "/ui/approvals/01J5K8A...",
-  "details": {
-    "op_id": "PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge",
-    "target": "github-meho",
-    "principal": "agent.assistant@pmsoft.at",
-    "requested_at": "2026-05-27T14:31:00Z"
+  "status": "awaiting_approval",
+  "op_id": "PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge",
+  "error": "awaiting_approval: 'PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge' requires approval before execution",
+  "extras": {
+    "error_code": "awaiting_approval",
+    "approval_request_id": "<approval_request_id>"
   }
 }
 ```
 
-The CLI exit code is non-zero (the call did not succeed), but the
-shape is **not** an error envelope — the operator can branch on
-`status == "approval_required"` to thread the approval through.
+The status is `awaiting_approval`, not `ok` or `error` — the caller
+can branch on it and pass `extras.approval_request_id` to the
+approver.
 
 ### Operator path — CLI
 
 ```bash
-# List pending approvals on a target.
-meho approvals list --target github-meho
+# List pending approvals (the default status filter is pending).
+meho approvals list
 
 # Inspect a specific request.
-meho approvals show 01J5K8A...
+meho approvals show <approval_request_id>
 
 # Approve.
-meho approvals approve 01J5K8A... --reason "merge after CI green"
+meho approvals approve <approval_request_id> --reason "merge after CI green"
 
 # Or reject.
-meho approvals reject 01J5K8A... --reason "needs second review"
+meho approvals reject <approval_request_id> --reason "needs second review"
 ```
 
-The approval / rejection writes a row to the `approvals` table
-and (on approval) wakes the original call's continuation — the
-queued dispatch retries against GitHub with the approver's
-identity threaded into the audit row alongside the original
-caller.
+The decision updates the `approval_request` row and writes a decision
+audit row. On approval MEHO runs the call against GitHub; the run's
+audit row carries the approver as its principal and points to the
+request row through `parent_audit_id`.
 
 ### Operator path — `/ui/approvals`
 
 The G11.2 operator-console UI exposes the same queue at
-`/ui/approvals` (rendered by the BFF at
-`backend/src/meho_backplane/api/ui/approvals.py`). Pending rows
+`/ui/approvals` (rendered by
+`backend/src/meho_backplane/ui/routes/approvals/routes.py`). Pending rows
 show the op_id, target, principal, requested-at, and any context
 the principal attached (e.g. PR number, issue title). Buttons
 approve / reject with a free-form reason.
@@ -617,15 +602,16 @@ operator → approver → connector → GitHub App identity → GitHub
 audit log) is what Initiative #1220 calls out as the load-bearing
 property of the typed connector over a raw `gh` CLI shell-out.
 
-### Worked example — "who merged PR #754 and when?"
+### Worked example — "who merged a PR and when?"
 
-The end-to-end reconstruction story takes a single
-`meho audit query` call:
+The `op_id` in the audit log is the template
+(`PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge`), not the
+filled-in path. Start with one `meho audit query` call:
 
 ```bash
 meho audit query \
   --target github-meho \
-  --op-id 'PUT:/repos/evoila/meho/pulls/754/merge' \
+  --op-id 'PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge' \
   --since 7d \
   --json
 ```
@@ -636,33 +622,38 @@ Expected (abbreviated):
 {
   "rows": [
     {
-      "audit_id": "8c3f...d2a1",
-      "principal": "agent.assistant@pmsoft.at",
-      "target": "github-meho",
+      "id": "8c3f...d2a1",
+      "ts": "2026-05-27T14:35:12Z",
+      "principal_sub": "...",
+      "principal_name": "approver@example.com",
+      "actor_name": null,
+      "target_name": "github-meho",
       "op_id": "PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge",
+      "op_class": "write",
       "result_status": "ok",
-      "occurred_at": "2026-05-27T14:35:12Z",
-      "approval_id": "01J5K8A...",
-      "approval_approved_by": "damir.topic@pmsoft.at",
-      "agent_session_id": "01J5K8B...",
-      "request_params": {"owner": "evoila", "repo": "meho", "pull_number": 754}
+      "parent_audit_id": "e4c2...",
+      "agent_session_id": "..."
     }
-  ]
+  ],
+  "next_cursor": null
 }
 ```
 
 Reading the row top to bottom:
 
-- **`principal`** — the agent (under operator delegation) that
-  asked for the merge.
-- **`approval_approved_by`** — the operator who clicked approve in
-  `/ui/approvals` (or hit `meho approvals approve` on the CLI).
-- **`agent_session_id`** — the MCP session that originated the
-  call (G0.14-T6 #1147 capture; G0.15-T4 closure unblocks the
-  audit-replay tree shape — the v0.7.0 G8.2 audit-replay surface
-  navigates this column).
-- **`occurred_at`** — when the dispatch landed (post-approval).
-- **`request_params`** — what was actually asked for.
+- **`principal_name`** — on an approved run this is the person who
+  approved it in `/ui/approvals` or with `meho approvals approve`.
+- **`parent_audit_id`** — the `approval.request` row. Look it up
+  with `meho audit query --audit-id <parent_audit_id>` to see who
+  asked for the merge, and list its decision and run rows with
+  `meho audit query --parent-audit-id <parent_audit_id>`.
+- **`actor_name`** — the agent that acted for the person, when an
+  agent run made the call.
+- **`agent_session_id`** — the MCP session that started the call;
+  `meho audit replay <session-id>` shows the whole session.
+- **`ts`** — when the run was recorded.
+- `meho audit show <id>` prints the full row, including the payload
+  with the call's parameters.
 
 ### Cross-referencing against GitHub's own audit log
 
@@ -675,74 +666,84 @@ The meho audit row anchors the meho side. To close the loop on the
    driven merge attributes to the App identity (the App's slug),
    which makes the GitHub-side row immediately recognisable.
 3. Match the GitHub-side `created_at` timestamp against the meho
-   row's `occurred_at` (the times should agree within ~100 ms —
-   the connector emits the API call to GitHub immediately after
-   writing the local audit row).
+   row's `ts` (the times should be close: MEHO writes the audit row
+   right after the GitHub call returns).
 
 The pair of rows establishes: who in meho asked, who in meho
 approved, when meho dispatched, what GitHub saw, and which App
 identity GitHub attributed it to. That is the full chain.
 
-### Composite ops fan out into multiple audit rows
+### Composite ops write one audit row
 
-`gh.composite.pr_status_summary` is the canonical example: one
-dispatch from the agent fans out to (currently) 3 sub-calls
-against GitHub (`pulls.get`, `pulls.list_commits`, `checks.list_for_ref`).
-Each sub-call writes its own audit row, all carrying the same
-`agent_session_id` and a `parent_audit_id` (UUID) pointing back to the
-composite parent row. `meho audit query --op-id 'gh.composite.*' --json`
-returns the composite rows; `meho audit replay <session-id>` then
-renders the parent + sub-call fan-out as a nested tree. The G8.2
-audit-replay surface shows the whole tree. To list only the direct
-sub-calls of one composite row, run
-`meho audit query --parent-audit-id <composite-row-id>`.
+`gh.composite.pr_status_summary` makes 3 calls to GitHub (the PR,
+the check runs of its head commit, and its reviews). It makes them
+through the connector session, not through the dispatcher, so the
+composite writes **one** audit row for the whole call.
+`meho audit query --op-id 'gh.composite.*' --json` returns these rows.
 
 ## Common failure modes
 
 The four failure modes operators hit most often during first-day
-onboarding, in order of how often they show up:
+onboarding, in order of how often they show up.
 
-### `503 github_app_not_installed`
+Where the error shows up:
 
-**What you see:**
+- **`meho targets probe`** returns `reachable: false`. `extras.error`
+  holds the error class and message, and `extras.error_code` holds
+  the stable `github_*` code.
+- **`meho operation call`** returns `status: "error"`. For a
+  credential or token error, `extras.error_code` is `connector_error`,
+  `extras.exception_class` names the class (for example
+  `GitHubAppNotInstalledError`), and `extras.exception_message` starts
+  with the `github_*` code.
 
-```json
-{
-  "code": "github_app_not_installed",
-  "message": "GitHub App 'meho-prod' (App ID 123456) is not installed on owner='evoila' repo='meho'. Install via https://github.com/settings/apps/meho-prod/installations.",
-  "details": {"app_id": 123456, "app_slug": "meho-prod", "owner": "evoila", "repo": "meho"}
-}
+### `github_app_not_installed`
+
+**What you see** (in `extras.exception_message`, or in
+`extras.error` on a probe):
+
+```
+github_app_not_installed: installation_id='987654321' is not reachable for this App — the App may not be installed on the target repo/org, or the installation_id in Vault is stale. ...
 ```
 
-**What happened:** the App exists and the private key is valid, but
-the App is not installed on the target repo / org. Most common
-shape: the operator created the App in their personal account,
-forgot Step 3 of
+**What happened:** the private key is valid (the JWT was signed), but
+GitHub answered `404` when MEHO asked for an installation token. The
+App is not installed on the target account, or the `installation_id`
+in Vault is wrong. Most common shape: the operator created the App in
+their personal account, forgot Step 3 of
 [`github-app-credential.md`](./github-app-credential.md#step-3--install-the-app-on-the-target-repo-or-org),
 and tried to dispatch against a repo in the org.
 
-**Fix:** open the App settings page (URL is in the `message`),
-click **Install App**, pick the target account, grant access to
-the target repos. Re-run `meho targets probe <target>` to confirm.
+**Fix:** open the App settings page, click **Install App**, pick the
+target account, grant access to the target repos, and write the new
+`installation_id` into Vault. Re-run `meho targets probe <target>` to
+confirm.
 
-### `503 github_installation_token_mint_failed` — missing permission
+### `connector_http_403` — missing permission
 
 **What you see:**
 
 ```json
 {
-  "code": "github_installation_token_mint_failed",
-  "message": "GitHub App 'meho-prod' is installed but lacks permission 'pull_requests:write' on owner='evoila' repo='meho'. Add the permission at https://github.com/settings/apps/meho-prod/permissions.",
-  "details": {"missing_permission": "pull_requests:write"}
+  "status": "error",
+  "error": "connector_http_403: the upstream returned HTTP 403 Forbidden. ...",
+  "extras": {
+    "error_code": "connector_http_403",
+    "http_status": 403,
+    "upstream_message": "Resource not accessible by integration",
+    "permission_headers": {"X-Accepted-GitHub-Permissions": "issues=write"}
+  }
 }
 ```
 
-**What happened:** the App is installed, JWT mint succeeded, but
-the installation-token exchange returned a token missing the
-requested permission. This is the most common **write-op** failure
-— the operator installed the App with the Tier-1 read-only
-permission set and is now trying to dispatch a Tier-2 write op
-(merge, issue-create, workflow-dispatch, release-create).
+**What happened:** the App is installed and the installation token
+was minted, but GitHub refused the call because the installation
+lacks the permission the operation needs. This is the most common
+**write-op** failure — the operator installed the App with the
+Tier-1 read-only permission set and is now trying to dispatch a
+Tier-2 write op (merge, issue-create, workflow-dispatch,
+release-create). `extras.permission_headers` echoes the permission
+GitHub wants, when GitHub sends it.
 
 **Fix:** open the App's permissions page in GitHub, add the missing
 permission, **and then accept the permission upgrade in the
@@ -753,34 +754,31 @@ is mandatory before the new scope takes effect). See
 [`github-app-credential.md` § Tier 2 — Write catalog](./github-app-credential.md#tier-2--write-catalog-additional-permissions-for-requires_approvaltrue-ops)
 for the full permission map.
 
-### `429 github_rate_limited` — composite fan-out
+`github_installation_token_mint_failed` is a different error: GitHub
+refused to mint the installation token at all (for example a revoked
+private key, or a network failure to `api.github.com`).
 
-**What you see:**
+### Rate limit — composite fan-out
 
-```json
-{
-  "code": "github_rate_limited",
-  "message": "GitHub API rate limit exceeded; reset at 2026-05-27T15:00:00Z (in 12m 34s).",
-  "details": {"limit": 5000, "remaining": 0, "reset_at": "2026-05-27T15:00:00Z", "resource": "core"}
-}
-```
+**What you see:** when the limit hits during the installation-token
+mint, the error is `github_rate_limited` (with the reset time as a
+Unix timestamp). When it hits during an operation call, GitHub
+answers `403` or `429`: a `403` comes back as `connector_http_403`,
+a `429` as `connector_error` with `extras.http_status: 429`. In both
+cases `extras.upstream_message` carries GitHub's text.
 
 **What happened:** the per-installation rate limit (5000
 requests/hour for App installation tokens; same ceiling for
-fine-grained PATs) is exhausted. The `X-RateLimit-Remaining: 0`
-header on the most recent response carried the reset wall-clock
-time, which the connector surfaces in `details`.
+fine-grained PATs) is exhausted.
 
 **Composite-op multiplier.** `gh.composite.pr_status_summary`
-makes ~3 sub-calls per invocation (pulls.get + pulls.list_commits +
-checks.list_for_ref). At the 5000/hour ceiling, that limits a
-single installation token to ~1666 composite calls/hour — which
-sounds like a lot but a polling agent on a busy repo with many open
-PRs can chew through it. Read the `X-RateLimit-Remaining` value off
-the structured error's `details.remaining` to gauge headroom on
-every dispatch.
+makes 3 GitHub calls per invocation (the PR, its check runs, its
+reviews). At the 5000/hour ceiling, that limits a single
+installation token to ~1666 composite calls/hour — which sounds
+like a lot but a polling agent on a busy repo with many open PRs
+can chew through it.
 
-**Fix:** wait until `reset_at`, then retry. If the limit hits
+**Fix:** wait for the reset window, then retry. If the limit hits
 during normal operation rather than a runaway loop, audit the
 agent's dispatch pattern — most read paths should run well under
 the ceiling. If the agent legitimately needs more headroom,
@@ -788,28 +786,18 @@ install the App on additional installations (each installation
 token has its own 5000/hour bucket) and partition target rows by
 installation.
 
-### `404 github_app_not_installed` — PR not visible
+### HTTP `404` — PR not visible
 
-**What you see:**
-
-```json
-{
-  "code": "github_app_not_installed",
-  "message": "GitHub returned 404 for owner='evoila' repo='private-research' pull_number=42. Verify the App is installed on this repo (or the PAT has read access).",
-  "details": {"owner": "evoila", "repo": "private-research", "pull_number": 42}
-}
-```
+**What you see:** `status: "error"` with `extras.error_code:
+connector_error`, `extras.http_status: 404`, and GitHub's
+`Not Found` text in `extras.upstream_message`.
 
 **What happened:** the dispatch reached GitHub but GitHub returned
-404. Two distinct shapes share this code: the App / PAT genuinely
-can't see the resource (private repo + App lacks installation
-scope, or PAT lacks the per-repo read permission), or the resource
-genuinely doesn't exist. Both render identically — GitHub does not
-distinguish "not allowed to see this private resource" from "no
-such resource" by design (otherwise the existence of a private
-resource leaks through the 403/404 split). See
-`github_app_not_installed` above for the most common cause; the
-fix is the same.
+404. Two cases look the same: the App / PAT can't see the resource
+(private repo + App lacks installation scope, or PAT lacks the
+per-repo read permission), or the resource does not exist. GitHub
+answers both with 404 by design, so it does not reveal that a
+private resource exists.
 
 **Fix:** verify the repo / PR exists on GitHub. If it does,
 re-walk Step 3 of
@@ -860,7 +848,7 @@ catalog-driven and registry-driven paths converge on ``"3"``.
 **As an operator, you'll see:**
 
 - `gh-rest-3` in `meho connector list` rows (registered class /
-  in-memory) and in `audit_query` `connector_id` cells.
+  in-memory).
 - `gh-rest-3` in `meho connector ingest --catalog gh/3` outputs
   and in connector-list rows **after** the catalog ingest lands
   the DB row (same form as the in-memory registered class).
@@ -896,7 +884,7 @@ agent_definition:
     timezone: UTC
 
   identity:
-    operator_delegation: damir.topic@pmsoft.at
+    operator_delegation: operator@example.com
 
   permitted_targets:
     - github-meho
@@ -939,7 +927,8 @@ agent_definition:
       # the agent's timeout; the audit row records the queue exit.
 ```
 
-The agent above is intentionally short — production agent definitions
+This YAML is an illustration of the idea, not a file format MEHO
+reads. The agent above is intentionally short — production agent definitions
 add prompt context, output schemas, and step-level retry budgets.
 The `permitted_op_groups` + `permitted_op_ids` shape is the agent-
 runtime contract that scopes which surfaces the agent can reach;
@@ -960,10 +949,10 @@ log — the same pattern every meho agent runtime uses.
 | Recipe (this doc) | producer | landed in this PR ([`./github-connector.md`](./github-connector.md)) |
 | `GitHubRestConnector` substrate (`gh-rest-3`) | producer | landed at T1 [#1221](https://github.com/evoila/meho/issues/1221) |
 | `github-app-credential.md` operator recipe | producer | landed at T2 [#1222](https://github.com/evoila/meho/issues/1222) |
-| `gh/3` catalog entry | producer | landed at T3 [#1223](https://github.com/evoila/meho/issues/1223); reconciled to digit-prefix form at T8 [#1242](https://github.com/evoila/meho/issues/1242) (live ingest gated on parser-scope follow-up T7 [#1241](https://github.com/evoila/meho/issues/1241)) |
-| `gh.composite.pr_status_summary` | producer | tracked at T4 [#1224](https://github.com/evoila/meho/issues/1224) |
-| `requires_approval=true` on 4 write ops | producer | tracked at T5 [#1225](https://github.com/evoila/meho/issues/1225) |
-| Parser extension to inline `#/components/responses/*` | producer | sibling follow-up — gates Step 4's live ingest |
+| `gh/3` catalog entry | producer | landed (T3), in the digit-prefix form (T8) |
+| `gh.composite.pr_status_summary` | producer | landed (T4) |
+| `requires_approval=true` on 4 write ops | producer | landed (T5) as the one-shot script in `backend/scripts/annotate_github_write_ops.py` |
+| Parser extension to inline `#/components/responses/*` | producer | landed (T7) — Step 4's live ingest works |
 | `meho-prod` App provisioned on the `evoila` org | consumer | pending — applied by the dogfooding lab operator before first-day on-ramp |
 | Operator follows this runbook end to end against `evoila/meho` PR #754 in ≤45 min | consumer | pending — the closing-comment artefact on Initiative #1220 |
 
@@ -988,4 +977,4 @@ log — the same pattern every meho agent runtime uses.
 - GitHub REST API documentation: <https://docs.github.com/en/rest>
 - GitHub REST API rate limits: <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api>
 - GitHub audit log API: <https://docs.github.com/en/enterprise-cloud@latest/admin/monitoring-activity-in-your-enterprise/reviewing-audit-logs-for-your-enterprise/using-the-audit-log-api-for-your-enterprise>
-- Consumer feature request: `claude-rdc-hetzner-dc#753` § "GitHub typed connector — operator runbook is a named acceptance criterion."
+- Consumer feature request: the consumer's request for a GitHub typed connector, which names this operator runbook as an acceptance item.

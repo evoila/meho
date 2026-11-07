@@ -12,25 +12,26 @@ Copyright (c) 2026 evoila Group
 > [`backend/src/meho_backplane/connectors/harbor/`](../../backend/src/meho_backplane/connectors/harbor/);
 > the engineering-facing companion is
 > [`docs/codebase/connectors-harbor.md`](../codebase/connectors-harbor.md).
-> This doc is the cookbook every RDC operator reads when onboarding a
+> This doc is the cookbook every operator reads when onboarding a
 > new Harbor registry or retiring a manual `curl` workflow.
 
 ## What this surface is
 
 The `harbor-rest-2.x` connector is a **fully typed** connector:
 
-- The 9 read-only ops (`harbor.about` … `harbor.robot.list`) are
-  registered as **typed** ops (`source_kind='typed'`) by the
-  `register_harbor_typed_operations` registrar (#2856). They dispatch on
-  a fresh boot with **zero catalog ingest** — no spec ingest or curation
-  step is required.
+- 12 read-only ops are **typed** ops (`source_kind='typed'`): the 9-op
+  core (`harbor.about` … `harbor.robot.list`) from the
+  `register_harbor_typed_operations` registrar, plus the CVE list of one
+  artifact, `harbor.project.summary` and `harbor.quota.list` from
+  `ops.py`. They dispatch on a fresh boot with
+  **zero catalog ingest** — no spec ingest or curation step is required.
 - Two **typed** write ops (`harbor.robot.create`, `harbor.robot.delete`)
-  are registered by the G3.5-T9 (#621) registrar, also
-  `source_kind='typed'`.
+  are registered in `ops.py`, also `source_kind='typed'`. Both wait until
+  a second person approves them.
 
 All ops dispatch through the same `POST /api/v1/operations/call` route
 the agent surface uses — auth, policy, audit, broadcast, and JSONFlux
-all run as documented in [CLAUDE.md](../../CLAUDE.md) §6.
+all run on every call.
 
 Auth is **HTTP Basic on every request** (username + password from
 Vault, no session-cookie dance). The connector handles this
@@ -44,14 +45,16 @@ The v0.2 op surface (Initiative
 | harbor-system | `meho harbor about` | `harbor.about` | Version, auth mode, registry URL |
 | harbor-system | `meho harbor health` | `harbor.health` | Composite health: DB / redis / registry / jobservice |
 | harbor-projects | `meho harbor project list` | `harbor.project.list` | Project inventory (public + private) |
-| harbor-projects | `meho harbor project info <name>` | `harbor.project.info` | Full project detail + quota |
+| harbor-projects | `meho harbor project info <name>` | `harbor.project.info` | Project detail: owner, repo count, metadata (no storage quota) |
+| harbor-projects | `meho harbor operation call harbor.project.summary` | `harbor.project.summary` | Storage quota (hard + used, bytes), repo count, member counts of one project |
+| harbor-projects | `meho harbor operation call harbor.quota.list` | `harbor.quota.list` | Storage quotas of all projects |
 | harbor-repositories | `meho harbor repository list <project>` | `harbor.repository.list` | Image repositories in a project |
 | harbor-repositories | `meho harbor repository info <project> <repo>` | `harbor.repository.info` | Repository detail |
 | harbor-artifacts | `meho harbor artifact list <project> <repo>` | `harbor.artifact.list` | Artifacts (tags + digests + SBOM/sig status) |
 | harbor-artifacts | `meho harbor artifact info <project> <repo> <ref>` | `harbor.artifact.info` | Full artifact metadata |
 | harbor-robots | `meho harbor robot list` | `harbor.robot.list` | System-level robots (no secret returned) |
-| harbor-robots | `meho harbor robot create …` | `harbor.robot.create` | Mint a project-scoped robot credential |
-| harbor-robots | `meho harbor robot delete …` | `harbor.robot.delete` | Delete a robot account |
+| robot | `meho harbor robot create …` | `harbor.robot.create` | Mint a project-scoped robot credential (`caution`, waits for approval) |
+| robot | `meho harbor robot delete …` | `harbor.robot.delete` | Delete a robot account (`destructive`, waits for approval) |
 
 The CLI verb tree is **operator ergonomics** over those dispatch routes;
 it is **not** a separate data path and is **not** mirrored on the MCP
@@ -63,8 +66,9 @@ surface (CLAUDE.md postulate 5).
 [`broadcast/events.py`](../../backend/src/meho_backplane/broadcast/events.py).
 The minted secret is returned to the **caller** in the `OperationResult`
 but the broadcast event collapses to aggregate-only — the secret never
-appears in the SSE stream or in `audit_log.payload`. Store it immediately
-after `meho harbor robot create` returns; Harbor does not expose it again.
+appears in the SSE stream or in `audit_log.payload`. The create waits for
+approval first; store the secret as soon as `meho approvals result <id>`
+shows it. Harbor does not expose it again.
 
 `harbor.robot.list` (list) never returns `secret` in any entry —
 this is a Harbor API guarantee, not a MEHO filter.
@@ -78,8 +82,8 @@ this is a Harbor API guarantee, not a MEHO filter.
 - **Service-account credentials in Vault.** The connector reads
   `{"username": ..., "password": ...}` from Vault at `target.secret_ref`.
   Use a Harbor admin account or a system-level robot with the required
-  permissions. HTTP Basic is re-sent on every request; no session state
-  is cached.
+  permissions. HTTP Basic is sent on every request. MEHO keeps no
+  session; it keeps only the credentials it read from Vault, per target.
 - **A registered Harbor target.** The CLI verbs take `--target <slug>`
   (e.g. `--target prod-harbor`). The target carries `product="harbor"`,
   `host` (the Harbor FQDN — no `https://`), `port` (default 443),
@@ -101,17 +105,17 @@ this is a Harbor API guarantee, not a MEHO filter.
 targets:
   - name: prod-harbor
     product: harbor
-    host: harbor.rdc.evoila.io
+    host: harbor.example.com
     port: 443
     secret_ref: kv/data/harbor/prod-harbor
     auth_model: shared_service_account
-    notes: "RDC production Harbor 2.11 registry"
+    notes: "Production Harbor 2.11 registry"
 ```
 
 ### CLI import
 
-`meho targets import` takes a `targets.yaml` **file** (there is no `meho
-targets create` verb in v0.2 — `import` is the CLI's only write path):
+`meho targets import` takes a `targets.yaml` **file**. To register one
+target from flags instead, use `meho targets add <name>` (alias `create`):
 
 ```bash
 meho targets import prod-harbor.yaml   # add --update to PATCH an existing target
@@ -185,6 +189,11 @@ meho harbor artifact list library ubuntu --target prod-harbor --json | \
 
 # Escape hatch: run any harbor-rest-2.x op by op_id
 meho harbor operation call harbor.about --target prod-harbor
+
+# Reads with no alias verb
+meho harbor operation call harbor.project.summary --target prod-harbor \
+  --params '{"project_name": "library"}'
+meho harbor operation call harbor.quota.list --target prod-harbor
 meho harbor operation search "robot accounts"
 ```
 
@@ -201,7 +210,12 @@ meho harbor robot create \
   --duration 90 \
   --target prod-harbor
 
-# Output:
+# The request waits until a second person approves it.
+# The command prints the approval id.
+
+# After the approval, MEHO runs the create. Read the result
+# (only the person who sent the request can read it):
+meho approvals result <approval-id>
 #   id:     42
 #   name:   robot$myproject+ci-push
 #   secret: <minted-secret>
@@ -209,8 +223,8 @@ meho harbor robot create \
 # IMPORTANT: store the secret now — Harbor does not return it again.
 ```
 
-The secret appears in the terminal and in the `OperationResult` payload
-returned to the caller. It does **not** appear in:
+The secret appears in the result returned to the person who sent the
+request. It does **not** appear in:
 - The SSE broadcast stream (`credential_mint` aggregate-only collapse).
 - The `audit_log.payload` (the payload carries a `params_hash`, not the
   secret value).
@@ -251,8 +265,8 @@ $ meho harbor about --target prod-harbor
 harbor-rest-2.x harbor.about — status=ok (38ms)
   version:      v2.11.0
   auth_mode:    db_auth
-  registry_url: harbor.rdc.evoila.io
-  external_url: https://harbor.rdc.evoila.io
+  registry_url: harbor.example.com
+  external_url: https://harbor.example.com
 ```
 
 ### `meho harbor health`
@@ -269,9 +283,11 @@ use `--json | jq` to filter.
 
 ### `meho harbor project info <project_name>`
 
-Dispatches `harbor.project.info`. Renders full
-project detail including quota usage/limit (in bytes), `repo_count`,
-and metadata flags (`public`, `auto_scan`, etc.).
+Dispatches `harbor.project.info`. Renders `name`, `owner`,
+`repo_count` and the `public` flag; `--json` shows all metadata flags.
+The project object has no storage quota. For the quota, call
+`harbor.project.summary` or `harbor.quota.list` with
+`meho harbor operation call`.
 
 ### `meho harbor repository list <project_name>`
 
@@ -307,8 +323,11 @@ robot secret** — Harbor's list endpoint does not include it.
 Dispatches `harbor.robot.create` (typed op). Required flags:
 `--name`, `--project`. Optional: `--duration` (days, default `-1`).
 
-The minted secret is printed once. If `--json` is used, it appears in
-`.result.secret` of the `OperationResult` envelope.
+The op is on the `caution` risk level and needs approval. The result is
+`status=awaiting_approval`; the create runs when a second person approves
+it. Then the person who sent the request reads the minted secret once
+with `meho approvals result <id>` (with `--json`, it is in the result's
+`secret` field).
 
 ### `meho harbor robot delete`
 
@@ -324,7 +343,9 @@ stops, shows the reason, and sends nothing.
 ### `meho harbor operation search`
 
 Hybrid BM25 + cosine RRF search across all `harbor-rest-2.x` ops.
-Useful for discovering op IDs outside the curated 9-op core.
+Useful for finding ops that have no alias verb, such as
+`harbor.project.summary`, `harbor.quota.list` and the CVE list of one
+artifact.
 
 ```bash
 meho harbor operation search "artifact vulnerabilities"
@@ -371,7 +392,7 @@ Example agent reasoning sequence:
 | `HTTP 404: project not found` | Project name typo or project in different tenant | `meho harbor project list` to confirm name |
 | `HTTP 403: forbidden` on robot create | Service account lacks robot-management permission | Use Harbor admin or a system-level robot |
 | `op_id unknown_op` on dispatch | Op id typo, or a backplane build predating #2856 | Check the op id table above; the typed read core registers at startup, so confirm the backplane ships it (no ingest/curation to run) |
-| Artifact list returns a JSONFlux handle | > JSONFlux threshold items (default 100) | Use `result_query` meta-tool to paginate the handle |
+| Artifact list returns a JSONFlux handle | The list has more than 50 rows or 4 KB | Use the `result_query` meta-tool or `meho operation result-query <handle_id>` to page through the handle |
 
 ## Related resources
 

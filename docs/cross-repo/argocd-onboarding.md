@@ -7,13 +7,13 @@ Copyright (c) 2026 evoila Group
 
 > Operator-facing recipe for the G3.12 `argocd-api-3.x` op surface — how
 > to register an `argocd` target (host, port, the Vault bearer-token
-> `secret_ref`), the six curated read ops, the `GET /api/version` probe,
+> `secret_ref`), the seven curated read ops, the `GET /api/version` probe,
 > and the **seven approval-gated write ops** (G3.12-T4 #1405). The op
 > handlers live in
 > [`backend/src/meho_backplane/connectors/argocd/`](../../backend/src/meho_backplane/connectors/argocd/);
 > the engineering-facing companion is
 > [`docs/codebase/connectors-argocd.md`](../codebase/connectors-argocd.md).
-> This doc is the cookbook an RDC operator reads when they want MEHO to
+> This doc is the cookbook an operator reads when they want MEHO to
 > see what ArgoCD sees, instead of reaching for the `argocd` CLI or raw
 > `kubectl` against the `argocd` namespace.
 
@@ -31,9 +31,7 @@ transport sibling (e.g. a gRPC variant) without breaking the resolver's
 tie-break ladder; G3.12 ships only the REST transport against
 `argocd-server`.
 
-The v0.10 op surface (Initiative
-[#1387](https://github.com/evoila/meho/issues/1387)) is **read-only** —
-the GitOps-visibility working set:
+The read ops are the GitOps-visibility working set:
 
 | Group | op_id | Endpoint | Returns |
 | --- | --- | --- | --- |
@@ -43,12 +41,12 @@ the GitOps-visibility working set:
 | `argocd-apps` | `argocd.app.resource_tree` | `GET /api/v1/applications/{name}/resource-tree` | `{nodes, orphanedNodes, hosts, shardsCount}` |
 | `argocd-projects` | `argocd.appproject.list` | `GET /api/v1/projects` | `{items, metadata}` — AppProjects + allow-lists |
 | `argocd-repos` | `argocd.repo.list` | `GET /api/v1/repositories` | `{items, metadata}` — repos + connectionState |
+| `argocd-clusters` | `argocd.cluster.list` | `GET /api/v1/clusters` | `{items, metadata}` — destination clusters + connectionState; the credential `config` field is removed from every item |
 
-Six ops total, every one `safety_level="safe"`, `requires_approval=False`,
+Seven read ops, every one `safety_level="safe"`, `requires_approval=False`,
 `read-only` tag. They dispatch through the same
 `POST /api/v1/operations/call` route the agent surface uses — auth,
-policy, audit, broadcast, and JSONFlux all run as documented in
-[CLAUDE.md](../../CLAUDE.md) §6. Operators reach them via the
+policy, audit, broadcast, and JSONFlux all run on every call. Operators reach them via the
 per-connector `meho argocd …` verb tree (the primary surface — see [the
 CLI invocation surface](#the-cli-invocation-surface)), or the equivalent
 generic `meho operation call argocd-api-3.x <op_id> …` verb; agents reach
@@ -66,8 +64,8 @@ path](#the-agent-meta-tool-path)).
   long-lived account or project token (`argocd account generate-token`
   for an account token, or a `project` token scoped to the AppProjects
   MEHO should see). Read-only RBAC is sufficient for this op surface —
-  the token only needs `get`/`list` on `applications`, `projects`, and
-  `repositories`. Scope the token to read-only so a stolen credential
+  the token only needs `get`/`list` on `applications`, `projects`,
+  `repositories`, and `clusters`. Scope the token to read-only so a stolen credential
   can't mutate the GitOps state.
 - **A registered `argocd` target.** The ops resolve a target slug
   server-side to a row in the `targets` table. The target carries
@@ -98,7 +96,7 @@ target row's `secret_ref` column.
 The connector's
 [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/argocd/session.py)
 reads exactly the `token` field; a Vault secret missing that key raises a
-`RuntimeError` naming the target and the missing key at dispatch time
+`VaultCredentialsReadError` naming the target and the missing field at dispatch time
 (fail-fast — never an opaque ArgoCD 401). The token is cached per target
 after first use, never logged (the `argocd_credentials_loaded` log event
 carries `target` + `host` only — no secret value), and never rides back
@@ -109,12 +107,12 @@ in the `OperationResult` envelope.
 Use the tenant's KV-v2 path convention `<tenant>/argocd/<host>`. The
 secret carries the single `token` field. `meho vault kv put` takes the
 `<mount> <path>` positional pair (`ExactArgs(2)` — here mount `secret`,
-logical path `rdc-hetzner-dc/argocd/api-token`, no `/data/` infix) and
+logical path `my-lab/argocd/api-token`, no `/data/` infix) and
 the secret body as a JSON object via `--data` (inline or `@<file>`):
 
 ```console
-$ meho vault kv put --target rdc-vault secret \
-    rdc-hetzner-dc/argocd/api-token \
+$ meho vault kv put --target my-vault secret \
+    my-lab/argocd/api-token \
     --data "{\"token\":\"$(cat ./argocd-token.txt)\"}"
 ```
 
@@ -130,16 +128,17 @@ for the federation setup).
 
 Targets are registered by importing a `targets.yaml` descriptor — `meho
 targets import <file>` (`ExactArgs(1)`) is the verb every sibling
-onboarding doc uses; there is no `meho targets create`. Add an entry:
+onboarding doc uses. `meho targets add <name>` (alias `create`) registers
+one target from flags instead. Add an entry:
 
 ```yaml
 # targets.yaml
 targets:
-  - name: rdc-argocd
+  - name: my-argocd
     product: argocd
-    host: argocd.rdc-hetzner-dc.example.com
+    host: argocd.example.com
     port: 443
-    secret_ref: secret/data/rdc-hetzner-dc/argocd/api-token
+    secret_ref: secret/data/my-lab/argocd/api-token
     auth_model: shared_service_account
     preferred_impl_id: argocd-api
 ```
@@ -160,7 +159,7 @@ future-proofs against a sibling transport).
 ### Verify — the `GET /api/version` probe
 
 ```console
-$ meho targets probe rdc-argocd
+$ meho targets probe my-argocd
 ok — argocd reachable; argocd-server v3.3.9
 ```
 
@@ -190,35 +189,36 @@ pre-bakes `connector_id="argocd-api-3.x"` so you don't retype the
 connector id on every call, mirroring the sibling `meho keycloak …`
 (#1395), `meho harbor …` (#622), and `meho nsx …` (#615) trees. Per
 CLAUDE.md postulate 5 these alias verbs are operator-only ergonomics —
-they are not mirrored on the MCP surface. All six read ops have a verb;
-each `meho argocd …` invocation and its generic `meho operation call`
+they are not mirrored on the MCP surface. Six of the seven read ops have
+a verb; `argocd.cluster.list` has none, so call it with
+`meho operation call` (below). Each `meho argocd …` invocation and its generic `meho operation call`
 equivalent dispatch the identical `POST /api/v1/operations/call` route.
 The target slug is whatever you registered.
 
 ```console
 # List every app + its sync/health status:
-$ meho argocd app list --target rdc-argocd
+$ meho argocd app list --target my-argocd
 
 # Narrow to one project / a label selector:
-$ meho argocd app list --target rdc-argocd --project payments --selector env=prod
+$ meho argocd app list --target my-argocd --project payments --selector env=prod
 
 # One app's full spec + status:
-$ meho argocd app get --target rdc-argocd --name guestbook
+$ meho argocd app get --target my-argocd --name guestbook
 
 # The desired-vs-live drift (the read-only `argocd app diff <app>` equivalent):
-$ meho argocd app diff --target rdc-argocd --name guestbook
+$ meho argocd app diff --target my-argocd --name guestbook
 
 # The reconciled resource tree with per-node health:
-$ meho argocd app resource-tree --target rdc-argocd --name guestbook
+$ meho argocd app resource-tree --target my-argocd --name guestbook
 
 # AppProjects + their allow-lists:
-$ meho argocd appproject list --target rdc-argocd
+$ meho argocd appproject list --target my-argocd
 
 # Configured repos + their connection state:
-$ meho argocd repo list --target rdc-argocd
+$ meho argocd repo list --target my-argocd
 
 # Machine-readable envelope for jq (every verb takes --json):
-$ meho argocd repo list --target rdc-argocd --json \
+$ meho argocd repo list --target my-argocd --json \
     | jq '.result.items[] | {repo, status: .connectionState.status}'
 ```
 
@@ -228,23 +228,25 @@ most recent `meho login`). Exit codes: `0`=ok, `1`=error/denied,
 
 ### The generic dispatcher alternative
 
-The same six ops are equally reachable through the generic `meho
+The same seven read ops are equally reachable through the generic `meho
 operation` verbs — useful for scripting against any connector with one
 code path, or when the op surface is newer than your CLI build's verb
 tree. The connector id is `argocd-api-3.x`:
 
 ```console
-$ meho operation call argocd-api-3.x argocd.app.list --target rdc-argocd
-$ meho operation call argocd-api-3.x argocd.app.get --target rdc-argocd \
+$ meho operation call argocd-api-3.x argocd.app.list --target my-argocd
+$ meho operation call argocd-api-3.x argocd.app.get --target my-argocd \
     --params '{"name": "guestbook"}'
-$ meho operation call argocd-api-3.x argocd.app.diff --target rdc-argocd \
+$ meho operation call argocd-api-3.x argocd.app.diff --target my-argocd \
     --params '{"name": "guestbook"}'
-$ meho operation call argocd-api-3.x argocd.repo.list --target rdc-argocd --json \
+$ meho operation call argocd-api-3.x argocd.cluster.list --target my-argocd
+$ meho operation call argocd-api-3.x argocd.repo.list --target my-argocd --json \
     | jq '.result.items[] | {repo, status: .connectionState.status}'
 ```
 
 `--params` accepts inline JSON or `@<file>`; omit it for the no-param ops
-(`app.list` with no filters, `appproject.list`, `repo.list`). Exit codes
+(`app.list` with no filters, `appproject.list`, `repo.list`,
+`cluster.list`). Exit codes
 mirror every dispatch verb: `0` ok, `1` error/denied, `2` auth_expired,
 `3` unreachable, `4` unexpected response shape.
 
@@ -259,16 +261,18 @@ $ meho operation search argocd-api-3.x "diff drift" --group argocd-apps
 ## The agent meta-tool path
 
 Agents never see the `meho operation …` verbs — those are operator CLI
-ergonomics. Per [CLAUDE.md](../../CLAUDE.md) postulate 5, an agent reaches
+ergonomics. An agent reaches
 every argocd op through the narrow-waist meta-tools — there are **no
 per-op MCP tools** (one tool per op would fan eleven-plus duplicated
 schemas onto the agent surface and re-implement the search-then-dispatch
 flow the meta-tools already cover):
 
 ```text
-search_connectors(query="argocd gitops")          → finds argocd-api-3.x
+meho_connector_list()                             → finds argocd-api-3.x
 list_operation_groups(connector_id="argocd-api-3.x")
-                                                   → argocd-apps / argocd-projects / argocd-repos
+                                                   → argocd-apps / argocd-projects / argocd-repos /
+                                                     argocd-clusters / argocd-apps-write /
+                                                     argocd-projects-write
 search_operations(
     connector_id="argocd-api-3.x",
     query="which apps are out of sync",
@@ -277,7 +281,7 @@ search_operations(
 call_operation(
     connector_id="argocd-api-3.x",
     op_id="argocd.app.diff",
-    target={"name": "rdc-argocd"},
+    target={"name": "my-argocd"},
     params={"name": "guestbook"},
 )
 ```
@@ -303,11 +307,11 @@ than hard-denying it):
 
 | op_id | safety | CLI verb | what it does |
 | --- | --- | --- | --- |
-| `argocd.app.sync` | dangerous | `meho argocd app sync --name N [--prune] [--revision R]` | reconcile to Git-desired; polls operationState to a terminal phase |
-| `argocd.app.rollback` | dangerous | `meho argocd app rollback --name N --id I` | roll back to a prior deployed history id; polls to terminal |
-| `argocd.app.set` | dangerous | `meho argocd app set --name N --spec-file F` | replace the ApplicationSpec; captures before/after into `proposed_effect` |
-| `argocd.app.refresh` | caution | `meho argocd app refresh --name N` | the governed replacement for `kubectl annotate … refresh=hard`; under selfHeal can trigger an auto-sync |
-| `argocd.app.delete` | dangerous | `meho argocd app delete --name N` | cascade-delete; captures the cascade resource list into `proposed_effect` |
+| `argocd.app.sync` | dangerous | `meho argocd app sync --name N [--prune] [--revision R] [--dry-run]` | reconcile to Git-desired; polls operationState to a terminal phase |
+| `argocd.app.rollback` | dangerous | `meho argocd app rollback --name N --id I [--prune] [--dry-run]` | roll back to a prior deployed history id; polls to terminal |
+| `argocd.app.set` | dangerous | `meho argocd app set --name N --spec-file F [--no-validate]` | replace the ApplicationSpec; captures before/after into `proposed_effect` |
+| `argocd.app.refresh` | caution | `meho argocd app refresh --name N [--no-hard]` | the governed replacement for `kubectl annotate … refresh=hard`; under selfHeal can trigger an auto-sync |
+| `argocd.app.delete` | dangerous | `meho argocd app delete --name N [--no-cascade] [--propagation-policy P]` | cascade-delete; captures the cascade resource list into `proposed_effect` |
 | `argocd.appproject.create` | dangerous | `meho argocd appproject create --project-file F [--upsert]` | create the tenancy/authorization boundary |
 | `argocd.appproject.update` | dangerous | `meho argocd appproject update --project-file F` | amend a project's allow-lists; captures before/after |
 
@@ -330,11 +334,11 @@ without touching the cluster.
 | --- | --- | --- |
 | `no backplane URL configured` (exit 2) | Never logged in / no `--backplane`. | `meho login <url>` or pass `--backplane <url>`. |
 | `auth_expired` / stored token rejected | Keycloak operator token expired. | `meho login <url>` again. |
-| `status=error … operation not found` | The typed-op registrar didn't run (lifespan crash) or op_id drift. | Verify the backplane started cleanly; `meho connector list` should show `argocd-api-3.x` with thirteen enabled ops (six read + seven write). Check logs for `argocd_operations_registered`. |
-| write op returns `status=awaiting_approval` | Expected — every write `requires_approval=True`; it's parked in the queue. | Approve via the approval queue (REST/MCP/CLI), then the run resumes; this is the designed governance gate, not an error. |
+| `status=error … operation not found` | The typed-op registrar didn't run (lifespan crash) or op_id drift. | Verify the backplane started cleanly; `meho connector list` should show `argocd-api-3.x` with fourteen enabled ops (seven read + seven write). Check logs for `argocd_operations_registered`. |
+| write op returns `status=awaiting_approval` | Expected — every write `requires_approval=True`; it's parked in the queue. | A second person approves it with `meho approvals approve <id>` or in the web console. Approving it runs the op; do not send it again. Read the outcome with `meho approvals result <id>`. Approval has no MCP tool. |
 | `status=error … unknown_connector` | Connector id drift — typed `argocd-3.x` instead of `argocd-api-3.x`. | Use `argocd-api-3.x`; the `-api` impl_id discriminator is part of the connector_id grammar. |
-| `RuntimeError … missing required key 'token'` | The Vault secret at `secret_ref` lacks the `token` field. | `meho vault kv get …` the path; the secret must carry a `token` key (no `username`). |
-| op returns ArgoCD `401` / `403` | The stored token is invalid or its RBAC lacks `get`/`list`. | Re-mint with `argocd account generate-token`; grant read-only RBAC on `applications` / `projects` / `repositories`. |
+| `VaultCredentialsReadError … is missing required field 'token'` | The Vault secret at `secret_ref` has no `token` field. | `meho vault kv get …` the path; the secret must carry a `token` key (no `username`). |
+| op returns ArgoCD `401` / `403` | The stored token is invalid or its RBAC lacks `get`/`list`. | Re-mint with `argocd account generate-token`; grant read-only RBAC on `applications` / `projects` / `repositories` / `clusters`. |
 | `probe` returns `ConnectError` | `argocd-server` not reachable from the backplane (port/VPN). | Confirm `:443` (or the configured port) is reachable; ArgoCD's `/api/version` is unauthenticated, so a 200 here isolates the failure to transport. |
 | `app.get` returns ArgoCD `404` for an app you can see in the UI | The optional `project` param scoped it out (ArgoCD 404s rather than 403s an out-of-project app), or the token's project scope excludes it. | Drop `project` from `--params`, or confirm the token's AppProject scope includes the app. |
 
@@ -348,4 +352,4 @@ without touching the cluster.
 - Generic dispatch CLI: [`cli/internal/cmd/operation/`](../../cli/internal/cmd/operation/) (`call.go`, `search.go`, `groups.go`).
 - ArgoCD API docs: <https://argo-cd.readthedocs.io/en/stable/developer-guide/api-docs/>; `VersionMessage` proto: `argoproj/argo-cd` `server/version/version.proto`.
 - Vault federation setup: [`vault-onboarding.md`](./vault-onboarding.md). Onboarding-doc precedents: [`bind9-onboarding.md`](./bind9-onboarding.md), [`kubernetes-onboarding.md`](./kubernetes-onboarding.md), [`harbor-onboarding.md`](./harbor-onboarding.md).
-- Approval-gated write ops ([#1405](https://github.com/evoila/meho/issues/1405)) route through the human approve-queue (G11.7-T1 [#1401](https://github.com/evoila/meho/issues/1401)); related approval-write precedents [`github-write-ops-approval.md`](./github-write-ops-approval.md), `g316-vmware-write-activation.md`.
+- The approval-gated write ops wait in the human approval queue; a related approval-write example is [`github-write-ops-approval.md`](./github-write-ops-approval.md).

@@ -278,6 +278,7 @@ _NET_FINGERPRINT_LLM_INSTRUCTIONS: dict[str, Any] = {
         "allowlist is not a reading: the call fails with "
         "error_code='connector_probe_refused'."
     ),
+    "result_scalars": {"keys": ["reachable", "product", "confidence", "version"]},
     "next_step": (
         "When the product is known, register the address as a target with "
         "`targets.register` using that product. When it is 'unknown', do not "

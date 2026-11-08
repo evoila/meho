@@ -76,7 +76,7 @@ def test_an_sa_operator_sees_they_may_approve_their_own_change() -> None:
 
     assert 'data-approve-right="yes"' in body
     assert 'data-approve-reason="own_change"' in body
-    assert "You may approve it as a MEHO-SA-Operator." in body
+    assert "MEHO-SA-Operators and MEHO-Admins may approve their own changes." in body
     assert "disabled" not in _approve_button(body)
     # The armed approve confirm says it is a self-approval.
     assert 'data-approval-confirm="self-approval"' in body
@@ -195,7 +195,7 @@ def test_a_self_approval_shows_a_confirmation_after_the_click() -> None:
     assert response.status_code == 200, response.text  # type: ignore[attr-defined]
     body = response.text  # type: ignore[attr-defined]
     assert 'data-testid="approval-self-approved"' in body
-    assert "You approved your own change as a MEHO-SA-Operator." in body
+    assert "You approved your own change, as a member of MEHO-SA-Operators or MEHO-Admins." in body
     assert "The audit log records it as a self-approval." in body
 
 

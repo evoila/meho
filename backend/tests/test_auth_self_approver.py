@@ -5,8 +5,9 @@
 
 ``Operator.self_approver`` says the person is in the SA-Operators group of
 the current tenant. ``Operator.may_self_approve`` is the one question the
-approval checks ask. The flag is off by default and every unclear token
-gives ``False``. A machine login never gets it.
+approval checks ask; it also says yes for a MEHO-Admin (#5969). The flag
+is off by default and every unclear token gives ``False``. A machine login
+never gets it.
 """
 
 from __future__ import annotations
@@ -290,10 +291,14 @@ async def test_switching_tenants_keeps_the_flag_off_after_a_bad_entry() -> None:
     assert in_b.may_self_approve is False
 
 
-async def test_platform_admin_in_a_tenant_without_a_group_gets_no_flag(
+async def test_platform_admin_in_a_tenant_without_a_group_counts_as_an_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A platform admin acts as ``tenant_admin`` there, never as an SA-Operator."""
+    """A platform admin acts as ``tenant_admin`` there, never as an SA-Operator.
+
+    The SA-Operators flag stays off, but an admin may approve their own
+    change (#5969), so ``may_self_approve`` is on.
+    """
     tenant_c = uuid.uuid4()
 
     async def _lookup(wanted: str) -> uuid.UUID | None:
@@ -305,8 +310,9 @@ async def test_platform_admin_in_a_tenant_without_a_group_gets_no_flag(
     in_c = await select_current_tenant(operator, "team-c")
     assert in_c.tenant_id == tenant_c
     assert in_c.role_from_platform_admin is True
+    assert in_c.tenant_role is TenantRole.TENANT_ADMIN
     assert in_c.self_approver is False
-    assert in_c.may_self_approve is False
+    assert in_c.may_self_approve is True
 
 
 async def test_status_answer_without_a_chosen_tenant_gets_no_flag() -> None:
@@ -361,6 +367,45 @@ def test_helper_refuses_a_machine_even_with_the_field_set(kind: PrincipalKind) -
         self_approver=True,
     )
     assert operator.may_self_approve is False
+
+
+# ---------------------------------------------------------------------------
+# MEHO-Admins may approve their own changes too (#5969)
+# ---------------------------------------------------------------------------
+
+
+def test_admin_in_a_chosen_tenant_may_self_approve() -> None:
+    operator = _operator(_claims(meho_tenants=[f"{_TENANT_A}:lab-a:Admins"]))
+    assert operator.tenant_role is TenantRole.TENANT_ADMIN
+    assert operator.self_approver is False
+    assert operator.may_self_approve is True
+
+
+def test_operator_without_the_sa_group_may_not_self_approve() -> None:
+    operator = _operator(_claims(meho_tenants=[f"{_TENANT_A}:lab-a:Operators"]))
+    assert operator.may_self_approve is False
+
+
+@pytest.mark.parametrize("kind", [PrincipalKind.AGENT, PrincipalKind.SERVICE, PrincipalKind.RUNNER])
+def test_admin_role_on_a_machine_login_never_self_approves(kind: PrincipalKind) -> None:
+    operator = Operator(
+        sub="s",
+        raw_jwt="t",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=kind,
+    )
+    assert operator.may_self_approve is False
+
+
+async def test_admin_without_a_chosen_tenant_may_not_self_approve() -> None:
+    operator = _operator(
+        _claims(meho_tenants=[f"{_TENANT_A}:lab-a:Admins", f"{_TENANT_B}:lab-b:Admins"]),
+    )
+    unchosen = await select_current_tenant(operator, None, allow_unchosen=True)
+    assert unchosen.tenant_chosen is False
+    assert unchosen.tenant_role is TenantRole.TENANT_ADMIN
+    assert unchosen.may_self_approve is False
 
 
 # ---------------------------------------------------------------------------

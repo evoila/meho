@@ -4,7 +4,7 @@
 """First-start checks: ``GET /first-start``.
 
 Right after an install, MEHO checks its own site and returns a plain list.
-Each line is green, or red with one sentence that names the fix. The four
+Each line is green, or red with one sentence that names the fix. The five
 checks are:
 
 * **DNS name** - the host of ``BACKPLANE_URL`` resolves, and the address it
@@ -22,6 +22,10 @@ checks are:
   system whose login is in Vault is checked with that person's token. The
   public list has no person: such a system is not contacted, and the line
   says how many systems could not be checked. That is not a red line.
+* **Network** - the addresses the host of ``BACKPLANE_URL`` resolves to are
+  not global internet addresses (``ipaddress`` ``is_global``). MEHO belongs
+  on the management network. A global address gives a ``warn`` line, not a
+  red one: the install goes on. Private, shared and local ranges give none.
 
 The endpoint needs no login, like the bare ``/ready`` verdict, so the answer
 holds the list only: no stack trace, no token, no exception text. A red
@@ -31,17 +35,19 @@ the names of the systems of the signed-in tenant. The checks run again on
 every call; calls that arrive while a run is in progress share that run.
 The checks change nothing.
 
-A line has one of three states: ``ok``, ``fail`` or ``skipped``. A check is
+A line has one of four states: ``ok``, ``fail``, ``warn`` or ``skipped``. A check is
 skipped when it cannot run or has no meaning (the certificate check when
 ``BACKPLANE_URL`` is plain http, or when the DNS name already failed; the
 reachability check when some systems need a signed-in person and none
-failed). The overall ``ok`` is true when no line is ``fail``.
+failed). The overall ``ok`` is true when no line is ``fail``; a ``warn`` line
+does not make it false.
 """
 
 import asyncio
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import socket
 import ssl
@@ -97,7 +103,7 @@ _VERIFY_EXPIRED: int = 10
 _VERIFY_HOSTNAME_MISMATCH: int = 62
 _VERIFY_IP_MISMATCH: int = 64
 
-LineStatus = Literal["ok", "fail", "skipped"]
+LineStatus = Literal["ok", "fail", "warn", "skipped"]
 ProbeOutcome = Literal["up", "down", "needs_person"]
 
 
@@ -110,11 +116,12 @@ class FirstStartLine(BaseModel):
 
     @property
     def ok(self) -> bool:
+        """A ``warn`` line does not fail the list."""
         return self.status != "fail"
 
 
 class FirstStartResponse(BaseModel):
-    """The whole list. ``ok`` is true when no line is ``fail``."""
+    """The whole list. ``ok`` is true when no line is ``fail`` (``warn`` is fine)."""
 
     ok: bool
     checks: list[FirstStartLine]
@@ -245,6 +252,50 @@ async def check_destination(
             "as this MEHO. Point the name at the address MEHO is served on, or fix BACKPLANE_URL.",
         )
     return _line("dns", "ok", f"The host name {host} resolves and points at this MEHO.")
+
+
+# --- Network ----------------------------------------------------------------
+
+
+def _global_addresses(addresses: list[str]) -> list[str]:
+    """The entries of *addresses* that are global internet addresses."""
+    found: list[str] = []
+    for raw in addresses:
+        try:
+            address = ipaddress.ip_address(raw.split("%", 1)[0])
+        except ValueError:
+            continue
+        if address.is_global:
+            found.append(str(address))
+    return found
+
+
+async def check_network(backplane_url: str, *, dns_ok: bool) -> FirstStartLine:
+    """Warn when the host of ``BACKPLANE_URL`` resolves to a global internet address.
+
+    MEHO runs on the management network, never on the internet. This is a
+    warning, not a failure. Private, shared (100.64.0.0/10) and local ranges
+    give no warning.
+    """
+    site = _site_host_port(backplane_url)
+    if site is None or not dns_ok:
+        return _line("network", "skipped", "Not checked until the DNS name check is green.")
+    host, port, _scheme = site
+    try:
+        addresses = await _resolve_host(host, port)
+    except (OSError, TimeoutError):
+        return _line("network", "skipped", "Not checked until the DNS name check is green.")
+    public = _global_addresses(addresses)
+    if public:
+        return _line(
+            "network",
+            "warn",
+            f"The host name {host} points at a public internet address. "
+            "MEHO belongs on the management network, never on the internet. "
+            "Point the name at a private address, or close the public access "
+            "with a firewall.",
+        )
+    return _line("network", "ok", f"The host name {host} points at a private address.")
 
 
 # --- Certificate ------------------------------------------------------------
@@ -533,7 +584,7 @@ async def run_first_start_checks(
     show_names: bool = False,
     operator: Operator | None = None,
 ) -> FirstStartResponse:
-    """Run the four checks and return the list. Changes nothing.
+    """Run the checks and return the list. Changes nothing.
 
     The console page passes its tenant, ``show_names=True`` and the
     signed-in person. The public endpoint passes none of them, so it shows
@@ -541,13 +592,14 @@ async def run_first_start_checks(
     """
     backplane_url = get_settings().backplane_url
     dns = await check_dns(backplane_url)
-    certificate, clock, reachability = await asyncio.gather(
+    certificate, network, clock, reachability = await asyncio.gather(
         check_certificate(backplane_url, dns_ok=dns.ok),
+        check_network(backplane_url, dns_ok=dns.ok),
         check_clock(),
         check_reachability(tenant_id=tenant_id, show_names=show_names, operator=operator),
     )
     dns = await check_destination(backplane_url, dns, certificate)
-    lines = [dns, certificate, clock, reachability]
+    lines = [dns, certificate, network, clock, reachability]
     return FirstStartResponse(ok=all(line.ok for line in lines), checks=lines)
 
 

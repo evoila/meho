@@ -32782,6 +32782,7 @@
             "enum": [
               "ok",
               "fail",
+              "warn",
               "skipped"
             ],
             "title": "Status"
@@ -32820,7 +32821,7 @@
           "checks"
         ],
         "title": "FirstStartResponse",
-        "description": "The whole list. ``ok`` is true when no line is ``fail``."
+        "description": "The whole list. ``ok`` is true when no line is ``fail`` (``warn`` is fine)."
       },
       "ForkInfo": {
         "properties": {

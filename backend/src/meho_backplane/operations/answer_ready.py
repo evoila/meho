@@ -37,6 +37,7 @@ __all__ = [
     "fit_items",
     "pick_columns",
     "read_more_line",
+    "too_large_line",
 ]
 
 #: Most bytes (JSON text) the ``items`` table may take inline.
@@ -88,7 +89,8 @@ ANSWER_READY_OUTPUT_PROPERTIES: dict[str, Any] = {
     },
 }
 
-_MISSING = object()
+#: The part of the read-more line that says how to read the stored rows.
+_READ_MORE_CALL = "For other columns or a filter, call result_query with handle_id="
 
 
 def _is_short(value: Any) -> bool:
@@ -118,24 +120,46 @@ def _short_columns(rows: Sequence[dict[str, Any]]) -> list[str]:
 
 def _count_key(value: Any) -> str:
     """The text a value is counted under (JSON spelling for non-text values)."""
-    if value is _MISSING or value is None:
+    if value is None:
         return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
     return value if isinstance(value, str) else str(value)
 
 
-def _value_counts(rows: Sequence[dict[str, Any]], column: str) -> dict[str, int] | None:
-    """Counts per value of *column*, or ``None`` when it has too many values or none repeat."""
-    counts: dict[str, int] = {}
+def _value_tallies(
+    rows: Sequence[dict[str, Any]], columns: Sequence[str]
+) -> dict[str, dict[str, int]]:
+    """Counts per present value of each of *columns*, in one pass over the rows.
+
+    The work grows with the cells in *rows*, not with rows times columns, so
+    many sparse rows stay cheap. A column that gets too many values is
+    dropped. Missing values are added by :func:`_finished_counts`.
+    """
+    tallies: dict[str, dict[str, int]] = {column: {} for column in columns}
     for row in rows:
-        key = _count_key(row.get(column, _MISSING))
-        if key not in counts and len(counts) >= MAX_COUNT_VALUES:
+        for column, value in row.items():
+            tally = tallies.get(column)
+            if tally is None:
+                continue
+            key = _count_key(value)
+            if key not in tally and len(tally) >= MAX_COUNT_VALUES:
+                del tallies[column]
+                continue
+            tally[key] = tally.get(key, 0) + 1
+    return tallies
+
+
+def _finished_counts(tally: dict[str, int], total_rows: int) -> dict[str, int] | None:
+    """*tally* with its missing values added, or ``None`` when too many values or none repeat."""
+    missing = total_rows - sum(tally.values())
+    if missing:
+        if "null" not in tally and len(tally) >= MAX_COUNT_VALUES:
             return None
-        counts[key] = counts.get(key, 0) + 1
-    if len(counts) >= len(rows):
+        tally["null"] = tally.get("null", 0) + missing
+    if len(tally) >= total_rows:
         return None
-    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+    return dict(sorted(tally.items(), key=lambda item: (-item[1], item[0])))
 
 
 def column_counts(
@@ -151,13 +175,16 @@ def column_counts(
     The counts cover every row in *rows*.
     """
     result: dict[str, dict[str, int]] = {}
-    for column in _short_columns(rows):
-        counts = _value_counts(rows, column)
+    used = 2  # the braces
+    for column, tally in _value_tallies(rows, _short_columns(rows)).items():
+        counts = _finished_counts(tally, len(rows))
         if counts is None:
             continue
-        if json_text_bytes({**result, column: counts}) > byte_budget:
+        entry = json_text_bytes({column: counts}) - 2 + (1 if result else 0)
+        if used + entry > byte_budget:
             continue
         result[column] = counts
+        used += entry
     return result
 
 
@@ -264,7 +291,22 @@ def read_more_line(
         if stored_rows >= total_rows
         else f" Only the first {stored_rows} rows are stored; the rest cannot be read."
     )
+    return f"{shown} {_READ_MORE_CALL}{handle_id}.{tail}"
+
+
+def too_large_line(rationale: str) -> str:
+    """*rationale* for a reply that lost its inline part because it was too large.
+
+    The read-more line says what the summary shows, and a smaller reply no
+    longer shows it. This keeps the part on how to read the stored rows and
+    replaces the rest. Text that is not a read-more line (the setting is
+    off) comes back unchanged. The last match is used, because a column
+    name in the first part of the line is vendor text.
+    """
+    _, found, rest = rationale.rpartition(_READ_MORE_CALL)
+    if not found:
+        return rationale
     return (
-        f"{shown} For other columns or a filter, call result_query with "
-        f"handle_id={handle_id}.{tail}"
+        "This reply was too large, so part of it is left out. To read the rows, "
+        f"call result_query with handle_id={rest}"
     )

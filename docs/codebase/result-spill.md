@@ -122,6 +122,12 @@ called `counts`) is never replaced; that block is left out. Credential-class
 operations, reduces without an `op_id`, and results over the admission
 work limit keep today's reply.
 
+When the whole reply is over the response limit and the rows can still be
+read through the handle, `query_topology` drops `items` and `counts` first
+and keeps the handle (`delivery="partial"`). `call_operation` drops the
+whole summary in that case. In both, the handle's line then says the reply
+was too large and how to read the rows, because it no longer shows them.
+
 ## Result field catalog (#3631)
 
 The captured JSON is the source of truth for a reduced result. The

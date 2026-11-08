@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.operations.answer_ready import (
     ITEMS_BYTE_BUDGET,
     column_counts,
@@ -26,6 +27,11 @@ from meho_backplane.operations.answer_ready import (
     fit_items,
     pick_columns,
     read_more_line,
+    too_large_line,
+)
+from meho_backplane.operations.delivery_budget import (
+    bound_complete_response,
+    measure_call_operation_bytes,
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.result_document import json_text_bytes
@@ -373,3 +379,91 @@ def test_read_more_line_without_items_or_counts() -> None:
         "Showing 5 of 80 rows this call returned. For other columns or a filter, "
         "call result_query with handle_id=<handle-id>."
     )
+
+
+class _CountingRow(dict[str, Any]):
+    """A row that counts how many times its cells are read."""
+
+    reads = 0
+
+    def get(self, key: str, default: Any = None) -> Any:
+        _CountingRow.reads += 1
+        return super().get(key, default)
+
+    def items(self) -> Any:
+        _CountingRow.reads += 1
+        return super().items()
+
+
+def test_counting_sparse_rows_reads_each_row_a_fixed_number_of_times() -> None:
+    """Rows that each have their own column must not cost rows times columns."""
+    rows: list[dict[str, Any]] = [_CountingRow({f"field_{i}": "x"}) for i in range(2000)]
+    _CountingRow.reads = 0
+
+    counts = column_counts(rows, byte_budget=200)
+
+    assert _CountingRow.reads <= 2 * len(rows)
+    assert counts["field_0"] == {"null": 1999, "x": 1}
+    assert json_text_bytes(counts) <= 200
+
+
+def test_missing_values_count_as_null_and_can_be_one_value_too_many() -> None:
+    fits = [{"state": f"s{i}"} for i in range(9)] + [{"state": "s0"}, {"other": 1}]
+    assert column_counts(fits)["state"]["null"] == 1
+
+    full = [{"state": f"s{i}"} for i in range(10)] + [{"state": "s0"}, {"other": 1}]
+    assert "state" not in column_counts(full)
+
+
+def test_too_large_line_keeps_only_the_way_to_read_more() -> None:
+    line = read_more_line(
+        handle_id="<handle-id>",
+        total_rows=80,
+        items_columns=("name",),
+        sample_rows=0,
+        has_counts=True,
+        stored_rows=20,
+        unavailable_reason=None,
+    )
+    assert too_large_line(line) == (
+        "This reply was too large, so part of it is left out. To read the rows, "
+        "call result_query with handle_id=<handle-id>. Only the first 20 rows are "
+        "stored; the rest cannot be read."
+    )
+    assert too_large_line("Read the rows with result_query.") == "Read the rows with result_query."
+
+
+def _operation_result(summary: dict[str, Any], handle: Any) -> OperationResult:
+    return OperationResult(
+        status="ok", op_id="example.vm.list", duration_ms=1.0, result=summary, handle=handle
+    )
+
+
+async def test_call_operation_cut_for_size_does_not_mention_the_table() -> None:
+    summary, handle = await _reducer().reduce({"value": _vms(20)}, None, _context())
+    assert handle is not None and "items" in summary
+    whole = _operation_result(summary, handle)
+
+    cut = bound_complete_response(whole, measure_call_operation_bytes(whole) - 1)
+
+    assert cut.delivery == "partial"
+    assert cut.result is None
+    assert cut.handle is not None and cut.handle.fetch_more is not None
+    rationale = cut.handle.fetch_more.drill_in.rationale
+    assert "in items" not in rationale
+    assert "counts cover" not in rationale
+    assert f"handle_id={handle.handle_id}" in rationale
+    assert rationale.endswith("The vendor may hold more rows than this call returned.")
+
+
+async def test_call_operation_cut_for_size_keeps_the_handle_text_with_the_switch_off() -> None:
+    summary, handle = await _reducer(answer_ready=False).reduce(
+        {"value": _vms(20)}, None, _context()
+    )
+    assert handle is not None
+    whole = _operation_result({**summary, "padding": "x" * 5000}, handle)
+
+    cut = bound_complete_response(whole, measure_call_operation_bytes(whole) - 1)
+
+    assert cut.delivery == "partial"
+    assert cut.handle == handle

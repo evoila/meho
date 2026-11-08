@@ -58,7 +58,7 @@ vendor shape, not just the object-collection happy path.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -87,6 +87,14 @@ from meho_backplane.jsonflux.query.result_catalog import (
     AdmissionLimitError,
     ResultFieldCatalog,
     _build_catalog_from_admitted,
+)
+from meho_backplane.operations.answer_ready import (
+    COUNTS_BYTE_BUDGET,
+    ITEMS_BYTE_BUDGET,
+    column_counts,
+    fit_items,
+    pick_columns,
+    read_more_line,
 )
 from meho_backplane.operations.result_document import (
     DOCUMENT_RECORD,
@@ -451,6 +459,13 @@ class _InlinePlan:
     sample_rows: list[dict[str, Any]]
     displaced: dict[str, Any]
     parts_not_inline: list[str]
+    #: Set by :meth:`JsonFluxReducer._answer_ready_plan` (``JSONFLUX_ANSWER_READY``
+    #: on): the handle gets one read-more line instead of the two long texts.
+    answer_ready: bool = False
+    #: The columns of the ``items`` table, empty when the summary has none.
+    items_columns: tuple[str, ...] = ()
+    #: The summary has a ``counts`` block.
+    has_counts: bool = False
 
 
 class JsonFluxReducer:
@@ -479,6 +494,7 @@ class JsonFluxReducer:
         max_spill_rows: int | None = None,
         sample_byte_budget: int | None = None,
         admission_guard: AdmissionGuard | None = None,
+        answer_ready: bool | None = None,
     ) -> None:
         self._row_threshold = row_threshold
         self._byte_threshold = byte_threshold
@@ -495,6 +511,8 @@ class JsonFluxReducer:
         self._max_spill_rows = max_spill_rows
         self._sample_byte_budget = sample_byte_budget
         self._admission_guard = admission_guard
+        # ``None`` reads the ``jsonflux_answer_ready`` setting at reduce time.
+        self._answer_ready = answer_ready
 
     async def reduce(
         self,
@@ -575,6 +593,13 @@ class JsonFluxReducer:
         plan = self._plan_inline(
             materialized, envelope_key, context, preserved_scalars, hinted_objects, digest, parts
         )
+        if self._resolve_answer_ready() and not _is_credential_class(context):
+            preferred = (
+                (digest_spec.name_field, digest_spec.status_field)
+                if digest_spec is not None and digest_spec.collection == envelope_key
+                else ()
+            )
+            plan = _answer_ready_plan(plan, materialized.full_rows, preferred)
         kept_fields = {
             **omitted_scalars,
             **plan.displaced,
@@ -1120,6 +1145,19 @@ class JsonFluxReducer:
             summary["parts_note"] = parts_note
         total_rows = materialized.total_rows
         omitted_fields = summary.get("omitted_scalar_count", 0)
+        read_more = (
+            read_more_line(
+                handle_id=str(materialized.handle_id),
+                total_rows=total_rows,
+                items_columns=plan.items_columns,
+                sample_rows=len(plan.sample_rows),
+                has_counts=plan.has_counts,
+                stored_rows=spill_outcome.stored_rows,
+                unavailable_reason=spill_outcome.skip_reason,
+            )
+            if plan.answer_ready
+            else None
+        )
         handle = ResultHandle(
             handle_id=materialized.handle_id,
             summary_md=(
@@ -1137,6 +1175,7 @@ class JsonFluxReducer:
                 ttl_seconds=self._ttl_seconds,
                 omitted_fields=omitted_fields if isinstance(omitted_fields, int) else 0,
                 parts_note=parts_note,
+                read_more=read_more,
             ),
         )
         return summary, handle
@@ -1152,6 +1191,17 @@ class JsonFluxReducer:
         if self._sample_byte_budget is not None:
             return self._sample_byte_budget
         return get_settings().jsonflux_sample_byte_budget
+
+    def _resolve_answer_ready(self) -> bool:
+        """Whether reduced replies get ``items``, ``counts`` and the read-more line.
+
+        An explicit constructor value (tests) wins; otherwise the
+        ``jsonflux_answer_ready`` setting (``JSONFLUX_ANSWER_READY``, off by
+        default).
+        """
+        if self._answer_ready is not None:
+            return self._answer_ready
+        return get_settings().jsonflux_answer_ready
 
     def _resolve_admission_guard(self) -> AdmissionGuard:
         """Read the catalog work limits lazily with the other reducer knobs."""
@@ -1599,6 +1649,57 @@ def _fit_inline(
                 base[_RESULT_OBJECT_TRUNCATIONS_KEY] = truncations
             else:
                 del base[_RESULT_OBJECT_TRUNCATIONS_KEY]
+
+
+def _answer_ready_plan(
+    plan: _InlinePlan, rows: list[dict[str, Any]], preferred: tuple[str, ...]
+) -> _InlinePlan:
+    """Add ``counts`` and ``items`` to a fitted plan, in the room it has left.
+
+    Runs only with ``JSONFLUX_ANSWER_READY`` on. The room is what
+    :func:`_fit_inline` left under :data:`_INLINE_SUMMARY_BYTE_LIMIT` after
+    the notes :meth:`JsonFluxReducer._assemble` still writes, so the limit
+    holds. ``counts`` comes first (it is small and answers "how many"); the
+    ``items`` table follows when every row fits in what is left, capped at
+    :data:`~meho_backplane.operations.answer_ready.ITEMS_BYTE_BUDGET`. With
+    the table inline, the sample rows are dropped (they would repeat rows
+    the table already has), so ``sample_rows_returned`` is 0. A key the
+    summary already has (a part named ``counts``) is never replaced; that
+    block is then left out.
+    """
+    summary = dict(plan.summary)
+    measured = _json_bytes_or_none(summary)
+    if measured is None or not rows:
+        return replace(plan, answer_ready=True)
+    notes = _result_object_note_bytes(summary)
+    if plan.parts_not_inline:
+        notes += _longest_entry("parts_note", _parts_note(True), _parts_note(False))
+    room = _INLINE_SUMMARY_BYTE_LIMIT - 1 - measured - notes
+    counts = column_counts(rows, byte_budget=COUNTS_BYTE_BUDGET)
+    has_counts = False
+    if counts and "counts" not in summary and _entry_bytes("counts", counts) <= room:
+        summary["counts"] = counts
+        room -= _entry_bytes("counts", counts)
+        has_counts = True
+    table = None
+    if "items" not in summary:
+        items_budget = min(ITEMS_BYTE_BUDGET, room - _entry_bytes("items", []) + 2)
+        table = fit_items(rows, pick_columns(rows, counts, preferred), byte_budget=items_budget)
+    if table is None:
+        return replace(plan, summary=summary, answer_ready=True, has_counts=has_counts)
+    items, columns = table
+    summary["items"] = items
+    summary["sample_rows_returned"] = 0
+    summary["sample_bytes"] = 0
+    summary.pop("sample_note", None)
+    return replace(
+        plan,
+        summary=summary,
+        sample_rows=[],
+        answer_ready=True,
+        items_columns=tuple(columns),
+        has_counts=has_counts,
+    )
 
 
 def _result_object_note_bytes(summary: dict[str, Any]) -> int:
@@ -2128,6 +2229,7 @@ def _build_fetch_more(
     ttl_seconds: int,
     omitted_fields: int = 0,
     parts_note: str = "",
+    read_more: str | None = None,
 ) -> FetchMore:
     """Build the :class:`FetchMore` envelope from the reducer's *context*.
 
@@ -2164,6 +2266,10 @@ def _build_fetch_more(
     instead at op-registration time (the connector author writes the
     hint as a :class:`PaginationHint` literal there, not as a free
     dict).
+
+    *read_more* (``JSONFLUX_ANSWER_READY`` on) replaces both long texts: it
+    becomes the drill-in rationale, and a missing pagination hint gets no
+    rationale at all.
     """
     drill_in = _build_drill_in(
         handle_id=handle_id,
@@ -2172,8 +2278,9 @@ def _build_fetch_more(
         ttl_seconds=ttl_seconds,
         omitted_fields=omitted_fields,
         parts_note=parts_note,
+        read_more=read_more,
     )
-    native = _native_pagination_from_context(context)
+    native = _native_pagination_from_context(context, quiet=read_more is not None)
     return FetchMore(drill_in=drill_in, native_pagination=native)
 
 
@@ -2185,6 +2292,7 @@ def _build_drill_in(
     ttl_seconds: int,
     omitted_fields: int = 0,
     parts_note: str = "",
+    read_more: str | None = None,
 ) -> FetchMoreDrillIn:
     """Build the drill-in branch: available when the set was spilled.
 
@@ -2196,6 +2304,10 @@ def _build_drill_in(
     returning an N-of-M sample. Otherwise the branch names the
     ``result_query`` tool, a first-page ``example_call``, and the
     handle's ``expires_at`` (now + the spill TTL).
+
+    *read_more* (``JSONFLUX_ANSWER_READY`` on) is the rationale in place of
+    the long prose; on the stored branch the note on fields left out of the
+    summary still follows it, so their ``path`` read stays named.
     """
     if spill_outcome.stored_rows is None:
         # ``_spill`` always sets ``skip_reason`` on the no-spill path; the
@@ -2204,19 +2316,24 @@ def _build_drill_in(
         reason: DrillInUnavailableReason = spill_outcome.skip_reason or "result_store_unavailable"
         return FetchMoreDrillIn(
             available=False,
-            rationale=_DRILL_IN_UNAVAILABLE_RATIONALES[reason],
+            rationale=read_more or _DRILL_IN_UNAVAILABLE_RATIONALES[reason],
             reason=reason,
         )
-    return FetchMoreDrillIn(
-        available=True,
-        rationale=_drill_in_available_rationale(
+    if read_more is not None:
+        rationale = read_more + _omitted_fields_note(
+            omitted_fields, spill_outcome.omitted_fields_stored
+        )
+    else:
+        rationale = _drill_in_available_rationale(
             handle_id,
             spill_outcome.stored_rows,
             total_rows,
             omitted_fields,
             spill_outcome.omitted_fields_stored,
-        )
-        + (f" {parts_note}" if parts_note else ""),
+        ) + (f" {parts_note}" if parts_note else "")
+    return FetchMoreDrillIn(
+        available=True,
+        rationale=rationale,
         mcp_tool=_RESULT_QUERY_TOOL,
         example_call={
             "tool": _RESULT_QUERY_TOOL,
@@ -2228,7 +2345,7 @@ def _build_drill_in(
 
 
 def _native_pagination_from_context(
-    context: dict[str, Any] | None,
+    context: dict[str, Any] | None, *, quiet: bool = False
 ) -> FetchMoreNativePagination:
     """Return the :class:`FetchMoreNativePagination` branch for *context*.
 
@@ -2243,13 +2360,14 @@ def _native_pagination_from_context(
        :class:`PaginationHint` here; the dispatcher does not import
        Pydantic for this codepath.
     3. Absent / invalid -- ``available=False`` with the curated
-       rationale.
+       rationale, or with no rationale when *quiet* (the answer-ready
+       read-more line already says how to read more).
     """
     hint = _resolve_pagination_hint(context)
     if hint is None:
         return FetchMoreNativePagination(
             available=False,
-            rationale=_NATIVE_PAGINATION_UNAVAILABLE_RATIONALE,
+            rationale=None if quiet else _NATIVE_PAGINATION_UNAVAILABLE_RATIONALE,
         )
     return FetchMoreNativePagination(
         available=True,

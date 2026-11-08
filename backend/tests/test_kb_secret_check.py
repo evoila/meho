@@ -46,6 +46,8 @@ def test_a_secret_shape_is_found_and_not_echoed(text: str, pattern: str) -> None
         "password: '<password>',",
         "password=<password>.",
         "Authorization: Bearer <token>)",
+        "Authorization : Basic '<token>'",
+        "DB_PASSWORD = ${DB_PASSWORD}",
         "Send Bearer ${TOKEN}.",
         "api_key=${API_KEY}",
         "https://store.example.com/file?sig=${SIG}",
@@ -64,6 +66,14 @@ def test_text_without_a_secret_passes(text: str) -> None:
         (f"password={MADE_UP}<x>", "api_key"),
         (f"password={MADE_UP}:${{TOKEN}}", "api_key"),
         (f"password=${{PREFIX}}{MADE_UP}", "api_key"),
+        # The value has a space before it. Only the label comes off, so
+        # the part of the value before its ``:`` or ``=`` stays checked.
+        (f"password: {MADE_UP}:${{TOKEN}}", "api_key"),
+        (f"DB_PASSWORD = {MADE_UP}=<x>", "api_key"),
+        ("password: a=<k9Tz2LmN>", "api_key"),
+        (f"Bearer {MADE_UP}:${{TOKEN}}", "bearer_token"),
+        (f"Authorization: Basic {MADE_UP}:${{TOKEN}}", "authorization_header"),
+        (f"Authorization : Bearer {MADE_UP}=<token>", "authorization_header"),
         (f"Authorization: Bearer {MADE_UP}<suffix>", "authorization_header"),
         (f"Bearer ${{A}}{MADE_UP}${{B}}", "bearer_token"),
         (f"https://store.example.com/file?sig={MADE_UP}${{X}}", "url_secret"),

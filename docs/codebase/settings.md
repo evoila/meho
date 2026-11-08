@@ -290,6 +290,14 @@ body and writes nothing. Otherwise it adds or updates, never deletes:
   revision.
 - An unchanged file gives an empty diff and writes no revision.
 
+### `POST /api/v1/settings/conventions-drift`
+
+The drift check for the team rules. Body: a settings file with one tenant
+block that holds only `conventions`, each of kind `operational`. The answer
+says what differs from the tenant's operational conventions. It writes
+nothing. The details, the login and the call the CI job makes are in
+[tenant_conventions.md](tenant_conventions.md#drift-check-against-the-team-rules).
+
 ### `GET /api/v1/settings/history?limit=50`
 
 The revisions the caller may see, newest first. `limit` is 1 to 500 (default

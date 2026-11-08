@@ -1980,6 +1980,61 @@
         }
       }
     },
+    "/api/v1/settings/conventions-drift": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Conventions Drift",
+        "description": "Compare a settings file that holds only conventions with the tenant's own.\n\nThe file has one tenant block (the caller's tenant) with ``conventions``\nonly, each of kind ``operational``. The answer lists what an import would\nadd or change, and the operational conventions only MEHO has. Always 200\n(403 for another tenant, 413 for a body over 4 MiB). Writes nothing.",
+        "operationId": "conventions_drift_api_v1_settings_conventions_drift_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConventionsDriftResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "The meho-settings.yaml file, as sent (YAML; JSON is valid YAML).",
+          "content": {
+            "application/yaml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/event-sources": {
       "get": {
         "tags": [
@@ -30148,6 +30203,60 @@
         "type": "object",
         "title": "ConventionUpdate",
         "description": "PATCH body for ``/api/v1/conventions/{slug}``.\n\nAll fields optional -- PATCH semantics means \"update only what's\nprovided\". Pydantic v2's :attr:`BaseModel.model_fields_set`\ndistinguishes \"field absent from JSON\" from \"field present with\nnull\", and the route handler uses that view to apply only the\nexplicitly-set keys to the ORM row. The kind discriminator is\nexcluded from the PATCH surface: changing a convention's kind\nin-place would silently change its preamble-inclusion behaviour\n(an ``operational`` rule becoming ``reference`` would disappear\nfrom every future preamble without an audit signal); operators\ndelete + recreate to switch kind, which produces a clean two-\nrow history trail.\n\n``priority`` is included because reranking is the most common\nedit shape (a rule that became more / less urgent without its\ntext changing). ``slug`` is not in the PATCH surface either --\nrenaming a convention is a delete + recreate as well, since\nthe audit log and history rows reference the old slug by\nnatural key."
+      },
+      "ConventionsDriftResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "in_sync": {
+            "type": "boolean",
+            "title": "In Sync"
+          },
+          "mistakes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Mistakes"
+          },
+          "added": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Added"
+          },
+          "changed": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Changed"
+          },
+          "only_in_meho": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Only In Meho"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "in_sync",
+          "mistakes",
+          "added",
+          "changed",
+          "only_in_meho"
+        ],
+        "title": "ConventionsDriftResponse",
+        "description": "The drift check's answer. ``in_sync`` is true only when nothing differs.\n\n``added``: ``{slug, value}``, a rule in the file that MEHO does not have.\n``changed``: ``{slug, before, after}``, only the fields an import would\nchange. ``only_in_meho``: ``{slug}``, an operational convention the file\ndoes not have. All three are empty when ``mistakes`` is not."
       },
       "CriterionResult": {
         "properties": {

@@ -189,9 +189,14 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    each of the Sensor's Dashboards: its own notice when the Dashboard
    state did not move, a rider on the Dashboard mail when it did. The
    mail reads "acknowledgement ended, `<member>` still `<state>`" and
-   runs the same gates as a "new problem" notice. A member that is
-   green as the Dashboard counts it, or that also got worse with that
-   result, gets no such change.
+   runs the same gates as a "new problem" notice, with one difference:
+   the flap window never holds it back. The warning that was
+   acknowledged claimed the member's window before the acknowledgement,
+   so a short acknowledgement would end inside it. The notice still
+   claims that window when it is free, but it is sent whether or not
+   the claim wins. The runner sends it once per ended acknowledgement.
+   A member that is green as the Dashboard counts it, or that also got
+   worse with that result, gets no such change.
 4. **Outcome logging.** `checks_notify_sent` (info, with
    `recipient_count`) on delivery; `checks_notify_failed` (warning, with
    the transport's stable reason code) on a `sent=False` result or an

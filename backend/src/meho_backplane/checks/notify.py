@@ -104,7 +104,7 @@ suppressed (``checks_notify_suppressed``). The window is
 suppression entirely and short-circuits before any Valkey call, restoring
 the pre-#2732 one-mail-per-edge behaviour.
 
-Three deliberate asymmetries keep the window from ever costing a page:
+Four deliberate asymmetries keep the window from ever costing a page:
 
 * **Escalation is never suppressed.** A different state is a different
   key, so ``degraded -> critical`` mails immediately after a recent
@@ -115,6 +115,12 @@ Three deliberate asymmetries keep the window from ever costing a page:
   -- even when the recovery edge itself sits below the floor -- so the
   incident *after* an all-clear is a new incident and its first crossing
   mails, never inherits a half-spent window.
+* **An acknowledgement ending is never suppressed** (#4128). The warning
+  that was acknowledged claimed the member's window before the
+  acknowledgement; the "acknowledgement ended" notice still claims that
+  window when it is free, but it mails whether or not the claim wins. A
+  person set the end time, and the runner sends this notice once per
+  ended acknowledgement, so there is no flap for the window to bound.
 * **Fail-open.** A Valkey error on claim or clear warn-logs
   (``checks_notify_suppression_failed``) and the notification is sent --
   a missed alert is worse than a duplicate.
@@ -355,6 +361,11 @@ def _edge(notice: DashboardNotice) -> tuple[str, str]:
     return notice.previous_state, notice.current_state
 
 
+def _acknowledgement_ended(notice: DashboardNotice) -> bool:
+    """True for an "acknowledgement ended" notice (#4128)."""
+    return notice.member_change is not None and notice.member_change.acknowledgement_ended
+
+
 def _log_fields(notice: DashboardNotice) -> dict[str, object]:
     """The structured fields every outcome log for *notice* carries."""
     previous, current = _edge(notice)
@@ -476,6 +487,11 @@ async def _claim_suppression(notice: DashboardNotice, window_seconds: int) -> bo
 
     Fail-open: any Valkey error warn-logs ``checks_notify_suppression_failed``
     and returns ``True`` -- a missed alert is worse than a duplicate.
+
+    An "acknowledgement ended" notice (#4128) calls this for the member's
+    key too, so a flap at that state inside the window stays bounded, but
+    its caller sends whatever the answer: the acknowledged warning claimed
+    the same key before the acknowledgement, and the mail must return.
     """
     _, current = _edge(notice)
     change = notice.member_change
@@ -790,7 +806,9 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
       these gates like a "new problem" notice;
     * a same-state notification already claimed this edge's flap window
       (#2732, see :func:`_claim_suppression`; skipped entirely when the
-      window is ``0`` or the crossing is into a rank-0 state);
+      window is ``0`` or the crossing is into a rank-0 state, and never
+      holding back an "acknowledgement ended" notice, whose window the
+      acknowledged warning itself claimed);
     * every configured recipient is refused by the allowlist, so there is
       nothing to send (``checks_notify_no_allowed_recipients``).
 
@@ -844,7 +862,8 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
         return
     if window_minutes > 0 and suppressible:
         window_seconds = window_minutes * 60
-        if not await _claim_suppression(notice, window_seconds):
+        claimed = await _claim_suppression(notice, window_seconds)
+        if not claimed and not _acknowledgement_ended(notice):
             _log().info(
                 "checks_notify_suppressed",
                 window_minutes=window_minutes,

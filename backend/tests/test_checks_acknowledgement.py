@@ -852,6 +852,70 @@ async def test_warning_mail_comes_back_when_the_time_is_up_and_the_sensor_still_
     assert len(transport.calls) == 1
 
 
+class _FakeWindowStore:
+    """Valkey double for the flap window: awaited ``SET NX EX`` and ``DEL``."""
+
+    def __init__(self) -> None:
+        self.keys: set[str] = set()
+
+    async def set(
+        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> bool | None:
+        assert nx and ex
+        if name in self.keys:
+            return None
+        self.keys.add(name)
+        return True
+
+    async def delete(self, *names: str) -> int:
+        removed = len(self.keys & set(names))
+        self.keys -= set(names)
+        return removed
+
+
+@pytest.fixture
+def window_store(transport: _Transport, monkeypatch: pytest.MonkeyPatch) -> _FakeWindowStore:
+    """The default 30-minute flap window, on a Valkey double (after ``transport``)."""
+    store = _FakeWindowStore()
+    monkeypatch.setattr(notify, "get_broadcast_client", lambda: store)
+    monkeypatch.setenv("CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES", "30")
+    get_settings.cache_clear()
+    return store
+
+
+@pytest.mark.asyncio
+async def test_acknowledgement_ended_mail_is_not_held_back_by_the_warning_window(
+    transport: _Transport, window_store: _FakeWindowStore
+) -> None:
+    """The warning mail went out, then the Sensor was acknowledged for a short time.
+
+    The warning claimed the member's flap window. The acknowledgement ends
+    inside that window while the Sensor still fails. The "acknowledgement
+    ended" mail must still be sent: no later result sends it again.
+    """
+    sensor_id = await _seed_sensor(last_state="ok")
+    await _seed_dashboard({sensor_id: "ok"}, state="ok")
+
+    await _persist(sensor_id, "critical")
+    assert transport.calls == ["[MEHO] estate: ok -> critical"]
+    assert any(key.endswith(f":member:{sensor_id}:critical") for key in window_store.keys)
+
+    await _ack(sensor_id)
+    await _persist(sensor_id, "critical")  # acknowledged: no mail
+    assert len(transport.calls) == 1
+
+    await _move_end_time(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+    await _persist(sensor_id, "critical")
+    assert transport.calls[1:] == [
+        "[MEHO] estate: acknowledgement ended, disk-space still critical (dashboard still critical)"
+    ]
+    (row,) = await _acks(sensor_id)
+    assert row.end_reason == "expired"
+
+    await _persist(sensor_id, "critical")  # the result after that: nothing new
+    assert len(transport.calls) == 2
+
+
 @pytest.mark.asyncio
 async def test_no_acknowledgement_ended_mail_when_the_sensor_is_green_at_the_end(
     transport: _Transport,

@@ -15,7 +15,8 @@ and a possible wait for approval, then failed with an internal
 the call with ``target_connector_mismatch`` right after the target check,
 before the policy gate, and writes one audit row
 (:func:`refuse_target_connector_mismatch`). ``preview_dispatch`` returns
-the same error without an audit row (:func:`mismatch_preview_envelope`).
+the same error, in the same place, without an audit row
+(:func:`mismatch_preview_envelope`).
 
 A module-level handler (no ``self``) has no connector class, so it is
 never refused here. A target that resolves no connector, or more than one,

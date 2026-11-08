@@ -297,7 +297,11 @@ async def _resolve_descriptor(
     picks the code and names other connectors that have the op (#4031).
     Returns the ``target_required`` envelope when the op needs a target
     and got none (#4139); like ``dispatch``, this comes before the
-    catalog choice.
+    catalog choice. Returns the ``target_connector_mismatch`` envelope
+    when the target's connector cannot run the op (#5948); like
+    ``dispatch``, this comes right after the target check, so it is never
+    hidden by the catalog choice or by the op's check before the wait for
+    approval.
     """
     product, version, impl_id = parse_connector_id(connector_id)
 
@@ -346,7 +350,34 @@ async def _resolve_descriptor(
             missing, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
         )
 
-    # --- Catalog choice (mirrors dispatch Step 3, no audit row) ------------
+    # #5948: same answer and same order as ``dispatch`` -- right after the
+    # target check, before the catalog choice (and so before the version
+    # check of a composite) and before the check before the wait for
+    # approval. No audit row.
+    mismatch = mismatch_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if mismatch is not None:
+        return mismatch
+
+    return await _catalog_choice(
+        operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
+    )
+
+
+async def _catalog_choice(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    target: Any,
+) -> tuple[EndpointDescriptor, str] | dict[str, Any]:
+    """The catalog choice of dispatch Step 3, with no audit row.
+
+    Returns the descriptor and connector id that would run (the sibling's
+    when a sibling catalog serves the target, #3600), or the
+    ``unqualified_target_version`` envelope when no catalog does (#4984).
+    """
     choice = await choose_catalog_for_target(
         operator=operator,
         descriptor=descriptor,
@@ -355,14 +386,17 @@ async def _resolve_descriptor(
     )
     if isinstance(choice, CatalogRefusal):
         refused = result_unqualified_target_version(
-            op_id,
+            descriptor.op_id,
             reason=choice.reason,
             target_product=choice.target_product,
             target_version=choice.target_version,
             duration_ms=0.0,
         )
         return _refused_envelope(
-            refused, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+            refused,
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            source_kind=descriptor.source_kind,
         )
     return choice.descriptor, choice.connector_id
 
@@ -747,7 +781,8 @@ async def preview_dispatch(
 
     Returns a JSON-shaped envelope: ``status`` ``"ok"`` (request/synthetic
     preview resolved), ``"error"`` (structured ``unknown_op`` /
-    ``target_required`` / ``unqualified_target_version`` / ``invalid_params`` /
+    ``target_required`` / ``target_connector_mismatch`` /
+    ``unqualified_target_version`` / ``invalid_params`` /
     ``no_connector`` / ``ambiguous_connector`` / ``dispatch_error`` /
     ``refused_before_approval`` -- the op's check before the wait for
     approval refused the call, see :func:`_park_check_envelope`), or
@@ -755,7 +790,8 @@ async def preview_dispatch(
     ``connector_id`` / ``source_kind`` echo for correlation. Every envelope
     whose op resolved (every status except ``unknown_op`` /
     ``unknown_connector`` / ``target_required`` /
-    ``unqualified_target_version``) carries ``safety_level``,
+    ``target_connector_mismatch`` / ``unqualified_target_version``) carries
+    ``safety_level``,
     ``requires_approval``, ``policy_verdict`` and ``policy_reason`` (#4923).
     On ``ok``: ``method``, ``resolved_path``, ``query``, ``redacted_body``,
     ``preview_hash`` (#3197 — the binding a caller presents on the governed
@@ -807,11 +843,6 @@ async def _preview_resolved_op(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """The preview envelope for a resolved descriptor, before the governance fields."""
-    mismatch = mismatch_preview_envelope(
-        descriptor=descriptor, connector_id=connector_id, target=target
-    )
-    if mismatch is not None:
-        return mismatch  # the target's connector cannot run this op (#5948)
     fault = _gate_and_validate(
         descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
     )

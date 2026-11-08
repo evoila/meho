@@ -6,9 +6,11 @@
 ``dispatch`` refuses it with ``target_connector_mismatch`` right after the
 target check, before the policy gate and any wait for approval, and writes
 one audit row. ``preview_dispatch`` gives the same answer without an audit
-row. A handler on a base class, or a subclass instance of the handler's
-class, still runs. The ``target_required`` and ``no_connector`` answers do
-not change.
+row, and in the same place: before the version check of a multi-step
+operation and before the check that runs before the wait for approval. A
+handler on a base class, or a subclass instance of the handler's class,
+still runs. The ``target_required`` and ``no_connector`` answers do not
+change.
 
 The connectors, the products and the targets here are made up.
 """
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -29,8 +32,10 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, AuditLog
+from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._park_check import register_park_check
+from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._target_connector_match import (
     TARGET_CONNECTOR_MISMATCH,
@@ -63,11 +68,20 @@ class _HostConnector(_ShellBase):
     product = "hostos"
     version = "1.0"
     impl_id = "hostos-ssh"
+    composite_supported_version_range = ">=1.0,<2.0"
 
     async def about(self, target: Any, params: dict[str, Any]) -> dict[str, Any]:
         del target, params
         _RUNS.append(f"{type(self).__name__}.about")
         return {"kind": "hostos"}
+
+    async def restart_all(
+        self, operator: Operator, target: Any, params: dict[str, Any], dispatch_child: Any
+    ) -> dict[str, Any]:
+        """A multi-step operation of the host connector. Runs no step."""
+        del operator, target, params, dispatch_child
+        _RUNS.append(f"{type(self).__name__}.restart_all")
+        return {"restarted": 0}
 
 
 class _ClusterConnector(_ShellBase):
@@ -166,13 +180,64 @@ async def _register(op_id: str, handler: Any, *, requires_approval: bool = False
     )
 
 
-async def _call(op_id: str, target: Any) -> Any:
+async def _add_composite(op_id: str) -> None:
+    """Store a multi-step operation whose handler is a method of the host connector."""
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as s:
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="hostos",
+                version="1.0",
+                impl_id="hostos-ssh",
+                op_id=op_id,
+                source_kind="composite",
+                method=None,
+                path=None,
+                handler_ref=f"{__name__}._HostConnector.restart_all",
+                summary=f"{op_id} summary.",
+                description=f"{op_id} description.",
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=[0.1] * 384,
+                custom_description=None,
+                custom_notes=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await s.commit()
+
+
+async def _always_refuse(ctx: PreviewContext) -> str | None:
+    """A check before the wait for approval that refuses every call."""
+    del ctx
+    return "param 'password' is a secret; give it as a reference, not as a plain value"
+
+
+async def _call(op_id: str, target: Any, params: dict[str, Any] | None = None) -> Any:
     return await dispatch(
         operator=_operator(),
         connector_id="hostos-ssh-1.0",
         op_id=op_id,
         target=target,
-        params={},
+        params=params or {},
+    )
+
+
+async def _preview(op_id: str, target: Any, params: dict[str, Any] | None = None) -> Any:
+    return await preview_dispatch(
+        operator=_operator(),
+        connector_id="hostos-ssh-1.0",
+        op_id=op_id,
+        target=target,
+        params=params or {},
     )
 
 
@@ -306,17 +371,47 @@ async def test_module_level_handler_is_never_refused() -> None:
 @pytest.mark.asyncio
 async def test_preview_gives_the_same_refusal_without_an_audit_row() -> None:
     await _register("hostos.reboot", _HostConnector.about, requires_approval=True)
-    preview = await preview_dispatch(
-        operator=_operator(),
-        connector_id="hostos-ssh-1.0",
-        op_id="hostos.reboot",
-        target=_Target("clusteros"),
-        params={},
-    )
+    preview = await _preview("hostos.reboot", _Target("clusteros"))
     assert preview["status"] == "error"
     assert preview["extras"]["error_code"] == TARGET_CONNECTOR_MISMATCH
     assert "is of kind clusteros" in preview["error"]
     assert await _audit_statuses("hostos.reboot") == []
+
+
+@pytest.mark.asyncio
+async def test_preview_refuses_the_mismatch_before_the_check_before_approval() -> None:
+    """The op has a check before the wait for approval that would refuse the params.
+
+    The call refuses the mismatch first. The preview must do the same, not
+    answer ``refused_before_approval``.
+    """
+    await _register("hostos.smtp.update", _HostConnector.about, requires_approval=True)
+    register_park_check("hostos.smtp.update", _always_refuse)
+    params = {"password": "made-up-plain-password"}
+    preview = await _preview("hostos.smtp.update", _Target("clusteros"), params)
+    assert preview["extras"]["error_code"] == TARGET_CONNECTOR_MISMATCH
+    assert "is of kind clusteros" in preview["error"]
+    result = await _call("hostos.smtp.update", _Target("clusteros"), params)
+    assert result.extras["error_code"] == TARGET_CONNECTOR_MISMATCH
+    assert await _approval_rows() == 0
+    assert _RUNS == []
+
+
+@pytest.mark.asyncio
+async def test_preview_refuses_the_mismatch_before_the_composite_version_check() -> None:
+    """The target has no known version, so the version check of a multi-step op would refuse.
+
+    The call refuses the mismatch first. The preview must do the same, not
+    answer ``unqualified_target_version``.
+    """
+    await _add_composite("hostos.restart_all")
+    preview = await _preview("hostos.restart_all", _Target("clusteros"))
+    assert preview["extras"]["error_code"] == TARGET_CONNECTOR_MISMATCH
+    assert "is of kind clusteros" in preview["error"]
+    result = await _call("hostos.restart_all", _Target("clusteros"))
+    assert result.extras["error_code"] == TARGET_CONNECTOR_MISMATCH
+    assert await _audit_statuses("hostos.restart_all") == [TARGET_CONNECTOR_MISMATCH]
+    assert _RUNS == []
 
 
 def test_unimportable_handler_is_left_to_the_run_step() -> None:

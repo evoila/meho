@@ -403,6 +403,7 @@ const (
 	FirstStartLineStatusFail    FirstStartLineStatus = "fail"
 	FirstStartLineStatusOk      FirstStartLineStatus = "ok"
 	FirstStartLineStatusSkipped FirstStartLineStatus = "skipped"
+	FirstStartLineStatusWarn    FirstStartLineStatus = "warn"
 )
 
 // Defines values for GatewayResultBodyOutcome.
@@ -6224,7 +6225,7 @@ type FirstStartLine struct {
 // FirstStartLineStatus defines model for FirstStartLine.Status.
 type FirstStartLineStatus string
 
-// FirstStartResponse The whole list. “ok“ is true when no line is “fail“.
+// FirstStartResponse The whole list. “ok“ is true when no line is “fail“ (“warn“ is fine).
 type FirstStartResponse struct {
 	Checks []FirstStartLine `json:"checks"`
 	Ok     bool             `json:"ok"`

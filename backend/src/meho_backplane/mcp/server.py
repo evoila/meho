@@ -436,6 +436,9 @@ async def _session_instructions(operator: Operator) -> str | None:
     session's tool list has ``meho_broadcast_announce`` (see
     :func:`_session_can_announce`). A ``read_only`` session cannot call
     the broadcast tools, so its instructions do not name them.
+
+    #5729: the caller's newest Memory notes follow the preamble
+    (:func:`meho_backplane.recall.memory_band`).
     """
     # Imported inside the function to break the import cycle (mcp.server
     # → conventions.preamble → db → ... → mcp.server). The cost of one
@@ -446,6 +449,7 @@ async def _session_instructions(operator: Operator) -> str | None:
         DEFAULT_MAX_PREAMBLE_TOKENS,
         estimate_tokens,
     )
+    from meho_backplane.recall import memory_band
 
     # ``sub`` (G12.4-T2 #1316) drives the per-run priming band;
     # ``capabilities`` (G4.6-T4 #1553) drives the doc-collection catalogue
@@ -470,8 +474,9 @@ async def _session_instructions(operator: Operator) -> str | None:
             tenant_id=str(operator.tenant_id),
             dropped_slugs=preamble.dropped_slugs,
         )
+    memory = await memory_band(operator)
     joined = "\n\n".join(
-        band for band in (preamble.text, VENDOR_TEXT_BAND, FEATURE_MATURITY_BAND) if band
+        band for band in (preamble.text, memory, VENDOR_TEXT_BAND, FEATURE_MATURITY_BAND) if band
     )
     _log.info(
         "mcp_preamble_receipt",

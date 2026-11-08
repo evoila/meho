@@ -256,7 +256,9 @@ no REST or MCP route for it yet.
 
 `recall` is a natural-key SELECT; `list_memories` pulls a wider
 candidate window (`limit * 4`, min 200) ordered by `updated_at
-DESC`, then post-filters through the RBAC matrix on `user_sub`. Both
+DESC`, then post-filters through the RBAC matrix on `user_sub`. Its
+`target_name` argument keeps only the notes of that target, in SQL;
+recall before an operation uses it ([recall.md](recall.md)). Both
 paths project via `document_to_entry`, so the returned timestamps
 are the real DB column values.
 

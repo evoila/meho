@@ -100,6 +100,7 @@ import structlog
 from fastapi import Depends, HTTPException, Request, status
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from meho_backplane.auth.conventions_drift_login import reject_conventions_drift_only_elsewhere
 from meho_backplane.auth.current_tenant import bind_tenant_role_source
 from meho_backplane.auth.jwt import verify_jwt
 from meho_backplane.auth.operator import Operator, PrincipalKind
@@ -559,6 +560,7 @@ async def verify_jwt_and_bind(
     # request does no DB write. See :func:`_reject_runner_outside_gateway`.
     _reject_runner_outside_gateway(operator, request)
     _reject_kb_import_only_elsewhere(operator, request)
+    reject_conventions_drift_only_elsewhere(operator, request)
     async with get_sessionmaker()() as session, session.begin():
         await ensure_tenant(operator.tenant_id, session)
     return operator

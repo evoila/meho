@@ -28,6 +28,7 @@ from typing import Any, Final
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
+from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import OperationRun, OperationRunOrigin, OperationRunStatus
@@ -130,9 +131,11 @@ def build_run_notices_router() -> APIRouter:
             )
         notices: list[dict[str, Any]] = []
         dropped: list[str] = []
+        stmt = select(OperationRun).where(OperationRun.id.in_(run_id))
         async with get_sessionmaker()() as db_session:
-            runs = {rid: await run_lifecycle.get_run(db_session, rid) for rid in run_id}
-        for rid, run in runs.items():
+            found = {run.id: run for run in (await db_session.execute(stmt)).scalars()}
+        for rid in dict.fromkeys(run_id):
+            run = found.get(rid)
             if (
                 run is None
                 or run.tenant_id != session.tenant_id

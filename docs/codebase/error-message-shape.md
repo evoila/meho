@@ -87,6 +87,20 @@ Examples in current use:
   Message: `ingested_ops_not_accepted: connector <class> runs only its
   own hand-written operations; ...` — see `docs/codebase/spec-ingestion.md`,
   "Which connector class ingested operations run on")
+- `target_connector_mismatch` (`call_operation` and `preview_operation`:
+  a typed or multi-step operation whose handler is a method of one
+  connector class, called on a target whose connector does not have that
+  method, for example `linux.about` on an rke2 target. Refused before the
+  policy check and any wait for approval, so nobody approves a call that
+  cannot run. A refused call writes one `policy_decision` audit row; a
+  refused preview writes none. `extras` names `target_product`,
+  `operation_product`, `target_connector_id` and `operation_connector_id`.
+  Message: `target_connector_mismatch: Target '<name>' is of kind rke2.
+  linux.about is an operation of kind linux and needs a target of kind
+  linux. Use a target with product linux, or pick an operation of kind
+  rke2 (search_operations on connector <connector-id>).` When both kinds are the same product but
+  another connector of that product was picked, the message names both
+  connectors and the target's `preferred_impl_id` — #5948)
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)

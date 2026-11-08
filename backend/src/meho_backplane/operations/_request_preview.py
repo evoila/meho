@@ -98,6 +98,7 @@ from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
 from meho_backplane.operations._preview_steps import preview_step_verdict
+from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     params_check_errors,
@@ -806,6 +807,11 @@ async def _preview_resolved_op(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """The preview envelope for a resolved descriptor, before the governance fields."""
+    mismatch = mismatch_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if mismatch is not None:
+        return mismatch  # the target's connector cannot run this op (#5948)
     fault = _gate_and_validate(
         descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
     )

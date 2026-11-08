@@ -196,6 +196,16 @@ async def test_cut_store_says_so() -> None:
     assert handle.fetch_more.drill_in.stored_rows == 10
 
 
+async def test_read_more_line_says_the_source_may_hold_more() -> None:
+    """The short line never calls the stored rows the whole source (#3676)."""
+    _summary, handle = await _reducer().reduce({"value": _vms(20)}, None, _context())
+    assert handle is not None and handle.fetch_more is not None
+    line = handle.fetch_more.drill_in.rationale
+    assert line.startswith("Showing all 20 rows this call returned in items")
+    assert line.endswith("The vendor may hold more rows than this call returned.")
+    assert "complete" not in line
+
+
 async def test_not_stored_says_result_query_cannot_read() -> None:
     context = {"op_id": "example.vm.list"}  # no tenant: the spill is skipped
     summary, handle = await _reducer().reduce({"value": _vms(20)}, None, context)

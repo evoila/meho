@@ -100,8 +100,12 @@ With `JSONFLUX_ANSWER_READY=true`, a reduced list reply changes like this
 - The two long texts on the handle are replaced by one line in
   `fetch_more.drill_in.rationale`, for example "Showing all 69 rows this
   call returned in items (name). The counts cover all 69 rows. For other
-  columns or a filter, call result_query with handle_id=...". It says when
-  only the first rows were stored, or when no rows were stored.
+  columns or a filter, call result_query with handle_id=... The vendor may
+  hold more rows than this call returned." It says when only the first
+  rows were stored, or when no rows were stored. When rows were stored, the
+  line always ends with that vendor note, so a reduced page is never called
+  the whole source (#3676). The note on parts kept out of the summary
+  (`parts_note`) stays in the summary only, not in this line.
   `native_pagination.rationale` is null when the operation has no paging
   hint; a paging hint still ships as today.
 

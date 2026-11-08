@@ -142,6 +142,11 @@ _DRILL_IN_WORKAROUND = (
 #: so the prose never calls the handle complete (#3676).
 _SOURCE_COVERAGE_NOTE = " The vendor may hold more rows (see ``native_pagination``)."
 
+#: The same point in plain words for the short answer-ready line
+#: (``JSONFLUX_ANSWER_READY`` on). That line may come without a
+#: ``native_pagination`` text, so it does not point there.
+_SOURCE_COVERAGE_NOTE_SHORT = " The vendor may hold more rows than this call returned."
+
 #: Per-reason rationale for the ``available=False`` drill-in branch
 #: (#1629). Keyed by the machine-readable
 #: :data:`~meho_backplane.connectors.schemas.DrillInUnavailableReason`
@@ -2307,7 +2312,9 @@ def _build_drill_in(
 
     *read_more* (``JSONFLUX_ANSWER_READY`` on) is the rationale in place of
     the long prose; on the stored branch the note on fields left out of the
-    summary still follows it, so their ``path`` read stays named.
+    summary still follows it, so their ``path`` read stays named, and the
+    line ends by saying the vendor may hold more rows (#3676): the handle
+    holds one call's rows, never the whole source.
     """
     if spill_outcome.stored_rows is None:
         # ``_spill`` always sets ``skip_reason`` on the no-spill path; the
@@ -2320,8 +2327,10 @@ def _build_drill_in(
             reason=reason,
         )
     if read_more is not None:
-        rationale = read_more + _omitted_fields_note(
-            omitted_fields, spill_outcome.omitted_fields_stored
+        rationale = (
+            read_more
+            + _omitted_fields_note(omitted_fields, spill_outcome.omitted_fields_stored)
+            + _SOURCE_COVERAGE_NOTE_SHORT
         )
     else:
         rationale = _drill_in_available_rationale(

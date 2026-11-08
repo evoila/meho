@@ -799,7 +799,7 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
     `null` brings the original text back.
   - Each state has its own keyword index: `endpoint_descriptor_bm25_idx`
     (migration `0005`) for off, `endpoint_descriptor_bm25_custom_idx`
-    (migration `0147`) for on. Turn the switch on only after `0147` ran,
+    (migration `0148`) for on. Turn the switch on only after `0148` ran,
     else the keyword half scans the table. Code: `agent_description`,
     `BM25_ORIGINAL_DOCUMENT_SQL` and `BM25_CUSTOM_DOCUMENT_SQL` in
     `operations/_search.py`; the switch is

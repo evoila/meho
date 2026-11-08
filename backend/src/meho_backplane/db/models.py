@@ -1912,7 +1912,7 @@ class EndpointDescriptor(Base):
       ``to_tsvector('english', coalesce(summary, '') || ' ' ||
       coalesce(description, ''))``. Powers the BM25 half of
       ``search_operations``'s hybrid retrieval. Its twin
-      ``endpoint_descriptor_bm25_custom_idx`` (migration ``0147``) is
+      ``endpoint_descriptor_bm25_custom_idx`` (migration ``0148``) is
       GIN over the same text with ``nullif(custom_description, '')``
       in place of ``description``; the keyword query uses it while the
       ``AGENT_READS_CUSTOM_DESCRIPTION`` switch is on. Declared in

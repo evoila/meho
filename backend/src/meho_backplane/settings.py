@@ -2351,7 +2351,7 @@ class Settings(BaseModel):
     #: before. ``True``: when an admin set a non-empty ``custom_description``
     #: with ``meho_connector_edit_op``, it takes the place of ``description``
     #: in all three. The keyword half then uses the index of migration
-    #: ``0147`` (``endpoint_descriptor_bm25_custom_idx``). Set via
+    #: ``0148`` (``endpoint_descriptor_bm25_custom_idx``). Set via
     #: ``AGENT_READS_CUSTOM_DESCRIPTION``.
     agent_reads_custom_description: bool = False
     #: Application-layer tenant-scope guard for the agent-supplied

@@ -16,8 +16,8 @@ This module checks what only PostgreSQL can show:
 * Each state's keyword expression is the one its index is built on:
   ``BM25_ORIGINAL_DOCUMENT_SQL`` and ``endpoint_descriptor_bm25_idx``
   (migration ``0005``), ``BM25_CUSTOM_DOCUMENT_SQL`` and
-  ``endpoint_descriptor_bm25_custom_idx`` (migration ``0147``).
-* Migration ``0147`` runs backward to ``0146`` and forward again, and
+  ``endpoint_descriptor_bm25_custom_idx`` (migration ``0148``).
+* Migration ``0148`` runs backward to ``0147`` and forward again, and
   leaves the index of ``0005`` alone.
 """
 
@@ -242,7 +242,7 @@ def _index_definitions(url: str) -> dict[str, str]:
     return asyncio.run(_read())
 
 
-def test_migration_0147_runs_backward_and_forward(integration_env: None, async_pg_url: str) -> None:
+def test_migration_0148_runs_backward_and_forward(integration_env: None, async_pg_url: str) -> None:
     reset_engine_for_testing()
     cfg = alembic_config()
     cfg.set_main_option("sqlalchemy.url", async_pg_url)
@@ -251,12 +251,12 @@ def test_migration_0147_runs_backward_and_forward(integration_env: None, async_p
         assert "custom_description" in at_head[_CUSTOM_INDEX]
         assert "custom_description" not in at_head[_ORIGINAL_INDEX]
 
-        command.downgrade(cfg, "0146")
+        command.downgrade(cfg, "0147")
         before = _index_definitions(async_pg_url)
         assert _CUSTOM_INDEX not in before
         assert before[_ORIGINAL_INDEX] == at_head[_ORIGINAL_INDEX]
 
-        command.upgrade(cfg, "0147")
+        command.upgrade(cfg, "0148")
         assert _index_definitions(async_pg_url) == at_head
     finally:
         command.upgrade(cfg, "head")

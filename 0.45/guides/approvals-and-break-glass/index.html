@@ -2112,10 +2112,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#option-1-a-meho-sa-operator-approves-their-own-change-recommended" class="md-nav__link">
+  <a href="#option-1-a-meho-sa-operator-or-a-meho-admin-approves-their-own-change-recommended" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Option 1 — a MEHO-SA-Operator approves their own change (recommended)
+        Option 1 — a MEHO-SA-Operator or a MEHO-Admin approves their own change (recommended)
       
     </span>
   </a>
@@ -3071,10 +3071,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#option-1-a-meho-sa-operator-approves-their-own-change-recommended" class="md-nav__link">
+  <a href="#option-1-a-meho-sa-operator-or-a-meho-admin-approves-their-own-change-recommended" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Option 1 — a MEHO-SA-Operator approves their own change (recommended)
+        Option 1 — a MEHO-SA-Operator or a MEHO-Admin approves their own change (recommended)
       
     </span>
   </a>
@@ -3249,8 +3249,8 @@ off, only the self-approval rules of the groups apply, and
 audited emergency switch for the whole deploy (Option 3 below). It
 covers only <code>safe</code> and <code>caution</code> changes and never reaches a
 <code>dangerous</code> or <code>destructive</code> operation. The endorsed way for one
-person to approve their own changes is the <strong>MEHO-SA-Operators</strong>
-group, not the switch.</p>
+person to approve their own changes is the <strong>MEHO-SA-Operators</strong> or
+the <strong>MEHO-Admins</strong> group, not the switch.</p>
 </div>
 <p>This guide also covers the case where <strong>you are the only operator.</strong> A
 solo deploy still has to be able to make changes that wait. This page
@@ -3368,13 +3368,13 @@ come from the <a href="../../install/keycloak-realm/#step-5-create-the-five-grou
 </tr>
 <tr>
 <td><code>MEHO-Admins</code></td>
-<td>only a <code>caution</code> change that waited because you sent it with a token, with a click in the web interface</td>
+<td>yes, at every risk level</td>
 <td>yes</td>
 <td>yes</td>
 </tr>
 <tr>
 <td><code>MEHO-Operators</code></td>
-<td>the same as <code>MEHO-Admins</code></td>
+<td>only a <code>caution</code> change that waited because you sent it with a token, with a click in the web interface</td>
 <td>yes</td>
 <td>no</td>
 </tr>
@@ -3392,8 +3392,9 @@ come from the <a href="../../install/keycloak-realm/#step-5-create-the-five-grou
 </tr>
 </tbody>
 </table>
-<p>"SA" means self-approval. A MEHO-SA-Operator's change still waits like
-any other. The same person then approves it, on purpose: with a click in
+<p>"SA" means self-approval. MEHO-Admins may approve their own changes in
+the same way. A MEHO-SA-Operator's or a MEHO-Admin's change still waits
+like any other. The same person then approves it, on purpose: with a click in
 the web interface, or on the command line after a fresh sign-in. The
 wait keeps three things: the approver sees exactly what will run, sees
 what else is affected, and the audit log records who approved, how and
@@ -3406,8 +3407,8 @@ let you approve your own request, every surface refuses with the same
 text:</p>
 <div class="highlight"><pre><span></span><code>self_approval_forbidden: operator '&lt;your-sub&gt;' may not approve approval_request
 &lt;id&gt;: You cannot approve your own change. Only members of the
-MEHO-SA-Operators group may approve their own changes. Ask another operator,
-an admin or an approver to approve it.
+MEHO-SA-Operators and MEHO-Admins groups may approve their own changes. Ask
+another operator, an admin or an approver to approve it.
 (set APPROVAL_ALLOW_SELF_APPROVAL=true for audited single-operator break-glass)
 </code></pre></div>
 <p>That is a REST <code>403</code> (the command line prints it), and a disabled
@@ -3429,8 +3430,9 @@ own request.</p>
 <p>On a team, a colleague approves your change. On a <strong>one-operator</strong>
 deploy you are both the requester and the only person who could
 approve. Pick one of the paths below.</p>
-<h3 id="option-1-a-meho-sa-operator-approves-their-own-change-recommended">Option 1 — a MEHO-SA-Operator approves their own change (recommended)<a class="headerlink" href="#option-1-a-meho-sa-operator-approves-their-own-change-recommended" title="Permanent link">&para;</a></h3>
-<p>Put yourself in the <strong><code>MEHO-SA-Operators</code></strong> group (see
+<h3 id="option-1-a-meho-sa-operator-or-a-meho-admin-approves-their-own-change-recommended">Option 1 — a MEHO-SA-Operator or a MEHO-Admin approves their own change (recommended)<a class="headerlink" href="#option-1-a-meho-sa-operator-or-a-meho-admin-approves-their-own-change-recommended" title="Permanent link">&para;</a></h3>
+<p>Put yourself in the <strong><code>MEHO-SA-Operators</code></strong> or the <strong><code>MEHO-Admins</code></strong>
+group (see
 <a href="../../install/keycloak-realm/#who-may-approve-their-own-changes">Keycloak realm setup</a>).
 The change applies at your next login. Then:</p>
 <ol>
@@ -3446,10 +3448,13 @@ same after a fresh sign-in, and prints a line that says it was a
 self-approval. The decision record shows <code>self_approved: true</code> and the
 rule <code>sa_operator_self_approval</code>.</p>
 <p>A person is in exactly one role group per tenant. So a person in
-<code>MEHO-Admins</code> is not a MEHO-SA-Operator, and cannot approve their own
-<code>dangerous</code> or <code>destructive</code> change. A deploy with a single admin needs
-a MEHO-SA-Operator, or the admin's own <code>dangerous</code> and <code>destructive</code>
-changes wait with nobody to approve them.</p>
+<code>MEHO-Admins</code> is not a MEHO-SA-Operator. But an admin may approve their
+own changes too, in the same way, also <code>dangerous</code> and <code>destructive</code>
+ones. The rule <code>approval_rule</code> is then <code>sa_operator_self_approval</code> as
+well. A deploy with a single admin needs no MEHO-SA-Operator. If you want
+a second person to check every risky change of an admin, keep the admins
+out of risky work: give the people who run changes the <code>MEHO-Operators</code>
+group.</p>
 <h3 id="option-2-the-agent-requester-pattern">Option 2 — the agent-requester pattern<a class="headerlink" href="#option-2-the-agent-requester-pattern" title="Permanent link">&para;</a></h3>
 <p>The second way is to make sure the write is <strong>not requested under
 your own subject</strong> in the first place. Park it under an <strong>agent
@@ -3513,7 +3518,7 @@ approve it — comes down to how the write was dispatched:</p>
 <tr>
 <td>You call it directly</td>
 <td>your <code>sub</code></td>
-<td>Only as a MEHO-SA-Operator (or under the rules for your own change in <a href="#who-may-approve">Who may approve</a>)</td>
+<td>Only as a MEHO-SA-Operator or a MEHO-Admin (or under the rules for your own change in <a href="#who-may-approve">Who may approve</a>)</td>
 </tr>
 <tr>
 <td>You launch an agent interactively; it makes the write</td>
@@ -3545,8 +3550,8 @@ change. Understand exactly what you traded away:</p>
 <li><strong>It never reaches a <code>dangerous</code> or <code>destructive</code> operation.</strong>
   Break-glass self-approval applies only to the <code>safe</code> and <code>caution</code>
   risk levels. For <code>dangerous</code> and <code>destructive</code> changes only the group
-  rules count: a MEHO-SA-Operator may approve their own, everyone else
-  needs a MEHO-SA-Operator or a MEHO-Admin.</li>
+  rules count: a MEHO-SA-Operator or a MEHO-Admin may approve their own,
+  everyone else needs a MEHO-SA-Operator or a MEHO-Admin.</li>
 <li><strong>It is for emergencies, not the solo default.</strong> Reach for Option 1
   first. Leaving this on lets every person in every tenant approve their
   own lower-risk changes.</li>
@@ -3555,7 +3560,8 @@ change. Understand exactly what you traded away:</p>
 </ul>
 <div class="admonition danger">
 <p class="admonition-title">Break-glass is a lever an admin holds, not a per-write toggle</p>
-<p>Prefer a MEHO-SA-Operator for anything you do more than once. Set
+<p>Prefer a MEHO-SA-Operator or a MEHO-Admin for anything you do more
+than once. Set
 <code>APPROVAL_ALLOW_SELF_APPROVAL=true</code> for a real emergency, make the
 write, and turn it back off.</p>
 </div>
@@ -3605,9 +3611,10 @@ written to the audit log. Concretely:</p>
   a "what this destroys" card above the request detail. An operation
   that cannot produce that statement cannot be parked at all — it fails
   closed.</li>
-<li><strong>Only a MEHO-SA-Operator approves their own delete.</strong> The break-glass
-  switch never applies to a <code>dangerous</code> or <code>destructive</code> operation. A
-  MEHO-SA-Operator may approve their own delete, on purpose, after
+<li><strong>Only a MEHO-SA-Operator or a MEHO-Admin approves their own delete.</strong>
+  The break-glass switch never applies to a <code>dangerous</code> or <code>destructive</code>
+  operation. A MEHO-SA-Operator or a MEHO-Admin may approve their own
+  delete, on purpose, after
   checking the preview; there are no per-system exceptions. Everyone
   else's delete needs a MEHO-SA-Operator or a MEHO-Admin to approve it.</li>
 <li><strong>The record shows who decided.</strong> The decision names the approver, so
@@ -3679,8 +3686,8 @@ cluster access to the chart needed:</p>
 <span class="c1"># "four_eyes_enforced"            → the default; the emergency switch is off</span>
 <span class="c1"># "single_operator_break_glass"   → APPROVAL_ALLOW_SELF_APPROVAL=true is set</span>
 </code></pre></div>
-<p>The posture reports only the emergency switch. A MEHO-SA-Operator may
-approve their own change under either posture; that shows on the
+<p>The posture reports only the emergency switch. A MEHO-SA-Operator or a
+MEHO-Admin may approve their own change under either posture; that shows on the
 decision row, not here.</p>
 <p><code>/ready</code> returns the <code>features</code> block only when you send the metrics
 token. Add <code>-H "Authorization: Bearer &lt;metrics-token&gt;"</code> to the <code>curl</code>
@@ -3691,8 +3698,8 @@ call. A chart install makes the token on the first install; read it with
 <li>On the audit ledger, every approval is an <code>approval.decision</code> row with
   the field <strong><code>self_approved</code></strong> (<code>true</code> when the requester is also the
   approver) and the field <strong><code>approval_rule</code></strong>, which names the rule that
-  allowed it: <code>sa_operator_self_approval</code> (a MEHO-SA-Operator approved
-  their own change), <code>break_glass_self_approval</code> (the emergency switch),
+  allowed it: <code>sa_operator_self_approval</code> (a MEHO-SA-Operator or a
+  MEHO-Admin approved their own change), <code>break_glass_self_approval</code> (the emergency switch),
   <code>token_call_self_approval</code> (a person's own token <code>caution</code> change,
   approved with a web click), <code>sa_operator_or_admin</code> or <code>reviewer</code>. The
   block <code>approval_auth</code> says how the person proved they were present:
@@ -3706,7 +3713,8 @@ call. A chart install makes the token on the first install; read it with
 <p>So a break-glass self-approval is visible three ways — the live posture
 on <code>/ready</code>, a WARNING log at the moment it happens, and the
 <code>break_glass_self_approval</code> decision row on the permanent ledger. A
-MEHO-SA-Operator's self-approval is visible on its decision row.</p>
+self-approval by a MEHO-SA-Operator or a MEHO-Admin is visible on its
+decision row.</p>
 <h2 id="deciding-on-someone-elses-written-instruction">Deciding on someone else's written instruction<a class="headerlink" href="#deciding-on-someone-elses-written-instruction" title="Permanent link">&para;</a></h2>
 <p>Sometimes you approve or reject a request because another person told
 you to, in writing. You still decide as yourself. MEHO records who told
@@ -3768,14 +3776,14 @@ pending. Add the missing line and try again. A reason can be at most
 <tbody>
 <tr>
 <td>Solo deploy, any change that waits</td>
-<td><strong>MEHO-SA-Operator</strong> (Option 1) — you approve your own change on purpose, in the web interface</td>
+<td><strong>MEHO-SA-Operator or MEHO-Admin</strong> (Option 1) — you approve your own change on purpose, in the web interface</td>
 </tr>
 <tr>
 <td>Solo deploy, writes that run on a schedule</td>
 <td><strong>Agent-requester</strong> (Option 2)</td>
 </tr>
 <tr>
-<td>Genuine emergency, <code>safe</code> or <code>caution</code> change, and nobody in MEHO-SA-Operators</td>
+<td>Genuine emergency, <code>safe</code> or <code>caution</code> change, and nobody in MEHO-SA-Operators or MEHO-Admins</td>
 <td><strong>Break-glass</strong> (Option 3), then turn it back off</td>
 </tr>
 <tr>
@@ -3788,8 +3796,8 @@ pending. Add the missing line and try again. A reason can be at most
 <p><strong><code>approve</code> returns <code>self_approval_forbidden</code> and I am the only
 operator.</strong> The write waits under <em>your</em> subject — a direct call, or an
 <em>interactive</em> agent run (where you stay the subject) — and you are not
-in <code>MEHO-SA-Operators</code>. Ask your Keycloak admin to move you to
-<code>MEHO-SA-Operators</code> (Option 1), sign in again, and approve in the web
+in <code>MEHO-SA-Operators</code> or <code>MEHO-Admins</code>. Ask your Keycloak admin to move
+you to <code>MEHO-SA-Operators</code> (Option 1), sign in again, and approve in the web
 interface. Or re-park the write under an agent-requester (Option 2).
 Reserve <code>APPROVAL_ALLOW_SELF_APPROVAL</code> for genuine emergencies — it
 re-opens the single-account hole for every <code>safe</code> and <code>caution</code>

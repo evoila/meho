@@ -3404,9 +3404,13 @@ meho<span class="w"> </span>approvals<span class="w"> </span>show<span class="w"
 meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval_request_id&gt;<span class="w"> </span>--reason<span class="w"> </span><span class="s2">"verified blast radius"</span>
 meho<span class="w"> </span>approvals<span class="w"> </span>reject<span class="w">  </span>&lt;approval_request_id&gt;<span class="w"> </span>--reason<span class="w"> </span><span class="s2">"wrong target"</span>
 </code></pre></div>
-<p>In general you cannot approve your own request. Members of the
-<code>MEHO-SA-Operators</code> group may, on purpose. Parked requests expire on a
-TTL. Approve
+<p>Members of the <code>MEHO-SA-Operators</code> and <code>MEHO-Admins</code> groups may approve
+their own requests, on purpose. Everyone else needs another person to
+approve their request. A login holds exactly one role group, so an admin
+is not also a MEHO-SA-Operator; both groups may approve their own
+requests. The rules are in the
+<a href="https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md">decision record on approval groups</a>.
+Parked requests expire on a TTL. Approve
 in the web interface (the normal place), or on the command line after a
 fresh sign-in. The full story — who may approve, and how a single
 operator approves their own change — is the

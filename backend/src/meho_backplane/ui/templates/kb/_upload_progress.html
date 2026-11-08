@@ -89,6 +89,9 @@
       <span>
         Upload failed for <strong class="font-mono">{{ row.filename }}</strong>:
         {{ row.message }}
+        {% if row.get('existing_slug') %}
+          <a href="/ui/kb/{{ row.existing_slug }}" class="link link-primary ml-2">Open entry &rarr;</a>
+        {% endif %}
       </span>
     </div>
     {% if row.similar is defined and row.similar %}
@@ -129,7 +132,7 @@
               <tr class="{{ 'bg-success/10' if row.status == 'success' else 'bg-error/10' }}">
                 <td class="font-mono text-xs break-all">{{ row.filename }}</td>
                 <td class="font-mono text-xs">
-                  {% if row.status == "success" %}
+                  {% if row.status == "success" or row.get('existing_slug') %}
                     <a href="/ui/kb/{{ row.slug }}" class="link link-primary">{{ row.slug }}</a>
                   {% else %}
                     {{ row.slug or "—" }}

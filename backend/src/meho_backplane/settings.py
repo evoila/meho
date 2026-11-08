@@ -367,8 +367,10 @@ class Settings(BaseModel):
         that token gets the one-group-per-tenant check instead (#5239).
         A name with and without a leading ``/`` is the
         same group, because the group-membership mapper can send full
-        group paths. Override with ``JWT_ROLE_GROUPS`` (comma-separated)
-        when a site renames the groups; a blank value keeps the default.
+        group paths. Upper and lower case do not count either:
+        ``meho-operators`` is the same group as ``MEHO-Operators``.
+        Override with ``JWT_ROLE_GROUPS`` (comma-separated) when a site
+        renames the groups; a blank value keeps the default.
     jwt_principal_kind_claim_name:
         Name of the JWT claim that carries the principal-kind
         discriminator (``user`` / ``service`` / ``agent``) added by
@@ -461,7 +463,8 @@ class Settings(BaseModel):
         ``MEHO-SA-Operators``, the group the shipped login setup creates
         (``docs/decisions/login-role-groups.md``). ``verify_jwt`` sets
         :attr:`~meho_backplane.auth.operator.Operator.self_approver` when
-        the token's ``groups`` claim names this group. This is used only
+        the token's ``groups`` claim names this group (a leading ``/``
+        and upper or lower case do not count). This is used only
         when the token has no ``meho_tenants`` claim; with that claim, the
         current tenant's ``SA-Operators`` entry decides. Off when the
         group is missing; a machine login never gets the flag. Change it

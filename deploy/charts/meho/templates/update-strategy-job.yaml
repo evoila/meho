@@ -1,0 +1,147 @@
+{{- /*
+Switch the live Deployment to Recreate before an upgrade (#5962).
+
+A chart before #5024 set no update strategy, so Kubernetes filled in
+`RollingUpdate` and a `rollingUpdate` block. Helm 4 upgrades with server-side
+apply and does not remove a block it never set, and Kubernetes refuses
+`Recreate` with a `rollingUpdate` block. This pre-upgrade Job removes the block
+and sets `Recreate` (python -m meho_backplane.update_strategy).
+
+Rendered only when the chart asks for Recreate and the live Deployment still
+has a `rollingUpdate` block. `lookup` is empty in `helm template` and in a
+client dry run, so those never render it. Same default as deployment.yaml.
+The account, the rights and the Job are removed once the Job succeeds.
+Details: docs/codebase/devops.md.
+*/}}
+{{- $strategy := .Values.updateStrategy | default (dict "type" "Recreate") }}
+{{- if eq (toString $strategy.type) "Recreate" }}
+{{- $live := lookup "apps/v1" "Deployment" .Release.Namespace (include "meho.fullname" .) }}
+{{- if dig "spec" "strategy" "rollingUpdate" "" $live }}
+{{- /* Cut the base name first, so the name keeps its suffix and never equals the
+backplane ServiceAccount. 47 + len("-update-strategy") = 63. */}}
+{{- $name := printf "%s-update-strategy" (include "meho.fullname" . | trunc 47 | trimSuffix "-") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: update-strategy
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-6"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: update-strategy
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-6"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  # Read and patch exactly the MEHO Deployment. Nothing else.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+    resourceNames:
+      - {{ include "meho.fullname" . | quote }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: update-strategy
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-6"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: update-strategy
+  annotations:
+    # After the other pre-upgrade hooks, so a failed migration Job leaves
+    # the Deployment as it was.
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-5"
+    # A failed Job stays for `kubectl logs`.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: {{ .Values.migrationJob.ttlSecondsAfterFinished }}
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        # Deliberately not `meho.selectorLabels`: the backplane's
+        # NetworkPolicy selects pods by those labels and allows no egress
+        # to the Kubernetes API, which this Job needs.
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: update-strategy
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: true
+      {{- with include "meho.core.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
+      containers:
+        - name: update-strategy
+          # The backplane image, with the same digest pin as the Deployment.
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "meho_backplane.update_strategy"]
+          terminationMessagePolicy: FallbackToLogsOnError
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: MEHO_DEPLOYMENT_NAME
+              value: {{ include "meho.fullname" . | quote }}
+          resources:
+            {{- toYaml .Values.migrationJob.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

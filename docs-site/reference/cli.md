@@ -2949,7 +2949,7 @@ meho k8s service list [flags]
 
 ## `meho kb`
 
-Operate the MEHO knowledge base (ingest / search / list / show / add / delete)
+Operate the MEHO knowledge base (ingest / search / list / show / add / delete / export)
 
 ```
 meho kb
@@ -2957,7 +2957,7 @@ meho kb
 
 ### `meho kb add`
 
-Create or re-index one kb entry (tenant_admin)
+Create or update one kb entry (tenant_admin)
 
 ```
 meho kb add <slug> [flags]
@@ -2967,6 +2967,7 @@ meho kb add <slug> [flags]
 - `--body` — entry body: inline text, @<path> to read a file, or @- to read from stdin
 - `--create-anyway` — create the new entry even when similar entries exist
 - `--dry-run` — write nothing; list the similar entries and say whether the write would go through
+- `--expected-revision` — revision_id of the entry as you read it (required to update an existing slug)
 - `--json` — emit raw KbEntry JSON instead of the human summary
 - `--metadata` — comma-separated key=value pairs to attach as entry metadata (e.g. owner=ops,source=runbook)
 
@@ -2981,6 +2982,18 @@ meho kb delete <slug> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--confirm` — skip the stdin confirmation prompt
 - `--json` — emit a machine-readable success envelope instead of the human line
+
+### `meho kb export`
+
+Write the confirmed, generic kb entries as Markdown pages into a local folder (operator)
+
+```
+meho kb export <directory> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--dry-run` — list what would be added, changed and removed, and write nothing
+- `--json` — emit the plan as JSON instead of the human summary
 
 ### `meho kb ingest`
 

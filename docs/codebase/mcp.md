@@ -222,6 +222,11 @@ When #4112 set the limits, the default list went from 96,804 to 66,092
 characters. The largest tool, `query_topology`, went from 16,302 to
 5,537.
 
+A client that needs fewer tools can also ask for a tool profile (see
+"Tool profiles" below). The `investigate` list has about a third of the
+text of the full list (23,261 characters), `operate` about half
+(35,776). The full list is 69,209.
+
 What a description keeps:
 
 - what the tool is for, and when to call it (the proactive-trigger
@@ -915,6 +920,58 @@ explicitly.
   authoring**, broadcast overrides, topology **mutations**, target
   registration, doc-collection create/delete, memory promotion,
   approvals **read**, and audit query.
+
+## Tool profiles (#4172)
+
+A client can ask for a smaller tool list. It adds `?profile=<name>` to
+the MCP URL, for example `https://<meho-host>/mcp?profile=investigate`.
+A small model then sees 9 or 13 tools, not 26, and keeps more of its
+context window for the job.
+
+| Profile | Tools |
+|---|---|
+| `investigate` (9) | `meho_status`, `meho_connector_list`, `list_targets`, `list_operation_groups`, `search_operations`, `call_operation`, `result_query`, `search_knowledge`, `search_memory` |
+| `operate` (13) | `investigate` plus `preview_operation`, `meho_broadcast_recent`, `meho_broadcast_announce`, `meho_broadcast_watch` |
+
+The lists are in `mcp/profiles.py`.
+
+How it works:
+
+- The MCP route reads the `profile` URL parameter
+  (`_dispatch_mcp_request` in `mcp/server.py`) and stores it on the
+  request's `Operator` as `mcp_tool_profile`. Only this route sets it.
+- `all_tools_for` (`mcp/registry.py`) runs the four gates above first,
+  then keeps only the profile's tools. So a profile only removes tools.
+  An `mcp:admin` session with a profile still sees only the profile.
+- `tools/call` checks the profile again (`handle_tools_call`). A call to
+  a tool outside the profile is refused with `reason: not_in_profile`,
+  and the handler does not run. The refusal is audited as a 403.
+- No profile, or an empty `profile=`, gives the full list, as before.
+- An unknown name, or two different names, is refused with HTTP 400
+  before the body is read. A typo must not quietly give the full list.
+  Names are not case-sensitive.
+- The session-start text follows the profile. The broadcast band is
+  there only when `meho_broadcast_announce` is on the list (#4113). A
+  profile without the runbook tools gets no runbook band, and a profile
+  without the docs tools gets no docs collection list
+  (`_session_instructions`). Tenant conventions are tenant text and are
+  not changed.
+- `meho_status` shows the hidden working tools in
+  `surface_summary.missing_working_tools`, because it uses the same
+  filter.
+
+Why a URL parameter and not a header: every MCP client can set the
+server URL, and not every client can set a header. MEHO checks the
+token audience against its configured MCP resource URI
+(`mcp_resource_uri`), which has no query. So on the server side the
+same token works with and without a profile. Whether each client's
+login flow accepts a server URL with a query has not been tried in a
+lab yet.
+
+A profile does not change what the person may do. `call_operation` in
+the `investigate` profile can still run a change, under the person's
+role, the operation's risk level and the approval rules. The profile
+only makes the tool list shorter.
 
 ## The current tenant of a session (#5239)
 

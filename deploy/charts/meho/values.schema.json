@@ -11,6 +11,11 @@
       "minimum": 1,
       "description": "Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2."
     },
+    "progressDeadlineSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Seconds before Kubernetes marks a rollout failed (#5812). Keep it above probes.startup.failureThreshold x probes.startup.periodSeconds."
+    },
     "updateStrategy": {
       "type": "object",
       "additionalProperties": false,

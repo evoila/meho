@@ -83,6 +83,7 @@ from meho_backplane.tenancy.policies import (
     set_announce_gate_enabled,
     set_flight_recorder_policy,
     set_mail_recipient_allowlist,
+    set_run_approval_target_kinds,
 )
 from meho_backplane.version import deployed_version_label
 
@@ -157,6 +158,7 @@ def _policies_block(tenant: Tenant) -> dict[str, Any]:
             "agent_readable": tenant.flight_recorder_agent_readable,
         },
         "mail_recipient_allowlist": tenant.mail_recipient_allowlist,
+        "run_approval_target_kinds": tenant.run_approval_target_kinds_enabled,
     }
 
 
@@ -445,6 +447,8 @@ def _plan_policies(
                 desired["flight_recorder"][key] = bool(value) if key == "enabled" else value
     if "mail_recipient_allowlist" in sent:
         desired["mail_recipient_allowlist"] = policies.mail_recipient_allowlist
+    if "run_approval_target_kinds" in sent:
+        desired["run_approval_target_kinds"] = bool(policies.run_approval_target_kinds)
     return desired, desired
 
 
@@ -781,6 +785,7 @@ async def _apply_policies(
                 },
             )
             set_mail_recipient_allowlist(tenant, policies["mail_recipient_allowlist"])
+            set_run_approval_target_kinds(tenant, policies["run_approval_target_kinds"])
     except Exception as exc:
         _log.warning(
             "settings_import_policies_failed", tenant_id=str(tenant_plan.tenant_id), error=str(exc)

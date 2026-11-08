@@ -39,6 +39,7 @@ spec:
         announce_gate_enabled: false
         flight_recorder: { enabled: true, retention_days: 14, agent_readable: null }
         mail_recipient_allowlist: "@example.com"
+        run_approval_target_kinds: false
       conventions:
         - slug: change-window
           title: Change window
@@ -81,8 +82,10 @@ spec:
 
 - `policies` — the per-tenant policy columns on `tenant`:
   `announce_gate_enabled`, `flight_recorder.{enabled, retention_days,
-  agent_readable}`, `mail_recipient_allowlist`. `null` means "use the
-  instance default" (`false` for the two switches, inherit for the others).
+  agent_readable}`, `mail_recipient_allowlist`,
+  `run_approval_target_kinds` (a run approval may list a target kind; see
+  [run-approvals.md](run-approvals.md)). `null` means "use the
+  instance default" (`false` for the switches, inherit for the others).
   `policies: null` resets all of them.
 - `conventions[]` — keyed by `slug`. `title` and `kind` are needed when the
   convention is new. `kind` cannot change on import, the same as on

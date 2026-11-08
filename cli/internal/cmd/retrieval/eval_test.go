@@ -4,6 +4,7 @@
 package retrieval
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -283,5 +284,32 @@ func TestEvalRequestBodyMarshalsToWire(t *testing.T) {
 	}
 	if !strings.Contains(wire, `"baseline":"grep"`) {
 		t.Errorf("expected baseline=grep on wire; got %s", wire)
+	}
+}
+
+func TestPrintEvalTableNamesNotRunQuestions(t *testing.T) {
+	reason := "connector 'example-rest-1.0' has no operations on this install"
+	notRun := 2
+	queries := []api.QueryResult{
+		{Query: "a", NotRunReason: &reason},
+		{Query: "b", NotRunReason: &reason},
+	}
+	r := &api.EvalResult{
+		OverallVerdict: api.EvalResultOverallVerdict("green"),
+		Surfaces: []api.SurfaceResult{
+			{Surface: api.SurfaceResultSurface("operations"), Verdict: api.SurfaceResultVerdict("green"),
+				NotRunCount: &notRun, Queries: &queries},
+			{Surface: api.SurfaceResultSurface("kb"), Verdict: api.SurfaceResultVerdict("green"), QueryCount: 10},
+		},
+	}
+	var buf bytes.Buffer
+	printEvalTable(&buf, r, nil)
+	out := buf.String()
+	want := "  not run: 2 question(s), not scored — " + reason + "\n"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing not-run line %q in:\n%s", want, out)
+	}
+	if strings.Count(out, "not run:") != 1 {
+		t.Fatalf("want one not-run line, got:\n%s", out)
 	}
 }

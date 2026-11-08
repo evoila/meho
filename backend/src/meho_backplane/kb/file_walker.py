@@ -65,13 +65,16 @@ Front-matter parsing
 --------------------
 
 Front-matter is parsed via the ``python-frontmatter`` 1.x library:
-``frontmatter.loads(text)`` returns a :class:`frontmatter.Post`
-whose ``.metadata`` is a dict and ``.content`` is the body text with
-the ``---`` delimiters stripped. Files without front-matter return
-``Post.metadata == {}`` and ``Post.content == <original text>``;
-malformed YAML raises ``yaml.YAMLError`` which the walker re-raises
-as :class:`KbFileParseError` so callers can distinguish parse
-failure from disk-read failure.
+``frontmatter.parse(text)`` returns the header dict and the body text
+with the ``---`` delimiters stripped. Files without front-matter return
+an empty dict and the original text; malformed YAML raises
+``yaml.YAMLError`` which the walker re-raises as
+:class:`KbFileParseError` so callers can distinguish parse failure
+from disk-read failure. ``frontmatter.loads`` is not used: it passes
+the header into the ``Post`` constructor, where a field named
+``content`` or ``handler``, or a key that is not text, raises
+``TypeError``. A key that is not text fails the file with
+:class:`KbFileParseError` instead.
 
 Header values are stored as the text the author wrote for dates and
 decimal numbers. Plain YAML would turn ``learned_at: 2026-11-03`` into a
@@ -448,18 +451,29 @@ def parse_front_matter(raw: str, rel: str) -> tuple[dict[str, object], str]:
 
     Dates and decimal numbers in a YAML header stay as the author's text
     (:class:`_HeaderYamlLoader`). *rel* names the file in the error.
-    Raises :class:`KbFileParseError` when the header is not valid YAML.
+    Raises :class:`KbFileParseError` when the header is not valid YAML or
+    when a header key is not text (an unquoted ``on:`` is the YAML value
+    ``true``).
     """
     # Passing a handler skips the library's format detection. Keep the
     # detection: use the text-keeping YAML handler only when the file
     # starts with a YAML header, else let the library pick (a JSON
     # header, or no header at all).
     handler = _HEADER_HANDLER if _HEADER_HANDLER.detect(raw.strip()) else None
+    # frontmatter.loads builds Post(content, handler, **header), so a
+    # header field named ``content`` or ``handler``, or a key that is not
+    # text, raises TypeError there. frontmatter.parse returns the pair.
     try:
-        post = frontmatter.loads(raw, handler=handler)
+        header, body = frontmatter.parse(raw, handler=handler)
     except yaml.YAMLError as exc:
         raise KbFileParseError(f"front-matter parse error in {rel}: {exc}") from exc
-    return dict(post.metadata), post.content
+    not_text = [key for key in header if not isinstance(key, str)]
+    if not_text:
+        names = ", ".join(repr(key) for key in not_text)
+        raise KbFileParseError(
+            f"front-matter key(s) {names} in {rel} are not text; write them with quotes"
+        )
+    return dict(header), body
 
 
 def assert_header_storable(metadata: dict[str, object], rel: str) -> None:

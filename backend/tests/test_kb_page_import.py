@@ -263,6 +263,36 @@ async def test_a_page_without_a_good_header_is_skipped(content: str, reason: str
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [
+        ("content: extra\n", None),
+        ("handler: extra\n", None),
+        ("on: push\n", "key(s) True in bad.md are not text"),
+        ("1: one\n", "key(s) 1 in bad.md are not text"),
+    ],
+)
+async def test_a_header_field_the_parser_chokes_on_skips_only_that_page(
+    field: str, reason: str | None
+) -> None:
+    """A field named like a parser argument, or a key that is not text, never stops the import."""
+    pages = (_page("bad.md", header=CONFIRMED + field), _page("good.md"))
+    preview = await _run(*pages, dry_run=True)
+    assert _rows(preview)["good.md"][0] == "create"
+    result = await _run(*pages)
+    assert _rows(result)["good.md"][0] == "create"
+    bad = _rows(result)["bad.md"]
+    if reason is None:
+        assert bad[0] == "create"
+        entry = await KbService().get_entry(TENANT, "bad")
+        assert entry is not None and entry.metadata[field.split(":")[0]] == "extra"
+    else:
+        assert bad[0] == "skip"
+        assert reason in (bad[2] or "")
+        assert await KbService().get_entry(TENANT, "bad") is None
+
+
+@pytest.mark.asyncio
 async def test_a_candidate_needs_include_candidates() -> None:
     page = _page("cand.md", header=CONFIRMED.replace("confirmed", "candidate"))
     refused = await _run(page)

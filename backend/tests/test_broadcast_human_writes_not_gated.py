@@ -182,4 +182,7 @@ def test_tenant_model_has_no_gate_flag() -> None:
 
 
 def test_settings_file_offers_no_gate_policy() -> None:
-    assert "announce_gate_enabled" not in TenantPolicies.model_fields
+    # Older files still carry the key, so it is accepted, but never written out.
+    policies = TenantPolicies.model_validate({"announce_gate_enabled": True})
+    assert "announce_gate_enabled" not in policies.model_dump()
+    assert "announce_gate_enabled" not in policies.model_dump(exclude_unset=True)

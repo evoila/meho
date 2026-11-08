@@ -165,7 +165,7 @@ jobs:
           echo "Probing: $ARTIFACTS_URL"
           # The Harbor API returns a JSON array; jq counts how many
           # artifacts the repo holds. We assert >=1 (an actual cache fill).
-          COUNT=$(curl -fsS "$ARTIFACTS_URL" | jq 'length')
+          COUNT=$(curl -fsS --retry 3 --retry-all-errors "$ARTIFACTS_URL" | jq 'length')
           echo "artifacts in Harbor cache for $HARBOR_REPO_PATH: $COUNT"
           if [ "$COUNT" -lt 1 ]; then
             echo

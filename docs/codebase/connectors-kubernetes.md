@@ -466,6 +466,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
 | `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
 | `k8s.secret.delete`    | **destructive** | `CoreV1Api.delete_namespaced_secret`. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_secret_write.py`. |
+| `k8s.finalizer.remove` | **destructive** | `ApiClient.call_api` JSON Patch: tests the finalizer list, then writes it without the named finalizer, on one object that already has a deletion time. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_finalizer.py`. |
 
 **`k8s.cronjob.run` (`ops_cronjob.py`).** Starts a CronJob's job without
 waiting for its schedule, the way `kubectl create job <name>
@@ -731,6 +732,43 @@ removal of a Secret use the two ops in `ops_secret_write.py`, in the
   nothing waits for approval.
 
 Tests: `tests/test_connectors_k8s_secret_write.py`.
+
+### Free a stuck object -- `k8s.finalizer.remove`
+
+A finalizer is a hold: Kubernetes keeps an object that has a deletion time
+until every finalizer is gone. When the controller's clean-up can never
+succeed, the object stays "being deleted". `k8s.finalizer.remove`
+(`ops_finalizer.py`, destructive, `requires_approval=True`, group `config`)
+removes exactly one named finalizer from exactly one named object, through
+approval and the audit log.
+
+- Takes `group` (empty for a core kind), `version`, `plural`, optional
+  `namespace`, `name`, `finalizer`, and optional `expected_finalizers`.
+  Result: `{group, version, plural, namespace, name, finalizer, removed,
+  remaining_finalizers}`.
+- It refuses, and writes nothing, when the object is missing, has no deletion
+  time, does not have the named finalizer, or its finalizer list differs from
+  the list on the approval card (or from `expected_finalizers`). A core `secrets` object is refused (the API answer
+  carries the values); use `k8s.secret.delete`.
+- The write is a JSON Patch (`application/json-patch+json`): a `test` step on
+  the whole `/metadata/finalizers` list, then a `replace` without the named
+  finalizer. If the list changes between the read and the write, the API
+  server answers 422 and the op reports "changed while the call ran". Other
+  finalizers stay. It goes through `ApiClient.call_api`, so one code path
+  covers core kinds (`/api/...`) and custom resources (`/apis/...`).
+- The preview builder runs the same read and checks, so a refusal fails the
+  preview and nothing waits for approval. The `blast_radius.object` shows the
+  kind, name, deletion time and finalizers, and the preview carries a warning
+  that the controller's clean-up is skipped. `children` is empty and
+  `irreversibility` is `permanent`.
+- The preview hash covers the params only, so the handler checks the list
+  itself. In the approved run it reads the card the approver saw
+  (`approved_preview`) and refuses when the live list is different, so a
+  change while the request waited never removes a finalizer. A card without
+  a finalizer list is refused too. Outside an approved run, the optional
+  `expected_finalizers` (the list the preview showed) does the same check.
+
+Tests: `tests/test_connectors_k8s_finalizer_remove.py`.
 
 ### Governed guest-cluster kubeconfig read -- `k8s.secret.read_to_ref` (#3496)
 
@@ -1195,6 +1233,42 @@ How it behaves:
   stores a trace (`redaction.py`, `_wire_span.py`), so the recorded API
   answers hold no values text either
   (`test_trace_capture_records_no_values_text_and_no_secret_data`).
+
+### A node's disk and images -- `k8s.node.disk` / `k8s.node.images` (`ops_node_disk.py`)
+
+Two read-only ops (group `inventory`, risk level `safe`). They answer
+"has the node recovered, and is the big image still there?". Both take an
+optional `node`. Without it they read every node, at most 50, and set
+`incomplete` when more exist. A named node that does not exist gives an
+empty `rows` and `node_state: "not present"`.
+
+- `k8s.node.disk`: per node, the capacity, used, available bytes and the
+  used percent of the node file system, the image store (`image_fs`) and, on
+  newer kubelets, the container store (`container_fs`). The sizes come from
+  the kubelet summary, read through the API server
+  (`/api/v1/nodes/<node>/proxy/stats/summary`, needs the `nodes/proxy`
+  right). The conditions `DiskPressure`, `MemoryPressure` and `PIDPressure`
+  (status, reason, last change time) come from the node status. When the
+  summary cannot be read, `summary.state` is `unknown` with a short error
+  and the sizes are `null`. The conditions still show.
+- `k8s.node.images`: per node, the images of the node status (`names`,
+  `size_bytes`), biggest first, each with `used_by_running_pod`. The flag
+  comes from the pods that run on the node (field selector
+  `spec.nodeName`). A pod counts unless it is `Succeeded` or `Failed`. An
+  image matches by name or by digest, also for init containers and debug
+  (ephemeral) containers. `nodes[]` holds the totals: image count, total
+  bytes, unused count and bytes. When the pods cannot be read, the flag and
+  the unused totals are `null`, never `false`, and `nodes[].pods.state` says
+  why. A byte total is `null` when one of its images has no size, so it
+  never shows less disk use than there is.
+- The kubelet lists at most 50 images in the node status by default. A node
+  with 50 or more rows carries `list_may_be_cut: true`.
+- A 401 is raised, so the dispatcher can renew the login. Long answers
+  become a result handle like every list read.
+
+Example question: "is the big image still on the node?" -- call
+`k8s.node.images` with the node name, read the first row (the biggest), and
+call `k8s.node.disk` for the free space.
 
 ### Read-side Secret redaction (#3501, `redaction.py`)
 

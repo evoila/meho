@@ -213,7 +213,7 @@ def _body_key(tenant_id: uuid.UUID, body: str) -> tuple[uuid.UUID, str]:
 async def _store_metadata(session: AsyncSession, doc: Document, metadata: dict[str, Any]) -> None:
     """Write *metadata* to *doc*; also its passages (knowledge) or a new revision (memory)."""
     if doc.source == KB_SOURCE:
-        await update_head_metadata(session, doc, metadata)
+        await update_head_metadata(session, doc, metadata, SYSTEM_OPERATOR_SUB)
     else:
         doc.doc_metadata = metadata
         doc.updated_at = datetime.now(UTC)

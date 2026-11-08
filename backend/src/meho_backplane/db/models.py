@@ -1153,6 +1153,10 @@ class KbRevision(Base):
     * ``embedding_model`` / ``chunker_version`` -- which embedding
       model and chunking rule indexed this body. ``None`` on backfill
       rows, because the migration cannot know them.
+    * ``entry_metadata`` -- the entry's metadata (the header) as of this
+      revision. A change to the body or to the metadata adds a
+      revision, so one revision id names one exact state of the entry.
+      ``None`` on rows stored before this column existed.
     * ``created_at`` -- when the revision was stored.
     """
 
@@ -1180,6 +1184,10 @@ class KbRevision(Base):
     origin: Mapped[str] = mapped_column(Text, nullable=False)
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunker_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entry_metadata: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -9742,7 +9750,7 @@ class OperationSearchRecord(Base):
 
     Written by :mod:`meho_backplane.operation_picks.recorder`, only when
     ``REQUEST_USAGE_RETENTION_DAYS`` is set. The request usage retention job
-    deletes rows older than that window. Migration ``0146`` makes the table.
+    deletes rows older than that window. Migration ``0147`` makes the table.
 
     * ``transport`` -- ``mcp``, ``rest`` or ``agent`` (a hosted agent run).
     * ``mode`` -- ``ranked`` (a query) or ``exact`` (one ``op_id``).

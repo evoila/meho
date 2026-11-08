@@ -35,6 +35,7 @@ from meho_backplane.kb.schemas import (
 )
 from meho_backplane.kb.service import KbService
 from meho_backplane.kb.similar import SIMILAR_LIMIT, check_new_entry, find_similar_entries
+from meho_backplane.kb.stale_revision import KbStaleRevisionError
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.tools.knowledge import _similar_check_payload
@@ -315,14 +316,28 @@ async def test_create_anyway_skips_the_search() -> None:
     mock.assert_not_awaited()
 
 
+async def _current_revision(tenant_id: uuid.UUID, slug: str) -> uuid.UUID:
+    entry = await KbService().get_entry(tenant_id, slug)
+    assert entry is not None
+    assert entry.revision_id is not None
+    return entry.revision_id
+
+
 async def test_update_of_an_existing_slug_is_not_checked() -> None:
     tenant = uuid.uuid4()
     await _seed(tenant, "snapshot-revert")
+    revision = await _current_revision(tenant, "snapshot-revert")
     mock, _ = _fake_retrieve(tenant, close={"snapshot-revert": 0.99})
     with patch("meho_backplane.kb.similar.retrieve", mock):
         assert (
             await check_new_entry(
-                tenant, "snapshot-revert", "new text", None, actor_sub="a", may_change_any=True
+                tenant,
+                "snapshot-revert",
+                "new text",
+                None,
+                actor_sub="a",
+                may_change_any=True,
+                expected_revision=revision,
             )
             is None
         )
@@ -334,12 +349,63 @@ async def test_update_of_an_existing_slug_is_not_checked() -> None:
             actor_sub="a",
             may_change_any=True,
             dry_run=True,
+            expected_revision=revision,
         )
     mock.assert_not_awaited()
     assert dry is not None
     assert dry.slug_exists is True
     assert dry.would_write is True
     assert dry.similar == []
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_a_missing_or_old_revision_is_refused_like_the_write(dry_run: bool) -> None:
+    """The check refuses what the write would refuse, also in a dry run."""
+    tenant = uuid.uuid4()
+    await _seed(tenant, "snapshot-revert")
+    old = await _current_revision(tenant, "snapshot-revert")
+    await KbService().create_entry(
+        tenant, "snapshot-revert", "changed text", None, actor_sub="b", expected_revision=old
+    )
+    mock = AsyncMock()
+    with patch("meho_backplane.kb.similar.retrieve", mock):
+        with pytest.raises(KbStaleRevisionError) as missing:
+            await check_new_entry(
+                tenant,
+                "snapshot-revert",
+                "new text",
+                None,
+                actor_sub="a",
+                may_change_any=True,
+                dry_run=dry_run,
+            )
+        with pytest.raises(KbStaleRevisionError) as stale:
+            await check_new_entry(
+                tenant,
+                "snapshot-revert",
+                "new text",
+                None,
+                actor_sub="a",
+                may_change_any=True,
+                dry_run=dry_run,
+                expected_revision=old,
+            )
+        with pytest.raises(KbStaleRevisionError) as gone:
+            await check_new_entry(
+                tenant,
+                "never-written",
+                "new text",
+                None,
+                actor_sub="a",
+                may_change_any=True,
+                dry_run=dry_run,
+                expected_revision=old,
+            )
+    mock.assert_not_awaited()
+    assert missing.value.detail.cause == "exists"
+    assert stale.value.detail.cause == "stale"
+    assert stale.value.detail.current_revision_number == 2
+    assert gone.value.detail.cause == "gone"
 
 
 async def test_dry_run_gives_the_same_list_and_says_whether_it_would_write() -> None:
@@ -418,7 +484,14 @@ async def test_dry_run_on_another_authors_slug_is_refused_like_the_write() -> No
                 dry_run=True,
             )
         own = await check_new_entry(
-            tenant, "my-note", "new text", None, actor_sub="me", may_change_any=False, dry_run=True
+            tenant,
+            "my-note",
+            "new text",
+            None,
+            actor_sub="me",
+            may_change_any=False,
+            dry_run=True,
+            expected_revision=await _current_revision(tenant, "my-note"),
         )
     assert info.value.slug == "team-runbook"
     assert own is not None

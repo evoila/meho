@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0146_create_operation_pick_records`` (#4750).
+"""Tests for Alembic migration ``0147_create_operation_pick_records`` (#4750).
 
 The migration adds the operation search and call record tables, each with
 two indexes. The tests check that ``upgrade`` creates them with the
@@ -25,8 +25,8 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.db.models import OperationCallRecord, OperationSearchRecord
 from meho_backplane.settings import get_settings
 
-_REVISION = "0146"
-_DOWN_REVISION = "0145"
+_REVISION = "0147"
+_DOWN_REVISION = "0146"
 _MODELS = (OperationSearchRecord, OperationCallRecord)
 
 
@@ -36,7 +36,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0146.db"
+    db_path = tmp_path / "migration_0147.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

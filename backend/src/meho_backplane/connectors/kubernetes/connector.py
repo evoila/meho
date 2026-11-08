@@ -125,9 +125,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "cluster": (
         "Use for cluster-identity questions before any per-resource "
         "drill-in: 'which K8s flavour / distribution / version is this "
-        "target running?' The single ``k8s.about`` op returns the "
+        "target running?' ``k8s.about`` returns the "
         "product slug (rke2 / k3s / eks / gke / aks / vanilla) plus "
-        "git_version. Call this first when the agent needs to pick a "
+        "git_version. ``k8s.meho.release.info`` shows what a MEHO "
+        "install on the cluster runs: image tag and digest, chart "
+        "version, Helm revisions, and the /version and /ready answers "
+        "of a host you give. Call this first when the agent needs to pick a "
         "version-flavoured doc page from the knowledge base or to "
         "decide whether RKE2-specific vs vanilla-K8s behaviour applies "
         "to a downstream op."
@@ -1743,6 +1746,39 @@ class KubernetesConnector(Connector):
 
         return await k8s_cronjob_list(self, target, operator, params)
 
+    async def k8s_meho_release_info(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.meho.release.info``."""
+        from meho_backplane.connectors.kubernetes.ops_meho_release import k8s_meho_release_info
+
+        return await k8s_meho_release_info(self, target, operator, params)
+
+    async def k8s_node_disk(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.node.disk``."""
+        from meho_backplane.connectors.kubernetes.ops_node_disk import k8s_node_disk
+
+        return await k8s_node_disk(self, target, operator, params)
+
+    async def k8s_node_images(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.node.images``."""
+        from meho_backplane.connectors.kubernetes.ops_node_disk import k8s_node_images
+
+        return await k8s_node_images(self, target, operator, params)
+
     async def k8s_secret_read_to_ref(
         self,
         operator: Operator,
@@ -1812,6 +1848,17 @@ class KubernetesConnector(Connector):
         from meho_backplane.connectors.kubernetes.ops_secret_write import k8s_secret_delete
 
         return await k8s_secret_delete(self, target, operator, params)
+
+    async def k8s_finalizer_remove(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.finalizer.remove``."""
+        from meho_backplane.connectors.kubernetes.ops_finalizer import k8s_finalizer_remove
+
+        return await k8s_finalizer_remove(self, target, operator, params)
 
     async def k8s_auth_can_i(
         self,

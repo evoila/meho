@@ -1554,6 +1554,13 @@ class Settings(BaseModel):
     # Only the owner tenant can write them. Read through
     # :attr:`kb_shared_tenant_set`. Set via ``KB_SHARED_TENANT_IDS``.
     kb_shared_tenant_ids: str = Field(default="")
+    # Lowest cosine score (0 to 1) at which an existing knowledge entry
+    # counts as similar to a new one. A create of a new slug that finds
+    # such an entry writes nothing and lists it (kb/similar.py). With the
+    # default embedding model a reworded copy scores about 0.9 and a
+    # different note on the same product about 0.8. Set via
+    # ``KB_SIMILAR_MIN_SCORE``.
+    kb_similar_min_score: float = Field(default=0.85, ge=0.0, le=1.0)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -1787,6 +1794,9 @@ class Settings(BaseModel):
     approval_default_ttl_seconds: int = Field(default=14 * 24 * 3600, ge=60)
     approval_expiry_enabled: bool = True
     approval_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
+    # #5026 -- an approved run that started and stored no result after this
+    # many minutes is listed for operators to check ("outcome unknown").
+    approval_outcome_unknown_after_minutes: int = Field(default=15, ge=1, le=1440)
     # #3151 — op-id patterns a service-principal standing grant may never
     # cover (delete-shaped ops are the floor of what runs unattended, never
     # grantable). See ``operations.service_grants``.
@@ -2828,6 +2838,7 @@ def get_settings() -> Settings:
         ),
         gsm_param_allowed_projects=os.environ.get("GSM_PARAM_ALLOWED_PROJECTS", "").strip(),
         kb_shared_tenant_ids=os.environ.get("KB_SHARED_TENANT_IDS", "").strip(),
+        kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -3030,6 +3041,10 @@ def get_settings() -> Settings:
         ),
         approval_expiry_tick_interval_seconds=int(
             os.environ.get("APPROVAL_EXPIRY_TICK_INTERVAL_SECONDS", "300"),
+        ),
+        # #5026 -- when a started run with no result counts as outcome unknown.
+        approval_outcome_unknown_after_minutes=int(
+            os.environ.get("APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES", "15"),
         ),
         # #3151 — delete-shaped op-id patterns never grantable to a service
         # principal. Comma-separated override; empty keeps the default set.

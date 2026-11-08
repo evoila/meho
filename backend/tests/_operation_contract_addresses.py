@@ -110,6 +110,7 @@ NOT_CALLER_ADDRESSES: Final[Mapping[tuple[str, str], str]] = {
         "to the portal in target_portal_address, which carries the marker"
     ),
     ("net.dns_lookup", "resolver"): BUILT_IN_CHECK_REASON,
+    ("net.fingerprint", "host"): BUILT_IN_CHECK_REASON,
     ("net.http_probe", "url"): BUILT_IN_CHECK_REASON,
     ("net.ntp_check", "host"): BUILT_IN_CHECK_REASON,
     ("net.path_mtu", "host"): BUILT_IN_CHECK_REASON,

@@ -80,6 +80,7 @@ from meho_backplane.memory.schemas import (
 from meho_backplane.memory.snippet import query_snippet
 from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
+from meho_backplane.retrieval.time_window import TimeWindow
 
 __all__ = ["MemoryService"]
 
@@ -721,6 +722,7 @@ class MemoryService:
         tag: str | None = None,
         include_expired: bool = False,
         limit: int = 100,
+        target_name: str | None = None,
     ) -> list[MemoryEntry]:
         """List memories the operator can read in this tenant.
 
@@ -738,6 +740,10 @@ class MemoryService:
         in-process filtering so common cases (some rows expired, some
         belong to other operators in the tenant) still return a full
         page when filters trim the candidate pool.
+
+        ``target_name`` keeps only the notes saved for that target (the
+        ``target`` and ``user-target`` scopes), matched exactly in SQL, so
+        notes of other targets never use up the candidate pull.
         """
         if limit < 1:
             return []
@@ -749,7 +755,7 @@ class MemoryService:
         # case. The 4x multiplier is empirical: tenant-shared corpora
         # rarely have >25% expired/cross-user rows.
         candidate_pull = max(limit * 4, 200)
-        docs = await self._list_documents(operator, candidate_kinds, candidate_pull)
+        docs = await self._list_documents(operator, candidate_kinds, candidate_pull, target_name)
 
         entries: list[MemoryEntry] = []
         for doc in docs:
@@ -774,6 +780,8 @@ class MemoryService:
         *,
         scope: MemoryScope | None = None,
         limit: int = 10,
+        metadata_filters: dict[str, Any] | None = None,
+        time_window: TimeWindow | None = None,
     ) -> list[MemoryEntrySearchHit]:
         """Hybrid BM25 + cosine search over the operator's eligible memories.
 
@@ -791,6 +799,12 @@ class MemoryService:
         * ``scope=<scope>`` narrows the eligibility to that scope's kind.
         * User-scoped rows match only the operator's ``sub``; tenant and
           target rows are shared within the tenant.
+        * ``metadata_filters`` (#5726) narrows by metadata containment, for
+          example ``{"status": "confirmed", "tags": ["vm"]}``: a list value
+          matches an entry that holds every listed item. ``time_window``
+          limits ``confirmed_at`` and the time of the last write. Both run
+          in the candidate SQL, next to the eligibility rule, so they can
+          only narrow what the caller may see.
 
         No Python post-filter trims the result: what the substrate returns
         is already eligible. An empty list is the same answer for "no
@@ -804,6 +818,8 @@ class MemoryService:
             source=MEMORY_SOURCE,
             limit=limit,
             memory_eligibility=self._rbac.eligibility(operator, scope),
+            metadata_filters=metadata_filters,
+            time_window=time_window,
         )
         results: list[MemoryEntrySearchHit] = []
         for hit in hits:
@@ -888,6 +904,7 @@ class MemoryService:
         operator: Operator,
         candidate_kinds: list[str],
         candidate_pull: int,
+        target_name: str | None = None,
     ) -> list[Document]:
         """Pull the candidate ``Document`` rows for an in-process filter pass.
 
@@ -895,17 +912,17 @@ class MemoryService:
         memories surface first; matches the operator-intuition contract
         ("show me what I just wrote") for the list verb.
         """
+        stmt = select(Document).where(
+            Document.tenant_id == operator.tenant_id,
+            Document.source == MEMORY_SOURCE,
+            Document.kind.in_(candidate_kinds),
+        )
+        if target_name is not None:
+            stmt = stmt.where(Document.doc_metadata["target_name"].as_string() == target_name)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             result = await session.execute(
-                select(Document)
-                .where(
-                    Document.tenant_id == operator.tenant_id,
-                    Document.source == MEMORY_SOURCE,
-                    Document.kind.in_(candidate_kinds),
-                )
-                .order_by(Document.updated_at.desc())
-                .limit(candidate_pull)
+                stmt.order_by(Document.updated_at.desc()).limit(candidate_pull)
             )
             return list(result.scalars().all())
 

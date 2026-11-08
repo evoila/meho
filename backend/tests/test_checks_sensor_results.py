@@ -264,8 +264,7 @@ async def test_record_history_stale_result_appends_no_duplicate() -> None:
                 evaluated_at=t0,
                 record_history=True,
             )
-            is True
-        )
+        ).changed is True
         # Same timestamp again -> stale/idempotent, must not append a 2nd row.
         assert (
             await record_sensor_result(
@@ -277,8 +276,7 @@ async def test_record_history_stale_result_appends_no_duplicate() -> None:
                 evaluated_at=t0,
                 record_history=True,
             )
-            is False
-        )
+        ).changed is False
         await session.commit()
     assert await _count_results(sensor_id) == 1
 
@@ -316,7 +314,7 @@ async def test_record_history_appends_row_for_unconfirmed_soft_reading() -> None
         await session.commit()
 
     # retry_times=2 holds the first differing reading soft: nothing commits...
-    assert committed is False
+    assert committed.changed is False
     read = await SensorAdminService().get(_TENANT_A, sensor_id)
     assert read is not None
     assert read.last_state == "unknown"

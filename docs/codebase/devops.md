@@ -908,9 +908,9 @@ up a realm by hand. It is **on by default** (`coreKeycloak.enabled:
 true`, since chart 0.2.0). An install that brings its own Keycloak sets it
 to `false`.
 
-**What it needs.** The built-in PostgreSQL (`corePostgres.enabled:
-true`; the schema refuses `coreKeycloak` without it) and five Secrets
-that the install's secrets Job creates. Keycloak only reads them:
+**What it needs.** A PostgreSQL (the built-in one, or your own: see
+"Your own PostgreSQL" below) and five Secrets that the install's secrets
+Job creates. Keycloak only reads them:
 
 | Secret (default name) | Keys | Used for |
 | --- | --- | --- |
@@ -933,6 +933,18 @@ secrets Job would check that Secret, not make the core one, and the
 Keycloak pod would wait for it forever. The render stops with one sentence
 that names the key and the expected Secret (#4591). The pod does not start
 until all five exist.
+
+**Your own PostgreSQL.** With `corePostgres.enabled: false`, Keycloak
+connects to the server in `coreKeycloak.database.host` and needs its own
+database and role there. Either `coreKeycloak.database.create.enabled`
+makes them (a `pre-install,pre-upgrade` hook Job, `database-job.yaml`, safe
+to run twice, with an admin login from `create.adminSecret.name`), or your
+database team makes them and you name them in `database.name`, `user` and
+`passwordSecret`. `database.sslMode` sets the TLS mode; `verify-ca` and
+`verify-full` also need `database.caBundle`, a ConfigMap with the CA
+certificate that both pods mount. The built-in PostgreSQL keeps the fixed
+names, so its render does not change. See
+[core-secrets.md](core-secrets.md).
 
 **What it renders.**
 
@@ -1051,7 +1063,14 @@ newer.
 With `coreKeycloak.enabled` on, the chart sets every Keycloak setting of the
 backplane itself (helper `meho.keycloakSettings` in
 `templates/_core-keycloak.tpl`). The values come from the subchart and the
-realm file, not from `config.*` or `keycloakAdmin.*`:
+realm file, not from `config.*` or `keycloakAdmin.*`. The chart also
+fills in the Secret names and the check runner client id, so the web
+console, the check runner and the Keycloak admin each turn on with one
+switch (#4766): `uiConsole.enabled` (with `UI_KEYCLOAK_CLIENT_ID` and the
+Secret `<release>-core-ui-auth`), `checkRunner.enabled` (with
+`CHECK_RUNNER_CLIENT_ID=meho-check-runner` and the Secret
+`<release>-core-check-runner`). `keycloakAdmin.enabled` is not needed:
+
 
 | Setting | Value |
 | --- | --- |
@@ -1087,13 +1106,24 @@ Keycloak:
 - `corePostgres.existingSecrets.keycloak`,
   `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` or
   `checkRunner.clientSecret.secretName` names a Secret other than the
-  matching `<release>-core-…` one, for example
+  matching `<release>-core-…` one;
+- `config.uiKeycloakClientId`, `checkRunner.clientId`, `keycloakAdmin.url`
+  or `keycloakAdmin.clientId` is set to anything but the value in the table
+  above (or `meho-check-runner` for the check runner). For example
   `uiConsole.secretName must be empty or "meho-core-ui-auth" while
-  coreKeycloak.enabled is on: the built-in Keycloak reads only that
-  Secret.`
+  coreKeycloak.enabled is on: the chart sets it itself.`
+
+Each of these keys is empty by default, so the operator sets none of them.
 
 The schema needs `keycloak.issuer`, `config.keycloakIssuerUrl` and
-`config.keycloakAudience` only while the built-in Keycloak is off.
+`config.keycloakAudience` only while the built-in Keycloak is off. It needs
+`uiConsole.secretName` and `config.uiKeycloakClientId` (with
+`uiConsole.enabled`), `checkRunner.clientId` and
+`checkRunner.clientSecret.secretName` (with `checkRunner.enabled`), and
+`keycloakAdmin.url` and `keycloakAdmin.clientId` (with
+`keycloakAdmin.enabled`) only while it is off. The helm test pod
+`test-agent-runtime-config` also runs with the built-in Keycloak and
+`agent.enabled`.
 
 **HTTPS inside the cluster.** The realm keeps `sslRequired: external`, and
 pods still call the Service over plain HTTP. That works for every pod
@@ -1189,7 +1219,7 @@ docs/codebase/core-vault-init.md.
 
 | Object | Shape |
 | --- | --- |
-| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao-ubi:2.7.1` pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data`; a second container `unseal` (below) |
+| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao:2.7.1` (the plain image, which runs on x86-64-v2 CPUs) pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data`; a second container `unseal` (below) |
 | ConfigMap `<release>-vault-config` | `server.hcl` at `/openbao/config`: raft storage, a plain-HTTP listener on 8200 (`tls_disable`), `ui = false`, the `file` audit device with `file_path = "stdout"`. A changed config restarts the pod (checksum annotation) |
 | Service `<release>-vault` | port 8200; `publishNotReadyAddresses: true` |
 | Service `<release>-vault-internal` | headless, ports 8200 and 8201; `publishNotReadyAddresses: true`. It gives the pod its DNS name, which sets `BAO_API_ADDR` and `BAO_CLUSTER_ADDR` |
@@ -1430,7 +1460,7 @@ them).
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
 | `corePostgres.enabled` / `coreKeycloak.enabled` / `coreVault.enabled` | `true` | Built-in core parts (#4041), on by default since chart 0.2.0. When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). A bring-your-own install sets all three to `false`. |
 | `corePostgres.existingSecrets.{superuser,keycloak}` / `coreKeycloak.existingSecrets.bootstrap` | `""` | Your own Secret instead of a made one; the Job only checks its keys. |
-| `coreKeycloak.enabled` | `true` | Also deploys the built-in Keycloak subchart (#4040). When true it needs `corePostgres.enabled: true`, `coreKeycloak.hostname` (equal to `ingress.host`) and `coreKeycloak.firstTenantId` (a UUID). See [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak). |
+| `coreKeycloak.enabled` | `true` | Also deploys the built-in Keycloak subchart (#4040). When true it needs `coreKeycloak.hostname` (equal to `ingress.host`) and `coreKeycloak.firstTenantId` (a UUID). With `corePostgres.enabled: false` it also needs `coreKeycloak.database.host` and a password Secret, or `coreKeycloak.database.create` (a Job makes the database). See [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak). |
 | `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](../architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
 | `config.ingestJobTimeoutSeconds` | `""` | Async ingest-job watchdog budget override, in seconds (#2318, hardens #2275). Empty (default) omits `INGEST_JOB_TIMEOUT_SECONDS` so the backend's built-in 30-min ceiling applies; set a positive number to raise it for a slow shared executor / large spec fleet. Set via a values file or `--set-string` (bare `--set` coerces to a number and fails the `type: string` schema — as with every `*Seconds` knob here). Non-finite (`inf`/`nan`), non-positive, or malformed values are rejected at the backend (warn + fall back to 30 min), so the watchdog can never be disabled. |
 

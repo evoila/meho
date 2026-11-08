@@ -93,7 +93,11 @@ from meho_backplane.ui.routes.account import build_account_router
 from meho_backplane.ui.routes.agents import build_agents_router
 from meho_backplane.ui.routes.agents.grants import build_agent_grants_router
 from meho_backplane.ui.routes.agents.runs import build_runs_router
-from meho_backplane.ui.routes.approvals import build_approvals_router, build_in_order_router
+from meho_backplane.ui.routes.approvals import (
+    build_approvals_router,
+    build_in_order_router,
+    build_outcome_check_router,
+)
 from meho_backplane.ui.routes.audit import build_audit_router
 from meho_backplane.ui.routes.automation import build_automation_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
@@ -103,6 +107,7 @@ from meho_backplane.ui.routes.conventions import build_conventions_router
 from meho_backplane.ui.routes.corpus import build_corpus_router
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.event_source import build_event_source_router
+from meho_backplane.ui.routes.first_start import build_first_start_router
 from meho_backplane.ui.routes.grants import build_grants_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.keycloak import build_keycloak_router
@@ -136,6 +141,7 @@ __all__ = [
     "build_conventions_router",
     "build_corpus_router",
     "build_dashboard_router",
+    "build_first_start_router",
     "build_kb_router",
     "build_keycloak_router",
     "build_memory_router",
@@ -244,6 +250,8 @@ def build_router() -> APIRouter:
     # approvals router's ``/ui/approvals/{request_id}`` slug route.
     router.include_router(build_in_order_router())
     router.include_router(build_approvals_router())
+    # Mark a run with an unknown outcome as checked (#5026).
+    router.include_router(build_outcome_check_router())
     # Scheduler lands ``/ui/scheduler`` + ``/ui/scheduler/{trigger_id}`` +
     # the literal ``/ui/scheduler/create`` + ``/ui/scheduler/validate-cron``
     # + ``/ui/scheduler/{id}/cancel`` write routes (G10.8-T6 #1826); the
@@ -327,6 +335,9 @@ def build_router() -> APIRouter:
     # ``{slug}`` route, so no shadowing concern against the stubs aggregate,
     # but registered before it for consistency with the other surfaces.
     router.include_router(build_account_router())
+    # First-start checks page: ``/ui/first-start``, the same list as the public
+    # ``GET /first-start`` endpoint. Literal path, registered before the stubs.
+    router.include_router(build_first_start_router())
     # Vault / secrets console KV browser (G10.18-T1 #1956): ``/ui/vault`` +
     # ``/ui/vault/list`` + ``/ui/vault/read`` + ``/ui/vault/versions``. The
     # literal sub-route segments register before any future ``{param}``

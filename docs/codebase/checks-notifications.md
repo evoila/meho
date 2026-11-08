@@ -171,6 +171,32 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    only the shown members, never one the `_MAX_MEMBER_LINES` cut dropped;
    a Dashboard mail that lost its claim mails its `member_changes` riders
    one by one as "new problem" notices instead (see below).
+   Since #4128 a warning (a notice whose state is `unknown`,
+   `degraded` or `critical`) is skipped before the flap window when every
+   Sensor it is about has an active acknowledgement: the member of a
+   "new problem" notice, or the non-green members of a Dashboard notice.
+   A notice with no member is never skipped. The log is
+   `checks_notify_skipped_acknowledged`. An all-clear is still sent. If
+   the acknowledgement read fails, the mail is sent
+   (`checks_notify_acknowledgement_read_failed`). The acknowledgement
+   ends when the Sensor gets worse, in the same transaction as that
+   result, before this check runs, so the worse state mails. When the
+   acknowledgement's time is up and the Sensor still fails, no memo
+   moves, so the runner tells the transition detector
+   (`investigate_on_transition(acknowledgement_expired=True)`), which
+   builds an "acknowledgement ended" change (`MemberChange` with
+   `acknowledgement_ended`, both states the member's counted state) for
+   each of the Sensor's Dashboards: its own notice when the Dashboard
+   state did not move, a rider on the Dashboard mail when it did. The
+   mail reads "acknowledgement ended, `<member>` still `<state>`" and
+   runs the same gates as a "new problem" notice, with one difference:
+   the flap window never holds it back. The warning that was
+   acknowledged claimed the member's window before the acknowledgement,
+   so a short acknowledgement would end inside it. The notice still
+   claims that window when it is free, but it is sent whether or not
+   the claim wins. The runner sends it once per ended acknowledgement.
+   A member that is green as the Dashboard counts it, or that also got
+   worse with that result, gets no such change.
 4. **Outcome logging.** `checks_notify_sent` (info, with
    `recipient_count`) on delivery; `checks_notify_failed` (warning, with
    the transport's stable reason code) on a `sent=False` result or an

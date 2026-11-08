@@ -564,7 +564,10 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
     result (not only state changes) because a ``for:`` hold expiring flips a
     Dashboard non-green with no sensor-state change. An *unconfirmed*
     reading never changes ``last_state``, so the fold the detector
-    recomputes sees no edge from it.
+    recomputes sees no edge from it. The detector is also told when this
+    result ended the Sensor's acknowledgement because its time was up
+    (#4128): no memo moves then, so the detector itself puts the warning
+    mail back for a Sensor that still fails.
     """
     evaluated_at = datetime.now(UTC)
     # #2756: persist a per-tick evidence-history row alongside the projection
@@ -575,7 +578,7 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
     record_history = get_settings().checks_evidence_retention_days > 0
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        await record_sensor_result(
+        recorded = await record_sensor_result(
             session,
             sensor_id=snap.id,
             state=outcome.state,
@@ -595,7 +598,11 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
                 not_later_than=evaluated_at + timedelta(seconds=row.retry_backoff_seconds),
             )
         await session.commit()
-    await investigate_on_transition(sensor_id=snap.id, tenant_id=snap.tenant_id)
+    await investigate_on_transition(
+        sensor_id=snap.id,
+        tenant_id=snap.tenant_id,
+        acknowledgement_expired=recorded.acknowledgement_ended == "expired",
+    )
 
 
 async def _evaluate_and_record(snap: _SensorSnapshot) -> None:

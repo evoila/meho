@@ -25,16 +25,19 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.checks.acknowledgement import AckEndReason, settle_acknowledgement
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorResult, SensorStatus
 from meho_backplane.scheduler.cron import next_fire_after
 
 __all__ = [
+    "RecordedResult",
     "accelerate_sensor_next_fire",
     "advance_sensor_next_fire",
     "claim_due_sensors",
@@ -43,6 +46,22 @@ __all__ = [
     "park_sensor",
     "record_sensor_result",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedResult:
+    """What :func:`record_sensor_result` did with one evaluation.
+
+    :attr:`changed` is true when the *committed* state changed, so #2506's
+    ``for:`` hold-time hysteresis measures confirmed time.
+    :attr:`acknowledgement_ended` says how this result ended the Sensor's
+    acknowledgement (#4128), or ``None``. The runner hands an ``expired``
+    end to the transition detector, so the warning mail comes back for a
+    Sensor that still fails although no memo moved.
+    """
+
+    changed: bool
+    acknowledgement_ended: AckEndReason | None = None
 
 
 async def create_sensor(
@@ -234,14 +253,17 @@ async def record_sensor_result(
     evidence: dict[str, object],
     evaluated_at: datetime,
     record_history: bool = False,
-) -> bool:
-    """Record one evaluation onto *sensor_id*'s projection; return state-committed.
+) -> RecordedResult:
+    """Record one evaluation onto *sensor_id*'s projection; say what changed.
 
     Updates ``last_value`` / ``last_evidence`` / ``last_evaluated_at`` on every
     accepted result, then commits ``last_state`` / ``state_since`` through
     :func:`_commit_through_confirmation_gate` (#2799's soft/hard-state gate) --
-    returning ``True`` iff the *committed* state changed, so #2506's ``for:``
-    hold-time hysteresis measures confirmed time. When *record_history* is true
+    the returned :attr:`RecordedResult.changed` is ``True`` iff the
+    *committed* state changed, so #2506's ``for:`` hold-time hysteresis
+    measures confirmed time. The result also says whether it ended the
+    Sensor's acknowledgement (#4128,
+    :attr:`RecordedResult.acknowledgement_ended`). When *record_history* is true
     it also appends a per-tick :class:`~meho_backplane.db.models.SensorResult`
     row via :func:`_append_evidence_row` (#2756) **in the same transaction** as
     the projection update, so history and projection cannot diverge; the
@@ -252,7 +274,7 @@ async def record_sensor_result(
 
     **Monotonicity guard.** A result whose ``evaluated_at`` is not strictly
     newer than the row's recorded ``last_evaluated_at`` is ignored (returns
-    ``False`` without mutating the projection **or appending history**).
+    ``changed=False`` without mutating the projection **or appending history**).
     #2505's runner is the single serialised evaluator, but a retried or
     reordered persist -- the gateway batch-post (#2415-T3) can deliver remote
     results out of order -- must not overwrite a newer projection with a stale
@@ -262,17 +284,17 @@ async def record_sensor_result(
     trend query's keyset pagination relies on.
 
     A ``sensor_id`` that names no row (deleted between an evaluation and the
-    persist) returns ``False`` without raising -- "nothing to record".
+    persist) returns ``changed=False`` without raising -- "nothing to record".
     """
     row = await session.get(Sensor, sensor_id)
     if row is None:
-        return False
+        return RecordedResult(changed=False)
     if row.last_evaluated_at is not None and _as_utc(evaluated_at) <= _as_utc(
         row.last_evaluated_at
     ):
         # Stale or duplicate result -- keep the newer projection intact and
         # append no history row.
-        return False
+        return RecordedResult(changed=False)
     row.last_value = value
     row.last_evidence = evidence
     row.last_evaluated_at = evaluated_at
@@ -289,7 +311,11 @@ async def record_sensor_result(
             evidence=evidence,
             evaluated_at=evaluated_at,
         )
-    return await _commit_through_confirmation_gate(session, row, state, evaluated_at)
+    changed = await _commit_through_confirmation_gate(session, row, state, evaluated_at)
+    # #4128: end an acknowledgement whose time is up or whose Sensor got
+    # worse, with its audit row, in this same transaction.
+    ended = await settle_acknowledgement(session, row, evaluated_at)
+    return RecordedResult(changed=changed, acknowledgement_ended=ended)
 
 
 async def list_sensor_results(

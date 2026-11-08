@@ -22,6 +22,9 @@ Route inventory
   :class:`KbEntryCreate`. Returns :class:`KbEntry` with HTTP **201**
   for a genuinely-new slug and **200** for an in-place overwrite of an
   existing slug (#1845 -- ``201`` on overwrite is REST-incorrect).
+  A new slug with similar entries answers **409** and writes nothing,
+  unless ``create_anyway`` is set; ``dry_run`` answers **200** and
+  writes nothing (both with :class:`KbSimilarCheck`).
   Role: ``tenant_admin``.
 * ``DELETE /api/v1/kb/{slug}`` -- delete an entry. Returns 204 on
   success **and** when the row was already absent (idempotent
@@ -44,6 +47,11 @@ self-describing about authorship without an audit-log join; see
 * ``POST /api/v1/kb/ingest`` -- server-side bulk ingest. Body:
   :class:`IngestKbRequest`. Returns :class:`KbIngestionResult`. Role:
   ``tenant_admin``.
+* ``POST /api/v1/kb/import`` -- import pages sent in the request (#5728).
+  Body: :class:`~meho_backplane.kb.page_import.KbImportRequest`. Returns
+  :class:`~meho_backplane.kb.page_import.KbImportResult`. Caller: a
+  ``tenant_admin``, or a login with the ``kb_import_only`` claim (the
+  team wiki's CI job), which may reach this route and nothing else.
 
 Tenant scoping
 --------------
@@ -122,7 +130,7 @@ from typing import Any, Final
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from meho_backplane.api.v1._freetext_filter import (
@@ -137,13 +145,16 @@ from meho_backplane.kb import (
     KbIngestRootError,
     KbService,
 )
+from meho_backplane.kb.page_import import KbImportRequest, KbImportResult, import_pages
 from meho_backplane.kb.schemas import (
     InvalidKbSlugError,
     KbSharedNotAllowedError,
     KbSharedSlugError,
 )
 from meho_backplane.kb.service import KbListOrder
+from meho_backplane.kb.similar import KbSimilarCheck, check_new_entry
 from meho_backplane.lesson_header import LessonHeaderError
+from meho_backplane.middleware import verify_jwt_and_bind
 
 __all__ = ["router"]
 
@@ -166,6 +177,7 @@ _KB_OP_IDS: Final[dict[str, str]] = {
     "create": "kb.create",
     "delete": "kb.delete",
     "ingest": "kb.ingest",
+    "import": "kb.import",
 }
 
 #: Maximum length of the ``slug`` path parameter accepted by /{slug}
@@ -209,6 +221,17 @@ class KbEntryCreate(BaseModel):
     )
     body: str = Field(min_length=1)
     metadata: dict[str, Any] | None = None
+    create_anyway: bool = Field(
+        default=False,
+        description="Create a new slug even when similar entries exist.",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "Write nothing. Answer 200 with the similar entries and whether the write would go "
+            "through."
+        ),
+    )
 
 
 class KbEntryPreview(BaseModel):
@@ -422,11 +445,21 @@ async def show_kb(
     status_code=http_status.HTTP_201_CREATED,
     responses={
         http_status.HTTP_200_OK: {
-            "model": KbEntry,
+            "model": KbEntry | KbSimilarCheck,
             "description": (
                 "An existing entry with this slug was overwritten in "
                 "place (id + created_at preserved, updated_at bumped). "
-                "201 is returned only for a genuinely-new slug."
+                "201 is returned only for a genuinely-new slug. With "
+                "`dry_run`, the answer is a KbSimilarCheck and nothing "
+                "is written."
+            ),
+        },
+        http_status.HTTP_409_CONFLICT: {
+            "model": KbSimilarCheck,
+            "description": (
+                "The slug is new and similar entries exist. Nothing was "
+                "written. Update one of the listed entries, or send the "
+                "create again with `create_anyway`."
             ),
         },
     },
@@ -435,7 +468,7 @@ async def create_kb(
     body: KbEntryCreate,
     response: Response,
     operator: Operator = _require_admin,
-) -> KbEntry:
+) -> KbEntry | JSONResponse:
     """Create / re-index one kb entry under the operator's tenant.
 
     ``tenant_admin`` only -- ``operator`` role gets 403 via
@@ -469,6 +502,12 @@ async def create_kb(
     that was created. The body content is NOT bound -- the audit
     row is for the operation, not the document content (which lives
     in the ``documents`` table and is recoverable via ``kb.show``).
+
+    A new slug is first checked for similar entries
+    (:func:`~meho_backplane.kb.similar.check_new_entry`). When some exist
+    and ``create_anyway`` is not set, nothing is written and the answer
+    is **409** with a :class:`KbSimilarCheck`. ``dry_run`` writes nothing
+    and answers **200** with a :class:`KbSimilarCheck`.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_KB_OP_IDS["create"],
@@ -477,6 +516,26 @@ async def create_kb(
     )
     service = KbService()
     try:
+        check = await check_new_entry(
+            operator.tenant_id,
+            body.slug,
+            body.body,
+            body.metadata,
+            actor_sub=operator.sub,
+            may_change_any=True,
+            create_anyway=body.create_anyway,
+            dry_run=body.dry_run,
+        )
+        if check is not None:
+            structlog.contextvars.bind_contextvars(
+                audit_created=False, audit_similar_count=len(check.similar)
+            )
+            return JSONResponse(
+                status_code=http_status.HTTP_200_OK
+                if body.dry_run
+                else http_status.HTTP_409_CONFLICT,
+                content=check.model_dump(mode="json"),
+            )
         entry, created = await service.create_entry(
             tenant_id=operator.tenant_id,
             slug=body.slug,
@@ -648,5 +707,52 @@ async def ingest_kb(
         audit_skipped_count=result.skipped_count,
         audit_error_count=result.error_count,
         audit_conflict_count=result.conflict_count,
+    )
+    return result
+
+
+def _require_importer(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
+    """Admit a ``tenant_admin`` or a ``kb_import_only`` login; 403 for anyone else."""
+    if operator.kb_import_only or operator.tenant_role is TenantRole.TENANT_ADMIN:
+        return operator
+    structlog.get_logger(__name__).warning(
+        "insufficient_role",
+        operator_sub=operator.sub,
+        actual_role=operator.tenant_role.value,
+        required_role=TenantRole.TENANT_ADMIN.value,
+    )
+    raise HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail="insufficient_role",
+    )
+
+
+@router.post("/import", response_model=KbImportResult)
+async def import_kb_pages(
+    body: KbImportRequest,
+    operator: Operator = Depends(_require_importer),
+) -> KbImportResult:
+    """Import knowledge pages sent in the request into the caller's tenant (#5728).
+
+    The team wiki's CI job calls this after each merge, with the
+    ``kb_import_only`` login. A ``tenant_admin`` may call it too. Every
+    page gets one row in the answer: ``create``, ``update``,
+    ``unchanged`` or ``skip`` with the reason. ``dry_run`` writes
+    nothing. The rules are in :mod:`meho_backplane.kb.page_import`.
+
+    Binds ``audit_op_id="kb.import"`` + ``audit_op_class="write"`` and
+    the four counters. The page texts are never in the audit payload.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_KB_OP_IDS["import"],
+        audit_op_class="write",
+        audit_dry_run=body.dry_run,
+    )
+    result = await import_pages(body, tenant_id=operator.tenant_id, actor_sub=operator.sub)
+    structlog.contextvars.bind_contextvars(
+        audit_created_count=result.created_count,
+        audit_updated_count=result.updated_count,
+        audit_unchanged_count=result.unchanged_count,
+        audit_skipped_count=result.skipped_count,
     )
     return result

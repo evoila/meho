@@ -242,6 +242,13 @@ async def verify_mcp_jwt_and_bind(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="runner_scope_violation",
         )
+    if operator.kb_import_only:
+        # #5728: a login that may only import knowledge has no MCP surface.
+        _log.warning("kb_import_only_scope_violation", operator_sub=operator.sub, surface="mcp")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="kb_import_only_scope_violation",
+        )
     if not operator.tenant_chosen:
         # #5239: a session with no current tenant binds nothing, as the
         # REST status route does. The tenant fields hold a placeholder,

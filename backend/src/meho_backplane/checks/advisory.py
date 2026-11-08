@@ -59,6 +59,7 @@ Design contract (mirrors the #2550 mould):
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import structlog
@@ -67,6 +68,7 @@ from sqlalchemy import select
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.client import get_broadcast_client
+from meho_backplane.checks.acknowledgement import DashboardAckState, acknowledged_dashboards
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import CheckDashboard
 from meho_backplane.settings import get_settings
@@ -121,7 +123,9 @@ def _dedupe_key(
     delegated agent and its human principal each get their own reminder.
     An unbound actor renders as ``-``. A state change mints a new key,
     so escalation (``degraded`` -> ``critical``) re-announces
-    immediately; window expiry re-reminds on unchanged state.
+    immediately; window expiry re-reminds on unchanged state. *state* may
+    carry an acknowledgement segment (#4128, see :func:`_entry`), so an
+    acknowledgement and its end each mint a new key too.
 
     The two sub segments are free-form and the delimiter is ``:``, so
     two distinct ``(principal, actor)`` pairs could in principle render
@@ -138,8 +142,13 @@ def _dedupe_key(
 
 async def _non_green_dashboards(
     tenant_id: uuid.UUID,
-) -> list[tuple[uuid.UUID, str, str]]:
+) -> tuple[list[tuple[uuid.UUID, str, str]], dict[uuid.UUID, DashboardAckState]]:
     """Read ``(id, name, last_rollup_state)`` for non-green memo rows.
+
+    Also returns the acknowledgement state of those Dashboards (#4128):
+    whether every non-green member is acknowledged, and until when, and
+    when an acknowledgement of a member last ended. Same session; the
+    second read runs only when a row is non-green.
 
     One SELECT riding ``check_dashboard_tenant_idx``; rows whose memo is
     ``NULL`` (never transitioned) or outside :data:`_ADVISORY_STATES`
@@ -159,7 +168,52 @@ async def _non_green_dashboards(
             .order_by(CheckDashboard.name)
             .limit(_ADVISORY_MAX_DASHBOARDS)
         )
-        return [(row[0], row[1], row[2]) for row in rows.all()]
+        found = [(row[0], row[1], row[2]) for row in rows.all()]
+        if not found:
+            return [], {}
+        acked = await acknowledged_dashboards(
+            session, [dashboard_id for dashboard_id, _n, _s in found], datetime.now(UTC)
+        )
+        return found, acked
+
+
+def _entry(
+    dashboard_id: uuid.UUID,
+    name: str,
+    state: str,
+    ack: DashboardAckState | None,
+) -> tuple[str, dict[str, Any]]:
+    """The dedupe-key state segment and the entry for one Dashboard.
+
+    An acknowledged Dashboard (#4128) says ``acknowledged`` and until when,
+    instead of the warning, under its own key segment
+    ``{state}:acknowledged:{end time}``: the caller is told once per
+    acknowledgement that the finding is acknowledged. After an
+    acknowledgement ends the warning comes back under
+    ``{state}:after:{latest end time}``, a key no caller has claimed yet,
+    so the warning returns at once even when the caller heard it before
+    the acknowledgement. A Dashboard that never had an acknowledgement
+    keeps the plain ``{state}`` segment.
+    """
+    entry: dict[str, Any] = {"dashboard_id": str(dashboard_id), "name": name, "state": state}
+    if ack is None:
+        return state, entry
+    if ack.acknowledged_until is not None:
+        entry["acknowledged"] = True
+        entry["acknowledged_until"] = ack.acknowledged_until.isoformat()
+        return f"{state}:acknowledged:{_stamp(ack.acknowledged_until)}", entry
+    if ack.last_ended_at is not None:
+        return f"{state}:after:{_stamp(ack.last_ended_at)}", entry
+    return state, entry
+
+
+def _stamp(value: datetime) -> str:
+    """A time as a compact key segment: microseconds since the epoch.
+
+    Whole seconds are too coarse: two acknowledgements made within one
+    second for the same duration would share a key.
+    """
+    return str(int(value.timestamp() * 1_000_000))
 
 
 async def _claim_unannounced(
@@ -200,7 +254,9 @@ async def build_checks_alert_advisory(operator: Operator) -> dict[str, Any]:
 
     Returns ``{"checks_alert_advisory": [{"dashboard_id", "name",
     "state"}, ...]}`` or an empty dict (no key added) when the advisory
-    does not apply. The empty-dict short-circuits, in order:
+    does not apply. A Dashboard whose every non-green member is
+    acknowledged (#4128) also carries ``acknowledged: true`` and
+    ``acknowledged_until`` (see :func:`_entry`). The empty-dict short-circuits, in order:
 
     * the feature is disabled (``checks_alert_advisory_window_minutes
       == 0`` -- checked before any DB or Valkey I/O);
@@ -228,20 +284,22 @@ async def build_checks_alert_advisory(operator: Operator) -> dict[str, Any]:
     if window_minutes <= 0:
         return {}
     try:
-        rows = await _non_green_dashboards(operator.tenant_id)
+        rows, acked = await _non_green_dashboards(operator.tenant_id)
         if not rows:
             return {}
         actor_sub = resolve_actor_sub()
-        entries = await _claim_unannounced(
-            [
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for dashboard_id, name, state in rows:
+            key_state, entry = _entry(dashboard_id, name, state, acked.get(dashboard_id))
+            candidates.append(
                 (
-                    _dedupe_key(operator.tenant_id, operator.sub, actor_sub, dashboard_id, state),
-                    {"dashboard_id": str(dashboard_id), "name": name, "state": state},
+                    _dedupe_key(
+                        operator.tenant_id, operator.sub, actor_sub, dashboard_id, key_state
+                    ),
+                    entry,
                 )
-                for dashboard_id, name, state in rows
-            ],
-            window_minutes * 60,
-        )
+            )
+        entries = await _claim_unannounced(candidates, window_minutes * 60)
     except Exception:
         # Advisory is best-effort awareness; any failure (a DB or Valkey
         # teardown included) must never convert a successful dispatch

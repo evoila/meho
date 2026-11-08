@@ -283,6 +283,82 @@ Both edits need the `tenant_admin` role. The audit log records the old
 and the new value of each changed field. The REST routes are
 `PATCH /api/v1/sensors/{id}` and `PATCH /api/v1/checks/dashboards/{id}`.
 
+## Acknowledge a finding
+
+Sometimes a red sensor is known and someone is on it. You can
+acknowledge it for a set time, with a reason. The sensor keeps running
+and its real state stays visible.
+
+```bash
+meho sensor ack <sensor_id> --until 72h \
+  --reason fix_planned --note "Disk swap on Friday"
+```
+
+- `--until` is required: a time (`2026-12-01T18:00:00Z`) or a duration
+  from now (`72h`). At most 90 days.
+- `--reason` is `accepted_risk`, `fix_planned` or `false_alarm`.
+- `--note` is a short text that says why.
+
+While the acknowledgement is active:
+
+- the advisory on operation answers says "acknowledged" instead of the
+  warning;
+- the warning mails for this sensor are not sent again (the all-clear
+  mail still goes out);
+- the dashboard page shows who acknowledged it, until when and why,
+  next to the real state.
+
+It ends at the end time. It ends earlier when the sensor gets worse,
+for example from `degraded` to `critical`. Then the warnings come back:
+the advisory warns again, and when the sensor still fails at the end
+time, the dashboard's recipients get a mail that says the
+acknowledgement ended. MEHO writes an audit row when you acknowledge,
+and when it ends.
+
+You need the `operator` role or higher, or the approver right (a person
+who may approve requests can acknowledge too, even with the `read_only`
+role). An agent cannot acknowledge, and there is no MCP tool for it. The REST route is
+`POST /api/v1/sensors/{id}/acknowledgement`. A green sensor is refused,
+and so is a sensor that is already acknowledged.
+
+## Copy a dashboard to another site
+
+Write a dashboard and its sensors to one file:
+
+```bash
+meho dashboard export <name> --output health-check.json
+```
+
+The file holds the operation, params, rule, cadence and severity of each
+sensor. It holds no ids, no state and no mail address. Each target name
+in it is a placeholder.
+
+At the other site, map each placeholder to a target there, and look
+first with `--dry-run`:
+
+```bash
+meho dashboard import health-check.json \
+  --map-target <placeholder>=<target> --dry-run
+meho dashboard import health-check.json \
+  --map-target <placeholder>=<target>
+```
+
+- MEHO checks the whole file first. When a placeholder is not mapped, a
+  target is not found, an operation is unknown or not `safe`, or a
+  connector does not fit its target, it changes nothing and lists every
+  problem. `--force` imports a sensor whose connector does not fit.
+- Sensors and the dashboard are matched by name. A missing one is
+  created, a different one is updated, an equal one stays. Importing the
+  same file twice changes nothing the second time.
+- The dashboard's members become the sensors of the file. A member that
+  is not in the file leaves the dashboard, but MEHO does not delete it.
+  The mail address of the dashboard stays as it is.
+
+Export needs the `operator` role, import `tenant_admin`. Each import
+writes an audit row. The REST routes are
+`GET /api/v1/checks/dashboard-files/export?name=<name>` and
+`POST /api/v1/checks/dashboard-files/import`.
+
 ## The investigator (optional deep tier)
 
 When a dashboard's rollup crosses from green into a non-green state,

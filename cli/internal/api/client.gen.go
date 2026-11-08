@@ -235,6 +235,19 @@ const (
 	DashboardDetailStateUnknown  DashboardDetailState = "unknown"
 )
 
+// Defines values for DashboardFileSettingsNotifyMinState.
+const (
+	DashboardFileSettingsNotifyMinStateCritical DashboardFileSettingsNotifyMinState = "critical"
+	DashboardFileSettingsNotifyMinStateDegraded DashboardFileSettingsNotifyMinState = "degraded"
+)
+
+// Defines values for DashboardImportResultDashboardAction.
+const (
+	DashboardImportResultDashboardActionCreate    DashboardImportResultDashboardAction = "create"
+	DashboardImportResultDashboardActionUnchanged DashboardImportResultDashboardAction = "unchanged"
+	DashboardImportResultDashboardActionUpdate    DashboardImportResultDashboardAction = "update"
+)
+
 // Defines values for DashboardMemberViewEffectiveState.
 const (
 	DashboardMemberViewEffectiveStateCritical DashboardMemberViewEffectiveState = "critical"
@@ -385,6 +398,13 @@ const (
 	FilterPredicateOpLessThanEqual    FilterPredicateOp = "<="
 )
 
+// Defines values for FirstStartLineStatus.
+const (
+	FirstStartLineStatusFail    FirstStartLineStatus = "fail"
+	FirstStartLineStatusOk      FirstStartLineStatus = "ok"
+	FirstStartLineStatusSkipped FirstStartLineStatus = "skipped"
+)
+
 // Defines values for GatewayResultBodyOutcome.
 const (
 	GatewayResultBodyOutcomeFailed    GatewayResultBodyOutcome = "failed"
@@ -395,6 +415,13 @@ const (
 const (
 	GrantPrincipalKindAgent     GrantPrincipalKind = "agent"
 	GrantPrincipalKindUserAgent GrantPrincipalKind = "user-agent"
+)
+
+// Defines values for ImportedSensorAction.
+const (
+	ImportedSensorActionCreate    ImportedSensorAction = "create"
+	ImportedSensorActionUnchanged ImportedSensorAction = "unchanged"
+	ImportedSensorActionUpdate    ImportedSensorAction = "update"
 )
 
 // Defines values for IngestJobHandleStatus.
@@ -430,16 +457,37 @@ const (
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
+// Defines values for KbImportPageResultAction.
+const (
+	KbImportPageResultActionCreate    KbImportPageResultAction = "create"
+	KbImportPageResultActionSkip      KbImportPageResultAction = "skip"
+	KbImportPageResultActionUnchanged KbImportPageResultAction = "unchanged"
+	KbImportPageResultActionUpdate    KbImportPageResultAction = "update"
+)
+
 // Defines values for KbProvenanceSourceKind.
 const (
 	KbProvenanceSourceKindDirect    KbProvenanceSourceKind = "direct"
 	KbProvenanceSourceKindDirectory KbProvenanceSourceKind = "directory"
+	KbProvenanceSourceKindImport    KbProvenanceSourceKind = "import"
 )
 
 // Defines values for KbProvenanceState.
 const (
 	KbProvenanceStateLegacy   KbProvenanceState = "legacy"
 	KbProvenanceStateRecorded KbProvenanceState = "recorded"
+)
+
+// Defines values for KbSimilarCheckReason.
+const (
+	KbSimilarCheckReasonDryRun         KbSimilarCheckReason = "dry_run"
+	KbSimilarCheckReasonSimilarEntries KbSimilarCheckReason = "similar_entries"
+)
+
+// Defines values for KbSimilarEntryMatch.
+const (
+	KbSimilarEntryMatchCloseMeaning       KbSimilarEntryMatch = "close_meaning"
+	KbSimilarEntryMatchSameProductVersion KbSimilarEntryMatch = "same_product_version"
 )
 
 // Defines values for KindFilterValue.
@@ -486,6 +534,18 @@ const (
 	OrderByDirectionDesc OrderByDirection = "desc"
 )
 
+// Defines values for OutcomeCheckVerdict.
+const (
+	OutcomeCheckVerdictDidNotHappen OutcomeCheckVerdict = "did_not_happen"
+	OutcomeCheckVerdictHappened     OutcomeCheckVerdict = "happened"
+)
+
+// Defines values for OutcomeUnknownReason.
+const (
+	OutcomeUnknownReasonStartedNoResult OutcomeUnknownReason = "started_no_result"
+	OutcomeUnknownReasonUncertain       OutcomeUnknownReason = "uncertain"
+)
+
 // Defines values for PermissionVerdict.
 const (
 	PermissionVerdictAutoExecute   PermissionVerdict = "auto-execute"
@@ -529,6 +589,15 @@ const (
 	RetireChecklistRequestSurfaceKb         RetireChecklistRequestSurface = "kb"
 	RetireChecklistRequestSurfaceMemory     RetireChecklistRequestSurface = "memory"
 	RetireChecklistRequestSurfaceOperations RetireChecklistRequestSurface = "operations"
+)
+
+// Defines values for RunApprovalReadStatus.
+const (
+	RunApprovalReadStatusApproved RunApprovalReadStatus = "approved"
+	RunApprovalReadStatusEnded    RunApprovalReadStatus = "ended"
+	RunApprovalReadStatusExpired  RunApprovalReadStatus = "expired"
+	RunApprovalReadStatusPending  RunApprovalReadStatus = "pending"
+	RunApprovalReadStatusRevoked  RunApprovalReadStatus = "revoked"
 )
 
 // Defines values for RunSummaryCurrentStepState.
@@ -581,6 +650,35 @@ const (
 	SelectSpecAggregateMax   SelectSpecAggregate = "max"
 	SelectSpecAggregateMin   SelectSpecAggregate = "min"
 	SelectSpecAggregateSum   SelectSpecAggregate = "sum"
+)
+
+// Defines values for SensorAcknowledgementCreateReason.
+const (
+	SensorAcknowledgementCreateReasonAcceptedRisk SensorAcknowledgementCreateReason = "accepted_risk"
+	SensorAcknowledgementCreateReasonFalseAlarm   SensorAcknowledgementCreateReason = "false_alarm"
+	SensorAcknowledgementCreateReasonFixPlanned   SensorAcknowledgementCreateReason = "fix_planned"
+)
+
+// Defines values for SensorAcknowledgementReadAckedState.
+const (
+	SensorAcknowledgementReadAckedStateCritical SensorAcknowledgementReadAckedState = "critical"
+	SensorAcknowledgementReadAckedStateDegraded SensorAcknowledgementReadAckedState = "degraded"
+	SensorAcknowledgementReadAckedStateOk       SensorAcknowledgementReadAckedState = "ok"
+	SensorAcknowledgementReadAckedStateSkip     SensorAcknowledgementReadAckedState = "skip"
+	SensorAcknowledgementReadAckedStateUnknown  SensorAcknowledgementReadAckedState = "unknown"
+)
+
+// Defines values for SensorAcknowledgementReadEndReason.
+const (
+	SensorAcknowledgementReadEndReasonExpired    SensorAcknowledgementReadEndReason = "expired"
+	SensorAcknowledgementReadEndReasonStateWorse SensorAcknowledgementReadEndReason = "state_worse"
+)
+
+// Defines values for SensorAcknowledgementReadReason.
+const (
+	SensorAcknowledgementReadReasonAcceptedRisk SensorAcknowledgementReadReason = "accepted_risk"
+	SensorAcknowledgementReadReasonFalseAlarm   SensorAcknowledgementReadReason = "false_alarm"
+	SensorAcknowledgementReadReasonFixPlanned   SensorAcknowledgementReadReason = "fix_planned"
 )
 
 // Defines values for SensorCadenceKind.
@@ -930,6 +1028,15 @@ const (
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateOk       ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "ok"
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateSkip     ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "skip"
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateUnknown  ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "unknown"
+)
+
+// Defines values for ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus.
+const (
+	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatusApproved ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus = "approved"
+	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatusEnded    ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus = "ended"
+	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatusExpired  ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus = "expired"
+	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatusPending  ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus = "pending"
+	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatusRevoked  ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus = "revoked"
 )
 
 // Defines values for UiConnectorsOverridesUiConnectorsOverridesGetParamsShow.
@@ -1573,13 +1680,19 @@ type ApprovalRequestView struct {
 	MayApprove       *bool                  `json:"may_approve"`
 	MayApproveReason *string                `json:"may_approve_reason"`
 	OpId             string                 `json:"op_id"`
-	ParamsHash       string                 `json:"params_hash"`
-	PreviewHash      *string                `json:"preview_hash"`
-	PrincipalAct     *string                `json:"principal_act"`
-	PrincipalName    *string                `json:"principal_name"`
-	PrincipalSub     string                 `json:"principal_sub"`
-	ProposedEffect   map[string]interface{} `json:"proposed_effect"`
-	ReleaseId        *string                `json:"release_id"`
+
+	// OutcomeCheck What a person recorded after they checked the target (#5026).
+	OutcomeCheck *OutcomeCheckView `json:"outcome_check,omitempty"`
+
+	// OutcomeUnknown Why an approved request is on the "outcome unknown" list (#5026).
+	OutcomeUnknown *OutcomeUnknownView    `json:"outcome_unknown,omitempty"`
+	ParamsHash     string                 `json:"params_hash"`
+	PreviewHash    *string                `json:"preview_hash"`
+	PrincipalAct   *string                `json:"principal_act"`
+	PrincipalName  *string                `json:"principal_name"`
+	PrincipalSub   string                 `json:"principal_sub"`
+	ProposedEffect map[string]interface{} `json:"proposed_effect"`
+	ReleaseId      *string                `json:"release_id"`
 
 	// ResultState Whether an approved request has run yet (#3486).
 	//
@@ -2369,6 +2482,14 @@ type BodyApprovalApproveUiApprovalsRequestIdApprovePost struct {
 	Reason *string `json:"reason,omitempty"`
 }
 
+// BodyApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPost defines model for Body_approval_outcome_check_ui_approvals__request_id__outcome_check_post.
+type BodyApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPost struct {
+	Note *string `json:"note,omitempty"`
+
+	// Verdict What the person found on the target.
+	Verdict OutcomeCheckVerdict `json:"verdict"`
+}
+
 // BodyApprovalRejectUiApprovalsRequestIdRejectPost defines model for Body_approval_reject_ui_approvals__request_id__reject_post.
 type BodyApprovalRejectUiApprovalsRequestIdRejectPost struct {
 	Reason *string `json:"reason,omitempty"`
@@ -2404,9 +2525,10 @@ type BodyKbEditorPreviewUiKbEditorPreviewPost struct {
 
 // BodyKbEditorSaveUiKbNewPost defines model for Body_kb_editor_save_ui_kb_new_post.
 type BodyKbEditorSaveUiKbNewPost struct {
-	Body string  `json:"body"`
-	Slug string  `json:"slug"`
-	Tags *string `json:"tags,omitempty"`
+	Body         string  `json:"body"`
+	CreateAnyway *bool   `json:"create_anyway,omitempty"`
+	Slug         string  `json:"slug"`
+	Tags         *string `json:"tags,omitempty"`
 }
 
 // BodyKbSearchUiKbSearchPost defines model for Body_kb_search_ui_kb_search_post.
@@ -2416,13 +2538,15 @@ type BodyKbSearchUiKbSearchPost struct {
 
 // BodyKbUploadBulkUiKbUploadBulkPost defines model for Body_kb_upload_bulk_ui_kb_upload_bulk_post.
 type BodyKbUploadBulkUiKbUploadBulkPost struct {
-	File []string `json:"file"`
+	CreateAnyway *bool    `json:"create_anyway,omitempty"`
+	File         []string `json:"file"`
 }
 
 // BodyKbUploadSingleUiKbUploadPost defines model for Body_kb_upload_single_ui_kb_upload_post.
 type BodyKbUploadSingleUiKbUploadPost struct {
-	File string  `json:"file"`
-	Slug *string `json:"slug,omitempty"`
+	CreateAnyway *bool   `json:"create_anyway,omitempty"`
+	File         string  `json:"file"`
+	Slug         *string `json:"slug,omitempty"`
 }
 
 // BodyKeycloakClientScopeCreateUiKeycloakClientScopesCreatePost defines model for Body_keycloak_client_scope_create_ui_keycloak_client_scopes_create_post.
@@ -4796,6 +4920,109 @@ type DashboardDetailNotifyMinState string
 // DashboardDetailState defines model for DashboardDetail.State.
 type DashboardDetailState string
 
+// DashboardFile One Dashboard and its member Sensors, as “meho dashboard export“ writes it.
+type DashboardFile struct {
+	// Dashboard The Dashboard part of the file. The mail address stays at each site.
+	Dashboard DashboardFileSettings  `json:"dashboard"`
+	Format    *string                `json:"format,omitempty"`
+	Sensors   *[]DashboardFileSensor `json:"sensors,omitempty"`
+}
+
+// DashboardFileSensor One Sensor in the file: the fields of a create, with a target placeholder.
+type DashboardFileSensor struct {
+	// Assertion A full assertion: one select stage feeding one typed comparator.
+	//
+	// #2503 imports this model to validate a Sensor's ``assertion`` payload at
+	// the wire (a bad path or comparator is a 422 at create); #2505 feeds it the
+	// op-result payload; #2506 rolls the outcomes up into a Dashboard.
+	Assertion AssertionSpec `json:"assertion"`
+
+	// CadenceKind Closed enum of the two cadence shapes a :class:`Sensor` may carry.
+	//
+	// Initiative #2416 (parent goal #221), Task #2503. One ``sensor`` row
+	// carries exactly one cadence, selected by this discriminator; the
+	// invariant is enforced by the DB-side ``ck_sensor_cadence_fields``
+	// CHECK that pairs each kind with its mandatory column (mirroring
+	// :class:`ScheduledTriggerKind`).
+	//
+	// Members:
+	//
+	// * :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The
+	//   sub-minute path #2505's interval-tick loop drives.
+	// * :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The
+	//   >=1-minute path #2505 rides on #804's durable scheduler discipline.
+	//
+	// Closed enum: widening it is a coordinated DB + model change so the
+	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
+	// ``0064``'s frozen tuple cannot drift.
+	CadenceKind         SensorCadenceKind       `json:"cadence_kind"`
+	ConnectorId         string                  `json:"connector_id"`
+	CronExpr            *string                 `json:"cron_expr"`
+	ForSeconds          *int                    `json:"for_seconds,omitempty"`
+	IntervalSeconds     *int                    `json:"interval_seconds"`
+	Name                string                  `json:"name"`
+	OpId                string                  `json:"op_id"`
+	Params              *map[string]interface{} `json:"params,omitempty"`
+	RetryBackoffSeconds *int                    `json:"retry_backoff_seconds,omitempty"`
+	RetryTimes          *int                    `json:"retry_times,omitempty"`
+
+	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+	//
+	// The per-sensor cap #2506 applies to the rollup: a ``degraded``-severity
+	// sensor whose assertion fails contributes at most ``degraded``, a
+	// ``critical`` one contributes ``critical``. The five-state vocabulary
+	// itself is declared once in #2504's :data:`CheckState`; this is only
+	// the two operator-selectable severities.
+	Severity *SensorSeverity `json:"severity,omitempty"`
+	Target   *string         `json:"target"`
+	Timezone *string         `json:"timezone,omitempty"`
+}
+
+// DashboardFileSettings The Dashboard part of the file. The mail address stays at each site.
+type DashboardFileSettings struct {
+	Description        *string                              `json:"description"`
+	InvestigatorPrompt *string                              `json:"investigator_prompt"`
+	Name               string                               `json:"name"`
+	NotifyMinState     *DashboardFileSettingsNotifyMinState `json:"notify_min_state,omitempty"`
+}
+
+// DashboardFileSettingsNotifyMinState defines model for DashboardFileSettings.NotifyMinState.
+type DashboardFileSettingsNotifyMinState string
+
+// DashboardImportRequest Request body for “POST /api/v1/checks/dashboard-files/import“.
+//
+//   - “target_map“ -- placeholder -> target name at this site. Every
+//     placeholder in the file needs an entry.
+//   - “dry_run“ -- say what would change, and change nothing.
+//   - “force“ -- import a Sensor even when its connector does not fit the
+//     mapped target's product and version (as “force“ on a Sensor create).
+//   - “tenant_id“ -- a platform admin may import into another tenant.
+type DashboardImportRequest struct {
+	DryRun *bool `json:"dry_run,omitempty"`
+
+	// File One Dashboard and its member Sensors, as ``meho dashboard export`` writes it.
+	File      DashboardFile       `json:"file"`
+	Force     *bool               `json:"force,omitempty"`
+	TargetMap *map[string]string  `json:"target_map,omitempty"`
+	TenantId  *openapi_types.UUID `json:"tenant_id"`
+}
+
+// DashboardImportResult The answer of an import. With “dry_run“ nothing was written.
+type DashboardImportResult struct {
+	Changed                bool                                 `json:"changed"`
+	DashboardAction        DashboardImportResultDashboardAction `json:"dashboard_action"`
+	DashboardChangedFields *[]string                            `json:"dashboard_changed_fields,omitempty"`
+	DashboardId            *openapi_types.UUID                  `json:"dashboard_id"`
+	DashboardName          string                               `json:"dashboard_name"`
+	DryRun                 bool                                 `json:"dry_run"`
+	MembersAdded           *[]string                            `json:"members_added,omitempty"`
+	MembersRemoved         *[]string                            `json:"members_removed,omitempty"`
+	Sensors                []ImportedSensor                     `json:"sensors"`
+}
+
+// DashboardImportResultDashboardAction defines model for DashboardImportResult.DashboardAction.
+type DashboardImportResultDashboardAction string
+
 // DashboardListResponse Unified list envelope for “GET /api/v1/checks/dashboards“.
 //
 // The `{items, next_cursor}` shape codified in
@@ -4817,6 +5044,8 @@ type DashboardListResponse struct {
 // the hysteresis clock (“state_since“), and the last observed value /
 // evidence.
 type DashboardMemberView struct {
+	// Acknowledgement One acknowledgement as REST, the CLI and the Dashboard detail show it.
+	Acknowledgement *SensorAcknowledgementRead        `json:"acknowledgement,omitempty"`
 	ConnectorId     string                            `json:"connector_id"`
 	EffectiveState  DashboardMemberViewEffectiveState `json:"effective_state"`
 	ForSeconds      int                               `json:"for_seconds"`
@@ -5049,6 +5278,11 @@ type DeprecateTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
 	Version int    `json:"version"`
+}
+
+// DestinationProof The answer of “GET /first-start/destination“: the proof for the nonce.
+type DestinationProof struct {
+	Proof string `json:"proof"`
 }
 
 // DiscardTemplateResponse Response for “meho_runbook_discard_template“ -- the discarded draft's coordinates.
@@ -5959,6 +6193,22 @@ type FingerprintResult struct {
 	Version     *string                 `json:"version"`
 }
 
+// FirstStartLine One line of the first-start list.
+type FirstStartLine struct {
+	Message string               `json:"message"`
+	Name    string               `json:"name"`
+	Status  FirstStartLineStatus `json:"status"`
+}
+
+// FirstStartLineStatus defines model for FirstStartLine.Status.
+type FirstStartLineStatus string
+
+// FirstStartResponse The whole list. “ok“ is true when no line is “fail“.
+type FirstStartResponse struct {
+	Checks []FirstStartLine `json:"checks"`
+	Ok     bool             `json:"ok"`
+}
+
 // ForkInfo Surfaced by “meho_runbook_edit_template“ when editing a published template forks.
 //
 // Editing a *published* template cannot mutate it in place (published
@@ -6381,6 +6631,16 @@ type HealthResponse struct {
 	Vault VaultStatus `json:"vault"`
 }
 
+// ImportedSensor What the import did, or would do, to one Sensor.
+type ImportedSensor struct {
+	Action        ImportedSensorAction `json:"action"`
+	ChangedFields *[]string            `json:"changed_fields,omitempty"`
+	Name          string               `json:"name"`
+}
+
+// ImportedSensorAction defines model for ImportedSensor.Action.
+type ImportedSensorAction string
+
 // InCompare Membership comparator: “ok“ if the value strict-equals a member.
 //
 // Same boolean strictness as :class:`EqualsCompare`, applied per member.
@@ -6730,7 +6990,13 @@ type KbEntry struct {
 // “extra="forbid"“ rejects unknown fields at 422 so a typo
 // ("body_text") doesn't silently become a no-op.
 type KbEntryCreate struct {
-	Body     string                  `json:"body"`
+	Body string `json:"body"`
+
+	// CreateAnyway Create a new slug even when similar entries exist.
+	CreateAnyway *bool `json:"create_anyway,omitempty"`
+
+	// DryRun Write nothing. Answer 200 with the similar entries and whether the write would go through.
+	DryRun   *bool                   `json:"dry_run,omitempty"`
 	Metadata *map[string]interface{} `json:"metadata"`
 
 	// Slug Operator-facing identifier in kebab-case. Must start with a lowercase letter, end with a lowercase letter or digit, and contain only lowercase letters, digits, hyphens, or dots. The leading-letter rule (G0.9.1-T8, Signal #15) is the most common surprise: '657-recovery' is rejected; rewrite as 'ticket-657-recovery'.
@@ -6751,6 +7017,49 @@ type KbEntryPreview struct {
 	Preview   string                 `json:"preview"`
 	Slug      string                 `json:"slug"`
 	UpdatedAt string                 `json:"updated_at"`
+}
+
+// KbImportPage One page the caller sends: its path in the wiki and its full text.
+type KbImportPage struct {
+	// Content The whole page: the YAML lesson header, then the text.
+	Content string `json:"content"`
+
+	// Path Path of the page in the wiki, relative, ending in .md.
+	Path string `json:"path"`
+}
+
+// KbImportPageResult What the import did, or would do in a dry run, with one page.
+type KbImportPageResult struct {
+	Action KbImportPageResultAction `json:"action"`
+	Path   string                   `json:"path"`
+
+	// Reason Why the page was skipped. Set for every skipped page.
+	Reason *string `json:"reason"`
+	Slug   *string `json:"slug"`
+}
+
+// KbImportPageResultAction defines model for KbImportPageResult.Action.
+type KbImportPageResultAction string
+
+// KbImportRequest POST body for “/api/v1/kb/import“.
+type KbImportRequest struct {
+	// DryRun Show what the import would do, and write nothing.
+	DryRun *bool `json:"dry_run,omitempty"`
+
+	// IncludeCandidates Also import pages with status: candidate. Off: they are skipped.
+	IncludeCandidates *bool          `json:"include_candidates,omitempty"`
+	Pages             []KbImportPage `json:"pages"`
+}
+
+// KbImportResult The answer of one import: one row per page, sorted by path.
+type KbImportResult struct {
+	Conflicts      []KbIngestConflict   `json:"conflicts"`
+	CreatedCount   int                  `json:"created_count"`
+	DryRun         bool                 `json:"dry_run"`
+	Pages          []KbImportPageResult `json:"pages"`
+	SkippedCount   int                  `json:"skipped_count"`
+	UnchangedCount int                  `json:"unchanged_count"`
+	UpdatedCount   int                  `json:"updated_count"`
 }
 
 // KbIngestConflict Two or more files in one directory ingest claim the same slug.
@@ -6843,6 +7152,42 @@ type KbProvenanceSourceKind string
 
 // KbProvenanceState defines model for KbProvenance.State.
 type KbProvenanceState string
+
+// KbSimilarCheck The answer of a create that wrote nothing.
+//
+// Given when similar entries were found (“reason="similar_entries"“)
+// or the caller asked for a dry run (“reason="dry_run"“).
+type KbSimilarCheck struct {
+	MinScore   float32              `json:"min_score"`
+	NextStep   string               `json:"next_step"`
+	Reason     KbSimilarCheckReason `json:"reason"`
+	Similar    []KbSimilarEntry     `json:"similar"`
+	Slug       string               `json:"slug"`
+	SlugExists bool                 `json:"slug_exists"`
+	WouldWrite bool                 `json:"would_write"`
+	Written    *bool                `json:"written,omitempty"`
+}
+
+// KbSimilarCheckReason defines model for KbSimilarCheck.Reason.
+type KbSimilarCheckReason string
+
+// KbSimilarEntry One existing entry that is similar to the entry about to be created.
+type KbSimilarEntry struct {
+	EntryId    openapi_types.UUID  `json:"entry_id"`
+	Match      KbSimilarEntryMatch `json:"match"`
+	MayChange  bool                `json:"may_change"`
+	Product    *string             `json:"product"`
+	RevisionId *openapi_types.UUID `json:"revision_id"`
+	Score      float32             `json:"score"`
+	Slug       string              `json:"slug"`
+	Snippet    string              `json:"snippet"`
+	Status     *string             `json:"status"`
+	Summary    *string             `json:"summary"`
+	Version    *string             `json:"version"`
+}
+
+// KbSimilarEntryMatch defines model for KbSimilarEntry.Match.
+type KbSimilarEntryMatch string
 
 // KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
 //
@@ -7633,6 +7978,41 @@ type OrderBy struct {
 
 // OrderByDirection Sort direction.
 type OrderByDirection string
+
+// OutcomeCheckRequestBody POST body for “…/outcome-check“ (#5026).
+type OutcomeCheckRequestBody struct {
+	// Note What you checked, in your own words. Stored on the request and the audit row.
+	Note string `json:"note"`
+
+	// Verdict What the person found on the target.
+	Verdict OutcomeCheckVerdict `json:"verdict"`
+}
+
+// OutcomeCheckVerdict What the person found on the target.
+type OutcomeCheckVerdict string
+
+// OutcomeCheckView What a person recorded after they checked the target (#5026).
+type OutcomeCheckView struct {
+	CheckedAt     string  `json:"checked_at"`
+	CheckedBy     string  `json:"checked_by"`
+	CheckedByName *string `json:"checked_by_name"`
+	Note          string  `json:"note"`
+
+	// Verdict What the person found on the target.
+	Verdict OutcomeCheckVerdict `json:"verdict"`
+}
+
+// OutcomeUnknownReason Why a request is on the "outcome unknown" list.
+type OutcomeUnknownReason string
+
+// OutcomeUnknownView Why an approved request is on the "outcome unknown" list (#5026).
+type OutcomeUnknownView struct {
+	Advice string `json:"advice"`
+
+	// Reason Why a request is on the "outcome unknown" list.
+	Reason       OutcomeUnknownReason `json:"reason"`
+	RunStartedAt *string              `json:"run_started_at"`
+}
 
 // PairAddonRequest Intake for :meth:`AddonPairingService.pair` — the handshake body.
 //
@@ -8535,6 +8915,69 @@ type ReviewerContextView struct {
 	TargetVersion       *string                 `json:"target_version"`
 }
 
+// RunApprovalCreate Body of “POST /api/v1/service-principals/run-approvals“.
+type RunApprovalCreate struct {
+	Entries []RunApprovalEntry `json:"entries"`
+
+	// ExpiresAt When the approval ends at the latest. Default: 24 hours; at most 7 days.
+	ExpiresAt *time.Time `json:"expires_at"`
+
+	// Reason What the run does, for the approver.
+	Reason string `json:"reason"`
+
+	// WorkRef The run reference. Calls of the run send it in the Meho-Work-Ref header.
+	WorkRef string `json:"work_ref"`
+}
+
+// RunApprovalEntry One operation the run may use.
+//
+// “target_id“ names one target. “target_product“ names a target kind,
+// so targets the run registers later are covered; it works only when the
+// tenant setting allows target kinds. With neither, the entry covers only
+// calls without a target (no target is not "any target").
+type RunApprovalEntry struct {
+	ConnectorId string `json:"connector_id"`
+	OpId        string `json:"op_id"`
+
+	// TargetId Exactly this target.
+	TargetId *openapi_types.UUID `json:"target_id"`
+
+	// TargetProduct Every target of this product (target kind). Needs the tenant setting.
+	TargetProduct *string `json:"target_product"`
+}
+
+// RunApprovalListResponse “GET /api/v1/service-principals/run-approvals“ response.
+type RunApprovalListResponse struct {
+	RunApprovals []RunApprovalRead `json:"run_approvals"`
+}
+
+// RunApprovalRead One run approval with its status.
+type RunApprovalRead struct {
+	ApprovedAt    *time.Time            `json:"approved_at"`
+	ApprovedBySub *string               `json:"approved_by_sub"`
+	EndedAt       *time.Time            `json:"ended_at"`
+	Entries       []RunApprovalEntry    `json:"entries"`
+	ExpiresAt     time.Time             `json:"expires_at"`
+	Id            openapi_types.UUID    `json:"id"`
+	PrincipalSub  string                `json:"principal_sub"`
+	Reason        string                `json:"reason"`
+	RequestedAt   time.Time             `json:"requested_at"`
+	RevokedAt     *time.Time            `json:"revoked_at"`
+	RevokedBySub  *string               `json:"revoked_by_sub"`
+	RevokedReason *string               `json:"revoked_reason"`
+	Status        RunApprovalReadStatus `json:"status"`
+	TenantId      openapi_types.UUID    `json:"tenant_id"`
+	WorkRef       string                `json:"work_ref"`
+}
+
+// RunApprovalReadStatus defines model for RunApprovalRead.Status.
+type RunApprovalReadStatus string
+
+// RunApprovalRevoke Body of “POST /api/v1/service-principals/run-approvals/{id}/revoke“.
+type RunApprovalRevoke struct {
+	Reason *string `json:"reason"`
+}
+
 // RunCompletedResponse Returned by “meho_runbook_next“ when the previous step was the last.
 //
 // The terminal-state shape: no step body, just the run coordinates
@@ -9345,6 +9788,42 @@ type SelectSpec struct {
 
 // SelectSpecAggregate defines model for SelectSpec.Aggregate.
 type SelectSpecAggregate string
+
+// SensorAcknowledgementCreate Body of “POST /api/v1/sensors/{id}/acknowledgement“.
+//
+// “expires_at“ is required and must carry a time zone: an acknowledgement
+// without an end time is refused with 422.
+type SensorAcknowledgementCreate struct {
+	ExpiresAt time.Time                         `json:"expires_at"`
+	Note      string                            `json:"note"`
+	Reason    SensorAcknowledgementCreateReason `json:"reason"`
+}
+
+// SensorAcknowledgementCreateReason defines model for SensorAcknowledgementCreate.Reason.
+type SensorAcknowledgementCreateReason string
+
+// SensorAcknowledgementRead One acknowledgement as REST, the CLI and the Dashboard detail show it.
+type SensorAcknowledgementRead struct {
+	AckedState   SensorAcknowledgementReadAckedState `json:"acked_state"`
+	CreatedAt    time.Time                           `json:"created_at"`
+	CreatedBySub string                              `json:"created_by_sub"`
+	EndReason    *SensorAcknowledgementReadEndReason `json:"end_reason"`
+	EndedAt      *time.Time                          `json:"ended_at"`
+	ExpiresAt    time.Time                           `json:"expires_at"`
+	Id           openapi_types.UUID                  `json:"id"`
+	Note         string                              `json:"note"`
+	Reason       SensorAcknowledgementReadReason     `json:"reason"`
+	SensorId     openapi_types.UUID                  `json:"sensor_id"`
+}
+
+// SensorAcknowledgementReadAckedState defines model for SensorAcknowledgementRead.AckedState.
+type SensorAcknowledgementReadAckedState string
+
+// SensorAcknowledgementReadEndReason defines model for SensorAcknowledgementRead.EndReason.
+type SensorAcknowledgementReadEndReason string
+
+// SensorAcknowledgementReadReason defines model for SensorAcknowledgementRead.Reason.
+type SensorAcknowledgementReadReason string
 
 // SensorCadenceKind Closed enum of the two cadence shapes a :class:`Sensor` may carry.
 //
@@ -11562,8 +12041,11 @@ type ListApprovalsApiV1ApprovalsGetParams struct {
 	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
 
 	// Order Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in.
-	Order         *ListApprovalsApiV1ApprovalsGetParamsOrder `form:"order,omitempty" json:"order,omitempty"`
-	Authorization *string                                    `json:"authorization,omitempty"`
+	Order *ListApprovalsApiV1ApprovalsGetParamsOrder `form:"order,omitempty" json:"order,omitempty"`
+
+	// OutcomeUnknown List only approved requests whose outcome MEHO does not know and that nobody marked as checked: the result says 'uncertain', or the latest run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default 15) ago and stored no result. When true, 'status' is ignored. Defaults to false.
+	OutcomeUnknown *bool   `form:"outcome_unknown,omitempty" json:"outcome_unknown,omitempty"`
+	Authorization  *string `json:"authorization,omitempty"`
 }
 
 // ListApprovalsApiV1ApprovalsGetParamsOrder defines parameters for ListApprovalsApiV1ApprovalsGet.
@@ -11581,6 +12063,11 @@ type ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostParams struct {
 
 // DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams defines parameters for DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost.
 type DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams defines parameters for MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPost.
+type MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -11714,6 +12201,18 @@ type GetAssignmentApiV1ChecksAssignmentGetParams struct {
 
 // PutAssignmentApiV1ChecksAssignmentRunnerPutParams defines parameters for PutAssignmentApiV1ChecksAssignmentRunnerPut.
 type PutAssignmentApiV1ChecksAssignmentRunnerPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams defines parameters for ExportDashboardFileApiV1ChecksDashboardFilesExportGet.
+type ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams struct {
+	Name          string              `form:"name" json:"name"`
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams defines parameters for ImportDashboardFileApiV1ChecksDashboardFilesImportPost.
+type ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -12022,6 +12521,11 @@ type ListKbApiV1KbGetParamsOrder string
 
 // CreateKbApiV1KbPostParams defines parameters for CreateKbApiV1KbPost.
 type CreateKbApiV1KbPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ImportKbPagesApiV1KbImportPostParams defines parameters for ImportKbPagesApiV1KbImportPost.
+type ImportKbPagesApiV1KbImportPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -12377,6 +12881,11 @@ type EditSensorApiV1SensorsSensorIdPatchParams struct {
 	Authorization *string             `json:"authorization,omitempty"`
 }
 
+// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams defines parameters for AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost.
+type AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListSensorResultsApiV1SensorsSensorIdResultsGetParams defines parameters for ListSensorResultsApiV1SensorsSensorIdResultsGet.
 type ListSensorResultsApiV1SensorsSensorIdResultsGetParams struct {
 	From          *time.Time                                                  `form:"from,omitempty" json:"from,omitempty"`
@@ -12429,6 +12938,43 @@ type ShowReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubGetParams struct {
 
 // SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams defines parameters for SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut.
 type SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParams defines parameters for ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGet.
+type ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParams struct {
+	PrincipalSub  *string                                                            `form:"principal_sub,omitempty" json:"principal_sub,omitempty"`
+	Status        *ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	Limit         *int                                                               `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int                                                               `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string                                                            `json:"authorization,omitempty"`
+}
+
+// ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus defines parameters for ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGet.
+type ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus string
+
+// RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams defines parameters for RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPost.
+type RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetParams defines parameters for ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGet.
+type ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostParams defines parameters for ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePost.
+type ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostParams defines parameters for EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPost.
+type EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams defines parameters for RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost.
+type RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -12624,6 +13170,12 @@ type TimelineRouteApiV1TopologyTimelineGetParams struct {
 	Limit         *int       `form:"limit,omitempty" json:"limit,omitempty"`
 	Cursor        *string    `form:"cursor,omitempty" json:"cursor,omitempty"`
 	Authorization *string    `json:"authorization,omitempty"`
+}
+
+// FirstStartDestinationFirstStartDestinationGetParams defines parameters for FirstStartDestinationFirstStartDestinationGet.
+type FirstStartDestinationFirstStartDestinationGetParams struct {
+	// Nonce 32 hex characters
+	Nonce string `form:"nonce" json:"nonce"`
 }
 
 // McpDispatchMcpPostParams defines parameters for McpDispatchMcpPost.
@@ -13045,6 +13597,9 @@ type ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostJSONRequestBody = A
 // DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody defines body for DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost for application/json ContentType.
 type DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody = DecideRequestBody
 
+// MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostJSONRequestBody defines body for MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPost for application/json ContentType.
+type MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostJSONRequestBody = OutcomeCheckRequestBody
+
 // RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody defines body for RejectApprovalRequestApiV1ApprovalsRequestIdRejectPost for application/json ContentType.
 type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody = RejectRequestBody
 
@@ -13071,6 +13626,9 @@ type CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody = BroadcastOverrid
 
 // PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody defines body for PutAssignmentApiV1ChecksAssignmentRunnerPut for application/json ContentType.
 type PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody = AssignmentDocument
+
+// ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody defines body for ImportDashboardFileApiV1ChecksDashboardFilesImportPost for application/json ContentType.
+type ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody = DashboardImportRequest
 
 // CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody defines body for CreateDashboardApiV1ChecksDashboardsPost for application/json ContentType.
 type CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody = DashboardCreate
@@ -13119,6 +13677,9 @@ type ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody = GatewayRes
 
 // CreateKbApiV1KbPostJSONRequestBody defines body for CreateKbApiV1KbPost for application/json ContentType.
 type CreateKbApiV1KbPostJSONRequestBody = KbEntryCreate
+
+// ImportKbPagesApiV1KbImportPostJSONRequestBody defines body for ImportKbPagesApiV1KbImportPost for application/json ContentType.
+type ImportKbPagesApiV1KbImportPostJSONRequestBody = KbImportRequest
 
 // IngestKbApiV1KbIngestPostJSONRequestBody defines body for IngestKbApiV1KbIngestPost for application/json ContentType.
 type IngestKbApiV1KbIngestPostJSONRequestBody = IngestKbRequest
@@ -13198,11 +13759,20 @@ type CreateSensorApiV1SensorsPostJSONRequestBody = SensorCreate
 // EditSensorApiV1SensorsSensorIdPatchJSONRequestBody defines body for EditSensorApiV1SensorsSensorIdPatch for application/json ContentType.
 type EditSensorApiV1SensorsSensorIdPatchJSONRequestBody = SensorUpdate
 
+// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody defines body for AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost for application/json ContentType.
+type AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody = SensorAcknowledgementCreate
+
 // CreateGrantApiV1ServicePrincipalsGrantsPostJSONRequestBody defines body for CreateGrantApiV1ServicePrincipalsGrantsPost for application/json ContentType.
 type CreateGrantApiV1ServicePrincipalsGrantsPostJSONRequestBody = ServiceGrantCreate
 
 // SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody defines body for SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut for application/json ContentType.
 type SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody = ServiceReadScopeSet
+
+// RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostJSONRequestBody defines body for RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPost for application/json ContentType.
+type RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostJSONRequestBody = RunApprovalCreate
+
+// RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody defines body for RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost for application/json ContentType.
+type RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody = RunApprovalRevoke
 
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
@@ -13311,6 +13881,9 @@ type ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody = BodyApproval
 
 // ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody defines body for ApprovalApproveUiApprovalsRequestIdApprovePost for application/x-www-form-urlencoded ContentType.
 type ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody = BodyApprovalApproveUiApprovalsRequestIdApprovePost
+
+// ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostFormdataRequestBody defines body for ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPost for application/x-www-form-urlencoded ContentType.
+type ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostFormdataRequestBody = BodyApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPost
 
 // ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody defines body for ApprovalRejectUiApprovalsRequestIdRejectPost for application/x-www-form-urlencoded ContentType.
 type ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody = BodyApprovalRejectUiApprovalsRequestIdRejectPost
@@ -15482,6 +16055,11 @@ type ClientInterface interface {
 
 	DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithBody request with any body
+	MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPost(ctx context.Context, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, body MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBody request with any body
 	RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15568,6 +16146,14 @@ type ClientInterface interface {
 	PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExportDashboardFileApiV1ChecksDashboardFilesExportGet request
+	ExportDashboardFileApiV1ChecksDashboardFilesExportGet(ctx context.Context, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBody request with any body
+	ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBody(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ImportDashboardFileApiV1ChecksDashboardFilesImportPost(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListDashboardsApiV1ChecksDashboardsGet request
 	ListDashboardsApiV1ChecksDashboardsGet(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15744,6 +16330,11 @@ type ClientInterface interface {
 	CreateKbApiV1KbPostWithBody(ctx context.Context, params *CreateKbApiV1KbPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ImportKbPagesApiV1KbImportPostWithBody request with any body
+	ImportKbPagesApiV1KbImportPostWithBody(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ImportKbPagesApiV1KbImportPost(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// IngestKbApiV1KbIngestPostWithBody request with any body
 	IngestKbApiV1KbIngestPostWithBody(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15947,6 +16538,11 @@ type ClientInterface interface {
 
 	EditSensorApiV1SensorsSensorIdPatch(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, body EditSensorApiV1SensorsSensorIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBody request with any body
+	AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBody(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListSensorResultsApiV1SensorsSensorIdResultsGet request
 	ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15974,6 +16570,28 @@ type ClientInterface interface {
 	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBody(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGet request
+	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGet(ctx context.Context, params *ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithBody request with any body
+	RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithBody(ctx context.Context, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPost(ctx context.Context, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, body RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGet request
+	ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGet(ctx context.Context, runApprovalId openapi_types.UUID, params *ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePost request
+	ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePost(ctx context.Context, runApprovalId openapi_types.UUID, params *ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPost request
+	EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPost(ctx context.Context, runApprovalId openapi_types.UUID, params *EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBody request with any body
+	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBody(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ExportApiV1SettingsExportGet request
 	ExportApiV1SettingsExportGet(ctx context.Context, params *ExportApiV1SettingsExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16069,6 +16687,12 @@ type ClientInterface interface {
 
 	// TimelineRouteApiV1TopologyTimelineGet request
 	TimelineRouteApiV1TopologyTimelineGet(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FirstStartFirstStartGet request
+	FirstStartFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FirstStartDestinationFirstStartDestinationGet request
+	FirstStartDestinationFirstStartDestinationGet(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// HealthzHealthzGet request
 	HealthzHealthzGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16256,6 +16880,11 @@ type ClientInterface interface {
 	ApprovalApproveUiApprovalsRequestIdApprovePostWithBody(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	ApprovalApproveUiApprovalsRequestIdApprovePostWithFormdataBody(ctx context.Context, requestId openapi_types.UUID, body ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithBody request with any body
+	ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithBody(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithFormdataBody(ctx context.Context, requestId openapi_types.UUID, body ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ApprovalRejectUiApprovalsRequestIdRejectPostWithBody request with any body
 	ApprovalRejectUiApprovalsRequestIdRejectPostWithBody(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16582,6 +17211,9 @@ type ClientInterface interface {
 	EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiFirstStartUiFirstStartGet request
+	UiFirstStartUiFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// IndexUiGrantsGet request
 	IndexUiGrantsGet(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -17528,6 +18160,30 @@ func (c *Client) DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost(ctx cont
 	return c.Client.Do(req)
 }
 
+func (c *Client) MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostRequestWithBody(c.Server, requestId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPost(ctx context.Context, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, body MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostRequest(c.Server, requestId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostRequestWithBody(c.Server, requestId, params, contentType, body)
 	if err != nil {
@@ -17902,6 +18558,42 @@ func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context
 
 func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest(c.Server, runner, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExportDashboardFileApiV1ChecksDashboardFilesExportGet(ctx context.Context, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExportDashboardFileApiV1ChecksDashboardFilesExportGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBody(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportDashboardFileApiV1ChecksDashboardFilesImportPost(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -18670,6 +19362,30 @@ func (c *Client) CreateKbApiV1KbPostWithBody(ctx context.Context, params *Create
 
 func (c *Client) CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateKbApiV1KbPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportKbPagesApiV1KbImportPostWithBody(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportKbPagesApiV1KbImportPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportKbPagesApiV1KbImportPost(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportKbPagesApiV1KbImportPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19592,6 +20308,30 @@ func (c *Client) EditSensorApiV1SensorsSensorIdPatch(ctx context.Context, sensor
 	return c.Client.Do(req)
 }
 
+func (c *Client) AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBody(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequestWithBody(c.Server, sensorId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequest(c.Server, sensorId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(c.Server, sensorId, params)
 	if err != nil {
@@ -19702,6 +20442,102 @@ func (c *Client) SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWith
 
 func (c *Client) SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPut(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequest(c.Server, principalSub, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGet(ctx context.Context, params *ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithBody(ctx context.Context, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPost(ctx context.Context, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, body RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGet(ctx context.Context, runApprovalId openapi_types.UUID, params *ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetRequest(c.Server, runApprovalId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePost(ctx context.Context, runApprovalId openapi_types.UUID, params *ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostRequest(c.Server, runApprovalId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPost(ctx context.Context, runApprovalId openapi_types.UUID, params *EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostRequest(c.Server, runApprovalId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBody(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostRequestWithBody(c.Server, runApprovalId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostRequest(c.Server, runApprovalId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -20110,6 +20946,30 @@ func (c *Client) RefreshApiV1TopologyRefreshTargetNamePost(ctx context.Context, 
 
 func (c *Client) TimelineRouteApiV1TopologyTimelineGet(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewTimelineRouteApiV1TopologyTimelineGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FirstStartFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartFirstStartGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FirstStartDestinationFirstStartDestinationGet(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartDestinationFirstStartDestinationGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -20974,6 +21834,30 @@ func (c *Client) ApprovalApproveUiApprovalsRequestIdApprovePostWithBody(ctx cont
 
 func (c *Client) ApprovalApproveUiApprovalsRequestIdApprovePostWithFormdataBody(ctx context.Context, requestId openapi_types.UUID, body ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApprovalApproveUiApprovalsRequestIdApprovePostRequestWithFormdataBody(c.Server, requestId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithBody(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostRequestWithBody(c.Server, requestId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithFormdataBody(ctx context.Context, requestId openapi_types.UUID, body ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostRequestWithFormdataBody(c.Server, requestId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -22462,6 +23346,18 @@ func (c *Client) EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slu
 
 func (c *Client) EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEditUiEventSourcesSlugEditPostRequestWithFormdataBody(c.Server, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiFirstStartUiFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiFirstStartUiFirstStartGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -26178,6 +27074,22 @@ func NewListApprovalsApiV1ApprovalsGetRequest(server string, params *ListApprova
 
 		}
 
+		if params.OutcomeUnknown != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "outcome_unknown", runtime.ParamLocationQuery, *params.OutcomeUnknown); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -26343,6 +27255,68 @@ func NewDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostRequestWithBody(se
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/approvals/%s/decide", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostRequest calls the generic MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPost builder with application/json body
+func NewMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostRequest(server string, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, body MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostRequestWithBody(server, requestId, params, "application/json", bodyReader)
+}
+
+// NewMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostRequestWithBody generates requests for MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPost with any type of body
+func NewMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostRequestWithBody(server string, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/outcome-check", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -27878,6 +28852,137 @@ func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server string
 	}
 
 	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewExportDashboardFileApiV1ChecksDashboardFilesExportGetRequest generates requests for ExportDashboardFileApiV1ChecksDashboardFilesExportGet
+func NewExportDashboardFileApiV1ChecksDashboardFilesExportGetRequest(server string, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboard-files/export")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "name", runtime.ParamLocationQuery, params.Name); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequest calls the generic ImportDashboardFileApiV1ChecksDashboardFilesImportPost builder with application/json body
+func NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequest(server string, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequestWithBody generates requests for ImportDashboardFileApiV1ChecksDashboardFilesImportPost with any type of body
+func NewImportDashboardFileApiV1ChecksDashboardFilesImportPostRequestWithBody(server string, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboard-files/import")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -31008,6 +32113,61 @@ func NewCreateKbApiV1KbPostRequestWithBody(server string, params *CreateKbApiV1K
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/kb")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewImportKbPagesApiV1KbImportPostRequest calls the generic ImportKbPagesApiV1KbImportPost builder with application/json body
+func NewImportKbPagesApiV1KbImportPostRequest(server string, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewImportKbPagesApiV1KbImportPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewImportKbPagesApiV1KbImportPostRequestWithBody generates requests for ImportKbPagesApiV1KbImportPost with any type of body
+func NewImportKbPagesApiV1KbImportPostRequestWithBody(server string, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/kb/import")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -34628,6 +35788,68 @@ func NewEditSensorApiV1SensorsSensorIdPatchRequestWithBody(server string, sensor
 	return req, nil
 }
 
+// NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequest calls the generic AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost builder with application/json body
+func NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequest(server string, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequestWithBody(server, sensorId, params, "application/json", bodyReader)
+}
+
+// NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequestWithBody generates requests for AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost with any type of body
+func NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequestWithBody(server string, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sensor_id", runtime.ParamLocationPath, sensorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors/%s/acknowledgement", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest generates requests for ListSensorResultsApiV1SensorsSensorIdResultsGet
 func NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(server string, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams) (*http.Request, error) {
 	var err error
@@ -35202,6 +36424,382 @@ func NewSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutRequestWithBo
 	}
 
 	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetRequest generates requests for ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGet
+func NewListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetRequest(server string, params *ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/service-principals/run-approvals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.PrincipalSub != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal_sub", runtime.ParamLocationQuery, *params.PrincipalSub); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostRequest calls the generic RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPost builder with application/json body
+func NewRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostRequest(server string, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, body RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostRequestWithBody generates requests for RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPost with any type of body
+func NewRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostRequestWithBody(server string, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/service-principals/run-approvals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetRequest generates requests for ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGet
+func NewShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetRequest(server string, runApprovalId openapi_types.UUID, params *ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_approval_id", runtime.ParamLocationPath, runApprovalId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/service-principals/run-approvals/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostRequest generates requests for ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePost
+func NewApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostRequest(server string, runApprovalId openapi_types.UUID, params *ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_approval_id", runtime.ParamLocationPath, runApprovalId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/service-principals/run-approvals/%s/approve", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostRequest generates requests for EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPost
+func NewEndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostRequest(server string, runApprovalId openapi_types.UUID, params *EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_approval_id", runtime.ParamLocationPath, runApprovalId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/service-principals/run-approvals/%s/end", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostRequest calls the generic RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost builder with application/json body
+func NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostRequest(server string, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostRequestWithBody(server, runApprovalId, params, "application/json", bodyReader)
+}
+
+// NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostRequestWithBody generates requests for RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost with any type of body
+func NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostRequestWithBody(server string, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_approval_id", runtime.ParamLocationPath, runApprovalId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/service-principals/run-approvals/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -37317,6 +38915,78 @@ func NewTimelineRouteApiV1TopologyTimelineGetRequest(server string, params *Time
 	return req, nil
 }
 
+// NewFirstStartFirstStartGetRequest generates requests for FirstStartFirstStartGet
+func NewFirstStartFirstStartGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/first-start")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewFirstStartDestinationFirstStartDestinationGetRequest generates requests for FirstStartDestinationFirstStartDestinationGet
+func NewFirstStartDestinationFirstStartDestinationGetRequest(server string, params *FirstStartDestinationFirstStartDestinationGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/first-start/destination")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "nonce", runtime.ParamLocationQuery, params.Nonce); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewHealthzHealthzGetRequest generates requests for HealthzHealthzGet
 func NewHealthzHealthzGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -39278,6 +40948,53 @@ func NewApprovalApproveUiApprovalsRequestIdApprovePostRequestWithBody(server str
 	}
 
 	operationPath := fmt.Sprintf("/ui/approvals/%s/approve", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostRequestWithFormdataBody calls the generic ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPost builder with application/x-www-form-urlencoded body
+func NewApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostRequestWithFormdataBody(server string, requestId openapi_types.UUID, body ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostRequestWithBody(server, requestId, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostRequestWithBody generates requests for ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPost with any type of body
+func NewApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostRequestWithBody(server string, requestId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/%s/outcome-check", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -43308,6 +45025,33 @@ func NewEditUiEventSourcesSlugEditPostRequestWithBody(server string, slug string
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiFirstStartUiFirstStartGetRequest generates requests for UiFirstStartUiFirstStartGet
+func NewUiFirstStartUiFirstStartGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/first-start")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -48616,6 +50360,11 @@ type ClientWithResponsesInterface interface {
 
 	DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, error)
 
+	// MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithBodyWithResponse request with any body
+	MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse, error)
+
+	MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, body MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostJSONRequestBody, reqEditors ...RequestEditorFn) (*MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse, error)
+
 	// RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse request with any body
 	RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse, error)
 
@@ -48702,6 +50451,14 @@ type ClientWithResponsesInterface interface {
 	PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
 
 	PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
+
+	// ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse request
+	ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse(ctx context.Context, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams, reqEditors ...RequestEditorFn) (*ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse, error)
+
+	// ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBodyWithResponse request with any body
+	ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBodyWithResponse(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error)
+
+	ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithResponse(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error)
 
 	// ListDashboardsApiV1ChecksDashboardsGetWithResponse request
 	ListDashboardsApiV1ChecksDashboardsGetWithResponse(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*ListDashboardsApiV1ChecksDashboardsGetResponse, error)
@@ -48878,6 +50635,11 @@ type ClientWithResponsesInterface interface {
 	CreateKbApiV1KbPostWithBodyWithResponse(ctx context.Context, params *CreateKbApiV1KbPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateKbApiV1KbPostResponse, error)
 
 	CreateKbApiV1KbPostWithResponse(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateKbApiV1KbPostResponse, error)
+
+	// ImportKbPagesApiV1KbImportPostWithBodyWithResponse request with any body
+	ImportKbPagesApiV1KbImportPostWithBodyWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error)
+
+	ImportKbPagesApiV1KbImportPostWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error)
 
 	// IngestKbApiV1KbIngestPostWithBodyWithResponse request with any body
 	IngestKbApiV1KbIngestPostWithBodyWithResponse(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestKbApiV1KbIngestPostResponse, error)
@@ -49081,6 +50843,11 @@ type ClientWithResponsesInterface interface {
 
 	EditSensorApiV1SensorsSensorIdPatchWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, body EditSensorApiV1SensorsSensorIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditSensorApiV1SensorsSensorIdPatchResponse, error)
 
+	// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBodyWithResponse request with any body
+	AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBodyWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error)
+
+	AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error)
+
 	// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request
 	ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error)
 
@@ -49108,6 +50875,28 @@ type ClientWithResponsesInterface interface {
 	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithBodyWithResponse(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse, error)
 
 	SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutWithResponse(ctx context.Context, principalSub string, params *SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutParams, body SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse, error)
+
+	// ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetWithResponse request
+	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetWithResponse(ctx context.Context, params *ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParams, reqEditors ...RequestEditorFn) (*ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse, error)
+
+	// RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithBodyWithResponse request with any body
+	RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithBodyWithResponse(ctx context.Context, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse, error)
+
+	RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithResponse(ctx context.Context, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, body RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse, error)
+
+	// ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetWithResponse request
+	ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetParams, reqEditors ...RequestEditorFn) (*ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse, error)
+
+	// ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostWithResponse request
+	ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostParams, reqEditors ...RequestEditorFn) (*ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse, error)
+
+	// EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostWithResponse request
+	EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostParams, reqEditors ...RequestEditorFn) (*EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse, error)
+
+	// RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBodyWithResponse request with any body
+	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBodyWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse, error)
+
+	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse, error)
 
 	// ExportApiV1SettingsExportGetWithResponse request
 	ExportApiV1SettingsExportGetWithResponse(ctx context.Context, params *ExportApiV1SettingsExportGetParams, reqEditors ...RequestEditorFn) (*ExportApiV1SettingsExportGetResponse, error)
@@ -49203,6 +50992,12 @@ type ClientWithResponsesInterface interface {
 
 	// TimelineRouteApiV1TopologyTimelineGetWithResponse request
 	TimelineRouteApiV1TopologyTimelineGetWithResponse(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*TimelineRouteApiV1TopologyTimelineGetResponse, error)
+
+	// FirstStartFirstStartGetWithResponse request
+	FirstStartFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*FirstStartFirstStartGetResponse, error)
+
+	// FirstStartDestinationFirstStartDestinationGetWithResponse request
+	FirstStartDestinationFirstStartDestinationGetWithResponse(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*FirstStartDestinationFirstStartDestinationGetResponse, error)
 
 	// HealthzHealthzGetWithResponse request
 	HealthzHealthzGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthzHealthzGetResponse, error)
@@ -49390,6 +51185,11 @@ type ClientWithResponsesInterface interface {
 	ApprovalApproveUiApprovalsRequestIdApprovePostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalApproveUiApprovalsRequestIdApprovePostResponse, error)
 
 	ApprovalApproveUiApprovalsRequestIdApprovePostWithFormdataBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, body ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalApproveUiApprovalsRequestIdApprovePostResponse, error)
+
+	// ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithBodyWithResponse request with any body
+	ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse, error)
+
+	ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithFormdataBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, body ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse, error)
 
 	// ApprovalRejectUiApprovalsRequestIdRejectPostWithBodyWithResponse request with any body
 	ApprovalRejectUiApprovalsRequestIdRejectPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalRejectUiApprovalsRequestIdRejectPostResponse, error)
@@ -49716,6 +51516,9 @@ type ClientWithResponsesInterface interface {
 	EditUiEventSourcesSlugEditPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
 
 	EditUiEventSourcesSlugEditPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
+
+	// UiFirstStartUiFirstStartGetWithResponse request
+	UiFirstStartUiFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiFirstStartUiFirstStartGetResponse, error)
 
 	// IndexUiGrantsGetWithResponse request
 	IndexUiGrantsGetWithResponse(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*IndexUiGrantsGetResponse, error)
@@ -50888,6 +52691,29 @@ func (r DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse) StatusCo
 	return 0
 }
 
+type MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalRequestView
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -51408,6 +53234,52 @@ func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DashboardFile
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DashboardImportResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -52489,9 +54361,12 @@ func (r ListKbApiV1KbGetResponse) StatusCode() int {
 type CreateKbApiV1KbPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *KbEntry
-	JSON201      *KbEntry
-	JSON422      *HTTPValidationError
+	JSON200      *struct {
+		union json.RawMessage
+	}
+	JSON201 *KbEntry
+	JSON409 *KbSimilarCheck
+	JSON422 *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -52504,6 +54379,29 @@ func (r CreateKbApiV1KbPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateKbApiV1KbPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ImportKbPagesApiV1KbImportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *KbImportResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ImportKbPagesApiV1KbImportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ImportKbPagesApiV1KbImportPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -53672,6 +55570,29 @@ func (r EditSensorApiV1SensorsSensorIdPatchResponse) StatusCode() int {
 	return 0
 }
 
+type AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *SensorAcknowledgementRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListSensorResultsApiV1SensorsSensorIdResultsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -53848,6 +55769,144 @@ func (r SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse) Sta
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r SetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunApprovalListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *RunApprovalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunApprovalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunApprovalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunApprovalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunApprovalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -54555,6 +56614,51 @@ func (r TimelineRouteApiV1TopologyTimelineGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r TimelineRouteApiV1TopologyTimelineGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FirstStartFirstStartGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *FirstStartResponse
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartFirstStartGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartFirstStartGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FirstStartDestinationFirstStartDestinationGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DestinationProof
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartDestinationFirstStartDestinationGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartDestinationFirstStartDestinationGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -55499,6 +57603,28 @@ func (r ApprovalApproveUiApprovalsRequestIdApprovePostResponse) Status() string 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ApprovalApproveUiApprovalsRequestIdApprovePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -57211,6 +59337,27 @@ func (r EditUiEventSourcesSlugEditPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EditUiEventSourcesSlugEditPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiFirstStartUiFirstStartGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiFirstStartUiFirstStartGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiFirstStartUiFirstStartGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -59874,6 +62021,23 @@ func (c *ClientWithResponses) DecideApprovalRequestApiV1ApprovalsRequestIdDecide
 	return ParseDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse(rsp)
 }
 
+// MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithBodyWithResponse request with arbitrary body returning *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse
+func (c *ClientWithResponses) MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse, error) {
+	rsp, err := c.MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostParams, body MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostJSONRequestBody, reqEditors ...RequestEditorFn) (*MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse, error) {
+	rsp, err := c.MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPost(ctx, requestId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse(rsp)
+}
+
 // RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse request with arbitrary body returning *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse
 func (c *ClientWithResponses) RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse, error) {
 	rsp, err := c.RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
@@ -60151,6 +62315,32 @@ func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithRes
 		return nil, err
 	}
 	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
+}
+
+// ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse request returning *ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse
+func (c *ClientWithResponses) ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse(ctx context.Context, params *ExportDashboardFileApiV1ChecksDashboardFilesExportGetParams, reqEditors ...RequestEditorFn) (*ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse, error) {
+	rsp, err := c.ExportDashboardFileApiV1ChecksDashboardFilesExportGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse(rsp)
+}
+
+// ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBodyWithResponse request with arbitrary body returning *ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse
+func (c *ClientWithResponses) ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBodyWithResponse(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error) {
+	rsp, err := c.ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithResponse(ctx context.Context, params *ImportDashboardFileApiV1ChecksDashboardFilesImportPostParams, body ImportDashboardFileApiV1ChecksDashboardFilesImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error) {
+	rsp, err := c.ImportDashboardFileApiV1ChecksDashboardFilesImportPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse(rsp)
 }
 
 // ListDashboardsApiV1ChecksDashboardsGetWithResponse request returning *ListDashboardsApiV1ChecksDashboardsGetResponse
@@ -60711,6 +62901,23 @@ func (c *ClientWithResponses) CreateKbApiV1KbPostWithResponse(ctx context.Contex
 		return nil, err
 	}
 	return ParseCreateKbApiV1KbPostResponse(rsp)
+}
+
+// ImportKbPagesApiV1KbImportPostWithBodyWithResponse request with arbitrary body returning *ImportKbPagesApiV1KbImportPostResponse
+func (c *ClientWithResponses) ImportKbPagesApiV1KbImportPostWithBodyWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error) {
+	rsp, err := c.ImportKbPagesApiV1KbImportPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportKbPagesApiV1KbImportPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ImportKbPagesApiV1KbImportPostWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error) {
+	rsp, err := c.ImportKbPagesApiV1KbImportPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportKbPagesApiV1KbImportPostResponse(rsp)
 }
 
 // IngestKbApiV1KbIngestPostWithBodyWithResponse request with arbitrary body returning *IngestKbApiV1KbIngestPostResponse
@@ -61371,6 +63578,23 @@ func (c *ClientWithResponses) EditSensorApiV1SensorsSensorIdPatchWithResponse(ct
 	return ParseEditSensorApiV1SensorsSensorIdPatchResponse(rsp)
 }
 
+// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBodyWithResponse request with arbitrary body returning *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse
+func (c *ClientWithResponses) AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBodyWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error) {
+	rsp, err := c.AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBody(ctx, sensorId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error) {
+	rsp, err := c.AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost(ctx, sensorId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse(rsp)
+}
+
 // ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request returning *ListSensorResultsApiV1SensorsSensorIdResultsGetResponse
 func (c *ClientWithResponses) ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error) {
 	rsp, err := c.ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx, sensorId, params, reqEditors...)
@@ -61457,6 +63681,76 @@ func (c *ClientWithResponses) SetReadScopeApiV1ServicePrincipalsReadScopesPrinci
 		return nil, err
 	}
 	return ParseSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse(rsp)
+}
+
+// ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetWithResponse request returning *ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse
+func (c *ClientWithResponses) ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetWithResponse(ctx context.Context, params *ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParams, reqEditors ...RequestEditorFn) (*ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse, error) {
+	rsp, err := c.ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse(rsp)
+}
+
+// RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithBodyWithResponse request with arbitrary body returning *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse
+func (c *ClientWithResponses) RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithBodyWithResponse(ctx context.Context, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse, error) {
+	rsp, err := c.RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithResponse(ctx context.Context, params *RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostParams, body RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse, error) {
+	rsp, err := c.RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse(rsp)
+}
+
+// ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetWithResponse request returning *ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse
+func (c *ClientWithResponses) ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetParams, reqEditors ...RequestEditorFn) (*ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse, error) {
+	rsp, err := c.ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGet(ctx, runApprovalId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse(rsp)
+}
+
+// ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostWithResponse request returning *ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse
+func (c *ClientWithResponses) ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostParams, reqEditors ...RequestEditorFn) (*ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse, error) {
+	rsp, err := c.ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePost(ctx, runApprovalId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse(rsp)
+}
+
+// EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostWithResponse request returning *EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse
+func (c *ClientWithResponses) EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostParams, reqEditors ...RequestEditorFn) (*EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse, error) {
+	rsp, err := c.EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPost(ctx, runApprovalId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse(rsp)
+}
+
+// RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBodyWithResponse request with arbitrary body returning *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse
+func (c *ClientWithResponses) RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBodyWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse, error) {
+	rsp, err := c.RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBody(ctx, runApprovalId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse, error) {
+	rsp, err := c.RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost(ctx, runApprovalId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse(rsp)
 }
 
 // ExportApiV1SettingsExportGetWithResponse request returning *ExportApiV1SettingsExportGetResponse
@@ -61756,6 +64050,24 @@ func (c *ClientWithResponses) TimelineRouteApiV1TopologyTimelineGetWithResponse(
 		return nil, err
 	}
 	return ParseTimelineRouteApiV1TopologyTimelineGetResponse(rsp)
+}
+
+// FirstStartFirstStartGetWithResponse request returning *FirstStartFirstStartGetResponse
+func (c *ClientWithResponses) FirstStartFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*FirstStartFirstStartGetResponse, error) {
+	rsp, err := c.FirstStartFirstStartGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartFirstStartGetResponse(rsp)
+}
+
+// FirstStartDestinationFirstStartDestinationGetWithResponse request returning *FirstStartDestinationFirstStartDestinationGetResponse
+func (c *ClientWithResponses) FirstStartDestinationFirstStartDestinationGetWithResponse(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*FirstStartDestinationFirstStartDestinationGetResponse, error) {
+	rsp, err := c.FirstStartDestinationFirstStartDestinationGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartDestinationFirstStartDestinationGetResponse(rsp)
 }
 
 // HealthzHealthzGetWithResponse request returning *HealthzHealthzGetResponse
@@ -62375,6 +64687,23 @@ func (c *ClientWithResponses) ApprovalApproveUiApprovalsRequestIdApprovePostWith
 		return nil, err
 	}
 	return ParseApprovalApproveUiApprovalsRequestIdApprovePostResponse(rsp)
+}
+
+// ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithBodyWithResponse request with arbitrary body returning *ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse
+func (c *ClientWithResponses) ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse, error) {
+	rsp, err := c.ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithBody(ctx, requestId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithFormdataBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, body ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse, error) {
+	rsp, err := c.ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithFormdataBody(ctx, requestId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse(rsp)
 }
 
 // ApprovalRejectUiApprovalsRequestIdRejectPostWithBodyWithResponse request with arbitrary body returning *ApprovalRejectUiApprovalsRequestIdRejectPostResponse
@@ -63445,6 +65774,15 @@ func (c *ClientWithResponses) EditUiEventSourcesSlugEditPostWithFormdataBodyWith
 		return nil, err
 	}
 	return ParseEditUiEventSourcesSlugEditPostResponse(rsp)
+}
+
+// UiFirstStartUiFirstStartGetWithResponse request returning *UiFirstStartUiFirstStartGetResponse
+func (c *ClientWithResponses) UiFirstStartUiFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiFirstStartUiFirstStartGetResponse, error) {
+	rsp, err := c.UiFirstStartUiFirstStartGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiFirstStartUiFirstStartGetResponse(rsp)
 }
 
 // IndexUiGrantsGetWithResponse request returning *IndexUiGrantsGetResponse
@@ -65853,6 +68191,39 @@ func ParseDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse(rsp *ht
 	return response, nil
 }
 
+// ParseMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse parses an HTTP response from a MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostWithResponse call
+func ParseMarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse(rsp *http.Response) (*MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &MarkApprovalOutcomeCheckedApiV1ApprovalsRequestIdOutcomeCheckPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalRequestView
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse parses an HTTP response from a RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithResponse call
 func ParseRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse(rsp *http.Response) (*RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -66574,6 +68945,72 @@ func ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp *http.Response
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AssignmentDocumentResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse parses an HTTP response from a ExportDashboardFileApiV1ChecksDashboardFilesExportGetWithResponse call
+func ParseExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse(rsp *http.Response) (*ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExportDashboardFileApiV1ChecksDashboardFilesExportGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DashboardFile
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse parses an HTTP response from a ImportDashboardFileApiV1ChecksDashboardFilesImportPostWithResponse call
+func ParseImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse(rsp *http.Response) (*ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ImportDashboardFileApiV1ChecksDashboardFilesImportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DashboardImportResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -68082,7 +70519,9 @@ func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostR
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest KbEntry
+		var dest struct {
+			union json.RawMessage
+		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -68094,6 +70533,46 @@ func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostR
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest KbSimilarCheck
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseImportKbPagesApiV1KbImportPostResponse parses an HTTP response from a ImportKbPagesApiV1KbImportPostWithResponse call
+func ParseImportKbPagesApiV1KbImportPostResponse(rsp *http.Response) (*ImportKbPagesApiV1KbImportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ImportKbPagesApiV1KbImportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KbImportResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -69738,6 +72217,39 @@ func ParseEditSensorApiV1SensorsSensorIdPatchResponse(rsp *http.Response) (*Edit
 	return response, nil
 }
 
+// ParseAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse parses an HTTP response from a AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithResponse call
+func ParseAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse(rsp *http.Response) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest SensorAcknowledgementRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse parses an HTTP response from a ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse call
 func ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp *http.Response) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -69971,6 +72483,204 @@ func ParseSetReadScopeApiV1ServicePrincipalsReadScopesPrincipalSubPutResponse(rs
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ServiceReadScopeRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse parses an HTTP response from a ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetWithResponse call
+func ParseListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse(rsp *http.Response) (*ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunApprovalListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse parses an HTTP response from a RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostWithResponse call
+func ParseRequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse(rsp *http.Response) (*RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest RunApprovalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse parses an HTTP response from a ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetWithResponse call
+func ParseShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse(rsp *http.Response) (*ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunApprovalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse parses an HTTP response from a ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostWithResponse call
+func ParseApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse(rsp *http.Response) (*ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApproveRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdApprovePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunApprovalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse parses an HTTP response from a EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostWithResponse call
+func ParseEndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse(rsp *http.Response) (*EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunApprovalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse parses an HTTP response from a RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithResponse call
+func ParseRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse(rsp *http.Response) (*RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunApprovalRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -70964,6 +73674,65 @@ func ParseTimelineRouteApiV1TopologyTimelineGetResponse(rsp *http.Response) (*Ti
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest TopologyTimelineResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFirstStartFirstStartGetResponse parses an HTTP response from a FirstStartFirstStartGetWithResponse call
+func ParseFirstStartFirstStartGetResponse(rsp *http.Response) (*FirstStartFirstStartGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartFirstStartGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FirstStartResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFirstStartDestinationFirstStartDestinationGetResponse parses an HTTP response from a FirstStartDestinationFirstStartDestinationGetWithResponse call
+func ParseFirstStartDestinationFirstStartDestinationGetResponse(rsp *http.Response) (*FirstStartDestinationFirstStartDestinationGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartDestinationFirstStartDestinationGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DestinationProof
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -72056,6 +74825,32 @@ func ParseApprovalApproveUiApprovalsRequestIdApprovePostResponse(rsp *http.Respo
 	}
 
 	response := &ApprovalApproveUiApprovalsRequestIdApprovePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse parses an HTTP response from a ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostWithResponse call
+func ParseApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse(rsp *http.Response) (*ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
@@ -74047,6 +76842,22 @@ func ParseEditUiEventSourcesSlugEditPostResponse(rsp *http.Response) (*EditUiEve
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiFirstStartUiFirstStartGetResponse parses an HTTP response from a UiFirstStartUiFirstStartGetWithResponse call
+func ParseUiFirstStartUiFirstStartGetResponse(rsp *http.Response) (*UiFirstStartUiFirstStartGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiFirstStartUiFirstStartGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

@@ -66,6 +66,7 @@ __all__ = [
     "compute_audit_params_hash",
     "compute_params_hash",
     "compute_value_fingerprint",
+    "derive_install_key",
     "ingested_schema_for_validation",
     "params_check_errors",
     "params_hash_candidates",
@@ -164,6 +165,17 @@ def _params_hash_key() -> bytes:
 def _database_url_key() -> bytes:
     """The key made from ``DATABASE_URL``: the key without ``PARAMS_HASH_KEY``."""
     return _derive_key(get_settings().database_url)
+
+
+def derive_install_key(label: bytes) -> bytes:
+    """Return a key of this install for one purpose, named by *label*.
+
+    The key is HMAC-SHA256 of *label* under the server key of
+    :func:`_params_hash_key`, so every pod of an install gets the same key
+    and no two labels share one. The first-start destination check uses it
+    (:mod:`meho_backplane.first_start`).
+    """
+    return hmac.new(_params_hash_key(), label, hashlib.sha256).digest()
 
 
 def _keyed_params_hash(params: Any) -> str:
@@ -597,6 +609,19 @@ async def _service_grant_verdict(
         )
     if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
+
+    # #4126: a person approved the operation list of this run once.
+    from meho_backplane.operations.run_approval_gate import consult_and_record_run_approval
+
+    run_approval_id = await consult_and_record_run_approval(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        record=not decide_only,
+    )
+    if run_approval_id is not None:
+        return PermissionVerdict.AUTO_EXECUTE, f"auto-approved by run approval {run_approval_id}"
 
     if has_caller_address(descriptor.parameter_schema):
         note = (

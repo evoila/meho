@@ -133,13 +133,21 @@ from meho_backplane.kb.shared import (
 )
 from meho_backplane.lesson_header import add_candidate_expiry, normalise_lesson_header
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
+from meho_backplane.retrieval.time_window import TimeWindow
 
-__all__ = ["KbIngestRootError", "KbListOrder", "KbService", "add_shared_hits"]
+__all__ = ["KbIngestRootError", "KbListOrder", "KbSearchScope", "KbService", "add_shared_hits"]
 
 #: Row order of :meth:`KbService.list_entries`. ``"slug"`` (the default)
 #: sorts A to Z by slug; ``"newest"`` puts the most recently updated
 #: entry first, like the memory list (#5679).
 KbListOrder = Literal["slug", "newest"]
+
+#: Where :meth:`KbService.search_entries` looks (#5726). ``"all"`` (the
+#: default): the caller's tenant and the shared scope of the instance.
+#: ``"tenant"``: only the entries the caller's tenant owns. ``"shared"``:
+#: only the entries in the shared scope, the caller's own shared entries
+#: included.
+KbSearchScope = Literal["all", "tenant", "shared"]
 
 
 #: First-N characters of a body returned in :class:`KbEntrySearchHit.snippet`
@@ -445,6 +453,8 @@ class KbService:
         *,
         filters: dict[str, Any] | None = None,
         limit: int = 10,
+        time_window: TimeWindow | None = None,
+        scope: KbSearchScope = "all",
     ) -> list[KbEntrySearchHit]:
         """Hybrid BM25 + cosine retrieval scoped to *tenant_id*'s kb corpus.
 
@@ -473,13 +483,20 @@ class KbService:
             predicate against ``documents.metadata`` (G4.4-T1 /
             #1177). Pass e.g. ``{"kind": "kb-entry", "source_kind":
             "evoila-distilled"}`` to scope hits to the curated
-            slice. Values must be JSON scalars -- the substrate's
-            ``@>`` containment is shape-flat-only by contract.
+            slice. A value may also be a list, such as ``{"tags":
+            ["vm", "snapshot"]}``: then the entry must hold every listed
+            item (``@>`` containment).
         limit
             Maximum entries to return. Default 10; capped at 50 by the
             API surface. Up to
             :data:`~meho_backplane.retrieval.retriever.CANDIDATE_LIMIT`
             passages are ranked to fill them.
+        time_window
+            Optional limits on ``confirmed_at`` and on the time of the
+            last write, checked in the candidate SQL (#5726).
+        scope
+            Where to look; see :data:`KbSearchScope`. Each hit carries
+            the ``tenant_id`` that owns it and whether it is ``shared``.
         """
         if limit < 0:
             raise ValueError(f"limit must be >= 0; got {limit}")
@@ -498,23 +515,50 @@ class KbService:
             residual = {k: v for k, v in filters.items() if k != "kind"}
             metadata_filters = residual or None
 
-        ranked = await retrieve(
-            tenant_id=tenant_id,
-            query=query,
-            source=KB_SOURCE,
-            kind=kind_filter,
-            limit=CANDIDATE_LIMIT,
-            metadata_filters=metadata_filters,
-        )
-        ranked = await add_shared_hits(
-            ranked,
-            tenant_id=tenant_id,
-            query=query,
-            kind=kind_filter,
-            limit=CANDIDATE_LIMIT,
-            metadata_filters=metadata_filters,
-        )
-        return _group_by_entry(ranked, limit)
+        own_filters = _own_scope_filters(tenant_id, metadata_filters, scope)
+        ranked: list[RetrievalHit] = []
+        if own_filters is not None:
+            ranked = await retrieve(
+                tenant_id=tenant_id,
+                query=query,
+                source=KB_SOURCE,
+                kind=kind_filter,
+                limit=CANDIDATE_LIMIT,
+                metadata_filters=own_filters or None,
+                time_window=time_window,
+            )
+        if scope != "tenant":
+            ranked = await add_shared_hits(
+                ranked,
+                tenant_id=tenant_id,
+                query=query,
+                kind=kind_filter,
+                limit=CANDIDATE_LIMIT,
+                metadata_filters=metadata_filters,
+                time_window=time_window,
+            )
+        return _group_by_entry(ranked, limit, shared_owner_tenants())
+
+
+def _own_scope_filters(
+    tenant_id: uuid.UUID,
+    metadata_filters: dict[str, Any] | None,
+    scope: KbSearchScope,
+) -> dict[str, Any] | None:
+    """Return the metadata filters of the search in the caller's own tenant.
+
+    ``None`` means: do not search the own tenant. That is the case for
+    ``scope="shared"`` when the tenant is not a listed owner (it has no
+    shared entries), or when the caller also asked for ``shared`` other
+    than true (nothing can match).
+    """
+    filters = dict(metadata_filters or {})
+    if scope != "shared":
+        return filters
+    if tenant_id not in shared_owner_tenants() or filters.get(META_SHARED, True) is not True:
+        return None
+    filters[META_SHARED] = True
+    return filters
 
 
 async def add_shared_hits(
@@ -525,6 +569,7 @@ async def add_shared_hits(
     kind: str | None,
     limit: int,
     metadata_filters: dict[str, Any] | None,
+    time_window: TimeWindow | None = None,
 ) -> list[RetrievalHit]:
     """Add the kb hits of the shared scope to *own*, best first, at most *limit*.
 
@@ -550,6 +595,7 @@ async def add_shared_hits(
             kind=kind,
             limit=limit,
             metadata_filters=filters,
+            time_window=time_window,
         )
         merged.extend(hit for hit in shared_hits if _hit_slug(hit) not in own_slugs)
     merged.sort(key=lambda hit: hit.fused_score, reverse=True)
@@ -640,7 +686,9 @@ def _refuse_if_not_own(slug: str, existing: dict[str, object], actor_sub: str | 
         raise KbEntryNotOwnedError(slug, creator if isinstance(creator, str) else None)
 
 
-def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearchHit]:
+def _group_by_entry(
+    ranked: list[RetrievalHit], limit: int, shared_owners: frozenset[uuid.UUID]
+) -> list[KbEntrySearchHit]:
     """Fold ranked passage rows into one hit per entry, best entry first.
 
     A hit takes its scores from its best passage and keeps up to
@@ -666,7 +714,9 @@ def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearc
                     cosine_rank=hit.cosine_rank,
                 )
             )
-    return [_entry_hit(slug, best, evidence) for slug, (best, evidence) in groups.items()]
+    return [
+        _entry_hit(slug, best, evidence, shared_owners) for slug, (best, evidence) in groups.items()
+    ]
 
 
 def _hit_slug(hit: RetrievalHit) -> str:
@@ -701,13 +751,22 @@ def _locator(hit: RetrievalHit) -> KbPassageLocator | None:
 
 
 def _entry_hit(
-    slug: str, best: RetrievalHit, evidence: list[KbPassageEvidence]
+    slug: str,
+    best: RetrievalHit,
+    evidence: list[KbPassageEvidence],
+    shared_owners: frozenset[uuid.UUID],
 ) -> KbEntrySearchHit:
-    """Build the hit for one entry from its best row and its passages."""
+    """Build the hit for one entry from its best row and its passages.
+
+    The entry is ``shared`` when its metadata says ``shared: true`` and
+    its owner tenant is listed in ``KB_SHARED_TENANT_IDS``.
+    """
     metadata = {k: v for k, v in best.doc_metadata.items() if k != META_KB_PASSAGE}
     complete = bool(evidence) and len(evidence) == evidence[0].locator.passage_count
     return KbEntrySearchHit(
         slug=slug,
+        tenant_id=best.tenant_id,
+        shared=metadata.get(META_SHARED) is True and best.tenant_id in shared_owners,
         snippet=_make_snippet(evidence[0].text if evidence else best.body),
         metadata=metadata,
         fused_score=best.fused_score,

@@ -104,11 +104,12 @@ META_LAST_UPDATED_BY_SUB: Final[str] = "last_updated_by_sub"
 #: this key: it writes it on every directory ingest and every direct
 #: create, and it replaces any value a caller or a front-matter block
 #: supplies. The stored value is a small dict with ``source_kind``
-#: (``"directory"`` or ``"direct"``), ``relative_path`` (the file path
-#: relative to the ingest directory, never an absolute host path; ``None``
-#: for direct writes) and ``ingested_at`` (UTC ISO-8601 time of the
-#: write). Rows written before this key existed have no value here; the
-#: read side reports them as ``state="legacy"`` instead of guessing.
+#: (``"directory"``, ``"direct"`` or ``"import"``), ``relative_path`` (the
+#: file path relative to the ingest directory or the imported page path,
+#: never an absolute host path; ``None`` for direct writes) and
+#: ``ingested_at`` (UTC ISO-8601 time of the write). Rows written before
+#: this key existed have no value here; the read side reports them as
+#: ``state="legacy"`` instead of guessing.
 META_PROVENANCE: Final[str] = "provenance"
 
 #: Metadata key that marks an entry as shared: every tenant on the
@@ -244,7 +245,7 @@ class KbProvenance(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     state: Literal["recorded", "legacy"]
-    source_kind: Literal["directory", "direct"] | None = None
+    source_kind: Literal["directory", "direct", "import"] | None = None
     relative_path: str | None = None
     ingested_at: datetime | None = None
 
@@ -374,11 +375,17 @@ class KbEntrySearchHit(BaseModel):
 
     ``snippet`` is the first ~200 characters of the best passage (or of
     the body, for an entry without passages).
+
+    ``tenant_id`` is the tenant that owns the entry, and ``shared`` says
+    whether the entry is in the shared knowledge scope of the instance
+    (#5726). A hit from another tenant is always a shared one.
     """
 
     model_config = ConfigDict(frozen=True)
 
     slug: str
+    tenant_id: uuid.UUID | None = None
+    shared: bool = False
     snippet: str
     metadata: dict[str, object]
     fused_score: float

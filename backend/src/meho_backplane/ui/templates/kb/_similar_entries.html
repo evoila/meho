@@ -1,0 +1,39 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The similar entries that stopped a new knowledge entry.
+
+  Included by ``_editor_modal.html`` (the editor save) and by
+  ``_upload_progress.html`` (single and bulk uploads). Shows each entry
+  with what the operator needs to choose between updating it and
+  creating the new entry anyway: slug, summary, product and version,
+  status, current revision, a short snippet, the score, and whether the
+  operator may change the entry (a shared entry of another tenant cannot
+  be changed here).
+
+  Context variables:
+    similar -- list[KbSimilarEntry]: the entries, best first
+-#}
+<ul class="list-disc pl-5 space-y-2" aria-label="Similar entries">
+  {% for item in similar %}
+  <li>
+    <a href="/ui/kb/{{ item.slug }}" class="link link-primary font-mono" target="_blank" rel="noopener">{{ item.slug }}</a>
+    {% if item.summary %}<span class="opacity-70">: {{ item.summary }}</span>{% endif %}
+    <span class="opacity-50 text-xs">(score {{ "%.2f" | format(item.score) }}{% if item.match == "same_product_version" %}, same product and version{% endif %})</span>
+    <div class="text-xs opacity-70">
+      {% if item.product %}Product: <span class="font-mono">{{ item.product }}</span>{% if item.version %} {{ item.version }}{% endif %} &middot; {% endif %}
+      {% if item.status %}Status: {{ item.status }} &middot; {% endif %}
+      Revision: <span class="font-mono">{{ item.revision_id or "none" }}</span>
+    </div>
+    {% if item.snippet %}
+    <blockquote class="text-xs opacity-70 border-l-2 border-base-300 pl-2 mt-1 whitespace-pre-wrap">{{ item.snippet }}</blockquote>
+    {% endif %}
+    {% if item.may_change %}
+    <span class="badge badge-ghost badge-sm">You can update this entry</span>
+    {% else %}
+    <span class="badge badge-warning badge-outline badge-sm">Shared by another tenant: you cannot change it. Create anyway, or ask its owner.</span>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>

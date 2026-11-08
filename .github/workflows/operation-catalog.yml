@@ -98,7 +98,7 @@ jobs:
           DIR="${RUNNER_TEMP}/previous"
           mkdir -p "${DIR}"
           BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${PREV}"
-          CODE=$(curl -sSL -o "${DIR}/operation-catalog.json" -w '%{http_code}' "${BASE}/operation-catalog.json")
+          CODE=$(curl -sSL --retry 3 -o "${DIR}/operation-catalog.json" -w '%{http_code}' "${BASE}/operation-catalog.json")
           if [[ "${CODE}" == "404" ]]; then
             echo "Release ${PREV} has no operation catalog."
             rm -f "${DIR}/operation-catalog.json"
@@ -108,7 +108,7 @@ jobs:
             echo "::error::Downloading the catalog of ${PREV} failed with HTTP ${CODE}."
             exit 1
           fi
-          curl -fsSL -o "${DIR}/operation-catalog.json.cosign.bundle" "${BASE}/operation-catalog.json.cosign.bundle"
+          curl -fsSL --retry 3 --retry-all-errors -o "${DIR}/operation-catalog.json.cosign.bundle" "${BASE}/operation-catalog.json.cosign.bundle"
           cosign verify-blob \
             --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/operation-catalog.yml@refs/tags/${PREV}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \

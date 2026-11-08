@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // createdTargetJSON is a complete Target row as POST /api/v1/targets
@@ -207,6 +209,50 @@ func TestAddSuccessRendersTargetAndOmitsTenantID(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout should render created-target field %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestAddNewTargetNamesTheProbeCommand checks that the human output of a
+// new target without a fingerprint ends with the probe command, and that
+// --json output stays the plain Target row.
+func TestAddNewTargetNamesTheProbeCommand(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(strings.ReplaceAll(createdTargetJSON, "rdc-vault", "new-target")))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	stdout, stderr, err := runAddCmd(t, srv.URL, "new-target", "--product", "vault", "--host", "vault.example.test")
+	if err != nil {
+		t.Fatalf("add: %v\nstderr=%s", err, stderr.String())
+	}
+	if want := "Not probed yet. Run `meho targets probe new-target`"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout should name the probe command %q:\n%s", want, stdout.String())
+	}
+
+	stdout, stderr, err = runAddCmd(t, srv.URL, "new-target", "--product", "vault", "--host", "vault.example.test", "--json")
+	if err != nil {
+		t.Fatalf("add --json: %v\nstderr=%s", err, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Not probed yet") {
+		t.Errorf("--json output must stay the plain Target row:\n%s", stdout.String())
+	}
+}
+
+// TestPrintProbeHintSkipsAProbedTarget checks that a target that already
+// has a fingerprint gets no probe hint.
+func TestPrintProbeHintSkipsAProbedTarget(t *testing.T) {
+	t.Parallel()
+	fp := map[string]interface{}{"vendor": "hashicorp", "product": "vault"}
+	var buf bytes.Buffer
+	printProbeHint(&buf, &api.Target{Name: "probed", Fingerprint: &fp})
+	if buf.Len() != 0 {
+		t.Errorf("a probed target needs no hint, got %q", buf.String())
 	}
 }
 

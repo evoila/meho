@@ -6,6 +6,7 @@ package targets
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -317,5 +318,16 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 		return output.PrintJSON(cmd.OutOrStdout(), &t)
 	}
 	printTargetSummary(cmd.OutOrStdout(), &t)
+	printProbeHint(cmd.OutOrStdout(), &t)
 	return nil
+}
+
+// printProbeHint names the next command when the new target has no
+// fingerprint. Registration does not contact the system, so MEHO knows
+// the product and version only after a probe.
+func printProbeHint(w io.Writer, t *api.Target) {
+	if t.Fingerprint != nil && len(*t.Fingerprint) > 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nNot probed yet. Run `meho targets probe %s` to detect the product and version.\n", t.Name)
 }

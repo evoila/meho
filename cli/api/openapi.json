@@ -40365,7 +40365,8 @@
             "additionalProperties": true,
             "type": "object",
             "nullable": true,
-            "title": "Fingerprint"
+            "title": "Fingerprint",
+            "description": "Product and version from the last successful probe. null means the target is not probed yet (a new target is never probed): run POST /api/v1/targets/{name}/probe, or `meho targets probe <name>` in the CLI."
           },
           "preferred_impl_id": {
             "type": "string",

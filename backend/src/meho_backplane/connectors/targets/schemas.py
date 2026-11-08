@@ -193,8 +193,16 @@ TARGETS_REGISTER_RESPONSE_SCHEMA: dict[str, Any] = {
                 "impossible)."
             ),
         },
+        "next_step": {
+            "type": "string",
+            "description": (
+                "What to do next. A new target is not probed yet: run "
+                "`targets.probe` with its name to detect the product and "
+                "version."
+            ),
+        },
     },
-    "required": ["target_id", "name", "product", "host", "tenant_id"],
+    "required": ["target_id", "name", "product", "host", "tenant_id", "next_step"],
 }
 
 

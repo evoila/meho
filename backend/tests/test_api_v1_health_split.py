@@ -35,6 +35,7 @@ needed.
 from __future__ import annotations
 
 import inspect
+import re
 from collections.abc import Iterator
 from unittest.mock import AsyncMock
 
@@ -222,7 +223,11 @@ def test_read_only_liveness_returns_200_without_vault_touch(
 
     assert response.status_code == 200
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()
-    assert response.json() == {
+    body = response.json()
+    # #5504: the server's time in UTC rides here too (a clock read, no
+    # Vault). Its value moves, so it is checked apart from the rest.
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", body.pop("server_time"))
+    assert body == {
         "operator": {
             "sub": "op-monitor",
             "name": "Monitor",

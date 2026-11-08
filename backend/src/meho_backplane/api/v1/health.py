@@ -620,6 +620,11 @@ class LivenessResponse(BaseModel):
 
     ``db`` shares :class:`DbStatus` with the deep check, so it carries
     the migration revision too (#4830). It still never touches Vault.
+
+    ``server_time`` (#5504) is the same field as on the deep check: the
+    server's time now, in UTC, to the second. ``meho status`` falls back
+    to this route for a login with the ``read_only`` role, so that login
+    reads the time here. A clock read; no Vault, no connector.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -627,6 +632,7 @@ class LivenessResponse(BaseModel):
     operator: OperatorIdentity
     db: DbStatus
     sensor_runner: SensorRunnerStatus | None = None
+    server_time: datetime | None = None
 
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
@@ -1072,6 +1078,7 @@ async def liveness(
         operator=_operator_identity(operator),
         db=_db_status(db_state),
         sensor_runner=_sensor_runner_status(),
+        server_time=_server_time(),
     )
 
 

@@ -61,3 +61,36 @@ func TestRenderHumanHealth_ServerTime(t *testing.T) {
 		t.Errorf("missing %q in output for a login with no tenant chosen:\n%s", want, unchosen)
 	}
 }
+
+// TestPrintLiveness_ServerTime: the liveness answer, which `meho status`
+// shows for a login with the read_only role, prints the same time line
+// in UTC; nothing new when an older backplane sends no field.
+func TestPrintLiveness_ServerTime(t *testing.T) {
+	render := func(ts *time.Time) string {
+		var buf bytes.Buffer
+		err := PrintLiveness(&buf, &api.LivenessResponse{
+			Operator:   api.OperatorIdentity{Sub: "alice-sub-id"},
+			Db:         api.DbStatus{Migrated: ptrBool(true)},
+			ServerTime: ts,
+		})
+		if err != nil {
+			t.Fatalf("PrintLiveness: %v", err)
+		}
+		return buf.String()
+	}
+	zone := time.FixedZone("plus-two", 2*60*60)
+	ts := time.Date(2026, 10, 31, 16, 34, 28, 0, zone)
+	want := "  Server time: 2026-10-31T14:34:28Z\n"
+
+	withTime := render(&ts)
+	if !strings.Contains(withTime, want) {
+		t.Errorf("missing %q in output:\n%s", want, withTime)
+	}
+	missing := render(nil)
+	if strings.Contains(missing, "Server time") {
+		t.Errorf("no line when the field is missing, got:\n%s", missing)
+	}
+	if strings.Count(withTime, "\n") != strings.Count(missing, "\n")+1 {
+		t.Errorf("the time adds exactly one line:\n%s\n---\n%s", withTime, missing)
+	}
+}

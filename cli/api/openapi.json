@@ -34508,6 +34508,12 @@
           "sensor_runner": {
             "$ref": "#/components/schemas/SensorRunnerStatus",
             "nullable": true
+          },
+          "server_time": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Server Time"
           }
         },
         "type": "object",
@@ -34516,7 +34522,7 @@
           "db"
         ],
         "title": "LivenessResponse",
-        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret.\n\n``db`` shares :class:`DbStatus` with the deep check, so it carries\nthe migration revision too (#4830). It still never touches Vault."
+        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret.\n\n``db`` shares :class:`DbStatus` with the deep check, so it carries\nthe migration revision too (#4830). It still never touches Vault.\n\n``server_time`` (#5504) is the same field as on the deep check: the\nserver's time now, in UTC, to the second. ``meho status`` falls back\nto this route for a login with the ``read_only`` role, so that login\nreads the time here. A clock read; no Vault, no connector."
       },
       "ManualStep": {
         "properties": {

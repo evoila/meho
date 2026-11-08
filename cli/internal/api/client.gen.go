@@ -7305,6 +7305,11 @@ type LearningMetrics struct {
 //
 // “db“ shares :class:`DbStatus` with the deep check, so it carries
 // the migration revision too (#4830). It still never touches Vault.
+//
+// “server_time“ (#5504) is the same field as on the deep check: the
+// server's time now, in UTC, to the second. “meho status“ falls back
+// to this route for a login with the “read_only“ role, so that login
+// reads the time here. A clock read; no Vault, no connector.
 type LivenessResponse struct {
 	// Db Database migration status.
 	//
@@ -7386,6 +7391,7 @@ type LivenessResponse struct {
 	// replica's claim stamp advances, so alert on the minimum across
 	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
+	ServerTime   *time.Time          `json:"server_time"`
 }
 
 // ManualStep A step the operator performs off-MEHO (SSH, web UI, console).

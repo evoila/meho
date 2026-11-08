@@ -1214,10 +1214,11 @@ is `docs-site/guides/several-tenants.md`. The CLI side:
   backplane's reason and how to pick another tenant (exit 4). With the
   read_only role in the current tenant the deep check answers `403
   insufficient_role`; status then reads `GET /api/v1/health/live` and
-  prints the identity, the tenants, the database state and a note that
-  the other checks need the operator role (`output.PrintLiveness`,
-  exit 0; `--json` prints the `LivenessResponse`). The deep check stays
-  behind the operator role on the backplane.
+  prints the identity, the tenants, the database state, the server's
+  time in UTC (`server_time`, #5504) and a note that the other checks
+  need the operator role (`output.PrintLiveness`, exit 0; `--json`
+  prints the `LivenessResponse`). The deep check stays behind the
+  operator role on the backplane.
 - The stored login is unchanged: one token holds all of the person's
   tenants, so a switch needs no new login. There is no global
   `--tenant` flag: several commands already use `--tenant` for "a

@@ -22,6 +22,7 @@ from meho_backplane.api.v1.health import HealthResponse, build_health_response
 from meho_backplane.auth.operator import Operator, RoleGroup, TenantMembership, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.middleware import verify_jwt_and_bind
 from tests.mcp_test_fixtures import (
     build_operator,
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -57,6 +58,22 @@ def status_client() -> Iterator[TestClient]:
         app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
 
 
+@pytest.fixture
+def read_only_client() -> Iterator[TestClient]:
+    """A login with the ``read_only`` role, the one ``meho status`` sends to the liveness route."""
+    operator = build_operator(TenantRole.READ_ONLY, scopes=frozenset())
+
+    async def _fake_verify() -> Operator:
+        return operator
+
+    app.dependency_overrides[verify_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(verify_jwt_and_bind, None)
+
+
 def test_meho_status_returns_server_time_in_utc(status_client: TestClient) -> None:
     client = status_client
     before = datetime.now(UTC)
@@ -76,6 +93,18 @@ def test_meho_status_returns_server_time_in_utc(status_client: TestClient) -> No
     assert result["isError"] is False
     payload = json.loads(result["content"][0]["text"])
     _assert_server_time_now(payload["server_time"], before, after)
+
+
+def test_liveness_returns_server_time_for_a_read_only_login(read_only_client: TestClient) -> None:
+    """``meho status`` reads the liveness route for a read_only login; the time is there too."""
+    before = datetime.now(UTC)
+    response = read_only_client.get("/api/v1/health/live")
+    after = datetime.now(UTC)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "vault" not in body
+    _assert_server_time_now(body["server_time"], before, after)
 
 
 async def test_server_time_is_set_for_a_login_that_chose_no_tenant() -> None:

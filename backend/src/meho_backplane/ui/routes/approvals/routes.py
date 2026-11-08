@@ -149,7 +149,9 @@ from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_context import (
     ReviewerContext,
     resolve_reviewer_context,
+    resolve_target_names,
 )
+from meho_backplane.operations.approval_outcome_check import list_outcome_unknown
 from meho_backplane.operations.approval_queue import (
     MAX_REASON_LENGTH,
     ApprovalGroupForbiddenError,
@@ -237,7 +239,13 @@ _HISTORY_TABS: Final[dict[str, str | None]] = {
     "expired": "expired",
     "withdrawn": "withdrawn",
     "all": None,
+    # Approved requests whose outcome MEHO does not know (#5026). Not a
+    # status: the list has its own rule (``list_outcome_unknown``).
+    "outcome_unknown": "approved",
 }
+
+#: The tab of approved runs whose outcome MEHO does not know (#5026).
+_OUTCOME_UNKNOWN_TAB: Final[str] = "outcome_unknown"
 
 #: Default tab when none is supplied. Pending is the actionable queue, so a
 #: bare ``/ui/approvals`` lands the operator on the work that needs them.
@@ -379,6 +387,7 @@ async def _list_history_for_session(
     work_ref: str | None,
     offset: int,
     order: ApprovalListOrder,
+    outcome_unknown: bool = False,
 ) -> tuple[list[ApprovalRequest], bool]:
     """Page through this tenant's approval history in *order*.
 
@@ -390,9 +399,22 @@ async def _list_history_for_session(
     Over-fetches one row (``limit + 1``) to detect a further page without a
     second count query, then trims to the page size. Returns
     ``(rows, has_more)``; ``has_more`` drives the "Load more" affordance.
+
+    ``outcome_unknown`` (#5026) lists the approved requests whose outcome
+    MEHO does not know instead, the same list REST, MCP and the CLI show.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
+        if outcome_unknown:
+            rows = await list_outcome_unknown(
+                db_session,
+                tenant_id=session.tenant_id,
+                work_ref=work_ref,
+                limit=_HISTORY_PAGE_SIZE + 1,
+                offset=offset,
+                order=order,
+            )
+            return rows[:_HISTORY_PAGE_SIZE], len(rows) > _HISTORY_PAGE_SIZE
         rows = await list_pending(
             db_session,
             tenant_id=session.tenant_id,
@@ -651,9 +673,25 @@ async def _build_history_context(
         work_ref=work_ref_filter,
         offset=offset,
         order=resolved_order,
+        outcome_unknown=tab == _OUTCOME_UNKNOWN_TAB,
     )
+    # The "outcome unknown" rows name the target to check (#5026); the
+    # other tabs show the target in the modal only.
+    target_names: dict[uuid.UUID, str] = {}
+    if tab == _OUTCOME_UNKNOWN_TAB:
+        async with sessionmaker() as db_session:
+            target_names = await resolve_target_names(
+                db_session, tenant_id=session.tenant_id, requests=rows
+            )
     return {
-        "requests": [project_request_to_view(row, chain=positions.get(row.id)) for row in rows],
+        "requests": [
+            project_request_to_view(
+                row,
+                chain=positions.get(row.id),
+                target_name=target_names.get(row.target_id) if row.target_id else None,
+            )
+            for row in rows
+        ],
         "order": resolved_order,
         "order_choice": order_choice,
         "status_pill_class": STATUS_PILL_CLASS,

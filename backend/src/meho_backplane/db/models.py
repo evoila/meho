@@ -938,7 +938,7 @@ class Tenant(Base):
     # ``search_knowledge`` and ``meho kb search`` also search it, and
     # ``add_to_knowledge`` says the lesson goes there as a candidate page
     # (:mod:`meho_backplane.kb.wiki_search`). ``NULL`` (default): lessons
-    # live in MEHO only, as before. Nullable, so migration ``0147`` needs
+    # live in MEHO only, as before. Nullable, so migration ``0148`` needs
     # no backfill.
     knowledge_wiki_collection: Mapped[str | None] = mapped_column(
         Text,

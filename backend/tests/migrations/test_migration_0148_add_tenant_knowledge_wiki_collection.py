@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0147_add_tenant_knowledge_wiki_collection`` (#5976).
+"""Behavioural tests for ``0148_add_tenant_knowledge_wiki_collection`` (#5976).
 
 The migration adds the nullable ``tenant.knowledge_wiki_collection``
 column. A tenant written before the upgrade reads ``NULL`` (lessons stay
 in MEHO only), and ``downgrade()`` drops the column again.
 
-Every step targets this migration's own revision (``0147``) and its
-``down_revision`` (``0146``), never ``head``.
+Every step targets this migration's own revision (``0148``) and its
+``down_revision`` (``0147``), never ``head``.
 """
 
 from __future__ import annotations
@@ -26,14 +26,14 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0147"
-_DOWN_REVISION = "0146"
+_REVISION = "0148"
+_DOWN_REVISION = "0147"
 _TENANT_ID = "a" * 32
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0147.db"
+    db_path = tmp_path / "migration_0148.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

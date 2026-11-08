@@ -3,8 +3,8 @@
 
 """Add the tenant setting ``knowledge_wiki_collection`` (#5976).
 
-Revision ID: 0147
-Revises: 0146
+Revision ID: 0148
+Revises: 0147
 Create Date: 2026-11-08
 
 The setting names the docs collection where a tenant keeps its lessons: the
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0147"
-down_revision: str | None = "0146"
+revision: str = "0148"
+down_revision: str | None = "0147"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -221,9 +221,11 @@ async def _answers(client: httpx.AsyncClient, token: str) -> dict[str, Any]:
     assert call.status_code == 200, call.text
     result = call.json()["result"]
     assert result["isError"] is False, result
-    out["mcp_status"], out["mcp_status_tenants"] = _split_tenants(
-        json.loads(result["content"][0]["text"])
-    )
+    status = json.loads(result["content"][0]["text"])
+    # #5504: the server's time moves between the two rounds, so check it is
+    # there and leave it out of the before-and-after compare.
+    assert status.pop("server_time"), status
+    out["mcp_status"], out["mcp_status_tenants"] = _split_tenants(status)
     return out
 
 

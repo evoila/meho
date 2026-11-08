@@ -17,6 +17,7 @@ import (
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -169,7 +170,7 @@ func printResult(w io.Writer, idArg string, v *api.ApprovalResultView, run *oper
 	operation.PrintCallResult(w, "Run:", run.OpID, run)
 	// A delivery=partial result already names the result-query command.
 	partial := run.Delivery != nil && *run.Delivery == "partial"
-	if id := operation.ResultHandleID(run.Handle); id != "" && !partial {
+	if id := dispatch.ResultHandleID(run.Handle); id != "" && !partial {
 		fmt.Fprintf(w, "read the full result with `meho operation result-query %s`.\n", id)
 	}
 }

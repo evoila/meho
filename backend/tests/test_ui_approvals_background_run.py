@@ -356,6 +356,30 @@ def test_a_run_that_was_never_started_by_this_server_stops_asking_at_the_outcome
     assert "no result: check it" in old_row
 
 
+def test_a_checked_old_started_request_does_not_ask_again() -> None:
+    """Marked as checked on the "outcome unknown" tab: the run is still old, so no asking."""
+    client, _ = _client()
+    rid = _approved(resumed_minutes_ago=60)
+
+    async def _mark_checked() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            row = await session.get(ApprovalRequest, rid)
+            assert row is not None
+            row.outcome_checked_at = datetime.now(UTC)
+            row.outcome_checked_by = _REVIEWER_SUB
+            row.outcome_check_verdict = "happened"
+            row.outcome_check_reason = "started_no_result"
+
+    asyncio.run(_mark_checked())
+
+    with respx.mock(assert_all_called=False), client:
+        card = client.get(f"/ui/approvals/{rid}/run").text
+        row = client.get(f"/ui/approvals/{rid}/row").text
+
+    assert "hx-trigger" not in card
+    assert "hx-trigger" not in row
+
+
 def test_run_state_routes_are_tenant_scoped() -> None:
     """A request of another tenant is a 404 on both routes."""
     client, _ = _client()

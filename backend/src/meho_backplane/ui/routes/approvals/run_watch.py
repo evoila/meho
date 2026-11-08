@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import structlog
@@ -37,7 +38,10 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, OperationRun, OperationRunStatus
 from meho_backplane.operations.approval_outcome import resume_outcome
-from meho_backplane.operations.approval_outcome_check import outcome_unknown
+from meho_backplane.operations.approval_outcome_check import (
+    outcome_unknown_after,
+    run_started_at,
+)
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalResultState,
@@ -104,8 +108,8 @@ def live_run(row: ApprovalRequest, run: OperationRun | None) -> dict[str, Any] |
     without one (a crash, a server restart, a cancel) is
     ``ended_no_result``. When another caller (usually the waiting
     requester) runs the operation, the request is ``started`` until its
-    result is stored, and asking stops once the request is on the
-    "outcome unknown" list.
+    result is stored, and asking stops once the run is old enough for the
+    "outcome unknown" list (also after someone marked it as checked).
     """
     state = approval_result_state(row)
     if state is None:
@@ -118,8 +122,18 @@ def live_run(row: ApprovalRequest, run: OperationRun | None) -> dict[str, Any] |
     if from_run is not None:
         return from_run
     if state == ApprovalResultState.STARTED:
-        return _state("started", run, polling=outcome_unknown(row) is None)
+        return _state("started", run, polling=_run_is_young(row))
     return _state(state.value, run, polling=False)
+
+
+def _run_is_young(row: ApprovalRequest) -> bool:
+    """True while the run started less than :func:`outcome_unknown_after` ago.
+
+    Only the age counts. A check on the "outcome unknown" tab takes the
+    request off that list, but the run is still old, so asking stays off.
+    """
+    started = run_started_at(row)
+    return started is not None and started > datetime.now(UTC) - outcome_unknown_after()
 
 
 def _from_own_run(row: ApprovalRequest, run: OperationRun) -> dict[str, Any] | None:

@@ -9,8 +9,11 @@ MEHO records who. The Sensor keeps running; while the acknowledgement is
 active the advisory says "acknowledged" and the warning mails are not sent
 again. See :mod:`meho_backplane.checks.acknowledgement`.
 
-* Role ``operator``, and only a person: an agent, service or runner token
-  gets 403 (``require_human_principal``). There is no MCP tool for this.
+* Role ``operator`` or higher, or a person with the ``approver`` claim
+  (``require_approvals_access``), so a dedicated approver with role
+  ``read_only`` can acknowledge too. Only a person: an agent, service or
+  runner token gets 403 (``require_human_principal``), also when it has
+  the ``approver`` claim. There is no MCP tool for this.
 * No end time (or one without a time zone) is 422 at the body. An end time
   in the past or more than 90 days away is 422
   ``sensor_ack_invalid_end_time``.
@@ -33,8 +36,8 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi import status as http_status
 
-from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_human_principal, require_role
+from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.rbac import require_approvals_access, require_human_principal
 from meho_backplane.checks.acknowledgement import (
     SensorAckAlreadyOpenError,
     SensorAckEndTimeError,
@@ -48,7 +51,7 @@ __all__ = ["router"]
 
 router = APIRouter(prefix="/api/v1/sensors", tags=["sensors"])
 
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_require_operator_or_approver = Depends(require_approvals_access)
 _require_human = Depends(require_human_principal)
 
 
@@ -61,7 +64,7 @@ _require_human = Depends(require_human_principal)
 async def acknowledge_sensor_finding(
     sensor_id: Annotated[uuid.UUID, Path()],
     body: SensorAcknowledgementCreate,
-    operator: Annotated[Operator, _require_operator],
+    operator: Annotated[Operator, _require_operator_or_approver],
 ) -> SensorAcknowledgementRead:
     """Acknowledge one Sensor finding of the caller's tenant: until when and why."""
     structlog.contextvars.bind_contextvars(

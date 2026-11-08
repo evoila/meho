@@ -8,7 +8,8 @@ What these tests check:
 * REST create: who is recorded, the request's audit row, and every refusal
   (no end time, no time zone, past or too far, bad reason, blank note, green
   or never-checked Sensor, a second open one, another tenant, a read-only
-  role, a machine token).
+  role without the approver claim, a machine token even with that claim).
+  A read-only person with the approver claim may acknowledge.
 * The end: at the end time (``expired``) and early when the state gets worse
   (``state_worse``), each with an audit row; a state that is not worse keeps
   it.
@@ -48,7 +49,6 @@ from meho_backplane.checks.acknowledgement import (
 )
 from meho_backplane.checks.advisory import CHECKS_ADVISORY_EXTRAS_KEY, build_checks_alert_advisory
 from meho_backplane.checks.dashboard_service import CheckDashboardAdminService
-from meho_backplane.checks.notify import DashboardNotice, MemberChange, NotifyMember
 from meho_backplane.checks.repository import record_sensor_result
 from meho_backplane.connectors.mail.transport import MailSendResult
 from meho_backplane.db.engine import get_sessionmaker
@@ -124,6 +124,7 @@ def _headers(
     role: TenantRole = TenantRole.OPERATOR,
     tenant_id: UUID = _TENANT_A,
     principal_kind: str | None = None,
+    approver: bool | None = None,
 ) -> dict[str, str]:
     token = mint_token(
         key,
@@ -131,6 +132,7 @@ def _headers(
         tenant_role=role.value,
         tenant_id=str(tenant_id),
         principal_kind=principal_kind,
+        approver=approver,
     )
     return {"Authorization": f"Bearer {token}"}
 
@@ -469,17 +471,43 @@ async def test_acknowledge_other_tenant_is_404(client: TestClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_read_only_approver_can_acknowledge(client: TestClient) -> None:
+    sensor_id = await _seed_sensor()
+    key = make_rsa_keypair("kid-ack-approver")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            f"/api/v1/sensors/{sensor_id}/acknowledgement",
+            json={"expires_at": _future(), "reason": "fix_planned", "note": "x"},
+            headers=_headers(key, sub="appr-bob", role=TenantRole.READ_ONLY, approver=True),
+        )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["created_by_sub"] == "appr-bob"
+    assert len(await _acks(sensor_id)) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("role", "principal_kind"),
+    ("role", "principal_kind", "approver"),
     [
-        (TenantRole.READ_ONLY, None),
-        (TenantRole.OPERATOR, "agent"),
-        (TenantRole.OPERATOR, "service"),
+        (TenantRole.READ_ONLY, None, None),
+        (TenantRole.READ_ONLY, None, False),
+        (TenantRole.OPERATOR, "agent", None),
+        (TenantRole.OPERATOR, "agent", True),
+        (TenantRole.READ_ONLY, "agent", True),
+        (TenantRole.OPERATOR, "service", None),
     ],
-    ids=["read-only", "agent", "service"],
+    ids=[
+        "read-only",
+        "read-only-approver-false",
+        "agent",
+        "agent-with-approver",
+        "read-only-agent-with-approver",
+        "service",
+    ],
 )
-async def test_acknowledge_needs_a_person_with_operator_role(
-    client: TestClient, role: TenantRole, principal_kind: str | None
+async def test_acknowledge_needs_a_person_who_is_operator_or_approver(
+    client: TestClient, role: TenantRole, principal_kind: str | None, approver: bool | None
 ) -> None:
     sensor_id = await _seed_sensor()
     key = make_rsa_keypair("kid-ack-role")
@@ -488,7 +516,7 @@ async def test_acknowledge_needs_a_person_with_operator_role(
         resp = client.post(
             f"/api/v1/sensors/{sensor_id}/acknowledgement",
             json={"expires_at": _future(), "reason": "fix_planned", "note": "x"},
-            headers=_headers(key, role=role, principal_kind=principal_kind),
+            headers=_headers(key, role=role, principal_kind=principal_kind, approver=approver),
         )
     assert resp.status_code == 403, resp.text
     assert await _acks(sensor_id) == []
@@ -674,9 +702,9 @@ def _notice(
     *,
     previous: str = "ok",
     current: str = "critical",
-    member_change: MemberChange | None = None,
-) -> DashboardNotice:
-    return DashboardNotice(
+    member_change: notify.MemberChange | None = None,
+) -> notify.DashboardNotice:
+    return notify.DashboardNotice(
         tenant_id=_TENANT_A,
         dashboard_id=dashboard_id,
         name="estate",
@@ -685,7 +713,7 @@ def _notice(
         notify_email="oncall@example.com",
         notify_min_state="degraded",
         members=(
-            NotifyMember(
+            notify.NotifyMember(
                 sensor_id=sensor_id,
                 name="disk-space",
                 effective_state=current,
@@ -712,7 +740,7 @@ async def test_warning_mail_is_not_sent_while_acknowledged_and_returns_after_exp
     assert transport.calls == []
     assert any(e["event"] == "checks_notify_skipped_acknowledged" for e in logs)
 
-    change = MemberChange(
+    change = notify.MemberChange(
         sensor_id=sensor_id, name="disk-space", previous_state="ok", current_state="critical"
     )
     await notify.notify_dashboard_transition(

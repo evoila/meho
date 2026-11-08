@@ -312,8 +312,9 @@ It ends at the end time. It ends earlier when the sensor gets worse,
 for example from `degraded` to `critical`. Then the warnings come back.
 MEHO writes an audit row when you acknowledge, and when it ends.
 
-You need the `operator` role. An agent cannot acknowledge, and there is
-no MCP tool for it. The REST route is
+You need the `operator` role or higher, or the approver right (a person
+who may approve requests can acknowledge too, even with the `read_only`
+role). An agent cannot acknowledge, and there is no MCP tool for it. The REST route is
 `POST /api/v1/sensors/{id}/acknowledgement`. A green sensor is refused,
 and so is a sensor that is already acknowledged.
 

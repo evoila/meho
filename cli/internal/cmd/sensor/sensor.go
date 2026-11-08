@@ -152,7 +152,7 @@ func NewRootCmd() *cobra.Command {
 			"kind=cron for >=1-minute cadence). The op must be safe (a " +
 			"caution/dangerous op is refused at create and edit). Write verbs " +
 			"(create / edit / delete) require tenant_admin; the read verb (list) and " +
-			"ack (acknowledge a finding for a set time) are operator-level. Tenant scoping is enforced server-side via the " +
+			"ack (acknowledge a finding for a set time) are operator-level; ack is also open to a person with the approver claim. Tenant scoping is enforced server-side via the " +
 			"JWT; platform_admin callers may use --tenant to act on another " +
 			"tenant's sensors.",
 		SilenceUsage: true,

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -303,6 +304,24 @@ func diffOneSurface(
 	return out
 }
 
+// notRunReasons joins the distinct reasons of the questions that could
+// not run on this install, in the order they first appear.
+func notRunReasons(queries *[]api.QueryResult) string {
+	if queries == nil {
+		return ""
+	}
+	seen := map[string]bool{}
+	var reasons []string
+	for _, q := range *queries {
+		if q.NotRunReason == nil || seen[*q.NotRunReason] {
+			continue
+		}
+		seen[*q.NotRunReason] = true
+		reasons = append(reasons, *q.NotRunReason)
+	}
+	return strings.Join(reasons, "; ")
+}
+
 // printEvalTable renders the EvalResult as a human-readable table
 // to *w*. Compact two-line-per-surface format keeps the output
 // scannable; per-query breakdown is gated on --json.
@@ -339,6 +358,10 @@ func printEvalTable(w io.Writer, r *api.EvalResult, regressions []string) {
 				*s.BaselineMrr,
 				*s.BaselineCoverage,
 			)
+		}
+		if s.NotRunCount != nil && *s.NotRunCount > 0 {
+			fmt.Fprintf(w, "  not run: %d question(s), not scored — %s\n",
+				*s.NotRunCount, notRunReasons(s.Queries))
 		}
 	}
 	if len(regressions) > 0 {

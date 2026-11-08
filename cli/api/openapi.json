@@ -36228,6 +36228,11 @@
             "type": "number",
             "nullable": true,
             "title": "Baseline Coverage At 5"
+          },
+          "not_run_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Not Run Reason"
           }
         },
         "type": "object",
@@ -36240,7 +36245,7 @@
           "coverage_at_5"
         ],
         "title": "QueryResult",
-        "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate."
+        "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate.\n\n``not_run_reason`` is set when the question could not be run on\nthis install (operations surface: its connector cannot be searched\nhere). Such a row has no hits and zeros, and the surface aggregate\nleaves it out (#4752)."
       },
       "ReadDocsRequest": {
         "properties": {
@@ -40227,6 +40232,11 @@
             "nullable": true,
             "title": "Baseline Verdict"
           },
+          "not_run_count": {
+            "type": "integer",
+            "title": "Not Run Count",
+            "default": 0
+          },
           "queries": {
             "items": {
               "$ref": "#/components/schemas/QueryResult"
@@ -40245,7 +40255,7 @@
           "verdict"
         ],
         "title": "SurfaceResult",
-        "description": "Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.\n\nThe verdict band is computed from the macro-mean metrics against\nthe configured :class:`Thresholds` (default\n:data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A\nsurface with ``query_count == 0`` (corpus YAML hasn't shipped\nyet) returns ``verdict=\"green\"`` deliberately \u2014 see runner.py\ndocstring.\n\n``baseline_verdict`` is computed only when the baseline ran;\n``None`` otherwise. The MEHO-\u2265-baseline overlay applies in the\naggregate verdict (see runner._apply_baseline_check)."
+        "description": "Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.\n\nThe verdict band is computed from the macro-mean metrics against\nthe configured :class:`Thresholds` (default\n:data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A\nsurface with ``query_count == 0`` (corpus YAML hasn't shipped\nyet) returns ``verdict=\"green\"`` deliberately \u2014 see runner.py\ndocstring.\n\n``baseline_verdict`` is computed only when the baseline ran;\n``None`` otherwise. The MEHO-\u2265-baseline overlay applies in the\naggregate verdict (see runner._apply_baseline_check).\n\n``query_count`` counts the scored questions only. ``not_run_count``\ncounts the questions that could not be run on this install; they\nare in ``queries`` with their ``not_run_reason`` but do not move the\nmetrics or the verdict (#4752)."
       },
       "SurfaceSummary": {
         "properties": {

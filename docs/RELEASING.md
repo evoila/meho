@@ -484,6 +484,21 @@ docker logout ghcr.io && docker pull ghcr.io/evoila/meho:main    # -> succeeds
 
 ### 6. Deploy + smoke
 
+- [ ] Before the deploy, check the SSH host-key pins on the release
+  that runs now. It must end with exit code 0:
+
+  ```bash
+  MEHO_ACCESS_TOKEN=... bash scripts/acceptance/ssh-host-key-pins.sh \
+    --backplane <backplane-url>
+  ```
+
+  Since v0.34.0, an SSH target with no `known_hosts` entry and no
+  `known_hosts_insecure` setting in its secret stops working. A
+  `[FAIL]` line names such a target. Fix it before the deploy (see the
+  v0.34.0 row in
+  [`deploying.md`](deploying.md#version-specific-upgrade-notes)). The
+  script needs `curl`, `jq` and the `vault` CLI with a Vault login that
+  can read the target secrets.
 - [ ] Deploy to the lab cluster.
 - [ ] Run smoke; confirm **smoke-green** (same pattern as
   v0.2.0 / v0.3.0 / v0.3.1).

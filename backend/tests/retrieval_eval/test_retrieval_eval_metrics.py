@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for :mod:`meho_backplane.retrieval.eval.metrics`.
+"""Behavioural tests for :mod:`scripts.retrieval_eval.metrics`.
 
 Coverage matrix (G4.3-T2 / Task #441 acceptance criteria):
 
@@ -21,8 +21,7 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-
-from meho_backplane.retrieval.eval.metrics import (
+from scripts.retrieval_eval.metrics import (
     GREEN_DEFAULTS,
     YELLOW_FLOOR_RATIO,
     Thresholds,

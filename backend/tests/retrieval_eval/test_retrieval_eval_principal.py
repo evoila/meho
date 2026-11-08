@@ -6,7 +6,6 @@
 * The eval answer for person A holds none of person B's user memories:
   the runner passes A's ``sub`` to every ``retrieve`` call, and the
   per-person rule keeps B's user memories out of the hit lists.
-* The retire checklist passes the caller's ``sub`` to the eval.
 * :func:`retrieve` refuses a memory search that names no principal,
   unless the caller sets ``all_principals=True`` on purpose.
 
@@ -23,10 +22,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from scripts.retrieval_eval.runner import eval_all, eval_surface
 
-from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.retrieval.eval.runner import eval_all, eval_surface
-from meho_backplane.retrieval.retire import compute_retire_checklist
 from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
 from meho_backplane.settings import get_settings
 
@@ -127,22 +124,6 @@ async def test_eval_all_passes_the_principal_to_every_surface() -> None:
 async def test_eval_memory_surface_without_principal_is_refused_by_the_real_retriever() -> None:
     with pytest.raises(ValueError, match="principal_sub"):
         await eval_surface("memory", tenant_id=_TENANT)
-
-
-@pytest.mark.asyncio
-async def test_retire_checklist_passes_the_principal_to_the_eval() -> None:
-    fake_retrieve, seen = _substrate_with_two_people()
-
-    async with get_sessionmaker()() as session:
-        await compute_retire_checklist(
-            session=session,
-            surfaces=["memory"],
-            tenant_id=_TENANT,
-            principal_sub=_SUB_A,
-            retrieve_fn=fake_retrieve,
-        )
-
-    assert seen and set(seen) == {_SUB_A}
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 # Per-entry `notes` records the originating context — keep when
 # editing so human review on regression has the why.
 #
-# Schema: meho_backplane.retrieval.eval.corpus.KbCorpusQuery.
+# Schema: scripts.retrieval_eval.corpus.KbCorpusQuery.
 #
 # Editing rules:
 # * Each `expected_hits` entry must be a slug present in the consumer

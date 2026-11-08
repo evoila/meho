@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for :mod:`meho_backplane.retrieval.eval.passage_bench` (#3765).
+"""Behavioural tests for :mod:`scripts.retrieval_eval.passage_bench` (#3765).
 
 No test here loads an embedding model. Searches are either scripted
 (exact hits per query, standing in for an injected production retrieve)
@@ -20,10 +20,8 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-
-from meho_backplane.retrieval.embedding import DEFAULT_EMBEDDING_MODEL, EmbeddingService
-from meho_backplane.retrieval.eval.corpus import KbPassageFixtures, load_kb_passage_fixtures
-from meho_backplane.retrieval.eval.passage_bench import (
+from scripts.retrieval_eval.corpus import KbPassageFixtures, load_kb_passage_fixtures
+from scripts.retrieval_eval.passage_bench import (
     BASELINE_CANDIDATE,
     CandidateSpec,
     PassageHit,
@@ -34,6 +32,8 @@ from meho_backplane.retrieval.eval.passage_bench import (
     retrieve_search,
     run_passage_bench,
 )
+
+from meho_backplane.retrieval.embedding import DEFAULT_EMBEDDING_MODEL, EmbeddingService
 from meho_backplane.retrieval.retriever import RetrievalHit
 
 _E5 = CandidateSpec(

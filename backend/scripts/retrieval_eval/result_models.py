@@ -1,19 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Result models for the retrieval-eval runner (G4.3-T2, #441).
+"""Result models for the retrieval-eval runner.
 
-Frozen Pydantic v2 models that define the shape every consumer of
-``meho retrieval eval`` (CLI, API route, regression detector, future
-dashboards) sees. Lifted out of ``runner.py`` so the runner module
+Frozen Pydantic v2 models that define the shape the CI gate, the
+baseline file and the regression check see. Lifted out of ``runner.py`` so the runner module
 stays under the code-quality file-size limit; the models are
 small, dependency-free, and don't change shape often, so a separate
 module is the right factoring.
 
 Hierarchy: ``EvalResult`` carries one or more ``SurfaceResult``;
 each ``SurfaceResult`` carries N ``QueryResult`` rows. All three
-carry per-metric MEHO numbers + optional baseline numbers + verdict
-bands; the verdict computation lives in :mod:`metrics`.
+carry per-metric MEHO numbers + verdict bands; the verdict computation lives in :mod:`metrics`.
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.retrieval.eval.metrics import Thresholds, Verdict
+from scripts.retrieval_eval.metrics import Thresholds, Verdict
 
 __all__ = [
     "EvalResult",
@@ -56,11 +54,9 @@ class QueryResult(BaseModel):
     """Per-query eval row — what the runner produces for each corpus entry.
 
     ``meho_hits`` is the surface-formatted top-``k`` slug list from
-    MEHO retrieval; ``baseline_hits`` mirrors it for the baseline
-    when configured. The per-query metrics (precision_at_5 / mrr /
+    MEHO retrieval. The per-query metrics (precision_at_5 / mrr /
     coverage) are computed against ``meho_hits`` + the corpus's
-    expected ground truth; ``baseline_*`` mirrors are populated when
-    the baseline ran. Frozen so the runner can't accidentally mutate
+    expected ground truth. Frozen so the runner can't accidentally mutate
     a row while folding the surface aggregate.
     """
 
@@ -72,10 +68,6 @@ class QueryResult(BaseModel):
     precision_at_5: float
     reciprocal_rank: float
     coverage_at_5: float
-    baseline_hits: list[str] | None = None
-    baseline_precision_at_5: float | None = None
-    baseline_reciprocal_rank: float | None = None
-    baseline_coverage_at_5: float | None = None
 
 
 class SurfaceResult(BaseModel):
@@ -83,14 +75,10 @@ class SurfaceResult(BaseModel):
 
     The verdict band is computed from the macro-mean metrics against
     the configured :class:`Thresholds` (default
-    :data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A
+    :data:`~scripts.retrieval_eval.metrics.GREEN_DEFAULTS`). A
     surface with ``query_count == 0`` (corpus YAML hasn't shipped
     yet) returns ``verdict="green"`` deliberately — see runner.py
     docstring.
-
-    ``baseline_verdict`` is computed only when the baseline ran;
-    ``None`` otherwise. The MEHO-≥-baseline overlay applies in the
-    aggregate verdict (see runner._apply_baseline_check).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -101,19 +89,14 @@ class SurfaceResult(BaseModel):
     mrr: float
     coverage: float
     verdict: Verdict
-    baseline_kind: Literal["grep"] | None = None
-    baseline_precision_at_5: float | None = None
-    baseline_mrr: float | None = None
-    baseline_coverage: float | None = None
-    baseline_verdict: Verdict | None = None
     queries: list[QueryResult] = Field(default_factory=list)
 
 
 class EvalResult(BaseModel):
-    """Top-level eval result — the shape the API + CLI return.
+    """Top-level eval result — the shape the CI gate reads.
 
     ``overall_verdict`` is the worst-of every surface (a red surface
-    flips the whole result red); the CLI's exit-1-on-red CI-gate
+    flips the whole result red); the CI gate's exit-1-on-red
     semantics key off this field. ``ran_at`` is the UTC timestamp
     the runner started; consumers comparing two saved baselines see
     when each was captured.

@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Eval runner — corpus-agnostic engine for `meho retrieval eval` (G4.3-T2, #441).
+"""Eval runner — the scoring engine of the retrieval CI gate.
 
-The runner is the load-bearing piece of the G4.3 retire-decision
-contract: it consumes T1's corpus loader, calls the in-process
-:func:`meho_backplane.retrieval.retriever.retrieve` helper per query,
-folds the per-query hits into precision@5 / MRR / coverage via the
-pure :mod:`metrics` module, and returns a typed
-:class:`~meho_backplane.retrieval.eval.result_models.EvalResult`
+It reads the question files through the corpus loader, calls a
+``retrieve`` function per query (the CI gate passes a stub; the
+acceptance tests pass the real
+:func:`meho_backplane.retrieval.retriever.retrieve`), folds the
+per-query hits into precision@5 / MRR / coverage via the pure
+:mod:`metrics` module, and returns a typed
+:class:`~scripts.retrieval_eval.result_models.EvalResult`
 whose ``verdict`` field gates the CI workflow.
 
 Surfaces
@@ -21,25 +22,9 @@ per-surface differences (slug vs ``(scope, slug)`` vs
 ``QueryResult`` shape. A surface whose corpus YAML hasn't shipped
 yet returns an empty ``SurfaceResult`` with ``verdict="green"`` +
 ``query_count=0`` — the "no data" green is intentional: an absent
-corpus must not flip the CI gate red. The retire-checklist verb
-(T6 #445) is responsible for asserting that an evaluable corpus
-actually shipped before trusting the green. The kb (T1 #440),
-operations (T3 #442) and memory (T4 #443) corpora are all shipped
-as of 2026-05; the "absent corpus" branch persists only as a guard
-against an accidentally-deleted YAML.
-
-Baseline integration
---------------------
-
-When ``baseline_corpus_root`` is passed, the runner asks
-:func:`meho_backplane.retrieval.eval.baseline_grep.run_grep_baseline`
-for the per-query top-k slugs, computes the same three metrics
-against them, and reports both side-by-side. The threshold contract
-"MEHO ≥ baseline" applies per-metric; if any MEHO metric is *worse*
-than baseline, the verdict downgrades to red regardless of absolute
-threshold (matches Initiative #373 retire-criterion #4 in the
-``retire-checklist`` body — "MEHO ranking ≥ baseline on every
-metric").
+corpus must not flip the CI gate red. The kb, operations and memory
+corpora are all shipped; the "absent corpus" branch persists only as
+a guard against an accidentally-deleted YAML.
 
 Out of scope (deferred per issue body)
 --------------------------------------
@@ -57,22 +42,21 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Final, Literal
 
 import structlog
 
-from meho_backplane.retrieval.eval.baseline_grep import run_grep_baseline
-from meho_backplane.retrieval.eval.baseline_io import (
+from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
+from scripts.retrieval_eval.baseline_io import (
     compare_baseline,
     load_baseline,
     save_baseline,
 )
-from meho_backplane.retrieval.eval.corpus import (
+from scripts.retrieval_eval.corpus import (
     OperationCorpusQuery,
     load_corpus,
 )
-from meho_backplane.retrieval.eval.metrics import (
+from scripts.retrieval_eval.metrics import (
     GREEN_DEFAULTS,
     Thresholds,
     Verdict,
@@ -82,13 +66,12 @@ from meho_backplane.retrieval.eval.metrics import (
     reciprocal_rank,
     verdict,
 )
-from meho_backplane.retrieval.eval.result_models import (
+from scripts.retrieval_eval.result_models import (
     EvalResult,
     QueryResult,
     RegressionEpsilon,
     SurfaceResult,
 )
-from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
 
 __all__ = [
     "DEFAULT_K",
@@ -203,20 +186,15 @@ async def _eval_query(
     principal_sub: str | None,
     source: str,
     hits_to_slugs: Callable[[list[RetrievalHit]], list[str]],
-    baseline_corpus_root: Path | None,
     k: int,
 ) -> QueryResult:
-    """Run one query against MEHO retrieval (+ optional baseline grep) and score it.
+    """Run one query against MEHO retrieval and score it.
 
     The surface-agnostic core: takes the per-surface conversion
     callable + the tenant the corpus is scoped to, runs the
     in-process :func:`retrieve` helper with ``source=<surface>`` and
     the caller's ``principal_sub`` (so a user memory of another person
-    never ranks), and folds the resulting hits into the three metrics. Baseline grep
-    runs when *baseline_corpus_root* is provided; baseline failures
-    surface as ``BaselineConfigError`` upstream rather than silently
-    skipping (the runner translates that into a per-surface "baseline
-    skipped" flag in the result).
+    never ranks), and folds the resulting hits into the three metrics.
     """
     hits = await retrieve_fn(
         tenant_id=tenant_id,
@@ -231,16 +209,6 @@ async def _eval_query(
     mrr_q = reciprocal_rank(meho_hits, expected)
     cov = coverage_at_k(meho_hits, expected, k=k)
 
-    baseline_hits: list[str] | None = None
-    baseline_p5: float | None = None
-    baseline_mrr: float | None = None
-    baseline_cov: float | None = None
-    if baseline_corpus_root is not None:
-        baseline_hits = await run_grep_baseline(query, baseline_corpus_root, k=k)
-        baseline_p5 = precision_at_k(baseline_hits, expected, k=k)
-        baseline_mrr = reciprocal_rank(baseline_hits, expected)
-        baseline_cov = coverage_at_k(baseline_hits, expected, k=k)
-
     return QueryResult(
         query=query,
         expected_hits=list(expected),
@@ -248,24 +216,7 @@ async def _eval_query(
         precision_at_5=p5,
         reciprocal_rank=mrr_q,
         coverage_at_5=cov,
-        baseline_hits=baseline_hits,
-        baseline_precision_at_5=baseline_p5,
-        baseline_reciprocal_rank=baseline_mrr,
-        baseline_coverage_at_5=baseline_cov,
     )
-
-
-def _aggregate_baseline(
-    queries: list[QueryResult],
-    thresholds: Thresholds,
-) -> tuple[float, float, float, Verdict]:
-    """Aggregate baseline numbers + verdict from queries that ran the baseline."""
-    rows = [q for q in queries if q.baseline_hits is not None]
-    p5 = mean_metric(q.baseline_precision_at_5 or 0.0 for q in rows)
-    mrr_v = mean_metric(q.baseline_reciprocal_rank or 0.0 for q in rows)
-    cov = mean_metric(q.baseline_coverage_at_5 or 0.0 for q in rows)
-    v = verdict(precision=p5, mrr=mrr_v, coverage=cov, thresholds=thresholds)
-    return p5, mrr_v, cov, v
 
 
 def _aggregate_surface(
@@ -273,15 +224,11 @@ def _aggregate_surface(
     surface: Literal["kb", "memory", "operations"],
     queries: list[QueryResult],
     thresholds: Thresholds,
-    baseline_kind: Literal["grep"] | None,
 ) -> SurfaceResult:
     """Fold per-query rows into the surface aggregate + verdict.
 
-    The MEHO-≥-baseline overlay (see :func:`_apply_baseline_check`)
-    runs here so the verdict reflects both the absolute thresholds
-    *and* the "MEHO must beat the operator's pre-MEHO workflow"
-    constraint. An empty *queries* list returns the corpus-not-yet-
-    shipped green per the module docstring.
+    An empty *queries* list returns the corpus-not-yet-shipped green
+    per the module docstring.
     """
     if not queries:
         return SurfaceResult(
@@ -297,60 +244,15 @@ def _aggregate_surface(
     p5 = mean_metric(q.precision_at_5 for q in queries)
     mrr_agg = mean_metric(q.reciprocal_rank for q in queries)
     cov = mean_metric(q.coverage_at_5 for q in queries)
-    base_verdict = verdict(precision=p5, mrr=mrr_agg, coverage=cov, thresholds=thresholds)
-
-    baseline_p5: float | None = None
-    baseline_mrr: float | None = None
-    baseline_cov: float | None = None
-    baseline_v: Verdict | None = None
-    final_verdict = base_verdict
-
-    if baseline_kind is not None:
-        baseline_p5, baseline_mrr, baseline_cov, baseline_v = _aggregate_baseline(
-            queries, thresholds
-        )
-        final_verdict = _apply_baseline_check(
-            base_verdict=base_verdict,
-            meho=(p5, mrr_agg, cov),
-            baseline=(baseline_p5, baseline_mrr, baseline_cov),
-        )
-
     return SurfaceResult(
         surface=surface,
         query_count=len(queries),
         precision_at_5=p5,
         mrr=mrr_agg,
         coverage=cov,
-        verdict=final_verdict,
-        baseline_kind=baseline_kind,
-        baseline_precision_at_5=baseline_p5,
-        baseline_mrr=baseline_mrr,
-        baseline_coverage=baseline_cov,
-        baseline_verdict=baseline_v,
+        verdict=verdict(precision=p5, mrr=mrr_agg, coverage=cov, thresholds=thresholds),
         queries=queries,
     )
-
-
-def _apply_baseline_check(
-    *,
-    base_verdict: Verdict,
-    meho: tuple[float, float, float],
-    baseline: tuple[float, float, float],
-) -> Verdict:
-    """Downgrade to red when MEHO is worse than baseline on any metric.
-
-    Per the Initiative #373 retire-checklist criterion #4: "MEHO
-    ranking ≥ baseline on every metric (kb: vs ``grep -r kb/``)".
-    Any per-metric loss is enough to block retire and gate CI red,
-    even if absolute thresholds are otherwise green.
-
-    A small epsilon (1e-9) avoids tripping on floating-point
-    drift when MEHO and baseline are mathematically equal but
-    represented as very-close floats.
-    """
-    if any(m < b - 1e-9 for m, b in zip(meho, baseline, strict=True)):
-        return "red"
-    return base_verdict
 
 
 async def _eval_kb(
@@ -358,7 +260,6 @@ async def _eval_kb(
     retrieve_fn: RetrieveCallable,
     tenant_id: uuid.UUID,
     principal_sub: str | None,
-    baseline_corpus_root: Path | None,
     thresholds: Thresholds,
     k: int,
 ) -> SurfaceResult:
@@ -373,15 +274,11 @@ async def _eval_kb(
             principal_sub=principal_sub,
             source="kb",
             hits_to_slugs=_kb_hits_to_slugs,
-            baseline_corpus_root=baseline_corpus_root,
             k=k,
         )
         for row in rows
     ]
-    baseline_kind: Literal["grep"] | None = "grep" if baseline_corpus_root else None
-    return _aggregate_surface(
-        surface="kb", queries=queries, thresholds=thresholds, baseline_kind=baseline_kind
-    )
+    return _aggregate_surface(surface="kb", queries=queries, thresholds=thresholds)
 
 
 async def _eval_memory(
@@ -403,14 +300,11 @@ async def _eval_memory(
             principal_sub=principal_sub,
             source="memory",
             hits_to_slugs=_memory_hits_to_pairs,
-            baseline_corpus_root=None,
             k=k,
         )
         for row in rows
     ]
-    return _aggregate_surface(
-        surface="memory", queries=queries, thresholds=thresholds, baseline_kind=None
-    )
+    return _aggregate_surface(surface="memory", queries=queries, thresholds=thresholds)
 
 
 async def _eval_operations(
@@ -439,13 +333,10 @@ async def _eval_operations(
                 principal_sub=principal_sub,
                 source="operations",
                 hits_to_slugs=_operations_hits_to_op_ids,
-                baseline_corpus_root=None,
                 k=k,
             )
         )
-    return _aggregate_surface(
-        surface="operations", queries=queries, thresholds=thresholds, baseline_kind=None
-    )
+    return _aggregate_surface(surface="operations", queries=queries, thresholds=thresholds)
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +350,6 @@ async def eval_surface(
     tenant_id: uuid.UUID,
     principal_sub: str | None = None,
     retrieve_fn: RetrieveCallable | None = None,
-    baseline_corpus_root: Path | None = None,
     thresholds: Thresholds = GREEN_DEFAULTS,
     k: int = DEFAULT_K,
 ) -> SurfaceResult:
@@ -467,23 +357,13 @@ async def eval_surface(
 
     *retrieve_fn* defaults to the production
     :func:`meho_backplane.retrieval.retriever.retrieve`; tests pass a
-    stub. *baseline_corpus_root* is honoured for the kb surface only
-    (memory/operations baselines are deferred per module docstring) —
-    pass on memory/operations and the runner silently ignores it.
+    stub.
 
     *principal_sub* is the caller's OIDC ``sub``. Every query runs with
     it, so a user memory of another person never ranks and never shows
     in ``meho_hits``. The production :func:`retrieve` refuses a memory
     search without it, so a caller that runs the memory surface against
     the real retriever must pass it.
-
-    Raises
-    ------
-    BaselineConfigError
-        Propagated from :func:`run_grep_baseline` when the baseline
-        was requested for a kb surface but the corpus root is missing
-        / empty / unreadable. The CLI / API translate this into an
-        operator-facing error rather than a silent fallback.
     """
     rfn: RetrieveCallable = retrieve_fn if retrieve_fn is not None else retrieve
 
@@ -492,7 +372,6 @@ async def eval_surface(
             retrieve_fn=rfn,
             tenant_id=tenant_id,
             principal_sub=principal_sub,
-            baseline_corpus_root=baseline_corpus_root,
             thresholds=thresholds,
             k=k,
         )
@@ -518,7 +397,6 @@ async def eval_all(
     tenant_id: uuid.UUID,
     principal_sub: str | None = None,
     retrieve_fn: RetrieveCallable | None = None,
-    baseline_corpus_root: Path | None = None,
     thresholds: Thresholds = GREEN_DEFAULTS,
     k: int = DEFAULT_K,
     surfaces: list[Literal["kb", "memory", "operations"]] | None = None,
@@ -548,7 +426,6 @@ async def eval_all(
             tenant_id=tenant_id,
             principal_sub=principal_sub,
             retrieve_fn=retrieve_fn,
-            baseline_corpus_root=baseline_corpus_root,
             thresholds=thresholds,
             k=k,
         )

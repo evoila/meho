@@ -23,7 +23,7 @@ Coverage matrix:
 
 from __future__ import annotations
 
-from meho_backplane.retrieval.eval.corpus import (
+from scripts.retrieval_eval.corpus import (
     OperationCorpusQuery,
     load_corpus,
 )
@@ -103,10 +103,8 @@ def test_operations_corpus_every_row_has_govc_equivalent() -> None:
     """Acceptance #2: every row maps to a govc workflow.
 
     The corpus's load-bearing pre-MEHO operator baseline. T2's eval
-    runner can't infer it; the corpus carries it so a future
-    ``meho retrieval eval --baseline govc`` mode (the operations
-    analogue of the kb grep baseline) can compare against the
-    operator's actual fallback CLI without re-deriving it.
+    runner can't infer it; the corpus carries it so a reviewer can
+    see the operator's fallback CLI next to each query.
     """
     rows = load_corpus("operations")
 

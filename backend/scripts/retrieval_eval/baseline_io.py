@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from meho_backplane.retrieval.eval.result_models import (
+from scripts.retrieval_eval.result_models import (
     EvalResult,
     RegressionEpsilon,
 )

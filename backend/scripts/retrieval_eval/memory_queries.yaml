@@ -9,7 +9,7 @@
 # Per-entry `notes` records the originating context — keep when
 # editing so human review on regression has the why.
 #
-# Schema: meho_backplane.retrieval.eval.corpus.MemoryCorpusQuery.
+# Schema: scripts.retrieval_eval.corpus.MemoryCorpusQuery.
 # Each expected hit is a `(scope, slug)` pair — same slug can
 # legitimately exist under different scopes (e.g. `<operator>` may
 # have user-target notes about `rdc-vcenter` while the tenant has

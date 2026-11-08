@@ -34,9 +34,7 @@ var usageSurfaces = map[string]struct{}{
 
 // newUsageCmd returns the `meho retrieval usage` subcommand. The
 // verb wraps GET /api/v1/retrieve/usage (G4.3-T5 #444) so operators
-// can read the daily-use telemetry (from request usage events) the
-// retire-checklist verb (T6 #445) consumes as one of its five
-// criteria.
+// can read the daily-use telemetry (from request usage events).
 //
 // CLI shape (matches issue #464 spec):
 //
@@ -69,10 +67,7 @@ func newUsageCmd() *cobra.Command {
 			"counts grouped by `(date, surface)` for the operator's " +
 			"tenant, read from request usage events. It reports per-day " +
 			"search counts, distinct operators, and a 0-100 " +
-			"search-to-action conversion percentage — the three signals " +
-			"the retire-checklist verb (T6 #445) consumes for criterion " +
-			"1 (≥1 month of daily use) and criterion 2 (≥3 operators / " +
-			"≥1 search-per-week for ≥4 consecutive weeks).\n\n" +
+			"search-to-action conversion percentage.\n\n" +
 			"Usage events are recorded only when the backplane sets " +
 			"REQUEST_USAGE_RETENTION_DAYS; when it is not set, this report " +
 			"is empty, and it covers only the time since collection started.\n\n" +
@@ -83,8 +78,7 @@ func newUsageCmd() *cobra.Command {
 			"--tenant scopes a tenant_admin query to a specific tenant; " +
 			"operator-role tokens that pass --tenant get a friendly " +
 			"insufficient_role error (HTTP 403, exit code 5).\n\n" +
-			"--json emits the raw UsageReport envelope on stdout, the " +
-			"shape T6's retire-checklist verb consumes as auxiliary input.",
+			"--json emits the raw UsageReport envelope on stdout.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

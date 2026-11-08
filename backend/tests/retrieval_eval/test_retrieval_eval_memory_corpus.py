@@ -30,11 +30,12 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from meho_backplane.memory.schemas import SLUG_PATTERN, MemoryScope
-from meho_backplane.retrieval.eval.corpus import (
+from scripts.retrieval_eval.corpus import (
     MemoryCorpusQuery,
     load_corpus,
 )
+
+from meho_backplane.memory.schemas import SLUG_PATTERN, MemoryScope
 
 # ---------------------------------------------------------------------------
 # Loader behaviour

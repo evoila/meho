@@ -287,9 +287,8 @@ class CorpusValidationError(Exception):
     """Raised when a corpus YAML file is malformed or schema-mismatched.
 
     The message names the surface, the file path that was loaded, and
-    the underlying parse / validation error. Operators running
-    ``meho retrieval eval`` (T2) see the message verbatim; the loud
-    failure is intentional — a corpus that loads with garbage entries
+    the underlying parse / validation error. The CI gate prints the
+    message verbatim; the loud failure is intentional — a corpus that loads with garbage entries
     would produce eval numbers that look authoritative but reflect
     nothing about retrieval quality.
     """

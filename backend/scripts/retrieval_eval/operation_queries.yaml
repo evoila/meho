@@ -5,7 +5,7 @@
 # phrase an experienced vSphere operator might type; expected_op_ids
 # is the canonical match for that workflow in the parsed corpus.
 #
-# Schema: meho_backplane.retrieval.eval.corpus.OperationCorpusQuery.
+# Schema: scripts.retrieval_eval.corpus.OperationCorpusQuery.
 #
 # Source of truth for the 10 (query, op_id) pairs is the G0.7-T8
 # vSphere canary's `GOVC_PARITY_BENCHMARK` tuple

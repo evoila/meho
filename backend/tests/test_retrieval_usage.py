@@ -803,8 +803,8 @@ def test_daily_usage_bucket_is_frozen() -> None:
 def test_usage_report_serialises_to_stable_json() -> None:
     """``UsageReport.model_dump_json`` is stable across runs.
 
-    Regression-locks the field set the CLI's ``--json`` consumer
-    (T6 retire-checklist) deserialises against. Adding a field is
+    Regression-locks the field set the CLI's ``--json`` consumers
+    deserialise against. Adding a field is
     a breaking change to consumers; this test surfaces it.
     """
     report = UsageReport(

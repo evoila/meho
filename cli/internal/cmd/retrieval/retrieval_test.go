@@ -223,26 +223,16 @@ func TestDecodeDetailStringFallback(t *testing.T) {
 	}
 }
 
-// TestNewRootCmdRegistersAllThreeVerbs — every advertised verb has
-// a cobra subcommand. The CLI manifest is the contract operators
-// build muscle memory around; dropping a verb silently is the
-// regression class we want to catch at unit-time.
-func TestNewRootCmdRegistersAllThreeVerbs(t *testing.T) {
+// TestNewRootCmdRegistersOnlyUsage — `meho retrieval` has exactly one
+// verb, `usage`. The eval and retire-checklist verbs were removed; a
+// test catches either one coming back by accident.
+func TestNewRootCmdRegistersOnlyUsage(t *testing.T) {
 	root := NewRootCmd()
-	want := map[string]bool{
-		"eval":             false,
-		"usage":            false,
-		"retire-checklist": false,
-	}
+	var names []string
 	for _, sub := range root.Commands() {
-		name := strings.SplitN(sub.Use, " ", 2)[0]
-		if _, ok := want[name]; ok {
-			want[name] = true
-		}
+		names = append(names, strings.SplitN(sub.Use, " ", 2)[0])
 	}
-	for name, seen := range want {
-		if !seen {
-			t.Errorf("subcommand %q not registered under `meho retrieval`", name)
-		}
+	if len(names) != 1 || names[0] != "usage" {
+		t.Errorf("`meho retrieval` subcommands = %v, want [usage]", names)
 	}
 }

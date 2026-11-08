@@ -97,15 +97,15 @@ and vice versa.
   otherwise default these op_ids to ``"other"`` (none of the verbs
   end in ``.list`` / ``.create`` / ``.delete``).
 
-Eval corpus (G4.3-T4 #443 shipped at retrieval/eval/memory_queries.yaml)
-=======================================================================
+Eval corpus (scripts/retrieval_eval/memory_queries.yaml)
+========================================================
 
 The Initiative #332 issue body names a new file
 ``backend/src/meho_backplane/memory/eval/queries.yaml`` -- this was
 the planning shape before G4.3-T1 (#440, CLOSED) shipped the
-corpus-loader contract under :mod:`meho_backplane.retrieval.eval`,
-and G4.3-T4 (#443, CLOSED) shipped the 10-query memory corpus at
-``backend/src/meho_backplane/retrieval/eval/memory_queries.yaml``.
+corpus-loader contract under :mod:`scripts.retrieval_eval`,
+and G4.3-T4 (#443, CLOSED) shipped the 10-query memory corpus, now at
+``backend/scripts/retrieval_eval/memory_queries.yaml``.
 Duplicating it under the memory module would fork the canonical
 single-source-of-truth the loader points at. The canary consumes
 the shipped corpus via :func:`load_corpus("memory")` -- the eval
@@ -168,6 +168,8 @@ import pytest
 import respx
 from fastapi import FastAPI
 from httpx import ASGITransport
+from scripts.retrieval_eval import eval_surface
+from scripts.retrieval_eval.corpus import load_corpus
 from sqlalchemy import select
 
 from meho_backplane.api.v1.memory import router as memory_router
@@ -178,8 +180,6 @@ from meho_backplane.db.models import AuditLog
 from meho_backplane.memory.rbac import PermissionDeniedError
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
-from meho_backplane.retrieval.eval import eval_surface
-from meho_backplane.retrieval.eval.corpus import load_corpus
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, GUARD_PREFIX
 from tests._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -1169,11 +1169,10 @@ async def test_eval_corpus_retrieval_quality_against_seeded_memory(
 ) -> None:
     """AC #8: 10-query memory eval corpus ranks expected (scope, slug) in top-5.
 
-    Runs :func:`eval_surface("memory", tenant_id=A)` -- the same call
-    the operator-facing ``meho retrieval eval --surface memory`` and
-    CI's ``run_eval_gate.py`` make -- against the seeded memory
+    Runs :func:`eval_surface("memory", tenant_id=A)` -- the same
+    engine CI's ``run_eval_gate.py`` uses -- against the seeded memory
     corpus. The runner consumes the 10-query memory corpus
-    (:mod:`meho_backplane.retrieval.eval.memory_queries.yaml`,
+    (:mod:`scripts.retrieval_eval.memory_queries.yaml`,
     shipped by G4.3-T4 #443) and folds per-query hits into MRR,
     coverage@5, and precision@5.
 

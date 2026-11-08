@@ -61,19 +61,19 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from meho_backplane.kb.passages import chunk_markdown
 from meho_backplane.retrieval.embedding import DEFAULT_EMBEDDING_MODEL
-from meho_backplane.retrieval.eval.corpus import (
+from meho_backplane.retrieval.retriever import retrieve
+from scripts.retrieval_eval.corpus import (
     KbPassageFixtures,
     KbPassageQuery,
     load_kb_passage_fixtures,
 )
-from meho_backplane.retrieval.eval.metrics import (
+from scripts.retrieval_eval.metrics import (
     coverage_at_k,
     mean_metric,
     percentile,
     reciprocal_rank,
 )
-from meho_backplane.retrieval.eval.runner import DEFAULT_K, RetrieveCallable
-from meho_backplane.retrieval.retriever import retrieve
+from scripts.retrieval_eval.runner import DEFAULT_K, RetrieveCallable
 
 __all__ = [
     "BASELINE_CANDIDATE",

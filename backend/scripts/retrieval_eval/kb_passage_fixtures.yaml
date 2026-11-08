@@ -3,7 +3,7 @@
 # Every product, command, error code and number below is made up.
 # Nothing here comes from a real knowledge base, ticket, or prompt.
 #
-# Schema: meho_backplane.retrieval.eval.corpus.KbPassageFixtures.
+# Schema: scripts.retrieval_eval.corpus.KbPassageFixtures.
 #
 # Editing rules:
 # * Bump `version` when you change an entry body, a query, or an

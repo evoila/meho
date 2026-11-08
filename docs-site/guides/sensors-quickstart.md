@@ -309,8 +309,11 @@ While the acknowledgement is active:
   next to the real state.
 
 It ends at the end time. It ends earlier when the sensor gets worse,
-for example from `degraded` to `critical`. Then the warnings come back.
-MEHO writes an audit row when you acknowledge, and when it ends.
+for example from `degraded` to `critical`. Then the warnings come back:
+the advisory warns again, and when the sensor still fails at the end
+time, the dashboard's recipients get a mail that says the
+acknowledgement ended. MEHO writes an audit row when you acknowledge,
+and when it ends.
 
 You need the `operator` role or higher, or the approver right (a person
 who may approve requests can acknowledge too, even with the `read_only`

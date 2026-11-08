@@ -68,7 +68,7 @@ from sqlalchemy import select
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.client import get_broadcast_client
-from meho_backplane.checks.acknowledgement import acknowledged_dashboards
+from meho_backplane.checks.acknowledgement import DashboardAckState, acknowledged_dashboards
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import CheckDashboard
 from meho_backplane.settings import get_settings
@@ -123,7 +123,9 @@ def _dedupe_key(
     delegated agent and its human principal each get their own reminder.
     An unbound actor renders as ``-``. A state change mints a new key,
     so escalation (``degraded`` -> ``critical``) re-announces
-    immediately; window expiry re-reminds on unchanged state.
+    immediately; window expiry re-reminds on unchanged state. *state* may
+    carry an acknowledgement segment (#4128, see :func:`_entry`), so an
+    acknowledgement and its end each mint a new key too.
 
     The two sub segments are free-form and the delimiter is ``:``, so
     two distinct ``(principal, actor)`` pairs could in principle render
@@ -140,13 +142,13 @@ def _dedupe_key(
 
 async def _non_green_dashboards(
     tenant_id: uuid.UUID,
-) -> tuple[list[tuple[uuid.UUID, str, str]], dict[uuid.UUID, datetime]]:
+) -> tuple[list[tuple[uuid.UUID, str, str]], dict[uuid.UUID, DashboardAckState]]:
     """Read ``(id, name, last_rollup_state)`` for non-green memo rows.
 
-    Also returns the Dashboards among them whose every non-green member is
-    acknowledged (#4128), with the earliest end time of those
-    acknowledgements. Same session; the second read runs only when a row
-    is non-green.
+    Also returns the acknowledgement state of those Dashboards (#4128):
+    whether every non-green member is acknowledged, and until when, and
+    when an acknowledgement of a member last ended. Same session; the
+    second read runs only when a row is non-green.
 
     One SELECT riding ``check_dashboard_tenant_idx``; rows whose memo is
     ``NULL`` (never transitioned) or outside :data:`_ADVISORY_STATES`
@@ -179,21 +181,39 @@ def _entry(
     dashboard_id: uuid.UUID,
     name: str,
     state: str,
-    acked_until: datetime | None,
+    ack: DashboardAckState | None,
 ) -> tuple[str, dict[str, Any]]:
     """The dedupe-key state segment and the entry for one Dashboard.
 
     An acknowledged Dashboard (#4128) says ``acknowledged`` and until when,
-    instead of the warning, under its own key: the caller is told once per
-    window that the finding is acknowledged, and the warning comes back
-    under the plain key when the acknowledgement ends.
+    instead of the warning, under its own key segment
+    ``{state}:acknowledged:{end time}``: the caller is told once per
+    acknowledgement that the finding is acknowledged. After an
+    acknowledgement ends the warning comes back under
+    ``{state}:after:{latest end time}``, a key no caller has claimed yet,
+    so the warning returns at once even when the caller heard it before
+    the acknowledgement. A Dashboard that never had an acknowledgement
+    keeps the plain ``{state}`` segment.
     """
     entry: dict[str, Any] = {"dashboard_id": str(dashboard_id), "name": name, "state": state}
-    if acked_until is None:
+    if ack is None:
         return state, entry
-    entry["acknowledged"] = True
-    entry["acknowledged_until"] = acked_until.isoformat()
-    return f"{state}:acknowledged", entry
+    if ack.acknowledged_until is not None:
+        entry["acknowledged"] = True
+        entry["acknowledged_until"] = ack.acknowledged_until.isoformat()
+        return f"{state}:acknowledged:{_stamp(ack.acknowledged_until)}", entry
+    if ack.last_ended_at is not None:
+        return f"{state}:after:{_stamp(ack.last_ended_at)}", entry
+    return state, entry
+
+
+def _stamp(value: datetime) -> str:
+    """A time as a compact key segment: microseconds since the epoch.
+
+    Whole seconds are too coarse: two acknowledgements made within one
+    second for the same duration would share a key.
+    """
+    return str(int(value.timestamp() * 1_000_000))
 
 
 async def _claim_unannounced(

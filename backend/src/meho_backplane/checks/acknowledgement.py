@@ -8,9 +8,13 @@ an end time, a reason from a fixed set and a short text. MEHO records who.
 While the acknowledgement is active:
 
 * the in-band advisory says "acknowledged" instead of the warning
-  (:func:`acknowledged_dashboards`, read by :mod:`.advisory`);
+  (:func:`acknowledged_dashboards`, read by :mod:`.advisory`); after the
+  end the warning comes back at once, also when the caller heard it before
+  the acknowledgement (the advisory's key carries the latest end time);
 * the warning mails for this Sensor are not sent again
-  (:func:`all_acknowledged`, read by :mod:`.notify`);
+  (:func:`all_acknowledged`, read by :mod:`.notify`); when the end time
+  passes and the Sensor still fails, the runner hands the expiry to the
+  transition detector, which mails that the acknowledgement ended;
 * the Dashboard detail shows who, until when and why next to the real state
   (:func:`active_acknowledgements`, read by :mod:`.dashboard_service`).
 
@@ -33,6 +37,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Final, Literal
@@ -56,6 +61,8 @@ from meho_backplane.db.models import (
 
 __all__ = [
     "MAX_ACK_DURATION",
+    "AckEndReason",
+    "DashboardAckState",
     "SensorAckAlreadyOpenError",
     "SensorAckEndTimeError",
     "SensorAckNotFailingError",
@@ -95,6 +102,7 @@ _RANK: Final[dict[str, int]] = {
 _NON_GREEN_MEMBER_STATES: Final[tuple[str, ...]] = ("degraded", "critical")
 
 AckReason = Literal["accepted_risk", "fix_planned", "false_alarm"]
+AckEndReason = Literal["expired", "state_worse"]
 
 
 class SensorAckNotFailingError(Exception):
@@ -151,7 +159,25 @@ class SensorAcknowledgementRead(BaseModel):
     created_at: datetime
     expires_at: datetime
     ended_at: datetime | None = None
-    end_reason: Literal["expired", "state_worse"] | None = None
+    end_reason: AckEndReason | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardAckState:
+    """What the advisory needs to know about one Dashboard's acknowledgements.
+
+    :attr:`acknowledged_until` is set when every non-green member is
+    acknowledged: the earliest end time of those acknowledgements, the
+    moment the warning can come back. :attr:`last_ended_at` is the latest
+    end among the acknowledgements of all members, ``None`` when none has
+    ended. The advisory puts each into its dedupe key, so "acknowledged"
+    is said once per acknowledgement and the warning comes back at once
+    when one ends, also when the caller heard it before the
+    acknowledgement.
+    """
+
+    acknowledged_until: datetime | None
+    last_ended_at: datetime | None
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -193,7 +219,7 @@ def _end(
     ack: SensorAcknowledgement,
     *,
     ended_at: datetime,
-    end_reason: Literal["expired", "state_worse"],
+    end_reason: AckEndReason,
 ) -> None:
     """End *ack* and add its audit row to the same transaction."""
     ack.ended_at = ended_at
@@ -230,21 +256,31 @@ def _end(
     )
 
 
-async def settle_acknowledgement(session: AsyncSession, sensor: Sensor, now: datetime) -> None:
+async def settle_acknowledgement(
+    session: AsyncSession, sensor: Sensor, now: datetime
+) -> AckEndReason | None:
     """End the Sensor's open acknowledgement when its time is up or its state got worse.
 
     Called by ``record_sensor_result`` after the new state is committed to
     the row, inside its transaction, so the end and its audit row commit
     with the result that caused them. Expiry wins over a worse state: an
     acknowledgement past its end time is ``expired``, at its end time.
+
+    Returns how the acknowledgement ended, or ``None`` when nothing ended.
+    The runner passes an ``expired`` end on to the transition detector,
+    which mails the warning again when the Sensor still fails: the
+    Dashboard and member memos did not move, so nothing else would.
     """
     ack = await _open_row(session, sensor.id)
     if ack is None:
-        return
+        return None
     if _as_utc(ack.expires_at) <= _as_utc(now):
         _end(session, sensor, ack, ended_at=ack.expires_at, end_reason="expired")
-    elif _RANK.get(sensor.last_state, 0) > _RANK[ack.acked_state]:
+        return "expired"
+    if _RANK.get(sensor.last_state, 0) > _RANK[ack.acked_state]:
         _end(session, sensor, ack, ended_at=now, end_reason="state_worse")
+        return "state_worse"
+    return None
 
 
 async def active_acknowledgements(
@@ -286,36 +322,64 @@ async def acknowledged_dashboards(
     session: AsyncSession,
     dashboard_ids: Sequence[uuid.UUID],
     now: datetime,
-) -> dict[uuid.UUID, datetime]:
-    """Dashboards whose every non-green member is acknowledged.
+) -> dict[uuid.UUID, DashboardAckState]:
+    """The acknowledgement state of each listed Dashboard that has any.
 
     Reads the member state each Dashboard last counted
-    (``check_dashboard_sensors.last_member_state``). A Dashboard with no
-    non-green member on record is not in the answer, so it keeps its normal
-    warning. The value is the earliest end time of those acknowledgements:
-    the moment the warning can come back.
+    (``check_dashboard_sensors.last_member_state``) and every
+    acknowledgement of its members, open or ended. A Dashboard is
+    acknowledged when every non-green member on record is; a Dashboard
+    with no non-green member on record is not, so it keeps its normal
+    warning. A Dashboard without any acknowledgement is not in the answer.
+    An open row past its end time counts as ended at that time, before the
+    Sensor's next result writes the end.
     """
     if not dashboard_ids:
         return {}
     links = (
         await session.execute(
-            select(CheckDashboardSensor.dashboard_id, CheckDashboardSensor.sensor_id).where(
-                CheckDashboardSensor.dashboard_id.in_(dashboard_ids),
-                CheckDashboardSensor.last_member_state.in_(_NON_GREEN_MEMBER_STATES),
-            )
+            select(
+                CheckDashboardSensor.dashboard_id,
+                CheckDashboardSensor.sensor_id,
+                CheckDashboardSensor.last_member_state,
+            ).where(CheckDashboardSensor.dashboard_id.in_(dashboard_ids))
         )
     ).all()
     if not links:
         return {}
-    active = await active_acknowledgements(session, (sid for _d, sid in links), now)
+    rows = await session.scalars(
+        select(SensorAcknowledgement).where(
+            SensorAcknowledgement.sensor_id.in_(list({sid for _d, sid, _s in links}))
+        )
+    )
+    active: dict[uuid.UUID, datetime] = {}
+    last_end: dict[uuid.UUID, datetime] = {}
+    for row in rows:
+        expires_at = _as_utc(row.expires_at)
+        if row.ended_at is None and expires_at > _as_utc(now):
+            active[row.sensor_id] = expires_at
+            continue
+        ended_at = _as_utc(row.ended_at) if row.ended_at is not None else expires_at
+        last_end[row.sensor_id] = max(ended_at, last_end.get(row.sensor_id, ended_at))
     members: dict[uuid.UUID, list[uuid.UUID]] = {}
-    for dashboard_id, sensor_id in links:
+    non_green: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for dashboard_id, sensor_id, member_state in links:
         members.setdefault(dashboard_id, []).append(sensor_id)
-    return {
-        dashboard_id: min(active[sid].expires_at for sid in sensor_ids)
-        for dashboard_id, sensor_ids in members.items()
-        if all(sid in active for sid in sensor_ids)
-    }
+        if member_state in _NON_GREEN_MEMBER_STATES:
+            non_green.setdefault(dashboard_id, []).append(sensor_id)
+    result: dict[uuid.UUID, DashboardAckState] = {}
+    for dashboard_id, sensor_ids in members.items():
+        red = non_green.get(dashboard_id, [])
+        until: datetime | None = None
+        if red and all(sid in active for sid in red):
+            until = min(active[sid] for sid in red)
+        ends = [last_end[sid] for sid in sensor_ids if sid in last_end]
+        if until is None and not ends:
+            continue
+        result[dashboard_id] = DashboardAckState(
+            acknowledged_until=until, last_ended_at=max(ends) if ends else None
+        )
+    return result
 
 
 async def acknowledge_sensor(

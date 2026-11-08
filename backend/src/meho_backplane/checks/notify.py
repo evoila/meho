@@ -290,12 +290,19 @@ class MemberChange:
     the floor and the flap window are judged on when this rides along on a
     :class:`DashboardNotice`. :attr:`sensor_id` keys the member's own flap
     window.
+
+    With :attr:`acknowledgement_ended` set (#4128) the member did not get
+    worse: its acknowledgement expired while it still fails, so the
+    warning comes back. Both states are then the member's counted state,
+    and the mail says that the acknowledgement ended instead of "new
+    problem".
     """
 
     sensor_id: uuid.UUID
     name: str
     previous_state: str
     current_state: str
+    acknowledgement_ended: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +366,8 @@ def _log_fields(notice: DashboardNotice) -> dict[str, object]:
     if notice.member_change is not None:
         fields["member_name"] = notice.member_change.name
         fields["member_sensor_id"] = str(notice.member_change.sensor_id)
+        if notice.member_change.acknowledgement_ended:
+            fields["acknowledgement_ended"] = True
     return fields
 
 
@@ -586,7 +595,8 @@ def _subject(notice: DashboardNotice) -> str:
     anything is still broken. A "new problem" notice (#5068) names the
     member and its edge, and says the Dashboard is still in its state --
     the Sensor name is operator-authored text, so it is folded like the
-    Dashboard name.
+    Dashboard name. An "acknowledgement ended" notice (#4128) names the
+    member and the state it is still in.
     """
     name = _single_line(notice.name)
     change = notice.member_change
@@ -597,6 +607,11 @@ def _subject(notice: DashboardNotice) -> str:
             if notice.previous_state == notice.current_state
             else f"{notice.previous_state} -> {notice.current_state}"
         )
+        if change.acknowledgement_ended:
+            return (
+                f"[MEHO] {name}: acknowledgement ended, {member} "
+                f"still {change.current_state} (dashboard {dashboard})"
+            )
         return (
             f"[MEHO] {name}: new problem {member} "
             f"{change.previous_state} -> {change.current_state} "
@@ -628,7 +643,9 @@ def _body(notice: DashboardNotice) -> str:
     A "new problem" notice (#5068) states the Dashboard state and the
     member's edge up front, then lists that member first and marks it
     ``(new)`` so the recipient finds it without reading every block -- and
-    so the member-line limit can never drop it.
+    so the member-line limit can never drop it. An "acknowledgement ended"
+    notice (#4128) does the same with the member that is still failing,
+    marked ``(acknowledgement ended)``.
     """
     change = notice.member_change
     lines = [f"Dashboard: {notice.name}"]
@@ -637,9 +654,15 @@ def _body(notice: DashboardNotice) -> str:
             lines.append(f"State: {notice.current_state} (unchanged)")
         else:
             lines.append(f"State: {notice.previous_state} -> {notice.current_state}")
-        lines.append(
-            f"New problem: {_clip(change.name)} {change.previous_state} -> {change.current_state}"
-        )
+        if change.acknowledgement_ended:
+            lines.append(
+                f"Acknowledgement ended: {_clip(change.name)} is still {change.current_state}"
+            )
+        else:
+            lines.append(
+                f"New problem: {_clip(change.name)} "
+                f"{change.previous_state} -> {change.current_state}"
+            )
     else:
         lines.append(f"State: {notice.previous_state} -> {notice.current_state}")
     lines.append("")
@@ -652,7 +675,9 @@ def _body(notice: DashboardNotice) -> str:
     lines.append(f"Non-green members ({len(members)}):")
     lines.append("")
     for member in shown:
-        marker = " (new)" if change is not None and member.sensor_id == change.sensor_id else ""
+        marker = ""
+        if change is not None and member.sensor_id == change.sensor_id:
+            marker = " (acknowledgement ended)" if change.acknowledgement_ended else " (new)"
         lines.append(f"- {_clip(member.name)} [{member.effective_state}]{marker}")
         lines.append(f"    last value: {_clip(member.last_value)}")
         lines.append(f"    evidence:   {_clip(member.last_evidence)}")
@@ -758,7 +783,11 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
     * the edge does not reach ``notify_min_state`` (see
       :func:`_crosses_threshold`);
     * it is a warning (not an all-clear) and every Sensor it is about is
-      acknowledged (#4128, see :func:`_acknowledged`);
+      acknowledged (#4128, see :func:`_acknowledged`); when the
+      acknowledgement's time is up and the Sensor still fails, the
+      transition detector sends an "acknowledgement ended" notice
+      (:class:`MemberChange` with ``acknowledgement_ended``), which runs
+      these gates like a "new problem" notice;
     * a same-state notification already claimed this edge's flap window
       (#2732, see :func:`_claim_suppression`; skipped entirely when the
       window is ``0`` or the crossing is into a rank-0 state);

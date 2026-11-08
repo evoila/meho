@@ -14,9 +14,13 @@ What these tests check:
   (``state_worse``), each with an audit row; a state that is not worse keeps
   it.
 * The advisory says "acknowledged" once, then nothing; after the end time the
-  warning comes back.
+  warning comes back, also when the caller heard it before the
+  acknowledgement, and a new acknowledgement is said again.
 * The warning mail is not sent while acknowledged; it comes back after the
-  end time and after an early end; the all-clear mail is still sent.
+  end time and after an early end; the all-clear mail is still sent. When
+  the end time passes and the Sensor still fails, the Sensor's next result
+  mails that the acknowledgement ended, through the runner's persist path
+  and the transition detector, once.
 * The Dashboard detail (REST and console) shows who, until when and why next
   to the real state.
 """
@@ -48,8 +52,10 @@ from meho_backplane.checks.acknowledgement import (
     acknowledge_sensor,
 )
 from meho_backplane.checks.advisory import CHECKS_ADVISORY_EXTRAS_KEY, build_checks_alert_advisory
+from meho_backplane.checks.assertions import AssertionOutcome
 from meho_backplane.checks.dashboard_service import CheckDashboardAdminService
 from meho_backplane.checks.repository import record_sensor_result
+from meho_backplane.checks.runner import _persist_outcome, _SensorSnapshot
 from meho_backplane.connectors.mail.transport import MailSendResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -282,6 +288,20 @@ async def _record(sensor_id: UUID, state: str, *, at: datetime | None = None) ->
             evaluated_at=at or datetime.now(UTC),
         )
         await session.commit()
+
+
+async def _persist(sensor_id: UUID, state: str) -> None:
+    """Record a result the way the runner does, then drain the mail tasks.
+
+    ``_persist_outcome`` records the result (which ends an acknowledgement
+    whose time is up) and hands the Sensor to the transition detector.
+    """
+    async with get_sessionmaker()() as session:
+        row = await session.get(Sensor, sensor_id)
+        assert row is not None
+        snap = _SensorSnapshot.from_row(row)
+    await _persist_outcome(snap, AssertionOutcome(state=state, value=1, evidence={}))  # type: ignore[arg-type]
+    await notify._await_pending_notifications()
 
 
 def _future(hours: float = 4) -> str:
@@ -647,6 +667,38 @@ async def test_advisory_says_acknowledged_once_and_the_warning_returns_after_exp
 
 
 @pytest.mark.asyncio
+async def test_advisory_warning_returns_after_expiry_when_heard_before_the_acknowledgement() -> (
+    None
+):
+    """The caller heard the warning, then the finding was acknowledged for a short time.
+
+    The plain warning key is still claimed when the acknowledgement ends.
+    The warning must still come back at once, and a new acknowledgement
+    must be said again.
+    """
+    sensor_id = await _seed_sensor(last_state="critical")
+    dashboard_id = await _seed_dashboard({sensor_id: "critical"})
+    store = _FakeNxStore()
+    with patch.object(get_broadcast_client(), "pipeline", new=store.pipeline):
+        before = await build_checks_alert_advisory(_operator())
+        await _ack(sensor_id)
+        acked = await build_checks_alert_advisory(_operator())
+        await _move_end_time(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+        after_expiry = await build_checks_alert_advisory(_operator())
+        again = await build_checks_alert_advisory(_operator())
+        await _ack(sensor_id)
+        acked_again = await build_checks_alert_advisory(_operator())
+
+    plain = {"dashboard_id": str(dashboard_id), "name": "estate", "state": "critical"}
+    assert before == {CHECKS_ADVISORY_EXTRAS_KEY: [plain]}
+    assert acked[CHECKS_ADVISORY_EXTRAS_KEY][0]["acknowledged"] is True
+    assert after_expiry == {CHECKS_ADVISORY_EXTRAS_KEY: [plain]}
+    assert again == {}
+    assert acked_again[CHECKS_ADVISORY_EXTRAS_KEY][0]["acknowledged"] is True
+    assert len(await _acks(sensor_id)) == 2
+
+
+@pytest.mark.asyncio
 async def test_advisory_warns_when_one_non_green_member_is_not_acknowledged() -> None:
     acked = await _seed_sensor(name="a", last_state="critical")
     other = await _seed_sensor(name="b", last_state="degraded")
@@ -680,9 +732,11 @@ async def test_advisory_warns_when_no_member_state_is_on_record() -> None:
 class _Transport:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.bodies: list[str] = []
 
     async def __call__(self, *, to: list[str], subject: str, body: str) -> MailSendResult:
         self.calls.append(subject)
+        self.bodies.append(body)
         return MailSendResult(sent=True)
 
 
@@ -768,6 +822,63 @@ async def test_warning_mail_returns_after_the_state_gets_worse(transport: _Trans
         _notice(sensor_id, dashboard_id, previous="degraded", current="critical")
     )
     assert len(transport.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_warning_mail_comes_back_when_the_time_is_up_and_the_sensor_still_fails(
+    transport: _Transport,
+) -> None:
+    """The Dashboard was red before the acknowledgement, and is still red after it.
+
+    No memo moves at the end time, so the runner's persist path tells the
+    transition detector about the expiry, and the detector mails once.
+    """
+    sensor_id = await _seed_sensor(last_state="critical")
+    await _seed_dashboard({sensor_id: "critical"})
+    await _ack(sensor_id)
+    await _move_end_time(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await _persist(sensor_id, "critical")
+
+    assert transport.calls == [
+        "[MEHO] estate: acknowledgement ended, disk-space still critical (dashboard still critical)"
+    ]
+    assert "Acknowledgement ended: disk-space is still critical" in transport.bodies[0]
+    assert "- disk-space [critical] (acknowledgement ended)" in transport.bodies[0]
+    (row,) = await _acks(sensor_id)
+    assert row.end_reason == "expired"
+
+    await _persist(sensor_id, "critical")  # the result after that: nothing new
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_acknowledgement_ended_mail_when_the_sensor_is_green_at_the_end(
+    transport: _Transport,
+) -> None:
+    sensor_id = await _seed_sensor(last_state="critical")
+    await _seed_dashboard({sensor_id: "critical"})
+    await _ack(sensor_id)
+    await _move_end_time(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await _persist(sensor_id, "ok")
+
+    assert transport.calls == ["[MEHO] all clear - estate: critical -> ok"]
+    (row,) = await _acks(sensor_id)
+    assert row.end_reason == "expired"
+
+
+@pytest.mark.asyncio
+async def test_an_early_end_mails_the_worse_state_once(transport: _Transport) -> None:
+    sensor_id = await _seed_sensor(last_state="degraded")
+    await _seed_dashboard({sensor_id: "degraded"}, state="degraded")
+    await _ack(sensor_id)
+
+    await _persist(sensor_id, "critical")
+
+    assert transport.calls == ["[MEHO] estate: degraded -> critical"]
+    (row,) = await _acks(sensor_id)
+    assert row.end_reason == "state_worse"
 
 
 @pytest.mark.asyncio

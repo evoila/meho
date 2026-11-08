@@ -426,11 +426,17 @@ and who. Code: `checks/acknowledgement.py`, table
   `sensor.acknowledgement.expire` or `sensor.acknowledgement.end`) to the
   same transaction. So the expiry row is written at the Sensor's next
   result after the end time, not at the end time itself; a paused Sensor
-  gets it only when it runs again.
+  gets it only when it runs again. `record_sensor_result` returns a
+  `RecordedResult` that says how the acknowledgement ended; the runner
+  passes an `expired` end to `investigate_on_transition`, which mails
+  that the acknowledgement ended when the Sensor still fails
+  (`checks-notifications.md`).
 - **Effects.** The advisory (`checks-advisory.md`) says `acknowledged`
-  for a Dashboard whose every non-green member is acknowledged. The
+  for a Dashboard whose every non-green member is acknowledged, and its
+  warning comes back at once when the acknowledgement ends. The
   warning mail (`checks-notifications.md`) is skipped when every Sensor
-  it is about is acknowledged. The Dashboard detail
+  it is about is acknowledged, and comes back as an "acknowledgement
+  ended" mail when the time is up and the Sensor still fails. The Dashboard detail
   (`DashboardMemberView.acknowledgement`, REST and `/ui/checks/{id}`)
   shows who, until when and why next to the real states. The rollup, the
   states and the investigator do not change.

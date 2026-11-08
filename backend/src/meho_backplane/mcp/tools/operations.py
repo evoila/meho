@@ -66,7 +66,11 @@ from meho_backplane.mcp.registry import (
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.mcp.tools._operation_recall import with_recall
-from meho_backplane.operation_picks.recorder import recorded_call, recorded_search
+from meho_backplane.operation_picks.recorder import (
+    recorded_background_call,
+    recorded_call,
+    recorded_search,
+)
 from meho_backplane.operations.meta_tools import (
     SEARCH_NARROWING_MAX,
     SEARCH_OUTCOMES,
@@ -196,11 +200,11 @@ async def _call_operation_handler(
             await poll_call(operator, call_arguments, str(run_id), wait_seconds=wait_seconds or 0)
         )
     if run_async:
-        result = await recorded_call(
+        result = await recorded_background_call(
             operator,
             call_arguments,
             transport="mcp",
-            run=lambda: submit_async_call(operator, call_arguments),
+            submit=lambda wrap: submit_async_call(operator, call_arguments, wrap=wrap),
         )
     else:
         result = await recorded_call(

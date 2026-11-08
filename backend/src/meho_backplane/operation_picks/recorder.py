@@ -15,6 +15,9 @@ call, then writes the record. The answer is returned unchanged.
   the newest search of the same tenant, caller, session and connector
   within :data:`LINK_WINDOW`. ``rank`` is the place of ``op_id`` in that
   search's results.
+* A call started in the background (:func:`recorded_background_call`) is
+  written as ``pending`` before it starts. When the background run ends,
+  the same record gets the outcome of the call; the search link stays.
 
 Never changes an answer: with ``REQUEST_USAGE_RETENTION_DAYS`` unset
 nothing is written, and a failed write is logged (exception class only)
@@ -31,7 +34,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
@@ -42,6 +45,7 @@ from meho_backplane.operations.meta_tools import (
     ConnectorNotIngestedError,
     UnknownConnectorError,
 )
+from meho_backplane.operations.operation_run_service import DispatchWrapper
 from meho_backplane.request_usage.collector import (
     collection_enabled,
     current_request_id,
@@ -53,6 +57,7 @@ __all__ = [
     "LINK_WINDOW",
     "QUERY_TEXT_MAX_CHARS",
     "Transport",
+    "recorded_background_call",
     "recorded_call",
     "recorded_meta_tool",
     "recorded_search",
@@ -197,6 +202,7 @@ async def _write_call(
     transport: Transport,
     occurred_at: datetime,
     outcome: str,
+    record_id: uuid.UUID | None = None,
 ) -> None:
     """Link the call to its search and write the call record."""
     connector_id = _text(arguments.get("connector_id"))
@@ -232,7 +238,7 @@ async def _write_call(
             rank = op_ids.index(op_id) + 1 if op_id in op_ids else None
         session.add(
             OperationCallRecord(
-                id=uuid.uuid4(),
+                id=record_id or uuid.uuid4(),
                 occurred_at=occurred_at,
                 tenant_id=operator.tenant_id,
                 principal_sub=operator.sub,
@@ -245,6 +251,17 @@ async def _write_call(
                 search_id=search_id,
                 rank=rank,
             )
+        )
+        await session.commit()
+
+
+async def _set_call_outcome(record_id: uuid.UUID, outcome: str) -> None:
+    """Set the outcome of a call record written before its background run."""
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(OperationCallRecord)
+            .where(OperationCallRecord.id == record_id)
+            .values(outcome=outcome)
         )
         await session.commit()
 
@@ -319,6 +336,57 @@ async def recorded_call(
         raise
     await _write_safely("call", lambda: _write(_call_outcome(answer)))
     return answer
+
+
+async def recorded_background_call(
+    operator: Operator,
+    arguments: dict[str, Any],
+    *,
+    transport: Transport,
+    submit: Callable[[DispatchWrapper | None], Awaitable[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Start one ``call_operation`` call in the background and record it.
+
+    *submit* starts the run and passes the wrapper it gets on to
+    :meth:`OperationRunService.submit_call`. The record is written as
+    ``pending`` before the run starts, so the run can never end before
+    its record exists. When the run ends, the wrapper sets the record's
+    outcome from the call's answer (``error`` when the call raised). A
+    start that raises sets ``error``. A run cancelled before it starts
+    keeps ``pending``.
+    """
+    if not collection_enabled():
+        return await submit(None)
+    record_id = uuid.uuid4()
+    await _write_safely(
+        "call",
+        lambda: _write_call(
+            operator,
+            arguments,
+            transport=transport,
+            occurred_at=datetime.now(UTC),
+            outcome="pending",
+            record_id=record_id,
+        ),
+    )
+
+    async def _finish(outcome: str) -> None:
+        await _write_safely("call", lambda: _set_call_outcome(record_id, outcome))
+
+    async def wrap(dispatch: AnswerRunner) -> dict[str, Any]:
+        try:
+            answer = await dispatch()
+        except Exception:
+            await _finish("error")
+            raise
+        await _finish(_call_outcome(answer))
+        return answer
+
+    try:
+        return await submit(wrap)
+    except Exception:
+        await _finish("error")
+        raise
 
 
 async def recorded_meta_tool(

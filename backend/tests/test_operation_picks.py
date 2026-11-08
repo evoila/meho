@@ -13,16 +13,20 @@
 * Nothing is recorded without ``REQUEST_USAGE_RETENTION_DAYS``, and a failed
   write never changes the answer.
 * The MCP tools, the REST routes and the hosted agent tools all record.
+* A background call is written as ``pending`` and gets its outcome when the
+  run ends, with the same search link.
 * The report counts per connector and day, for one tenant, over REST.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 import structlog
 from fastapi import FastAPI
@@ -39,13 +43,19 @@ from meho_backplane.mcp.tools import operations as operation_tools
 from meho_backplane.operation_picks import recorder
 from meho_backplane.operation_picks.recorder import (
     LINK_WINDOW,
+    recorded_background_call,
     recorded_call,
     recorded_meta_tool,
     recorded_search,
 )
 from meho_backplane.operation_picks.report import compute_pick_report
+from meho_backplane.operations import meta_tools
 from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.operations.meta_tools import UnknownConnectorError
+from meho_backplane.operations.operation_run_service import (
+    DispatchWrapper,
+    get_operation_run_service,
+)
 from meho_backplane.request_usage.retention import prune_request_usage_once
 from meho_backplane.retrieval.usage import CONVERSION_WINDOW
 from meho_backplane.settings import get_settings
@@ -601,6 +611,140 @@ async def test_rest_routes_record_search_and_call(
     assert (search_row.transport, call_row.transport) == ("rest", "rest")
     assert call_row.search_id == search_row.id
     assert call_row.rank == 1
+
+
+# ---------------------------------------------------------------------------
+# Background calls
+# ---------------------------------------------------------------------------
+
+_UNKNOWN_OP_ANSWER: dict[str, Any] = {
+    "status": "error",
+    "op_id": "k8s.pod.lst",
+    "error": "unknown_op: k8s.pod.lst",
+    "extras": {"error_code": "unknown_op"},
+}
+
+
+def _background_call_answers(
+    monkeypatch: pytest.MonkeyPatch, answer: dict[str, Any]
+) -> asyncio.Event:
+    """Make the background run answer *answer* once the returned event is set."""
+    release = asyncio.Event()
+
+    async def fake_call(_operator: Operator, _arguments: dict[str, Any]) -> dict[str, Any]:
+        await release.wait()
+        return answer
+
+    monkeypatch.setattr(meta_tools, "call_operation", fake_call)
+    return release
+
+
+async def _finish_background_runs(release: asyncio.Event) -> None:
+    """Let the background runs end and wait for them."""
+    tasks = [state.task for state in get_operation_run_service()._store.values()]
+    assert tasks
+    release.set()
+    await asyncio.gather(*tasks)
+
+
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [(_ok("k8s.pod.get"), "ok"), (_UNKNOWN_OP_ANSWER, "unknown_op")],
+)
+@pytest.mark.usefixtures("usage_on")
+async def test_mcp_background_call_gets_its_outcome_when_the_run_ends(
+    operator: Operator, monkeypatch: pytest.MonkeyPatch, answer: dict[str, Any], outcome: str
+) -> None:
+    release = _background_call_answers(monkeypatch, answer)
+    _bind_mcp_session(_SESSION_A)
+    await _search(operator, "k8s.pod.list", "k8s.pod.get")
+    started = await operation_tools._call_operation_handler(
+        operator,
+        {"connector_id": _CONNECTOR, "op_id": "k8s.pod.get", "params": {}, "async": True},
+    )
+    assert started["status"] == "pending"
+    [search] = await _searches()
+    [pending] = await _calls()
+    assert (pending.outcome, pending.search_id, pending.rank) == ("pending", search.id, 2)
+
+    await _finish_background_runs(release)
+
+    [call] = await _calls()
+    assert call.id == pending.id
+    assert (call.outcome, call.search_id, call.rank) == (outcome, search.id, 2)
+
+
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [(_ok("k8s.pod.get"), "ok"), (_UNKNOWN_OP_ANSWER, "unknown_op")],
+)
+@pytest.mark.usefixtures("usage_on")
+async def test_rest_background_call_gets_its_outcome_when_the_run_ends(
+    operator: Operator, monkeypatch: pytest.MonkeyPatch, answer: dict[str, Any], outcome: str
+) -> None:
+    release = _background_call_answers(monkeypatch, answer)
+    await _search(operator, "k8s.pod.list", "k8s.pod.get", transport="rest")
+    transport = httpx.ASGITransport(app=_rest_app(operator))
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        started = await client.post(
+            "/api/v1/operations/call",
+            json={"connector_id": _CONNECTOR, "op_id": "k8s.pod.get", "params": {}, "async": True},
+        )
+    assert started.status_code == 202
+    [search] = await _searches()
+    [pending] = await _calls()
+    assert (pending.outcome, pending.transport, pending.search_id) == ("pending", "rest", search.id)
+
+    await _finish_background_runs(release)
+
+    [call] = await _calls()
+    assert call.id == pending.id
+    assert (call.outcome, call.search_id, call.rank) == (outcome, search.id, 2)
+
+
+@pytest.mark.usefixtures("usage_on")
+async def test_background_call_that_raises_is_recorded_as_error(operator: Operator) -> None:
+    async def failing_dispatch() -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    wrappers: list[DispatchWrapper] = []
+
+    async def submit(wrap: DispatchWrapper | None) -> dict[str, Any]:
+        assert wrap is not None
+        wrappers.append(wrap)
+        return {"status": "pending"}
+
+    arguments = {"connector_id": _CONNECTOR, "op_id": "k8s.pod.list"}
+    await recorded_background_call(operator, arguments, transport="mcp", submit=submit)
+    with pytest.raises(RuntimeError, match="boom"):
+        await wrappers[0](failing_dispatch)
+    [call] = await _calls()
+    assert call.outcome == "error"
+
+
+@pytest.mark.usefixtures("usage_on")
+async def test_background_start_that_raises_is_recorded_as_error(operator: Operator) -> None:
+    async def submit(_wrap: DispatchWrapper | None) -> dict[str, Any]:
+        raise RuntimeError("no database")
+
+    arguments = {"connector_id": _CONNECTOR, "op_id": "k8s.pod.list"}
+    with pytest.raises(RuntimeError, match="no database"):
+        await recorded_background_call(operator, arguments, transport="rest", submit=submit)
+    [call] = await _calls()
+    assert call.outcome == "error"
+
+
+async def test_background_call_without_retention_passes_no_wrapper(operator: Operator) -> None:
+    seen: list[DispatchWrapper | None] = []
+
+    async def submit(wrap: DispatchWrapper | None) -> dict[str, Any]:
+        seen.append(wrap)
+        return {"status": "pending"}
+
+    arguments = {"connector_id": _CONNECTOR, "op_id": "k8s.pod.list"}
+    await recorded_background_call(operator, arguments, transport="mcp", submit=submit)
+    assert seen == [None]
+    assert await _calls() == []
 
 
 # ---------------------------------------------------------------------------

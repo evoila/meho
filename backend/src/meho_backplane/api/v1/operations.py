@@ -53,7 +53,11 @@ from meho_backplane.api.v1._freetext_filter import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.operation_picks.recorder import recorded_call, recorded_search
+from meho_backplane.operation_picks.recorder import (
+    recorded_background_call,
+    recorded_call,
+    recorded_search,
+)
 from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.operations.governed_subops import GovernedSubopsResponse
 from meho_backplane.operations.meta_tools import (
@@ -70,7 +74,10 @@ from meho_backplane.operations.meta_tools import (
     preview_operation,
     search_operations,
 )
-from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.operations.operation_run_service import (
+    DispatchWrapper,
+    get_operation_run_service,
+)
 from meho_backplane.operations.result_query import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -379,11 +386,13 @@ async def post_call(
     arguments = body.model_dump(exclude={"async_"})
     if body.async_:
 
-        async def _submit() -> dict[str, Any]:
-            run_id = await get_operation_run_service().submit_call(operator, arguments)
+        async def _submit(wrap: DispatchWrapper | None) -> dict[str, Any]:
+            run_id = await get_operation_run_service().submit_call(operator, arguments, wrap=wrap)
             return {"run_id": str(run_id), "status": "pending", "async": True}
 
-        answer = await recorded_call(operator, arguments, transport="rest", run=_submit)
+        answer = await recorded_background_call(
+            operator, arguments, transport="rest", submit=_submit
+        )
         response.status_code = http_status.HTTP_202_ACCEPTED
         return answer
     async with watch_caller(request.receive):

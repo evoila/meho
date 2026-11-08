@@ -43,6 +43,8 @@ searches and calls:
 Calls that MEHO makes for itself are not recorded: runbook steps, console
 pages and the run after an approval. A check of a background run
 (`call_operation` with `run_id`) is not a new call and is not recorded.
+The background run itself updates the outcome of its call record when it
+ends; the link to the search does not change.
 
 ### The search record (`operation_search_record`)
 
@@ -70,7 +72,7 @@ One row for each call.
 |---|---|
 | `id`, `occurred_at`, `tenant_id`, `principal_sub`, `session_id`, `request_id`, `transport`, `connector_id` | As above. |
 | `op_id` | The operation the call named. |
-| `outcome` | The call's status: `ok`, `error`, `denied`, `pending` (started in the background), `awaiting_approval`, `rate_limited`, or `other`. `unknown_op` when the operation does not exist. `error` when the call raised. |
+| `outcome` | The call's status: `ok`, `error`, `denied`, `pending`, `awaiting_approval`, `rate_limited`, or `other`. `unknown_op` when the operation does not exist. `error` when the call raised. A background call (`async: true`) is written as `pending` before it starts; when the background run ends, the same row gets the call's outcome. It stays `pending` only when the run never ended (cancelled before it started, or the worker stopped). |
 | `search_id` | The search the call followed, or empty. |
 | `rank` | The place of `op_id` in that search's results (1 is the first), or empty when it was not there. |
 

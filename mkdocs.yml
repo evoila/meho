@@ -74,7 +74,6 @@ nav:
       - TLS and ingress: install/tls-ingress.md
       - First-start checks: install/first-start-checks.md
       - Upgrades: install/upgrades.md
-      - Local kind quickstart: install/kind-quickstart.md
   - Connect clients:
       - clients/index.md
       - MCP surface and scopes: clients/mcp-surface-and-scopes.md

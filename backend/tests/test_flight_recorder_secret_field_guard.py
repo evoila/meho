@@ -65,6 +65,7 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 #: Operations with a flagged field that send no secret. One line each.
 _EXEMPT: dict[str, str] = {
     "argocd.app.set": "An Argo CD app spec names a Git source and a cluster; no login in it.",
+    "k8s.cronjob.list": "continue_token is the paging cursor of the list, not a secret.",
     "k8s.deployment.list": "continue_token is the paging cursor of the list, not a secret.",
     "k8s.job.list": "continue_token is the paging cursor of the list, not a secret.",
     "k8s.workload.list": "continue_token is the paging cursor of the list, not a secret.",

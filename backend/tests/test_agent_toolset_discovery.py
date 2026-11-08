@@ -171,6 +171,36 @@ async def test_connector_list_with_empty_allow_list_shows_nothing() -> None:
     assert result["connectors"] == []
 
 
+@pytest.mark.parametrize(
+    ("allowed", "expected_result"),
+    [([_VAULT], "no_connector"), ([_LINUX], "compatible")],
+)
+@pytest.mark.usefixtures("_two_connectors")
+async def test_connector_list_target_fit_follows_the_allow_list(
+    monkeypatch: pytest.MonkeyPatch,
+    allowed: list[str],
+    expected_result: str,
+) -> None:
+    """When no allowed connector fits the target, the summary says so."""
+
+    async def _load(_operator: Operator, _name: str) -> Any:
+        return object()
+
+    def _fit(_target: Any, rows: list[ConnectorListItem]) -> tuple[dict[str, Any], Any]:
+        linux = [row for row in rows if row.connector_id == _LINUX]
+        return {"target": "box-1", "result": "compatible", "hint": "fits"}, linux
+
+    monkeypatch.setattr(connector_admin, "_load_target", _load)
+    monkeypatch.setattr(connector_admin, "connectors_for_target", _fit)
+    tool = _single_tool({"meta_tools": ["meho_connector_list"], "connectors": allowed})
+    result = await tool.function(_ctx(_operator()), target="box-1")
+    assert result["target_fit"]["result"] == expected_result
+    assert result["target_fit"]["target"] == "box-1"
+    if expected_result == "no_connector":
+        assert result["connectors"] == []
+        assert "this agent may use none of them" in result["target_fit"]["hint"]
+
+
 async def test_connector_list_filters_before_it_reduces(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -222,6 +222,11 @@ When #4112 set the limits, the default list went from 96,804 to 66,092
 characters. The largest tool, `query_topology`, went from 16,302 to
 5,537.
 
+A client that needs fewer tools can also ask for a tool profile (see
+"Tool profiles" below). The `investigate` list has about a third of the
+text of the full list (23,261 characters), `operate` about half
+(35,776). The full list is 69,209.
+
 What a description keeps:
 
 - what the tool is for, and when to call it (the proactive-trigger
@@ -678,6 +683,57 @@ built-in op hidden by the tenant's own connector row is not named
 either. The extra lookups run only on this error path
 (`operations/_op_miss.py`). Tests: `tests/test_operations_op_miss.py`.
 
+### Connectors that fit one target (#3677)
+
+`meho_connector_list` takes an optional `target` (a target name or
+alias, not its id). With it, the list keeps only the connectors that fit
+that target, and the answer has a `target_fit` summary: `target`,
+`product`, `version` (probed, else set by an operator, else `null`),
+`preferred_impl_id`, `result` and a plain-text `hint`.
+
+- **Same answer as a call.** The result comes from the resolver that
+  runs when `call_operation` gets this target (`resolve_connector` in
+  `connectors/resolver.py`, the function `resolve_connector_or_label`
+  wraps). No version match is written in the MCP layer.
+- **Four results**, all outcomes the resolver already has:
+  - `compatible`: the resolver finds a connector. The rows are every
+    listed connector that fits (`connector_serves_target`). When the
+    target's version is outside every declared range, the resolver
+    still picks a class through its entry that accepts every version.
+    Then the rows are the listed rows of that class, and the hint says
+    the version is outside their range. A row whose catalog refuses the
+    target in its own check (`catalog_refuses_target`, the check a call
+    runs before it answers `unqualified_target_version`) is left out.
+    `compatible` never comes with an empty list: when a `status` or
+    `product` filter hides the connector a call would use, or every
+    row's catalog refuses the target, the result is `no_connector` with
+    a hint that says why.
+  - `fingerprint_unknown`: the target has no version yet. The rows are
+    the connectors of its product; they may fit. The hint says to probe
+    the target or set its version.
+  - `no_connector`: no connector fits. No rows.
+  - `ambiguous`: two or more connectors are still tied after the
+    tie-break. The rows are the tied connectors; the hint says to set
+    `preferred_impl_id` on the target.
+- **It chooses nothing.** The answer names no chosen connector, and a
+  `preferred_impl_id` does not hide the other rows. `call_operation`
+  still picks the connector by target each time it runs.
+- **Reads only.** The target is read in the caller's tenant. An unknown
+  name is `-32602` with `error_code: no_target` (or `ambiguous_target`)
+  and the near-miss names. Nothing is probed and the target row is not
+  written.
+- `status`, `product` and `detail` still apply. A long list still comes
+  back as a handle; `target_fit` stays next to it.
+- **Hosted agent.** The agent's connector allow-list runs after the
+  summary is made. When it removes every row, the result becomes
+  `no_connector`, and the hint says this agent may use none of the
+  connectors that fit (`keep_allowed_connectors` in
+  `agent/toolset_discovery.py`).
+
+Code: `connectors_for_target` in `mcp/tools/connector_admin.py`. Tests:
+`tests/test_mcp_tools_connector_admin.py` (`target_fit`) and
+`tests/test_agent_toolset_discovery.py`.
+
 ### Close ids for an unknown connector (#4136)
 
 Every unknown-connector error names up to 5 close connector ids, so a
@@ -894,6 +950,58 @@ explicitly.
   registration, doc-collection create/delete, memory promotion,
   approvals **read**, and audit query.
 
+## Tool profiles (#4172)
+
+A client can ask for a smaller tool list. It adds `?profile=<name>` to
+the MCP URL, for example `https://<meho-host>/mcp?profile=investigate`.
+A small model then sees 9 or 13 tools, not 26, and keeps more of its
+context window for the job.
+
+| Profile | Tools |
+|---|---|
+| `investigate` (9) | `meho_status`, `meho_connector_list`, `list_targets`, `list_operation_groups`, `search_operations`, `call_operation`, `result_query`, `search_knowledge`, `search_memory` |
+| `operate` (13) | `investigate` plus `preview_operation`, `meho_broadcast_recent`, `meho_broadcast_announce`, `meho_broadcast_watch` |
+
+The lists are in `mcp/profiles.py`.
+
+How it works:
+
+- The MCP route reads the `profile` URL parameter
+  (`_dispatch_mcp_request` in `mcp/server.py`) and stores it on the
+  request's `Operator` as `mcp_tool_profile`. Only this route sets it.
+- `all_tools_for` (`mcp/registry.py`) runs the four gates above first,
+  then keeps only the profile's tools. So a profile only removes tools.
+  An `mcp:admin` session with a profile still sees only the profile.
+- `tools/call` checks the profile again (`handle_tools_call`). A call to
+  a tool outside the profile is refused with `reason: not_in_profile`,
+  and the handler does not run. The refusal is audited as a 403.
+- No profile, or an empty `profile=`, gives the full list, as before.
+- An unknown name, or two different names, is refused with HTTP 400
+  before the body is read. A typo must not quietly give the full list.
+  Names are not case-sensitive.
+- The session-start text follows the profile. The broadcast band is
+  there only when `meho_broadcast_announce` is on the list (#4113). A
+  profile without the runbook tools gets no runbook band, and a profile
+  without the docs tools gets no docs collection list
+  (`_session_instructions`). Tenant conventions are tenant text and are
+  not changed.
+- `meho_status` shows the hidden working tools in
+  `surface_summary.missing_working_tools`, because it uses the same
+  filter.
+
+Why a URL parameter and not a header: every MCP client can set the
+server URL, and not every client can set a header. MEHO checks the
+token audience against its configured MCP resource URI
+(`mcp_resource_uri`), which has no query. So on the server side the
+same token works with and without a profile. Whether each client's
+login flow accepts a server URL with a query has not been tried in a
+lab yet.
+
+A profile does not change what the person may do. `call_operation` in
+the `investigate` profile can still run a change, under the person's
+role, the operation's risk level and the approval rules. The profile
+only makes the tool list shorter.
+
 ## The current tenant of a session (#5239)
 
 One login can list several tenants (the `meho_tenants` claim). An MCP
@@ -1019,7 +1127,7 @@ add-on-family gate.
 | `meho_broadcast_announce` | operator | — | CLI: `meho broadcast announce <activity>` publishes through the shared durable publisher. |
 | `meho_broadcast_recent` | operator | — | CLI: `meho broadcast recent` reads stored agent announcements through the shared archive reader (operation, approval and check events are on the SSE feed and in `query_audit`). |
 | `meho_broadcast_watch` | operator | — | CLI: `meho broadcast watch` tails the authenticated `/api/v1/feed` SSE route. |
-| `meho_connector_list` | operator | — | List connectors visible to the tenant (plus built-in / global). |
+| `meho_connector_list` | operator | — | List connectors visible to the tenant (plus built-in / global); `target` keeps only the ones that fit one target. |
 | `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |
 | `meho_runbook_list_runs` | operator | — | List runbook runs (operators see only their own). |
 | `meho_runbook_list_templates` | operator | — | List runbook templates in the tenant. |

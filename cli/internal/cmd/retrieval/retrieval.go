@@ -11,6 +11,9 @@
 //     (T5b #464) against /api/v1/retrieve/usage (T5 #444).
 //   - `meho retrieval retire-checklist` — combined retire-decision
 //     verb (T6 #445).
+//   - `meho retrieval picks` — per connector and day, whether calls used
+//     an operation the search before them returned (#4750), against
+//     /api/v1/retrieve/operation-picks.
 //
 // G0.12-T12 #1270 migrated this package off the per-verb hand-rolled
 // `postXxxWithBearer` helpers + hand-typed copies of backend pydantic
@@ -63,6 +66,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newEvalCmd())
 	cmd.AddCommand(newUsageCmd())
 	cmd.AddCommand(newRetireChecklistCmd())
+	cmd.AddCommand(newPicksCmd())
 	return cmd
 }
 

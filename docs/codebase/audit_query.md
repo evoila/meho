@@ -34,6 +34,10 @@ A call of an ingested op on a connector class that does not accept
 ingested operations also writes a `policy_decision` row (`denied`, code
 `ingested_ops_not_accepted`).
 
+A typed or multi-step op called on a target whose connector does not
+have its handler writes a `policy_decision` row with result status
+`target_connector_mismatch` (#5948).
+
 A refused call's row says why (#5773). `payload["error"]` holds the
 `error_code` the caller got, a `reason_code`, and the `reason` text. The
 `reason_code` names the rule that refused the call

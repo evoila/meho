@@ -303,6 +303,8 @@ cli/
     │   │   ├── eval_test.go            # output-contract + URL-resolution + EvalRequest body shape tests.
     │   │   ├── usage.go                # `meho retrieval usage` (GET /api/v1/retrieve/usage) — G4.3-T5b #464, typed client.
     │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing + JSON200 nil-guard tests.
+    │   │   ├── picks.go                # `meho retrieval picks` (GET /api/v1/retrieve/operation-picks) — #4750, typed client.
+    │   │   ├── picks_test.go           # query-param + 403/400 routing + bad tenant + JSON200 nil-guard tests.
     │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445, typed client. Keeps the hand-typed `ghIssueLabel` / `ghIssue` for the `gh issue list` subprocess output.
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + body-shape (null vs empty) tests.
     │   ├── migrate/           # G5.3 #608–#612 — `meho migrate …` laptop-local migration verb tree (Initiative #375). G0.12-T11 #1269 migrated to typed client.
@@ -2132,10 +2134,14 @@ generic indented-JSON renderer rather than a per-shape table — a
 per-op table buys little over the dump while risking contract-drift
 panics. Set-shaped responses (`vault kv list`,
 `vault auth userpass-list`, …) arrive **already reduced** to the
-JSONFlux sample + result-handle envelope by the dispatcher; the CLI
-prints that verbatim with the handle hint intact, consistent with the
-`vmware` sibling. Operators drill into a handle with the
-`meho operation` result verbs.
+JSONFlux summary and sample by the dispatcher, plus a top-level
+`handle`. The shared `dispatch.Render` keeps it for every vendor verb:
+the human render ends with `result handle: <handle_id>` and the
+`meho operation result-query <handle_id>` command, and `--json` prints
+the whole envelope, including `handle`, `audit_id` and `delivery`
+(#4659). When `delivery` is `partial` or `unavailable`, the human
+render also says the operation already ran and must not be run again.
+Operators read the full result with `meho operation result-query`.
 
 ### HTTP shape + exit codes
 

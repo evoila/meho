@@ -388,6 +388,84 @@
         }
       }
     },
+    "/api/v1/retrieve/operation-picks": {
+      "get": {
+        "tags": [
+          "retrieval"
+        ],
+        "summary": "Operation Picks Endpoint",
+        "description": "Return the operation pick numbers per connector and day.\n\n*since* accepts ``<N>d`` / ``<N>h`` or an ISO-8601 date; a malformed\nvalue is a 400. *connector_id* narrows the report to one connector. A\n*tenant_filter* naming another tenant is a 403 unless the caller is a\nplatform admin. No records in the window is an empty ``buckets`` list.",
+        "operationId": "operation_picks_endpoint_api_v1_retrieve_operation_picks_get",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "30d",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "nullable": true,
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationPickReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/retrieve/eval": {
       "post": {
         "tags": [
@@ -35361,6 +35439,127 @@
         "title": "OperationOverrideRow",
         "description": "One operator override of a risk level or approval flag (#4711).\n\n``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or\n``install`` (the whole install). ``safety_level`` / ``requires_approval``\nare the values that apply in that scope: the classification with every\noverride there. ``reason`` is the reason a platform admin gave for\nturning approval off."
       },
+      "OperationPickBucket": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "searches": {
+            "type": "integer",
+            "title": "Searches",
+            "description": "search_operations calls."
+          },
+          "searches_followed_by_call": {
+            "type": "integer",
+            "title": "Searches Followed By Call",
+            "description": "Searches that a later call on the same connector was linked to."
+          },
+          "calls": {
+            "type": "integer",
+            "title": "Calls",
+            "description": "call_operation calls."
+          },
+          "calls_in_results": {
+            "type": "integer",
+            "title": "Calls In Results",
+            "description": "Calls whose op_id was in the linked search."
+          },
+          "calls_at_rank_1": {
+            "type": "integer",
+            "title": "Calls At Rank 1",
+            "description": "Calls whose op_id was the first result."
+          },
+          "calls_in_top_3": {
+            "type": "integer",
+            "title": "Calls In Top 3",
+            "description": "Calls whose op_id was in the first three results."
+          },
+          "calls_in_results_ok": {
+            "type": "integer",
+            "title": "Calls In Results Ok",
+            "description": "Calls whose op_id was in the linked search and that returned ok."
+          },
+          "calls_not_in_results": {
+            "type": "integer",
+            "title": "Calls Not In Results",
+            "description": "Calls after a search whose op_id was not in its results."
+          },
+          "calls_unknown_op": {
+            "type": "integer",
+            "title": "Calls Unknown Op",
+            "description": "Calls to an op_id that does not exist."
+          },
+          "calls_without_search": {
+            "type": "integer",
+            "title": "Calls Without Search",
+            "description": "Calls with no search on the same connector in the 5 minutes before."
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "connector_id",
+          "searches",
+          "searches_followed_by_call",
+          "calls",
+          "calls_in_results",
+          "calls_at_rank_1",
+          "calls_in_top_3",
+          "calls_in_results_ok",
+          "calls_not_in_results",
+          "calls_unknown_op",
+          "calls_without_search"
+        ],
+        "title": "OperationPickBucket",
+        "description": "The numbers of one connector on one day."
+      },
+      "OperationPickReport": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Since"
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Until"
+          },
+          "connector_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Connector Id"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/OperationPickBucket"
+            },
+            "type": "array",
+            "title": "Buckets"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "since",
+          "until",
+          "connector_id",
+          "buckets"
+        ],
+        "title": "OperationPickReport",
+        "description": "The report for one tenant and window."
+      },
       "OperationRunStatus": {
         "type": "string",
         "enum": [
@@ -36216,6 +36415,11 @@
             "type": "number",
             "nullable": true,
             "title": "Baseline Coverage At 5"
+          },
+          "not_run_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Not Run Reason"
           }
         },
         "type": "object",
@@ -36228,7 +36432,7 @@
           "coverage_at_5"
         ],
         "title": "QueryResult",
-        "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate."
+        "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate.\n\n``not_run_reason`` is set when the question could not be run on\nthis install (operations surface: its connector cannot be searched\nhere). Such a row has no hits and zeros, and the surface aggregate\nleaves it out (#4752)."
       },
       "ReadDocsRequest": {
         "properties": {
@@ -40215,6 +40419,11 @@
             "nullable": true,
             "title": "Baseline Verdict"
           },
+          "not_run_count": {
+            "type": "integer",
+            "title": "Not Run Count",
+            "default": 0
+          },
           "queries": {
             "items": {
               "$ref": "#/components/schemas/QueryResult"
@@ -40233,7 +40442,7 @@
           "verdict"
         ],
         "title": "SurfaceResult",
-        "description": "Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.\n\nThe verdict band is computed from the macro-mean metrics against\nthe configured :class:`Thresholds` (default\n:data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A\nsurface with ``query_count == 0`` (corpus YAML hasn't shipped\nyet) returns ``verdict=\"green\"`` deliberately \u2014 see runner.py\ndocstring.\n\n``baseline_verdict`` is computed only when the baseline ran;\n``None`` otherwise. The MEHO-\u2265-baseline overlay applies in the\naggregate verdict (see runner._apply_baseline_check)."
+        "description": "Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.\n\nThe verdict band is computed from the macro-mean metrics against\nthe configured :class:`Thresholds` (default\n:data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A\nsurface with ``query_count == 0`` (corpus YAML hasn't shipped\nyet) returns ``verdict=\"green\"`` deliberately \u2014 see runner.py\ndocstring.\n\n``baseline_verdict`` is computed only when the baseline ran;\n``None`` otherwise. The MEHO-\u2265-baseline overlay applies in the\naggregate verdict (see runner._apply_baseline_check).\n\n``query_count`` counts the scored questions only. ``not_run_count``\ncounts the questions that could not be run on this install; they\nare in ``queries`` with their ``not_run_reason`` but do not move the\nmetrics or the verdict (#4752)."
       },
       "SurfaceSummary": {
         "properties": {

@@ -14,6 +14,11 @@
        with ``precision_at_5`` / ``mrr`` / ``coverage`` and a verdict pill.
     2. otherwise (initial render) -> a quiet prompt.
 
+  Not-run notes:
+    A question that could not run on this install (operations: its
+    connector cannot be searched here) is left out of the numbers. One
+    line per surface names how many and why.
+
   Verdict -> color mapping (lives here, NOT in the service):
     The service returns a ``Verdict`` token (``green`` / ``yellow`` / ``red``)
     verbatim -- an empty-corpus surface legitimately returns ``green``. The
@@ -92,6 +97,15 @@
         </tbody>
       </table>
     </div>
+
+    {# ---------- Questions that could not run on this install ---------- #}
+    {% for surface in result.surfaces if surface.not_run_count %}
+      <p class="text-sm opacity-70" data-not-run="{{ surface.surface }}">
+        {{ surface.surface }}: {{ surface.not_run_count }} question(s) not run and not scored
+        &mdash;
+        {{ surface.queries | selectattr("not_run_reason") | map(attribute="not_run_reason") | unique | join("; ") }}
+      </p>
+    {% endfor %}
 
   {% else %}
     {# ---------- Initial prompt (no run yet) ---------- #}

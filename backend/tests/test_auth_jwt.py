@@ -1151,6 +1151,43 @@ def test_two_role_groups_as_full_paths_are_refused() -> None:
     assert response.json()["detail"].startswith("multiple_role_groups: ")
 
 
+def test_two_role_groups_in_lower_case_are_refused(log_buffer: io.StringIO) -> None:
+    """Group names in another case count as the MEHO groups; the message keeps the token's names."""
+    response = _whoami_with_groups(["meho-admins", "meho-operators"])
+
+    assert response.status_code == 401
+    detail = response.json()["detail"]
+    assert detail.startswith("multiple_role_groups: ")
+    assert "(meho-operators, meho-admins)" in detail
+    _assert_event_logged(
+        log_buffer,
+        "multiple_role_groups",
+        claim_name="groups",
+        groups=["meho-operators", "meho-admins"],
+    )
+
+
+def test_one_role_group_in_lower_case_logs_in() -> None:
+    """One group in another case, next to other groups, passes."""
+    response = _whoami_with_groups(["meho-operators", "staff"])
+
+    assert response.status_code == 200
+
+
+def test_same_group_in_two_cases_counts_as_one_group() -> None:
+    """``/MEHO-Operators`` and ``meho-operators`` are the same group."""
+    response = _whoami_with_groups(["/MEHO-Operators", "meho-operators"])
+
+    assert response.status_code == 200
+
+
+def test_group_named_like_a_role_group_but_longer_is_not_a_role_group() -> None:
+    """Only the whole name counts, so ``MEHO-Operators-old`` is another group."""
+    response = _whoami_with_groups(["MEHO-Operators", "meho-operators-old"])
+
+    assert response.status_code == 200
+
+
 def test_jwt_role_groups_env_override_replaces_the_default_list() -> None:
     """``JWT_ROLE_GROUPS`` renames the groups the check looks for."""
     with pytest.MonkeyPatch.context() as mp:

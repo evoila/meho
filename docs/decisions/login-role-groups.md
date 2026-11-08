@@ -38,7 +38,11 @@ each site has one tenant, so all five groups carry the same
    a login with `401 multiple_role_groups` and names the groups
    ([#4594](https://github.com/evoila/meho/issues/4594)). The check
    reads the `groups` claim and the group names in `JWT_ROLE_GROUPS`
-   (default: the five groups above).
+   (default: the five groups above). Upper and lower case do not
+   count, so `meho-operators` is the same group as `MEHO-Operators`.
+   A token with the `meho_tenants` list (see "More than one tenant"
+   below) is checked by the group attributes in that list instead, so
+   there the group names do not matter.
 2. **No group, no access.** A person in none of the five groups gets
    no `tenant_id`. MEHO refuses the login with
    `401 missing_tenant_claim`.

@@ -20,8 +20,8 @@ Coverage matrix (per the Task acceptance criteria):
 * Broadcast-clamp membership: ``file.write`` / ``script.run`` classify
   ``credential_write``; ``sysctl.write`` / ``firewall.load`` /
   ``service.control`` do not.
-* Park-time bespoke-preview redaction: no ``content`` / ``script`` /
-  ``arguments`` / ``env`` value leaks.
+* Park-time bespoke previews: the ``script.run`` approver reads the script;
+  no ``content`` / ``arguments`` / ``env`` value reaches a preview.
 * ``preview_operation`` returns ``preview_unavailable`` for the two
   credential-class writes with no secret in the envelope (mirrors fbbf536f);
   the two non-secret writes preview via the generic params-echo default.
@@ -32,6 +32,7 @@ Coverage matrix (per the Task acceptance criteria):
 from __future__ import annotations
 
 import base64
+import hashlib
 import shlex
 import types
 import uuid
@@ -611,7 +612,7 @@ async def test_file_write_preview_echoes_shape_never_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_script_run_preview_echoes_shape_never_values() -> None:
+async def test_script_run_preview_shows_script_never_argument_or_env_values() -> None:
     ctx = types.SimpleNamespace(
         params={
             "script": _SCRIPT_CANARY,
@@ -628,15 +629,17 @@ async def test_script_run_preview_echoes_shape_never_values() -> None:
     assert preview == {
         "target": "linux-1",
         "interpreter": "/usr/bin/python3",
+        "script": _SCRIPT_CANARY,
         "script_bytes": len(_SCRIPT_CANARY.encode("utf-8")),
+        "script_sha256": hashlib.sha256(_SCRIPT_CANARY.encode("utf-8")).hexdigest(),
         "use_sudo": True,
         "argument_bytes": len(_ARG_CANARY.encode("utf-8")),
         "env_var_names": ["MEHO_ENV_NAME"],
         "working_directory": "/opt/app",
         "timeout_seconds": 30,
     }
-    for leaked in (_SCRIPT_CANARY, _ARG_CANARY, _ENV_VALUE_CANARY):
-        assert leaked not in repr(preview)
+    for hidden_value in (_ARG_CANARY, _ENV_VALUE_CANARY):
+        assert hidden_value not in repr(preview)
 
 
 # ---------------------------------------------------------------------------

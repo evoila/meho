@@ -4,23 +4,28 @@
 """Tests for the first-start checks (``GET /first-start``).
 
 Covers the four fault injections (wrong host name, expired certificate, a
-clock five minutes off, an unreachable target), the clean list, the missing
-login, and that no secret or exception text reaches the answer. The
-certificate tests do a real TLS handshake against a local server.
+clock five minutes off, an unreachable target), a name that resolves to the
+wrong server, the clean list, the missing login, and that no secret or
+exception text reaches the answer. The certificate tests do a real TLS
+handshake against a local server.
 """
 
 import asyncio
 import ssl
 import tempfile
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from ipaddress import ip_address
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
+import httpx
 import pytest
+import respx
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -32,6 +37,7 @@ from meho_backplane import first_start
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import require_ui_operator
+from meho_backplane.ui.routes import first_start as first_start_page
 from meho_backplane.ui.routes.first_start import build_first_start_router
 
 _SITE = "https://meho.example.com"
@@ -44,10 +50,14 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("BACKPLANE_URL", _SITE)
     get_settings.cache_clear()
-    first_start.reset_public_cache_for_testing()
+    first_start.reset_public_run_for_testing()
     yield
     get_settings.cache_clear()
-    first_start.reset_public_cache_for_testing()
+    first_start.reset_public_run_for_testing()
+
+
+def _target(name: str, secret_ref: str | None = None) -> Any:
+    return SimpleNamespace(name=name, secret_ref=secret_ref)
 
 
 def _patch_green(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -64,12 +74,16 @@ def _patch_green(monkeypatch: pytest.MonkeyPatch) -> None:
         return datetime.now(UTC)
 
     async def targets(tenant_id: Any = None) -> list[Any]:
-        return [SimpleNamespace(name="esx-1"), SimpleNamespace(name="esx-2")]
+        return [_target("esx-1"), _target("esx-2")]
 
-    async def probe(target: Any) -> bool:
-        return True
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        return "up"
+
+    async def proof(backplane_url: str, nonce: str) -> str | None:
+        return first_start._destination_proof(nonce)
 
     monkeypatch.setattr(first_start, "_resolve_host", resolve)
+    monkeypatch.setattr(first_start, "_fetch_destination_proof", proof)
     monkeypatch.setattr(first_start, "_fetch_peer_certificate", cert)
     monkeypatch.setattr(first_start, "_keycloak_time", now)
     monkeypatch.setattr(first_start, "_database_time", now)
@@ -87,12 +101,17 @@ def _red(body: dict[str, Any]) -> list[dict[str, Any]]:
     return [c for c in body["checks"] if c["status"] == "fail"]
 
 
+async def _never_called(*args: Any) -> Any:
+    raise AssertionError("must not be called")
+
+
 def test_clean_site_is_all_green(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
     body = _get()
     assert body["ok"] is True
     assert [c["name"] for c in body["checks"]] == ["dns", "certificate", "clock", "reachability"]
     assert [c["status"] for c in body["checks"]] == ["ok"] * 4
+    assert "points at this MEHO" in body["checks"][0]["message"]
 
 
 def test_wrong_host_name_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,6 +121,7 @@ def test_wrong_host_name_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) -> 
         raise OSError("no such host")
 
     monkeypatch.setattr(first_start, "_resolve_host", nothing)
+    monkeypatch.setattr(first_start, "_fetch_destination_proof", _never_called)
     body = _get()
     red = _red(body)
     assert body["ok"] is False
@@ -150,8 +170,8 @@ def test_clock_source_that_cannot_be_read_is_red_not_green(monkeypatch: pytest.M
 def test_unreachable_target_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
 
-    async def probe(target: Any) -> bool:
-        return target.name != "esx-2"
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        return "up" if target.name != "esx-2" else "down"
 
     monkeypatch.setattr(first_start, "_probe_one", probe)
     red = _red(_get())
@@ -161,41 +181,53 @@ def test_unreachable_target_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) 
     assert "esx-2" not in red[0]["message"]
 
 
-def test_public_answer_is_reused_for_a_short_time(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_public_answer_runs_fresh_after_a_repair(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+    up = {"esx-2": False}
+
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        return "up" if up.get(target.name, True) else "down"
+
+    monkeypatch.setattr(first_start, "_probe_one", probe)
+    assert [c["name"] for c in _red(_get())] == ["reachability"]
+    up["esx-2"] = True  # the operator fixes the system
+    assert _get()["ok"] is True
+
+
+async def test_overlapping_public_calls_share_one_run(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
     calls = 0
 
-    async def probe(target: Any) -> bool:
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
         nonlocal calls
         calls += 1
-        return True
+        await asyncio.sleep(0.05)
+        return "up"
 
     monkeypatch.setattr(first_start, "_probe_one", probe)
-    clock = [1000.0]
-    monkeypatch.setattr(first_start.time, "monotonic", lambda: clock[0])
-    _get()
-    _get()
+    first, second = await asyncio.gather(
+        first_start.run_public_first_start_checks(),
+        first_start.run_public_first_start_checks(),
+    )
+    assert first is second
     assert calls == 2  # two systems, one run
-    clock[0] += first_start._PUBLIC_CACHE_TTL_S + 1
-    _get()
-    assert calls == 4
+    await first_start.run_public_first_start_checks()
+    assert calls == 4  # the next call runs again
 
 
 async def test_names_show_only_when_asked_and_only_for_the_tenant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import uuid
-
     _patch_green(monkeypatch)
     seen: list[Any] = []
     tenant = uuid.uuid4()
 
     async def targets(tenant_id: Any = None) -> list[Any]:
         seen.append(tenant_id)
-        return [SimpleNamespace(name="esx-1"), SimpleNamespace(name="esx-2")]
+        return [_target("esx-1"), _target("esx-2")]
 
-    async def probe(target: Any) -> bool:
-        return target.name != "esx-2"
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        return "up" if target.name != "esx-2" else "down"
 
     monkeypatch.setattr(first_start, "_live_targets", targets)
     monkeypatch.setattr(first_start, "_probe_one", probe)
@@ -387,13 +419,221 @@ def test_console_page_shows_the_same_list(monkeypatch: pytest.MonkeyPatch) -> No
         return datetime.now(UTC) + timedelta(minutes=5)
 
     monkeypatch.setattr(first_start, "_database_time", late)
+    person = object()
+    operators_seen: list[Any] = []
+
+    async def lift(session_ctx: Any) -> Any:
+        return person
+
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        operators_seen.append(operator)
+        return "up"
+
+    monkeypatch.setattr(first_start_page, "resolve_ui_operator", lift)
+    monkeypatch.setattr(first_start, "_probe_one", probe)
     page_app = FastAPI()
     page_app.include_router(build_first_start_router())
     page_app.dependency_overrides[require_ui_operator] = lambda: SimpleNamespace(tenant_id=None)
     page = TestClient(page_app).get("/ui/first-start")
     assert page.status_code == 200
+    # The console passes the signed-in person to every probe; the public list passes none.
+    assert operators_seen == [person, person]
+    operators_seen.clear()
     api = _get()
+    assert operators_seen == [None, None]
     for line in api["checks"]:
         marker = f'data-check="{line["name"]}" data-status="{line["status"]}"'
         assert marker in page.text
         assert line["message"] in page.text
+
+
+# --- the destination of the DNS name ----------------------------------------
+
+
+def test_name_that_resolves_to_the_wrong_server_is_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+
+    async def not_meho(backplane_url: str, nonce: str) -> str | None:
+        return None  # the server answers 404, or not at all
+
+    monkeypatch.setattr(first_start, "_fetch_destination_proof", not_meho)
+    body = _get()
+    red = _red(body)
+    assert [c["name"] for c in red] == ["dns"]
+    assert "does not answer as this MEHO" in red[0]["message"]
+    assert "BACKPLANE_URL" in red[0]["message"]
+    assert body["checks"][1]["status"] == "ok"  # the certificate of the wrong server is fine
+
+
+def test_name_that_resolves_to_another_meho_is_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+
+    async def other_install(backplane_url: str, nonce: str) -> str | None:
+        return first_start._destination_proof("0" * 32)  # a proof for another nonce
+
+    monkeypatch.setattr(first_start, "_fetch_destination_proof", other_install)
+    assert [c["name"] for c in _red(_get())] == ["dns"]
+
+
+def test_destination_waits_for_the_certificate(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+
+    async def bad_certificate(host: str, port: int) -> dict[str, object]:
+        raise ssl.SSLError("certificate verify failed")
+
+    monkeypatch.setattr(first_start, "_fetch_peer_certificate", bad_certificate)
+    monkeypatch.setattr(first_start, "_fetch_destination_proof", _never_called)
+    body = _get()
+    assert [c["name"] for c in _red(body)] == ["certificate"]
+    assert body["checks"][0]["status"] == "ok"
+    assert "once the certificate check is green" in body["checks"][0]["message"]
+
+
+def test_destination_fetch_reads_the_proof_over_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    def answer(request: httpx.Request) -> httpx.Response:
+        nonce = request.url.params["nonce"]
+        return httpx.Response(200, json={"proof": first_start._destination_proof(nonce)})
+
+    async def run() -> tuple[str | None, str | None, str | None]:
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("https://meho.example.com/first-start/destination").mock(side_effect=answer)
+            mock.get("https://wrong.example.com/first-start/destination").mock(
+                return_value=httpx.Response(404, text="<html>not found</html>")
+            )
+            mock.get("https://down.example.com/first-start/destination").mock(
+                side_effect=httpx.ConnectError("refused")
+            )
+            nonce = "ab" * 16
+            return (
+                await first_start._fetch_destination_proof(_SITE + "/", nonce),
+                await first_start._fetch_destination_proof("https://wrong.example.com", nonce),
+                await first_start._fetch_destination_proof("https://down.example.com", nonce),
+            )
+
+    right, wrong, down = asyncio.run(run())
+    assert right == first_start._destination_proof("ab" * 16)
+    assert wrong is None
+    assert down is None
+
+
+def test_destination_endpoint_answers_the_proof_without_login() -> None:
+    nonce = "ab" * 16
+    response = TestClient(app).get("/first-start/destination", params={"nonce": nonce})
+    assert response.status_code == 200
+    assert response.json() == {"proof": first_start._destination_proof(nonce)}
+    assert (
+        TestClient(app).get("/first-start/destination", params={"nonce": "short"}).status_code
+        == 422
+    )
+
+
+# --- the clock source must answer with success ------------------------------
+
+
+_REAL_KEYCLOAK_TIME = first_start._keycloak_time
+
+
+async def _keycloak_time_with(status: int) -> datetime | None:
+    """The real Keycloak reader against a discovery answer with the current date."""
+    url = "https://keycloak.test/realms/meho/.well-known/openid-configuration"
+    with respx.mock() as mock:
+        mock.get(url).mock(
+            return_value=httpx.Response(
+                status, headers={"date": format_datetime(datetime.now(UTC), usegmt=True)}
+            )
+        )
+        return await _REAL_KEYCLOAK_TIME()
+
+
+async def test_keycloak_time_comes_from_a_successful_answer_only() -> None:
+    reading = await _keycloak_time_with(200)
+    assert reading is not None
+    assert abs((datetime.now(UTC) - reading).total_seconds()) < 5
+    # A 503 from a proxy carries the proxy's time, not Keycloak's.
+    assert await _keycloak_time_with(503) is None
+
+
+def test_clock_is_red_when_keycloak_answers_an_error_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+
+    async def error_page() -> datetime | None:
+        return await _keycloak_time_with(503)
+
+    monkeypatch.setattr(first_start, "_keycloak_time", error_page)
+    red = _red(_get())
+    assert [c["name"] for c in red] == ["clock"]
+    assert "could not read the time from Keycloak" in red[0]["message"]
+
+
+# --- systems whose login is in Vault ----------------------------------------
+
+
+class _Fingerprint:
+    """A fake connector: records the operator and answers "reachable"."""
+
+    seen: ClassVar[list[Any]] = []
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> Any:
+        self.seen.append(operator)
+        return SimpleNamespace(reachable=True)
+
+
+def _use_fake_connector(monkeypatch: pytest.MonkeyPatch) -> None:
+    from meho_backplane.connectors import resolver
+
+    _Fingerprint.seen.clear()
+    monkeypatch.setattr(
+        resolver, "resolve_connector_or_label", lambda target: (_Fingerprint, None, None)
+    )
+
+
+async def test_signed_in_person_is_passed_to_a_system_with_login_in_vault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_fake_connector(monkeypatch)
+    person = cast("Any", object())
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [_target("k8s-1", secret_ref="secret/k8s-1"), _target("esx-1")]
+
+    line = await first_start.check_reachability(
+        operator=person, show_names=True, list_targets=targets
+    )
+    assert line.status == "ok", line.message
+    assert _Fingerprint.seen == [person, person]
+
+
+async def test_system_with_login_in_vault_is_not_contacted_without_a_person(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_fake_connector(monkeypatch)
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [_target("k8s-1", secret_ref="secret/k8s-1"), _target("esx-1")]
+
+    line = await first_start.check_reachability(operator=None, list_targets=targets)
+    assert line.status == "skipped"
+    assert "1 of 2 systems answered" in line.message
+    assert "1 of 2 systems could not be checked without a signed-in person" in line.message
+    assert "k8s-1" not in line.message
+    assert _Fingerprint.seen == [None]  # only esx-1 was contacted
+
+
+async def test_unchecked_systems_are_told_apart_from_systems_that_did_not_answer() -> None:
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [_target("k8s-1", secret_ref="secret/k8s-1"), _target("esx-1"), _target("esx-2")]
+
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        if target.secret_ref:
+            return "needs_person"
+        return "down" if target.name == "esx-2" else "up"
+
+    line = await first_start.check_reachability(list_targets=targets, probe_one=probe)
+    assert line.status == "fail"
+    assert "1 of 3 systems did not answer" in line.message
+    assert "1 of 3 systems could not be checked" in line.message
+    named = await first_start.check_reachability(
+        show_names=True, list_targets=targets, probe_one=probe
+    )
+    assert "These systems did not answer: esx-2." in named.message
+    assert "login is in Vault: k8s-1." in named.message

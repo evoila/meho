@@ -6,7 +6,9 @@
 Shows the same list as the public ``GET /first-start`` endpoint
 (:mod:`meho_backplane.first_start`). Read-only. It needs the ``operator`` role,
 like the other console pages that run checks against systems. It names the
-systems of the signed-in tenant that did not answer.
+systems of the signed-in tenant that did not answer, and it passes the
+signed-in person to the checks, so a system whose login is in Vault is read
+with that person's token.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.first_start import run_first_start_checks
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
+from meho_backplane.ui.roles import resolve_ui_operator
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_first_start_router"]
@@ -32,7 +35,10 @@ def build_first_start_router() -> APIRouter:
         session_ctx: UISessionContext = _require_ui_operator_dep,
     ) -> HTMLResponse:
         """``GET /ui/first-start``."""
-        result = await run_first_start_checks(tenant_id=session_ctx.tenant_id, show_names=True)
+        operator = await resolve_ui_operator(session_ctx)
+        result = await run_first_start_checks(
+            tenant_id=session_ctx.tenant_id, show_names=True, operator=operator
+        )
         context: dict[str, object] = {
             "page_title": "First-start checks",
             "active_surface": "",

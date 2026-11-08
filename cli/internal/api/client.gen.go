@@ -5058,6 +5058,11 @@ type DeprecateTemplateResponse struct {
 	Version int    `json:"version"`
 }
 
+// DestinationProof The answer of “GET /first-start/destination“: the proof for the nonce.
+type DestinationProof struct {
+	Proof string `json:"proof"`
+}
+
 // DiscardTemplateResponse Response for “meho_runbook_discard_template“ -- the discarded draft's coordinates.
 //
 // “status“ is the synthetic terminal marker “"discarded"“ -- unlike
@@ -12649,6 +12654,12 @@ type TimelineRouteApiV1TopologyTimelineGetParams struct {
 	Authorization *string    `json:"authorization,omitempty"`
 }
 
+// FirstStartDestinationFirstStartDestinationGetParams defines parameters for FirstStartDestinationFirstStartDestinationGet.
+type FirstStartDestinationFirstStartDestinationGetParams struct {
+	// Nonce 32 hex characters
+	Nonce string `form:"nonce" json:"nonce"`
+}
+
 // McpDispatchMcpPostParams defines parameters for McpDispatchMcpPost.
 type McpDispatchMcpPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -16095,6 +16106,9 @@ type ClientInterface interface {
 
 	// FirstStartFirstStartGet request
 	FirstStartFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FirstStartDestinationFirstStartDestinationGet request
+	FirstStartDestinationFirstStartDestinationGet(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// HealthzHealthzGet request
 	HealthzHealthzGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20151,6 +20165,18 @@ func (c *Client) TimelineRouteApiV1TopologyTimelineGet(ctx context.Context, para
 
 func (c *Client) FirstStartFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewFirstStartFirstStartGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FirstStartDestinationFirstStartDestinationGet(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartDestinationFirstStartDestinationGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -37397,6 +37423,51 @@ func NewFirstStartFirstStartGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewFirstStartDestinationFirstStartDestinationGetRequest generates requests for FirstStartDestinationFirstStartDestinationGet
+func NewFirstStartDestinationFirstStartDestinationGetRequest(server string, params *FirstStartDestinationFirstStartDestinationGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/first-start/destination")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "nonce", runtime.ParamLocationQuery, params.Nonce); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewHealthzHealthzGetRequest generates requests for HealthzHealthzGet
 func NewHealthzHealthzGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -49314,6 +49385,9 @@ type ClientWithResponsesInterface interface {
 	// FirstStartFirstStartGetWithResponse request
 	FirstStartFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*FirstStartFirstStartGetResponse, error)
 
+	// FirstStartDestinationFirstStartDestinationGetWithResponse request
+	FirstStartDestinationFirstStartDestinationGetWithResponse(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*FirstStartDestinationFirstStartDestinationGetResponse, error)
+
 	// HealthzHealthzGetWithResponse request
 	HealthzHealthzGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthzHealthzGetResponse, error)
 
@@ -54690,6 +54764,29 @@ func (r FirstStartFirstStartGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r FirstStartFirstStartGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FirstStartDestinationFirstStartDestinationGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DestinationProof
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartDestinationFirstStartDestinationGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartDestinationFirstStartDestinationGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -61921,6 +62018,15 @@ func (c *ClientWithResponses) FirstStartFirstStartGetWithResponse(ctx context.Co
 		return nil, err
 	}
 	return ParseFirstStartFirstStartGetResponse(rsp)
+}
+
+// FirstStartDestinationFirstStartDestinationGetWithResponse request returning *FirstStartDestinationFirstStartDestinationGetResponse
+func (c *ClientWithResponses) FirstStartDestinationFirstStartDestinationGetWithResponse(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*FirstStartDestinationFirstStartDestinationGetResponse, error) {
+	rsp, err := c.FirstStartDestinationFirstStartDestinationGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartDestinationFirstStartDestinationGetResponse(rsp)
 }
 
 // HealthzHealthzGetWithResponse request returning *HealthzHealthzGetResponse
@@ -71175,6 +71281,39 @@ func ParseFirstStartFirstStartGetResponse(rsp *http.Response) (*FirstStartFirstS
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFirstStartDestinationFirstStartDestinationGetResponse parses an HTTP response from a FirstStartDestinationFirstStartDestinationGetWithResponse call
+func ParseFirstStartDestinationFirstStartDestinationGetResponse(rsp *http.Response) (*FirstStartDestinationFirstStartDestinationGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartDestinationFirstStartDestinationGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DestinationProof
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
 
 	}
 

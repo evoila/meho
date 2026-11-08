@@ -19,7 +19,9 @@ fastembed model + ingested kb seed would 5-10x the CI wall clock,
 violating Goal #11 DoD bullet 4 — "PR CI <10 minutes"). This gate
 therefore exercises the runner end-to-end against a **deterministic
 stub retrieve_fn** that hits the kb seed corpus's first expected
-slug per query — the "perfect-retrieval reference" case.
+slug per query — the "perfect-retrieval reference" case — and a
+matching **stub operation search** for the operations surface (the
+live runner searches ``endpoint_descriptor`` there, #4752).
 
 This catches:
 
@@ -83,6 +85,7 @@ from scripts.retrieval_eval.baseline_io import (
     save_baseline,
 )
 from scripts.retrieval_eval.corpus import load_corpus
+from scripts.retrieval_eval.operation_search import OperationSearchResult
 from scripts.retrieval_eval.runner import eval_all
 
 from meho_backplane.retrieval.retriever import RetrievalHit
@@ -107,11 +110,8 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
 
     * kb — corpus row's first ``expected_hits`` slug; RetrievalHit
       ``source_id`` is the slug.
-    * operations — corpus row's first ``expected_op_ids`` value;
-      RetrievalHit ``source_id`` is the op_id (per
-      ``runner._operations_hits_to_op_ids``). The G4.3-T3 operations
-      corpus shipped 10 govc-parity queries; without this branch the
-      gate would flip red the moment the YAML lands.
+    * operations — not served here: the runner calls the operation
+      search for that surface, see :func:`_build_perfect_search_operations_fn`.
     * memory — corpus row's first ``expected_hits`` ``(scope, slug)``
       pair, encoded into ``source_id`` as ``"<scope>:<slug>"``. The
       runner's ``_memory_hits_to_pairs`` splits on ``:`` and joins
@@ -123,9 +123,6 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
       surface.
     """
     kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
-    ops_answers = {
-        row.query: row.expected_op_ids[0] for row in load_corpus("operations")
-    }
     memory_answers = {row.query: row.expected_hits[0] for row in load_corpus("memory")}
 
     def _hit(slug: str, source: str, tenant_id: uuid.UUID) -> RetrievalHit:
@@ -155,9 +152,6 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
         limit: int = 10,
         principal_sub: str | None = None,
     ) -> list[RetrievalHit]:
-        if source == "operations":
-            op_id = ops_answers.get(query)
-            return [_hit(op_id, "operations", tenant_id)] if op_id else []
         if source == "memory":
             pair = memory_answers.get(query)
             if pair is None:
@@ -169,6 +163,31 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
             return [_hit(f"{scope}:{slug}", "memory", tenant_id)]
         slug = kb_answers.get(query)
         return [_hit(slug, source or "kb", tenant_id)] if slug else []
+
+    return perfect  # type: ignore[return-value]
+
+
+def _build_perfect_search_operations_fn() -> Awaitable[OperationSearchResult]:
+    """Stub operation search that returns the corpus's first expected op_id.
+
+    The operations surface of the runner calls an operation search, not
+    ``retrieve_fn`` (#4752). This stub models a perfect search for the
+    10 govc-parity questions of the operations corpus, so the gate's
+    reference run stays green and a drop is a runner / metrics regression.
+    """
+    ops_answers = {
+        row.query: row.expected_op_ids[0] for row in load_corpus("operations")
+    }
+
+    async def perfect(
+        *,
+        tenant_id: uuid.UUID,
+        connector_id: str,
+        query: str,
+        limit: int,
+    ) -> OperationSearchResult:
+        op_id = ops_answers.get(query)
+        return OperationSearchResult(op_ids=[op_id] if op_id else [])
 
     return perfect  # type: ignore[return-value]
 
@@ -192,6 +211,7 @@ async def _run() -> int:
     today = await eval_all(
         tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
         retrieve_fn=perfect,
+        search_operations_fn=_build_perfect_search_operations_fn(),
     )
 
     if args.save_baseline:

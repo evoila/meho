@@ -58,6 +58,11 @@ class QueryResult(BaseModel):
     coverage) are computed against ``meho_hits`` + the corpus's
     expected ground truth. Frozen so the runner can't accidentally mutate
     a row while folding the surface aggregate.
+
+    ``not_run_reason`` is set when the question could not be run on
+    this install (operations surface: its connector cannot be searched
+    here). Such a row has no hits and zeros, and the surface aggregate
+    leaves it out (#4752).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -68,6 +73,7 @@ class QueryResult(BaseModel):
     precision_at_5: float
     reciprocal_rank: float
     coverage_at_5: float
+    not_run_reason: str | None = None
 
 
 class SurfaceResult(BaseModel):
@@ -79,6 +85,11 @@ class SurfaceResult(BaseModel):
     surface with ``query_count == 0`` (corpus YAML hasn't shipped
     yet) returns ``verdict="green"`` deliberately — see runner.py
     docstring.
+
+    ``query_count`` counts the scored questions only. ``not_run_count``
+    counts the questions that could not be run on this install; they
+    are in ``queries`` with their ``not_run_reason`` but do not move the
+    metrics or the verdict (#4752).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -89,6 +100,7 @@ class SurfaceResult(BaseModel):
     mrr: float
     coverage: float
     verdict: Verdict
+    not_run_count: int = 0
     queries: list[QueryResult] = Field(default_factory=list)
 
 

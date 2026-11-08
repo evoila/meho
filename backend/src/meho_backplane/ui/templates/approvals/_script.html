@@ -1,0 +1,62 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The script of a script-run approval, shown as code (included by
+  ``_modal.html``). ``fields`` is the preview dict. The block renders when the
+  preview carries a ``script`` text or a ``script_unavailable`` reason, so
+  it serves every operation whose preview uses these keys
+  (``linux.script.run``). The text is shown as it is stored, autoescaped,
+  in a ``<pre>`` so line breaks and indents stay.
+-#}
+{% set script = fields.get("script") %}
+{% set unavailable = fields.get("script_unavailable") %}
+{% if script is string or unavailable %}
+  <div class="mt-3 rounded-box border border-base-300 p-3" aria-label="Script to run" data-testid="approval-script">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h4 class="text-sm font-semibold">Script to run</h4>
+      {% if fields.get("script_bytes") is not none %}
+        <span class="text-xs text-base-content/55">{{ fields.get("script_bytes") }} bytes</span>
+      {% endif %}
+    </div>
+    <dl class="mt-1 space-y-0.5 text-xs">
+      {% if fields.get("script_sha256") %}
+        <div class="flex flex-wrap gap-2">
+          <dt class="text-base-content/55">SHA-256</dt>
+          <dd class="font-mono [overflow-wrap:anywhere]" data-testid="approval-script-sha256">{{ fields.get("script_sha256") }}</dd>
+        </div>
+      {% endif %}
+      {% if fields.get("script_ref") %}
+        <div class="flex flex-wrap gap-2">
+          <dt class="text-base-content/55">Reviewed copy</dt>
+          <dd class="font-mono [overflow-wrap:anywhere]">{{ fields.get("script_ref") }}</dd>
+        </div>
+      {% endif %}
+      {% if fields.get("script_check") %}
+        <div class="flex flex-wrap gap-2">
+          <dt class="text-base-content/55">Expected SHA-256</dt>
+          <dd>
+            <span class="badge badge-sm {{ 'badge-success' if fields.get('script_check') == 'matches' else 'badge-error' }}" data-testid="approval-script-check">{{ fields.get("script_check") }}</span>
+          </dd>
+        </div>
+      {% endif %}
+    </dl>
+    {% if fields.get("script_values_hidden") %}
+      <p class="mt-2 text-xs font-semibold" data-testid="approval-script-hidden">
+        Values that look like secrets are hidden in the text below. The script
+        that runs holds them. MEHO shows no SHA-256 for this script.
+      </p>
+    {% endif %}
+    {% if fields.get("script_truncated") %}
+      <p class="mt-2 text-xs font-semibold" data-testid="approval-script-truncated">
+        The script is longer than the text below. Compare its SHA-256 with a
+        reviewed copy before you approve.
+      </p>
+    {% endif %}
+    {% if script is string %}
+      <pre class="mt-2 max-h-96 overflow-auto rounded-box bg-base-200 p-3 font-mono text-xs whitespace-pre" data-testid="approval-script-body">{{ script }}</pre>
+    {% else %}
+      <p class="mt-2 text-xs" data-testid="approval-script-unavailable">{{ unavailable }}</p>
+    {% endif %}
+  </div>
+{% endif %}

@@ -652,10 +652,11 @@
           values pretty-printed per row. -#}
       {% set fields = effect.get("params_echo") or effect.get("preview") %}
       {% if fields is mapping and fields %}
+        {% include "approvals/_script.html" %}
         <div class="mt-2 overflow-auto rounded-box border border-base-300">
           <table class="table table-xs" aria-label="Proposed effect fields">
             <tbody>
-              {% for key, value in fields | dictsort %}
+              {% for key, value in fields | dictsort if key != "script" %}
                 <tr>
                   <th class="align-top font-mono font-normal text-base-content/55">{{ key }}</th>
                   <td class="font-mono [overflow-wrap:anywhere]">

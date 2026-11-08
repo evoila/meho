@@ -316,7 +316,7 @@ in `ops_write.py`; the root-elevation primitive lives in `_sudo.py`.
 |---|---|---|---|---|
 | `linux.file.write` | `file` | `dangerous` + approval | `path`, `content`, `validate_command?`, `backup?` | `{written, path, backup_path, validated, rolled_back}` |
 | `linux.service.control` | `service` | `caution` (no approval) | `action`, `unit`, `daemon_reload?` | `{unit, action, daemon_reload, ok}` |
-| `linux.script.run` | `exec` | `dangerous` + approval | `script`, `interpreter?`, `arguments?`, `working_directory?`, `env?`, `secret_env?`, `timeout_seconds?`, `use_sudo?` | `{stdout, total, stderr, exit_code, interpreter, used_sudo}` |
+| `linux.script.run` | `exec` | `dangerous` + approval | `script`, `interpreter?`, `arguments?`, `working_directory?`, `env?`, `secret_env?`, `timeout_seconds?`, `use_sudo?`, `script_ref?`, `expected_sha256?` | `{stdout, total, stderr, exit_code, interpreter, used_sudo}` |
 | `linux.sysctl.write` | `system` | `dangerous` + approval | `key`, `value` | `{key, value, applied, dropin_path}` |
 | `linux.firewall.load` | `firewall` | `dangerous` + approval | `ruleset`, `backend?` | `{applied, backend, validated}` |
 
@@ -371,18 +371,45 @@ differently, by design:
   credential-class exclusion in `_is_previewable`), because the request-time
   preview's `redacted_body` slot cannot scrub a structured secret. Their
   reviewer preview is instead a **bespoke park-time `proposed_effect`**
-  (`register_preview_builder`, fail-soft) that echoes only shape — path +
-  content byte size + backup path + validate command for `file.write`;
-  interpreter + script byte size + argument byte size + env-var **names** +
-  the `secret_env` **reference mapping** (`ENV → <vault-path>#<field>`, the
-  non-secret Vault pointers) + working directory + sudo intent + timeout for
-  `script.run` — and **never** the `content` / script body / argument values /
-  env values / resolved `secret_env` values.
+  (`register_preview_builder`, fail-soft). For `file.write` it echoes only
+  shape — path + content byte size + backup path + validate command, never
+  the `content`. For `script.run` it shows interpreter + argument byte size +
+  env-var **names** + the `secret_env` **reference mapping**
+  (`ENV → <vault-path>#<field>`, the non-secret Vault pointers) + working
+  directory + sudo intent + timeout, and **the script itself** (see "What the
+  approver of `script.run` reads" below) — never the argument values / env
+  values / resolved `secret_env` values.
 - `linux.sysctl.write` and `linux.firewall.load` carry no secret, so they
   register **no** bespoke builder and stay previewable via
   `preview_operation` on the generic params-echo default. For
   `firewall.load` this is the point: the reviewer sees the full ruleset
   before approving.
+
+### What the approver of `script.run` reads
+
+For `script.run` the script body is the change that waits for approval, so
+the approver reads it. `linux/script_preview.py` builds these preview fields:
+
+| Field | What it holds |
+|---|---|
+| `script` | The script text. Values that look like secrets (`DB_PASSWORD=...`, a bearer token, a JWT, a private key block, the password in a URL, a quoted `"password": "..."` pair) are replaced by a marker, with the packaged default redaction policy (`docs/codebase/redaction.md`). Cut at 64 KiB. |
+| `script_bytes` | The size of the full script in UTF-8 bytes. |
+| `script_sha256` | The SHA-256 of the full script as it runs, to compare with a reviewed copy. Left out when values were hidden: with the rest of the text in view, the hash would let a reader test guesses of the hidden value. |
+| `script_values_hidden`, `script_truncated` | `true` when the shown text differs from the script that runs. |
+| `script_unavailable` | Set, with no text and no hash, when the redaction pass fails. |
+| `script_ref` | The optional `script_ref` param: where the reviewed copy lives. |
+| `script_check` | `matches` or `does not match`, when the caller sent the optional `expected_sha256` param. |
+
+When `expected_sha256` is set and the script does not match it, the handler
+refuses to run the script. The preview lives only in the approval row's
+`proposed_effect`; the audit row keeps only the params hash, and the
+broadcast stays aggregate-only for this `credential_write` op.
+
+The console approval modal shows the text as code in a "Script to run"
+block (`ui/templates/approvals/_script.html`), with the hash, the reviewed
+copy and the check. `meho approvals show` and the `meho approvals approve`
+prompt print the same block, one line per script line
+(`cli/internal/cmd/approvals/script.go`).
 
 ### Approval + secret hygiene
 

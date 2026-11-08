@@ -726,8 +726,17 @@
       "name": "list_targets",
       "outputSchema": {
         "properties": {
+          "counts": {
+            "type": "object"
+          },
           "handle": {
             "type": "object"
+          },
+          "items": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
           },
           "next_cursor": {
             "type": [
@@ -4259,6 +4268,9 @@
             ],
             "type": "object"
           },
+          "counts": {
+            "type": "object"
+          },
           "data_notice": {
             "type": "string"
           },
@@ -4310,6 +4322,12 @@
           },
           "include_edges": {
             "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
           },
           "kind": {
             "enum": [

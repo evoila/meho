@@ -74,6 +74,16 @@ the data artifact.
 | `rke2-cis.txt` | the CIS check of RKE2 on the install (for example `meho-host check`) | as it is, in a code block |
 | `ubuntu-cis.txt` | the appliance's scan result list, `meho-appliance-<version>-cis.txt` from the `appliance-build` run | counts per result, and each rule that does not pass |
 
+A new run of the release job (for example by hand after a fix) keeps
+these three parts. Before it writes the sheet, it downloads the sheet that
+is already on the release and gives it to the script as `--previous`.
+Without `--lab`, the script takes the three parts from it. Each part sits
+between two HTML comments, `<!-- lab_ports -->` and `<!-- end lab_ports -->`
+(a Markdown page does not show them), so the script finds them even when
+the template text changed. A previous sheet without these marks stops the
+job, and the release manager gives the results again with `--lab`. The
+previous sheet also goes into the `security-sheet-data` artifact.
+
 A missing or empty lab file gives "Not measured for this release yet."
 The script replaces each IPv4 address in the shown text with
 `<address>`, because the sheet is public. Host names are not found by the
@@ -107,9 +117,6 @@ agree: a place without a value, or a value without a place, stops it too.
   Keycloak, OpenBao, Valkey, and the storage helper's) are not in the
   sheet.
 - Trivy scans the linux/amd64 image of the multi-arch image.
-- A rerun with `--clobber` replaces the files on the release. The
-  `security-sheet-data` artifact of the first run is still the one to use
-  for the lab step, unless the rerun changed the data.
 
 ## References
 

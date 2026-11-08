@@ -24,10 +24,13 @@
 #   4. reads the firewall's port list from the tag's install script, and
 #      the appliance's CIS exception list from the tag;
 #   5. writes the sheet with scripts/release/security_sheet.py and attaches
-#      the sheet, the SBOM and the full scan report to the release.
+#      the sheet, the SBOM and the full scan report to the release. When
+#      the release already has a sheet, the new sheet keeps its test-install
+#      results (the port scan and the two CIS results).
 # The collected data stays as the workflow artifact `security-sheet-data`
-# for 90 days. With it, the release manager can add the results of a test
-# install later (docs/RELEASING.md, step 5).
+# for 90 days, with the previous sheet when there was one. With it, the
+# release manager can add the results of a test install later
+# (docs/RELEASING.md, step 5).
 #
 # Two checkouts: the script and the template come from the commit of this
 # workflow run (`tool/`), the data from the tag (`release/`). So a manual
@@ -201,11 +204,23 @@ jobs:
             > "${DATA}/facts.json"
 
       - name: Write the sheet
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/assets"
+          sheet="meho-security-sheet-${TAG}.md"
+          # A new run keeps the test-install results of the sheet that is
+          # already on the release. The script stops when it cannot read them.
+          previous=()
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name' \
+              | grep -Fxq "${sheet}"; then
+            gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern "${sheet}" --output "${DATA}/previous-sheet.md"
+            previous=(--previous "${DATA}/previous-sheet.md")
+          fi
           python3 tool/scripts/release/security_sheet.py \
-            --data "${DATA}" --out "${RUNNER_TEMP}/assets/meho-security-sheet-${TAG}.md"
+            --data "${DATA}" "${previous[@]}" --out "${RUNNER_TEMP}/assets/${sheet}"
           cp "${DATA}/trivy.json" "${RUNNER_TEMP}/assets/meho-vulnerability-scan-${TAG}.json"
           cp "${DATA}/sbom.spdx.json" "${RUNNER_TEMP}/assets/meho-sbom-${TAG}.spdx.json"
           cat "${RUNNER_TEMP}/assets/meho-security-sheet-${TAG}.md" >> "${GITHUB_STEP_SUMMARY}"

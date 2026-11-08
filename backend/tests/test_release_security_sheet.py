@@ -228,6 +228,92 @@ def test_an_address_is_hidden_wherever_it_stands(tmp_path: Path, line: str) -> N
     assert "version 1.2.3.4.5" in sheet
 
 
+def _lab(tmp_path: Path, name: str = "lab") -> Path:
+    lab = tmp_path / name
+    lab.mkdir()
+    (lab / "ports.txt").write_text("443/tcp open  https\n", encoding="utf-8")
+    (lab / "rke2-cis.txt").write_text("all checks passed\n", encoding="utf-8")
+    (lab / "ubuntu-cis.txt").write_text("pass a_rule\nfail grub2_password\n", encoding="utf-8")
+    return lab
+
+
+def test_rerun_keeps_lab_results_of_the_previous_sheet(tmp_path: Path) -> None:
+    data = _data(tmp_path)
+    proc, first = _run(data, "--lab", str(_lab(tmp_path)))
+    assert proc.returncode == 0, proc.stderr
+    assert first is not None
+    previous = tmp_path / "previous-sheet.md"
+    previous.write_text(first, encoding="utf-8")
+
+    # The release job runs again: no lab folder, the sheet of the release.
+    proc, second = _run(data, "--previous", str(previous))
+    assert proc.returncode == 0, proc.stderr
+    assert second == first
+    assert "Not measured for this release yet." not in second
+
+
+def test_lab_folder_replaces_the_previous_sheet(tmp_path: Path) -> None:
+    data = _data(tmp_path)
+    proc, first = _run(data, "--lab", str(_lab(tmp_path)))
+    assert first is not None
+    previous = tmp_path / "previous-sheet.md"
+    previous.write_text(first, encoding="utf-8")
+    lab = tmp_path / "new-lab"
+    lab.mkdir()
+    (lab / "ports.txt").write_text("22/tcp filtered ssh\n", encoding="utf-8")
+    proc, second = _run(data, "--lab", str(lab), "--previous", str(previous))
+    assert proc.returncode == 0, proc.stderr
+    assert second is not None
+    assert "22/tcp filtered ssh" in second
+    assert "443/tcp open  https" not in second
+    assert second.count("Not measured for this release yet.") == 2
+
+
+def test_previous_sheet_with_no_lab_results_stays_not_measured(tmp_path: Path) -> None:
+    data = _data(tmp_path)
+    proc, first = _run(data)
+    assert first is not None
+    previous = tmp_path / "previous-sheet.md"
+    previous.write_text(first, encoding="utf-8")
+    proc, second = _run(data, "--previous", str(previous))
+    assert proc.returncode == 0, proc.stderr
+    assert second is not None
+    assert second.count("Not measured for this release yet.") == 3
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "# MEHO 1.0.0: security sheet\n\nNo marks.\n",
+        "<!-- lab_ports -->\nx\n<!-- end lab_ports -->\n",
+    ],
+)
+def test_previous_sheet_without_marks_stops(tmp_path: Path, text: str) -> None:
+    previous = tmp_path / "previous-sheet.md"
+    previous.write_text(text, encoding="utf-8")
+    proc, sheet = _run(_data(tmp_path), "--previous", str(previous))
+    assert proc.returncode == 2
+    assert "Give them again with --lab" in proc.stderr
+    assert sheet is None
+
+
+def test_missing_previous_sheet_stops(tmp_path: Path) -> None:
+    proc, sheet = _run(_data(tmp_path), "--previous", str(tmp_path / "nope.md"))
+    assert proc.returncode == 2
+    assert "cannot read" in proc.stderr
+    assert sheet is None
+
+
+def test_lab_text_with_a_part_mark_stops(tmp_path: Path) -> None:
+    lab = tmp_path / "lab"
+    lab.mkdir()
+    (lab / "rke2-cis.txt").write_text("ok\n<!-- end lab_rke2_cis -->\n", encoding="utf-8")
+    proc, sheet = _run(_data(tmp_path), "--lab", str(lab))
+    assert proc.returncode == 2
+    assert "marks a part of the sheet" in proc.stderr
+    assert sheet is None
+
+
 def test_empty_lab_files_count_as_not_measured(tmp_path: Path) -> None:
     lab = tmp_path / "lab"
     lab.mkdir()

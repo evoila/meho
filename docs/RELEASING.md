@@ -421,6 +421,9 @@ form-2 download.
   gh release upload "$TAG" "meho-security-sheet-$TAG.md" --repo evoila/meho --clobber
   ```
 
+  A later run of the workflow `security-sheet` keeps these three parts: it
+  takes them from the sheet that is on the Release.
+
 #### Maintainer one-time setup — GHCR package visibility
 
 The first time `image.yml` pushes to `ghcr.io/evoila/meho`, GHCR creates

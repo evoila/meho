@@ -28,13 +28,21 @@ per rule), shown as counts and the rules that do not pass. A missing file
 gives the line "Not measured for this release yet." IPv4 addresses in the
 shown text are replaced with ``<address>``, because the sheet is public.
 
+The previous sheet (``--previous``, optional) is the sheet that is already
+on the release. Without ``--lab``, the script takes the three test-install
+parts from it, so a new run of the release job keeps them. Each part sits
+between two HTML comments in the sheet (``<!-- lab_ports -->`` and
+``<!-- end lab_ports -->``); a Markdown page does not show them. A
+previous sheet without these marks stops the script.
+
 A file that is missing or has the wrong shape stops the script with exit
 code 2. The script never writes a sheet that reads as "nothing found"
 when it could not read the data.
 
 Usage::
 
-    python3 scripts/release/security_sheet.py --data DIR [--lab DIR] --out FILE
+    python3 scripts/release/security_sheet.py --data DIR [--lab DIR]
+        [--previous FILE] --out FILE
 """
 
 from __future__ import annotations
@@ -55,6 +63,7 @@ PORT_STATES = {"open", "admin-network", "closed"}
 FACT_KEYS = ("tag", "commit", "image_digest", "chart_digest", "made_on")
 LAB_TEXT_FILES = {"lab_ports": "ports.txt", "lab_rke2_cis": "rke2-cis.txt"}
 LAB_UBUNTU_CIS = "ubuntu-cis.txt"
+LAB_KEYS = ("lab_ports", "lab_rke2_cis", "lab_ubuntu_cis")
 # The scan results that count as "no problem"; harden.sh uses the same set.
 CIS_OK_RESULTS = ("pass", "notapplicable", "notselected", "informational")
 NOT_MEASURED = "Not measured for this release yet."
@@ -65,6 +74,7 @@ _PLACEHOLDER = re.compile(r"\{\{ ([a-z0-9_]+) \}\}")
 _TAG = re.compile(r"^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IPV4 = re.compile(r"(?<!\d)(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?!\.?\d)")
+_LAB_MARK = re.compile(r"<!-- (?:end )?lab_")
 
 
 class InputError(Exception):
@@ -224,6 +234,8 @@ def lab_block(path: Path) -> str:
     if not path.is_file():
         return NOT_MEASURED
     text = _IPV4.sub("<address>", _read_text(path)).strip("\n")
+    if _LAB_MARK.search(text):
+        raise InputError(f"{path.name} holds '<!-- lab_', which marks a part of the sheet.")
     if not text.strip():
         return NOT_MEASURED
     longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
@@ -267,6 +279,38 @@ def cis_exceptions(text: str) -> str:
     return "\n".join(rows)
 
 
+def _marked(key: str, text: str) -> str:
+    return f"<!-- {key} -->\n{text}\n<!-- end {key} -->"
+
+
+def lab_from_previous(text: str) -> dict[str, str]:
+    """The three test-install parts of a sheet that this script wrote."""
+    parts: dict[str, str] = {}
+    for key in LAB_KEYS:
+        found = re.findall(
+            rf"^<!-- {key} -->\n(.*?)\n<!-- end {key} -->$", text, flags=re.DOTALL | re.MULTILINE
+        )
+        if len(found) != 1:
+            raise InputError(
+                f"the previous sheet does not mark the part '{key}' once, so its test-install "
+                "results cannot be kept. Give them again with --lab."
+            )
+        parts[key] = found[0]
+    return parts
+
+
+def lab_parts(lab: Path | None, previous: Path | None) -> dict[str, str]:
+    """The test-install parts: from the lab folder, else the previous sheet."""
+    if lab is not None:
+        parts = {key: lab_block(lab / name) for key, name in LAB_TEXT_FILES.items()}
+        parts["lab_ubuntu_cis"] = ubuntu_cis_block(lab / LAB_UBUNTU_CIS)
+    elif previous is not None:
+        parts = lab_from_previous(_read_text(previous))
+    else:
+        parts = dict.fromkeys(LAB_KEYS, NOT_MEASURED)
+    return {key: _marked(key, text) for key, text in parts.items()}
+
+
 def render(template: str, values: dict[str, str]) -> str:
     """Fill every ``{{ name }}`` of the template. Every value must be used."""
     used: set[str] = set()
@@ -287,8 +331,8 @@ def render(template: str, values: dict[str, str]) -> str:
     return text
 
 
-def sheet(data: Path, lab: Path | None, template: str) -> str:
-    """The security sheet for the data folder and the optional lab folder."""
+def sheet(data: Path, lab: Path | None, previous: Path | None, template: str) -> str:
+    """The security sheet for the data folder, the lab folder and the previous sheet."""
     facts = read_facts(data / "facts.json")
     tag = facts["tag"]
     counts, findings = vuln_parts(_read_json(data / "trivy.json"))
@@ -303,12 +347,8 @@ def sheet(data: Path, lab: Path | None, template: str) -> str:
         "vuln_report_file": VULN_REPORT_FILE.format(tag=tag),
         "sbom_file": SBOM_FILE.format(tag=tag),
         **sbom_parts(_read_json(data / "sbom.spdx.json")),
+        **lab_parts(lab, previous),
     }
-    for key, name in LAB_TEXT_FILES.items():
-        values[key] = lab_block(lab / name) if lab is not None else NOT_MEASURED
-    values["lab_ubuntu_cis"] = (
-        ubuntu_cis_block(lab / LAB_UBUNTU_CIS) if lab is not None else NOT_MEASURED
-    )
     return render(template, values)
 
 
@@ -316,6 +356,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--data", type=Path, required=True, help="the data folder of the release")
     parser.add_argument("--lab", type=Path, help="the folder with the results of a test install")
+    parser.add_argument(
+        "--previous", type=Path, help="the sheet on the release, to keep its test-install parts"
+    )
     parser.add_argument("--template", type=Path, default=TEMPLATE, help="the sheet template")
     parser.add_argument("--out", type=Path, required=True, help="where to write the sheet")
     return parser
@@ -326,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.lab is not None and not args.lab.is_dir():
             raise InputError(f"the lab folder {args.lab} does not exist.")
-        text = sheet(args.data, args.lab, _read_text(args.template))
+        text = sheet(args.data, args.lab, args.previous, _read_text(args.template))
     except InputError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -1758,6 +1758,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-smaller-tool-list-for-small-models-tool-profiles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A smaller tool list for small models (tool profiles)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-operator-planes-behind-mcpadmin" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2994,6 +3005,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-smaller-tool-list-for-small-models-tool-profiles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A smaller tool list for small models (tool profiles)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-operator-planes-behind-mcpadmin" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3180,6 +3202,46 @@ the operation id, never in a tool name.</p>
 <li><code>result_query</code> — page a large, set-shaped result back from its
    handle.</li>
 </ol>
+<h2 id="a-smaller-tool-list-for-small-models-tool-profiles">A smaller tool list for small models (tool profiles)<a class="headerlink" href="#a-smaller-tool-list-for-small-models-tool-profiles" title="Permanent link">&para;</a></h2>
+<p>A small model has a small context window. The 26 tools use a large part
+of it before the user asks anything. So a client can ask for a
+<strong>tool profile</strong>: add <code>?profile=&lt;name&gt;</code> to the MEHO MCP URL.</p>
+<table>
+<thead>
+<tr>
+<th>Profile</th>
+<th>What the session can do</th>
+<th>Tools</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>investigate</code></td>
+<td>Find and read: connectors, targets, operations, results, knowledge and memory.</td>
+<td><code>meho_status</code>, <code>meho_connector_list</code>, <code>list_targets</code>, <code>list_operation_groups</code>, <code>search_operations</code>, <code>call_operation</code>, <code>result_query</code>, <code>search_knowledge</code>, <code>search_memory</code></td>
+</tr>
+<tr>
+<td><code>operate</code></td>
+<td>Everything in <code>investigate</code>, plus preview a change and tell other agents about it.</td>
+<td>the 9 above, plus <code>preview_operation</code>, <code>meho_broadcast_recent</code>, <code>meho_broadcast_announce</code>, <code>meho_broadcast_watch</code></td>
+</tr>
+</tbody>
+</table>
+<p>Example URL: <code>https://&lt;meho-host&gt;/mcp?profile=investigate</code>.</p>
+<ul>
+<li>Without a profile, the session sees the full list, as before.</li>
+<li>A profile only removes tools. It never gives a tool the session may
+  not use, and it ignores <code>mcp:admin</code>.</li>
+<li>A tool outside the profile is also refused when called. The error
+  says it is not in the profile.</li>
+<li>A wrong profile name is refused with HTTP 400, so a typo never gives
+  the full list by mistake.</li>
+<li>The session-start instructions follow the profile. They do not name
+  a tool the session cannot see.</li>
+<li>A profile does not change what the person may do. <code>call_operation</code>
+  still runs under the person's role, and changes still wait for
+  approval when the rules say so.</li>
+</ul>
 <h2 id="the-operator-planes-behind-mcpadmin">The operator planes (behind <code>mcp:admin</code>)<a class="headerlink" href="#the-operator-planes-behind-mcpadmin" title="Permanent link">&para;</a></h2>
 <p>The governance and lifecycle tools — connector lifecycle and ingest,
 agents / principals / grants, scheduler, sensors, broadcast overrides,

@@ -74,3 +74,13 @@ def test_shell_script_hides_a_password_glued_to_dash_u() -> None:
     assert hide_shell_script(script) == (
         f"curl -u{_USER}:{HIDDEN} https://example.invalid/api\ncurl -uadmin https://example.invalid\n"
     )
+
+
+def test_a_flag_waits_for_its_value_across_a_line_continuation() -> None:
+    text, pending = hide_command_text(f"curl -u \\\n  {_USER}:{_FAKE} -k", None, shell=True)
+    assert text == f"curl -u \\\n  {_USER}:{HIDDEN} -k"
+    assert pending is None
+    script = f"mysql \\\n  -p \\\n  {_FAKE} appdb\nmkdir -p \\\n  /tmp/x\n"
+    assert hide_shell_script(script) == (
+        f"mysql \\\n  -p \\\n  {HIDDEN} appdb\nmkdir -p \\\n  /tmp/x\n"
+    )

@@ -22,7 +22,9 @@ words stay, so the approver still reads what runs. Hidden are:
 (``sshpass``, ``mysql*``, ``mariadb*``, ``mongo*``, and any command with the
 word ``login``, such as ``docker login``), and a password glued to it
 (``mysql -pVALUE``) is hidden too. A password glued to ``-u``
-(``curl -uuser:password``) is hidden in a script as well.
+(``curl -uuser:password``) is hidden in a script as well. A line
+continuation (a ``\\`` at the end of a line) does not end a command: the
+value of a flag may be on the next line.
 """
 
 from __future__ import annotations
@@ -68,11 +70,18 @@ _SHELL_WORD = (
     r""""(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
 )
 
-#: One token of a shell command string: whitespace, a run of operator
+#: Space between shell words: whitespace and line continuations (a ``\\``
+#: right before a new line), which the shell removes. So in ``curl -u \\``
+#: and a new line, the next line holds the value of ``-u``.
+_SHELL_SPACE = r"(?:\s|\\\n)+"
+
+#: One token of a shell command string: space, a run of operator
 #: characters, or a shell word in which a quoted or escaped part may hold
 #: spaces (``--password 'my phrase'``, ``--password my\\ phrase``). Joined
 #: back, the tokens give the string as it was.
-_SHELL_TOKEN = re.compile(rf"""\s+|[{_OPERATOR_CHARS}]+|{_SHELL_WORD}|\S+""")
+_SHELL_TOKEN = re.compile(rf"""{_SHELL_SPACE}|[{_OPERATOR_CHARS}]+|{_SHELL_WORD}|\S+""")
+
+_SHELL_SPACE_TOKEN = re.compile(_SHELL_SPACE)
 
 #: One token of a direct argument (a list item no shell reads): whitespace
 #: or a run of other characters. Quotes and operators are plain text here.
@@ -223,8 +232,8 @@ def hide_command_text(
     previous = ""
     p_rule = _P_FLAG if p_programs is None else _P_NONE
     for index, word in enumerate(words):
-        if word.isspace():
-            if p_programs is not None and "\n" in word:
+        if word.isspace() or (shell and _SHELL_SPACE_TOKEN.fullmatch(word)):
+            if p_programs is not None and "\n" in word.replace("\\\n", ""):
                 pending = None
                 p_rule = _P_NONE
             continue
@@ -233,6 +242,10 @@ def hide_command_text(
             previous = ""
             p_rule = _P_FLAG if p_programs is None else _P_NONE
             continue
+        if shell and not _QUOTED_STRING.fullmatch(word):
+            # The shell removes a line continuation inside a word too: ``-u\\``
+            # and a new line is the flag ``-u``. A quoted string is read as it is.
+            word = word.replace("\\\n", "")
         previous, prior = word, previous
         value = word if shell else "".join(words[index:])
         hidden, pending = _hide_word(

@@ -6,7 +6,8 @@
 * The preview carries the script text, its size and its SHA-256.
 * Values that look like secrets are hidden in the text, also the shell
   shapes (``PGPASSWORD=...``, ``sshpass -p ...``, ``curl -u user:...``,
-  ``mysql -p...``); then the preview says so and leaves out the SHA-256.
+  ``mysql -p...``), also when the value is on the next line after a
+  ``\\`` line continuation; then the preview says so and leaves out the SHA-256.
   ``-p`` hides its value for ``sshpass``, ``mysql*``, ``mariadb*``,
   ``mongo*`` and a ``login`` command (``docker login``). Common short
   flags (``mkdir -p``, ``cp -p``, ``ssh -p 22``, ``docker run -p``) stay
@@ -138,6 +139,12 @@ def test_values_that_look_like_secrets_are_hidden_and_no_hash_is_shown(line: str
         f"helm registry login registry.example.invalid -u bot -p {_FAKE_VALUE}",
         # The password glued to -u.
         f"curl -u{_USER}:{_FAKE_VALUE} https://example.invalid/api",
+        # The value on the next line, after a line continuation.
+        f"curl -u \\\n  {_USER}:{_FAKE_VALUE} https://example.invalid/api",
+        f"curl -u\\\n  {_USER}:{_FAKE_VALUE} https://example.invalid/api",
+        f"mytool --password \\\n  {_FAKE_VALUE} run",
+        f"sshpass -p \\\n  {_FAKE_VALUE} ssh deploy@host uptime",
+        f"mysql -u app \\\n  -p \\\n  {_FAKE_VALUE} appdb",
     ],
 )
 def test_shell_command_secrets_are_hidden_and_no_hash_is_shown(line: str) -> None:
@@ -161,6 +168,7 @@ def test_common_short_flags_keep_the_script_as_it_is() -> None:
         'for f in /tmp/work/*; do\n  echo "$f"\ndone\n'
         "mysql -u app -p\n"
         "mkdir -p /tmp/other\n"
+        "mkdir -p \\\n  /tmp/next\n"
     )
     fields = script_preview_fields({"script": script})
     assert fields["script"] == script

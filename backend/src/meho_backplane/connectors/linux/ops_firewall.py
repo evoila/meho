@@ -11,13 +11,22 @@ shell. Returns ``{rows, total, backend}`` where ``rows`` is the ruleset
 lines and ``backend`` is a ``nftables`` / ``iptables`` / ``none``
 discriminator; the row list spills to a ``result_query`` handle above the
 JSONFlux threshold.
+
+A login that is not root cannot read the ruleset. Then the read runs under
+sudo: with the sudo password of the target's secret through the shared sudo
+path (:mod:`~meho_backplane.connectors.linux._sudo`), or with ``sudo -n``
+when the secret holds no password. A read that fails raises
+:class:`LinuxFirewallReadError`; it never answers "no rules".
 """
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vault_creds import strip_credential_value
+from meho_backplane.connectors.linux._sudo import run_remote_bash_with_sudo
 from meho_backplane.connectors.linux.ops import (
     SSH_TRANSPORT_NOTE,
     LinuxOp,
@@ -31,6 +40,7 @@ __all__ = [
     "BACKEND_MARKER",
     "FIREWALL_OPS",
     "FIREWALL_SHOW_COMMAND",
+    "LinuxFirewallReadError",
     "linux_firewall_show",
     "parse_firewall_output",
 ]
@@ -41,15 +51,36 @@ BACKEND_MARKER: str = "MEHO_BACKEND="
 
 #: The fixed, operator-input-free firewall dump command. Prefers ``nft``
 #: (the modern default), falls back to ``iptables-save``, and reports
-#: ``none`` when neither is installed. Every branch is read-only.
+#: ``none`` when neither is installed. Every branch is read-only. The exit
+#: status is the one of the read tool, and its error text is kept, so a failed
+#: read is never taken for an empty ruleset.
 FIREWALL_SHOW_COMMAND: str = (
     f"if command -v nft >/dev/null 2>&1; then printf '%snftables\\n' {BACKEND_MARKER!r}; "
-    "nft list ruleset 2>/dev/null; "
+    "nft list ruleset; "
     "elif command -v iptables-save >/dev/null 2>&1; then "
     f"printf '%siptables\\n' {BACKEND_MARKER!r}; "
-    "iptables-save 2>/dev/null; "
+    "iptables-save; "
     f"else printf '%snone\\n' {BACKEND_MARKER!r}; fi"
 )
+
+#: Words in the error text of a read that lacked the rights to run.
+_PERMISSION_WORDS: tuple[str, ...] = (
+    "operation not permitted",
+    "permission denied",
+    "a password is required",
+    "sudo:",
+)
+
+_ERROR_TEXT_CAP: int = 300
+
+
+class LinuxFirewallReadError(RuntimeError):
+    """The firewall ruleset could not be read.
+
+    The message starts with ``permission_denied`` when the login lacked the
+    rights, else with ``read_failed``. The dispatcher turns it into a
+    connector error, so a failed read never looks like an empty ruleset.
+    """
 
 
 def parse_firewall_output(stdout: str) -> dict[str, Any]:
@@ -79,10 +110,50 @@ async def linux_firewall_show(
 ) -> dict[str, Any]:
     """Handler for ``linux.firewall.show`` -- dump the live firewall ruleset."""
     del params  # declared empty in schema; intentionally ignored
-    proc = await connector._run_command(target, FIREWALL_SHOW_COMMAND, operator=operator)
-    raw = (proc.stdout or "") if hasattr(proc, "stdout") else ""
-    stdout = raw if isinstance(raw, str) else ""
+    secret = await connector._resolve_secret(target, operator)
+    username = strip_credential_value(secret.get("username", "root"))
+    sudo_password = secret.get("sudo_password") or secret.get("password")
+    if username == "root":
+        proc = await connector._run_command(target, FIREWALL_SHOW_COMMAND, operator=operator)
+    elif sudo_password:
+        proc = await run_remote_bash_with_sudo(
+            connector,
+            target,
+            FIREWALL_SHOW_COMMAND,
+            operator=operator,
+            sudo_password=strip_credential_value(sudo_password),
+        )
+    else:
+        proc = await connector._run_command(
+            target,
+            f"sudo -n /bin/sh -c {shlex.quote(FIREWALL_SHOW_COMMAND)}",
+            operator=operator,
+        )
+    stdout = _text(proc, "stdout")
+    exit_status = getattr(proc, "exit_status", None)
+    if exit_status != 0:
+        stderr = _text(proc, "stderr")
+        raise LinuxFirewallReadError(_read_error_message(stdout, stderr, exit_status))
     return parse_firewall_output(stdout)
+
+
+def _text(proc: Any, field: str) -> str:
+    raw = getattr(proc, field, "") or ""
+    return raw if isinstance(raw, str) else ""
+
+
+def _read_error_message(stdout: str, stderr: str, exit_status: Any) -> str:
+    """Build the error text of a failed read: the kind, the tool and its words."""
+    backend = parse_firewall_output(stdout)["backend"] if stdout else "unknown"
+    detail = " ".join(stderr.split())[:_ERROR_TEXT_CAP]
+    if any(word in stderr.lower() for word in _PERMISSION_WORDS):
+        kind = "permission_denied"
+        hint = "The login needs root, or sudo rights for nft or iptables-save."
+    else:
+        kind = "read_failed"
+        hint = f"The read ended with exit status {exit_status}."
+    message = f"{kind}: could not read the firewall rules (backend {backend}). {hint}"
+    return f"{message} {detail}".strip() if detail else message
 
 
 _FIREWALL_SHOW_OP = LinuxOp(
@@ -94,8 +165,10 @@ _FIREWALL_SHOW_OP = LinuxOp(
         "and returns ``{rows, total, backend}`` where ``rows`` is the "
         "ruleset lines and ``backend`` names which tool produced them "
         "(``nftables`` / ``iptables`` / ``none``). Takes no parameters. "
-        "Read-only -- it never loads, flushes, or edits a ruleset. Above "
-        "the JSONFlux threshold the rows spill to a handle paged with "
+        "Read-only -- it never loads, flushes, or edits a ruleset. A login "
+        "that is not root reads through sudo. A failed read is an error "
+        "(``permission_denied`` or ``read_failed``), never an empty list. "
+        "Above the JSONFlux threshold the rows spill to a handle paged with "
         "``result_query(handle_id, offset, limit)``."
     ),
     parameter_schema={
@@ -126,7 +199,9 @@ _FIREWALL_SHOW_OP = LinuxOp(
         "parameter_hints": {},
         "output_shape": (
             "``{rows, total, backend}``; rows are ruleset lines. Large "
-            "rulesets spill to a ``result_query`` handle."
+            "rulesets spill to a ``result_query`` handle. ``backend: none`` "
+            "means the host has neither nft nor iptables-save. A read that "
+            "fails is an error, not empty rows."
         ),
     },
 )

@@ -66,22 +66,27 @@ printf '%s' "$TEMP_PW" | kubectl -n "$NS" create secret generic keycloak-temp-ad
 unset TEMP_PW
 ```
 
-Start a one-off pod. It copies the image, the database settings, the
-security settings and the pull secrets from the StatefulSet, so it uses
-the same database as Keycloak:
+Start a one-off pod. It copies the pod labels, the image, the database
+settings, the security settings, the volumes and the pull secrets from
+the StatefulSet. So it uses the same database as Keycloak, the network
+rule of the built-in PostgreSQL lets it in (the rule admits only pods
+with Keycloak's labels), and a company CA certificate the chart mounts
+for Keycloak is there too:
 
 ```bash
 kubectl -n "$NS" get statefulset "$KC" -o json | jq '
-  .spec.template.spec as $s
+  .spec.template as $t | $t.spec as $s
   | {apiVersion: "v1", kind: "Pod",
-     metadata: {name: "keycloak-bootstrap-admin"},
+     metadata: {name: "keycloak-bootstrap-admin", labels: $t.metadata.labels},
      spec: {
        restartPolicy: "Never",
        automountServiceAccountToken: false,
        imagePullSecrets: ($s.imagePullSecrets // []),
        securityContext: $s.securityContext,
+       volumes: ($s.volumes // []),
        containers: [ $s.containers[0] | {
          name: "bootstrap-admin", image, imagePullPolicy, resources, securityContext,
+         volumeMounts: (.volumeMounts // []),
          env: (.env + [
            {name: "TEMP_ADMIN_NAME", value: "temp-admin"},
            {name: "TEMP_ADMIN_PASSWORD",

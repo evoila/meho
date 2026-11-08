@@ -127,10 +127,10 @@ calls on the day of the call.
 - `backend/src/meho_backplane/operation_picks/retention.py` — the delete,
   called by `request_usage/retention.py`.
 - `backend/src/meho_backplane/api/v1/retrieve_operation_picks.py` — the route.
-- `backend/alembic/versions/0145_create_operation_pick_records.py` — the tables.
+- `backend/alembic/versions/0146_create_operation_pick_records.py` — the tables.
 - `cli/internal/cmd/retrieval/picks.go` — `meho retrieval picks`.
 - Tests: `backend/tests/test_operation_picks.py`,
-  `backend/tests/migrations/test_migration_0145_create_operation_pick_records.py`,
+  `backend/tests/migrations/test_migration_0146_create_operation_pick_records.py`,
   `cli/internal/cmd/retrieval/picks_test.go`.
 
 ## Known limits

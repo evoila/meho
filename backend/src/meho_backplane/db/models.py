@@ -9742,7 +9742,7 @@ class OperationSearchRecord(Base):
 
     Written by :mod:`meho_backplane.operation_picks.recorder`, only when
     ``REQUEST_USAGE_RETENTION_DAYS`` is set. The request usage retention job
-    deletes rows older than that window. Migration ``0145`` makes the table.
+    deletes rows older than that window. Migration ``0146`` makes the table.
 
     * ``transport`` -- ``mcp``, ``rest`` or ``agent`` (a hosted agent run).
     * ``mode`` -- ``ranked`` (a query) or ``exact`` (one ``op_id``).

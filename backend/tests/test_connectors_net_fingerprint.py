@@ -525,8 +525,10 @@ async def test_detected_product_is_not_the_token_targets_register_needs(
     another token. ``targets.register`` refuses the detected name, and the
     guidance says where the right token comes from.
     """
-    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "192.0.2.0/24")
-    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "192.0.2.0/24")
+    # A private address: the suite's target allowlist admits it, so the product
+    # token is the only thing targets.register can refuse.
+    host = "192.168.0.10"
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "192.168.0.0/24")
     service = AsyncMock()
     service.encode_one.return_value = [0.1] * 384
     service.encode.return_value = [[0.1] * 384]
@@ -539,7 +541,7 @@ async def test_detected_product_is_not_the_token_targets_register_needs(
         update={"tenant_role": TenantRole.TENANT_ADMIN, "web_session": True}
     )
 
-    detected = await net_fingerprint(admin, None, {"host": _HOST, "timeout_seconds": 2})
+    detected = await net_fingerprint(admin, None, {"host": host, "timeout_seconds": 2})
     assert detected["product"] == "vcenter"
 
     registered = await dispatch(
@@ -547,7 +549,7 @@ async def test_detected_product_is_not_the_token_targets_register_needs(
         connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
         op_id=TARGETS_REGISTER_OP_ID,
         target=None,
-        params={"name": "vc-01", "product": detected["product"], "host": _HOST},
+        params={"name": "vc-01", "product": detected["product"], "host": host},
     )
 
     assert registered.status == "error", registered

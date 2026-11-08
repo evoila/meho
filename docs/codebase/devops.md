@@ -1051,7 +1051,14 @@ newer.
 With `coreKeycloak.enabled` on, the chart sets every Keycloak setting of the
 backplane itself (helper `meho.keycloakSettings` in
 `templates/_core-keycloak.tpl`). The values come from the subchart and the
-realm file, not from `config.*` or `keycloakAdmin.*`:
+realm file, not from `config.*` or `keycloakAdmin.*`. The chart also
+fills in the Secret names and the check runner client id, so the web
+console, the check runner and the Keycloak admin each turn on with one
+switch (#4766): `uiConsole.enabled` (with `UI_KEYCLOAK_CLIENT_ID` and the
+Secret `<release>-core-ui-auth`), `checkRunner.enabled` (with
+`CHECK_RUNNER_CLIENT_ID=meho-check-runner` and the Secret
+`<release>-core-check-runner`). `keycloakAdmin.enabled` is not needed:
+
 
 | Setting | Value |
 | --- | --- |
@@ -1087,13 +1094,24 @@ Keycloak:
 - `corePostgres.existingSecrets.keycloak`,
   `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` or
   `checkRunner.clientSecret.secretName` names a Secret other than the
-  matching `<release>-core-…` one, for example
+  matching `<release>-core-…` one;
+- `config.uiKeycloakClientId`, `checkRunner.clientId`, `keycloakAdmin.url`
+  or `keycloakAdmin.clientId` is set to anything but the value in the table
+  above (or `meho-check-runner` for the check runner). For example
   `uiConsole.secretName must be empty or "meho-core-ui-auth" while
-  coreKeycloak.enabled is on: the built-in Keycloak reads only that
-  Secret.`
+  coreKeycloak.enabled is on: the chart sets it itself.`
+
+Each of these keys is empty by default, so the operator sets none of them.
 
 The schema needs `keycloak.issuer`, `config.keycloakIssuerUrl` and
-`config.keycloakAudience` only while the built-in Keycloak is off.
+`config.keycloakAudience` only while the built-in Keycloak is off. It needs
+`uiConsole.secretName` and `config.uiKeycloakClientId` (with
+`uiConsole.enabled`), `checkRunner.clientId` and
+`checkRunner.clientSecret.secretName` (with `checkRunner.enabled`), and
+`keycloakAdmin.url` and `keycloakAdmin.clientId` (with
+`keycloakAdmin.enabled`) only while it is off. The helm test pod
+`test-agent-runtime-config` also runs with the built-in Keycloak and
+`agent.enabled`.
 
 **HTTPS inside the cluster.** The realm keeps `sslRequired: external`, and
 pods still call the Service over plain HTTP. That works for every pod
@@ -1644,7 +1662,7 @@ The chart is packaged, pushed to OCI, and cosign-signed by
 `.github/workflows/chart.yml`. Its `publish` and `verify-anonymous-pull` jobs run on `meho-runners-ci`
 (the project's self-hosted runner pool on a dedicated CI cluster,
 introduced by #160 + #167). It shares the
-hardening conventions of `image.yml`: job-level fork-PR guard (the `validate` job runs on GitHub-hosted `ubuntu-24.04`),
+hardening conventions of `image.yml`: job-level fork-PR guard (the `validate` job runs on GitHub-hosted `ubuntu-latest`),
 SHA-pinned actions with `# vX.Y.Z` comments, a minimum `permissions:`
 block (the workflow default is `contents: read`; only the `publish` job
 adds `packages: write` and `id-token: write`), per-job
@@ -2731,7 +2749,7 @@ their isolation posture:
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
 | `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
-| `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-24.04`; publish/verify jobs are `push`-only |
+| `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
 | `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **hosted runner** for every event (#4626); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |

@@ -96,8 +96,10 @@ jobs:
             exit 1
           fi
 
-          # Resolve the latest release tag.
-          latest_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          # Resolve the latest final release tag. Skip release
+          # candidates (v1.0.0-rc.1): the README names final releases
+          # (#3860).
+          latest_tag="$(git describe --tags --abbrev=0 --exclude='v*-rc.*' 2>/dev/null || true)"
           if [ -z "$latest_tag" ]; then
             echo "::error::No git tags found; cannot determine the latest release tag."
             exit 1

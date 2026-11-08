@@ -2750,10 +2750,40 @@ of CI. Two actions are unique to `ci.yml`:
   so a new uv release cannot change CI on its own. The Python version
   comes from `backend/.python-version` (3.14, the same as the image's
   `python:3.14-slim`). Raise the uv pin by hand, in all steps at once.
-- `golangci/golangci-lint-action@v9.3.0` with the golangci-lint binary
-  pinned to `v2.12.2`. The in-tree
+- golangci-lint, kubeconform and kind are pinned in
+  [`scripts/ci/tool-versions.env`](../../scripts/ci/tool-versions.env), one
+  version and one sha256 per tool. The in-tree
   [`cli/.golangci.yml`](../../cli/.golangci.yml) uses the golangci-lint
-  v2 config schema. Raise the action and the binary together.
+  v2 config schema. Raise a tool by changing its two lines there.
+
+### Tools that CI downloads
+
+A job must not fail because a download failed once. The rules:
+
+- `scripts/ci/install_tool.sh` puts a pinned tool on the PATH. It uses the
+  tool already on the runner when the version matches, then the copy in
+  `~/.cache/meho-ci-tools` (restored with `actions/cache`, keyed by the
+  hash of `tool-versions.env`), and downloads last.
+- `scripts/ci/fetch_with_retry.sh` is the download. It tries three times
+  (pauses of 5 s and 15 s) and counts a wrong sha256 as a failed try.
+- `scripts/ci/install_spacy_model.sh` puts the spaCy model into the job's
+  Python environment. The model version and sha256 are pinned in
+  `tool-versions.env`. It uses the model when it is installed at that
+  version, then the model file in `~/.cache/meho-ci-tools`, and downloads
+  last.
+- `scripts/ci/retry.sh` runs any download command (the language model
+  warm-up) with the same three tries.
+- `.github/actions/setup-kind` installs kind this way and starts the
+  cluster. It replaces `helm/kind-action`, which downloaded kind on every
+  run.
+- Release-time workflows that cannot rely on the script (they check out a
+  tag) use `curl --retry 3 --retry-all-errors`.
+- `scripts/tests/test_ci_tool_scripts.py` tests these scripts with fake
+  commands and no network. The `linux-server-test` workflow runs it when
+  one of the scripts changes.
+- A runner image that carries the tools at the pinned versions makes the
+  download step a no-op. Change the pin in `tool-versions.env` and in the
+  image together.
 
 ## Untrusted pull-request isolation
 

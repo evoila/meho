@@ -182,6 +182,15 @@ jobs:
         with:
           version: v3.16.4  # pin at execution time; >=3.8 ships OCI helm push
 
+      - name: Restore kubeconform from the cache
+        # install_tool.sh uses kubeconform from the runner when it has this
+        # version, then this cache, and downloads (three tries) last. Keep
+        # the version in scripts/ci/tool-versions.env; the key follows it.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-kubeconform-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
       - name: Install kubeconform
         # kubeconform validates rendered manifests against Kubernetes JSON
         # Schemas (offline; no API server needed). Pinned to v0.6.7 by SHA256
@@ -200,19 +209,11 @@ jobs:
         # depend on PATH propagation that hasn't happened yet.
         run: |
           set -euo pipefail
-          KC_VER=v0.6.7
-          KC_SHA=95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
-          curl -fsSL -o /tmp/kubeconform.tar.gz \
-            "https://github.com/yannh/kubeconform/releases/download/${KC_VER}/kubeconform-linux-amd64.tar.gz"
-          echo "${KC_SHA}  /tmp/kubeconform.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/kubeconform.tar.gz -C /tmp/ kubeconform
-          mkdir -p "${HOME}/.local/bin"
-          install -m 0755 /tmp/kubeconform "${HOME}/.local/bin/kubeconform"
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-          # Smoke test the freshly installed binary. PATH for *this* step
-          # was frozen before $GITHUB_PATH was appended above, so call by
-          # the absolute path; subsequent steps pick it up via PATH.
-          "${HOME}/.local/bin/kubeconform" -v
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          VERSION_ARG=-v "${GITHUB_WORKSPACE}/scripts/ci/install_tool.sh" kubeconform "${KUBECONFORM_VER}" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VER}/kubeconform-linux-amd64.tar.gz" \
+            "${KUBECONFORM_SHA}" kubeconform
 
       - name: Verify kubeconform on PATH for subsequent steps
         # Independent of the install step's own shell. By the time this
@@ -855,13 +856,14 @@ jobs:
           version: v3.16.4
 
       - name: Create kind cluster
-        # helm/kind-action provisions a single-node kind cluster with
-        # Docker as the container backend. The default node image
-        # (kindest/node:v1.32.x at action HEAD) is fine for our
+        # The local setup-kind action starts a single-node kind cluster
+        # with Docker as the container backend. The kind program comes
+        # from the runner or the cache; it is downloaded with retries last.
+        # The default node image of this kind version is fine for our
         # Kubernetes 1.28+ chart target.
-        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
+        uses: ./.github/actions/setup-kind
         with:
-          cluster_name: meho-helm-test
+          cluster-name: meho-helm-test
 
       - name: Set up Docker Buildx
         # Required by docker/build-push-action to use buildkit. Same
@@ -1638,9 +1640,9 @@ jobs:
           version: v3.16.4
 
       - name: Create kind cluster
-        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
+        uses: ./.github/actions/setup-kind
         with:
-          cluster_name: meho-helm-test
+          cluster-name: meho-helm-test
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
@@ -1956,9 +1958,9 @@ jobs:
           version: v4.3.1
 
       - name: Create kind cluster
-        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
+        uses: ./.github/actions/setup-kind
         with:
-          cluster_name: meho-helm-test
+          cluster-name: meho-helm-test
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1

@@ -14,7 +14,12 @@ run once. Two additive changes:
   the run reference (``work_ref``), the JSON list of operations, and the
   times it was requested, approved, revoked or ended. A call matches only
   an approved row that is still live, so a new table changes nothing until
-  a person approves a request.
+  a person approves a request. The partial unique index
+  ``run_approval_open_run_idx`` lets one run (tenant, token subject, run
+  reference) hold at most one open row: one that is not revoked, not ended
+  and not recorded as expired. Two requests for the same run that arrive at
+  the same time on two workers both pass the check in the service; the
+  index lets only one of them insert.
 * ``tenant.run_approval_target_kinds_enabled`` -- the tenant setting that
   lets a run approval list a target kind (a product) instead of one
   target. ``false`` by default, so existing tenants keep exact targets.
@@ -48,6 +53,9 @@ __all__ = [
 ]
 
 _TABLE = "run_approval"
+_OPEN_INDEX = "run_approval_open_run_idx"
+# Must match ``RunApproval.__table_args__`` in ``db/models.py``.
+_OPEN_PREDICATE = "revoked_at IS NULL AND ended_at IS NULL AND expired_at IS NULL"
 
 
 def upgrade() -> None:
@@ -72,11 +80,20 @@ def upgrade() -> None:
         sa.Column("revoked_by_sub", sa.Text(), nullable=True),
         sa.Column("revoked_reason", sa.Text(), nullable=True),
         sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("expired_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index(
         "run_approval_lookup_idx",
         _TABLE,
         ["tenant_id", "principal_sub", "work_ref"],
+    )
+    op.create_index(
+        _OPEN_INDEX,
+        _TABLE,
+        ["tenant_id", "principal_sub", "work_ref"],
+        unique=True,
+        postgresql_where=sa.text(_OPEN_PREDICATE),
+        sqlite_where=sa.text(_OPEN_PREDICATE),
     )
     with op.batch_alter_table("tenant") as batch_op:
         batch_op.add_column(
@@ -93,5 +110,6 @@ def downgrade() -> None:
     """Drop the tenant setting and the run approval table."""
     with op.batch_alter_table("tenant") as batch_op:
         batch_op.drop_column("run_approval_target_kinds_enabled")
+    op.drop_index(_OPEN_INDEX, table_name=_TABLE)
     op.drop_index("run_approval_lookup_idx", table_name=_TABLE)
     op.drop_table(_TABLE)

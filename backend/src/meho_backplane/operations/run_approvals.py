@@ -38,6 +38,11 @@ Rules that never change:
   covered either (a person approves each call).
 * A target kind entry (``target_product``) works only when the tenant
   setting ``run_approval_target_kinds_enabled`` is on.
+* One run (tenant, token subject, run reference) has at most one open
+  request at a time. The service refuses a second one (HTTP 409), and the
+  partial unique index ``run_approval_open_run_idx`` (migration ``0142``)
+  refuses the one of two requests that arrive at the same time on two
+  workers and both pass that check.
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -125,7 +131,7 @@ def _status(row: RunApproval, now: datetime) -> RunApprovalStatus:
         return "revoked"
     if row.ended_at is not None:
         return "ended"
-    if as_utc(row.expires_at) <= now:
+    if row.expired_at is not None or as_utc(row.expires_at) <= now:
         return "expired"
     return "approved" if row.approved_at is not None else "pending"
 
@@ -254,6 +260,77 @@ async def _load(
     return row
 
 
+async def _open_rows(
+    session: AsyncSession, tenant_id: uuid.UUID, principal_sub: str, work_ref: str
+) -> Sequence[RunApproval]:
+    """The rows of this run that hold its slot in ``run_approval_open_run_idx``.
+
+    ``populate_existing`` reads the row again when the session already
+    holds it, so the second read after a lost insert sees what the other
+    worker stored.
+    """
+    return (
+        await session.scalars(
+            select(RunApproval)
+            .where(
+                RunApproval.tenant_id == tenant_id,
+                RunApproval.principal_sub == principal_sub,
+                RunApproval.work_ref == work_ref,
+                RunApproval.revoked_at.is_(None),
+                RunApproval.ended_at.is_(None),
+                RunApproval.expired_at.is_(None),
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+
+
+def _still_open(row: RunApproval, now: datetime) -> RunApprovalConflictError:
+    return RunApprovalConflictError(
+        f"run approval {row.id} for this run is still {_status(row, now)}; "
+        "end it or wait until a person revokes it before you ask again"
+    )
+
+
+async def _refuse_live_or_record_expired(
+    session: AsyncSession, operator: Operator, work_ref: str, now: datetime
+) -> None:
+    """Refuse when a live row holds the run; record the expiry of a dead one.
+
+    A row past ``expires_at`` covers nothing, but it holds the run's slot in
+    the unique index until ``expired_at`` is written. This writes it, in the
+    same transaction as the insert, so the new request can take the slot.
+    """
+    for row in await _open_rows(session, operator.tenant_id, operator.sub, work_ref):
+        if as_utc(row.expires_at) > now:
+            raise _still_open(row, now)
+        row.expired_at = now
+
+
+async def _insert_one_open(session: AsyncSession, row: RunApproval, now: datetime) -> None:
+    """Insert *row* in a savepoint; the loser of two racing requests gets 409.
+
+    Two requests for the same run on two workers can both pass
+    :func:`_refuse_live_or_record_expired`. The partial unique index
+    ``run_approval_open_run_idx`` (migration ``0142``) lets only one insert.
+    The other insert fails, its savepoint rolls back, the transaction stays
+    usable, and the error names the row the winner stored.
+    """
+    try:
+        async with session.begin_nested():
+            session.add(row)
+            await session.flush()
+    except IntegrityError as exc:
+        winners = [
+            other
+            for other in await _open_rows(session, row.tenant_id, row.principal_sub, row.work_ref)
+            if as_utc(other.expires_at) > now
+        ]
+        if not winners:
+            raise
+        raise _still_open(winners[0], now) from exc
+
+
 class RunApprovalService:
     """Tenant-scoped request / read / approve / revoke / end of run approvals.
 
@@ -279,7 +356,7 @@ class RunApprovalService:
                     "allow target kinds in run approvals; name each target, or ask a tenant "
                     "admin to turn on run_approval_target_kinds in the settings file"
                 )
-            await self._refuse_second_live(session, operator, payload.work_ref, now)
+            await _refuse_live_or_record_expired(session, operator, payload.work_ref, now)
             row = RunApproval(
                 tenant_id=operator.tenant_id,
                 principal_sub=operator.sub,
@@ -289,7 +366,7 @@ class RunApprovalService:
                 requested_at=now,
                 expires_at=expires_at,
             )
-            session.add(row)
+            await _insert_one_open(session, row, now)
             await session.commit()
             await session.refresh(row)
             read = _read(row, now)
@@ -302,28 +379,6 @@ class RunApprovalService:
             entry_count=len(payload.entries),
         )
         return read
-
-    @staticmethod
-    async def _refuse_second_live(
-        session: AsyncSession, operator: Operator, work_ref: str, now: datetime
-    ) -> None:
-        rows = (
-            await session.scalars(
-                select(RunApproval).where(
-                    RunApproval.tenant_id == operator.tenant_id,
-                    RunApproval.principal_sub == operator.sub,
-                    RunApproval.work_ref == work_ref,
-                    RunApproval.revoked_at.is_(None),
-                    RunApproval.ended_at.is_(None),
-                )
-            )
-        ).all()
-        live = [row for row in rows if as_utc(row.expires_at) > now]
-        if live:
-            raise RunApprovalConflictError(
-                f"run approval {live[0].id} for this run is still {_status(live[0], now)}; "
-                "end it or wait until a person revokes it before you ask again"
-            )
 
     async def list_(
         self,

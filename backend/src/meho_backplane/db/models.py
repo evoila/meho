@@ -6210,6 +6210,15 @@ class RunApproval(Base):
     on a client name. A row is live while it is approved, not revoked, not
     ended and before ``expires_at``. Rows are never deleted, so the history
     stays visible. Destructive operations are never covered.
+
+    ``expired_at`` is written by the next request of the same run, when the
+    row is past ``expires_at``. Until then the dead row still holds the
+    run's slot in ``run_approval_open_run_idx``, the partial unique index
+    that lets one run hold at most one open row (not revoked, not ended,
+    not recorded as expired). Two requests for the same run that arrive at
+    the same time both pass the check in the service; the index lets only
+    one of them insert
+    (:meth:`meho_backplane.operations.run_approvals.RunApprovalService.request`).
     """
 
     __tablename__ = "run_approval"
@@ -6232,8 +6241,24 @@ class RunApproval(Base):
     revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
     revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    __table_args__ = (Index("run_approval_lookup_idx", "tenant_id", "principal_sub", "work_ref"),)
+    __table_args__ = (
+        Index("run_approval_lookup_idx", "tenant_id", "principal_sub", "work_ref"),
+        # Matches migration 0142: at most one open row per (tenant, token
+        # subject, run reference).
+        Index(
+            "run_approval_open_run_idx",
+            "tenant_id",
+            "principal_sub",
+            "work_ref",
+            unique=True,
+            postgresql_where=sa.text(
+                "revoked_at IS NULL AND ended_at IS NULL AND expired_at IS NULL"
+            ),
+            sqlite_where=sa.text("revoked_at IS NULL AND ended_at IS NULL AND expired_at IS NULL"),
+        ),
+    )
 
 
 class SandboxModeState(Base):

@@ -16,6 +16,7 @@ A person approves the operation list of one automation run once. Then:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -42,7 +43,11 @@ from meho_backplane.db.models import (
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._validate import policy_gate
-from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
+from meho_backplane.operations.run_approval_schemas import (
+    RunApprovalCreate,
+    RunApprovalEntry,
+    RunApprovalRead,
+)
 from meho_backplane.operations.run_approvals import (
     RunApprovalConflictError,
     RunApprovalGroupError,
@@ -534,6 +539,88 @@ async def test_second_live_request_for_the_same_run_is_refused() -> None:
         await RunApprovalService().request(
             _operator(), RunApprovalCreate(work_ref=_RUN, entries=[entry], reason="again")
         )
+
+
+async def _rows_of_run(work_ref: str = _RUN) -> list[RunApproval]:
+    async with get_sessionmaker()() as s:
+        return list(
+            (
+                await s.scalars(
+                    select(RunApproval)
+                    .where(RunApproval.work_ref == work_ref)
+                    .order_by(RunApproval.requested_at)
+                )
+            ).all()
+        )
+
+
+@pytest.mark.asyncio
+async def test_two_requests_at_the_same_time_store_one(run_ref: str) -> None:
+    """Two requests for the same run arrive together: one is stored, the other gets 409."""
+    create = RunApprovalCreate(
+        work_ref=_RUN,
+        entries=[RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP)],
+        reason="at the same time",
+    )
+
+    outcomes = await asyncio.gather(
+        RunApprovalService().request(_operator(), create),
+        RunApprovalService().request(_operator(), create),
+        return_exceptions=True,
+    )
+
+    stored = [o for o in outcomes if isinstance(o, RunApprovalRead)]
+    refused = [o for o in outcomes if isinstance(o, RunApprovalConflictError)]
+    assert len(stored) == 1, outcomes
+    assert len(refused) == 1, outcomes
+    assert str(stored[0].id) in refused[0].message
+    assert [row.id for row in await _rows_of_run()] == [stored[0].id]
+
+
+@pytest.mark.asyncio
+async def test_unique_index_refuses_the_second_of_two_racing_inserts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both requests passed the live check (two workers); only one row gets in."""
+    monkeypatch.setattr(
+        "meho_backplane.operations.run_approvals._refuse_live_or_record_expired",
+        AsyncMock(return_value=None),
+    )
+    create = RunApprovalCreate(
+        work_ref=_RUN,
+        entries=[RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP)],
+        reason="both passed the check",
+    )
+    first = await RunApprovalService().request(_operator(), create)
+
+    with pytest.raises(RunApprovalConflictError) as refused:
+        await RunApprovalService().request(_operator(), create)
+
+    assert str(first.id) in refused.value.message
+    assert [row.id for row in await _rows_of_run()] == [first.id]
+
+
+@pytest.mark.asyncio
+async def test_request_after_the_time_limit_is_stored_and_the_old_row_stays_expired() -> None:
+    entry = RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP)
+    old_id = await _approved(entry)
+    async with get_sessionmaker()() as s:
+        row = await s.get(RunApproval, old_id)
+        assert row is not None
+        row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await s.commit()
+
+    new = await RunApprovalService().request(
+        _operator(), RunApprovalCreate(work_ref=_RUN, entries=[entry], reason="again")
+    )
+
+    assert new.status == "pending"
+    rows = {row.id: row for row in await _rows_of_run()}
+    assert set(rows) == {old_id, new.id}
+    assert rows[old_id].expired_at is not None
+    assert (await RunApprovalService().get(_TENANT_A, old_id)).status == "expired"
+    with pytest.raises(RunApprovalConflictError):
+        await RunApprovalService().end(_operator(), old_id)
 
 
 @pytest.mark.asyncio

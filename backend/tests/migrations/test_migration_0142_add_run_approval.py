@@ -6,7 +6,8 @@
 The migration adds the ``run_approval`` table and the ``tenant`` setting
 ``run_approval_target_kinds_enabled``. These tests pin: a tenant written
 before the upgrade reads ``false`` (target kinds stay off), the table
-exists, and ``downgrade()`` drops both.
+exists, the unique index lets one run hold at most one open row, and
+``downgrade()`` drops both.
 
 Every step targets this migration's own revision (``0142``) and its
 ``down_revision`` (``0141``), never ``head``.
@@ -22,6 +23,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine as sa_create_engine
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
@@ -85,6 +87,67 @@ def test_old_tenant_keeps_target_kinds_off(alembic_cfg: tuple[Config, str]) -> N
     assert not enabled
     tables, _ = _tables_and_tenant_columns(sync_url)
     assert "run_approval" in tables
+
+
+def _indexes(sync_url: str) -> dict[str, bool]:
+    """Index name -> unique, for the ``run_approval`` table."""
+    engine = sa_create_engine(sync_url)
+    try:
+        return {
+            str(index["name"]): bool(index["unique"])
+            for index in inspect(engine).get_indexes("run_approval")
+        }
+    finally:
+        engine.dispose()
+
+
+def test_one_open_row_per_run(alembic_cfg: tuple[Config, str]) -> None:
+    """The unique index refuses a second open row of one run; a closed row frees the slot."""
+    cfg, sync_url = alembic_cfg
+    command.upgrade(cfg, _REVISION)
+    insert = text(
+        "INSERT INTO run_approval (id, tenant_id, principal_sub, work_ref, entries, reason, "
+        "requested_at, expires_at) VALUES (:id, :tenant, 'svc', 'run-1', '[]', 'r', "
+        "'2026-11-07 00:00:00', '2026-11-08 00:00:00')"
+    )
+    engine = sa_create_engine(sync_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO tenant (id, slug, name, created_at) "
+                    "VALUES (:id, 'tenant-a', 'Tenant A', '2026-11-07 00:00:00')"
+                ),
+                {"id": _TENANT_ID},
+            )
+            conn.execute(insert, {"id": "1" * 32, "tenant": _TENANT_ID})
+        with pytest.raises(IntegrityError), engine.begin() as conn:
+            conn.execute(insert, {"id": "2" * 32, "tenant": _TENANT_ID})
+        # Each way a row closes frees the slot for the next request.
+        for previous, column, new_id in (
+            ("1" * 32, "expired_at", "2" * 32),
+            ("2" * 32, "ended_at", "3" * 32),
+            ("3" * 32, "revoked_at", "4" * 32),
+        ):
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"UPDATE run_approval SET {column} = '2026-11-07 01:00:00' WHERE id = :id"
+                    ),
+                    {"id": previous},
+                )
+                conn.execute(insert, {"id": new_id, "tenant": _TENANT_ID})
+        with engine.begin() as conn:
+            open_rows = conn.execute(
+                text(
+                    "SELECT count(*) FROM run_approval WHERE revoked_at IS NULL "
+                    "AND ended_at IS NULL AND expired_at IS NULL"
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+    assert open_rows == 1
+    assert _indexes(sync_url)["run_approval_open_run_idx"] is True
 
 
 def test_downgrade_drops_table_and_setting(alembic_cfg: tuple[Config, str]) -> None:

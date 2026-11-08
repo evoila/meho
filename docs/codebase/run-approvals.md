@@ -34,7 +34,9 @@ status. MEHO records the decision; there is no second-person step.
 - `RunApproval` (`db/models.py`, table `run_approval`, migration `0142`):
   `principal_sub`, `work_ref`, `entries` (JSON), `reason`, `requested_at`,
   `expires_at`, `approved_at` / `approved_by_sub`, `revoked_at` /
-  `revoked_by_sub` / `revoked_reason`, `ended_at`. Rows are never deleted.
+  `revoked_by_sub` / `revoked_reason`, `ended_at`, `expired_at`. Rows are
+  never deleted. The partial unique index `run_approval_open_run_idx`
+  lets one run hold at most one open row (see below).
 - `Tenant.run_approval_target_kinds_enabled` (migration `0142`, default
   `false`): the tenant setting for target kinds. It is set with the
   settings file (`policies.run_approval_target_kinds`).
@@ -56,6 +58,25 @@ status. MEHO records the decision; there is no second-person step.
 | `target_id` | exactly that target |
 | `target_product` | every target of that product (a target kind), so targets the run registers itself are covered. Only when the tenant setting is on; otherwise the request is refused (422), and an entry stored before the setting was turned off covers nothing |
 | neither | only calls **without** a target. No target is not "any target" |
+
+## One open request per run
+
+One run (tenant, token subject, run reference) has at most one open
+request at a time: a row that is not revoked, not ended and not recorded
+as expired. `RunApprovalService.request` refuses a second one with 409
+while the first is pending or approved and before its `expires_at`.
+
+Two requests for the same run can arrive at the same time on two
+workers, and both pass that check. The partial unique index
+`run_approval_open_run_idx` (migration `0142`) lets only one of them
+insert. The other insert fails inside a savepoint, and the caller gets
+409 with the id of the row that was stored. The same shape as the
+idempotency key of the approval queue (migration `0105`).
+
+A row past `expires_at` covers nothing, but it still holds the run's
+slot in the index. The next request of the same run writes `expired_at`
+on it, in the same transaction as its own insert, and takes the slot.
+The status of that row stays `expired`.
 
 ## Control flow at call time
 

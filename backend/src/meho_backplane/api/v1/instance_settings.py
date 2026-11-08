@@ -15,6 +15,10 @@ The design is ``core.md`` §5; the file, the endpoints and the table are in
 * ``POST /api/v1/settings/import`` -- add or update, never delete. 422 with
   the same body as the preview when the file has mistakes.
 * ``GET /api/v1/settings/history`` -- the revisions, newest first.
+* ``POST /api/v1/settings/conventions-drift`` -- compare a file that holds
+  only conventions with the tenant's operational conventions: added, changed,
+  only in MEHO. Writes nothing. The team wiki's CI job calls it with a login
+  that may run this check and nothing else (``conventions_drift_only``).
 
 Who may call: all four need a login (401 without a token). Export, import and
 history need ``tenant_admin`` or ``platform_admin``; every other role gets 403
@@ -46,6 +50,7 @@ from meho_backplane.auth.operator import Operator, TenantRole, is_human_principa
 from meho_backplane.auth.rbac import authorize_tenant_scope, ensure_human_principal
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Tenant
+from meho_backplane.instance_settings.conventions_drift import check_conventions_drift
 from meho_backplane.instance_settings.schema import MAX_FILE_BYTES
 from meho_backplane.instance_settings.service import (
     ImportPlan,
@@ -67,6 +72,7 @@ _OP_ID_EXPORT: Final[str] = "settings.export"
 _OP_ID_PREVIEW: Final[str] = "settings.import.preview"
 _OP_ID_IMPORT: Final[str] = "settings.import"
 _OP_ID_HISTORY: Final[str] = "settings.history"
+_OP_ID_CONVENTIONS_DRIFT: Final[str] = "settings.conventions_drift"
 
 
 def _require_settings_admin(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
@@ -265,3 +271,68 @@ async def history(
     structlog.contextvars.bind_contextvars(audit_op_id=_OP_ID_HISTORY, audit_op_class="read")
     rows = await list_history(session, operator, limit=limit)
     return [SettingsRevision.model_validate(row) for row in rows]
+
+
+def _require_drift_checker(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
+    """A ``conventions_drift_only`` login, or a settings admin; 403 for anyone else."""
+    if operator.conventions_drift_only:
+        return operator
+    return _require_settings_admin(operator)
+
+
+class ConventionsDriftResponse(BaseModel):
+    """The drift check's answer. ``in_sync`` is true only when nothing differs.
+
+    ``added``: ``{slug, value}``, a rule in the file that MEHO does not have.
+    ``changed``: ``{slug, before, after}``, only the fields an import would
+    change. ``only_in_meho``: ``{slug}``, an operational convention the file
+    does not have. All three are empty when ``mistakes`` is not.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    ok: bool
+    in_sync: bool
+    mistakes: list[str]
+    added: list[dict[str, Any]]
+    changed: list[dict[str, Any]]
+    only_in_meho: list[dict[str, Any]]
+
+
+@router.post(
+    "/conventions-drift", response_model=ConventionsDriftResponse, openapi_extra=_IMPORT_BODY
+)
+async def conventions_drift(
+    request: Request,
+    operator: Annotated[Operator, Depends(_require_drift_checker)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ConventionsDriftResponse:
+    """Compare a settings file that holds only conventions with the tenant's own.
+
+    The file has one tenant block (the caller's tenant) with ``conventions``
+    only, each of kind ``operational``. The answer lists what an import would
+    add or change, and the operational conventions only MEHO has. Always 200
+    (403 for another tenant, 413 for a body over 4 MiB). Writes nothing.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_ID_CONVENTIONS_DRIFT, audit_op_class="read"
+    )
+    content = await _read_file(request)
+    try:
+        drift = await check_conventions_drift(session, operator, content)
+    except SettingsForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    structlog.contextvars.bind_contextvars(
+        audit_in_sync=drift.in_sync,
+        audit_added_count=len(drift.added),
+        audit_changed_count=len(drift.changed),
+        audit_only_in_meho_count=len(drift.only_in_meho),
+    )
+    return ConventionsDriftResponse(
+        ok=not drift.mistakes,
+        in_sync=drift.in_sync,
+        mistakes=drift.mistakes,
+        added=drift.added,
+        changed=drift.changed,
+        only_in_meho=drift.only_in_meho,
+    )

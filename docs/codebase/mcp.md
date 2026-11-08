@@ -667,10 +667,13 @@ that target, and the answer has a `target_fit` summary: `target`,
     target's version is outside every declared range, the resolver
     still picks a class through its entry that accepts every version.
     Then the rows are the listed rows of that class, and the hint says
-    the version is outside their range. `compatible` never comes with
-    an empty list: when a `status` or `product` filter hides the
-    connector a call would use, the result is `no_connector` with a
-    hint that names the filter.
+    the version is outside their range. A row whose catalog refuses the
+    target in its own check (`catalog_refuses_target`, the check a call
+    runs before it answers `unqualified_target_version`) is left out.
+    `compatible` never comes with an empty list: when a `status` or
+    `product` filter hides the connector a call would use, or every
+    row's catalog refuses the target, the result is `no_connector` with
+    a hint that says why.
   - `fingerprint_unknown`: the target has no version yet. The rows are
     the connectors of its product; they may fit. The hint says to probe
     the target or set its version.
@@ -687,9 +690,15 @@ that target, and the answer has a `target_fit` summary: `target`,
   written.
 - `status`, `product` and `detail` still apply. A long list still comes
   back as a handle; `target_fit` stays next to it.
+- **Hosted agent.** The agent's connector allow-list runs after the
+  summary is made. When it removes every row, the result becomes
+  `no_connector`, and the hint says this agent may use none of the
+  connectors that fit (`keep_allowed_connectors` in
+  `agent/toolset_discovery.py`).
 
 Code: `connectors_for_target` in `mcp/tools/connector_admin.py`. Tests:
-`tests/test_mcp_tools_connector_admin.py` (`target_fit`).
+`tests/test_mcp_tools_connector_admin.py` (`target_fit`) and
+`tests/test_agent_toolset_discovery.py`.
 
 ### Close ids for an unknown connector (#4136)
 

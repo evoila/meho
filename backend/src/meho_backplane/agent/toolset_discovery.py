@@ -282,6 +282,14 @@ def _governed_handler(definition: ToolDefinition, handler: _MetaToolHandler) -> 
     return _wrapped
 
 
+#: The ``target_fit`` hint when connectors fit the target but this agent
+#: may use none of them.
+_NO_ALLOWED_CONNECTOR_HINT = (
+    "Connectors in MEHO fit the target, but this agent may use none of them. "
+    "Ask an operator to add one to the agent's connectors."
+)
+
+
 def keep_allowed_connectors(
     result: dict[str, Any],
     allowed_connectors: frozenset[str],
@@ -289,13 +297,21 @@ def keep_allowed_connectors(
     """Return a ``meho_connector_list`` *result* with only the allowed rows.
 
     The toolset calls this when the spec has a ``connectors`` allow-list, so
-    the agent is shown only the connectors it may call (#4233).
+    the agent is shown only the connectors it may call (#4233). When a
+    ``target_fit`` summary had rows and none of them is allowed, the summary
+    says ``no_connector``: no connector this agent may use fits the target.
     """
     rows = result.get("connectors", [])
-    return {
-        **result,
-        "connectors": [r for r in rows if r.get("connector_id") in allowed_connectors],
-    }
+    kept = [r for r in rows if r.get("connector_id") in allowed_connectors]
+    narrowed = {**result, "connectors": kept}
+    target_fit = result.get("target_fit")
+    if target_fit is not None and rows and not kept:
+        narrowed["target_fit"] = {
+            **target_fit,
+            "result": "no_connector",
+            "hint": _NO_ALLOWED_CONNECTOR_HINT,
+        }
+    return narrowed
 
 
 async def _hosted_status(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:

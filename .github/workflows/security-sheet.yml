@@ -105,7 +105,7 @@ jobs:
           set -euo pipefail
           REGCTL_VER=v0.11.6
           REGCTL_SHA=8e0e62a497fcdb8048d18aa927a139613176ba0531f412bc541044e28f9856bd
-          curl -fsSL -o "${RUNNER_TEMP}/regctl" \
+          curl -fsSL --retry 3 --retry-all-errors -o "${RUNNER_TEMP}/regctl" \
             "https://github.com/regclient/regclient/releases/download/${REGCTL_VER}/regctl-linux-amd64"
           echo "${REGCTL_SHA}  ${RUNNER_TEMP}/regctl" | sha256sum -c -
           mkdir -p "${HOME}/.local/bin"
@@ -192,7 +192,7 @@ jobs:
           source "${PACKAGING_DIR}/parts.sh"
           work="${RUNNER_TEMP}/images"
           mkdir -p "${work}/chart"
-          curl -fsSL -o "${work}/helm.tar.gz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL --retry 3 --retry-all-errors -o "${work}/helm.tar.gz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
           echo "${HELM_SHA256}  ${work}/helm.tar.gz" | sha256sum -c -
           tar -xzf "${work}/helm.tar.gz" -C "${work}" linux-amd64/helm
           helm="${work}/linux-amd64/helm"

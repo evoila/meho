@@ -105,6 +105,10 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       the read never runs, see spec-ingestion.md)
         ├─ target is None and descriptor_requires_target ? → status=error
         │       error_code=target_required (same answer and order as /call, #4139)
+        ├─ the target's connector does not have the op's handler ? → status=error
+        │       error_code=target_connector_mismatch (same answer and order as
+        │       /call: before the catalog choice and before the check before
+        │       the wait for approval, no audit row, #5948)
         ├─ choose_catalog_for_target → sibling fits ? → use the sibling (#3600)
         │       → refused ? → status=error error_code=unqualified_target_version
         │       (same reason and target fields as dispatch, no audit row, #4984;
@@ -144,10 +148,10 @@ what MEHO would do with this call for this caller and this target:
 `auto-execute` (runs at once), `needs-approval` (waits for a second
 person), or `deny` (refused, with the reason). The `unknown_op` /
 `unknown_connector`, `license_read_off` and `target_required` envelopes
-have no governance fields. The
-`unqualified_target_version` envelope has no fields either: like the real
-call, the preview stops there, before the params check and the policy gate
-(#4984).
+have no governance fields. The `target_connector_mismatch` (#5948) and
+`unqualified_target_version` (#4984) envelopes have no fields either: like
+the real call, the preview stops there, before the params check and the
+policy gate.
 
 The HTTP transport (`HttpConnector._post_json` / `_request_json`) is
 **never** called: there is no network egress, no audit row, no broadcast
@@ -195,7 +199,7 @@ surfaces stay `OPERATOR`-gated at the route / tool layer.
 | `status` | meaning | extra fields |
 |---|---|---|
 | `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding). Every synthetic preview also carries `plan_shown` (#4028): `true` with `proposed_effect`, or `false` with a plain `plan_note` when the builder needs the target and declined (both unhashed). Plus the four governance fields below |
-| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `refused_before_approval` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` also carries the four governance fields below |
+| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` / `target_connector_mismatch` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `refused_before_approval` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` / `target_required` / `target_connector_mismatch` / `unqualified_target_version` also carries the four governance fields below |
 | `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested`, plus the four governance fields below |
 
 An ingested operation whose path names licences, with any HTTP method,

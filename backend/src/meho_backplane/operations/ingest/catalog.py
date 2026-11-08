@@ -411,9 +411,7 @@ class ConnectorSpecEntry(BaseModel):
     #: the live ingest uses, so a malformed shipped spec crashes boot
     #: (and CI's app-boot smoke) rather than 500-ing a ``--catalog``
     #: ingest. ``None`` keeps the historical fetch-from-``upstream``
-    #: behaviour. T2 (#1976) authors the actual vmware/sddc specs; T1
-    #: (#1975) ships the mechanism + a fixture that exercises the
-    #: boot-time validator.
+    #: behaviour.
     spec_resource: str | None = Field(default=None, min_length=1, max_length=256)
     #: Resource name of a MEHO-authored
     #: :class:`~meho_backplane.connectors.profile.ExecutionProfile`

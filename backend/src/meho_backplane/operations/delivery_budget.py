@@ -55,6 +55,7 @@ import structlog
 
 from meho_backplane.connectors.schemas import OperationResult, ResultHandle
 from meho_backplane.operations._errors import result_receipt_too_large
+from meho_backplane.operations.answer_ready import too_large_line
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
 from meho_backplane.untrusted_text import with_data_notice
 
@@ -134,6 +135,23 @@ def handle_is_readable(handle: ResultHandle | None) -> bool:
     )
 
 
+def with_too_large_line(handle: ResultHandle | None) -> ResultHandle | None:
+    """Return *handle* with a read-more line that fits a reply cut for size.
+
+    A handle without the answer-ready read-more line comes back unchanged.
+    """
+    if handle is None or handle.fetch_more is None:
+        return handle
+    drill_in = handle.fetch_more.drill_in
+    rationale = too_large_line(drill_in.rationale)
+    if rationale == drill_in.rationale:
+        return handle
+    fetch_more = handle.fetch_more.model_copy(
+        update={"drill_in": drill_in.model_copy(update={"rationale": rationale})}
+    )
+    return handle.model_copy(update={"fetch_more": fetch_more})
+
+
 _PARTIAL_REMEDIATION = (
     "The operation completed, but its full response was too large to deliver "
     "({size} bytes; the limit is {limit}). Read the result through `result_query` "
@@ -165,7 +183,7 @@ def _trimmed(
         status=result.status,
         op_id=result.op_id,
         duration_ms=result.duration_ms,
-        handle=result.handle if delivery == "partial" else None,
+        handle=with_too_large_line(result.handle) if delivery == "partial" else None,
         audit_id=result.audit_id,
         delivery=delivery,
         extras=extras,

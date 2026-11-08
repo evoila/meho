@@ -11,6 +11,9 @@ durable-team-knowledge layer. It has four callers:
 - **REST** under `/api/v1/kb/...` (G4.1-T2). This includes
   `POST /api/v1/kb/import`, which the team wiki's CI job calls after
   each merge (#5728, see [Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728)).
+  It also includes `POST /api/v1/kb/export`, which the team wiki's CI
+  job calls to get MEHO's confirmed, generic lessons (#5730, see
+  [Export of confirmed, generic entries](#export-of-confirmed-generic-entries-5730)).
 - **MCP** via the `search_knowledge` + `add_to_knowledge` meta-tools
   in [`mcp/tools/knowledge.py`](../../backend/src/meho_backplane/mcp/tools/knowledge.py)
   (G4.1-T3).
@@ -163,6 +166,9 @@ before returning. Seven verbs:
 `kb/page_import.py::import_pages(request, *, tenant_id, actor_sub)` is
 not a `KbService` method: the import route calls it directly. See
 [Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728).
+`kb/page_export.py::export_pages(tenant_id)` is not one either: the
+export route calls it directly. See
+[Export of confirmed, generic entries](#export-of-confirmed-generic-entries-5730).
 
 ### `walk_kb_directory` (`kb/file_walker.py`)
 
@@ -545,7 +551,7 @@ else:
 
 - every other REST route, and every method but `POST` on the import
   path, answers `403 kb_import_only_scope_violation`
-  (`middleware.py::_reject_kb_import_only_elsewhere`, keyed on
+  (`middleware.py::_reject_kb_limited_login_elsewhere`, keyed on
   `KB_IMPORT_ROUTE`, the pair `POST` + `KB_IMPORT_PATH`), whatever role
   the token names;
 - every MCP call answers the same `403` (`mcp/auth.py::verify_mcp_jwt_and_bind`);
@@ -596,6 +602,131 @@ curl -sf -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 
 The job fails when the call fails. It reports the skipped pages from
 the answer.
+
+### Export of confirmed, generic entries (#5730)
+
+`POST /api/v1/kb/export` (`kb/page_export.py::export_pages`) returns
+the caller's confirmed, generic entries as Markdown pages. It is the
+mirror of the import. The caller is a CI job in the team wiki repo: it
+writes the pages into the wiki and opens a merge request there, and a
+person reviews it. MEHO writes nothing, and never holds Git
+credentials. The job lives in the team wiki repo, not here.
+
+The route has no body. It is a `POST` because `GET /api/v1/kb/export`
+would hide an entry with the slug `export` from `GET /api/v1/kb/{slug}`.
+
+**Which entries.** Only the caller's own tenant (no shared entries of
+another tenant), and only entries with `applies_to:
+product-and-version`. Then, by `status`:
+
+- `confirmed`: a page.
+- `retired` or `replaced`: a page to remove (`remove`).
+- any other status (`candidate`, `disputed`) or no status: neither.
+  The page in the wiki stays as it was. A deleted entry gives no page
+  to remove either.
+
+**Where the entry came from** (its [provenance](#provenance)):
+
+- `source_kind: "direct"` (an operator wrote it in MEHO): exported.
+- `source_kind: "import"` or `"directory"`: left out, without a
+  row in the answer. These came from pages, so a page never goes round
+  in a circle.
+- no provenance (`state: "legacy"`, written before MEHO recorded it):
+  listed in `skipped` with the reason. Write the entry again in MEHO to
+  export it.
+
+**The page.** The file name is `<slug>.md` (`path` in the answer). The
+page is the YAML lesson header, then the entry's text with a single
+newline at the end. The header holds only the lesson header fields, in
+the order of `lesson_header.py::LESSON_HEADER_FIELDS`, and leaves out
+empty values. MEHO's own keys (`provenance`, `created_by_sub`,
+`last_updated_by_sub`, passage data and any other metadata key) stay in
+MEHO. An entry with no `source` gets `source: meho://kb/<slug>`, so
+the import takes the page back to the same entry, also when a reviewer
+moves the file to another folder of the wiki. So the same entries give
+the same bytes on every export, and a second export changes only what
+changed.
+
+**Secret check.** Each page goes through the same generic secret check
+as the import (`kb/secret_check.py::find_secret`, header and text). A
+page that fails it is listed in `skipped`, and the reason names the
+pattern and the line, never the value.
+
+**Answer** (`KbExportResult`): `page_count`, `remove_count`,
+`skipped_count`, `pages` (`path`, `slug`, `content`), `remove` (`path`,
+`slug`, `status`) and `skipped` (`slug`, `reason`), each sorted by
+slug. All matching entries come in one answer. The audit row has op id
+`kb.export`, class `read` and the three counters, never the page text.
+
+**The round trip.** After the merge request is merged, the import job
+sends the page back. When the page differs from the entry (for example
+the added `source`), the import updates the entry. It then has
+`source_kind: "import"`, so the next export leaves it out until an
+operator changes it in MEHO again. When the page is the same, the
+import writes nothing, and the next export gives the same bytes, so the
+wiki sees no change.
+
+#### The export login
+
+The route admits an `operator` or a `tenant_admin`, or a login whose
+token carries the claim `kb_export_only: true`
+(`Operator.kb_export_only`, `auth/jwt.py::_extract_kb_export_only`).
+Such a login can only read the export. It is limited in the same way as
+the import login: every other REST route, and every method but `POST`
+on the export path, answers `403 kb_export_only_scope_violation`
+(`middleware.py::_reject_kb_limited_login_elsewhere`, keyed on
+`KB_EXPORT_ROUTE`); every MCP call answers the same `403`; and the
+claim fails closed (a value MEHO cannot read limits the login). A token
+with both `kb_import_only` and `kb_export_only` reaches no route.
+
+Set it up in Keycloak like the import login, as its own client, with
+`kb_export_only` in place of `kb_import_only`:
+
+| Mapper | Claim | Value |
+|---|---|---|
+| Audience | `aud` | the backplane audience (`KEYCLOAK_AUDIENCE`) |
+| Hardcoded claim | `tenant_id` | the one tenant to export |
+| Hardcoded claim | `tenant_role` | `read_only` |
+| Hardcoded claim | `principal_kind` | `service` |
+| Hardcoded claim (JSON type boolean) | `kb_export_only` | `true` |
+
+#### `meho kb export` and the call from the CI job
+
+`meho kb export <directory> [--dry-run] [--json]`
+(`cli/internal/cmd/kb/export.go`, role `operator`) calls the route and
+writes the answer into a folder on the caller's machine:
+
+- each page is written to `<directory>/<slug>.md`: `add` when the file
+  is new, `change` when its bytes differ, `unchanged` when they are the
+  same (the file is not written);
+- the file of each page to remove is removed when it is there;
+- no other file in the folder is touched;
+- a name that is not one plain `.md` file name, or a file that is a
+  link or a folder, stops the run before any file is written.
+
+`--dry-run` lists what would be added, changed and removed, and writes
+nothing (it does not create the folder either). `--json` prints the same
+lists as JSON. Skipped entries are listed with their reason.
+
+The CI job can do the same with `curl`, as for the import. Use a folder
+of its own for the exported pages:
+
+```bash
+TOKEN=$(curl -s -d grant_type=client_credentials \
+  -d client_id="$MEHO_EXPORT_CLIENT_ID" -d client_secret="$MEHO_EXPORT_CLIENT_SECRET" \
+  "$KEYCLOAK_ISSUER_URL/protocol/openid-connect/token" | jq -r .access_token)
+
+curl -sf -X POST -H "Authorization: Bearer $TOKEN" "$MEHO_URL/api/v1/kb/export" > export.json
+mkdir -p from-meho
+jq -c '.pages[]' export.json | while read -r page; do
+  jq -j .content <<<"$page" > "from-meho/$(jq -r .path <<<"$page")"
+done
+jq -r '.remove[].path' export.json | while read -r name; do rm -f "from-meho/$name"; done
+jq '.skipped' export.json   # report these in the merge request
+```
+
+Then the job runs its identifier check on the pages, commits them to a
+branch and opens the merge request.
 
 ### Provenance
 
@@ -828,10 +959,13 @@ Direct:
   `.md` front-matter parsing.
 - `meho_backplane.redaction.patterns` for the secret check of the page
   import (`kb/secret_check.py`).
+- The same secret check for the page export, and `PyYAML`
+  (`yaml.safe_dump`) for the header of an exported page.
 
 Transports that call into this service:
 
 - `meho_backplane.api.v1.kb` (REST, G4.1-T2), also for the page import.
+  The page export goes through the same module.
 - `meho_backplane.mcp.tools.knowledge` (MCP, G4.1-T3).
 - `meho_backplane.ui.routes.kb.routes` (console).
 - The Go CLI in `cli/internal/cmd/kb/` calls the REST routes, not this

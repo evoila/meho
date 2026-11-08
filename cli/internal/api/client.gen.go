@@ -457,6 +457,12 @@ const (
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
+// Defines values for KbExportRemovalStatus.
+const (
+	KbExportRemovalStatusReplaced KbExportRemovalStatus = "replaced"
+	KbExportRemovalStatusRetired  KbExportRemovalStatus = "retired"
+)
+
 // Defines values for KbImportPageResultAction.
 const (
 	KbImportPageResultActionCreate    KbImportPageResultAction = "create"
@@ -7019,6 +7025,43 @@ type KbEntryPreview struct {
 	UpdatedAt string                 `json:"updated_at"`
 }
 
+// KbExportPage One page to write into the wiki.
+type KbExportPage struct {
+	// Content The whole page: the YAML lesson header, then the text.
+	Content string `json:"content"`
+
+	// Path The file name of the page: <slug>.md.
+	Path string `json:"path"`
+	Slug string `json:"slug"`
+}
+
+// KbExportRemoval One page to remove from the wiki: its entry is retired or replaced.
+type KbExportRemoval struct {
+	// Path The file name of the page: <slug>.md.
+	Path   string                `json:"path"`
+	Slug   string                `json:"slug"`
+	Status KbExportRemovalStatus `json:"status"`
+}
+
+// KbExportRemovalStatus defines model for KbExportRemoval.Status.
+type KbExportRemovalStatus string
+
+// KbExportResult The answer of one export. Each list is sorted by slug.
+type KbExportResult struct {
+	PageCount    int               `json:"page_count"`
+	Pages        []KbExportPage    `json:"pages"`
+	Remove       []KbExportRemoval `json:"remove"`
+	RemoveCount  int               `json:"remove_count"`
+	Skipped      []KbExportSkip    `json:"skipped"`
+	SkippedCount int               `json:"skipped_count"`
+}
+
+// KbExportSkip An entry that would be exported, but is not, and why.
+type KbExportSkip struct {
+	Reason string `json:"reason"`
+	Slug   string `json:"slug"`
+}
+
 // KbImportPage One page the caller sends: its path in the wiki and its full text.
 type KbImportPage struct {
 	// Content The whole page: the YAML lesson header, then the text.
@@ -12524,6 +12567,11 @@ type CreateKbApiV1KbPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ExportKbPagesApiV1KbExportPostParams defines parameters for ExportKbPagesApiV1KbExportPost.
+type ExportKbPagesApiV1KbExportPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ImportKbPagesApiV1KbImportPostParams defines parameters for ImportKbPagesApiV1KbImportPost.
 type ImportKbPagesApiV1KbImportPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -16331,6 +16379,9 @@ type ClientInterface interface {
 
 	CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ExportKbPagesApiV1KbExportPost request
+	ExportKbPagesApiV1KbExportPost(ctx context.Context, params *ExportKbPagesApiV1KbExportPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ImportKbPagesApiV1KbImportPostWithBody request with any body
 	ImportKbPagesApiV1KbImportPostWithBody(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -19362,6 +19413,18 @@ func (c *Client) CreateKbApiV1KbPostWithBody(ctx context.Context, params *Create
 
 func (c *Client) CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateKbApiV1KbPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExportKbPagesApiV1KbExportPost(ctx context.Context, params *ExportKbPagesApiV1KbExportPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExportKbPagesApiV1KbExportPostRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -32128,6 +32191,48 @@ func NewCreateKbApiV1KbPostRequestWithBody(server string, params *CreateKbApiV1K
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewExportKbPagesApiV1KbExportPostRequest generates requests for ExportKbPagesApiV1KbExportPost
+func NewExportKbPagesApiV1KbExportPostRequest(server string, params *ExportKbPagesApiV1KbExportPostParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/kb/export")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -50636,6 +50741,9 @@ type ClientWithResponsesInterface interface {
 
 	CreateKbApiV1KbPostWithResponse(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateKbApiV1KbPostResponse, error)
 
+	// ExportKbPagesApiV1KbExportPostWithResponse request
+	ExportKbPagesApiV1KbExportPostWithResponse(ctx context.Context, params *ExportKbPagesApiV1KbExportPostParams, reqEditors ...RequestEditorFn) (*ExportKbPagesApiV1KbExportPostResponse, error)
+
 	// ImportKbPagesApiV1KbImportPostWithBodyWithResponse request with any body
 	ImportKbPagesApiV1KbImportPostWithBodyWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error)
 
@@ -54379,6 +54487,29 @@ func (r CreateKbApiV1KbPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateKbApiV1KbPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ExportKbPagesApiV1KbExportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *KbExportResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ExportKbPagesApiV1KbExportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExportKbPagesApiV1KbExportPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -62903,6 +63034,15 @@ func (c *ClientWithResponses) CreateKbApiV1KbPostWithResponse(ctx context.Contex
 	return ParseCreateKbApiV1KbPostResponse(rsp)
 }
 
+// ExportKbPagesApiV1KbExportPostWithResponse request returning *ExportKbPagesApiV1KbExportPostResponse
+func (c *ClientWithResponses) ExportKbPagesApiV1KbExportPostWithResponse(ctx context.Context, params *ExportKbPagesApiV1KbExportPostParams, reqEditors ...RequestEditorFn) (*ExportKbPagesApiV1KbExportPostResponse, error) {
+	rsp, err := c.ExportKbPagesApiV1KbExportPost(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExportKbPagesApiV1KbExportPostResponse(rsp)
+}
+
 // ImportKbPagesApiV1KbImportPostWithBodyWithResponse request with arbitrary body returning *ImportKbPagesApiV1KbImportPostResponse
 func (c *ClientWithResponses) ImportKbPagesApiV1KbImportPostWithBodyWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error) {
 	rsp, err := c.ImportKbPagesApiV1KbImportPostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -70540,6 +70680,39 @@ func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostR
 			return nil, err
 		}
 		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExportKbPagesApiV1KbExportPostResponse parses an HTTP response from a ExportKbPagesApiV1KbExportPostWithResponse call
+func ParseExportKbPagesApiV1KbExportPostResponse(rsp *http.Response) (*ExportKbPagesApiV1KbExportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExportKbPagesApiV1KbExportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KbExportResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

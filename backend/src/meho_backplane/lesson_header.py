@@ -39,6 +39,7 @@ from typing import Any, Final
 __all__ = [
     "CANDIDATE_EXPIRY_MONTHS",
     "LESSON_APPLIES_TO",
+    "LESSON_HEADER_FIELDS",
     "LESSON_STATUSES",
     "LESSON_TYPES",
     "RESERVED_NAMES",
@@ -84,6 +85,8 @@ _SHOWN_FIELDS: Final[tuple[str, ...]] = (
     *_DATE_FIELDS,
     "tags",
 )
+#: Every header field, in the order a read surface or an exported page shows them.
+LESSON_HEADER_FIELDS: Final[tuple[str, ...]] = _SHOWN_FIELDS
 
 
 class LessonHeaderError(ValueError):

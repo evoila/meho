@@ -362,6 +362,10 @@ class Operator(BaseModel):
     #: :func:`~meho_backplane.middleware.verify_jwt_and_bind` refuses it on
     #: every other REST route, and the MCP seam refuses it on every call.
     kb_import_only: bool = False
+    #: The login may only export knowledge (``kb_export_only`` claim, #5730).
+    #: Such a token reaches ``POST /api/v1/kb/export`` and nothing else, in
+    #: the same way as ``kb_import_only``.
+    kb_export_only: bool = False
     runner_id: UUID | None = None
     check_runner_dispatch: bool = False
     #: The ``auth_time`` claim: when the person last entered their

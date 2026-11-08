@@ -52,6 +52,13 @@ self-describing about authorship without an audit-log join; see
   :class:`~meho_backplane.kb.page_import.KbImportResult`. Caller: a
   ``tenant_admin``, or a login with the ``kb_import_only`` claim (the
   team wiki's CI job), which may reach this route and nothing else.
+* ``POST /api/v1/kb/export`` -- the confirmed, generic entries as
+  Markdown pages, plus the pages to remove (#5730). No body. Returns
+  :class:`~meho_backplane.kb.page_export.KbExportResult`. Caller: an
+  ``operator``, or a login with the ``kb_export_only`` claim (the team
+  wiki's CI job), which may reach this route and nothing else. It is a
+  ``POST`` because ``GET /api/v1/kb/export`` would hide an entry with
+  the slug ``export``; it writes nothing.
 
 Tenant scoping
 --------------
@@ -145,6 +152,7 @@ from meho_backplane.kb import (
     KbIngestRootError,
     KbService,
 )
+from meho_backplane.kb.page_export import KbExportResult, export_pages
 from meho_backplane.kb.page_import import KbImportRequest, KbImportResult, import_pages
 from meho_backplane.kb.schemas import (
     InvalidKbSlugError,
@@ -178,6 +186,7 @@ _KB_OP_IDS: Final[dict[str, str]] = {
     "delete": "kb.delete",
     "ingest": "kb.ingest",
     "import": "kb.import",
+    "export": "kb.export",
 }
 
 #: Maximum length of the ``slug`` path parameter accepted by /{slug}
@@ -753,6 +762,50 @@ async def import_kb_pages(
         audit_created_count=result.created_count,
         audit_updated_count=result.updated_count,
         audit_unchanged_count=result.unchanged_count,
+        audit_skipped_count=result.skipped_count,
+    )
+    return result
+
+
+def _require_exporter(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
+    """Admit an ``operator`` or higher, or a ``kb_export_only`` login; 403 for anyone else."""
+    if operator.kb_export_only or operator.tenant_role in (
+        TenantRole.OPERATOR,
+        TenantRole.TENANT_ADMIN,
+    ):
+        return operator
+    structlog.get_logger(__name__).warning(
+        "insufficient_role",
+        operator_sub=operator.sub,
+        actual_role=operator.tenant_role.value,
+        required_role=TenantRole.OPERATOR.value,
+    )
+    raise HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail="insufficient_role",
+    )
+
+
+@router.post("/export", response_model=KbExportResult)
+async def export_kb_pages(operator: Operator = Depends(_require_exporter)) -> KbExportResult:
+    """Return the caller's confirmed, generic entries as Markdown pages (#5730).
+
+    The team wiki's CI job calls this with the ``kb_export_only`` login,
+    writes the pages into the wiki and opens a merge request there. An
+    operator may call it too (``meho kb export``). MEHO writes nothing.
+    The rules are in :mod:`meho_backplane.kb.page_export`.
+
+    Binds ``audit_op_id="kb.export"`` + ``audit_op_class="read"`` and
+    the three counters. The page texts are never in the audit payload.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_KB_OP_IDS["export"],
+        audit_op_class="read",
+    )
+    result = await export_pages(operator.tenant_id)
+    structlog.contextvars.bind_contextvars(
+        audit_page_count=result.page_count,
+        audit_remove_count=result.remove_count,
         audit_skipped_count=result.skipped_count,
     )
     return result

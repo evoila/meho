@@ -27,15 +27,15 @@ import datetime as dt
 import json
 import os
 import shutil
-import socket
 import stat
 import subprocess
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 import yaml
+
+from tests._pgvector_image import chart_postgres_image
 
 # backend/tests/<this> -> parents[2] == repo root
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -480,22 +480,9 @@ def test_watchdog_reads_only_this_attempt(tmp_path: Path) -> None:
 
 # --- The smoke check: extra_runner_smoke.sh -------------------------------------
 
-_BLOCKED = "no-such-host.invalid"
-
-
-@pytest.fixture
-def open_port() -> Iterator[int]:
-    with socket.socket() as server:
-        server.bind(("127.0.0.1", 0))
-        server.listen(16)
-        yield server.getsockname()[1]
-
-
-@pytest.fixture
-def closed_port() -> int:
-    with socket.socket() as server:
-        server.bind(("127.0.0.1", 0))
-        return cast("int", server.getsockname()[1])
+_REACH = "https://reach.example"
+_ADDRESS = "secret.example"
+_ADDRESS_URL = f"https://{_ADDRESS}/"
 
 
 def _smoke(
@@ -503,136 +490,163 @@ def _smoke(
     deny: str | None,
     *reach: str,
     site: str = "extra",
-    timeout_exit: int | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Run the smoke check. ``timeout_exit`` makes every probe end that way."""
+    exits: dict[str, int] | None = None,
+    connected: str = "0.000000",
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run the smoke check with a fake curl.
+
+    ``exits`` gives the exit code for a URL. By default a reach check works
+    and a deny check times out.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    body = 'shift\nexec "$@"' if timeout_exit is None else f"exit {timeout_exit}"
-    _fake(bin_dir, "timeout", body)
+    calls = tmp_path / "curl.log"
+    rules = "\n".join(f'  "{url}") code={code} ;;' for url, code in (exits or {}).items())
+    _fake(
+        bin_dir,
+        "curl",
+        f"""echo "$*" >> "{calls}"
+for url; do :; done
+code=0
+if [[ "$*" == *--write-out* ]]; then code=28; printf '%s' '{connected}'; fi
+case "$url" in
+{rules}
+esac
+exit "$code"
+""",
+    )
     env = {"MEHO_CI_SITE": site}
     if deny is not None:
         env["MEHO_CI_DENY_PROBE_HOSTS"] = deny
-    return _run(_SMOKE, tmp_path, env, *reach)
+    result = _run(_SMOKE, tmp_path, env, *reach)
+    return result, calls.read_text().splitlines() if calls.exists() else []
 
 
 def _assert_private(result: subprocess.CompletedProcess[str], *secrets: str) -> None:
-    text = result.stdout + result.stderr
+    """The ``::add-mask::`` lines are the only ones that may hold an address.
+
+    The runner reads those as a command and hides the value in the log.
+    """
+    text = "\n".join(
+        line
+        for line in (result.stdout + result.stderr).splitlines()
+        if not line.startswith("::add-mask::")
+    )
     for secret in secrets:
         assert secret not in text, f"{secret!r} was printed"
 
 
-def test_smoke_passes_when_reach_works_and_deny_does_not(tmp_path: Path, open_port: int) -> None:
-    result = _smoke(tmp_path, _BLOCKED, f"127.0.0.1:{open_port}")
+def test_smoke_passes_when_every_address_times_out(tmp_path: Path) -> None:
+    result, _ = _smoke(tmp_path, f"{_ADDRESS},second.example:8443", _REACH)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "address 1 of 2: exit code 28" in result.stdout
+    assert "address 2 of 2: exit code 28" in result.stdout
     assert "passed" in result.stdout
-    _assert_private(result, _BLOCKED)
+    _assert_private(result, _ADDRESS, "second.example")
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        pytest.param(0, id="success"),
+        pytest.param(7, id="refused"),
+        pytest.param(60, id="certificate-error"),
+        pytest.param(35, id="tls-error"),
+        pytest.param(6, id="name-not-found"),
+        pytest.param(52, id="empty-reply"),
+    ],
+)
+def test_smoke_fails_on_anything_but_a_timeout(tmp_path: Path, code: int) -> None:
+    result, _ = _smoke(tmp_path, _ADDRESS, _REACH, exits={_ADDRESS_URL: code})
+    assert result.returncode == 1
+    assert f"Address 1 of 1: exit code {code}" in result.stdout
+    assert "passed" not in result.stdout
+    _assert_private(result, _ADDRESS)
+
+
+def test_smoke_fails_on_a_timeout_after_the_connection_was_made(tmp_path: Path) -> None:
+    result, _ = _smoke(tmp_path, _ADDRESS, _REACH, connected="0.031000")
+    assert result.returncode == 1
+    assert "Address 1 of 1: exit code 28" in result.stdout
+    _assert_private(result, _ADDRESS)
+
+
+def test_smoke_checks_every_address(tmp_path: Path) -> None:
+    deny = f"{_ADDRESS}, second.example:8443 ,third.example"
+    result, calls = _smoke(tmp_path, deny, _REACH, exits={"https://second.example:8443/": 7})
+    assert result.returncode == 1
+    assert "address 1 of 3: exit code 28" in result.stdout
+    assert "Address 2 of 3: exit code 7" in result.stdout
+    assert "address 3 of 3: exit code 28" in result.stdout
+    assert len(calls) == 4, "one reach check and three deny checks"
+    _assert_private(result, _ADDRESS, "second.example", "third.example")
+
+
+def test_smoke_masks_each_address_before_it_is_used(tmp_path: Path) -> None:
+    result, _ = _smoke(tmp_path, f"{_ADDRESS},second.example:8443", _REACH)
+    lines = result.stdout.splitlines()
+    first_probe = next(i for i, line in enumerate(lines) if line.startswith("reached"))
+    assert f"::add-mask::{_ADDRESS}" in lines[:first_probe]
+    assert "::add-mask::second.example:8443" in lines[:first_probe]
+    assert "::add-mask::second.example" in lines[:first_probe]
+
+
+def test_smoke_deny_probe_has_the_right_flags(tmp_path: Path) -> None:
+    _, calls = _smoke(tmp_path, _ADDRESS, _REACH)
+    deny_call = calls[-1]
+    assert deny_call.endswith(_ADDRESS_URL)
+    assert "--connect-timeout 5" in deny_call
+    assert "--noproxy *" in deny_call
+    for call in calls:
+        assert "--insecure" not in call
+        assert " -k " not in call
 
 
 @pytest.mark.parametrize("deny", [None, "", "   ", ",", " , ,"])
-def test_smoke_fails_when_the_list_is_empty(
-    tmp_path: Path, open_port: int, deny: str | None
-) -> None:
-    result = _smoke(tmp_path, deny, f"127.0.0.1:{open_port}")
+def test_smoke_fails_when_the_list_is_empty(tmp_path: Path, deny: str | None) -> None:
+    result, calls = _smoke(tmp_path, deny, _REACH)
     assert result.returncode == 1
     assert "is empty" in result.stdout
+    assert calls == []
 
 
-def test_smoke_fails_on_the_wrong_site(tmp_path: Path, open_port: int) -> None:
-    result = _smoke(tmp_path, _BLOCKED, f"127.0.0.1:{open_port}", site="other")
+def test_smoke_fails_on_the_wrong_site(tmp_path: Path) -> None:
+    result, _ = _smoke(tmp_path, _ADDRESS, _REACH, site="other")
     assert result.returncode == 1
     assert "MEHO_CI_SITE" in result.stdout
 
 
-def test_smoke_fails_without_a_host_to_reach(tmp_path: Path) -> None:
-    result = _smoke(tmp_path, _BLOCKED)
+def test_smoke_fails_without_a_url_to_reach(tmp_path: Path) -> None:
+    result, calls = _smoke(tmp_path, _ADDRESS)
     assert result.returncode == 1
+    assert calls == []
 
 
-def test_smoke_fails_when_a_needed_host_is_refused(tmp_path: Path, closed_port: int) -> None:
-    result = _smoke(tmp_path, _BLOCKED, f"127.0.0.1:{closed_port}")
+def test_smoke_fails_when_a_needed_url_is_out_of_reach(tmp_path: Path) -> None:
+    result, calls = _smoke(tmp_path, _ADDRESS, _REACH, exits={_REACH: 28})
     assert result.returncode == 1
-    assert f"Cannot reach 127.0.0.1 on port {closed_port}" in result.stdout
-
-
-def test_smoke_fails_when_a_needed_host_does_not_answer(tmp_path: Path) -> None:
-    result = _smoke(tmp_path, _BLOCKED, "needed.example:443", timeout_exit=124)
-    assert result.returncode == 1
-    assert "no-answer" in result.stdout
-
-
-def test_smoke_fails_when_a_denied_address_answers(tmp_path: Path, open_port: int) -> None:
-    deny = f"127.0.0.1:{open_port}"
-    result = _smoke(tmp_path, deny, f"127.0.0.1:{open_port}")
-    assert result.returncode == 1
-    assert "Address 1 of 1 answered" in result.stdout
-    _assert_private(result, deny)
-
-
-def test_smoke_counts_refused_as_reached(tmp_path: Path, open_port: int, closed_port: int) -> None:
-    deny = f"127.0.0.1:{closed_port}"
-    result = _smoke(tmp_path, deny, f"127.0.0.1:{open_port}")
-    assert result.returncode == 1
-    assert "(refused)" in result.stdout
-    _assert_private(result, deny)
-
-
-def test_smoke_checks_every_address(tmp_path: Path, open_port: int) -> None:
-    deny = f"{_BLOCKED}:443, 127.0.0.1:{open_port}"
-    result = _smoke(tmp_path, deny, f"127.0.0.1:{open_port}")
-    assert result.returncode == 1
-    assert "Address 2 of 2 answered" in result.stdout
-    assert "address 1 of 2, port 443: no answer" in result.stdout
-    _assert_private(result, _BLOCKED, f"127.0.0.1:{open_port}")
-
-
-def test_smoke_probes_three_ports_when_none_is_given(tmp_path: Path, open_port: int) -> None:
-    result = _smoke(tmp_path, _BLOCKED, f"127.0.0.1:{open_port}")
-    assert result.returncode == 0
-    for port in (443, 80, 22):
-        assert f"address 1 of 1, port {port}: no answer" in result.stdout
-
-
-def test_smoke_counts_a_timeout_as_not_reached(tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    # github.com passes; the probe of the denied address times out.
-    _fake(bin_dir, "timeout", 'if [ "$5" = needed.example ]; then exit 0; fi\nexit 124')
-    result = _run(
-        _SMOKE,
-        tmp_path,
-        {"MEHO_CI_SITE": "extra", "MEHO_CI_DENY_PROBE_HOSTS": "secret.example:8443"},
-        "needed.example",
-    )
-    assert result.returncode == 0, result.stdout
-    _assert_private(result, "secret.example")
+    assert f"Cannot reach {_REACH} (curl exit code 28)" in result.stdout
+    assert len(calls) == 1, "no deny check runs when a reach check fails"
+    _assert_private(result, _ADDRESS)
 
 
 @pytest.mark.parametrize(
     "entry",
     ["bad/value", "bad value!", "host:notaport", "$(touch /tmp/x)"],
 )
-def test_smoke_refuses_an_entry_of_the_wrong_shape(
-    tmp_path: Path, open_port: int, entry: str
-) -> None:
-    result = _smoke(tmp_path, entry, f"127.0.0.1:{open_port}")
+def test_smoke_refuses_an_entry_of_the_wrong_shape(tmp_path: Path, entry: str) -> None:
+    result, calls = _smoke(tmp_path, entry, _REACH)
     assert result.returncode == 1
     assert "Entry 1 of MEHO_CI_DENY_PROBE_HOSTS" in result.stdout
+    assert calls == []
     _assert_private(result, entry)
 
 
-def test_smoke_accepts_an_ipv6_address(tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _fake(bin_dir, "timeout", 'if [ "$5" = needed.example ]; then exit 0; fi\nexit 124')
+def test_smoke_puts_an_ipv6_address_in_brackets(tmp_path: Path) -> None:
     deny = "2001:db8::1"
-    result = _run(
-        _SMOKE,
-        tmp_path,
-        {"MEHO_CI_SITE": "extra", "MEHO_CI_DENY_PROBE_HOSTS": deny},
-        "needed.example",
-    )
+    result, calls = _smoke(tmp_path, deny, _REACH)
     assert result.returncode == 0, result.stdout
+    assert calls[-1].endswith(f"https://[{deny}]/")
     _assert_private(result, deny)
 
 
@@ -647,7 +661,7 @@ def test_smoke_workflow_is_safe_by_construction() -> None:
     assert "env" not in job, "a private value must stay on the pod, not in the log"
     for step in job["steps"]:
         assert "env" not in step, "the runner prints a step's env block in the public log"
-    assert job["steps"][-1]["run"].split()[2] == "github.com"
+    assert job["steps"][-1]["run"].split()[2] == "https://github.com"
 
 
 # --- The public image names: use_public_test_images.sh ------------------------
@@ -663,6 +677,8 @@ def _images(tmp_path: Path, env: dict[str, str]) -> tuple[dict[str, str], str, i
     return written, result.stdout, result.returncode
 
 
+# Every job with a MEHO_TEST_*_IMAGE line. Only the jobs that can run on the
+# second pool have the step; the name rule is checked on all of these lines.
 _IMAGE_JOBS = [
     name
     for name, job in yaml.safe_load((_WORKFLOWS / "ci.yml").read_text())["jobs"].items()
@@ -682,18 +698,28 @@ def test_image_jobs_are_the_ones_we_expect() -> None:
     }
 
 
-@pytest.mark.parametrize("job", _IMAGE_JOBS)
-def test_image_step_comes_right_after_checkout(job: str) -> None:
-    steps = _ci_jobs()[job]["steps"]
+def test_image_step_comes_right_after_checkout() -> None:
+    steps = _ci_jobs()["python-unit-shard"]["steps"]
     assert steps[0]["name"] == "Checkout"
     assert steps[1]["name"] == _IMAGE_STEP
     assert steps[1]["run"] == "bash scripts/ci/use_public_test_images.sh"
 
 
-def test_image_step_is_only_in_jobs_that_set_images() -> None:
-    for name, job in _ci_jobs().items():
-        names = [step.get("name") for step in job.get("steps", [])]
-        assert (_IMAGE_STEP in names) == (name in _IMAGE_JOBS), name
+def test_image_step_is_only_in_the_job_that_can_use_the_pool() -> None:
+    with_step = [
+        name
+        for name, job in _ci_jobs().items()
+        if _IMAGE_STEP in [step.get("name") for step in job.get("steps", [])]
+    ]
+    assert with_step == ["python-unit-shard"]
+
+
+def test_login_step_still_skips_on_an_empty_username() -> None:
+    steps = _ci_jobs()["python-unit-shard"]["steps"]
+    names = [step.get("name") for step in steps]
+    login = names.index("Docker Hub login (for testcontainers pulls)")
+    assert steps[login]["if"] == "env.DOCKERHUB_USERNAME != ''"
+    assert names.index(_IMAGE_STEP) < login
 
 
 @pytest.mark.parametrize("job", _IMAGE_JOBS)
@@ -701,7 +727,7 @@ def test_images_do_not_change_on_todays_pools(tmp_path: Path, job: str) -> None:
     env = {k: str(v) for k, v in _ci_jobs()[job]["env"].items() if k.startswith("MEHO_TEST_")}
     written, stdout, code = _images(tmp_path, env)
     assert code == 0
-    assert written == {}
+    assert written == {}, "nothing may change on today's pools, also not the login"
     assert "Not the second runner pool" in stdout
 
 
@@ -722,12 +748,13 @@ def test_real_image_lines_become_public_names(tmp_path: Path, job: str) -> None:
     }
     written, _, code = _images(tmp_path, {"MEHO_CI_SITE": "extra", **images})
     assert code == 0
-    assert set(written) == set(images)
+    assert set(written) == set(images) | {"DOCKERHUB_USERNAME"}
     for name, value in images.items():
         registry = value.split("/", 1)[0]
         assert "." in registry, f"{name} is expected to name a registry today"
-        assert not written[name].startswith(registry)
-        assert value.endswith("/" + written[name]), name
+        assert written[name].startswith("docker.io/"), name
+        assert registry not in written[name], name
+        assert value.endswith("/" + written[name].removeprefix("docker.io/")), name
 
 
 def test_keycloak_gets_a_public_name(tmp_path: Path) -> None:
@@ -739,7 +766,25 @@ def test_keycloak_gets_a_public_name(tmp_path: Path) -> None:
     assert "MEHO_TEST_KEYCLOAK_IMAGE" in images
     written, _, code = _images(tmp_path, {"MEHO_CI_SITE": "extra", **images})
     assert code == 0
-    assert written["MEHO_TEST_KEYCLOAK_IMAGE"].startswith("keycloak/keycloak:")
+    assert written["MEHO_TEST_KEYCLOAK_IMAGE"].startswith("docker.io/keycloak/keycloak:")
+
+
+def test_pgvector_keeps_the_pin_the_chart_test_expects(tmp_path: Path) -> None:
+    images = {
+        k: str(v)
+        for k, v in _ci_jobs()["python-unit-shard"]["env"].items()
+        if k == "MEHO_TEST_PGVECTOR_IMAGE"
+    }
+    written, _, code = _images(tmp_path, {"MEHO_CI_SITE": "extra", **images})
+    assert code == 0
+    assert written["MEHO_TEST_PGVECTOR_IMAGE"].endswith(f"/{chart_postgres_image()}")
+
+
+def test_the_docker_hub_login_is_skipped_on_the_second_pool(tmp_path: Path) -> None:
+    written, stdout, code = _images(tmp_path, {"MEHO_CI_SITE": "extra"})
+    assert code == 0
+    assert written == {"DOCKERHUB_USERNAME": ""}
+    assert "login step is skipped" in stdout
 
 
 def test_a_digest_pin_survives(tmp_path: Path) -> None:
@@ -749,14 +794,15 @@ def test_a_digest_pin_survives(tmp_path: Path) -> None:
     }
     written, _, code = _images(tmp_path, env)
     assert code == 0
-    assert written == {"MEHO_TEST_X_IMAGE": "org/app@sha256:abc123"}
+    assert written["MEHO_TEST_X_IMAGE"] == "docker.io/org/app@sha256:abc123"
 
 
-def test_a_public_name_is_left_alone(tmp_path: Path) -> None:
-    env = {"MEHO_CI_SITE": "extra", "MEHO_TEST_X_IMAGE": "org/app:1"}
+@pytest.mark.parametrize("value", ["org/app:1", "docker.io/org/app:1"])
+def test_a_public_name_is_left_alone(tmp_path: Path, value: str) -> None:
+    env = {"MEHO_CI_SITE": "extra", "MEHO_TEST_X_IMAGE": value}
     written, stdout, code = _images(tmp_path, env)
     assert code == 0
-    assert written == {}
+    assert "MEHO_TEST_X_IMAGE" not in written
     assert "already a public name" in stdout
 
 
@@ -764,7 +810,7 @@ def test_a_private_name_without_a_project_fails(tmp_path: Path) -> None:
     env = {"MEHO_CI_SITE": "extra", "MEHO_TEST_X_IMAGE": "mirror.example/app:1"}
     written, stdout, code = _images(tmp_path, env)
     assert code == 1
-    assert written == {}
+    assert "MEHO_TEST_X_IMAGE" not in written
     assert "no project part" in stdout
 
 
@@ -776,4 +822,4 @@ def test_other_variables_are_not_touched(tmp_path: Path) -> None:
     }
     written, _, code = _images(tmp_path, env)
     assert code == 0
-    assert written == {}
+    assert written == {"DOCKERHUB_USERNAME": ""}

@@ -1767,11 +1767,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Use public test images on the second runner pool
-        # Changes nothing on every other pool. See the script.
-        working-directory: ${{ github.workspace }}
-        run: bash scripts/ci/use_public_test_images.sh
-
       - name: Start memory sampling
         # Feeds the "Print peak memory" step at the end of this job. A small
         # background loop reads this container's cgroup v2 memory files once a
@@ -2368,14 +2363,11 @@ jobs:
       # default** in the fixture: the Keycloak image is ~600 MB and an
       # unauthenticated docker.io pull would reliably exhaust the
       # cluster's shared NAT egress bucket, so the fixture skips when
-      # MEHO_TEST_KEYCLOAK_IMAGE is unset rather than falling back. Only a
-      # set image name runs the suite to pass: this line, or on a runner
-      # of the second pool the public name that the step
-      # `scripts/ci/use_public_test_images.sh` writes (#6026; that pool
-      # pulls through its own Docker Hub cache). Everywhere else (local
-      # dev sandboxes, agent sandboxes, any future fork PR job that
-      # doesn't see this env) the test skips cleanly with a clear
-      # remediation message.
+      # MEHO_TEST_KEYCLOAK_IMAGE is unset rather than falling back. The
+      # Harbor-proxied tag is the only path that runs the suite to
+      # pass; everywhere else (local dev sandboxes, agent sandboxes,
+      # any future fork PR job that doesn't see this env) the test
+      # skips cleanly with a clear remediation message.
       MEHO_TEST_KEYCLOAK_IMAGE: harbor.evba.lab/dockerhub-proxy/keycloak/keycloak:26.0
       # #2949 — vendor spec-shelf wiring for the tests/integration
       # real-spec lanes. See the comment on the python-unit-shard job's
@@ -2390,11 +2382,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Use public test images on the second runner pool
-        # Changes nothing on every other pool. See the script.
-        working-directory: ${{ github.workspace }}
-        run: bash scripts/ci/use_public_test_images.sh
 
       - name: List the required spec-shelf files
         # The required vendor API files are listed in ci/spec-shelf/, one
@@ -2635,11 +2622,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Use public test images on the second runner pool
-        # Changes nothing on every other pool. See the script.
-        working-directory: ${{ github.workspace }}
-        run: bash scripts/ci/use_public_test_images.sh
 
       - name: Docker Hub login (for testcontainers pulls)
         # Authenticated pulls avoid the shared-NAT Docker Hub anonymous

@@ -2125,13 +2125,20 @@ minutes while the pool is on. It fails unless the runner:
 - has `MEHO_CI_SITE=extra`,
 - reaches github.com and the other hosts a unit test shard cannot work
   without (the list is in the workflow),
-- reaches no address in the private pod env `MEHO_CI_DENY_PROBE_HOSTS`,
-  which must not be empty.
+- gets a timeout from every address in the private pod env
+  `MEHO_CI_DENY_PROBE_HOSTS`, which must not be empty.
 
-It never prints one of those addresses, because the logs of this repository
-are public. A host that refuses the connection counts as reached, because a
-reply came back. On a dead pool the job waits for a runner and the next
-scheduled run replaces it, so at most one run waits. The last pass then
+Only a curl timeout (exit code 28) counts as "cannot reach". A success, a
+refused connection or a certificate error means the packets got through, and
+every other error means the check proved nothing, so the check fails. The
+network of the pool must therefore drop these packets, not reject them, and
+each entry must be an address the check can try: an IP address, or a name
+the pod can resolve.
+
+The check masks each address with `::add-mask::` before it uses it, and
+prints only the position and the exit code, because the logs of this
+repository are public. On a dead pool the job waits for a runner and the
+next scheduled run replaces it, so at most one run waits. The last pass then
 grows old and CI goes back to today's pool.
 
 **If the pool dies after a good smoke check.** The job
@@ -2144,10 +2151,13 @@ pool on the re-run.
 
 **Test images.** The second pool cannot reach the private image mirror. On
 a runner with `MEHO_CI_SITE=extra`, the step
-`scripts/ci/use_public_test_images.sh` writes the public Docker Hub name of
-each `MEHO_TEST_*_IMAGE` to `$GITHUB_ENV`. That is also how Keycloak gets a
-public image. The step runs in every job that sets these images, and it
-changes nothing on other pools.
+`scripts/ci/use_public_test_images.sh` writes the public `docker.io/` name
+of each `MEHO_TEST_*_IMAGE` to `$GITHUB_ENV`. The same step makes the Docker
+Hub login step skip, because that login goes straight to Docker Hub and the
+pool pulls through its own cache. The step runs in `python-unit-shard`, the
+only job that can run on this pool, and it changes nothing on other pools.
+If another job moves to this pool, add the same step to it: a job with a
+Keycloak or k3s image line then gets the public name with no other change.
 
 **To switch the pool on:**
 

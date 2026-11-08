@@ -5,8 +5,8 @@
 # schedule run it every 30 minutes once the pool is switched on.
 #
 # A pass does two things. It proves the pool is set up safely: it reaches
-# what a unit test shard needs, and it does not reach the addresses in the
-# private pod env MEHO_CI_DENY_PROBE_HOSTS. And it tells CI the pool is
+# what a unit test shard needs, and every address in the private pod env
+# MEHO_CI_DENY_PROBE_HOSTS ends in a timeout. And it tells CI the pool is
 # online: the `changes` job of ci.yml reads this workflow's run history and
 # sends unit test shards 4-6 to the pool only after a pass in the last 45
 # minutes. So no pass means today's pool.
@@ -59,9 +59,9 @@ jobs:
         # If a pool gets these through a mirror, change this list.
         run: >-
           bash scripts/ci/extra_runner_smoke.sh
-          github.com
-          pypi.org
-          files.pythonhosted.org
-          get.helm.sh
-          huggingface.co
-          archive.ubuntu.com:80
+          https://github.com
+          https://pypi.org
+          https://files.pythonhosted.org
+          https://get.helm.sh
+          https://huggingface.co
+          http://archive.ubuntu.com

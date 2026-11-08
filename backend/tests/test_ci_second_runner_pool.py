@@ -750,11 +750,9 @@ def test_real_image_lines_become_public_names(tmp_path: Path, job: str) -> None:
     assert code == 0
     assert set(written) == set(images) | {"DOCKERHUB_USERNAME"}
     for name, value in images.items():
-        registry = value.split("/", 1)[0]
+        registry, _project, rest = value.split("/", 2)
         assert "." in registry, f"{name} is expected to name a registry today"
-        assert written[name].startswith("docker.io/"), name
-        assert registry not in written[name], name
-        assert value.endswith("/" + written[name].removeprefix("docker.io/")), name
+        assert written[name] == f"docker.io/{rest}", name
 
 
 def test_keycloak_gets_a_public_name(tmp_path: Path) -> None:
@@ -766,7 +764,9 @@ def test_keycloak_gets_a_public_name(tmp_path: Path) -> None:
     assert "MEHO_TEST_KEYCLOAK_IMAGE" in images
     written, _, code = _images(tmp_path, {"MEHO_CI_SITE": "extra", **images})
     assert code == 0
-    assert written["MEHO_TEST_KEYCLOAK_IMAGE"].startswith("docker.io/keycloak/keycloak:")
+    _registry, _project, rest = images["MEHO_TEST_KEYCLOAK_IMAGE"].split("/", 2)
+    assert rest.split(":")[0] == "keycloak/keycloak"
+    assert written["MEHO_TEST_KEYCLOAK_IMAGE"] == f"docker.io/{rest}"
 
 
 def test_pgvector_keeps_the_pin_the_chart_test_expects(tmp_path: Path) -> None:

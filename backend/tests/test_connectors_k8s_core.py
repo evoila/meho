@@ -48,6 +48,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from kubernetes_asyncio.client.models import (
+    V1CronJob,
+    V1CronJobList,
+    V1CronJobSpec,
+    V1DaemonSet,
+    V1DaemonSetList,
+    V1DaemonSetSpec,
+    V1JobTemplateSpec,
+    V1LabelSelector,
     V1ListMeta,
     V1Namespace,
     V1NamespaceList,
@@ -60,6 +68,10 @@ from kubernetes_asyncio.client.models import (
     V1NodeStatus,
     V1NodeSystemInfo,
     V1ObjectMeta,
+    V1PodTemplateSpec,
+    V1StatefulSet,
+    V1StatefulSetList,
+    V1StatefulSetSpec,
     V1Taint,
 )
 
@@ -678,15 +690,10 @@ async def test_k8s_ls_namespace_kind_with_rbac_403_records_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_k8s_ls_namespace_kind_forwards_to_unknown_op_envelope() -> None:
-    """Kinds whose ``list`` op isn't registered come back as ``unknown_op`` via the shim.
+async def test_k8s_ls_namespace_kind_with_no_list_op_raises_and_names_kinds() -> None:
+    """A kind with no ``list`` op makes ``k8s.ls`` fail, not answer ``ok`` with rows missing.
 
-    Pinned against a kind the registered surface deliberately does not
-    cover. T3 (#323) brought ``k8s.pod.list`` and ``k8s.deployment.list``
-    into the registered set; T4 (#324) added ``service`` / ``ingress`` /
-    ``configmap`` / ``event``. ``statefulsets`` is out of v0.2 scope (no
-    ``k8s.statefulset.list`` op registered), so it keeps the test pinned
-    on the unknown-op shape until a future Task adds it.
+    The error names the kinds ``k8s.ls`` can list, so the caller can pick one.
     """
     from meho_backplane.operations import typed_register as tr_module
 
@@ -698,37 +705,192 @@ async def test_k8s_ls_namespace_kind_forwards_to_unknown_op_envelope() -> None:
     ):
         await KubernetesConnector.register_operations()
 
-    result = await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd/statefulsets"})
+    with pytest.raises(ValueError, match="cannot list the kind 'widgets'") as excinfo:
+        await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd/widgets"})
+    for kind in ("cronjobs", "statefulsets", "daemonsets", "pods"):
+        assert kind in str(excinfo.value)
 
-    assert result["path"] == "/argocd/statefulsets"
-    assert result["forwarded_to"] == "k8s.statefulset.list"
-    inner = result["result"]
-    assert inner["status"] == "error"
-    assert inner["error"].startswith("unknown_op:")
-    assert inner["extras"]["error_code"] == "unknown_op"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path_kind", "sub_op_id", "sub_params"),
+    [
+        ("cronjobs", "k8s.cronjob.list", {"namespace": "argocd"}),
+        ("statefulsets", "k8s.workload.list", {"namespace": "argocd", "kind": "StatefulSet"}),
+        ("daemonsets", "k8s.workload.list", {"namespace": "argocd", "kind": "DaemonSet"}),
+        ("statefulset", "k8s.workload.list", {"namespace": "argocd", "kind": "StatefulSet"}),
+    ],
+)
+async def test_k8s_ls_namespace_kind_forwards_to_the_right_list_op(
+    path_kind: str, sub_op_id: str, sub_params: dict[str, Any]
+) -> None:
+    """``cronjobs``, ``statefulsets`` and ``daemonsets`` reach a real list op and return rows."""
+    from meho_backplane.connectors.schemas import OperationResult
+
+    connector = _make_connector()
+    ok = OperationResult(
+        status="ok", op_id=sub_op_id, result={"rows": [{"name": "x"}], "total": 1}, duration_ms=1.0
+    )
+    operator = _make_operator()
+    with patch.object(connector, "execute", AsyncMock(return_value=ok)) as execute:
+        result = await connector.k8s_ls(operator, _TARGET, {"path": f"/argocd/{path_kind}"})
+
+    execute.assert_awaited_once_with(_TARGET, sub_op_id, sub_params, operator=operator)
+    assert result["forwarded_to"] == sub_op_id
+    assert result["result"]["result"]["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_k8s_ls_namespace_kind_raises_when_the_sub_op_fails() -> None:
+    """A sub-op that fails (for example RBAC) is not passed on inside an ``ok`` answer."""
+    from meho_backplane.connectors.schemas import OperationResult
+
+    connector = _make_connector()
+    failed = OperationResult(
+        status="error", op_id="k8s.pod.list", error="connector_error: Forbidden", duration_ms=1.0
+    )
+    with (
+        patch.object(connector, "execute", AsyncMock(return_value=failed)),
+        pytest.raises(RuntimeError, match=r"k8s\.pod\.list failed: connector_error: Forbidden"),
+    ):
+        await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd/pods"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path_kind", "api_path", "list_method", "items"),
+    [
+        (
+            "cronjobs",
+            "meho_backplane.connectors.kubernetes.ops_cronjob_list.client.BatchV1Api",
+            "list_namespaced_cron_job",
+            V1CronJobList(
+                items=[
+                    V1CronJob(
+                        metadata=V1ObjectMeta(name="backup", namespace="argocd"),
+                        spec=V1CronJobSpec(schedule="0 3 * * *", job_template=V1JobTemplateSpec()),
+                    )
+                ],
+                metadata=V1ListMeta(),
+            ),
+        ),
+        (
+            "statefulsets",
+            "meho_backplane.connectors.kubernetes.ops_workload_set.client.AppsV1Api",
+            "list_namespaced_stateful_set",
+            V1StatefulSetList(
+                items=[
+                    V1StatefulSet(
+                        metadata=V1ObjectMeta(name="db", namespace="argocd"),
+                        spec=V1StatefulSetSpec(
+                            replicas=2,
+                            selector=V1LabelSelector(match_labels={"app": "db"}),
+                            service_name="db",
+                            template=V1PodTemplateSpec(),
+                        ),
+                    )
+                ],
+                metadata=V1ListMeta(),
+            ),
+        ),
+        (
+            "daemonsets",
+            "meho_backplane.connectors.kubernetes.ops_workload_set.client.AppsV1Api",
+            "list_namespaced_daemon_set",
+            V1DaemonSetList(
+                items=[
+                    V1DaemonSet(
+                        metadata=V1ObjectMeta(name="node-agent", namespace="argocd"),
+                        spec=V1DaemonSetSpec(
+                            selector=V1LabelSelector(match_labels={"app": "agent"}),
+                            template=V1PodTemplateSpec(),
+                        ),
+                    )
+                ],
+                metadata=V1ListMeta(),
+            ),
+        ),
+    ],
+)
+async def test_k8s_ls_namespace_kind_forwards_under_the_callers_operator(
+    path_kind: str, api_path: str, list_method: str, items: Any
+) -> None:
+    """The real forwarding path runs the sub-op under the caller's operator and returns rows.
+
+    The credential loader stands in for Vault: it refuses the system operator,
+    as Vault refuses its placeholder token. So the rows only come back when
+    ``k8s.ls`` hands its own operator to the forwarded call.
+    """
+    from meho_backplane.connectors._shared.system_operator import is_system_operator
+    from meho_backplane.operations import typed_register as tr_module
+    from meho_backplane.operations._handler_resolve import reset_handler_cache
+
+    reset_handler_cache()
+    with patch.object(
+        tr_module,
+        "encode_endpoint_text",
+        AsyncMock(return_value=[0.1] * 384),
+    ):
+        await KubernetesConnector.register_operations()
+
+    seen_operators: list[Operator] = []
+
+    async def _loader(_target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        if is_system_operator(operator):
+            raise RuntimeError("Vault rejects the system operator's placeholder token")
+        seen_operators.append(operator)
+        return _stub_kubeconfig()
+
+    connector = KubernetesConnector(kubeconfig_loader=_loader)
+    operator = _make_operator()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch(api_path) as api_cls,
+    ):
+        setattr(api_cls.return_value, list_method, AsyncMock(return_value=items))
+        result = await connector.k8s_ls(operator, _TARGET, {"path": f"/argocd/{path_kind}"})
+
+    assert seen_operators == [operator]
+    assert result["result"]["status"] == "ok"
+    assert result["result"]["result"]["total"] == 1
+    assert result["result"]["result"]["rows"][0]["namespace"] == "argocd"
+
+
+def test_k8s_ls_listable_kinds_all_have_a_registered_list_op() -> None:
+    """Every kind named in the ``k8s.ls`` error maps to an op that exists."""
+    from meho_backplane.connectors.kubernetes import KUBERNETES_OPS
+    from meho_backplane.connectors.kubernetes.connector import (
+        _APPS_WORKLOAD_KINDS,
+        _LS_LISTABLE_KINDS,
+        _normalise_kind_to_singular,
+    )
+
+    op_ids = {op.op_id for op in KUBERNETES_OPS}
+    for kind in _LS_LISTABLE_KINDS:
+        singular = _normalise_kind_to_singular(kind)
+        expected = (
+            "k8s.workload.list" if singular in _APPS_WORKLOAD_KINDS else f"k8s.{singular}.list"
+        )
+        assert expected in op_ids, kind
 
 
 @pytest.mark.asyncio
 async def test_k8s_ls_path_with_extra_segments_collapses_to_two_arg_forward() -> None:
-    """``k8s.ls /ns/kind/extra`` collapses to the ``/ns/kind`` forwarder shape.
-
-    Uses ``services`` (still unshipped post-T3) so the inner result is
-    the deterministic ``unknown_op`` envelope; the assertion target is
-    the canonical 2-segment collapse, not the sub-op's success.
-    """
-    from meho_backplane.operations import typed_register as tr_module
+    """``k8s.ls /ns/kind/extra`` collapses to the ``/ns/kind`` forwarder shape."""
+    from meho_backplane.connectors.schemas import OperationResult
 
     connector = _make_connector()
-    with patch.object(
-        tr_module,
-        "encode_endpoint_text",
-        AsyncMock(return_value=[0.1] * 384),
-    ):
-        await KubernetesConnector.register_operations()
-
-    result = await connector.k8s_ls(
-        _make_operator(), _TARGET, {"path": "/argocd/services/extra/segments"}
+    ok = OperationResult(
+        status="ok", op_id="k8s.service.list", result={"rows": []}, duration_ms=1.0
     )
+    with patch.object(connector, "execute", AsyncMock(return_value=ok)):
+        result = await connector.k8s_ls(
+            _make_operator(), _TARGET, {"path": "/argocd/services/extra/segments"}
+        )
     assert result["forwarded_to"] == "k8s.service.list"
     # The path retained is the canonical 2-segment shape.
     assert result["path"] == "/argocd/services"
@@ -798,17 +960,14 @@ async def test_k8s_ls_forwards_singular_ingress_path_without_mangling() -> None:
     before composing the sub-op id; the B1 fix ensures the singular
     form survives the normalisation.
     """
-    from meho_backplane.operations import typed_register as tr_module
+    from meho_backplane.connectors.schemas import OperationResult
 
     connector = _make_connector()
-    with patch.object(
-        tr_module,
-        "encode_endpoint_text",
-        AsyncMock(return_value=[0.1] * 384),
-    ):
-        await KubernetesConnector.register_operations()
-
-    result = await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd/ingress"})
+    ok = OperationResult(
+        status="ok", op_id="k8s.ingress.list", result={"rows": []}, duration_ms=1.0
+    )
+    with patch.object(connector, "execute", AsyncMock(return_value=ok)):
+        result = await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd/ingress"})
 
     assert result["path"] == "/argocd/ingress"
     assert result["forwarded_to"] == "k8s.ingress.list"

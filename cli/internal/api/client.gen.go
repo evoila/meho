@@ -1696,6 +1696,7 @@ type ApprovalRequestView struct {
 	ParamsHash     string                 `json:"params_hash"`
 	PreviewHash    *string                `json:"preview_hash"`
 	PrincipalAct   *string                `json:"principal_act"`
+	PrincipalKind  *string                `json:"principal_kind"`
 	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`

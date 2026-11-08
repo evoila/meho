@@ -6923,7 +6923,14 @@ class ApprovalRequest(Base):
       hoist-at-write pattern as ``audit_log.principal_name`` (#1212); NULL
       when the token carried no name (fail-open) and on pre-0097 rows.
       Display name only -- never email or other profile fields. Added by
-      migration ``0097``.
+      migration ``0097``. For a machine token without a ``name`` claim
+      it is the registered agent name or the client id (#3885).
+
+    * ``principal_kind`` -- Text nullable. The requester's
+      ``principal_kind`` (``user`` / ``agent`` / ``service`` / ``runner``),
+      saved at park time so the console and the CLI can mark a machine
+      requester as not a person (#3885). NULL on rows parked before
+      migration ``0147``.
 
     * ``op_id`` / ``connector_id`` -- the operation + connector the
       dispatcher was asked to call. Stored verbatim for resume.
@@ -7148,6 +7155,9 @@ class ApprovalRequest(Base):
     # Display name only -- no email / groups / other profile fields. Added
     # by migration ``0097``.
     principal_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The requester's principal kind (#3885), so the approval surfaces can
+    # mark an agent requester as not a person. NULL before migration 0147.
+    principal_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Dispatch coordinates for resume.
     op_id: Mapped[str] = mapped_column(Text, nullable=False)
     connector_id: Mapped[str] = mapped_column(Text, nullable=False)

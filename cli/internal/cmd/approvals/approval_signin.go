@@ -190,7 +190,7 @@ func showRequest(w io.Writer, header string, d *api.ApprovalRequestView) {
 	if d.TargetId != nil {
 		fmt.Fprintf(w, "  Target:       %s\n", targetLabel(d.TargetId.String(), rc))
 	}
-	fmt.Fprintf(w, "  Requested by: %s\n", principalLabel(d.PrincipalSub, d.PrincipalName))
+	fmt.Fprintf(w, "  Requested by: %s\n", requesterLabel(d.PrincipalSub, d.PrincipalName, d.PrincipalKind))
 	if rc != nil && rc.BlastRadius != nil {
 		b, _ := json.MarshalIndent(*rc.BlastRadius, "    ", "  ")
 		fmt.Fprintf(w, "  What else is affected:\n    %s\n", output.SafeLines(string(b)))

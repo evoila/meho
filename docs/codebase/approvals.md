@@ -605,19 +605,52 @@ the stable, machine-truthful key. This is the first slice of Initiative
 `sub` → name join table (the agent / runner principal tables key on the
 Keycloak client id, not the token `sub`; see
 `meho_backplane.ui.references`), so the name cannot be resolved after the
-fact. Migration `0097` adds two nullable `approval_request` columns:
+fact from the `sub` alone. Migration `0097` adds two nullable
+`approval_request` columns:
 
 - `principal_name` — the requester's name, set in
-  `create_pending_request` from the parking `Operator.name`.
+  `create_pending_request`.
 - `reviewed_by_name` — the approver's name, set in `approve_request` /
   `reject_request` from the deciding `Operator.name`.
 
-Both come from the JWT `name` claim — the same hoist-at-write pattern
-`audit_log.principal_name` uses (#1212). The approval audit rows
-(`_write_audit_row`) carry the same `payload['principal_name']` so the
-name-aware audit views resolve the row's `operator_sub` too, and the
-`/decide` response gains an additive `decided_by_name` beside
-`decided_by`.
+This is the same hoist-at-write pattern `audit_log.principal_name` uses
+(#1212). The approval audit rows (`_write_audit_row`) carry the same
+`payload['principal_name']` so the name-aware audit views resolve the
+row's `operator_sub` too, and the `/decide` response gains an additive
+`decided_by_name` beside `decided_by`.
+
+**Where the requester's name comes from (#3885).** An agent's token
+(`client_credentials`) has no `name` claim. But at write time MEHO has
+the token's client id (`Operator.client_id`), and a registered agent is
+found by it. So one helper,
+`meho_backplane.auth.display_name.principal_display_name`, picks the
+name in this order:
+
+1. The token's `name` claim. A person's name always wins.
+2. For an agent token: the registered agent's name
+   (`AgentPrincipal.name`), found by `keycloak_client_id ==
+   Operator.client_id` in the caller's tenant. A revoked agent still
+   counts.
+3. For any machine token (agent, service, runner): the client id itself,
+   for example `agent:<name>`.
+
+No name in any step: nothing is stored, as before. Every place that
+stores the caller's name calls this helper: the approval request and its
+audit rows, the operation run and refusal rows (`write_audit_row`), the
+MCP tool rows (`write_mcp_audit_row`) and the tool rows of MEHO's own
+agent runs (`write_agent_tool_row`).
+
+**Machine requesters are marked (#3885).** Migration `0147` adds
+`approval_request.principal_kind` (nullable text): the requester's
+`principal_kind` (`user` / `agent` / `service` / `runner`), saved at park
+time. A composite step that waits again during a re-run keeps the kind of
+the original requester (`ResumeRequester.kind`). REST returns it as
+`ApprovalRequestView.principal_kind`. The console `subject(ref)` macro
+shows a badge with the kind next to a machine requester, and the CLI adds
+it in brackets: `show` prints `incident-triage (<sub>) [agent]`, and the
+`list` PRINCIPAL column puts it first (`[agent] incident-triage`) so a cut
+column still shows it. A person, or a request made before `0147`, gets no
+marker.
 
 **Fail-open contract.** Resolution can never fail or slow a decision: no
 identity provider is called; the surface reads a column already loaded on

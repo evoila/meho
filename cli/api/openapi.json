@@ -25536,6 +25536,11 @@
             "nullable": true,
             "title": "Principal Name"
           },
+          "principal_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Kind"
+          },
           "op_id": {
             "type": "string",
             "title": "Op Id"

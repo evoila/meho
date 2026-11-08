@@ -158,6 +158,8 @@ def test_no_token_is_401(client: TestClient) -> None:
         ("POST", "/api/v1/kb", {"slug": "x", "body": "y"}),
         ("DELETE", "/api/v1/kb/limits", None),
         ("POST", "/api/v1/kb/ingest", {"directory": "kb"}),
+        ("GET", KB_IMPORT_PATH, None),
+        ("DELETE", KB_IMPORT_PATH, None),
     ],
 )
 @pytest.mark.parametrize("role", [TenantRole.READ_ONLY, TenantRole.TENANT_ADMIN])

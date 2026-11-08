@@ -384,7 +384,10 @@ Body (`KbImportRequest`, unknown fields are a `422`):
 ```
 
 At most 1000 pages per request (`MAX_PAGES`) and 1,000,000 characters
-per page (`MAX_PAGE_CHARS`). A bigger wiki sends several requests.
+per page (`MAX_PAGE_CHARS`). The whole request body must also stay
+under `HTTP_MAX_REQUEST_BODY_BYTES` (32 MiB by default); a bigger body
+gets `413`. A bigger wiki sends several requests. Two pages with the
+same slug are found only when they sit in the same request.
 
 Each page goes through these checks, in this order. A page that fails
 one is skipped (`action: "skip"`), and `reason` says why:
@@ -459,9 +462,11 @@ claim `kb_import_only: true` (`Operator.kb_import_only`,
 `auth/jwt.py::_extract_kb_import_only`). Such a login can do nothing
 else:
 
-- every other REST route answers `403 kb_import_only_scope_violation`
+- every other REST route, and every method but `POST` on the import
+  path, answers `403 kb_import_only_scope_violation`
   (`middleware.py::_reject_kb_import_only_elsewhere`, keyed on
-  `KB_IMPORT_PATH`), whatever role the token names;
+  `KB_IMPORT_ROUTE`, the pair `POST` + `KB_IMPORT_PATH`), whatever role
+  the token names;
 - every MCP call answers the same `403` (`mcp/auth.py::verify_mcp_jwt_and_bind`);
 - the console needs an interactive sign-in, which a client-credentials
   login cannot do.

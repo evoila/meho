@@ -404,6 +404,11 @@ class Operator(BaseModel):
     #: and MCP never do. Off means the call came with a token: it follows the
     #: agent rule, so only ``safe`` operations run at once.
     web_session: bool = False
+    #: The MCP tool profile the client named with ``?profile=`` (#4172),
+    #: or ``None`` for the full tool list. Only the MCP route sets it, from
+    #: the URL; see :mod:`meho_backplane.mcp.profiles`. It only hides
+    #: tools. It gives no right and takes no right from the person.
+    mcp_tool_profile: str | None = None
 
     @property
     def may_self_approve(self) -> bool:

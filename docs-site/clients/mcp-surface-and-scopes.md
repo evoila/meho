@@ -60,6 +60,32 @@ A useful session almost always walks the same rungs:
 5. `result_query` — page a large, set-shaped result back from its
    handle.
 
+## A smaller tool list for small models (tool profiles)
+
+A small model has a small context window. The 26 tools use a large part
+of it before the user asks anything. So a client can ask for a
+**tool profile**: add `?profile=<name>` to the MEHO MCP URL.
+
+| Profile | What the session can do | Tools |
+|---|---|---|
+| `investigate` | Find and read: connectors, targets, operations, results, knowledge and memory. | `meho_status`, `meho_connector_list`, `list_targets`, `list_operation_groups`, `search_operations`, `call_operation`, `result_query`, `search_knowledge`, `search_memory` |
+| `operate` | Everything in `investigate`, plus preview a change and tell other agents about it. | the 9 above, plus `preview_operation`, `meho_broadcast_recent`, `meho_broadcast_announce` |
+
+Example URL: `https://<meho-host>/mcp?profile=investigate`.
+
+- Without a profile, the session sees the full list, as before.
+- A profile only removes tools. It never gives a tool the session may
+  not use, and it ignores `mcp:admin`.
+- A tool outside the profile is also refused when called. The error
+  says it is not in the profile.
+- A wrong profile name is refused with HTTP 400, so a typo never gives
+  the full list by mistake.
+- The session-start instructions follow the profile. They do not name
+  a tool the session cannot see.
+- A profile does not change what the person may do. `call_operation`
+  still runs under the person's role, and changes still wait for
+  approval when the rules say so.
+
 ## The operator planes (behind `mcp:admin`)
 
 The governance and lifecycle tools — connector lifecycle and ingest,

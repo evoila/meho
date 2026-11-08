@@ -815,14 +815,9 @@ register_mcp_tool(
             "for review; 'enabled' = reviewed and ready to use; "
             "'disabled' = every group is turned off. With no `status`, "
             "it lists every connector. Do not pass `status` unless the "
-            "user asks for connectors in one review state. Pass `target` "
-            "(a target name) to list only the connectors that fit that "
-            "target's product and version, plus a `target_fit` summary: "
-            "'compatible', 'fingerprint_unknown' (version not known yet; "
-            "probe the target), 'no_connector', or 'ambiguous' (set the "
-            "target's preferred_impl_id). This is a hint only: it does not "
-            "choose a connector, and call_operation still picks one by "
-            "target. Read-only; visible to operator and tenant_admin roles."
+            "user asks for connectors in one review state. `target` keeps "
+            "only those that fit it. Read-only; visible to operator and "
+            "tenant_admin roles."
         ),
         inputSchema={
             "type": "object",
@@ -849,12 +844,7 @@ register_mcp_tool(
                 },
                 "target": {
                     "type": "string",
-                    "description": (
-                        "Name of a target (as list_targets shows it, not "
-                        "its id). Keeps only the connectors that fit this "
-                        "target and adds a `target_fit` summary. A hint "
-                        "only: it does not choose a connector."
-                    ),
+                    "description": "A target name, not its id.",
                 },
                 "detail": {
                     "type": "string",

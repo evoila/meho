@@ -1,0 +1,37 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  First-start checks page. The same list as ``GET /first-start``: one line
+  per check, green, red or skipped, and a red line says what to fix.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}First-start checks &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="mx-auto max-w-3xl space-y-6">
+  <header class="space-y-1">
+    <h1 class="text-xl font-semibold">First-start checks</h1>
+    <p class="text-sm opacity-70">
+      MEHO checks the DNS name, the certificate, the clock and the systems in
+      the settings. Reload the page to run the checks again.
+    </p>
+  </header>
+  <ul class="space-y-3" data-field="first-start-list">
+    {% for line in result.checks %}
+    <li class="card bg-base-100 border-base-300 border shadow-sm" data-check="{{ line.name }}" data-status="{{ line.status }}">
+      <div class="card-body space-y-1 p-4">
+        <h2 class="flex items-center gap-2 text-base font-medium">
+          <span class="badge {% if line.status == 'ok' %}badge-success{% elif line.status == 'fail' %}badge-error{% else %}badge-ghost{% endif %}">
+            {% if line.status == 'ok' %}green{% elif line.status == 'fail' %}red{% else %}skipped{% endif %}
+          </span>
+          <span>{{ line.name }}</span>
+        </h2>
+        <p class="text-sm">{{ line.message }}</p>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}

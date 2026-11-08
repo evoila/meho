@@ -398,6 +398,13 @@ const (
 	FilterPredicateOpLessThanEqual    FilterPredicateOp = "<="
 )
 
+// Defines values for FirstStartLineStatus.
+const (
+	FirstStartLineStatusFail    FirstStartLineStatus = "fail"
+	FirstStartLineStatusOk      FirstStartLineStatus = "ok"
+	FirstStartLineStatusSkipped FirstStartLineStatus = "skipped"
+)
+
 // Defines values for GatewayResultBodyOutcome.
 const (
 	GatewayResultBodyOutcomeFailed    GatewayResultBodyOutcome = "failed"
@@ -5264,6 +5271,11 @@ type DeprecateTemplateResponse struct {
 	Version int    `json:"version"`
 }
 
+// DestinationProof The answer of “GET /first-start/destination“: the proof for the nonce.
+type DestinationProof struct {
+	Proof string `json:"proof"`
+}
+
 // DiscardTemplateResponse Response for “meho_runbook_discard_template“ -- the discarded draft's coordinates.
 //
 // “status“ is the synthetic terminal marker “"discarded"“ -- unlike
@@ -6170,6 +6182,22 @@ type FingerprintResult struct {
 	Reachable   bool                    `json:"reachable"`
 	Vendor      string                  `json:"vendor"`
 	Version     *string                 `json:"version"`
+}
+
+// FirstStartLine One line of the first-start list.
+type FirstStartLine struct {
+	Message string               `json:"message"`
+	Name    string               `json:"name"`
+	Status  FirstStartLineStatus `json:"status"`
+}
+
+// FirstStartLineStatus defines model for FirstStartLine.Status.
+type FirstStartLineStatus string
+
+// FirstStartResponse The whole list. “ok“ is true when no line is “fail“.
+type FirstStartResponse struct {
+	Checks []FirstStartLine `json:"checks"`
+	Ok     bool             `json:"ok"`
 }
 
 // ForkInfo Surfaced by “meho_runbook_edit_template“ when editing a published template forks.
@@ -13087,6 +13115,12 @@ type TimelineRouteApiV1TopologyTimelineGetParams struct {
 	Authorization *string    `json:"authorization,omitempty"`
 }
 
+// FirstStartDestinationFirstStartDestinationGetParams defines parameters for FirstStartDestinationFirstStartDestinationGet.
+type FirstStartDestinationFirstStartDestinationGetParams struct {
+	// Nonce 32 hex characters
+	Nonce string `form:"nonce" json:"nonce"`
+}
+
 // McpDispatchMcpPostParams defines parameters for McpDispatchMcpPost.
 type McpDispatchMcpPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -16589,6 +16623,12 @@ type ClientInterface interface {
 	// TimelineRouteApiV1TopologyTimelineGet request
 	TimelineRouteApiV1TopologyTimelineGet(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// FirstStartFirstStartGet request
+	FirstStartFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FirstStartDestinationFirstStartDestinationGet request
+	FirstStartDestinationFirstStartDestinationGet(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// HealthzHealthzGet request
 	HealthzHealthzGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17106,6 +17146,9 @@ type ClientInterface interface {
 	EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiFirstStartUiFirstStartGet request
+	UiFirstStartUiFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// IndexUiGrantsGet request
 	IndexUiGrantsGet(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20824,6 +20867,30 @@ func (c *Client) TimelineRouteApiV1TopologyTimelineGet(ctx context.Context, para
 	return c.Client.Do(req)
 }
 
+func (c *Client) FirstStartFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartFirstStartGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FirstStartDestinationFirstStartDestinationGet(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartDestinationFirstStartDestinationGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) HealthzHealthzGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewHealthzHealthzGetRequest(c.Server)
 	if err != nil {
@@ -23190,6 +23257,18 @@ func (c *Client) EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slu
 
 func (c *Client) EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEditUiEventSourcesSlugEditPostRequestWithFormdataBody(c.Server, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiFirstStartUiFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiFirstStartUiFirstStartGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -38692,6 +38771,78 @@ func NewTimelineRouteApiV1TopologyTimelineGetRequest(server string, params *Time
 	return req, nil
 }
 
+// NewFirstStartFirstStartGetRequest generates requests for FirstStartFirstStartGet
+func NewFirstStartFirstStartGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/first-start")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewFirstStartDestinationFirstStartDestinationGetRequest generates requests for FirstStartDestinationFirstStartDestinationGet
+func NewFirstStartDestinationFirstStartDestinationGetRequest(server string, params *FirstStartDestinationFirstStartDestinationGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/first-start/destination")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "nonce", runtime.ParamLocationQuery, params.Nonce); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewHealthzHealthzGetRequest generates requests for HealthzHealthzGet
 func NewHealthzHealthzGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -44734,6 +44885,33 @@ func NewEditUiEventSourcesSlugEditPostRequestWithBody(server string, slug string
 	return req, nil
 }
 
+// NewUiFirstStartUiFirstStartGetRequest generates requests for UiFirstStartUiFirstStartGet
+func NewUiFirstStartUiFirstStartGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/first-start")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewIndexUiGrantsGetRequest generates requests for IndexUiGrantsGet
 func NewIndexUiGrantsGetRequest(server string, params *IndexUiGrantsGetParams) (*http.Request, error) {
 	var err error
@@ -50666,6 +50844,12 @@ type ClientWithResponsesInterface interface {
 	// TimelineRouteApiV1TopologyTimelineGetWithResponse request
 	TimelineRouteApiV1TopologyTimelineGetWithResponse(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*TimelineRouteApiV1TopologyTimelineGetResponse, error)
 
+	// FirstStartFirstStartGetWithResponse request
+	FirstStartFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*FirstStartFirstStartGetResponse, error)
+
+	// FirstStartDestinationFirstStartDestinationGetWithResponse request
+	FirstStartDestinationFirstStartDestinationGetWithResponse(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*FirstStartDestinationFirstStartDestinationGetResponse, error)
+
 	// HealthzHealthzGetWithResponse request
 	HealthzHealthzGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthzHealthzGetResponse, error)
 
@@ -51183,6 +51367,9 @@ type ClientWithResponsesInterface interface {
 	EditUiEventSourcesSlugEditPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
 
 	EditUiEventSourcesSlugEditPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
+
+	// UiFirstStartUiFirstStartGetWithResponse request
+	UiFirstStartUiFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiFirstStartUiFirstStartGetResponse, error)
 
 	// IndexUiGrantsGetWithResponse request
 	IndexUiGrantsGetWithResponse(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*IndexUiGrantsGetResponse, error)
@@ -56261,6 +56448,51 @@ func (r TimelineRouteApiV1TopologyTimelineGetResponse) StatusCode() int {
 	return 0
 }
 
+type FirstStartFirstStartGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *FirstStartResponse
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartFirstStartGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartFirstStartGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FirstStartDestinationFirstStartDestinationGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DestinationProof
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartDestinationFirstStartDestinationGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartDestinationFirstStartDestinationGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type HealthzHealthzGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -58933,6 +59165,27 @@ func (r EditUiEventSourcesSlugEditPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EditUiEventSourcesSlugEditPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiFirstStartUiFirstStartGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiFirstStartUiFirstStartGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiFirstStartUiFirstStartGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -63610,6 +63863,24 @@ func (c *ClientWithResponses) TimelineRouteApiV1TopologyTimelineGetWithResponse(
 	return ParseTimelineRouteApiV1TopologyTimelineGetResponse(rsp)
 }
 
+// FirstStartFirstStartGetWithResponse request returning *FirstStartFirstStartGetResponse
+func (c *ClientWithResponses) FirstStartFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*FirstStartFirstStartGetResponse, error) {
+	rsp, err := c.FirstStartFirstStartGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartFirstStartGetResponse(rsp)
+}
+
+// FirstStartDestinationFirstStartDestinationGetWithResponse request returning *FirstStartDestinationFirstStartDestinationGetResponse
+func (c *ClientWithResponses) FirstStartDestinationFirstStartDestinationGetWithResponse(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*FirstStartDestinationFirstStartDestinationGetResponse, error) {
+	rsp, err := c.FirstStartDestinationFirstStartDestinationGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartDestinationFirstStartDestinationGetResponse(rsp)
+}
+
 // HealthzHealthzGetWithResponse request returning *HealthzHealthzGetResponse
 func (c *ClientWithResponses) HealthzHealthzGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthzHealthzGetResponse, error) {
 	rsp, err := c.HealthzHealthzGet(ctx, reqEditors...)
@@ -65314,6 +65585,15 @@ func (c *ClientWithResponses) EditUiEventSourcesSlugEditPostWithFormdataBodyWith
 		return nil, err
 	}
 	return ParseEditUiEventSourcesSlugEditPostResponse(rsp)
+}
+
+// UiFirstStartUiFirstStartGetWithResponse request returning *UiFirstStartUiFirstStartGetResponse
+func (c *ClientWithResponses) UiFirstStartUiFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiFirstStartUiFirstStartGetResponse, error) {
+	rsp, err := c.UiFirstStartUiFirstStartGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiFirstStartUiFirstStartGetResponse(rsp)
 }
 
 // IndexUiGrantsGetWithResponse request returning *IndexUiGrantsGetResponse
@@ -73189,6 +73469,65 @@ func ParseTimelineRouteApiV1TopologyTimelineGetResponse(rsp *http.Response) (*Ti
 	return response, nil
 }
 
+// ParseFirstStartFirstStartGetResponse parses an HTTP response from a FirstStartFirstStartGetWithResponse call
+func ParseFirstStartFirstStartGetResponse(rsp *http.Response) (*FirstStartFirstStartGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartFirstStartGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FirstStartResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFirstStartDestinationFirstStartDestinationGetResponse parses an HTTP response from a FirstStartDestinationFirstStartDestinationGetWithResponse call
+func ParseFirstStartDestinationFirstStartDestinationGetResponse(rsp *http.Response) (*FirstStartDestinationFirstStartDestinationGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartDestinationFirstStartDestinationGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DestinationProof
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseHealthzHealthzGetResponse parses an HTTP response from a HealthzHealthzGetWithResponse call
 func ParseHealthzHealthzGetResponse(rsp *http.Response) (*HealthzHealthzGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -76281,6 +76620,22 @@ func ParseEditUiEventSourcesSlugEditPostResponse(rsp *http.Response) (*EditUiEve
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiFirstStartUiFirstStartGetResponse parses an HTTP response from a UiFirstStartUiFirstStartGetWithResponse call
+func ParseUiFirstStartUiFirstStartGetResponse(rsp *http.Response) (*UiFirstStartUiFirstStartGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiFirstStartUiFirstStartGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

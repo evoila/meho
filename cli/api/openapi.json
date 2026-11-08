@@ -52,6 +52,74 @@
         }
       }
     },
+    "/first-start": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "First Start",
+        "description": "The first-start list. No login: it shows the verdict lines only.",
+        "operationId": "first_start_first_start_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FirstStartResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/first-start/destination": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "First Start Destination",
+        "description": "The proof that this address serves this MEHO. Used by the DNS check only.",
+        "operationId": "first_start_destination_first_start_destination_get",
+        "parameters": [
+          {
+            "name": "nonce",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$",
+              "description": "32 hex characters",
+              "title": "Nonce"
+            },
+            "description": "32 hex characters"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationProof"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/version": {
       "get": {
         "tags": [
@@ -23807,6 +23875,28 @@
         }
       }
     },
+    "/ui/first-start": {
+      "get": {
+        "tags": [
+          "ui-first-start"
+        ],
+        "summary": "Ui First Start",
+        "description": "``GET /ui/first-start``.",
+        "operationId": "ui_first_start_ui_first_start_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/vault/list": {
       "get": {
         "tags": [
@@ -31087,6 +31177,20 @@
         "title": "DeprecateTemplateResponse",
         "description": "Response for ``meho_runbook_deprecate_template`` -- the now-deprecated coordinates."
       },
+      "DestinationProof": {
+        "properties": {
+          "proof": {
+            "type": "string",
+            "title": "Proof"
+          }
+        },
+        "type": "object",
+        "required": [
+          "proof"
+        ],
+        "title": "DestinationProof",
+        "description": "The answer of ``GET /first-start/destination``: the proof for the nonce."
+      },
       "DiscardTemplateResponse": {
         "properties": {
           "slug": {
@@ -32503,6 +32607,57 @@
         ],
         "title": "FingerprintResult",
         "description": "Connector fingerprint per consumer-needs L95."
+      },
+      "FirstStartLine": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "status",
+          "message"
+        ],
+        "title": "FirstStartLine",
+        "description": "One line of the first-start list."
+      },
+      "FirstStartResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/FirstStartLine"
+            },
+            "type": "array",
+            "title": "Checks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "checks"
+        ],
+        "title": "FirstStartResponse",
+        "description": "The whole list. ``ok`` is true when no line is ``fail``."
       },
       "ForkInfo": {
         "properties": {

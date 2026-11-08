@@ -198,7 +198,8 @@ What changes for the tenant:
   cannot apply. The knowledge hits still come back.
 - When MEHO holds an imported copy of a wiki page, the page is shown once,
   as the knowledge hit. This happens only when the copy has the same path
-  and holds the same text as the wiki hit.
+  and the same whole text as the wiki hit. A long page that the wiki
+  search returns in parts shows in both places.
 - `add_to_knowledge` still stores the lesson in MEHO. Its answer has a
   `wiki` part: the collection, and whether the lesson also goes to the
   wiki. A lesson with `applies_to: product-and-version`, a full lesson

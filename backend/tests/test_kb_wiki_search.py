@@ -15,8 +15,9 @@ collection where the tenant keeps its lessons. These tests cover:
   not-ready collection, with the index down, or with filters, the store's
   hits still come back and ``wiki`` says why the wiki was not searched;
 * a wiki page that the store holds as an imported copy is shown once, and
-  only when the stored copy holds the wiki hit's text (a page at the same
-  path in another repository stays);
+  only when the stored copy's whole text is the wiki hit's text (a page at
+  the same path in another repository stays, also when it shares a
+  paragraph with the copy);
 * ``add_to_knowledge`` stores the lesson as a direct write and its answer
   names the collection and says whether the lesson goes to the wiki;
 * the setting is per tenant;
@@ -152,7 +153,7 @@ def _corpus(*chunks: CorpusChunk) -> AsyncMock:
 
 async def _seed_import(
     path: str = _PAGE_PATH,
-    body: str = "# Snapshot limits\n\nKeep at most 32 snapshots\nper VM.",
+    body: str = "Keep at most 32 snapshots\nper VM.",
     tenant_id: uuid.UUID = OPERATOR_TENANT_ID,
 ) -> str:
     """Import one confirmed page into the store, as the wiki's CI job does; return its slug."""
@@ -371,6 +372,24 @@ async def test_the_same_path_from_another_repository_is_not_a_copy() -> None:
         "snapshot-limits",
         _WIKI_CHUNK.chunk_id,
     ]
+    assert response["wiki"]["duplicate_count"] == 0
+    assert response["wiki"]["hit_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_shared_paragraph_at_the_same_path_is_not_a_copy() -> None:
+    """Pages from two repositories share a paragraph but differ elsewhere: the wiki hit stays."""
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    slug = await _seed_import(
+        body="# Snapshot limits\n\nKeep at most 32 snapshots per VM.\n\nDelete old ones weekly."
+    )
+    response, _ = await _search(
+        _operator(), store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))]
+    )
+    wiki_hit = response["hits"][1]
+    assert wiki_hit["chunk_id"] == _WIKI_CHUNK.chunk_id
+    assert wiki_hit["source_url"].endswith(f"/blob/abc123/{_PAGE_PATH}")
     assert response["wiki"]["duplicate_count"] == 0
     assert response["wiki"]["hit_count"] == 1
 
@@ -624,8 +643,9 @@ async def test_kb_search_over_rest_gives_the_same_wiki_result() -> None:
 @pytest.mark.parametrize(
     ("stored_body", "duplicates"),
     [
-        ("# Snapshot limits\n\nKeep at most 32 snapshots\nper VM.", 1),
+        ("Keep at most 32 snapshots\nper VM.", 1),
         ("Notes from another repository about snapshots.", 0),
+        ("# Snapshot limits\n\nKeep at most 32 snapshots per VM.\n\nOther advice.", 0),
     ],
 )
 async def test_kb_search_over_rest_leaves_out_only_proven_copies(

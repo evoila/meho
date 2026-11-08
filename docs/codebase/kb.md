@@ -1119,9 +1119,11 @@ query and `limit`:
    `blob/<commit>/` in its `source_url` / `upstream_url`. A page with
    the same file name in another folder stays in the answer. The import
    does not record which repository a page came from, so the stored
-   entry's text must also hold the wiki hit's text (spaces and line
-   breaks aside). A page at the same path in another repository has
-   other text and stays. When this cannot be shown, the wiki hit stays.
+   entry's whole text must also be the wiki hit's text (spaces and line
+   breaks aside). A page at the same path in another repository that
+   only shares a paragraph with the copy stays. A page that the index
+   splits into several hits is not matched, so it shows twice. When the
+   match cannot be shown, the wiki hit stays.
    The store hit stays: it has the slug for a full read and is what the
    recall before an operation uses.
 

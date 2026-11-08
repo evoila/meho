@@ -43,9 +43,11 @@ a wiki hit is left out only when all of these hold:
   ``blob/<commit>/`` in the hit's source link, or the hit's
   ``document_id`` (a page with only the same file name in another folder
   is a different page);
-* the stored entry's text holds the wiki hit's text (spaces and line
-  breaks aside). A page at the same path in another repository has other
-  text, so it stays in the answer.
+* the stored entry's whole text is the wiki hit's text (spaces and line
+  breaks aside). A page at the same path in another repository may share
+  a paragraph with the stored copy, but then the stored copy holds more
+  than that hit, so the hit stays. A page that the index splits into
+  several hits is not matched and shows twice.
 
 When any of these cannot be shown, the wiki hit stays.
 """
@@ -270,7 +272,7 @@ async def _imported_copies(
     copies: set[str] = set()
     for chunk in hits:
         text = _plain(chunk.content)
-        if text and any(text in bodies.get(slug, "") for slug in matched[chunk.chunk_id]):
+        if text and any(text == bodies.get(slug) for slug in matched[chunk.chunk_id]):
             copies.add(chunk.chunk_id)
     return copies
 

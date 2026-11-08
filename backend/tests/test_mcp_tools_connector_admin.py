@@ -1984,11 +1984,19 @@ class _NsxB(_FitConnector):
     supported_version_range = ">=4.0,<5.0"
 
 
+class _Argo3(_FitConnector):
+    product = "argo"
+    supported_version_range = ">=3.0,<4.0"
+
+
 _FIT_REGISTRY: dict[tuple[str, str, str], type[Connector]] = {
     ("vmware", "9.0", "vmware-rest"): _Vmware9,
     ("vmware", "8.0", "vmware-rest"): _Vmware8,
     ("nsx", "4.x", "nsx-a"): _NsxA,
     ("nsx", "4.x", "nsx-b"): _NsxB,
+    ("argo", "3.x", "argo-api"): _Argo3,
+    # The entry that accepts every version, as many typed connectors have.
+    ("argo", "", ""): _Argo3,
 }
 
 
@@ -2008,7 +2016,9 @@ def _fit_row(product: str, version: str, impl_id: str) -> ConnectorListItem:
     )
 
 
-_FIT_ROWS = [_fit_row(*key) for key in _FIT_REGISTRY] + [_fit_row("harbor", "2.x", "harbor-rest")]
+_FIT_ROWS = [_fit_row(*key) for key in _FIT_REGISTRY if key[1]] + [
+    _fit_row("harbor", "2.x", "harbor-rest")
+]
 
 
 def _fit_target(
@@ -2034,6 +2044,7 @@ _FIT_TARGETS = {
     "fw-one": _fit_target("fw-one", "firewall", asserted="7.2"),
     "nsx-one": _fit_target("nsx-one", "nsx", probed="4.1.2"),
     "nsx-pinned": _fit_target("nsx-pinned", "nsx", probed="4.1.2", preferred_impl_id="nsx-b"),
+    "argo-old": _fit_target("argo-old", "argo", probed="2.9.1"),
 }
 
 
@@ -2050,6 +2061,7 @@ def fit_world(monkeypatch: pytest.MonkeyPatch) -> None:
         return _FIT_TARGETS[name]
 
     monkeypatch.setattr(resolver_mod, "all_connectors_v2", lambda: dict(_FIT_REGISTRY))
+    monkeypatch.setattr(ca_mod, "get_connector_v2", lambda *key: _FIT_REGISTRY.get(key))
     monkeypatch.setattr(ca_mod, "list_ingested_connectors", _rows)
     monkeypatch.setattr(ca_mod, "_load_target", _load)
 
@@ -2068,9 +2080,9 @@ def test_connector_list_schema_target_is_optional() -> None:
 
 
 async def test_connector_list_without_target_has_no_target_fit(fit_world: None) -> None:
-    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
 
-    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {})
+    result = await ca_mod.list_connector_rows(build_operator(TenantRole.OPERATOR), {})
 
     assert set(result) == {"connectors"}
     assert len(result["connectors"]) == len(_FIT_ROWS)
@@ -2092,9 +2104,11 @@ async def test_connector_list_target_fit_buckets(
     expected_ids: list[str],
 ) -> None:
     """One target per resolver outcome; the rows are the candidates."""
-    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
 
-    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {"target": target})
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"target": target}
+    )
 
     assert result["target_fit"]["result"] == expected_result
     assert result["target_fit"]["target"] == target
@@ -2103,12 +2117,12 @@ async def test_connector_list_target_fit_buckets(
 
 async def test_connector_list_target_fit_versions(fit_world: None) -> None:
     """The summary shows the version MEHO uses, probed before asserted."""
-    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
 
     op = build_operator(TenantRole.OPERATOR)
-    probed = await list_connector_rows(op, {"target": "vc-new"})
-    asserted = await list_connector_rows(op, {"target": "fw-one"})
-    unknown = await list_connector_rows(op, {"target": "vc-fresh"})
+    probed = await ca_mod.list_connector_rows(op, {"target": "vc-new"})
+    asserted = await ca_mod.list_connector_rows(op, {"target": "fw-one"})
+    unknown = await ca_mod.list_connector_rows(op, {"target": "vc-fresh"})
 
     assert probed["target_fit"]["version"] == "9.0.2"
     assert asserted["target_fit"]["version"] == "7.2"
@@ -2118,11 +2132,11 @@ async def test_connector_list_target_fit_versions(fit_world: None) -> None:
 
 async def test_connector_list_target_fit_selects_nothing(fit_world: None) -> None:
     """The answer lists candidates and never names a chosen connector."""
-    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
 
     op = build_operator(TenantRole.OPERATOR)
-    tied = await list_connector_rows(op, {"target": "nsx-one"})
-    pinned = await list_connector_rows(op, {"target": "nsx-pinned"})
+    tied = await ca_mod.list_connector_rows(op, {"target": "nsx-one"})
+    pinned = await ca_mod.list_connector_rows(op, {"target": "nsx-pinned"})
 
     for result in (tied, pinned):
         assert set(result["target_fit"]) == {
@@ -2141,11 +2155,43 @@ async def test_connector_list_target_fit_selects_nothing(fit_world: None) -> Non
     assert [row["connector_id"] for row in pinned["connectors"]] == ["nsx-a-4.x", "nsx-b-4.x"]
 
 
+async def test_connector_list_target_fit_through_every_version_entry(fit_world: None) -> None:
+    """A version outside every range still runs; the rows are never empty.
+
+    The resolver picks the class's entry that accepts every version. No
+    listed row is that entry, so the rows are the listed rows of the same
+    class, and the hint says the version is outside their range.
+    """
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"target": "argo-old"}
+    )
+
+    assert result["target_fit"]["result"] == "compatible"
+    assert [row["connector_id"] for row in result["connectors"]] == ["argo-api-3.x"]
+    assert "outside the version range" in result["target_fit"]["hint"]
+
+
+@pytest.mark.parametrize("target", ["vc-new", "argo-old"])
+async def test_connector_list_target_fit_hidden_by_filter(fit_world: None, target: str) -> None:
+    """When a filter hides the connector a call would use, it is not ``compatible``."""
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"target": target, "product": "harbor"}
+    )
+
+    assert result["connectors"] == []
+    assert result["target_fit"]["result"] == "no_connector"
+    assert "filter may hide" in result["target_fit"]["hint"]
+
+
 async def test_connector_list_target_with_filters(fit_world: None) -> None:
     """``product`` and ``detail`` still apply to the rows that fit."""
-    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
 
-    result = await list_connector_rows(
+    result = await ca_mod.list_connector_rows(
         build_operator(TenantRole.OPERATOR),
         {"target": "vc-fresh", "product": "harbor", "detail": "full"},
     )

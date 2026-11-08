@@ -102,7 +102,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors import resolve_target_version
+from meho_backplane.connectors import get_connector_v2, resolve_target_version
 from meho_backplane.connectors.resolver import (
     AmbiguousConnectorResolution,
     NoMatchingConnector,
@@ -287,6 +287,18 @@ _TARGET_FIT_HINTS: Final[dict[str, str]] = {
     ),
 }
 
+#: Hints for the two cases where the resolver finds a connector but no
+#: listed row is inside its declared version range.
+_FALLBACK_HINT: Final[str] = (
+    "The target's version is outside the version range these connectors "
+    "declare. A call still runs, through the connector's entry that accepts "
+    "every version, so some operations may not work on this version."
+)
+_NOT_LISTED_HINT: Final[str] = (
+    "No connector in this list fits the target. The `status` or `product` "
+    "filter may hide the one a call would use: ask again without them."
+)
+
 
 def _registry_key(item: ConnectorListItem) -> tuple[str, str, str]:
     return (item.product, item.version, item.impl_id)
@@ -311,17 +323,24 @@ def connectors_for_target(
     * ``ambiguous`` — two or more connectors are still tied after the
       resolver's tie-break. The rows are the tied connectors.
     * ``compatible`` — the resolver finds one. The rows are every listed
-      connector that fits the target (:func:`connector_serves_target`).
+      connector that fits the target (:func:`connector_serves_target`), or,
+      when none does, the listed rows of the class the resolver picked
+      (it picked the class's entry that accepts every version).
+
+    ``compatible`` never comes with an empty list: when the class the
+    resolver picked is not listed either, the answer is ``no_connector``
+    with a hint that a filter may hide it.
     """
     product = getattr(target, "product", None) or None
     version = resolve_target_version(target)
     fitting: list[ConnectorListItem]
+    hint: str | None = None
     if product is not None and version is None:
         result = "fingerprint_unknown"
         fitting = [item for item in connectors if item.product == product]
     else:
         try:
-            resolve_connector(target)
+            resolved = resolve_connector(target)
         except NoMatchingConnector:
             result, fitting = "no_connector", []
         except AmbiguousConnectorResolution as exc:
@@ -329,19 +348,34 @@ def connectors_for_target(
             result = "ambiguous"
             fitting = [item for item in connectors if _registry_key(item) in tied]
         else:
-            result = "compatible"
-            fitting = [
-                item for item in connectors if connector_serves_target(*_registry_key(item), target)
-            ]
+            result, hint, fitting = _compatible_rows(resolved, target, connectors)
     summary = {
         "target": getattr(target, "name", None),
         "product": product,
         "version": version,
         "preferred_impl_id": getattr(target, "preferred_impl_id", None) or None,
         "result": result,
-        "hint": _TARGET_FIT_HINTS[result],
+        "hint": hint or _TARGET_FIT_HINTS[result],
     }
     return summary, fitting
+
+
+def _compatible_rows(
+    resolved: type[Any],
+    target: Any,
+    connectors: list[ConnectorListItem],
+) -> tuple[str, str | None, list[ConnectorListItem]]:
+    """Return ``(result, hint, rows)`` when the resolver found *resolved*.
+
+    ``hint`` is ``None`` for the plain ``compatible`` hint.
+    """
+    fitting = [item for item in connectors if connector_serves_target(*_registry_key(item), target)]
+    if fitting:
+        return "compatible", None, fitting
+    same_class = [item for item in connectors if get_connector_v2(*_registry_key(item)) is resolved]
+    if same_class:
+        return "compatible", _FALLBACK_HINT, same_class
+    return "no_connector", _NOT_LISTED_HINT, []
 
 
 async def _load_target(operator: Operator, name: str) -> Any:

@@ -663,7 +663,14 @@ that target, and the answer has a `target_fit` summary: `target`,
   wraps). No version match is written in the MCP layer.
 - **Four results**, all outcomes the resolver already has:
   - `compatible`: the resolver finds a connector. The rows are every
-    listed connector that fits (`connector_serves_target`).
+    listed connector that fits (`connector_serves_target`). When the
+    target's version is outside every declared range, the resolver
+    still picks a class through its entry that accepts every version.
+    Then the rows are the listed rows of that class, and the hint says
+    the version is outside their range. `compatible` never comes with
+    an empty list: when a `status` or `product` filter hides the
+    connector a call would use, the result is `no_connector` with a
+    hint that names the filter.
   - `fingerprint_unknown`: the target has no version yet. The rows are
     the connectors of its product; they may fit. The hint says to probe
     the target or set its version.

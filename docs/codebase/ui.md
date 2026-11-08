@@ -1555,7 +1555,13 @@ same on a laptop:
 * **Filters.** Below `md` the four filters fold away behind a "Filters"
   button (Alpine `filtersOpen` on the form), so the newest events sit at
   the top of the screen. Without JavaScript the fields stay visible.
-* **Details.** A tap on a row opens the detail drawer as before. Below
+* **Announcements.** An agent announcement has no audit row, so it has
+  no detail drawer. On a phone a tap on it (or on the small button in
+  its status cell, which carries `aria-expanded`) folds out a details
+  block under the row: the phase, the full text without cutting, the
+  targets and the claim metadata (`detailsOpen`, local to the row). From
+  `sm` up the columns show these, and the block stays hidden.
+* **Details.** A tap on an operation row opens the detail drawer as before. Below
   `lg` the drawer sits under the feed, so `openDrawer` scrolls it into
   view once it is swapped in. It swaps with `settle:0ms`: htmx keeps the
   old element's classes until the settle step, and the empty placeholder

@@ -53,7 +53,7 @@ def _row_template(body: str) -> str:
 def test_feed_rows_use_a_six_column_grid_on_a_phone() -> None:
     row = _row_template(_feed_page())
 
-    li_class = re.search(r'<li\s+class="([^"]+)"', row)
+    li_class = re.search(r'<li\b[^>]*?\sclass="([^"]+)"', row)
     assert li_class is not None
     assert "grid-cols-6" in li_class.group(1)
     assert "sm:grid-cols-12" in li_class.group(1)
@@ -65,6 +65,33 @@ def test_feed_rows_use_a_six_column_grid_on_a_phone() -> None:
     # Class and payload cells show from sm up only.
     assert row.count('class="hidden sm:col-span-1 sm:block"') == 2
     assert row.count('class="hidden truncate text-xs sm:col-span-2 sm:block"') == 2
+
+
+def test_announcement_rows_fold_out_their_details_on_a_phone() -> None:
+    row = _row_template(_feed_page())
+
+    # An announcement has no audit row, so no drawer: a tap folds out the
+    # details instead, and operation rows still open the drawer.
+    assert 'x-data="{ detailsOpen: false }"' in row
+    assert 'x-on:click="isAnnouncement(ev) ? (detailsOpen = !detailsOpen) : openDrawer(ev)"' in row
+    announcement = row.split('<template x-if="isAnnouncement(ev)">', 1)[1]
+    button = re.search(r'<button[^>]*aria-label="Announcement details"[^>]*>', announcement)
+    assert button is not None
+    assert "sm:hidden" in button.group(0)
+    assert ":aria-expanded=" in button.group(0)
+    assert 'x-on:click.stop="detailsOpen = !detailsOpen"' in button.group(0)
+    details = announcement.split("data-announcement-details", 1)[0].rsplit("<div", 1)[1]
+    assert 'class="col-span-6 space-y-1 text-xs sm:hidden"' in details
+    assert 'x-show="detailsOpen"' in details
+    body = announcement.split("data-announcement-details", 1)[1].split("</div>", 1)[0]
+    # The phase, the full text wrapped (not cut), the targets and the claim
+    # metadata; agent-authored text stays on x-text (escaped).
+    assert "phaseBadgeClass(ev.phase)" in body
+    assert "whitespace-pre-wrap" in body and 'x-text="ev.activity"' in body
+    assert "truncate" not in body
+    assert "announcementTargets(ev)" in body
+    assert "announcementMeta(ev)" in body
+    assert "x-html" not in announcement
 
 
 def test_feed_column_header_shows_from_sm_up_only() -> None:

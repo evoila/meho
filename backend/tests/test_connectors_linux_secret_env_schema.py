@@ -45,7 +45,16 @@ _OPERATOR = Operator(
 )
 _REF = f"tenants/{_TENANT_ID}/app/db#cred"
 
-_BAD_NAMES = ("1LEADING_DIGIT", "has-dash", "has space", "", "PA;TH", "ÄNAME")
+_BAD_NAMES = (
+    "1LEADING_DIGIT",
+    "has-dash",
+    "has space",
+    "",
+    "PA;TH",
+    "ÄNAME",
+    "APP_DB_CRED\n",
+    "\nAPP_DB_CRED",
+)
 _GOOD_NAMES = ("APP_DB_CRED", "_x", "a1", "Z")
 
 
@@ -172,9 +181,10 @@ async def _dispatch(secret_env: dict[str, str]) -> dict[str, Any]:
     "secret_env",
     [
         {"has-dash": _REF},
+        {"APP_DB_CRED\n": _REF},
         {f"V{i}": _REF for i in range(_MAX_SECRET_ENV + 1)},
     ],
-    ids=["bad-name", "over-cap"],
+    ids=["bad-name", "trailing-newline", "over-cap"],
 )
 async def test_bad_secret_env_fails_at_dispatch_not_after_approval(
     linux_registered: None, secret_env: dict[str, str]

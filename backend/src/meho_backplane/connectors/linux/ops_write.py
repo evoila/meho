@@ -199,7 +199,10 @@ _ENV_NAME_CHARSET: frozenset[str] = frozenset(
 #: starting with a digit. ``linux.script.run``'s ``secret_env`` schema uses it in
 #: ``propertyNames``, so the dispatcher refuses a bad name before the call waits
 #: for approval. :func:`_validate_secret_env` still checks every name at run time.
-_ENV_NAME_PATTERN: str = r"^[A-Za-z_][A-Za-z0-9_]*$"
+#: It ends with ``(?![\s\S])``, not ``$``: Python's ``$`` also matches before a
+#: final newline, so ``"NAME\n"`` would pass. The lookahead works in Python and
+#: in ECMA-262 regex.
+_ENV_NAME_PATTERN: str = r"^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])"
 
 #: Upper bound on the number of ``secret_env`` entries one ``script.run`` may
 #: declare -- a bounded fan-out of per-call Vault reads, not an open-ended loop.

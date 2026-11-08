@@ -7221,6 +7221,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-retrieval-picks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho retrieval picks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-retrieval-retire-checklist" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -14464,6 +14475,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-retrieval-picks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho retrieval picks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-retrieval-retire-checklist" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -20181,6 +20203,17 @@
 <li><code>--json</code> — emit a machine-readable JSON envelope on stdout instead of the human table</li>
 <li><code>--save-baseline</code> — write the eval result to this file for future regression comparison</li>
 <li><code>--surface</code> — retrieval surface to evaluate (kb|memory|operations|all)</li>
+</ul>
+<h3 id="meho-retrieval-picks"><code>meho retrieval picks</code><a class="headerlink" href="#meho-retrieval-picks" title="Permanent link">&para;</a></h3>
+<p>Show if calls used an operation the search returned (per connector and day)</p>
+<div class="highlight"><pre><span></span><code>meho retrieval picks [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--connector</code> — show only this connector id (for example <code>k8s-1.x</code>)</li>
+<li><code>--json</code> — print the raw OperationPickReport instead of the table</li>
+<li><code>--since</code> — window start; accepts relative (<code>30d</code>, <code>7d</code>, <code>24h</code>) or ISO-8601 date (<code>2026-04-01</code>)</li>
+<li><code>--tenant</code> — tenant UUID (platform admin only; others get a 403)</li>
 </ul>
 <h3 id="meho-retrieval-retire-checklist"><code>meho retrieval retire-checklist</code><a class="headerlink" href="#meho-retrieval-retire-checklist" title="Permanent link">&para;</a></h3>
 <p>Run the 5-criterion retire-decision checklist per retrieval surface</p>

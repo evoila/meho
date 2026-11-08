@@ -148,6 +148,7 @@ from meho_backplane.operations.approval_resume_checks import (
     preview_changed_since_request,
     target_changed_since_request,
 )
+from meho_backplane.operations.grant_approval import check_grant_approval, grant_audit_fields
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
@@ -1879,6 +1880,7 @@ async def approve_request(
         "reviewed_by": operator.sub,
         "self_approved": self_approved,
         "approval_rule": rule.value,
+        **grant_audit_fields(request, operator),
     }
     if reason:
         extra["reason"] = reason
@@ -3598,6 +3600,7 @@ async def _load_pending_for_approval(
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
+    check_grant_approval(operator, request)
     rule = _check_approver_group(operator, request)
     _check_approver_role_floor(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):

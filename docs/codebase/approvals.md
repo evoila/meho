@@ -916,6 +916,33 @@ self-approval (`self_approved`), which rule allowed it (`approval_rule`)
 and how the person proved they were present (`approval_auth`: channel
 `web` or `rest`, method `fresh_sign_in` or `one_time_code`).
 
+## Changes of rights: the login is never its own approver
+
+`operations/grant_approval.py` checks the Keycloak writes that change who
+has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign` and
+`keycloak.group.update_attributes`. The connector registers them
+(`connectors/keycloak/ops_write_grant.py`) and adds a `grant` block to the
+preview of the waiting request: `user_id` (a user name is resolved to its
+id when the request is parked), `login_realm` (the target manages a realm
+of MEHO's own login, see `_backplane_login_realms()`) and `platform_admin`
+(the platform admin group or role).
+
+`approve_request` and `approve_right` call `check_grant_approval` before
+the group rule. It refuses with `ApprovalRoleFloorError` (403):
+
+- when the login the change is for is the approver, in every group and for
+  every risk level. A second login of the same person is another login, so
+  it is another approver in this check;
+- in the login realm, when the approver is the requester, even for a
+  MEHO-SA-Operator;
+- in the login realm, when the approver is not a tenant admin (not a
+  platform admin for the platform admin group or role).
+
+A request without the `grant` block, or with a group MEHO could not read,
+gets the strict rule. The decision audit row carries `grant_user_id`,
+`grant_for_approver`, `grant_in_login_realm` and, when the request named
+one, `grant_username`. MEHO does not link two logins of one person.
+
 ## The "may I approve this?" answer (#3329)
 
 People see, for each request, whether they may approve it and why not.

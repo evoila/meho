@@ -49,6 +49,7 @@ from meho_backplane.operations.approval_queue import (
     _check_approver_role_floor,
     _check_reviewer_role,
 )
+from meho_backplane.operations.grant_approval import check_grant_approval
 
 __all__ = [
     "WEB_APPROVAL_HINT",
@@ -207,6 +208,7 @@ def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
             f"This request is {request.status}. Only a pending request can be approved.",
         )
     try:
+        check_grant_approval(operator, request)
         rule = _check_approver_group(operator, request, log_break_glass=False)
         _check_approver_role_floor(operator, request)
     except SelfApprovalForbiddenError as exc:

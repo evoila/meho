@@ -210,6 +210,22 @@ To take back your *own* pending request, withdraw it:
 not run. A person, an agent or a service account can each withdraw its
 own request.
 
+## Changes of rights need a second person
+
+A change that adds a login to a group, gives a login a role, or changes the
+attributes of a group follows two more rules:
+
+- The login the change is for cannot approve it. This holds for every group.
+  A second login of the same person is not a second person. If you have two
+  logins, ask a colleague to approve.
+- In MEHO's own login realm, a second person who is a tenant admin must
+  approve the change. For the platform admin group or role, a platform admin
+  must approve it. A MEHO-SA-Operator cannot approve such a change of their
+  own.
+
+The decision record in the audit log names the login the change is for and
+says whether it is the approver.
+
 ## When you are the only operator
 
 On a team, a colleague approves your change. On a **one-operator**

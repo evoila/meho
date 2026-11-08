@@ -10,11 +10,15 @@ server knows ``web01.example.com`` points at ``192.0.2.10``). This module
 turns those links into ``resolves-to`` edges inside the refresh
 transaction:
 
-* Each name of a link is looked up among the tenant's live nodes of the
+* The names of a link are looked up among the tenant's live nodes of the
   link's ``to_kinds`` (case does not matter, ``legacy:`` rows and the
-  refreshing target's own rows are left out). Exactly one match gives an
-  edge. No match, or more than one, gives nothing: the refresh never makes
-  a node for a link.
+  refreshing target's own rows are left out). The links of one node are
+  tried in the order the connector sent them, and the first link whose
+  names match any node decides: exactly one node gives an edge, more than
+  one gives nothing. The later links of that node are not tried, so a
+  weak match (the first label of a DNS name) can never add an edge next
+  to a strong one (the full name), and an ambiguous strong match is never
+  replaced by a weak one. The refresh never makes a node for a link.
 * The edges are keyed by node ids, not by names, because the far node can
   share its ``(kind, name)`` with a node in another scope.
 * The refreshing target owns the ``resolves-to`` edges that start at its
@@ -90,29 +94,34 @@ def _discovered_links(
     candidates: dict[str, list[_Candidate]],
     live_node_key_to_id: dict[tuple[str, str], uuid.UUID],
 ) -> dict[_LinkKey, tuple[uuid.UUID, uuid.UUID, EdgeHint]]:
-    """Resolve each link name to one node; the first link for an edge wins."""
+    """Resolve the links of each node in order; the first link with a match decides."""
     out: dict[_LinkKey, tuple[uuid.UUID, uuid.UUID, EdgeHint]] = {}
+    decided: set[tuple[uuid.UUID, str]] = set()
     for link in links:
         from_id = live_node_key_to_id.get((link.from_kind, link.from_name))
-        if from_id is None:
+        if from_id is None or (from_id, link.kind) in decided:
             continue
-        for match_name in link.match_names:
-            matches = [c for c in candidates.get(match_name.lower(), ()) if c[1] in link.to_kinds]
-            if len(matches) != 1:
-                continue
-            to_id, to_kind, to_name = matches[0]
-            key = (from_id, to_id, link.kind)
-            if key in out:
-                continue
-            hint = EdgeHint(
-                from_kind=link.from_kind,
-                from_name=link.from_name,
-                to_kind=cast(NodeKind, to_kind),
-                to_name=to_name,
-                kind=link.kind,
-                properties=link.properties,
-            )
-            out[key] = (from_id, to_id, hint)
+        matches = {
+            candidate
+            for match_name in link.match_names
+            for candidate in candidates.get(match_name.lower(), ())
+            if candidate[1] in link.to_kinds
+        }
+        if not matches:
+            continue
+        decided.add((from_id, link.kind))
+        if len(matches) != 1:
+            continue
+        to_id, to_kind, to_name = next(iter(matches))
+        hint = EdgeHint(
+            from_kind=link.from_kind,
+            from_name=link.from_name,
+            to_kind=cast(NodeKind, to_kind),
+            to_name=to_name,
+            kind=link.kind,
+            properties=link.properties,
+        )
+        out[(from_id, to_id, link.kind)] = (from_id, to_id, hint)
     return out
 
 

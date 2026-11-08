@@ -665,13 +665,18 @@ behind it. A DNS server knows that `web01.example.com` points at
 refresh runs it right after the edge pass (step 5), in the same
 transaction, and adds its counts to the edge counts.
 
-- **Match.** Each name in `match_names` is looked up among the tenant's
+- **Match.** The names in `match_names` are looked up among the tenant's
   live nodes whose kind is in `to_kinds`. Case does not matter.
   Soft-deleted rows, `legacy:` rows and the refreshing target's own rows
-  never match. A name with exactly one match gives one `resolves-to`
-  edge from the link's node (it must be in the same snapshot) to the
-  match. No match, or more than one, gives nothing. A link never creates
-  a node.
+  never match. The links of one node (it must be in the same snapshot)
+  are tried in the order the connector sent them. The first link whose
+  names match any node decides: exactly one matched node gives one
+  `resolves-to` edge to it, more than one gives nothing. The later links
+  of that node are not tried. So a connector sends its strongest match
+  first and its weakest last: a weak match can never add a second edge
+  next to a strong one, and an ambiguous strong match is never replaced
+  by a weak one. A node whose links match nothing gets no edge. A link
+  never creates a node.
 - **Key.** Link edges are keyed by node ids, not names: the far node may
   share its `(kind, name)` with a node in another scope.
 - **Owner.** The refreshing target owns the `resolves-to` edges from its
@@ -688,8 +693,8 @@ transaction, and adds its counts to the edge counts.
 The bind9 and Windows DNS connectors are the users today
 (`connectors/_shared/dns_topology.py`): one `dns-record` node per DNS
 name, with its A / AAAA / CNAME records and the source, linked to `vm`,
-`host` and `node` rows by full name, by address, and by first label
-(edge property `matched_on`: `name`, `address`, `short-name`). See
+`host` and `node` rows by full name, else by address, else by first
+label (edge property `matched_on`: `name`, `address`, `short-name`). See
 `connectors-bind9.md` and `connectors-windows-dns.md`, "Topology map".
 Tests: `tests/test_topology_refresh_links.py`.
 

@@ -616,11 +616,12 @@ zone. Only reads run; no sudo.
   `resolves-to` edge to that name. Wildcard names and other record types
   are left out.
 - **Links.** Each name asks the refresh for a `resolves-to` edge to an
-  existing `vm`, `host` or `node` with the same full name, the same
-  address, or the same first label (`matched_on` on the edge). Only a
-  single match links; no match or several matches link nothing, and no
-  system node is ever created. See `topology.md`, "Links to nodes of
-  other targets".
+  existing `vm`, `host` or `node`: by the same full name, else by the
+  same address, else by the same first label (`matched_on` on the
+  edge). The first step that matches anything decides. Only a single
+  match links; several matches link nothing and the weaker steps are
+  not tried, so a name never gets two edges and no system node is ever
+  created. See `topology.md`, "Links to nodes of other targets".
 - **Time and source.** The map stores when a refresh first and last saw
   each row; the target that found it is the row's target.
 - **Scheduled refresh.** As for Kubernetes: the scheduled refresh has no

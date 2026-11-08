@@ -9,6 +9,9 @@ what :mod:`meho_backplane.topology.refresh_links` does with them:
 
 * exactly one match gives one ``resolves-to`` edge;
 * no match, or more than one, gives no edge and never a new node;
+* the links of one name are tried in order: a first label only links when
+  the full name and the address matched nothing, and an ambiguous link
+  is never replaced by a weaker one;
 * soft-deleted and ``legacy:`` nodes are never matched;
 * a later refresh without the link, or after the far node is gone, marks
   the edge as gone; a curated edge stays;
@@ -235,6 +238,61 @@ async def test_ambiguous_name_links_nothing() -> None:
     _FakeConnector.hints_by_target = {
         "vc": _systems(("vm", "db"), ("host", "DB")),
         "dns": _dns(("db.example.com", ("db",), "short-name")),
+    }
+    op = _operator(tenant_id)
+    await refresh_target_topology(targets["vc"], op)
+    await refresh_target_topology(targets["dns"], op)
+    assert await _resolves_to(tenant_id) == set()
+
+
+@pytest.mark.asyncio
+async def test_short_name_is_only_a_fallback() -> None:
+    tenant_id, targets = await _seed(["vc", "dns"])
+    _FakeConnector.hints_by_target = {
+        "vc": _systems(
+            ("vm", "web01.example.com"),
+            ("host", "web01"),
+            ("vm", "192.0.2.30"),
+            ("host", "store"),
+            ("vm", "app"),
+        ),
+        "dns": _dns(
+            # The full name matches: the first label must not add a second edge.
+            ("web01.example.com", ("web01.example.com",), "name"),
+            ("web01.example.com", ("192.0.2.10",), "address"),
+            ("web01.example.com", ("web01",), "short-name"),
+            # The address matches: the first label must not add a second edge.
+            ("store.example.com", ("store.example.com",), "name"),
+            ("store.example.com", ("192.0.2.30",), "address"),
+            ("store.example.com", ("store",), "short-name"),
+            # Nothing stronger matches: the first label links.
+            ("app.example.com", ("app.example.com",), "name"),
+            ("app.example.com", ("192.0.2.40",), "address"),
+            ("app.example.com", ("app",), "short-name"),
+        ),
+    }
+    op = _operator(tenant_id)
+    await refresh_target_topology(targets["vc"], op)
+    result = await refresh_target_topology(targets["dns"], op)
+    assert await _resolves_to(tenant_id) == {
+        ("web01.example.com", "vm:web01.example.com"),
+        ("store.example.com", "vm:192.0.2.30"),
+        ("app.example.com", "vm:app"),
+    }
+    assert result.added_edges == 3 + 3  # three belongs-to, three links
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_link_is_not_replaced_by_a_weaker_one() -> None:
+    tenant_id, targets = await _seed(["vc", "dns"])
+    _FakeConnector.hints_by_target = {
+        "vc": _systems(("host", "192.0.2.20"), ("host", "192.0.2.21"), ("vm", "store")),
+        "dns": _dns(
+            # Two addresses on two systems: the name links nothing, and the
+            # first label is not tried.
+            ("store.example.com", ("192.0.2.20", "192.0.2.21"), "address"),
+            ("store.example.com", ("store",), "short-name"),
+        ),
     }
     op = _operator(tenant_id)
     await refresh_target_topology(targets["vc"], op)

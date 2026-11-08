@@ -588,13 +588,17 @@ class LinkHint(BaseModel):
 
     A DNS server knows that ``web01.example.com`` points at ``192.0.2.10``,
     but it does not know which map node that is. The refresh service looks
-    each of ``match_names`` up among the live nodes of the tenant whose kind
-    is in ``to_kinds`` (case does not matter). A name that matches exactly
-    one node gives one ``resolves-to`` edge from ``(from_kind, from_name)``
-    (a node of the same snapshot) to that node. A name that matches no node, or
-    more than one, gives no edge, and the refresh never creates a node for
-    it. The edge belongs to the target that sent the link: its next refresh
-    marks the edge as gone when the link or the far node is gone.
+    ``match_names`` up among the live nodes of the tenant whose kind is in
+    ``to_kinds`` (case does not matter). The links of one ``(from_kind,
+    from_name)`` (a node of the same snapshot) are tried in the order they
+    are sent: the first link whose names match any node decides. Exactly one
+    matched node gives one ``resolves-to`` edge to it; more than one gives
+    no edge. The later links of that node are not tried, so send the
+    strongest match first (the full name) and the weakest last (the first
+    label). A node whose links match nothing gets no edge, and the refresh
+    never creates a node for a link. The edge belongs to the target that
+    sent the link: its next refresh marks the edge as gone when the link or
+    the far node is gone.
     """
 
     model_config = ConfigDict(frozen=True)

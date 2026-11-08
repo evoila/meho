@@ -43,7 +43,6 @@ from pydantic_ai.usage import RunUsage
 
 import meho_backplane.agent.toolset as toolset_mod
 from meho_backplane.agent import AgentDefinition, PydanticAgentRun
-from meho_backplane.agent.toolset import resolve_agent_tools
 from meho_backplane.agent.toolset_operations import (
     LEFT_OUT_FIELDS,
     OPERATION_TOOL_NAMES,
@@ -151,7 +150,7 @@ def test_descriptions_follow_the_mcp_text() -> None:
 
 def test_switch_off_keeps_the_hand_written_tools() -> None:
     assert get_settings().agent_operation_tools_from_mcp is False
-    tools = {t.name: t for t in resolve_agent_tools({}, _operator())}
+    tools = {t.name: t for t in toolset_mod.resolve_agent_tools({}, _operator())}
     search = tools["search_operations"].tool_def.parameters_json_schema
     call = tools["call_operation"].tool_def.parameters_json_schema
     assert "op_id" not in search["properties"]
@@ -160,7 +159,7 @@ def test_switch_off_keeps_the_hand_written_tools() -> None:
 
 @pytest.mark.usefixtures("switch_on")
 def test_switch_on_uses_the_mcp_tools() -> None:
-    tools = resolve_agent_tools({}, _operator())
+    tools = toolset_mod.resolve_agent_tools({}, _operator())
     by_name = {t.name: t for t in tools}
     search = by_name["search_operations"].tool_def.parameters_json_schema
     call = by_name["call_operation"].tool_def.parameters_json_schema
@@ -223,7 +222,8 @@ async def test_call_operation_passes_preview_hash_to_the_dispatcher(
     )
     monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
     tools = {
-        t.name: t for t in resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
+        t.name: t
+        for t in toolset_mod.resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
     }
 
     result = await tools["call_operation"].function(
@@ -248,7 +248,8 @@ async def test_call_operation_refuses_a_left_out_field(monkeypatch: pytest.Monke
     dispatch_mock = AsyncMock()
     monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
     tools = {
-        t.name: t for t in resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
+        t.name: t
+        for t in toolset_mod.resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
     }
 
     with pytest.raises(ModelRetry, match="invalid arguments"):
@@ -297,7 +298,8 @@ async def test_switch_off_call_operation_checks_its_own_schema(
     dispatch_mock = AsyncMock()
     monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
     tools = {
-        t.name: t for t in resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
+        t.name: t
+        for t in toolset_mod.resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
     }
 
     with pytest.raises(ModelRetry, match="invalid arguments"):
@@ -319,7 +321,8 @@ async def test_switch_off_call_operation_passes_its_own_fields(
     )
     monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
     tools = {
-        t.name: t for t in resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
+        t.name: t
+        for t in toolset_mod.resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
     }
 
     result = await tools["call_operation"].function(

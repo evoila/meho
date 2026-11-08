@@ -54,6 +54,16 @@ func newReflexCmd() *cobra.Command {
 			"with an earlier same-session announce claim.\n" +
 			"  - write-back rate: add_to_knowledge + add_to_memory calls " +
 			"per 100 call_operation calls.\n\n" +
+			"A [learning] block follows with four numbers that show whether " +
+			"stored lessons help:\n\n" +
+			"  - repeat-mistake rate: %% of failed operations that already " +
+			"failed the same way (same operation, same target) in an earlier session.\n" +
+			"  - hit rate: %% of knowledge and memory entries that searches " +
+			"gave to a session and the session then used (an operation succeeded after it).\n" +
+			"  - precision: %% of retrieved entries that were right (not " +
+			"disputed, not expired, replaced or retired when found).\n" +
+			"  - first correct action: median seconds from the start of a " +
+			"session to its first successful operation on a known system.\n\n" +
 			"Usage events are recorded only when the backplane sets " +
 			"REQUEST_USAGE_RETENTION_DAYS; when it is not set, this report " +
 			"is empty, and it covers only the time since collection started.\n\n" +
@@ -203,6 +213,16 @@ func printReflexReport(w io.Writer, r *api.ReflexReport) {
 		fmt.Fprintf(w, "  write-back rate:  %s  (%d adds / %d call_operation)\n",
 			rateOrNA(s.WriteBackPer100CallOps), s.WriteBackAddCalls, s.WriteBackCallOperations)
 	}
+	l := r.Learning
+	fmt.Fprintf(w, "\n[learning]\n")
+	fmt.Fprintf(w, "  repeat-mistake rate:  %s  (%d/%d failed operations were repeats)\n",
+		pctOrNA(l.RepeatMistakePct), l.RepeatMistakeRepeats, l.RepeatMistakeFailures)
+	fmt.Fprintf(w, "  hit rate:             %s  (%d/%d retrieved entries used)\n",
+		pctOrNA(l.HitRatePct), l.HitRateUsed, l.HitRateRetrievals)
+	fmt.Fprintf(w, "  precision:            %s  (%d/%d retrieved entries right)\n",
+		pctOrNA(l.PrecisionPct), l.PrecisionRight, l.PrecisionJudged)
+	fmt.Fprintf(w, "  first correct action: %s s  (median over %d sessions on known systems)\n",
+		rateOrNA(l.FirstCorrectActionMedianSeconds), l.FirstCorrectActionSessions)
 }
 
 // pctOrNA renders a nullable percentage as `NN.NN%` or `n/a` (nil).

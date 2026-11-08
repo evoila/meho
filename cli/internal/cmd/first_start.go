@@ -77,7 +77,7 @@ func runFirstStart(cmd *cobra.Command, backplaneURL string, jsonOut bool) error 
 	return nil
 }
 
-// printFirstStart writes one line per check: GREEN, RED or SKIPPED, the
+// printFirstStart writes one line per check: GREEN, RED, WARN or SKIPPED, the
 // check name and its sentence.
 func printFirstStart(w io.Writer, list firstStartList) {
 	for _, line := range list.Checks {
@@ -85,6 +85,8 @@ func printFirstStart(w io.Writer, list firstStartList) {
 		switch line.Status {
 		case "fail":
 			label = "RED"
+		case "warn":
+			label = "WARN"
 		case "skipped":
 			label = "SKIPPED"
 		}

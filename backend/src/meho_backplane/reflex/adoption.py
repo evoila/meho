@@ -91,6 +91,15 @@ Let a *session* be a distinct non-null ``agent_session_id``.
 4. **surface split** — every metric above, reported once per surface
    (``agent`` / ``cli_rest``).
 
+Learning numbers
+----------------
+
+The report also carries ``learning``: the repeat-mistake rate, the hit
+rate and the precision of retrieved knowledge and memory entries, and the
+time to the first correct action on a known system. They are defined and
+computed in :mod:`meho_backplane.lessons.metrics`, from ``audit_log``
+dispatch rows and the recorded retrievals.
+
 Request usage events (#3734)
 ----------------------------
 
@@ -136,6 +145,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AgentAnnouncement, AuditLog
+from meho_backplane.lessons.metrics import LearningMetrics, compute_learning_metrics
 from meho_backplane.request_usage.reader import (
     MCP_TOOL_ROUTE_PREFIX,
     UsageSource,
@@ -161,6 +171,7 @@ __all__ = [
     "MCP_TOOL_PATH_PREFIX",
     "SUCCESS_STATUS",
     "WRITE_OP_CLASSES",
+    "LearningMetrics",
     "ReflexReport",
     "SinceValueError",
     "SurfaceMetrics",
@@ -241,6 +252,9 @@ class ReflexReport(BaseModel):
     empty window (both surfaces present with zero-valued / ``None``
     metrics). ``tenant_id`` is the scope the report was computed for
     (the operator's own tenant, or a ``platform_admin`` filter).
+    ``learning`` holds the four numbers that show whether stored lessons
+    help (:mod:`meho_backplane.lessons.metrics`); they are not split by
+    surface, because each one is about agent sessions.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -249,6 +263,7 @@ class ReflexReport(BaseModel):
     until: datetime
     tenant_id: UUID | None
     surfaces: list[SurfaceMetrics]
+    learning: LearningMetrics
 
 
 class _MetaToolRow(NamedTuple):
@@ -546,9 +561,16 @@ async def compute_reflex_report(
         )
         for surface in _SURFACES
     ]
+    learning = await compute_learning_metrics(
+        session,
+        since=since,
+        until=until,
+        tenant_id=tenant_id,
+    )
     return ReflexReport(
         since=since,
         until=until,
         tenant_id=tenant_id,
         surfaces=surfaces,
+        learning=learning,
     )

@@ -1980,6 +1980,61 @@
         }
       }
     },
+    "/api/v1/settings/conventions-drift": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Conventions Drift",
+        "description": "Compare a settings file that holds only conventions with the tenant's own.\n\nThe file has one tenant block (the caller's tenant) with ``conventions``\nonly, each of kind ``operational``. The answer lists what an import would\nadd or change, and the operational conventions only MEHO has. Always 200\n(403 for another tenant, 413 for a body over 4 MiB). Writes nothing.",
+        "operationId": "conventions_drift_api_v1_settings_conventions_drift_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConventionsDriftResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "The meho-settings.yaml file, as sent (YAML; JSON is valid YAML).",
+          "content": {
+            "application/yaml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/event-sources": {
       "get": {
         "tags": [
@@ -30149,6 +30204,60 @@
         "title": "ConventionUpdate",
         "description": "PATCH body for ``/api/v1/conventions/{slug}``.\n\nAll fields optional -- PATCH semantics means \"update only what's\nprovided\". Pydantic v2's :attr:`BaseModel.model_fields_set`\ndistinguishes \"field absent from JSON\" from \"field present with\nnull\", and the route handler uses that view to apply only the\nexplicitly-set keys to the ORM row. The kind discriminator is\nexcluded from the PATCH surface: changing a convention's kind\nin-place would silently change its preamble-inclusion behaviour\n(an ``operational`` rule becoming ``reference`` would disappear\nfrom every future preamble without an audit signal); operators\ndelete + recreate to switch kind, which produces a clean two-\nrow history trail.\n\n``priority`` is included because reranking is the most common\nedit shape (a rule that became more / less urgent without its\ntext changing). ``slug`` is not in the PATCH surface either --\nrenaming a convention is a delete + recreate as well, since\nthe audit log and history rows reference the old slug by\nnatural key."
       },
+      "ConventionsDriftResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "in_sync": {
+            "type": "boolean",
+            "title": "In Sync"
+          },
+          "mistakes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Mistakes"
+          },
+          "added": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Added"
+          },
+          "changed": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Changed"
+          },
+          "only_in_meho": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Only In Meho"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "in_sync",
+          "mistakes",
+          "added",
+          "changed",
+          "only_in_meho"
+        ],
+        "title": "ConventionsDriftResponse",
+        "description": "The drift check's answer. ``in_sync`` is true only when nothing differs.\n\n``added``: ``{slug, value}``, a rule in the file that MEHO does not have.\n``changed``: ``{slug, before, after}``, only the fields an import would\nchange. ``only_in_meho``: ``{slug}``, an operational convention the file\ndoes not have. All three are empty when ``mistakes`` is not."
+      },
       "CriterionResult": {
         "properties": {
           "name": {
@@ -32673,6 +32782,7 @@
             "enum": [
               "ok",
               "fail",
+              "warn",
               "skipped"
             ],
             "title": "Status"
@@ -32711,7 +32821,7 @@
           "checks"
         ],
         "title": "FirstStartResponse",
-        "description": "The whole list. ``ok`` is true when no line is ``fail``."
+        "description": "The whole list. ``ok`` is true when no line is ``fail`` (``warn`` is fine)."
       },
       "ForkInfo": {
         "properties": {
@@ -34146,6 +34256,74 @@
         ],
         "title": "KindFilterValue",
         "description": "Closed enum of the trigger ``kind`` values exposed in the filter URL.\n\nMirrors the wire-level :data:`~meho_backplane.scheduler.schemas.KindFilter`\nliteral (``cron`` / ``one_off`` / ``event``). The ``str`` mixin keeps\nthe template's ``{{ kind_filter }}`` rendering + ``selected`` matching\nstable, and an out-of-enum value fails Pydantic validation at the HTTP\nboundary with a 422 rather than silently filtering nothing."
+      },
+      "LearningMetrics": {
+        "properties": {
+          "repeat_mistake_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Repeat Mistake Pct"
+          },
+          "repeat_mistake_failures": {
+            "type": "integer",
+            "title": "Repeat Mistake Failures"
+          },
+          "repeat_mistake_repeats": {
+            "type": "integer",
+            "title": "Repeat Mistake Repeats"
+          },
+          "hit_rate_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Hit Rate Pct"
+          },
+          "hit_rate_retrievals": {
+            "type": "integer",
+            "title": "Hit Rate Retrievals"
+          },
+          "hit_rate_used": {
+            "type": "integer",
+            "title": "Hit Rate Used"
+          },
+          "precision_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Precision Pct"
+          },
+          "precision_judged": {
+            "type": "integer",
+            "title": "Precision Judged"
+          },
+          "precision_right": {
+            "type": "integer",
+            "title": "Precision Right"
+          },
+          "first_correct_action_median_seconds": {
+            "type": "number",
+            "nullable": true,
+            "title": "First Correct Action Median Seconds"
+          },
+          "first_correct_action_sessions": {
+            "type": "integer",
+            "title": "First Correct Action Sessions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "repeat_mistake_pct",
+          "repeat_mistake_failures",
+          "repeat_mistake_repeats",
+          "hit_rate_pct",
+          "hit_rate_retrievals",
+          "hit_rate_used",
+          "precision_pct",
+          "precision_judged",
+          "precision_right",
+          "first_correct_action_median_seconds",
+          "first_correct_action_sessions"
+        ],
+        "title": "LearningMetrics",
+        "description": "The four numbers that show whether stored lessons help.\n\nFor one tenant and window. Each ratio comes with its count and its\nbase, and is ``null`` when the base is 0. The median time is in\nseconds."
       },
       "LivenessResponse": {
         "properties": {
@@ -36095,6 +36273,9 @@
             },
             "type": "array",
             "title": "Surfaces"
+          },
+          "learning": {
+            "$ref": "#/components/schemas/LearningMetrics"
           }
         },
         "type": "object",
@@ -36102,10 +36283,11 @@
           "since",
           "until",
           "tenant_id",
-          "surfaces"
+          "surfaces",
+          "learning"
         ],
         "title": "ReflexReport",
-        "description": "Top-level shape returned by :func:`compute_reflex_report` + the route.\n\n``surfaces`` is always ordered ``[agent, cli_rest]`` so table\nrenderers and ``--json`` consumers see a stable shape even for an\nempty window (both surfaces present with zero-valued / ``None``\nmetrics). ``tenant_id`` is the scope the report was computed for\n(the operator's own tenant, or a ``platform_admin`` filter)."
+        "description": "Top-level shape returned by :func:`compute_reflex_report` + the route.\n\n``surfaces`` is always ordered ``[agent, cli_rest]`` so table\nrenderers and ``--json`` consumers see a stable shape even for an\nempty window (both surfaces present with zero-valued / ``None``\nmetrics). ``tenant_id`` is the scope the report was computed for\n(the operator's own tenant, or a ``platform_admin`` filter).\n``learning`` holds the four numbers that show whether stored lessons\nhelp (:mod:`meho_backplane.lessons.metrics`); they are not split by\nsurface, because each one is about agent sessions."
       },
       "RefreshResult": {
         "properties": {

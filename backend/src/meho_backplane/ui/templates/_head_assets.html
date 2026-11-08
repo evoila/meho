@@ -27,6 +27,16 @@
    targets renders SVG favicons, and one vector scales across tab sizes.
    A <link> element, so it keeps the zero-inline-script CSP posture. #}
 <link rel="icon" href="/ui/static/src/brand/favicon.svg" type="image/svg+xml" />
+{# Installable app: the manifest names the app, its icons and the page it
+   opens on; iPhones and iPads read the touch icon and the title instead.
+   The service worker (registered by pwa-register.js) keeps only the app
+   shell and shows the offline page when MEHO is not reachable. See
+   docs/codebase/ui.md, "Installable app". #}
+<link rel="manifest" href="/ui/static/src/pwa/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/ui/static/src/brand/apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-title" content="MEHO" />
+<meta name="mobile-web-app-capable" content="yes" />
+<script src="/ui/static/src/app/pwa-register.js" defer></script>
 {# Compiled Tailwind 4 + DaisyUI 5 bundle; built by the ``tailwindcss``
    CLI step in backend/Dockerfile from static/src/styles.css. #}
 <link rel="stylesheet" href="/ui/static/dist/tailwind.css" />

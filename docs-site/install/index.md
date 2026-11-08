@@ -350,12 +350,13 @@ instead of the standard one.
 
 - **Your own secret store.** Set `coreVault.enabled: false`. It works
   with the built-in PostgreSQL and Keycloak.
-- **Your own PostgreSQL.** Set `corePostgres.enabled: false`. The
-  built-in Keycloak keeps its data in the built-in PostgreSQL, and the
-  built-in OpenBao needs the built-in Keycloak. So today your own
-  PostgreSQL also needs your own Keycloak and your own secret store:
-  set all three to `false`, and read
-  [Your own Keycloak](#your-own-keycloak) first.
+- **Your own PostgreSQL.** Set `corePostgres.enabled: false`. You can
+  keep MEHO's Keycloak: it then needs its own database and login role
+  on your PostgreSQL. See
+  [Your own PostgreSQL with the built-in Keycloak](#your-own-postgresql-with-the-built-in-keycloak).
+  The built-in OpenBao needs the built-in Keycloak. If you bring your
+  own Keycloak (expert path, below), also bring your own secret store:
+  set `coreKeycloak.enabled` and `coreVault.enabled` to `false`.
 
 ### What you need for your own parts
 
@@ -585,6 +586,87 @@ Directory / LDAP, Entra ID, authentik): see
 
 **Who logs in with your own Keycloak.** The user you created in this
 step. In Part A, Step 5, log in with that user.
+
+### Your own PostgreSQL with the built-in Keycloak
+
+Set `corePostgres.enabled: false` and keep `coreKeycloak.enabled: true`.
+Fill `postgres.credentialsSecret` (and `networkPolicy.postgresCIDR`) as
+for any own PostgreSQL. MEHO's Keycloak needs its own database and its
+own login role on your server. Name the server in
+`coreKeycloak.database.host`, then pick one of two ways.
+
+**The chart creates them.** Give the chart a login that may create a
+role and a database. A one-time Job uses it before Keycloak starts. It is
+safe to run twice: it makes only what is missing. The Job sets the
+password of the Keycloak role to the one in the Secret
+`<release>-core-postgres-keycloak`, which the install makes by itself.
+
+```bash
+kubectl create secret generic keycloak-db-admin \
+  --from-literal=username=<admin-user> \
+  --from-literal=password=<admin-password>
+```
+
+```yaml
+corePostgres:
+  enabled: false
+coreKeycloak:
+  database:
+    host: db.example.com
+    create:
+      enabled: true
+      adminSecret:
+        name: keycloak-db-admin
+```
+
+**You name them in values.** Your database team makes the database and
+the role. Put the role's password in a Secret with the key `password`
+(or name another key in `passwordSecret.key`; that works only for your
+own Secret, because the Secret the install makes has the key `password`).
+
+```yaml
+corePostgres:
+  enabled: false
+coreKeycloak:
+  database:
+    host: db.example.com
+    name: keycloak            # default
+    user: keycloak            # default
+    passwordSecret:
+      name: keycloak-db-password
+```
+
+If the Keycloak role already exists, the Job sets its password again. This
+can fail when the admin login is not allowed to manage that role. This is
+the case on PostgreSQL 16 and later when another login made the role. The
+Job then stops with an error. Fix it in one of two ways: give the admin
+login the rights to manage the role, or make the role yourself and use the
+"You name them in values" way.
+
+Both ways accept `coreKeycloak.database.port` (default `5432`) and
+`coreKeycloak.database.sslMode` (`require`, `verify-full` and so on) for
+a TLS connection. With `verify-ca` or `verify-full`, Keycloak and the Job
+check the server's certificate against a CA certificate you give them.
+Put the CA certificate (PEM) in a ConfigMap and name it:
+
+```bash
+kubectl create configmap postgres-ca --from-file=ca.crt=<path to the CA file>
+```
+
+```yaml
+coreKeycloak:
+  database:
+    sslMode: verify-full
+    caBundle:
+      configMapName: postgres-ca
+      key: ca.crt               # default
+```
+
+Without a host, or without a password Secret or an admin Secret, Helm
+stops with a message that names the key. So does a `verify-ca` or
+`verify-full` mode without the CA ConfigMap. These keys work only with
+your own PostgreSQL. Moving the data of an existing install from the
+built-in PostgreSQL to yours is not covered here.
 
 ### Values file for your own parts
 

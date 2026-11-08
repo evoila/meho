@@ -66,8 +66,15 @@ cat "$file"
 """
 
 
-def _target(name: str, product: str, secret_ref: str | None) -> dict[str, Any]:
-    return {"name": name, "product": product, "secret_ref": secret_ref}
+def _target(
+    name: str, product: str, secret_ref: str | None, field_map: dict[str, str] | None = None
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "product": product,
+        "secret_ref": secret_ref,
+        "secret_field_map": field_map or {},
+    }
 
 
 class _Fake:
@@ -173,6 +180,58 @@ def test_unreadable_secret_fails(fake: _Fake) -> None:
 
     assert result.returncode == 1
     assert "[FAIL] node-2 (linux): cannot read the secret from Vault" in result.stdout
+
+
+@_needs_jq
+def test_mapped_pin_passes(fake: _Fake) -> None:
+    fake.page([_target("web-1", "linux", "targets/web-1", {"known_hosts": "host_pin"})])
+    fake.secret("targets/web-1", {"host_pin": "web-1 ssh-ed25519 AAAA"})
+
+    result = fake.run()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[ok]   web-1 (linux): host key pinned" in result.stdout
+
+
+@_needs_jq
+def test_mapped_opt_out_warns_but_passes(fake: _Fake) -> None:
+    fake.page([_target("fw-1", "pfsense", "targets/fw-1", {"known_hosts_insecure": "no_check"})])
+    fake.secret("targets/fw-1", {"no_check": "true"})
+
+    result = fake.run()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[WARN] fw-1 (pfsense): known_hosts_insecure is set" in result.stdout
+
+
+@_needs_jq
+@pytest.mark.parametrize("field", ["known_hosts", "known_hosts_insecure"])
+def test_missing_mapped_field_fails(fake: _Fake, field: str) -> None:
+    # The secret has the field under its own name, but the map points the
+    # connector at another field, so the connector does not see it.
+    fake.page([_target("node-1", "rke2", "targets/node-1", {field: "gone_field"})])
+    value = "node-1 ssh-ed25519 AAAA" if field == "known_hosts" else True
+    fake.secret("targets/node-1", {field: value})
+
+    result = fake.run()
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert (
+        "[FAIL] node-1 (rke2): the target's secret_field_map points to a field "
+        "the secret does not have (gone_field)"
+    ) in result.stdout
+    assert "AAAA" not in result.stdout
+
+
+@_needs_jq
+def test_missing_mapped_pin_with_opt_out_passes(fake: _Fake) -> None:
+    fake.page([_target("node-1", "rke2", "targets/node-1", {"known_hosts": "gone_field"})])
+    fake.secret("targets/node-1", {"known_hosts_insecure": True})
+
+    result = fake.run()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[WARN] node-1 (rke2): known_hosts_insecure is set" in result.stdout
 
 
 @_needs_jq

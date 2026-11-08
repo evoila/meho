@@ -14,7 +14,9 @@
 #
 #   1. Lists the targets of your tenant (GET /api/v1/targets, all pages).
 #   2. Keeps the targets whose product uses an SSH connector.
-#   3. Reads each target's secret from Vault (`vault kv get`) and checks:
+#   3. Reads each target's secret from Vault (`vault kv get`), applies
+#      the target's `secret_field_map` the way the SSH connector does, and
+#      checks:
 #        [ok]   the secret has a `known_hosts` entry
 #        [WARN] the secret sets `known_hosts_insecure` (no host-key check)
 #        [WARN] the target has no secret_ref, or its secret_ref names
@@ -115,7 +117,10 @@ targets_page() {
         curl "${args[@]}" "$BACKPLANE/api/v1/targets"
 }
 
-# Print one line per SSH target: name<TAB>product<TAB>secret_ref.
+# Print one line per SSH target:
+# name<TAB>product<TAB>secret_field_map (JSON, base64)<TAB>secret_ref.
+# The secret_ref comes last: it may be empty, and `read` joins empty
+# fields between tabs.
 list_ssh_targets() {
     local products cursor="" page
     products="$(printf '%s\n' "${SSH_PRODUCTS[@]}" | jq -R . | jq -sc .)"
@@ -126,17 +131,21 @@ list_ssh_targets() {
         }
         jq -r --argjson p "$products" \
             '.items[] | select(.product as $x | $p | index($x)) |
-             [.name, .product, (.secret_ref // "")] | @tsv' <<<"$page"
+             [.name, .product, (.secret_field_map // {} | tojson | @base64),
+              (.secret_ref // "")] | @tsv' <<<"$page"
         cursor="$(jq -r '.next_cursor // ""' <<<"$page")"
         [ -n "$cursor" ] || break
     done
 }
 
-# Decide one target. The rules match the SSH connector: a non-empty
-# `known_hosts` wins; else a truthy `known_hosts_insecure` (true, or the
-# strings 1/true/yes/on) is the opt-out; else the target fails.
+# Decide one target. The rules match the SSH connector. First the
+# target's `secret_field_map` ({connector_field: source_field}) is applied:
+# a mapped field takes the value of its source field, and is gone when the
+# source field is not in the secret. Then a non-empty `known_hosts` wins;
+# else a truthy `known_hosts_insecure` (true, or the strings
+# 1/true/yes/on) is the opt-out; else the target fails.
 check_target() {
-    local name="$1" product="$2" ref="$3" path secret verdict
+    local name="$1" product="$2" ref="$3" field_map="$4" path secret verdict
     local label="$name ($product)"
     if [ -z "$ref" ]; then
         warn "$label: no secret_ref, so SSH does not work with or without a pin"
@@ -154,30 +163,39 @@ check_target() {
         fail "$label: cannot read the secret from Vault; check it by hand"
         return
     fi
-    verdict="$(jq -r '
-        (.data.data // {}) as $s
+    verdict="$(jq -r --arg map "$field_map" '
+        (.data.data // {}) as $raw
+        | (if $map == "" then {} else ($map | @base64d | fromjson) end) as $m
+        | (reduce ($m | to_entries[]) as $e ($raw;
+            if $raw | has($e.value) then .[$e.key] = $raw[$e.value]
+            else del(.[$e.key]) end)) as $s
+        | ([$m | to_entries[]
+            | select(.key == "known_hosts" or .key == "known_hosts_insecure")
+            | select(.value as $v | $raw | has($v) | not) | .value] | unique | join(", ")) as $gone
         | if (($s.known_hosts // "") | tostring | gsub("^\\s+|\\s+$"; "")) != "" then "pinned"
           elif ($s.known_hosts_insecure == true)
             or (($s.known_hosts_insecure | type) == "string"
                 and (($s.known_hosts_insecure | ascii_downcase | gsub("^\\s+|\\s+$"; ""))
                      | IN("1", "true", "yes", "on")))
           then "insecure"
+          elif $gone != "" then "unmapped:" + $gone
           else "missing" end' <<<"$secret")" || verdict="missing"
     case "$verdict" in
         pinned) ok "$label: host key pinned" ;;
         insecure) warn "$label: known_hosts_insecure is set, so MEHO does not check the host key" ;;
+        unmapped:*) fail "$label: the target's secret_field_map points to a field the secret does not have (${verdict#unmapped:}); SSH stops working after the upgrade" ;;
         *) fail "$label: no known_hosts entry and no known_hosts_insecure; SSH stops working after the upgrade" ;;
     esac
 }
 
 main() {
     parse_args "$@"
-    local targets name product ref count=0
+    local targets name product ref field_map count=0
     targets="$(list_ssh_targets)"
-    while IFS=$'\t' read -r name product ref; do
+    while IFS=$'\t' read -r name product field_map ref; do
         [ -n "$name" ] || continue
         count=$((count + 1))
-        check_target "$name" "$product" "$ref"
+        check_target "$name" "$product" "$ref" "$field_map"
     done <<<"$targets"
     printf 'Checked %d SSH target(s).\n' "$count"
     if [ "$FAILED" -ne 0 ]; then

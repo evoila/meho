@@ -7,7 +7,9 @@
   ``fqdn`` marked as addresses, with a ``tenant_admin`` role floor.
 * **Change** -- only the sent fields change; ``null`` clears a nullable
   field; the target is found by id in the caller's tenant only, also when
-  another target is named like that id.
+  another target is named like that id. A deleted target is refused, and
+  the change lands on the row found by id, never on a target found again
+  by name or alias.
 * **Checks of PATCH** -- a host check, a bad CA pin, a ``null`` product,
   a call with no field and an unknown id are errors, and nothing changes.
 * **Role** -- a person with the ``operator`` or ``read_only`` role is
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -34,6 +37,7 @@ from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors.targets import update as update_module
 from meho_backplane.connectors.targets.ops import TARGETS_REGISTRY_CONNECTOR_ID
 from meho_backplane.connectors.targets.update import (
     TARGETS_UPDATE_OP_ID,
@@ -147,6 +151,13 @@ async def _run(operator: Operator, target_id: uuid.UUID | str, **fields: Any) ->
     )
 
 
+async def _soft_delete(target_id: uuid.UUID) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        row = await session.get(TargetORM, target_id)
+        assert row is not None
+        row.deleted_at = datetime.now(UTC)
+
+
 async def _audit_rows() -> list[AuditLog]:
     async with get_sessionmaker()() as session:
         rows = (await session.execute(select(AuditLog))).scalars().all()
@@ -230,6 +241,45 @@ async def test_the_target_is_found_by_id_also_when_another_is_named_like_it() ->
     assert result.result["target_id"] == str(wanted.id)
     assert (await _row(wanted.id)).notes == "new note"
     assert (await _row(decoy.id)).notes == "old note"
+
+
+async def test_a_deleted_target_is_refused_and_no_alias_holder_changes() -> None:
+    gone = await _seed("gone")
+    holder = await _seed("holder", aliases=["gone"])
+    await _soft_delete(gone.id)
+
+    result = await _run(_admin(), gone.id, notes="new note")
+
+    assert result.status == "error", result
+    assert "no live target" in str(result.extras.get("exception_message"))
+    assert (await _row(holder.id)).notes == "old note"
+
+
+async def test_the_change_lands_on_the_row_found_by_id_and_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The target is deleted right after the id lookup; no name lookup follows."""
+    first = await _seed("first")
+    holder = await _seed("holder", aliases=["first"])
+    real_lookup = update_module.resolve_target_by_id
+    lock_flags: list[bool] = []
+
+    async def lookup_then_delete(
+        session: Any, tenant_id: uuid.UUID, target_id: uuid.UUID, *, for_update: bool = False
+    ) -> TargetORM | None:
+        row = await real_lookup(session, tenant_id, target_id, for_update=for_update)
+        lock_flags.append(for_update)
+        await _soft_delete(target_id)
+        return row
+
+    monkeypatch.setattr(update_module, "resolve_target_by_id", lookup_then_delete)
+
+    result = await _run(_admin(), first.id, notes="new note")
+
+    assert lock_flags == [True]
+    assert result.status == "ok", result
+    assert result.result["target_id"] == str(first.id)
+    assert (await _row(holder.id)).notes == "old note"
 
 
 @pytest.mark.parametrize("case", ["unknown_id", "other_tenant"])

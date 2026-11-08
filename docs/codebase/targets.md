@@ -525,8 +525,12 @@ with the operator-plane MCP tool `meho_targets_update`. People also have
 `meho targets update` on the CLI, which calls `PATCH`.
 
 - **One code path.** The handler finds the target by id in the caller's
-  tenant (`resolve_target_by_id`) and calls `update_target`, the `PATCH`
-  service, with the row's name in the same transaction. So every check of
+  tenant (`resolve_target_by_id` with `for_update=True`, which locks the
+  row until the change commits) and hands that row to
+  `apply_target_update`, the code that `PATCH` runs after its own lookup.
+  MEHO does not look the target up again by name, so a target deleted
+  before the lock gives an error, and no other target with that name or
+  alias is changed. So every check of
   `PATCH` applies (product, `secret_ref` tenant path, host, TLS,
   `secret_field_map` merge, Vault login keys in `extras`), and the change
   drops kept logins like a `PATCH` does.

@@ -5,8 +5,8 @@
 
 ``targets.update`` changes the stored fields of one target of the
 caller's tenant, for example a wrong ``secret_ref`` or a new host. It
-runs :func:`~meho_backplane.api.v1.targets.update_target`, the same code
-as REST ``PATCH /api/v1/targets/{name}``. So every check of that route
+runs :func:`~meho_backplane.api.v1.targets.apply_target_update`, the same
+code as REST ``PATCH /api/v1/targets/{name}``. So every check of that route
 applies here too: the product check, the ``secret_ref`` tenant check,
 the host check, the TLS checks, the merge of ``secret_field_map``, the
 platform-admin check on the Vault login keys in ``extras``, the audit of
@@ -15,7 +15,9 @@ change. This module checks none of them again.
 
 The target is named by its id, as ``list_targets`` shows it, never by
 name. A name or alias could point at another target by the time an
-approved call runs. Only targets of the caller's tenant are found.
+approved call runs. Only targets of the caller's tenant are found. The
+row found by id is locked and changed; MEHO does not look it up again
+by name.
 
 Like ``PATCH``, only the fields in the call change. An explicit ``null``
 clears a field that can be empty (``fqdn``, ``secret_ref``, ``notes`` and
@@ -41,10 +43,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+import structlog
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from meho_backplane.api.v1.targets import update_target
+from meho_backplane.api.v1.targets import apply_target_update
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.targets.ops import (
@@ -265,12 +268,10 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
 
     Op-id: ``targets.update``. Targetless typed op; the target is named by
     ``target_id`` in *params*. The row is looked up by id in the operator's
-    tenant only, then handed by its name to
-    :func:`~meho_backplane.api.v1.targets.update_target` in the same
-    transaction. Names are unique in a tenant and the name is matched
-    first, so the service changes the same row. A missing target, a call
-    with no field and every service or model check failure is a
-    :class:`ValueError`; nothing is changed then.
+    tenant only and locked until the change commits; that row goes to
+    :func:`~meho_backplane.api.v1.targets.apply_target_update`. A missing
+    or deleted target, a call with no field and every service or model
+    check failure is a :class:`ValueError`; nothing is changed then.
     """
     target_id = _parse_target_id(params)
     try:
@@ -281,14 +282,15 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as session, session.begin():
-            row = await resolve_target_by_id(session, operator.tenant_id, target_id)
+            row = await resolve_target_by_id(
+                session, operator.tenant_id, target_id, for_update=True
+            )
             if row is None:
                 raise ValueError(
                     f"no live target with id {target_id} in your tenant; nothing was changed"
                 )
-            updated = await update_target(
-                name=row.name, body=body, operator=operator, session=session
-            )
+            structlog.contextvars.bind_contextvars(target_id=str(row.id), target_name=row.name)
+            updated = await apply_target_update(row, body, operator, session)
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc
 

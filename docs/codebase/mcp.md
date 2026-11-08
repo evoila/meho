@@ -1378,7 +1378,8 @@ service login has the `operator` role, and the delete grant is enough (#5480). I
 
 `meho_targets_update` (`mcp/tools/targets_update.py` +
 `connectors/targets/update.py`) changes fields of one target. It runs the
-`targets.update` operation, which calls the `update_target` service of
+`targets.update` operation, which finds the target by id, locks the row,
+and calls `apply_target_update`, the code of
 REST `PATCH /api/v1/targets/{name}`, so every check of that route applies
 and none is written again. It is `caution` with `requires_approval=True`,
 not the dial above: `host` and `fqdn` carry `x-meho-caller-address: true`

@@ -334,9 +334,19 @@ git checkout main && git pull
 # exists to prevent). Substitute the PR number:
 REL_SHA=$(gh pr view <phase2-pr#> --repo evoila/meho --json mergeCommit --jq .mergeCommit.oid)
 git merge-base --is-ancestor "$REL_SHA" main || { echo "merge commit not on main — abort"; exit 1; }
-git tag vX.Y.Z "$REL_SHA"   # tag the release-cutting merge commit by SHA, not HEAD
+git tag -a vX.Y.Z -m "MEHO X.Y.Z: <short summary>" "$REL_SHA"   # tag the release-cutting merge commit by SHA, not HEAD
 git push origin vX.Y.Z
 ```
+
+**The tag has a message** (git calls this an annotated tag). Always use
+`git tag -a` with `-m`, never a plain `git tag vX.Y.Z`:
+
+- The message is one line: `MEHO X.Y.Z: <short summary>`. The summary
+  names the main changes in a few words.
+- Why: the git manual says tags with a message are meant for releases.
+  The tag also stores who made it and when.
+- Nothing in the release reads the message. The GitHub Release text
+  still comes from `CHANGELOG.md`.
 
 The push fans out to `cli-release.yml`, `image.yml`, `chart.yml` and
 `docs-site.yml`. `cli-release.yml` then calls `linux-download.yml` for the
@@ -566,7 +576,8 @@ into the pod's environment and re-deploy.
 ### 6b. Rollback drill — the migration ↔ rollback contract
 
 **Contract** (#1607, hardened after the 2026-06-08 outage):
-`helm rollback` / `--atomic` reverts **manifests only** — the
+`helm rollback` / `--rollback-on-failure` (Helm 4's name for the
+deprecated `--atomic`) reverts **manifests only** — the
 migration's schema commit survives the rollback. The migration runs in
 the `pre-install,pre-upgrade` hook Job when the install brings its own
 PostgreSQL, and in the `migrate` init container of each new backplane
@@ -598,39 +609,63 @@ tolerance lives in the image being rolled back **to** — rolling back
 to a pre-tolerance release (strict `current == head` probe) across a
 migration still bricks readiness; recover those by rolling forward.
 
-**Failure-injection drill** — run on a sandbox (kind/minikube or the
-staging namespace, never prod) when the release carries a migration,
-and whenever the migration Job, the `migrate` init container, the
-migration runner or the `db` probe changes. Run it in the mode the
-release targets; with the built-in PostgreSQL, also delete one
-rolled-back pod after step 4 and check that the new pod's `migrate`
-init container logs `migration_skipped` and the pod gets Ready:
+**Failure-injection drill** — run it when the release carries a
+migration, and whenever the migration Job, the `migrate` init container,
+the migration runner or the `db` probe changes.
 
-- [ ] 1. Install the prior release `v(n)` (DB at migration `00NN`);
-  wait Ready. Per the caveat above, `v(n)` must already carry the
-  db-ahead-tolerant probe (#1607) — the drill proves the safety net
-  of the release being rolled back *to*.
+**In CI (the normal way).** Start the `rollback-drill` job: GitHub
+Actions → workflow `chart` → **Run workflow**. Pick the commit to test
+(the release-cutting commit on `main`, or the candidate tag) and enter
+the prior release in `prior` (for example `v0.44.0`; `v0.39.0` or later).
+
+```bash
+gh workflow run chart.yml --repo evoila/meho --ref <branch-or-tag> -f prior=v<n>
+```
+
+The job runs steps 1 to 5 below on a kind cluster, with a
+bring-your-own PostgreSQL (the migration runs in the hook Job). It uses
+the prior release's published chart and image, and the chart and image
+of the chosen commit. The run summary says whether the way back works.
+It fails when the database did not move, because then there is no new
+migration and the drill proves nothing. There is no login server and no
+Vault in the job, so logins are not tested.
+
+**By hand.** Run the same steps on a sandbox (kind/minikube or the
+staging namespace, never prod) when you need the built-in PostgreSQL or
+your own values. Use Helm 4. Run it in the mode the release targets:
+
+- [ ] 1. Install the prior release `v(n)` (DB at migration `00NN`) with
+  your values file; wait Ready. Per the caveat above, `v(n)` must already
+  carry the db-ahead-tolerant probe (#1607) — the drill proves the
+  safety net of the release being rolled back *to*.
 - [ ] 2. Upgrade to the candidate `v(n+1)` (carrying `00NN+1`) with
   readiness deliberately broken, so the rollout must fail and
-  auto-roll-back:
+  auto-roll-back. Pass the same values file as a normal install. Do not
+  use `--reuse-values`: it keeps the old chart's defaults, so the upgrade
+  can fail for another reason than the broken probe.
 
   ```bash
   helm upgrade meho oci://ghcr.io/evoila/meho-chart \
-    --version <candidate> --reuse-values --atomic --timeout 5m \
+    --version <candidate> --values <your-values-file> \
+    --rollback-on-failure --timeout 5m \
     --set probes.readiness.httpGet.path=/definitely-404
   ```
 
 - [ ] 3. Confirm the upgrade fails and Helm auto-rolls-back:
-  `helm history meho` shows a rollback revision; pods run the `v(n)`
-  image again.
-- [ ] 4. Assert the rolled-back pods reach `READY 1/1` **without any
-  manual `alembic` command**, and `GET /ready` returns 200 with the
-  `db` check `ok=true`, detail `current=00NN+1 head=00NN
-  db_ahead=true`.
+  `helm history meho` shows a failed revision and then a deployed
+  rollback revision; the Deployment runs the `v(n)` image again.
+- [ ] 4. Delete the backplane pod, every time. A failed upgrade can leave
+  the old pod running, so the rollback alone may start nothing. The
+  proof is a brand new `v(n)` pod. Assert it reaches `READY 1/1`
+  **without any manual `alembic` command**, and that the `db` check of
+  `GET /ready` is `ok=true` with detail `current=00NN+1 head=00NN
+  db_ahead=true`. With the built-in PostgreSQL, also check that the new
+  pod's `migrate` init container logs `migration_skipped`.
 - [ ] 5. Clean up by rolling **forward**: re-run the upgrade with
   readiness intact. The DB is already at `00NN+1`; the migration Job
   (or the new pods' `migrate` init container) re-runs as a no-op
-  (`alembic upgrade head` is idempotent).
+  (`alembic upgrade head` is idempotent). The `db` check of the new
+  version shows `revision=00NN+1`.
 
 ### 7. Post-release
 
@@ -646,9 +681,9 @@ tag, the same publish workflows, the same six artefacts — whose
 version carries a SemVer pre-release identifier. Everything in steps
 1–7 applies; this section carries only the deltas. No rc tag has ever
 been pushed (`git tag -l 'v*-rc.*'` is empty as of v0.45.0), so every
-workflow behaviour below is read from the YAML, cited by file and line,
-and must be confirmed on the first rc — the unconfirmed points are
-collected under [Known gaps](#r9--known-gaps-rc-tags-in-the-pipeline).
+workflow behaviour below is read from the YAML and must be confirmed on
+the first rc. The gaps that are left are listed under
+[Known gaps](#r9--known-gaps-rc-tags-in-the-pipeline).
 
 ### R1 — Version scheme
 
@@ -738,7 +773,7 @@ Run step 1 as written (Tasks closed; **real** `success` on the
     PR-triggered, so check it on the PRs that carried migrations since
     the previous tag rather than on the `main` run.
 - [ ] **Contract diff since the previous tag is classified.** There is
-  no automated breaking-vs-additive gate yet (Known gap 3), so do it by
+  no automated breaking-vs-additive gate yet (Known gap 2), so do it by
   hand and record the classification on #2661:
 
   ```bash
@@ -793,7 +828,7 @@ git merge-base --is-ancestor "$RC_SHA" origin/main \
   || { echo "$RC_SHA is no longer on main (force-push or revert) — repeat R3 for the current tip"; exit 1; }
 [ "$(git rev-parse origin/main)" = "$RC_SHA" ] \
   || echo "main moved past the verified candidate: tag $RC_SHA as verified, or repeat R3 for the new tip"
-git tag v1.0.0-rc.N "$RC_SHA"
+git tag -a v1.0.0-rc.N -m "MEHO 1.0.0-rc.N: <short summary>" "$RC_SHA"   # a tag with a message, as in step 4
 git push origin v1.0.0-rc.N
 ```
 
@@ -804,19 +839,20 @@ pre-release identifier, read from the YAML:
 
 | Artefact | What `v1.0.0-rc.N` produces | Where |
 |---|---|---|
-| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. `[Unreleased]` must therefore be audited and non-empty; an empty body here is the step-2 failure mode, not a quirk of rcs. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) L264–269; [`cli-release.yml`](../.github/workflows/cli-release.yml) L171–187, L218–223 |
+| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. The body starts with a one-line header: "**Release candidate.** `v1.0.0-rc.N` is a test version before `v1.0.0`. The notes below list all changes since `<last final tag>`." When both sections are empty (or hold only blank lines), the step **fails** and no Release is made: fill `[Unreleased]` and cut `rc.N+1`. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) `prerelease: auto`; [`cli-release.yml`](../.github/workflows/cli-release.yml) step "Extract release notes from CHANGELOG.md" |
 | CLI tarballs | `meho_1.0.0-rc.N_<os>_<arch>.tar.gz` (`{{ .Version }}` strips the `v`); `meho version` prints `v1.0.0-rc.N` (`{{.Tag}}` keeps it). The cosign identity regex `refs/tags/v.+` covers rc tags, so the step-5 verify recipe is unchanged. | `.goreleaser.yaml` L104, L117, L157; `cli-release.yml` L421 |
 | `.mcpb` bundle | `meho-claude-desktop-1.0.0-rc.N.mcpb`, attached as the fifth asset. `mcpb pack` accepts a pre-release semver — the PR dry-run already packs `0.0.0-pr<N>` on every bundle PR. | `cli-release.yml` L308–320; [`mcpb-bundle.yml`](../.github/workflows/mcpb-bundle.yml) L90–94 |
 | Form-2 download | `meho-linux-1.0.0-rc.N-amd64.tar`, `SHA256SUMS-linux` and `SHA256SUMS-linux.cosign.bundle` on the pre-release. The build waits for the rc's chart `1.0.0-rc.N` and image `:v1.0.0-rc.N`. The cosign identity is `linux-download.yml@refs/tags/v1.0.0-rc.N`, so the step-5 recipe works with `TAG=v1.0.0-rc.N`. | [`linux-download.yml`](../.github/workflows/linux-download.yml); `cli-release.yml` job `linux-download` |
-| Backplane image | Alias `ghcr.io/evoila/meho:v1.0.0-rc.N` — `type=semver,pattern={{raw}}` is the only tag-push pattern; `:main` is not emitted on a tag (`enable={{is_default_branch}}`). Quarantine build → trivy gate → promote → cosign sign → SBOM attest run unchanged, so the rc's promoted **digest** is what the lab deploy pins (R5). | [`image.yml`](../.github/workflows/image.yml) L190–193, L200–307, L342–466 |
+| Backplane image | Alias `ghcr.io/evoila/meho:v1.0.0-rc.N` — `type=semver,pattern={{raw}}` is the only tag-push pattern, and `{{raw}}` keeps the pre-release part; `:main` is not emitted on a tag (`enable={{is_default_branch}}`). The step "Check the release tag is in the image tags" fails the run before the build when the tags do not include `:<tag name>`. Quarantine build → trivy gate → promote → cosign sign → SBOM attest run unchanged, so the rc's promoted **digest** is what the lab deploy pins (R5). | [`image.yml`](../.github/workflows/image.yml) L190–193, L200–307, L342–466 |
 | Helm chart | Version `1.0.0-rc.N` (`VERSION="${REF#refs/tags/v}"`), `appVersion` = the git SHA; pushed to `oci://ghcr.io/evoila/meho-chart:1.0.0-rc.N` and anonymously pulled back by exact version. Hyphenated chart versions are already the norm for `main` pushes (`0.1.<date>-<sha>`), so the push path is proven. Always pass the exact `--version 1.0.0-rc.N` when installing. | [`chart.yml`](../.github/workflows/chart.yml) L1805–1823, L1867, L1998 |
-| Docs site | Publishes under **`1.0`** and **moves `latest` + the site default to it**: the `v[0-9]*.[0-9]*` case matches, `sed` truncates to MAJOR.MINOR, then `mike deploy --push --update-aliases 1.0 latest` and `mike set-default --push latest`. Deploying under the minor is intended ("the rc docs are that minor's docs in progress"); moving `latest` before GA is **Known gap 1**. | [`docs-site.yml`](../.github/workflows/docs-site.yml) L60–66, L156–183 |
+| Docs site | **Never moves `latest` or the site default**, so the public site keeps showing the last final release. While the minor has no final tag (`v1.0.0-rc.N` before `v1.0.0`), the rc publishes under **`1.0`**: the rc docs are that minor's docs in progress. Once the minor has a final tag (`v1.0.1-rc.1` after `v1.0.0`), the rc publishes under its own name (`1.0.1-rc.1`), because `latest` serves the `1.0` folder. A maintainer can remove an old rc entry with `mike delete --push <name>`. | [`docs-site.yml`](../.github/workflows/docs-site.yml) step "Deploy versioned docs"; [`scripts/ci/docs_deploy.sh`](../scripts/ci/docs_deploy.sh) |
 
 Verify per step 5, with these substitutions: the Release **is** marked
 pre-release; `meho version` → `v1.0.0-rc.N`; image alias
 `:v1.0.0-rc.N`; chart `1.0.0-rc.N`; bundle
 `meho-claude-desktop-1.0.0-rc.N.mcpb`; docs at
-`https://evoila.github.io/meho/1.0/`. Do **not** add a `whats-new.md`
+`https://evoila.github.io/meho/1.0/` (the deploy step prints the
+version it published). Do **not** add a `whats-new.md`
 section for an rc — the single `[v1.0.0]` section at promotion covers
 the series (the rc docs publish whatever `whats-new.md` holds at the
 tagged commit, which is fine).
@@ -923,34 +959,25 @@ Steps 2–7 as written, with `PREV` = the last **final** tag (R1
   every upgrade-relevant change since `PREV`.
 - [ ] Tag `v1.0.0` on `REL_SHA` per step 4. Verify per step 5 — the
   Release is **not** marked pre-release; `meho version` → `v1.0.0`;
-  chart `1.0.0`; docs republish `1.0` in place (`latest` already points
-  there since `rc.1`).
+  chart `1.0.0`; docs republish `1.0` in place, and this final tag
+  moves `latest` and the site default to `1.0` (the rc tags did not).
 - [ ] #2661 definition of done: all five gates recorded as holding on
   the promoted rc; the rc tags stay (they are the audit trail of what
   was measured).
 
 ### R9 — Known gaps: rc tags in the pipeline
 
-Read from the YAML; nothing here is fixed by this document. Each is a
-follow-up task.
+The tag-driven workflows now handle rc tags (#3860): the docs site
+keeps `latest` on the last final release, the rc Release has an rc
+header and fails when its notes are empty, the image workflow checks
+the `:v1.0.0-rc.N` tag, and the README guard skips rc tags. Two gaps
+are left. Each is a follow-up task.
 
-1. **Docs site moves `latest` to the rc's minor.**
-   `.github/workflows/docs-site.yml` L172–173: `mike deploy --push
-   --update-aliases "${VERSION}" latest` then `mike set-default --push
-   latest` run for any `v*` tag, so `v1.0.0-rc.1` re-points the public
-   site root at the `1.0` docs before GA. The header (L63–65) intends
-   the minor publish; it does not intend the alias move. Suggested
-   fix: when `GITHUB_REF_NAME` contains `-`, deploy the version without
-   the `latest` alias and skip `set-default`.
-2. **`git describe --tags --abbrev=0` returns the rc.** Used by this
-   runbook's step 2.1 (`PREV`) and step 3, the `/release` skill's
-   Phase 0, and `.github/workflows/readme-version-check.yml` L103. This
-   section fixes the runbook (R1 `--exclude`); the skill needs the same
-   edit. The README guard is harmless today — `README.md` L11 carries
-   no `vX.Y` token and the self-updating badge (L6) short-circuits the
-   check at L93–97 — but reintroducing a `**Status:** vX.Y` token while
-   an rc is the latest tag would fail it on every merge-queue admission.
-3. **No automated compatibility-diff gate.** #2662 closed 2026-08-30
+1. **The `/release` skill still uses `git describe --tags --abbrev=0`
+   without `--exclude`.** Once an rc exists, that returns the rc.
+   This runbook already excludes rcs where it derives `PREV` (R1); the
+   skill needs the same edit (tracked separately).
+2. **No automated compatibility-diff gate.** #2662 closed 2026-08-30
    ("All children shipped; contract-freeze gates live in CI"), but the
    mechanisms its body lists — an oasdiff-class compat gate on the
    public OpenAPI snapshot, a committed `tools/list` snapshot, an
@@ -962,20 +989,6 @@ follow-up task.
    documented here when it lands". Until they exist, gate 4 is the R3
    hand-classification plus those gates. Suggested fix: file the
    missing children (at minimum the compat-diff gate) before `rc.1`.
-4. **Image alias for a pre-release tag is not asserted in the YAML.**
-   `.github/workflows/image.yml` L190–193 configures
-   `type=semver,pattern={{raw}}`; the header (L10, L183) documents only
-   the `v<x.y.z>` shape. The expected alias is `:v1.0.0-rc.N`; confirm
-   it on `rc.1`'s run and, if `docker/metadata-action` drops
-   pre-releases from the `semver` type, add `type=raw,value={{ref}}`
-   (or equivalent) for tag pushes.
-5. **The rc Release body is the raw `[Unreleased]` block.**
-   `.github/workflows/cli-release.yml` L218–223 — by design, but
-   nothing labels it as cumulative rc notes, and the GoReleaser git-log
-   fallback (L231) kicks in silently if `[Unreleased]` is empty.
-   Suggested fix: prepend a one-line "Release candidate `rc.N` for
-   1.0.0 — cumulative notes since `PREV`" header when the tag contains
-   a hyphen, and fail the step (not warn) when both sections are empty.
 
 ## Checklist
 
@@ -1003,8 +1016,9 @@ follow-up task.
 [ ] 6a. Post-deploy enablement — for each gate in /ready features:
         configure the env vars per the cited doc; verify gate
         flips to configured (read features with the metrics token)
-[ ] 6b. Rollback drill (releases carrying a migration): broken-readiness
-        upgrade auto-rolls-back; rolled-back pods reach Ready with
+[ ] 6b. Rollback drill (releases carrying a migration): run the
+        `rollback-drill` job of chart.yml; broken-readiness upgrade
+        auto-rolls-back; a new rolled-back pod reaches Ready with
         db_ahead=true and no manual alembic (#1607)
 [ ] 7. Initiative closed; board/roadmap updated; consumers notified
 

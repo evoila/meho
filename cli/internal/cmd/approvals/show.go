@@ -212,6 +212,8 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "Refs:         %s\n", output.SafeText(strings.Join(dl.Refs, ", ")))
 	}
 	printRunOutcome(w, d)
+	printOutcomeUnknown(w, d)
+	printOutcomeCheck(w, d)
 	printResultHint(w, d)
 	if d.ProposedEffect != nil {
 		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")

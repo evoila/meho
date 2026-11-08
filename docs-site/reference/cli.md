@@ -394,7 +394,7 @@ meho agent-principal revoke <name> [flags]
 
 ## `meho approvals`
 
-Manage approval requests (list / show / result / approve / reject / withdraw)
+Manage approval requests (list / show / result / approve / reject / withdraw / mark-checked)
 
 ```
 meho approvals
@@ -428,7 +428,21 @@ meho approvals list [flags]
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
 - `--order` — sort order: oldest or newest (default: newest; oldest when --filter-work-ref is set)
+- `--outcome-unknown` — list approved changes whose outcome MEHO does not know, for you to check
 - `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
+
+### `meho approvals mark-checked`
+
+Record what you found on the target of a run with an unknown outcome
+
+```
+meho approvals mark-checked <id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw JSON response instead of summary
+- `--note` — what you checked (required)
+- `--outcome` — what you found: happened or did-not-happen (required)
 
 ### `meho approvals reject`
 
@@ -3665,7 +3679,7 @@ meho nsx transport-zone list [flags]
 
 ## `meho operation`
 
-operation meta-tool surface (groups / search / call / preview / result-query / subops)
+operation meta-tool surface (groups / search / call / run-status / preview / result-query / subops)
 
 ```
 meho operation
@@ -3679,6 +3693,7 @@ Invoke an operation through the dispatcher
 meho operation call <connector_id> <op_id> [flags]
 ```
 
+- `--async` — start the operation in the background and return at once with a run id; read it with `meho operation run-status`
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON instead of the human render
 - `--params` — operation params as inline JSON or @<file>; omitted means no params
@@ -3729,6 +3744,18 @@ meho operation result-query <handle_id> [flags]
 - `--query-limit` — query: max output rows (clamps to 500); the result flags truncation when more matched
 - `--select` — query: projection column to return (repeatable; omit for all columns)
 - `--where` — query: WHERE predicate "<field> <op> [value]" (repeatable; op = != < <= > >= IN 'IS NULL')
+
+### `meho operation run-status`
+
+Show the state and result of a background operation run
+
+```
+meho operation run-status <run_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the server's answer as JSON instead of the human render
+- `--wait` — check every few seconds until the run ends, then print the result
 
 ### `meho operation search`
 

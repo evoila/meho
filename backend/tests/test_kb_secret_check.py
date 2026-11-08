@@ -43,6 +43,9 @@ def test_a_secret_shape_is_found_and_not_echoed(text: str, pattern: str) -> None
         "A plain page about snapshot limits in version 9.0.",
         "Set password: <password> in the form.",
         'password: "<password>"',
+        "password: '<password>',",
+        "password=<password>.",
+        "Authorization: Bearer <token>)",
         "Send Bearer ${TOKEN}.",
         "api_key=${API_KEY}",
         "https://store.example.com/file?sig=${SIG}",
@@ -64,6 +67,16 @@ def test_text_without_a_secret_passes(text: str) -> None:
         (f"Authorization: Bearer {MADE_UP}<suffix>", "authorization_header"),
         (f"Bearer ${{A}}{MADE_UP}${{B}}", "bearer_token"),
         (f"https://store.example.com/file?sig={MADE_UP}${{X}}", "url_secret"),
+        # The text next to the placeholder is shorter than the eight
+        # characters a value needs, so it must not be checked on its own.
+        ("password=Q7<k9Tz2LmN>p4", "api_key"),
+        ("password=<k9Tz2LmN>p4", "api_key"),
+        ("password=Q7${K9TZ2LMN}", "api_key"),
+        ("password='<k9Tz2LmN>p4'", "api_key"),
+        ("password=<k9Tz2LmN><p4LmN2>", "api_key"),
+        ("Authorization: Bearer <k9Tz2LmN>p4", "authorization_header"),
+        ("Bearer Q7<k9Tz2LmN>p4", "bearer_token"),
+        ("https://store.example.com/file?sig=Q7${K9TZ2LMN}p4", "url_secret"),
     ],
 )
 def test_a_value_with_a_placeholder_in_it_is_still_a_secret(text: str, pattern: str) -> None:

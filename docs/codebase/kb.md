@@ -471,10 +471,11 @@ one is skipped (`action: "skip"`), and `reason` says why:
    headers, bearer tokens, JWTs, labelled passwords and keys
    (`api_key`), private key blocks, password hashes, Ceph keys, BIND key
    secrets and secrets in links. A placeholder such as `<password>` or
-   `${TOKEN}` is not a secret, but only when nothing secret-shaped is
-   left once the placeholders are taken out of the match:
-   `password=made-up-value:${TOKEN}` is still a secret, and a private
-   key block is never a placeholder. The reason names the pattern and
+   `${TOKEN}` is not a secret, but only when the whole value is one
+   placeholder, with at most quotes around it and punctuation after it:
+   `password: "<password>",` passes, `password=made-up-value:${TOKEN}`
+   and `password=Q7<k9Tz2LmN>p4` are still secrets, and a private key
+   block is never a placeholder. The reason names the pattern and
    the line, never the value. MEHO holds no list of customer names, host
    names or addresses: the team wiki's CI job checks its own
    identifier list before it sends the pages, and refuses and reports a

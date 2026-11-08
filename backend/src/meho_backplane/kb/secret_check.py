@@ -16,10 +16,11 @@ from, and that repo's own CI job checks it before it sends the pages
 (#5728).
 
 A placeholder such as ``<password>`` or ``${TOKEN}`` is not a secret,
-so a page can show what a setting looks like. A value is a placeholder
-only when nothing secret-shaped is left once its placeholders are taken
-out: ``password=made-up-value:${TOKEN}`` is still a secret. A private
-key block is never a placeholder.
+so a page can show what a setting looks like. A value is exempt only
+when the whole value is one placeholder, with at most quotes around it
+and punctuation after it: ``password: "<password>",`` is no secret,
+``password=made-up-value:${TOKEN}`` and ``password=Q7<k9Tz2LmN>p4`` are.
+A private key block is never a placeholder.
 """
 
 from __future__ import annotations
@@ -47,7 +48,14 @@ SECRET_PATTERNS: Final[tuple[str, ...]] = (
     "bind_key_secret",
 )
 
-_PLACEHOLDER: Final[re.Pattern[str]] = re.compile(r"<[^<>\s]+>|\$\{[^{}\s]+\}")
+#: A value that is one placeholder, with at most quotes around it and
+#: punctuation after it.
+_PLACEHOLDER_VALUE: Final[re.Pattern[str]] = re.compile(
+    r"""['"]?(?:<[^<>\s]+>|\$\{[^{}\s]+\})['"]?[.,;:!?)\]}]*"""
+)
+#: The label and the ``=`` or ``:`` after it, at the start of a word such
+#: as ``password=<password>``.
+_LABEL: Final[re.Pattern[str]] = re.compile(r"""^[^\s=:'"<>${}]+[=:]""")
 #: A key block cut off before its ``END`` line runs to the end of the
 #: text, so its last word says nothing about the block. It is never exempt.
 _NEVER_A_PLACEHOLDER: Final[frozenset[str]] = frozenset({"pem_private_key"})
@@ -70,15 +78,15 @@ def find_secret(text: str) -> str | None:
 
 
 def _is_placeholder(pattern: re.Pattern[str] | SecretFinder, found: str) -> bool:
-    """Return whether *found* matches *pattern* only because of its placeholders.
+    """Return whether the value in *found* is one placeholder and nothing more.
 
-    A regex reports the label and the value. The placeholders are taken
-    out of *found*, and the rest is checked against *pattern* again.
-    ``password: <password>`` leaves ``password: ``, which is no secret.
-    ``password=made-up-value:${TOKEN}`` leaves ``password=made-up-value:``,
-    which still is one. A :class:`SecretFinder` reports only the value,
-    so the whole value must be one placeholder.
+    A regex reports the label and the value, as in ``password: "<password>"``
+    or ``Authorization: Bearer <token>``. The value is the last word of
+    the match, without its label. A :class:`SecretFinder` reports only
+    the value. Either way the whole value must be one placeholder:
+    ``password=Q7<k9Tz2LmN>p4`` and ``password=${PREFIX}made-up-value``
+    keep text of their own next to the placeholder, so they stay secrets.
     """
     if isinstance(pattern, re.Pattern):
-        return not secret_spans(pattern, _PLACEHOLDER.sub("", found))
-    return _PLACEHOLDER.fullmatch(found.strip("\"'")) is not None
+        found = _LABEL.sub("", found.split()[-1], count=1)
+    return _PLACEHOLDER_VALUE.fullmatch(found) is not None

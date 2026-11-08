@@ -149,6 +149,14 @@
          <lastmod>2026-11-08</lastmod>
     </url>
     <url>
+         <loc>https://evoila.github.io/meho/0.45/install/backup-restore-update/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
+         <loc>https://evoila.github.io/meho/0.45/install/common-problems/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
          <loc>https://evoila.github.io/meho/0.45/install/company-login-authentik/</loc>
          <lastmod>2026-11-08</lastmod>
     </url>
@@ -157,11 +165,47 @@
          <lastmod>2026-11-08</lastmod>
     </url>
     <url>
+         <loc>https://evoila.github.io/meho/0.45/install/first-day/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
+         <loc>https://evoila.github.io/meho/0.45/install/first-start-checks/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
+         <loc>https://evoila.github.io/meho/0.45/install/form-1-vmware-appliance/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
+         <loc>https://evoila.github.io/meho/0.45/install/form-2-linux-server/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
+         <loc>https://evoila.github.io/meho/0.45/install/form-3-your-kubernetes/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
+         <loc>https://evoila.github.io/meho/0.45/install/keycloak-break-glass/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
          <loc>https://evoila.github.io/meho/0.45/install/keycloak-realm/</loc>
          <lastmod>2026-11-08</lastmod>
     </url>
     <url>
+         <loc>https://evoila.github.io/meho/0.45/install/laptop-tools/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
+         <loc>https://evoila.github.io/meho/0.45/install/login-setup/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
          <loc>https://evoila.github.io/meho/0.45/install/openbao-unseal-key/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
+         <loc>https://evoila.github.io/meho/0.45/install/setup-page/</loc>
          <lastmod>2026-11-08</lastmod>
     </url>
     <url>
@@ -174,6 +218,10 @@
     </url>
     <url>
          <loc>https://evoila.github.io/meho/0.45/install/ways-to-install/</loc>
+         <lastmod>2026-11-08</lastmod>
+    </url>
+    <url>
+         <loc>https://evoila.github.io/meho/0.45/install/which-form/</loc>
          <lastmod>2026-11-08</lastmod>
     </url>
     <url>

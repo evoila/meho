@@ -1153,6 +1153,10 @@ class KbRevision(Base):
     * ``embedding_model`` / ``chunker_version`` -- which embedding
       model and chunking rule indexed this body. ``None`` on backfill
       rows, because the migration cannot know them.
+    * ``entry_metadata`` -- the entry's metadata (the header) as of this
+      revision. A change to the body or to the metadata adds a
+      revision, so one revision id names one exact state of the entry.
+      ``None`` on rows stored before this column existed.
     * ``created_at`` -- when the revision was stored.
     """
 
@@ -1180,6 +1184,10 @@ class KbRevision(Base):
     origin: Mapped[str] = mapped_column(Text, nullable=False)
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunker_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entry_metadata: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1248,6 +1256,46 @@ class MemoryRevision(Base):
             "revision_number",
             unique=True,
         ),
+    )
+
+
+class LessonRetrieval(Base):
+    """One knowledge or memory entry that a search gave to an agent session.
+
+    The weekly knowledge upkeep (:mod:`meho_backplane.lessons.upkeep`) and
+    the learning numbers of ``meho audit reflex``
+    (:mod:`meho_backplane.lessons.metrics`) read these rows. A row is
+    written only for a call that has a session id, because only a session
+    can later show that the entry was used.
+
+    * ``tenant_id`` -- the tenant of the session that searched.
+    * ``store`` -- ``"kb"`` or ``"memory"``.
+    * ``entry_id`` -- the ``documents.id`` of the entry. No foreign key:
+      the row stays when the entry is deleted, so the numbers of the past
+      do not change.
+    * ``entry_tenant_id`` -- the tenant that owns the entry (another
+      tenant for a shared knowledge entry).
+    * ``status`` -- the header ``status`` of the entry at that moment, or
+      ``None``.
+    * ``expired`` -- whether the entry's ``expires_at`` had passed at that
+      moment.
+    """
+
+    __tablename__ = "lesson_retrieval"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    store: Mapped[str] = mapped_column(Text, nullable=False)
+    entry_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    entry_tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    agent_session_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index("lesson_retrieval_tenant_time_idx", "tenant_id", "retrieved_at"),
+        Index("lesson_retrieval_entry_idx", "entry_id"),
     )
 
 

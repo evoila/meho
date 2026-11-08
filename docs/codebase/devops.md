@@ -101,6 +101,7 @@ deploy/charts/meho/
 │   ├── serviceaccount.yaml # Pod identity
 │   ├── networkpolicy.yaml  # default-deny + explicit egress (broadcast / result-cache egress conditional)
 │   ├── migration-job.yaml  # pre-install/pre-upgrade Helm hook (alembic upgrade head)
+│   ├── update-strategy-job.yaml # pre-upgrade hook: removes an old rollingUpdate block before Recreate (#5962)
 │   ├── _core-secrets.tpl   # built-in core: hook account name, core Secret names, the secrets Job's plan
 │   ├── core-secrets-rbac.yaml # built-in core: hook ServiceAccount + Role + RoleBinding (weight -40)
 │   ├── core-secrets-job.yaml  # built-in core: makes missing <release>-core-* Secrets (weight -30)
@@ -312,6 +313,32 @@ the order on a kind cluster, and the rollback after a start that fails
 right after it wrote its operation rows (the test-only setting
 `MEHO_TEST_FAIL_START_AFTER_REGISTRATION`, see
 [rollback.md](../acceptance/rollback.md)).
+
+**Upgrade from a chart without a strategy (#5962).** A chart before #5024
+set no strategy, so Kubernetes filled in `RollingUpdate` and a
+`rollingUpdate` block on the live Deployment. Helm 4 upgrades with
+server-side apply. Helm never set that block, so the apply does not remove
+it, and Kubernetes refuses `Recreate` together with a `rollingUpdate`
+block (`spec.strategy.rollingUpdate: Forbidden`). Helm 3 (client-side
+apply) removes the block itself. So `templates/update-strategy-job.yaml`
+adds a `pre-upgrade` hook: a Job (weight -5, after the migration Job) that
+runs `python -m meho_backplane.update_strategy`. It sends one merge patch,
+`{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}`, with the
+field manager `meho-update-strategy`. The pod template does not change, so
+no pod restarts. Its own ServiceAccount, Role (`get` and `patch` on this one
+Deployment) and RoleBinding come at weight -6, and Helm removes all four
+objects once the Job succeeds. Their name is `<fullname>-update-strategy`,
+with the fullname cut to 47 characters first. So the name always keeps its
+suffix and never equals the backplane ServiceAccount, which the hook's
+delete policy would otherwise remove. The chart renders them only when
+`updateStrategy.type` is `Recreate` and `lookup` finds the live Deployment
+with a `rollingUpdate` block. So a new install, `helm template` and every
+later upgrade render nothing. Argo CD renders with `helm template`, so it
+never gets this Job. Render tests:
+`backend/tests/test_chart_update_strategy_job.py` (a copy of the chart in
+which `lookup` returns a fixed Deployment); Job tests:
+`backend/tests/test_update_strategy.py`. The CI check that upgrades from the
+last release with Helm 4 server-side apply is #5963.
 
 ### Security context
 
@@ -900,6 +927,25 @@ database moved, that Helm rolled back, and that a new prior pod gets
 Ready with the `db` check `db_ahead=true`. Then it rolls forward and
 checks `revision=<head>`. On this event `changes` skips, so the other
 kind jobs and `helm-test-gate` skip too.
+
+A fourth kind job, `upgrade-from-release` (#5963), runs on every
+same-repo pull request that touches the chart. It answers one question:
+does an install made with the last release upgrade to this chart with
+Helm 4 and server-side apply? `helm-test` and `helm-test-byo` cannot see
+this, because they install and upgrade the same new chart with Helm 3.
+The job reuses the setup of `rollback-drill`. It finds the newest GitHub
+release, installs that release's published chart and image with a plain
+`helm install` (Helm 4), then upgrades to the chart of the pull request
+with a plain `helm upgrade`, and again with `--server-side=auto
+--force-conflicts=true`, which is how the Helm job of RKE2 and k3s runs
+it. Each upgrade must finish, the Deployment must run the new image and
+the pod must be Ready. The second upgrade starts from the already
+upgraded release, so it proves the flags work, not a second jump from the
+old chart. `helm-test-gate` needs this job, so a failed upgrade blocks
+the merge. The gate asks for it only on a same-repo pull request, because
+other events skip it on purpose. Both charts can pin different Valkey
+images under one tag, so the job loads the last release's Valkey under
+its own tag, `<tag>-prior`.
 
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 
@@ -1720,7 +1766,7 @@ What it costs:
 
 | Trigger | Jobs run | Side effects |
 | --- | --- | --- |
-| `pull_request` against `main` (same-repo PRs only) | `changes`, `validate`, `helm-test`, `helm-test-byo`, `helm-test-gate` (the kind jobs skip when no chart file changed) | Lint + render + kubeconform + kind install; no push, no sign |
+| `pull_request` against `main` (same-repo PRs only) | `changes`, `validate`, `helm-test`, `helm-test-byo`, `upgrade-from-release`, `helm-test-gate` (the kind jobs skip when no chart file changed) | Lint + render + kubeconform + kind install; no push, no sign |
 | `merge_group` | `changes`, `validate`, `helm-test`, `helm-test-byo`, `helm-test-gate` | Full kind install on the merge result; no push, no sign |
 | `push` to `main` (every commit) | `validate` -> `publish` -> `verify-anonymous-pull` | Push at calver `0.1.YYYYMMDD-<short-sha>`, cosign-sign, anonymous-pull check |
 | `push` of a `v*` tag | `validate` -> `publish` -> `verify-anonymous-pull` | Push at plain semver `<x.y.z>` (leading `v` stripped), cosign-sign, anonymous-pull check |
@@ -2734,10 +2780,40 @@ of CI. Two actions are unique to `ci.yml`:
   so a new uv release cannot change CI on its own. The Python version
   comes from `backend/.python-version` (3.14, the same as the image's
   `python:3.14-slim`). Raise the uv pin by hand, in all steps at once.
-- `golangci/golangci-lint-action@v9.3.0` with the golangci-lint binary
-  pinned to `v2.12.2`. The in-tree
+- golangci-lint, kubeconform and kind are pinned in
+  [`scripts/ci/tool-versions.env`](../../scripts/ci/tool-versions.env), one
+  version and one sha256 per tool. The in-tree
   [`cli/.golangci.yml`](../../cli/.golangci.yml) uses the golangci-lint
-  v2 config schema. Raise the action and the binary together.
+  v2 config schema. Raise a tool by changing its two lines there.
+
+### Tools that CI downloads
+
+A job must not fail because a download failed once. The rules:
+
+- `scripts/ci/install_tool.sh` puts a pinned tool on the PATH. It uses the
+  tool already on the runner when the version matches, then the copy in
+  `~/.cache/meho-ci-tools` (restored with `actions/cache`, keyed by the
+  hash of `tool-versions.env`), and downloads last.
+- `scripts/ci/fetch_with_retry.sh` is the download. It tries three times
+  (pauses of 5 s and 15 s) and counts a wrong sha256 as a failed try.
+- `scripts/ci/install_spacy_model.sh` puts the spaCy model into the job's
+  Python environment. The model version and sha256 are pinned in
+  `tool-versions.env`. It uses the model when it is installed at that
+  version, then the model file in `~/.cache/meho-ci-tools`, and downloads
+  last.
+- `scripts/ci/retry.sh` runs any download command (the language model
+  warm-up) with the same three tries.
+- `.github/actions/setup-kind` installs kind this way and starts the
+  cluster. It replaces `helm/kind-action`, which downloaded kind on every
+  run.
+- Release-time workflows that cannot rely on the script (they check out a
+  tag) use `curl --retry 3 --retry-all-errors`.
+- `scripts/tests/test_ci_tool_scripts.py` tests these scripts with fake
+  commands and no network. The `linux-server-test` workflow runs it when
+  one of the scripts changes.
+- A runner image that carries the tools at the pinned versions makes the
+  download step a no-op. Change the pin in `tool-versions.env` and in the
+  image together.
 
 ## Untrusted pull-request isolation
 

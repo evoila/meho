@@ -208,6 +208,62 @@ When a tenant in the file already has a secret-like value stored in
 MEHO, the preview and the import stop and name that place. Fix the
 target or convention through its normal API first, then import again.
 
+## Check the conventions against the team rules
+
+When your team writes its rules in one place (for example a wiki) and loads
+them into MEHO with the settings file, a copy can drift: someone edits a
+convention by hand in MEHO, or nobody imports a new rule. The drift check
+shows this. It saves nothing.
+
+Send a settings file with one tenant block that holds only `conventions`.
+Each convention needs `kind: operational`. This can be the same file you
+import.
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/yaml" \
+  --data-binary @team-rules-settings.yaml \
+  https://meho.example.com/api/v1/settings/conventions-drift
+```
+
+The answer compares the file with the tenant's `operational`
+conventions, the ones every agent session gets at start:
+
+```json
+{
+  "ok": true,
+  "in_sync": false,
+  "mistakes": [],
+  "added": [{"slug": "read-first", "value": {"slug": "read-first", "title": "Read first", "body": "...", "kind": "operational", "priority": 1}}],
+  "changed": [{"slug": "change-window", "before": {"body": "..."}, "after": {"body": "..."}}],
+  "only_in_meho": [{"slug": "old-rule"}]
+}
+```
+
+- `added`: a rule in the file that MEHO does not have yet.
+- `changed`: a rule that differs in MEHO, with only the fields that differ.
+- `only_in_meho`: a convention in MEHO that the file does not have.
+- `mistakes`: problems with the file, as in the preview. Then `ok` is
+  `false`.
+- `in_sync` is `true` only when nothing differs and there is no mistake.
+
+To fix drift, a person imports the file (preview first). To keep a
+convention that is only in MEHO, add it to your rules.
+
+**Who may call:** a `tenant_admin` or a platform admin, for their own
+tenant. A CI job can use a login that may run this check and nothing else:
+a Keycloak service account whose token has the claim
+`conventions_drift_only: true`. Such a login gets `403` on every other call,
+also on the preview and the import. The job can fail when `in_sync` is not
+`true`:
+
+```bash
+curl -sf -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/yaml" \
+  --data-binary @team-rules-settings.yaml \
+  https://meho.example.com/api/v1/settings/conventions-drift | jq -e '.in_sync'
+```
+
 ## History
 
 ```bash

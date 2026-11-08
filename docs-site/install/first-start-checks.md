@@ -14,12 +14,12 @@ Check that MEHO is healthy before you use it.
    install, run `sudo meho doctor` on the server too. See
    [Troubleshooting](../clients/troubleshooting.md#start-with-meho-doctor).
 4. **Read the first-start list.** MEHO checks the site and shows a plain
-   list of four checks. The rest of this page explains it.
+   list of five checks. The rest of this page explains it.
 
 ## The first-start list
 
 Right after the install, MEHO checks the site and shows a plain list. Each
-line is green, or red with one sentence that says what to fix. The list is
+line is green, yellow (a warning) or red with one sentence that says what to fix. The list is
 the same in every install form.
 
 Three ways to read it:
@@ -35,20 +35,32 @@ Three ways to read it:
 The checks run again on every call. Calls that arrive while a run is in
 progress get the result of that run. The checks change nothing.
 
-A line is `ok` (green), `fail` (red) or `skipped`. A line is skipped when the
+A line is `ok` (green), `warn` (a warning), `fail` (red) or `skipped`. A warning does not make the list red, and the install goes on. A line is skipped when the
 check cannot run or has no meaning: the certificate check waits until the DNS
 name is green, and it is skipped when `BACKPLANE_URL` uses plain `http`. The
 reachability line is skipped when some systems need a signed-in person (see
 the notes) and none of the others failed.
 
-## The four checks
+## The five checks
 
 | Check | Green when | Red line, and the fix |
 |---|---|---|
 | `dns` | The host of `BACKPLANE_URL` resolves, and the address it points at answers as this MEHO. | "The host name ... does not resolve." Add the name to DNS, or fix `BACKPLANE_URL`. If `BACKPLANE_URL` is empty, set it to the address people use to reach MEHO. "The address it points at does not answer as this MEHO." The name points at another server: point it at the address MEHO is served on, or fix `BACKPLANE_URL`. |
 | `certificate` | MEHO opens a TLS connection to `BACKPLANE_URL`. The chain is trusted, the name matches, and more than 30 days are left. | Expired: renew the certificate. Name does not match: use a certificate that lists the name, or fix `BACKPLANE_URL`. Not trusted: install the full chain, or add your own CA to the trust bundle of MEHO. Under 30 days left: renew it. Cannot connect: check that MEHO can reach its own address. |
+| `network` | The host of `BACKPLANE_URL` points at a private, shared or local address. | Warning, not red: "points at a public internet address". See [MEHO stays on the management network](#meho-stays-on-the-management-network). |
 | `clock` | The clock of MEHO is within 60 seconds of the time Keycloak reports and the time PostgreSQL reports. | The clock is more than 60 seconds away from Keycloak or PostgreSQL: set up time sync (NTP) on the server or the cluster nodes. If a time source cannot be read, check that MEHO can reach it. |
 | `reachability` | Every system in the settings answers the same call that `meho targets probe` uses. With no systems added, the line is green. | "2 of 5 systems did not answer." (the console page names them). Check that each one is switched on, that MEHO can reach its address, and that its login in MEHO is right. |
+
+## MEHO stays on the management network
+
+MEHO runs behind your firewall, on the management network. It is never on
+the internet, not even the console. MEHO holds the logins for your systems,
+so an open address is a risk you do not need. The `network` line warns when
+the host name of `BACKPLANE_URL` points at a public internet address. This
+can happen when the DNS name is wrong, or when you install behind a cloud
+provider's public address. If you see the warning, point the name at a
+private address of the management network, or close the public access with
+a firewall, and run the checks again. The install itself is not stopped.
 
 ## Notes
 

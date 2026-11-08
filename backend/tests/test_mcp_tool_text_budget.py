@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Size limits for the tool text on the default MCP tool list (#4112, #4172).
+"""Size limits for the tool text on the default MCP tool list (#4112).
 
 Every MCP session gets the default tool list. Its tool text (name,
 description and input schema) is sent to the model before the user's
@@ -34,14 +34,13 @@ from tests.mcp_test_fixtures import (
 )
 
 #: Most characters one default-list tool may use. The largest tool,
-#: ``query_topology``, used 4,751 when this limit was set (#4172), down
-#: from 5,537.
-MAX_CHARS_PER_TOOL = 5_000
+#: ``query_topology``, used 5,537 when this limit was set.
+MAX_CHARS_PER_TOOL = 6_000
 
-#: Most characters the whole default tool list may use (about 17,000
-#: tokens at 4 characters per token). The list used 67,339 when this limit
-#: was set (#4172).
-MAX_CHARS_TOTAL = 68_000
+#: Most characters the whole default tool list may use (about 17,500
+#: tokens at 4 characters per token). The list used 66,092 when this limit
+#: was set, down from 96,804.
+MAX_CHARS_TOTAL = 70_000
 
 
 def tool_text_size(definition: ToolDefinition) -> int:

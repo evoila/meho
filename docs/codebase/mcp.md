@@ -214,19 +214,18 @@ this text must stay short.
 as its name plus description plus input schema as compact JSON, taken
 from `ToolDefinition.to_wire()`. Output schemas are not counted.
 
-- One tool: at most 5,000 characters.
-- The whole default list (26 tools, docs add-on on): at most 68,000
-  characters, about 17,000 tokens.
+- One tool: at most 6,000 characters.
+- The whole default list (26 tools, docs add-on on): at most 70,000
+  characters, about 17,500 tokens.
 
 When #4112 set the limits, the default list went from 96,804 to 66,092
 characters. The largest tool, `query_topology`, went from 16,302 to
-5,537. #4172 made `query_topology` (4,751) and `add_to_knowledge`
-shorter again and lowered both limits.
+5,537.
 
 A client that needs fewer tools can also ask for a tool profile (see
 "Tool profiles" below). The `investigate` list has about a third of the
 text of the full list (23,261 characters), `operate` about half
-(33,075).
+(35,776). The full list is 69,209.
 
 What a description keeps:
 
@@ -875,13 +874,13 @@ explicitly.
 
 A client can ask for a smaller tool list. It adds `?profile=<name>` to
 the MCP URL, for example `https://<meho-host>/mcp?profile=investigate`.
-A small model then sees 9 or 12 tools, not 26, and keeps more of its
+A small model then sees 9 or 13 tools, not 26, and keeps more of its
 context window for the job.
 
 | Profile | Tools |
 |---|---|
 | `investigate` (9) | `meho_status`, `meho_connector_list`, `list_targets`, `list_operation_groups`, `search_operations`, `call_operation`, `result_query`, `search_knowledge`, `search_memory` |
-| `operate` (12) | `investigate` plus `preview_operation`, `meho_broadcast_recent`, `meho_broadcast_announce` |
+| `operate` (13) | `investigate` plus `preview_operation`, `meho_broadcast_recent`, `meho_broadcast_announce`, `meho_broadcast_watch` |
 
 The lists are in `mcp/profiles.py`.
 

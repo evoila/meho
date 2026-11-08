@@ -49,11 +49,14 @@ INVESTIGATE_TOOLS: Final[frozenset[str]] = frozenset(
 )
 
 #: Investigate, plus preview a change and tell the other agents about it.
+#: All three broadcast tools are here, because the broadcast part of the
+#: session-start text names all three.
 OPERATE_TOOLS: Final[frozenset[str]] = INVESTIGATE_TOOLS | frozenset(
     {
         "preview_operation",
         "meho_broadcast_recent",
         "meho_broadcast_announce",
+        "meho_broadcast_watch",
     }
 )
 

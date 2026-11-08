@@ -69,7 +69,7 @@ of it before the user asks anything. So a client can ask for a
 | Profile | What the session can do | Tools |
 |---|---|---|
 | `investigate` | Find and read: connectors, targets, operations, results, knowledge and memory. | `meho_status`, `meho_connector_list`, `list_targets`, `list_operation_groups`, `search_operations`, `call_operation`, `result_query`, `search_knowledge`, `search_memory` |
-| `operate` | Everything in `investigate`, plus preview a change and tell other agents about it. | the 9 above, plus `preview_operation`, `meho_broadcast_recent`, `meho_broadcast_announce` |
+| `operate` | Everything in `investigate`, plus preview a change and tell other agents about it. | the 9 above, plus `preview_operation`, `meho_broadcast_recent`, `meho_broadcast_announce`, `meho_broadcast_watch` |
 
 Example URL: `https://<meho-host>/mcp?profile=investigate`.
 

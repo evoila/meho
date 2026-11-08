@@ -17,6 +17,7 @@ The client adds ``?profile=<name>`` to the MCP URL. These tests check:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -142,7 +143,12 @@ def test_every_profile_tool_is_a_registered_working_tool() -> None:
 def test_operate_is_investigate_plus_preview_and_broadcast() -> None:
     assert OPERATE_TOOLS > INVESTIGATE_TOOLS
     added = OPERATE_TOOLS - INVESTIGATE_TOOLS
-    assert added == {"preview_operation", "meho_broadcast_recent", "meho_broadcast_announce"}
+    assert added == {
+        "preview_operation",
+        "meho_broadcast_recent",
+        "meho_broadcast_announce",
+        "meho_broadcast_watch",
+    }
     # The investigate profile has no tool that writes to MEHO itself.
     for tool in INVESTIGATE_TOOLS - {"call_operation"}:
         entry = get_tool(tool)
@@ -321,6 +327,10 @@ async def test_investigate_instructions_name_no_broadcast_tool(
     assert BROADCAST_BLOCK_START in operate
     assert BROADCAST_BLOCK_START not in investigate
     assert "meho_broadcast_" not in investigate
+    # Every broadcast tool the operate start text names is on its list.
+    named = set(re.findall(r"meho_broadcast_[a-z_]+", operate))
+    assert named
+    assert named <= OPERATE_TOOLS
 
 
 def _fake_preamble() -> PreambleAssembly:

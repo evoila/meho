@@ -27,6 +27,7 @@ the ``create_target`` service and its guards are covered end-to-end in
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
@@ -36,6 +37,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors.targets.ops import _probe_next_step
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, Tenant
 from meho_backplane.db.models import Target as TargetORM
@@ -275,7 +277,24 @@ async def test_register_result_says_unprobed_and_names_the_probe(
     assert "not probed yet" in next_step
     assert "targets.probe" in next_step
     assert "targets-registry-1.x" in next_step
-    assert "`meho targets probe new-vault`" in next_step
+    assert "`meho targets probe -- new-vault`" in next_step
+
+
+@pytest.mark.parametrize(
+    ("name", "cli_command"),
+    [
+        ("db;id", "meho targets probe -- 'db;id'"),
+        ("team's-db", "meho targets probe -- 'team'\"'\"'s-db'"),
+        ("-rf", "meho targets probe -- -rf"),
+        ("$(whoami)", "meho targets probe -- '$(whoami)'"),
+    ],
+)
+def test_probe_next_step_quotes_the_name_for_the_shell(name: str, cli_command: str) -> None:
+    """The CLI command in the hint is one safe shell word after ``--``, for any valid name."""
+    next_step = _probe_next_step(name)
+    assert f"`{cli_command}`" in next_step
+    command = next_step.split("`")[1]
+    assert shlex.split(command) == ["meho", "targets", "probe", "--", name]
 
 
 async def _stored_vpn_required(name: str) -> bool:

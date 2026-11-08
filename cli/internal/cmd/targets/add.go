@@ -324,10 +324,34 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 
 // printProbeHint names the next command when the new target has no
 // fingerprint. Registration does not contact the system, so MEHO knows
-// the product and version only after a probe.
+// the product and version only after a probe. The name is quoted for a
+// POSIX shell and follows "--", so the command is safe to copy for any
+// valid name.
 func printProbeHint(w io.Writer, t *api.Target) {
 	if t.Fingerprint != nil && len(*t.Fingerprint) > 0 {
 		return
 	}
-	fmt.Fprintf(w, "\nNot probed yet. Run `meho targets probe %s` to detect the product and version.\n", t.Name)
+	fmt.Fprintf(w, "\nNot probed yet. Run `meho targets probe -- %s` to detect the product and version.\n", shellQuote(t.Name))
+}
+
+// shellQuote returns s as one POSIX shell word. A name of only safe
+// characters stays as it is; any other name goes in single quotes, with
+// each single quote written as '"'"'. Same rule as Python's shlex.quote.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if strings.IndexFunc(s, isUnsafeShellRune) < 0 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+func isUnsafeShellRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return false
+	default:
+		return !strings.ContainsRune("@%+=:,./-_", r)
+	}
 }

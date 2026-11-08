@@ -80,6 +80,7 @@ carries a clean message the MCP front maps to ``-32602``.
 
 from __future__ import annotations
 
+import shlex
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -232,13 +233,16 @@ def _probe_next_step(name: str) -> str:
 
     Registration does not contact the system: its login is often stored
     only after the target exists. So a new target has no fingerprint, and
-    the register result names the probe that adds one.
+    the register result names the probe that adds one. The CLI command
+    quotes the name for a POSIX shell and ends the options with ``--``, so
+    it is safe to copy for any valid name.
     """
+    cli_command = f"meho targets probe -- {shlex.quote(name)}"
     return (
         f"Target {name!r} is not probed yet, so MEHO does not know its product "
         f"version. Probe it next: call_operation with connector_id "
         f"{TARGETS_REGISTRY_CONNECTOR_ID!r}, op_id 'targets.probe' and params "
-        f"{{'name': {name!r}}}, or `meho targets probe {name}` in the CLI."
+        f"{{'name': {name!r}}}, or `{cli_command}` in the CLI."
     )
 
 

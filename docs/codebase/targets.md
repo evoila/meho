@@ -487,9 +487,12 @@ stored only after the target exists. So a new target has no fingerprint,
 and each register path says so and names the probe:
 
 - `targets.register` and `meho_targets_register` return a `next_step`
-  text that names this `call_operation` and `meho targets probe <name>`.
-- `meho targets add` prints `Not probed yet. Run meho targets probe <name> ...`
+  text that names this `call_operation` and `meho targets probe -- <name>`.
+- `meho targets add` prints `Not probed yet. Run meho targets probe -- <name> ...`
   under the target (not with `--json`).
+- In both CLI commands the name is quoted for a POSIX shell, and `--`
+  comes before it. So the command is safe to copy for any valid name,
+  also one with `;`, a quote or a leading `-`.
 - `POST /api/v1/targets` returns `fingerprint: null`. The OpenAPI text of
   the `fingerprint` field says what null means and names
   `POST /api/v1/targets/{name}/probe`.

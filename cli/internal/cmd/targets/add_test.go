@@ -231,7 +231,7 @@ func TestAddNewTargetNamesTheProbeCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add: %v\nstderr=%s", err, stderr.String())
 	}
-	if want := "Not probed yet. Run `meho targets probe new-target`"; !strings.Contains(stdout.String(), want) {
+	if want := "Not probed yet. Run `meho targets probe -- new-target`"; !strings.Contains(stdout.String(), want) {
 		t.Errorf("stdout should name the probe command %q:\n%s", want, stdout.String())
 	}
 
@@ -241,6 +241,27 @@ func TestAddNewTargetNamesTheProbeCommand(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Not probed yet") {
 		t.Errorf("--json output must stay the plain Target row:\n%s", stdout.String())
+	}
+}
+
+// TestPrintProbeHintQuotesTheName checks that the probe command quotes
+// names with shell characters and puts "--" before the name.
+func TestPrintProbeHintQuotesTheName(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"db;id":      "meho targets probe -- 'db;id'",
+		"team's-db":  `meho targets probe -- 'team'"'"'s-db'`,
+		"-rf":        "meho targets probe -- -rf",
+		"$(whoami)":  "meho targets probe -- '$(whoami)'",
+		"a`b`":       "meho targets probe -- 'a`b`'",
+		"plain.name": "meho targets probe -- plain.name",
+	}
+	for name, want := range cases {
+		var buf bytes.Buffer
+		printProbeHint(&buf, &api.Target{Name: name})
+		if !strings.Contains(buf.String(), "`"+want+"`") {
+			t.Errorf("name %q: want %q in %q", name, want, buf.String())
+		}
 	}
 }
 

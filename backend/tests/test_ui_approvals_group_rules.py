@@ -4,7 +4,7 @@
 """Who may approve, in the web interface (#3328).
 
 The web interface calls the same service checks as REST. A MEHO-SA-Operator
-approves their own change with a click; another person's ``destructive``
+or a MEHO-Admin approves their own change with a click; another person's ``destructive``
 change, approved by someone outside the groups that may approve it, shows
 the refusal text and stays pending.
 """
@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock
 
 from sqlalchemy import select
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequestStatus, AuditLog
 from tests.test_ui_approvals import (
@@ -62,6 +63,28 @@ def test_an_sa_operator_approves_their_own_destructive_change_with_a_click() -> 
     )
 
     response = _post_decision(sa_operator, rid)
+
+    assert response.status_code == 200, response.text  # type: ignore[attr-defined]
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
+    payload = _decision_payload(rid)
+    assert payload["self_approved"] is True
+    assert payload["approval_rule"] == "sa_operator_self_approval"
+    assert payload["approval_auth"]["channel"] == "web"
+
+
+def test_an_admin_approves_their_own_destructive_change_with_a_click() -> None:
+    """MEHO-Admins may approve their own changes, like MEHO-SA-Operators (#5969)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        principal_sub=_REVIEWER_SUB,
+        op_id="vsphere.vm.destroy",
+        proposed_effect={"op_id": "vsphere.vm.destroy", "safety_level": "destructive"},
+        preview_hash="preview-hash",
+    )
+    admin = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.TENANT_ADMIN)
+
+    response = _post_decision(admin, rid)
 
     assert response.status_code == 200, response.text  # type: ignore[attr-defined]
     assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value

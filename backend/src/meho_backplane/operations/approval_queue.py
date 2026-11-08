@@ -249,8 +249,8 @@ class ApprovalRule(StrEnum):
     Recorded as ``approval_rule`` on the ``approval.decision`` audit row
     and on the ``approval.approved`` step event, next to ``self_approved``.
 
-    * ``sa_operator_self_approval`` — a MEHO-SA-Operator approved their own
-      change.
+    * ``sa_operator_self_approval`` — a MEHO-SA-Operator or a MEHO-Admin
+      approved their own change (both groups may, #5969).
     * ``break_glass_self_approval`` — the requester approved their own
       ``safe`` or ``caution`` change under ``APPROVAL_ALLOW_SELF_APPROVAL``.
     * ``sa_operator_or_admin`` — another person's ``dangerous`` or
@@ -435,8 +435,9 @@ class SelfApprovalForbiddenError(ApprovalError):
 
     Raised by :func:`approve_request` when
     ``operator.sub == request.principal_sub``, the person is not in the
-    MEHO-SA-Operators group (:attr:`~meho_backplane.auth.operator.Operator.may_self_approve`,
-    #3328), and the audited single-operator break-glass mode
+    MEHO-SA-Operators or MEHO-Admins group
+    (:attr:`~meho_backplane.auth.operator.Operator.may_self_approve`), and
+    the audited single-operator break-glass mode
     (``Settings.approval_allow_self_approval``) does not cover the change.
     Break-glass never covers a ``dangerous`` or ``destructive`` change
     (*high_risk*). The route layer maps this to 403.
@@ -474,7 +475,8 @@ class SelfApprovalForbiddenError(ApprovalError):
         #: The plain refusal text, without ids, for the web interface.
         self.reason_text = (
             "You cannot approve your own change. Only members of the "
-            f"MEHO-SA-Operators group may approve their own changes. {who_can}"
+            "MEHO-SA-Operators and MEHO-Admins groups may approve their own "
+            f"changes. {who_can}"
         )
         break_glass = (
             ""
@@ -3453,8 +3455,8 @@ def _check_self_approval(
     comparison is on the stable ``sub`` claim, so a renamed display name
     can never turn into a self-approval. Then, in order:
 
-    1. A MEHO-SA-Operator (:attr:`Operator.may_self_approve`, #3327) may
-       approve their own change at every risk level (#3328). On the
+    1. A MEHO-SA-Operator or a MEHO-Admin (:attr:`Operator.may_self_approve`)
+       may approve their own change at every risk level. On the
        command line and REST the approve routes have already required a
        fresh sign-in (#3979).
     2. A person may approve their own ``caution`` change that waited only

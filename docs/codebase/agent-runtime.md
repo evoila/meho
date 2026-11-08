@@ -659,7 +659,8 @@ caller may also be another agent (an `agent`-kind token). Then the caller's
 own grants and the hosted agent's grants both apply, and the stricter wins:
 a caller deny grant refuses the call even when the hosted agent would only
 wait for approval. A call that must wait for approval follows the normal approval rules (the
-person who asked cannot approve their own request, unless the deploy allows it). See
+person who asked cannot approve their own request, unless they are in MEHO-SA-Operators or
+MEHO-Admins, or the deploy allows it). See
 `agent-permission-model.md`.
 
 MEHO does not swap the person's token for the agent's on a direct run. That

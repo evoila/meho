@@ -2132,10 +2132,14 @@ generic indented-JSON renderer rather than a per-shape table — a
 per-op table buys little over the dump while risking contract-drift
 panics. Set-shaped responses (`vault kv list`,
 `vault auth userpass-list`, …) arrive **already reduced** to the
-JSONFlux sample + result-handle envelope by the dispatcher; the CLI
-prints that verbatim with the handle hint intact, consistent with the
-`vmware` sibling. Operators drill into a handle with the
-`meho operation` result verbs.
+JSONFlux summary and sample by the dispatcher, plus a top-level
+`handle`. The shared `dispatch.Render` keeps it for every vendor verb:
+the human render ends with `result handle: <handle_id>` and the
+`meho operation result-query <handle_id>` command, and `--json` prints
+the whole envelope, including `handle`, `audit_id` and `delivery`
+(#4659). When `delivery` is `partial` or `unavailable`, the human
+render also says the operation already ran and must not be run again.
+Operators read the full result with `meho operation result-query`.
 
 ### HTTP shape + exit codes
 

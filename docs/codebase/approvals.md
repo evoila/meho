@@ -22,7 +22,9 @@ shows each case. In short (#3325):
   at once. `caution`, `dangerous` and `destructive` wait.
 - **Service principals** (fixed automation) keep their standing-grant
   rule: a grant can let `caution` and `dangerous` changes run; without
-  one they wait. `destructive` always waits for a person.
+  one they wait. A person can also approve the operation list of one
+  automation run once ([run-approvals.md](run-approvals.md)).
+  `destructive` always waits for a person.
 
 A person approves or rejects a waiting request on **REST, the `meho`
 command line and the web interface** only. Approve and reject have no

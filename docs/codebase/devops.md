@@ -327,7 +327,10 @@ runs `python -m meho_backplane.update_strategy`. It sends one merge patch,
 field manager `meho-update-strategy`. The pod template does not change, so
 no pod restarts. Its own ServiceAccount, Role (`get` and `patch` on this one
 Deployment) and RoleBinding come at weight -6, and Helm removes all four
-objects once the Job succeeds. The chart renders them only when
+objects once the Job succeeds. Their name is `<fullname>-update-strategy`,
+with the fullname cut to 47 characters first. So the name always keeps its
+suffix and never equals the backplane ServiceAccount, which the hook's
+delete policy would otherwise remove. The chart renders them only when
 `updateStrategy.type` is `Recreate` and `lookup` finds the live Deployment
 with a `rollingUpdate` block. So a new install, `helm template` and every
 later upgrade render nothing. Argo CD renders with `helm template`, so it

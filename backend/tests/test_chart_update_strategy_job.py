@@ -146,6 +146,32 @@ def test_live_rolling_update_block_renders_the_job(tmp_path: Path) -> None:
     assert "app.kubernetes.io/name" not in ours["Job"]["spec"]["template"]["metadata"]["labels"]
 
 
+def test_long_name_keeps_the_hook_account_apart_from_the_backplane(tmp_path: Path) -> None:
+    # A 63-character name fills the whole name limit. The hook objects must
+    # still get their own name: the same name as the backplane ServiceAccount
+    # would let the hook's delete policy remove the live account.
+    override = "m" * 63
+    docs = _render(
+        _chart_with_live(tmp_path, _LIVE_ROLLING), "--set", f"fullnameOverride={override}"
+    )
+    ours = _ours(docs)
+    other_accounts = {
+        d["metadata"]["name"]
+        for d in docs
+        if d["kind"] == "ServiceAccount" and d is not ours["ServiceAccount"]
+    }
+
+    hook_name = ours["ServiceAccount"]["metadata"]["name"]
+    assert hook_name.endswith("-update-strategy")
+    assert len(hook_name) <= 63
+    assert override in other_accounts
+    assert hook_name not in other_accounts
+    assert {obj["metadata"]["name"] for obj in ours.values()} == {hook_name}
+    assert ours["RoleBinding"]["subjects"][0]["name"] == hook_name
+    assert ours["Job"]["spec"]["template"]["spec"]["serviceAccountName"] == hook_name
+    assert ours["Role"]["rules"][0]["resourceNames"] == [override]
+
+
 def test_job_uses_the_backplane_image(tmp_path: Path) -> None:
     docs = _render(_chart_with_live(tmp_path, _LIVE_ROLLING))
     deployment = next(

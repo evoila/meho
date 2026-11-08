@@ -17,7 +17,9 @@ Details: docs/codebase/devops.md.
 {{- if eq (toString $strategy.type) "Recreate" }}
 {{- $live := lookup "apps/v1" "Deployment" .Release.Namespace (include "meho.fullname" .) }}
 {{- if dig "spec" "strategy" "rollingUpdate" "" $live }}
-{{- $name := printf "%s-update-strategy" (include "meho.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- /* Cut the base name first, so the name keeps its suffix and never equals the
+backplane ServiceAccount. 47 + len("-update-strategy") = 63. */}}
+{{- $name := printf "%s-update-strategy" (include "meho.fullname" . | trunc 47 | trimSuffix "-") }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:

@@ -290,6 +290,8 @@ spec:
                   key: {{ $kc.adminSecretKey | quote }}
             {{- end }}
             {{- if .Values.uiConsole.enabled }}
+            {{- /* With the built-in Keycloak the Secret name is filled in (#4766). */}}
+            {{- $kc := include "meho.keycloakSettings" . | fromYaml }}
             # #2594 (Goal #336) — operator-console browser BFF confidential
             # credentials. Wired only when `uiConsole.enabled: true`. Both
             # are confidential and use `secretKeyRef` (never plaintext) —
@@ -307,12 +309,12 @@ spec:
             - name: UI_KEYCLOAK_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.uiConsole.secretName | quote }}
+                  name: {{ $kc.uiSecretName | quote }}
                   key: {{ .Values.uiConsole.clientSecretKey | quote }}
             - name: UI_SESSION_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.uiConsole.secretName | quote }}
+                  name: {{ $kc.uiSecretName | quote }}
                   key: {{ .Values.uiConsole.sessionEncryptionKey | quote }}
             {{- end }}
             {{- /* On by default with a built-in part, from the Secret the install makes (#4047). */}}
@@ -334,6 +336,8 @@ spec:
                   key: {{ $hashKey.secretKey | quote }}
             {{- end }}
             {{- if .Values.checkRunner.enabled }}
+            {{- /* With the built-in Keycloak the client id and Secret name are filled in (#4766). */}}
+            {{- $kc := include "meho.keycloakSettings" . | fromYaml }}
             # #2642 — the in-process check-runner's service-principal
             # identity for background dispatch. Wired only when
             # `checkRunner.enabled: true`; the schema requires a non-empty
@@ -344,11 +348,11 @@ spec:
             # Sensor whose target needs an operator-context credential read
             # reads `unknown` (`meho_backplane.auth.runner_identity`).
             - name: CHECK_RUNNER_CLIENT_ID
-              value: {{ .Values.checkRunner.clientId | quote }}
+              value: {{ $kc.checkRunnerClientId | quote }}
             - name: CHECK_RUNNER_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.checkRunner.clientSecret.secretName | quote }}
+                  name: {{ $kc.checkRunnerSecretName | quote }}
                   key: {{ .Values.checkRunner.clientSecret.secretKey | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}

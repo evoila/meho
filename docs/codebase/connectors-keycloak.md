@@ -471,9 +471,65 @@ with `read_back_checked: false`. A realm
 rename (a new `realm` in the representation) is read back under the new
 name.
 
-The approval preview for both ops is the generic params echo: the
-approver sees the fields the caller sent. With read-merge-write those are
-exactly the fields that will change.
+The approval preview shows the fields the caller sent: the generic params
+echo for `client.update`, and its own card for `realm.update` (secret
+values hidden, see "Set a realm's mail server"). With read-merge-write
+those are exactly the fields that will change.
+
+### Set a realm's mail server
+
+Keycloak needs a mail server (SMTP) to send "forgot password" and "set up
+your account" mails. Set it with `keycloak.realm.update`:
+
+- Put the mail server settings in `representation.smtpServer`, for
+  example `host`, `port`, `from`, `auth`, `user`, `starttls`. Keycloak
+  keeps them as a map of text values, so send `"587"`, not `587`.
+- Give the password as a reference: `smtp_password_secret_ref`, with the
+  optional `smtp_password_secret_mount` and `smtp_password_secret_key`.
+  These follow the same rules as `password_secret_ref` of the user ops:
+  a plain path reads the default backend (Vault KV-v2), and a `<kind>:`
+  reference reaches that backend.
+- MEHO reads the password under your identity when the approved call
+  runs, and sets it as `smtpServer.password` only in the body it sends to
+  Keycloak. The result names changed fields, never values.
+- A call with a `password` key (any case) inside
+  `representation.smtpServer` is refused before it waits for approval
+  (`refused_before_approval`, a check registered with
+  `register_park_check` in `ops_write_realm_smtp.py`). MEHO stores no
+  approval request for it, and the message names
+  `smtp_password_secret_ref`, never the value. `preview_operation` gives
+  the same answer, and the handler refuses such a call too.
+- `keycloak.realm.update` is a credential write (`op_classes.py`), like
+  the user password ops. So the params of a waiting request (only the
+  reference) are kept in the encrypted handoff store, the flight recorder
+  keeps no request or answer body of its calls, and the activity feed
+  gets only an aggregate. A failed secret read shows the error class, not
+  its text. The approval card shows the realm, the requested fields with
+  secret values hidden, and `smtp_password_secret_ref`. The card runs the
+  Keycloak list of secret fields and then the same two passes as the
+  generic params echo (`_redact_echoed_params`):
+  - Secret-named keys are hidden. A key matches the name rule
+    `is_secret_param_name`, so `clientSecret`, `authTokenClientSecret` or
+    `someApiKey` show as hidden at any depth.
+  - Secret-shaped text in a value is hidden too, also under a plain key
+    name. Examples: a token, a `Bearer ...` header value, or a
+    `token=...` pair.
+- As a credential write, the op needs the approval handoff encryption key
+  (`APPROVAL_HANDOFF_ENCRYPTION_KEY`) to wait for approval, like the user
+  password ops. Without a valid key, MEHO denies the call instead of
+  letting it wait (see `approvals.md`).
+
+Example params:
+
+```json
+{
+  "representation": {
+    "smtpServer": {"host": "<mail-host>", "port": "587", "from": "<sender-address>",
+                   "auth": "true", "user": "<smtp-user>", "starttls": "true"}
+  },
+  "smtp_password_secret_ref": "<path-to-smtp-password>"
+}
+```
 
 ### User logout (#3851)
 
@@ -752,9 +808,10 @@ as a plain `write` in `connectors/keycloak/op_classes.py`.
 
 ### Park-time approval preview (#1857)
 
-Fourteen of the write ops register bespoke `proposed_effect` preview builders
+Fifteen of the write ops register bespoke `proposed_effect` preview builders
 (twelve in `connectors/keycloak/ops_write_preview.py`, one in
-`ops_login_check.py`, one in `ops_authflow_passkey.py`), wired onto the per-op hook
+`ops_login_check.py`, one in `ops_authflow_passkey.py`, one in
+`ops_write_realm_smtp.py`), wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
 `__init__`. They give the approval reviewer a resource-centric view at park
 time — secrets scrubbed via the same `redact_secret_fields` the read ops
@@ -775,6 +832,7 @@ use:
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back}` (registered in `ops_authflow_passkey.py`) |
+| `keycloak.realm.update` | `{resource, realm, representation[, smtp_password_source, smtp_password_secret_ref]}` (registered in `ops_write_realm_smtp.py`) |
 
 The group builders surface `attribute_keys` (which attributes change,
 e.g. `tenant_id` / `tenant_role`) and echo the attribute map scrubbed —

@@ -6,9 +6,8 @@
 Initiative #1840 (G10.14 Retrieval diagnostics & quality console), Task #1888.
 
 The anchor Task stands up the ``/ui/retrieval`` page scaffold (the sidebar
-entry, the tab strip, the page chrome) + its default Diagnostics tab. Sibling
-Tasks T2 (Usage / Eval tabs) and T3 (Retire-checklist tab) nest into the same
-page as additional client-side tab panels.
+entry, the tab strip, the page chrome) + its default Diagnostics tab. The
+Usage tab nests into the same page as an additional client-side tab panel.
 
 Exposes :func:`~meho_backplane.ui.routes.retrieval.routes.build_retrieval_router`
 -- the ``GET /ui/retrieval`` + ``POST /ui/retrieval/diagnostics`` factory -- so

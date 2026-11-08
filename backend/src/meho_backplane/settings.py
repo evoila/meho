@@ -1372,6 +1372,16 @@ class Settings(BaseModel):
         scope. Deployments with fine-grained scope enforcement set
         this to the value the IdP expects. Set via
         ``VCF_PAIF_OIDC_SCOPE``.
+    operation_contract_guidance:
+        Off by default (#4757). When on, the exact-op contract of
+        ``search_operations`` (a call with ``op_id``) also carries a
+        ``guidance`` block: the written advice from the operation's
+        ``llm_instructions`` (``when_to_call`` / ``when_to_use``,
+        ``preconditions``, ``parameter_hints``, ``output_shape``,
+        ``next_step``), with a size limit
+        (:mod:`meho_backplane.operations._contract_guidance`). Ranked hits
+        do not change. It stays off until model tests show it helps.
+        Env ``OPERATION_CONTRACT_GUIDANCE``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
@@ -2264,6 +2274,7 @@ class Settings(BaseModel):
     # external orchestrator (or running tests without the drain) opt out.
     event_drain_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
     event_drain_enabled: bool = True
+    operation_contract_guidance: bool = False
     mcp_require_session_id: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
@@ -3262,6 +3273,9 @@ def get_settings() -> Settings:
         ),
         event_drain_enabled=parse_bool_env(
             os.environ.get("EVENT_DRAIN_ENABLED", "true"),
+        ),
+        operation_contract_guidance=parse_bool_env(
+            os.environ.get("OPERATION_CONTRACT_GUIDANCE", "false"),
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),

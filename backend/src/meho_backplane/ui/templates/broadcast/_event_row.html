@@ -50,6 +50,12 @@
   wrapped in a ``display:contents`` div so its cells participate in the
   same 12-col grid).
 
+  Phone layout (#6000): below the ``sm`` width the row uses a 6-column
+  grid and drops the column header. Line one: time and person. Line two:
+  the operation (or the announcement text). Line three: status and target.
+  The class and payload columns show from ``sm`` up; on a phone a tap on
+  the row opens the detail drawer, which holds them in full.
+
   ``wall`` (default ``false``): when the row renders inside the
   wall-monitor feed (``broadcast/wall.html`` includes ``_feed.html`` with
   ``wall=True``), the row uses taller padding + a larger type scale so
@@ -58,7 +64,7 @@
 -#}
 {% set wall = wall | default(false) %}
 <li
-  class="grid grid-cols-12 items-center gap-2 hover:bg-base-200 focus:bg-base-200 focus:outline-none {% if wall %}px-4 py-4 text-base{% else %}px-3 py-2 text-sm{% endif %}"
+  class="grid grid-cols-6 items-center gap-x-2 gap-y-1 hover:bg-base-200 sm:grid-cols-12 sm:gap-2 focus:bg-base-200 focus:outline-none {% if wall %}px-4 py-4 text-base{% else %}px-3 py-2 text-sm{% endif %}"
   :class="isAnnouncement(ev) ? 'border-l-2 border-l-secondary' : 'cursor-pointer'"
   :role="isAnnouncement(ev) ? 'listitem' : 'button'"
   :tabindex="isAnnouncement(ev) ? '-1' : '0'"
@@ -77,15 +83,15 @@
       </span>
 
       {# ---------- principal ---------- #}
-      <span class="col-span-2 truncate">
+      <span class="col-span-4 truncate sm:col-span-2">
         <span class="badge badge-outline badge-sm" x-text="ev.principal_name || ev.principal_sub"></span>
       </span>
 
       {# ---------- op_id ---------- #}
-      <span class="col-span-3 truncate font-mono text-xs" x-text="ev.op_id" :title="ev.op_id"></span>
+      <span class="col-span-6 truncate font-mono text-xs sm:col-span-3" x-text="ev.op_id" :title="ev.op_id"></span>
 
       {# ---------- op_class (colour-coded) ---------- #}
-      <span class="col-span-1">
+      <span class="hidden sm:col-span-1 sm:block">
         <span class="badge badge-sm" :class="badgeClass(ev.op_class)" x-text="ev.op_class"></span>
       </span>
 
@@ -115,14 +121,14 @@
       </span>
 
       {# ---------- target ---------- #}
-      <span class="col-span-1 truncate text-xs opacity-80">
+      <span class="col-span-5 truncate text-xs opacity-80 sm:col-span-1">
         <span x-text="ev.target_name || '—'"></span>
       </span>
 
       {# ---------- payload summary / PII marker (work item #7) ----------
          Aggregate-only events render the 🔒 lock + the placeholder copy; all
          other events render the one-line param summary. -#}
-      <span class="col-span-2 truncate text-xs">
+      <span class="hidden truncate text-xs sm:col-span-2 sm:block">
         <template x-if="isAggregateOnly(ev)">
           <span
             class="flex items-center gap-1 text-warning"
@@ -155,7 +161,7 @@
       </span>
 
       {# ---------- principal (marked agent-authored) ---------- #}
-      <span class="col-span-2 truncate">
+      <span class="col-span-4 truncate sm:col-span-2">
         <span
           class="badge badge-secondary badge-sm gap-1"
           :title="'Agent-authored announcement — ' + (ev.principal_sub || '')"
@@ -169,7 +175,7 @@
          Sits under the "Operation" column (col-span-3); rendered as a
          blockquote-styled span to visually mark it as agent prose
          "displayed as plain quoted text — never interpreted". -#}
-      <span class="col-span-3 truncate">
+      <span class="col-span-6 truncate sm:col-span-3">
         <span
           class="border-l-2 border-base-300 pl-2 italic opacity-90"
           :title="ev.activity"
@@ -178,7 +184,7 @@
       </span>
 
       {# ---------- phase chip (under the "Class" column) ---------- #}
-      <span class="col-span-1">
+      <span class="hidden sm:col-span-1 sm:block">
         <span
           class="badge badge-sm"
           :class="phaseBadgeClass(ev.phase)"
@@ -190,12 +196,12 @@
       <span class="col-span-1 text-xs opacity-40" aria-hidden="true">&#x2014;</span>
 
       {# ---------- target(s) ---------- #}
-      <span class="col-span-1 truncate text-xs opacity-80">
+      <span class="col-span-5 truncate text-xs opacity-80 sm:col-span-1">
         <span :title="announcementTargets(ev)" x-text="announcementTargets(ev) || '—'"></span>
       </span>
 
       {# ---------- claim metadata: planned_op_class · TTL · work_ref ---------- #}
-      <span class="col-span-2 truncate text-xs">
+      <span class="hidden truncate text-xs sm:col-span-2 sm:block">
         <span
           class="opacity-60"
           :title="announcementMeta(ev)"

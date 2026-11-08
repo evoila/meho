@@ -201,6 +201,7 @@ from meho_backplane.ui.routes.approvals.render import (
     project_stored_run_result,
     set_csrf_cookie,
 )
+from meho_backplane.ui.routes.approvals.waiting import waiting_for_me_first
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_approvals_router"]
@@ -325,6 +326,24 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
         request_tenant=session.tenant_id,
     )
     return operator
+
+
+async def _operator_or_none(session: UISessionContext) -> Operator | None:
+    """Return the session's :class:`Operator`, or ``None`` when it cannot be checked.
+
+    The Pending tab uses it to put the requests this person may approve
+    first. The list pages are open with the session alone, and a list is
+    still useful without that order. So any failed check (a session that
+    ended, a tenant switched in another tab, the sign-in service not
+    reachable) shows the plain order with no "waiting for you" mark,
+    instead of an error. The decision routes keep the strict
+    :func:`_resolve_operator`.
+    """
+    try:
+        return await _resolve_operator(session)
+    except Exception as exc:
+        log.warning("ui_approvals_waiting_order_skipped", error=type(exc).__name__)
+        return None
 
 
 def _is_htmx(request: Request) -> bool:
@@ -683,13 +702,19 @@ async def _build_history_context(
             target_names = await resolve_target_names(
                 db_session, tenant_id=session.tenant_id, requests=rows
             )
+    waiting: set[uuid.UUID] = set()
+    if tab == "pending" and rows:
+        rows, waiting = waiting_for_me_first(rows, await _operator_or_none(session))
     return {
         "requests": [
-            project_request_to_view(
-                row,
-                chain=positions.get(row.id),
-                target_name=target_names.get(row.target_id) if row.target_id else None,
-            )
+            {
+                **project_request_to_view(
+                    row,
+                    chain=positions.get(row.id),
+                    target_name=target_names.get(row.target_id) if row.target_id else None,
+                ),
+                "waiting_for_me": row.id in waiting,
+            }
             for row in rows
         ],
         "order": resolved_order,

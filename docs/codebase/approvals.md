@@ -3253,6 +3253,48 @@ under `StrictUndefined`. Template-only: no route, projection, or schema
 change (`render.project_request_to_view` already passes `proposed_effect`
 through verbatim).
 
+### The approvals page on a phone (#6000)
+
+The page works on a phone screen (about 390 px wide) and still looks the
+same on a laptop. It uses the existing Tailwind and DaisyUI classes, with
+the `sm:` width (640 px) as the switch point.
+
+- **Waiting for you first.** On the Pending tab, the requests the
+  signed-in person may approve come first, each with a "Waiting for you"
+  badge (`data-waiting-for-me` on the row). The check is
+  `approval_rights.approve_right`, the same one the modal and the approve
+  use. `ui/routes/approvals/waiting.py` (`waiting_for_me_first`) does the
+  split; it is stable, so each group keeps the order the database returned
+  (a change ticket's steps stay oldest first). The split works per page:
+  "Load more" splits the next page the same way. The other tabs do not
+  check the person and keep their order.
+- **The person check can fail.** The list pages are open with the session
+  alone. To know who may approve, the Pending tab also checks the
+  session's sign-in (`routes._operator_or_none`, the same check the modal
+  makes). When that check fails for any reason (a session that ended, a
+  tenant switched in another tab, the sign-in service not reachable), the
+  list shows its plain order with no badge, and logs
+  `ui_approvals_waiting_order_skipped`. It never shows the badge without a
+  real check.
+- **Rows.** Below `sm` a row stacks: the text wraps instead of being cut
+  (`[overflow-wrap:anywhere] sm:truncate`), so the person sees who asks
+  for what, and the Review / View button fills the row as a large touch
+  target. The status tabs wrap to a second line. The bell panel rows do
+  the same.
+- **Decision window.** The modal, the bell panel, the "decision recorded"
+  window and the in-order window open as a sheet from the bottom on a
+  phone (`modal-bottom sm:modal-middle`). In the request modal the
+  decision bar (Deny / Approve and their confirm steps,
+  `data-approval-decision-bar`) sticks to the bottom of the window while
+  the detail scrolls, so the buttons are in reach without scrolling, also
+  on a laptop for a long request. The reason field sits above the bar;
+  the confirm forms still read it by id (`hx-include`). On a phone the
+  two buttons are larger and share the row.
+
+The console has no browser test harness. `test_ui_approvals_phone_layout.py`
+pins the order and the markup; the look was checked in a real browser at
+390 px and 1366 px wide (no sideways scroll, decision buttons in view).
+
 ## Ordered and dependent approvals (#3598)
 
 This section is for a sender (an agent, an add-on or a script) that sends

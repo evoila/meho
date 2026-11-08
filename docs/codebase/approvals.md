@@ -922,17 +922,35 @@ and how the person proved they were present (`approval_auth`: channel
 has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign` and
 `keycloak.group.update_attributes`. The connector registers them
 (`connectors/keycloak/ops_write_grant.py`) and adds a `grant` block to the
-preview of the waiting request: `user_id` (a user name is resolved to its
-id when the request is parked), `login_realm` (the target manages a realm
-of MEHO's own login, see `_backplane_login_realms()`) and `platform_admin`
-(the platform admin group or role).
+preview of the waiting request:
+
+- `user_id`: the login the change is for. A user name is resolved to its
+  id when the request is parked.
+- `group_id`: the group the change is for, resolved the way the handler
+  resolves it. An id in the params wins; without one, the name is looked
+  up on its level (`parent_id`). So a request cannot name one group and
+  point at another by id.
+- `login_realm`: the target manages a realm of MEHO's own login, see
+  `_backplane_login_realms()`.
+- `platform_admin`: the group the handler will change is the platform
+  admin group, or the roles include the platform admin role.
+- `members`: for a group attribute change in the login realm, the ids of
+  the logins in the group (up to 1000, read page by page). `None` when
+  they could not be read, or when the group has more.
+
+A value that could not be read is `None`, never a guess.
 
 `approve_request` and `approve_right` call `check_grant_approval` before
 the group rule. It refuses with `ApprovalRoleFloorError` (403):
 
+- when the login or the group the change is for is unknown (the lookup
+  failed when the request was parked). Nobody can approve such a request;
+  the requester sends a new one;
 - when the login the change is for is the approver, in every group and for
   every risk level. A second login of the same person is another login, so
   it is another approver in this check;
+- for a group attribute change in the login realm, when the approver is in
+  the group, or when MEHO could not read who is in the group;
 - in the login realm, when the approver is the requester, even for a
   MEHO-SA-Operator;
 - in the login realm, when the approver is not a tenant admin (not a
@@ -940,8 +958,20 @@ the group rule. It refuses with `ApprovalRoleFloorError` (403):
 
 A request without the `grant` block, or with a group MEHO could not read,
 gets the strict rule. The decision audit row carries `grant_user_id`,
-`grant_for_approver`, `grant_in_login_realm` and, when the request named
-one, `grant_username`. MEHO does not link two logins of one person.
+`grant_group_id` (when the change names a group), `grant_for_approver`,
+`grant_in_login_realm` and, when the request named one, `grant_username`.
+MEHO does not link two logins of one person.
+
+**The run is bound to the ids the approver saw.** The handlers resolve a
+user name or a group name again when the change runs. A name can move to
+another account or group while the request waits. So right before every
+approved run, `grant_changed_since_request` builds the card again against
+the live system and compares `user_id` and `group_id` with the stored
+ones. A changed id, or one that cannot be read, refuses the run with the
+`object_changed_since_approval` error code. The check runs for every
+change of rights, also without a preview hash, in the shared resume check
+`refuse_resume_if_preview_changed` (the approve surfaces and the agent's
+own resume) and in the re-run after a failure (`approval_rerun`).
 
 ## The "may I approve this?" answer (#3329)
 

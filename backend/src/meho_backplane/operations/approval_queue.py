@@ -148,7 +148,11 @@ from meho_backplane.operations.approval_resume_checks import (
     preview_changed_since_request,
     target_changed_since_request,
 )
-from meho_backplane.operations.grant_approval import check_grant_approval, grant_audit_fields
+from meho_backplane.operations.grant_approval import (
+    check_grant_approval,
+    grant_audit_fields,
+    grant_changed_since_request,
+)
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
@@ -2608,10 +2612,13 @@ async def refuse_resume_if_preview_changed(
     object the approval card named must still be the object the live
     system has under the call's name
     (:func:`~meho_backplane.operations.approval_object_check.object_changed_since_request`).
-    Returns ``None`` when both hold, or when the request stored no preview
-    hash. Else the operation does not run: the refusal is stored as the
-    request's run result, so every read surface shows the run as failed
-    with the ``preview_changed_since_approval`` or
+    A third check runs for every change of rights, with or without a
+    preview hash: the login and the group it is for must still have the
+    ids the approver saw
+    (:func:`~meho_backplane.operations.grant_approval.grant_changed_since_request`).
+    Returns ``None`` when all hold. Else the operation does not run: the
+    refusal is stored as the request's run result, so every read surface
+    shows the run as failed with the ``preview_changed_since_approval`` or
     ``object_changed_since_approval`` error code. The caller has already
     won the one-resumer claim, so the request cannot run later.
 
@@ -2633,6 +2640,8 @@ async def refuse_resume_if_preview_changed(
         )
     else:
         reason = await object_changed_since_request(operator, request, target, params)
+        if reason is None:
+            reason = await grant_changed_since_request(operator, request, target, params)
         if reason is None:
             return None
         refusal = result_object_changed_since_approval(

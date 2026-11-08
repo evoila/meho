@@ -10,22 +10,34 @@ When one of them waits for approval, :func:`with_grant_facts` adds a
 
 * ``user_id``: the login the change is for. A user name is resolved to its
   id here, so the approval compares ids. ``None`` when it cannot be read.
+* ``group_id``: the group the change is for, resolved the way the handler
+  resolves it: an id in the params wins, else the name is looked up on
+  the same level (``parent_id``). ``None`` when it cannot be read.
 * ``login_realm``: the target manages a realm that MEHO's own login uses.
 * ``platform_admin``: the change is for the platform admin group or role.
-  ``None`` when MEHO could not read the group, which the approval treats as
-  the strict case.
+  Read from the group the handler will change, by id when the params
+  carry one. ``None`` when MEHO could not read the group, which the
+  approval treats as the strict case.
+* ``members``: for a group attribute change in the login realm, the ids
+  of the logins in the group (up to :data:`MEMBER_CAP`). ``None`` when
+  they could not be read, or when there are more than the cap. The
+  approval then refuses: it cannot tell whether the approver is in the
+  group.
 
-The approval rules that use these facts are in
+The same builder runs again right before the approved change runs, so
+the approval check can compare the ids with the live system. The approval
+rules that use these facts are in
 :mod:`meho_backplane.operations.grant_approval`.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.keycloak._paths import _GROUP_MEMBERS_PATH, fill_path
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import find_group
 from meho_backplane.connectors.keycloak.ops_write_realm_delete import _backplane_login_realms
-from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 from meho_backplane.core.keycloak import ADMIN_GROUPS
 from meho_backplane.operations._preview import PreviewBuilder, PreviewContext
 from meho_backplane.operations.grant_approval import register_grant_op
@@ -34,9 +46,16 @@ from meho_backplane.settings import get_settings
 if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 
-__all__ = ["GRANT_OPS", "register_grant_ops", "with_grant_facts"]
+__all__ = ["GRANT_OPS", "MEMBER_CAP", "register_grant_ops", "with_grant_facts"]
 
 PLATFORM_ADMIN_GROUP = ADMIN_GROUPS[1]
+_WANTED: Final[str] = PLATFORM_ADMIN_GROUP.casefold()
+
+#: The most members MEHO reads for a group attribute change. A group with
+#: more counts as "members unknown".
+MEMBER_CAP: Final[int] = 1000
+
+_MEMBER_PAGE: Final[int] = 100
 
 #: op_id -> (params with the user id, param with the group id, param with the group name)
 GRANT_OPS: dict[str, tuple[tuple[str, ...], str | None, str | None]] = {
@@ -48,8 +67,12 @@ GRANT_OPS: dict[str, tuple[tuple[str, ...], str | None, str | None]] = {
 
 def register_grant_ops() -> None:
     """Tell the approval check which Keycloak ops change who has rights."""
-    for op_id, (user_params, _group_id, _group_name) in GRANT_OPS.items():
-        register_grant_op(op_id, user_id_params=user_params)
+    for op_id, (user_params, group_id_param, _group_name) in GRANT_OPS.items():
+        register_grant_op(
+            op_id,
+            user_id_params=user_params,
+            group_id_params=(group_id_param,) if group_id_param else (),
+        )
 
 
 def _text(value: Any) -> str | None:
@@ -91,33 +114,83 @@ async def _user_id(ctx: PreviewContext, user_params: tuple[str, ...]) -> str | N
         return None
 
 
-async def _group_is_platform_admin(
-    ctx: PreviewContext, group_id_param: str | None, group_name_param: str | None
-) -> bool | None:
-    """Whether the group is the platform admin group; ``None`` when unknown."""
-    wanted = PLATFORM_ADMIN_GROUP.casefold()
-    name = _text(ctx.params.get(group_name_param)) if group_name_param else None
-    if name is not None:
-        return name.casefold() == wanted
-    group_id = _text(ctx.params.get(group_id_param)) if group_id_param else None
+async def _group(
+    ctx: PreviewContext, group_id_param: str, group_name_param: str
+) -> tuple[str | None, str | None]:
+    """The id and the name of the group the handler will change; ``None`` when unknown.
+
+    The same order as the handler: an id in the params wins, and its name
+    is read by that id. Without an id, the name is looked up on the level
+    ``parent_id`` names, which gives the id.
+    """
+    group_id = _text(ctx.params.get(group_id_param))
+    name = _text(ctx.params.get(group_name_param))
     connector = _live_connector(ctx)
-    if group_id is None or connector is None:
-        return None
+    if group_id is not None:
+        if connector is None:
+            return group_id, None
+        try:
+            found = await find_group(connector, ctx.operator, ctx.target, {"id": group_id})
+        except Exception:
+            return group_id, None
+        return group_id, found.name
+    if name is None or connector is None:
+        return None, name
     try:
-        found = await find_group(connector, ctx.operator, ctx.target, {"id": group_id})
+        realm = resolve_realm_config(ctx.target).managed_realm
+        row = await connector._find_group(
+            ctx.target, realm, name, _text(ctx.params.get("parent_id")), operator=ctx.operator
+        )
+    except Exception:
+        return None, name
+    found_id = row.get("id") if isinstance(row, dict) else None
+    return (found_id if isinstance(found_id, str) and found_id else None), name
+
+
+async def _members(ctx: PreviewContext, group_id: str) -> list[str] | None:
+    """The ids of the logins in the group; ``None`` when they cannot be read or exceed the cap."""
+    connector = _live_connector(ctx)
+    if connector is None:
+        return None
+    members: list[str] = []
+    try:
+        realm = resolve_realm_config(ctx.target).managed_realm
+        path = fill_path(_GROUP_MEMBERS_PATH, {"realm": realm, "group-id": quote_segment(group_id)})
+        while len(members) <= MEMBER_CAP:
+            rows = await connector._get_admin_list(
+                ctx.target,
+                path,
+                operator=ctx.operator,
+                params={
+                    "first": str(len(members)),
+                    "max": str(_MEMBER_PAGE),
+                    "briefRepresentation": "true",
+                },
+            )
+            ids = [row["id"] for row in rows if isinstance(row, dict) and _text(row.get("id"))]
+            if len(ids) != len(rows):
+                return None
+            members.extend(ids)
+            if len(rows) < _MEMBER_PAGE:
+                break
     except Exception:
         return None
-    return None if found.name is None else found.name.casefold() == wanted
+    return None if len(members) > MEMBER_CAP else members
 
 
-def _roles_include_platform_admin(ctx: PreviewContext) -> bool:
+def _roles_include_platform_admin(ctx: PreviewContext) -> bool | None:
+    """Whether the roles include the platform admin role; ``None`` when that cannot be read."""
     raw = ctx.params.get("roles")
     names = {str(r).strip().casefold() for r in raw} if isinstance(raw, list) else set()
-    wanted = {PLATFORM_ADMIN_GROUP.casefold(), "platform_admin"}
-    configured = get_settings().jwt_platform_admin_role_name
-    if configured:
-        wanted.add(configured.casefold())
-    return bool(names & wanted)
+    if names & {PLATFORM_ADMIN_GROUP.casefold(), "platform_admin"}:
+        return True
+    try:
+        configured = get_settings().jwt_platform_admin_role_name
+    except Exception:
+        return None
+    if not configured:
+        return False
+    return configured.casefold() in names
 
 
 def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
@@ -128,15 +201,24 @@ def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
         preview = await builder(ctx)
         if preview is None:
             return None
-        if group_id_param is None:
-            platform: bool | None = _roles_include_platform_admin(ctx)
+        login_realm = _login_realm(ctx)
+        group_id: str | None = None
+        if group_id_param is None or group_name_param is None:
+            platform = _roles_include_platform_admin(ctx)
         else:
-            platform = await _group_is_platform_admin(ctx, group_id_param, group_name_param)
-        preview["grant"] = {
+            group_id, group_name = await _group(ctx, group_id_param, group_name_param)
+            platform = None if group_name is None else group_name.casefold() == _WANTED
+        grant: dict[str, Any] = {
             "user_id": await _user_id(ctx, user_params),
-            "login_realm": _login_realm(ctx),
+            "group_id": group_id,
+            "login_realm": login_realm,
             "platform_admin": platform,
         }
+        if not user_params:
+            grant["members"] = (
+                await _members(ctx, group_id) if login_realm and group_id is not None else None
+            )
+        preview["grant"] = grant
         return preview
 
     return _wrapped

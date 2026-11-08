@@ -8351,6 +8351,11 @@ type PublishTemplateResponse struct {
 // expected ground truth; “baseline_*“ mirrors are populated when
 // the baseline ran. Frozen so the runner can't accidentally mutate
 // a row while folding the surface aggregate.
+//
+// “not_run_reason“ is set when the question could not be run on
+// this install (operations surface: its connector cannot be searched
+// here). Such a row has no hits and zeros, and the surface aggregate
+// leaves it out (#4752).
 type QueryResult struct {
 	BaselineCoverageAt5    *float32  `json:"baseline_coverage_at_5"`
 	BaselineHits           *[]string `json:"baseline_hits"`
@@ -8359,6 +8364,7 @@ type QueryResult struct {
 	CoverageAt5            float32   `json:"coverage_at_5"`
 	ExpectedHits           []string  `json:"expected_hits"`
 	MehoHits               []string  `json:"meho_hits"`
+	NotRunReason           *string   `json:"not_run_reason"`
 	PrecisionAt5           float32   `json:"precision_at_5"`
 	Query                  string    `json:"query"`
 	ReciprocalRank         float32   `json:"reciprocal_rank"`
@@ -10598,6 +10604,11 @@ type SurfaceMetricsSurface string
 // “baseline_verdict“ is computed only when the baseline ran;
 // “None“ otherwise. The MEHO-≥-baseline overlay applies in the
 // aggregate verdict (see runner._apply_baseline_check).
+//
+// “query_count“ counts the scored questions only. “not_run_count“
+// counts the questions that could not be run on this install; they
+// are in “queries“ with their “not_run_reason“ but do not move the
+// metrics or the verdict (#4752).
 type SurfaceResult struct {
 	BaselineCoverage     *float32                      `json:"baseline_coverage"`
 	BaselineKind         *string                       `json:"baseline_kind"`
@@ -10606,6 +10617,7 @@ type SurfaceResult struct {
 	BaselineVerdict      *SurfaceResultBaselineVerdict `json:"baseline_verdict"`
 	Coverage             float32                       `json:"coverage"`
 	Mrr                  float32                       `json:"mrr"`
+	NotRunCount          *int                          `json:"not_run_count,omitempty"`
 	PrecisionAt5         float32                       `json:"precision_at_5"`
 	Queries              *[]QueryResult                `json:"queries,omitempty"`
 	QueryCount           int                           `json:"query_count"`

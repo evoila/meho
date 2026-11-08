@@ -18,7 +18,9 @@
 #     (no empty commit; the build time line of the pages does not count);
 #   * it refuses to push a branch with fewer files than the remote one has;
 #   * the push is a plain push, and the file counts before and after are
-#     printed.
+#     printed;
+#   * when the push is refused because gh-pages moved, it fetches the branch
+#     again, builds again and checks again, at most 3 times, then fails.
 #
 # Usage: docs_republish.sh
 # Prints the published version and, when GITHUB_OUTPUT is set, writes
@@ -40,29 +42,61 @@ fi
 VERSION=$(printf '%s' "${NEWEST#v}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 echo "Newest release tag ${NEWEST}; republishing docs version ${VERSION} from main."
 
-# The branch exists after the first tag deploy.
-git fetch origin gh-pages:refs/remotes/origin/gh-pages
-git update-ref refs/heads/gh-pages refs/remotes/origin/gh-pages
-BEFORE_COUNT=$(git ls-tree -r --name-only refs/remotes/origin/gh-pages | wc -l)
+attempt_publish() {
+  # Runs inside `||`, so set -e is off here: each step ends in `|| return 1`.
+  # Returns 0 when it pushed or had nothing to push, 2 when the push was
+  # refused (gh-pages moved on the remote), 1 on a failed guard.
+  # The branch exists after the first tag deploy.
+  git fetch origin gh-pages:refs/remotes/origin/gh-pages || return 1
+  git update-ref refs/heads/gh-pages refs/remotes/origin/gh-pages || return 1
+  BEFORE_COUNT=$(git ls-tree -r --name-only refs/remotes/origin/gh-pages | wc -l) || return 1
 
-"${MIKE[@]}" deploy --update-aliases "${VERSION}" latest
-"${MIKE[@]}" set-default latest
+  "${MIKE[@]}" deploy --update-aliases "${VERSION}" latest || return 1
+  "${MIKE[@]}" set-default latest || return 1
 
-AFTER_COUNT=$(git ls-tree -r --name-only refs/heads/gh-pages | wc -l)
-echo "gh-pages file count: ${BEFORE_COUNT} (remote), ${AFTER_COUNT} (new)."
+  AFTER_COUNT=$(git ls-tree -r --name-only refs/heads/gh-pages | wc -l)
+  echo "gh-pages file count: ${BEFORE_COUNT} (remote), ${AFTER_COUNT} (new)."
 
-# The build writes its own build time into the pages ("Build Date UTC"), so
-# the trees differ on every build. That line does not count as a change.
-if git diff --quiet -I'^Build Date UTC' refs/remotes/origin/gh-pages refs/heads/gh-pages; then
-  echo "The published site is already the same — nothing to push."
+  # The build writes its own build time into the pages ("Build Date UTC"), so
+  # the trees differ on every build. That line does not count as a change.
+  if git diff --quiet -I'^Build Date UTC' refs/remotes/origin/gh-pages refs/heads/gh-pages; then
+    echo "The published site is already the same — nothing to push."
+    NOTHING_PUSHED=1
+    return 0
+  fi
+  if [ "${AFTER_COUNT}" -lt "${BEFORE_COUNT}" ]; then
+    echo "gh-pages would lose files (${BEFORE_COUNT} -> ${AFTER_COUNT}) — not pushing." >&2
+    return 1
+  fi
+
+  git push origin gh-pages || return 2
+}
+
+# A push is refused when another run (a tag deploy) moved gh-pages after the
+# fetch. Then the script fetches again, builds again and checks again.
+MAX_ATTEMPTS=3
+NOTHING_PUSHED=0
+attempt=1
+while true; do
+  rc=0
+  attempt_publish || rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    break
+  fi
+  if [ "${rc}" -ne 2 ]; then
+    exit "${rc}"
+  fi
+  if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
+    echo "The push to gh-pages was refused ${MAX_ATTEMPTS} times — giving up." >&2
+    exit 1
+  fi
+  echo "The push to gh-pages was refused (attempt ${attempt} of ${MAX_ATTEMPTS}) — fetching it again." >&2
+  attempt=$((attempt + 1))
+done
+if [ "${NOTHING_PUSHED}" -eq 1 ]; then
   exit 0
 fi
-if [ "${AFTER_COUNT}" -lt "${BEFORE_COUNT}" ]; then
-  echo "gh-pages would lose files (${BEFORE_COUNT} -> ${AFTER_COUNT}) — not pushing." >&2
-  exit 1
-fi
 
-git push origin gh-pages
 echo "Published docs version ${VERSION}."
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   printf 'version=%s\n' "${VERSION}" >> "${GITHUB_OUTPUT}"

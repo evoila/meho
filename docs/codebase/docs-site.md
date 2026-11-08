@@ -95,15 +95,22 @@ A docs fix is on the public site the same week, with no hand step.
 3. `mike deploy --update-aliases <version> latest` builds main and
    commits it onto the local `gh-pages` branch. `latest` points at that
    version, so it shows the docs of the newest release, built from main.
-4. Guards before the plain `git push`: no push when the pages are the
+   When main is on a minor that has no final release yet, its docs still
+   go out under the newest final release's version.
+4. Guards before the plain `git push` (they run again after a retry): no push when the pages are the
    same as on the remote branch (the build time line does not count), so
    no empty commit; no push when the file count of `gh-pages` would
    drop. Both file counts are printed.
 5. The reachability gate runs as for a tag. It is skipped when nothing
    was pushed.
 
-The tag deploy is unchanged. Both paths share the `docs-site-gh-pages`
-concurrency group, so they never push at the same time.
+The tag deploy is unchanged. A tag deploy keeps the `docs-site-gh-pages`
+concurrency group and is never cancelled. The main republish has its own
+group (`docs-site-gh-pages-main`), because GitHub keeps only one waiting
+run per group and a later main run would replace a waiting tag deploy.
+The two can overlap, so when the push is refused because `gh-pages`
+moved, the script fetches it again, builds again, checks the guards
+again and pushes. It tries at most 3 times, then fails with a message.
 
 ## Local development
 

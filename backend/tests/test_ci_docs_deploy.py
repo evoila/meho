@@ -211,3 +211,44 @@ def test_republish_without_a_final_release_publishes_nothing(site: Path) -> None
     assert result.returncode == 1
     assert "No final release tag" in result.stderr
     assert _pages_head(site) == head
+
+
+def test_republish_tries_again_when_the_push_is_refused(site: Path) -> None:
+    assert _deploy(site, "v1.0.0").returncode == 0
+    # A mike that, on its first deploy, lets another run push gh-pages first.
+    other = site.parent / "other"
+    _git(site.parent, "clone", "-q", "-b", "gh-pages", str(site.parent / "origin.git"), "other")
+    _git(other, "config", "user.name", "test")
+    _git(other, "config", "user.email", "test@example.com")
+    (other / "extra.txt").write_text("another run\n")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "another run")
+    wrapper = site.parent / "mike-race"
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        f"flag={site.parent}/raced\n"
+        'if [ "$1" = deploy ] && [ ! -e "$flag" ]; then\n'
+        '  touch "$flag"\n'
+        f"  git -C {other} push -q origin gh-pages\n"
+        "fi\n"
+        f'exec {_MIKE} "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    (site / "docs" / "index.md").write_text("Docs of main-fix end.\n")
+    _git(site, "add", "-A")
+    _git(site, "commit", "-q", "-m", "main-fix")
+    _git(site, "push", "-q", "origin", "main")
+    env = {**_GIT_ENV, "MIKE": str(wrapper), "GITHUB_OUTPUT": str(site / "github_output")}
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(_REPUBLISH)],
+        cwd=site,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "refused (attempt 1 of 3)" in result.stderr
+    pages = _published(site)
+    assert (pages / "extra.txt").exists()
+    assert _shows(pages, "latest", "main-fix")

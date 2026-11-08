@@ -98,8 +98,11 @@ concurrency:
   # don't collide; cancel-in-progress is scoped OFF for merge_group
   # because a cancelled queue check fails the merge attempt. Same
   # shape as readme-version-check.yml.
+  # Push runs (main and tags) are never cancelled here: a newer main run
+  # would otherwise stop an older one in the middle of its publish. The
+  # publish is serialised by the job-level group below.
   group: docs-site-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && github.event_name != 'push' }}
 
 jobs:
   build:
@@ -147,8 +150,11 @@ jobs:
     concurrency:
       # Serialise gh-pages pushes across tags — two near-simultaneous
       # tag pushes would otherwise race mike's branch update. Never
-      # cancel a publish in flight.
-      group: docs-site-gh-pages
+      # cancel a publish in flight. GitHub keeps one waiting run per
+      # group, so a main republish has its own group: a waiting tag
+      # deploy is never replaced by it. When a main run and a tag run
+      # overlap, docs_republish.sh fetches gh-pages again and retries.
+      group: ${{ github.ref_type == 'tag' && 'docs-site-gh-pages' || 'docs-site-gh-pages-main' }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

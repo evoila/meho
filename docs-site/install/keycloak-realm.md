@@ -38,7 +38,7 @@ the end, then return to the trail.
 | `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers` | Top-level groups with attributes | Give each person their tenant and their role |
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
 | A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
-| A user in `MEHO-SA-Operators` | Realm user | A second person, so a change the first admin asks for can be approved |
+| A user in `MEHO-SA-Operators` | Realm user | A second person for daily work: runs changes, approves their own risky changes and other people's |
 | A user of realm `master` with every role of the client `meho-realm` except `impersonation` | `master` user (not in realm `meho`) | The console admin: administers realm `meho` in the Keycloak admin console. MEHO refuses its tokens. |
 
 !!! tip "There is an automation for this"
@@ -378,10 +378,11 @@ without it, the command writes the all-zero UUID to the five groups.
 
 ### Who may approve their own changes
 
-A person in **`MEHO-SA-Operators`** may approve their own changes, on
-purpose: with a click in the web interface, or on the command line after
-a fresh sign-in. They may also approve other people's `dangerous` and
-`destructive` changes. The rules for every group are in
+A person in **`MEHO-SA-Operators`** or in **`MEHO-Admins`** may approve
+their own changes, on purpose: with a click in the web interface, or on
+the command line after a fresh sign-in. They may also approve other
+people's `dangerous` and `destructive` changes. Agents and other machine
+logins never approve. The rules for every group are in
 [Approvals and break-glass](../guides/approvals-and-break-glass.md#who-may-approve).
 
 To make a person a MEHO-SA-Operator:
@@ -400,9 +401,10 @@ setup maps to `MEHO-SA-Operators` instead
 the [login groups decision record](https://github.com/evoila/meho/blob/main/docs/decisions/login-role-groups.md)
 ([#3959](https://github.com/evoila/meho/issues/3959)).
 
-Keep at least one person in `MEHO-SA-Operators`. A person in
-`MEHO-Admins` may approve other people's `dangerous` and `destructive`
-changes, but not their own.
+A person is in exactly one role group per tenant, so an admin is not a
+MEHO-SA-Operator. Both groups may approve their own changes. The rules
+are in the
+[decision record on approval groups](https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md).
 
 ### More than one tenant
 
@@ -444,12 +446,20 @@ one. Create at least one user with:
 - membership in the **`MEHO-Admins`** group, so the user gets the
   `tenant_admin` role, and in **`MEHO-Platform-Admins`**.
 
-Create a second person in **`MEHO-SA-Operators`**. A `dangerous` or
-`destructive` change waits until a MEHO-SA-Operator or an admin approves
-it, and an admin cannot approve their own. So the first admin needs this
-second person to approve their risky changes. The MEHO-SA-Operator may
-also approve their own changes (see
-[Who may approve their own changes](#who-may-approve-their-own-changes)).
+A `dangerous` or `destructive` change waits until a person approves it
+with a click. A member of **`MEHO-SA-Operators`** or **`MEHO-Admins`**
+may approve their own risky change, on purpose, in the web interface. So
+the first admin can approve their own changes. A person in
+`MEHO-Operators` needs a MEHO-SA-Operator or an admin to approve their
+risky changes. A login holds exactly one role group, so an admin is not
+also a MEHO-SA-Operator; both groups may approve their own changes (see
+[Who may approve their own changes](#who-may-approve-their-own-changes)
+and the
+[decision record on approval groups](https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md)).
+
+Also create a second person in **`MEHO-SA-Operators`**, for daily work
+without admin rights. This person runs changes, approves their own risky
+changes, and may approve the admin's changes too.
 
 The user's email does not need to be verified for device-code login to
 complete.

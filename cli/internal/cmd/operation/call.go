@@ -369,17 +369,6 @@ func sendCall(
 	return &out, nil, nil
 }
 
-// ResultHandleID returns the handle_id of a result handle, or "" when there is none.
-func ResultHandleID(raw json.RawMessage) string {
-	var h struct {
-		HandleID string `json:"handle_id"`
-	}
-	if len(raw) == 0 || json.Unmarshal(raw, &h) != nil {
-		return ""
-	}
-	return h.HandleID
-}
-
 // PrintCallResult is the human render of an OperationResult envelope.
 // `meho approvals result` uses it too, so the stored result of an
 // approved run looks the same as a direct call (#5313).
@@ -411,7 +400,7 @@ func PrintCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 		if r.Delivery != nil && (*r.Delivery == "unavailable" || *r.Delivery == "partial") {
 			fmt.Fprintln(w, "delivery incomplete: operation already executed; do not re-invoke it.")
 			if *r.Delivery == "partial" {
-				if id := ResultHandleID(r.Handle); id != "" {
+				if id := dispatch.ResultHandleID(r.Handle); id != "" {
 					fmt.Fprintf(w, "the response was too large to show; read it with `meho operation result-query %s`.\n", id)
 				}
 			}

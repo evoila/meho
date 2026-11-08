@@ -148,6 +148,15 @@ _CASES: list[tuple[str, Operator, str | None, str, bool, str, ApprovalRule | Non
         _person(_REQUESTER, role=TenantRole.TENANT_ADMIN),
         "dangerous",
         _REQUESTER,
+        True,
+        "own_change",
+        ApprovalRule.SA_OPERATOR_SELF_APPROVAL,
+    ),
+    (
+        "operator, own dangerous change",
+        _person(_REQUESTER),
+        "dangerous",
+        _REQUESTER,
         False,
         "own_change",
         None,
@@ -312,7 +321,7 @@ def test_the_confirmation_line_names_the_self_approval_rule() -> None:
     token_call = self_approval_confirmation(ApprovalRule.TOKEN_CALL_SELF_APPROVAL)
     break_glass = self_approval_confirmation(ApprovalRule.BREAK_GLASS_SELF_APPROVAL)
 
-    assert sa is not None and "MEHO-SA-Operator" in sa and "audit log" in sa
+    assert sa is not None and "MEHO-SA-Operators or MEHO-Admins" in sa and "audit log" in sa
     assert token_call is not None and "came with a token" in token_call
     assert break_glass is not None and "APPROVAL_ALLOW_SELF_APPROVAL" in break_glass
     assert self_approval_confirmation(ApprovalRule.REVIEWER) is None

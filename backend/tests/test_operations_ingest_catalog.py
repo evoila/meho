@@ -56,6 +56,8 @@ from meho_backplane.operations.ingest.catalog import (
     OpAllowlistEntry,
     info_version_matches_compatibility,
     load_catalog,
+    load_entry_profile,
+    load_entry_spec,
     load_profile_resource,
     load_spec_resource,
     op_allowlist_for,
@@ -63,14 +65,20 @@ from meho_backplane.operations.ingest.catalog import (
     validate_catalog_registry_coverage,
     validate_shipped_artifacts,
 )
+from tests.fixtures.catalog import (
+    FIXTURE_CATALOG_PACKAGE,
+    FIXTURE_PROFILE_RESOURCE,
+    FIXTURE_SPEC_RESOURCE,
+    fixture_entry,
+    load_fixture_catalog,
+)
 
 # The catalog entries currently shipped: the public connectors plus
 # ``gh/3`` (G3.11-T3 #1223 -- the GitHub REST API entry that consumes the
-# GitHubRestConnector class shipped by G3.11-T1 #1221) plus the
-# ``_fixture/1.0`` profile-backed shipped-spec mechanism row (#1964 T1
-# #1975 -- exercises the spec_resource / profile_resource on-ramp + the
-# boot-time dry-run-parse validator). The VMware rows left with evoila's
-# own connectors; they ship in the private connector package.
+# GitHubRestConnector class shipped by G3.11-T1 #1221). The VMware rows left
+# with evoila's own connectors; they ship in the private connector package.
+# The test row for the shipped-spec path (``_fixture/1.0``) is not here: it
+# is test data in ``tests/fixtures/catalog/``.
 # The ``gh`` row's ``version`` field stores the
 # digit-prefix ``"3"`` (G3.11-T8 #1242 reconciled the catalog with
 # the registry's parse-friendly form -- the dispatcher's
@@ -83,8 +91,6 @@ _EXPECTED_PRODUCT_VERSION = {
     ("vault", "1.x"),
     ("k8s", "1.x"),
     ("bind9", "9.x"),
-    # #1964 T1 #1975: profile-backed shipped-spec mechanism fixture.
-    ("_fixture", "1.0"),
     # meho-automation add-on: profile-backed generic connector with NO
     # vendored spec (ingested at registration from the add-on's
     # /openapi.json). Public #3571 oauth2_mint external issuer.
@@ -97,11 +103,6 @@ _TYPED_PRODUCTS = {"vault", "k8s", "bind9"}
 # vendored). They carry a ``profile_resource`` and ``catalog_ingest:
 # spec-only``. The meho-automation add-on is the first such row.
 _RUNTIME_SPEC_PRODUCTS = {"mehoauto"}
-# Products whose catalog row carries neither an ``upstream`` nor is a
-# hand-coded typed connector: the profile-backed shipped-spec rows whose
-# spec ships as package data via ``spec_resource``. The ``_fixture/1.0``
-# mechanism row landed with #1975.
-_SHIPPED_SPEC_PRODUCTS = {"_fixture"}
 
 
 @pytest.fixture(autouse=True)
@@ -149,18 +150,9 @@ def test_shipped_catalog_parses_cleanly() -> None:
 
 
 def test_shipped_catalog_typed_connectors_have_null_upstream() -> None:
-    """Typed connectors carry ``upstream: null``; generic ones carry URLs.
-
-    Profile-backed shipped-spec rows (#1975) are a third shape: null
-    ``upstream`` (the spec ships as package data, not fetched) but a
-    ``spec_resource`` instead of a hand-coded connector, so they're
-    exempt from both branches.
-    """
+    """Typed connectors carry ``upstream: null``; generic ones carry URLs."""
     for entry in load_catalog().entries:
-        if entry.product in _SHIPPED_SPEC_PRODUCTS:
-            assert entry.upstream is None, f"{entry.product} ships its spec (null upstream)"
-            assert entry.spec_resource, f"{entry.product} needs a shipped spec_resource"
-        elif entry.product in _RUNTIME_SPEC_PRODUCTS:
+        if entry.product in _RUNTIME_SPEC_PRODUCTS:
             # Profile-backed but spec-less: ingested at registration from the
             # target's /openapi.json, never vendored. Null upstream + null
             # spec_resource + a profile_resource, listed spec-only.
@@ -441,16 +433,24 @@ def test_resource_name_rejects_path_traversal() -> None:
             _entry(profile_resource=bad)
 
 
-def test_load_spec_resource_reads_shipped_fixture() -> None:
-    """The shipped fixture spec resolves to its package-data text."""
-    text = load_spec_resource("_fixture_minimal.yaml")
+def test_load_spec_resource_reads_the_test_spec() -> None:
+    """A spec resource resolves to the text of the file in its package."""
+    text = load_spec_resource(FIXTURE_SPEC_RESOURCE, package=FIXTURE_CATALOG_PACKAGE)
     assert "openapi:" in text
     assert "/things" in text
 
 
-def test_load_profile_resource_reads_shipped_fixture() -> None:
-    text = load_profile_resource("_fixture_minimal.yaml")
+def test_load_profile_resource_reads_the_test_profile() -> None:
+    text = load_profile_resource(FIXTURE_PROFILE_RESOURCE, package=FIXTURE_CATALOG_PACKAGE)
     assert "scheme: basic" in text
+
+
+def test_test_catalog_rows_read_their_files_from_the_test_folder() -> None:
+    """The test row reads its spec and profile from the test folder, not from MEHO."""
+    entry = fixture_entry()
+    assert entry.source_package == FIXTURE_CATALOG_PACKAGE
+    assert "/things" in load_entry_spec(entry)
+    assert "scheme: basic" in load_entry_profile(entry)
 
 
 def test_load_spec_resource_missing_raises_catalog_error() -> None:
@@ -462,13 +462,32 @@ def test_resource_packages_are_importable() -> None:
     """The shipped resource packages (in-package data) exist and are addressable."""
     from importlib.resources import files
 
-    assert files(SPEC_RESOURCE_PACKAGE).joinpath("_fixture_minimal.yaml").is_file()
-    assert files(PROFILE_RESOURCE_PACKAGE).joinpath("_fixture_minimal.yaml").is_file()
+    assert files(SPEC_RESOURCE_PACKAGE).is_dir()
+    assert files(PROFILE_RESOURCE_PACKAGE).is_dir()
+
+
+def test_resource_packages_ship_no_test_fixture() -> None:
+    """Test data stays in the tests: no fixture file ships in MEHO's resource packages."""
+    from importlib.resources import files
+
+    for package in (SPEC_RESOURCE_PACKAGE, PROFILE_RESOURCE_PACKAGE):
+        names = [item.name for item in files(package).iterdir()]
+        assert not [name for name in names if "fixture" in name], (package, names)
+
+
+def test_shipped_catalog_has_no_test_fixture_row() -> None:
+    assert load_catalog().get("_fixture", "1.0") is None
+    assert all("fixture" not in e.impl_id for e in load_catalog().entries)
 
 
 def test_validate_shipped_artifacts_passes_for_shipped_catalog() -> None:
     """Every shipped spec/profile dry-run-parses cleanly at boot."""
     validate_shipped_artifacts()  # must not raise
+
+
+def test_validate_shipped_artifacts_passes_for_the_test_catalog() -> None:
+    """The test row's spec and profile pass the start-up check from the test folder."""
+    validate_shipped_artifacts(load_fixture_catalog())  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +536,7 @@ def test_validate_shipped_artifacts_crashes_on_malformed_spec(
                 version="1.0",
                 impl_id="prof-rest",
                 requires_connector_class="ProfiledRestConnector_prof",
-                spec_resource="_fixture_minimal.yaml",
+                spec_resource="some_spec.yaml",
             ),
         ),
     )
@@ -553,7 +572,7 @@ def test_validate_shipped_artifacts_crashes_on_malformed_profile(
                 version="1.0",
                 impl_id="prof-rest",
                 requires_connector_class="ProfiledRestConnector_prof",
-                profile_resource="_fixture_minimal.yaml",
+                profile_resource="some_profile.yaml",
             ),
         ),
     )

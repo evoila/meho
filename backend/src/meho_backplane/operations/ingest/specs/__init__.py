@@ -23,7 +23,6 @@ with the same :func:`~meho_backplane.operations.ingest.openapi.parse_openapi`
 the live ingest uses, so a malformed spec crashes boot (and CI's app-boot
 smoke) rather than 500-ing the first ``--catalog`` ingest.
 
-T1 (#1975) ships the mechanism plus ``_fixture_minimal.yaml`` — a tiny
-valid OpenAPI 3.1 spec that exercises the boot-time validator end to end.
-T2 (#1976) authors the real vmware/sddc specs.
+The tests check this path with their own catalog and spec in
+``backend/tests/fixtures/catalog/``; no test data ships here.
 """

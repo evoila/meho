@@ -50,7 +50,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import Document, Tenant
-from meho_backplane.retrieval.eval.result_models import EvalResult, SurfaceResult
+from meho_backplane.retrieval.eval.result_models import EvalResult, QueryResult, SurfaceResult
 from meho_backplane.retrieval.retire import (
     CriterionResult,
     RetireChecklistReport,
@@ -1339,6 +1339,56 @@ def test_eval_renders_green_for_empty_corpus_surface_verbatim() -> None:
     body = response.text
     assert 'data-verdict="green"' in body
     assert "badge-success" in body
+
+
+def test_eval_renders_the_not_run_questions_and_their_reason() -> None:
+    """A surface with questions that could not run names how many and why (#4752)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    reason = "connector 'example-rest-1.0' has no operations on this install"
+    not_run = QueryResult(
+        query="list things",
+        expected_hits=["GET:/things"],
+        meho_hits=[],
+        precision_at_5=0.0,
+        reciprocal_rank=0.0,
+        coverage_at_5=0.0,
+        not_run_reason=reason,
+    )
+    surface = SurfaceResult(
+        surface="operations",
+        query_count=0,
+        precision_at_5=0.0,
+        mrr=0.0,
+        coverage=0.0,
+        verdict="green",
+        not_run_count=2,
+        queries=[not_run, not_run],
+    )
+    result = _eval_result(surfaces=[surface, _surface_result()], overall_verdict="green")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_EVAL_ALL, new_callable=AsyncMock, return_value=result),
+        ):
+            response = client.post(
+                "/ui/retrieval/eval",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-not-run="operations"' in body
+    assert 'data-not-run="kb"' not in body
+    assert "2 question(s) not run" in body
+    # The reason is shown once, HTML-escaped.
+    assert body.count("has no operations on this install") == 1
 
 
 def test_eval_own_tenant_only_no_baseline() -> None:

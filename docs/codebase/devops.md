@@ -3315,6 +3315,20 @@ Together they assert "the N image runs cleanly against the N+1
 schema" at two layers: testcontainers in CI (fast, on migration-touching
 PRs) and real `helm rollback` against the lab (slow, Goal-closing milestone).
 
+One more check in the same folder runs **before** an upgrade, not after
+it: [`scripts/acceptance/ssh-host-key-pins.sh`](../../scripts/acceptance/ssh-host-key-pins.sh).
+Since v0.34.0 the SSH connectors refuse a target whose secret has no
+`known_hosts` entry and no `known_hosts_insecure` setting. The script
+lists the SSH targets of the running release (`GET /api/v1/targets`),
+reads each secret with the `vault` CLI, applies the target's
+`secret_field_map` the way the connector does, and ends with exit code 1
+when a target has neither setting. Step 6 of [`RELEASING.md`](../RELEASING.md)
+runs it before the deploy. Its product list must match the
+`SshConnector` subclasses;
+[`backend/tests/test_ssh_host_key_pins_script.py`](../../backend/tests/test_ssh_host_key_pins_script.py)
+checks that and runs the script against fake `curl` and `vault`
+commands.
+
 ## References
 
 - The acceptance contracts: `docs/acceptance/install.md`,

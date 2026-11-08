@@ -72,7 +72,7 @@ func refused(detail string) mockHandler {
 // was the person's own change.
 func TestApproveOfOwnChangePrintsTheSelfApprovalLine(t *testing.T) {
 	cases := map[string]string{
-		ruleSAOperatorSelf: "self-approved as a MEHO-SA-Operator",
+		ruleSAOperatorSelf: "self-approved as a MEHO-SA-Operator or MEHO-Admin",
 		ruleBreakGlassSelf: "self-approved because APPROVAL_ALLOW_SELF_APPROVAL is on",
 	}
 	for rule, want := range cases {
@@ -201,7 +201,7 @@ func TestInOrderStepPrintsTheSelfApprovalLine(t *testing.T) {
 	var buf bytes.Buffer
 	line := selfApprovalLine(&api.DecideResponseBody{SelfApproved: ptr(true), ApprovalRule: ptr(ruleSAOperatorSelf)})
 	printInOrderStep(&buf, inOrderStep{Step: 1, ID: stubID, OpID: "op", Outcome: stepApproved, SelfApproval: line}, 1)
-	if !strings.Contains(buf.String(), "self-approved as a MEHO-SA-Operator") {
+	if !strings.Contains(buf.String(), "self-approved as a MEHO-SA-Operator or MEHO-Admin") {
 		t.Errorf("in-order step has no self-approval line:\n%s", buf.String())
 	}
 }
@@ -223,7 +223,7 @@ func TestSelfApprovalLineNeedsTheServerAnswer(t *testing.T) {
 
 // TestApproveHelpExplainsWhoMayApprove checks the --help texts.
 func TestApproveHelpExplainsWhoMayApprove(t *testing.T) {
-	for _, want := range []string{"MEHO-SA-Operator may approve their own change", "self-approval line", approveWebHint} {
+	for _, want := range []string{"MEHO-SA-Operator or a MEHO-Admin may approve their own change", "self-approval line", approveWebHint} {
 		if !strings.Contains(newApproveCmd().Long, want) {
 			t.Errorf("approve --help is missing %q", want)
 		}

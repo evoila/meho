@@ -6080,6 +6080,60 @@
         }
       }
     },
+    "/api/v1/kb/import": {
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "Import Kb Pages",
+        "description": "Import knowledge pages sent in the request into the caller's tenant (#5728).\n\nThe team wiki's CI job calls this after each merge, with the\n``kb_import_only`` login. A ``tenant_admin`` may call it too. Every\npage gets one row in the answer: ``create``, ``update``,\n``unchanged`` or ``skip`` with the reason. ``dry_run`` writes\nnothing. The rules are in :mod:`meho_backplane.kb.page_import`.\n\nBinds ``audit_op_id=\"kb.import\"`` + ``audit_op_class=\"write\"`` and\nthe four counters. The page texts are never in the audit payload.",
+        "operationId": "import_kb_pages_api_v1_kb_import_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KbImportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbImportResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runbooks/templates": {
       "post": {
         "tags": [
@@ -33676,6 +33730,153 @@
         "title": "KbEntryPreview",
         "description": "Lightweight projection of :class:`KbEntry` for list responses.\n\nDrops the full body and emits a 200-char preview instead --\nconsumers that need the full body issue a follow-up ``GET\n/{slug}``. Mirrors the kb-search-hit snippet shape (T1's\n:class:`KbEntrySearchHit`) so an operator can do\n``list \u2192 identify slug \u2192 fetch full body`` without learning a\ndifferent field name on each surface."
       },
+      "KbImportPage": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path",
+            "description": "Path of the page in the wiki, relative, ending in .md.",
+            "examples": [
+              "products/<product>/<page>.md"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 1000000,
+            "minLength": 1,
+            "title": "Content",
+            "description": "The whole page: the YAML lesson header, then the text."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path",
+          "content"
+        ],
+        "title": "KbImportPage",
+        "description": "One page the caller sends: its path in the wiki and its full text."
+      },
+      "KbImportPageResult": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "slug": {
+            "type": "string",
+            "nullable": true,
+            "title": "Slug"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "create",
+              "update",
+              "unchanged",
+              "skip"
+            ],
+            "title": "Action"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason",
+            "description": "Why the page was skipped. Set for every skipped page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "action"
+        ],
+        "title": "KbImportPageResult",
+        "description": "What the import did, or would do in a dry run, with one page."
+      },
+      "KbImportRequest": {
+        "properties": {
+          "pages": {
+            "items": {
+              "$ref": "#/components/schemas/KbImportPage"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Pages"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "description": "Show what the import would do, and write nothing.",
+            "default": false
+          },
+          "include_candidates": {
+            "type": "boolean",
+            "title": "Include Candidates",
+            "description": "Also import pages with status: candidate. Off: they are skipped.",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "pages"
+        ],
+        "title": "KbImportRequest",
+        "description": "POST body for ``/api/v1/kb/import``."
+      },
+      "KbImportResult": {
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run"
+          },
+          "created_count": {
+            "type": "integer",
+            "title": "Created Count"
+          },
+          "updated_count": {
+            "type": "integer",
+            "title": "Updated Count"
+          },
+          "unchanged_count": {
+            "type": "integer",
+            "title": "Unchanged Count"
+          },
+          "skipped_count": {
+            "type": "integer",
+            "title": "Skipped Count"
+          },
+          "pages": {
+            "items": {
+              "$ref": "#/components/schemas/KbImportPageResult"
+            },
+            "type": "array",
+            "title": "Pages"
+          },
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/KbIngestConflict"
+            },
+            "type": "array",
+            "title": "Conflicts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dry_run",
+          "created_count",
+          "updated_count",
+          "unchanged_count",
+          "skipped_count",
+          "pages",
+          "conflicts"
+        ],
+        "title": "KbImportResult",
+        "description": "The answer of one import: one row per page, sorted by path."
+      },
       "KbIngestConflict": {
         "properties": {
           "slug": {
@@ -33779,7 +33980,8 @@
             "type": "string",
             "enum": [
               "directory",
-              "direct"
+              "direct",
+              "import"
             ],
             "nullable": true,
             "title": "Source Kind"

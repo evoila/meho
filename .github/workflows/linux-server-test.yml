@@ -38,6 +38,9 @@
 # chart with values-single-node.yaml and the place values install.sh
 # writes, with the Helm version the download ships (#4735).
 #
+# The job also tests the scripts that CI jobs use to get their tools
+# (scripts/ci), with fake commands and no network.
+#
 # Advisory (non-required) and path-scoped, like plugin-test.yml: a required
 # check would need the `changes`-job + job-`if:` shape ci.yml uses.
 
@@ -51,6 +54,11 @@ on:
       - 'deploy/appliance/**'
       - 'deploy/charts/meho/**'
       - '.github/workflows/linux-server-test.yml'
+      - 'scripts/ci/install_tool.sh'
+      - 'scripts/ci/install_spacy_model.sh'
+      - 'scripts/ci/fetch_with_retry.sh'
+      - 'scripts/ci/retry.sh'
+      - 'scripts/tests/test_ci_tool_scripts.py'
   workflow_dispatch:
 
 permissions:
@@ -78,6 +86,9 @@ jobs:
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
+
+      - name: Run the tests of the CI tool scripts
+        run: python -m unittest discover -s scripts/tests -p 'test_ci_tool_scripts.py' -v
 
       - name: Install shellcheck
         # Pinned version and checksum. The checksum is the sha256 digest that

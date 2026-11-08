@@ -2750,13 +2750,21 @@ A job must not fail because a download failed once. The rules:
   hash of `tool-versions.env`), and downloads last.
 - `scripts/ci/fetch_with_retry.sh` is the download. It tries three times
   (pauses of 5 s and 15 s) and counts a wrong sha256 as a failed try.
+- `scripts/ci/install_spacy_model.sh` puts the spaCy model into the job's
+  Python environment. The model version and sha256 are pinned in
+  `tool-versions.env`. It uses the model when it is installed at that
+  version, then the model file in `~/.cache/meho-ci-tools`, and downloads
+  last.
 - `scripts/ci/retry.sh` runs any download command (the language model
-  warm-up, the spaCy model) with the same three tries.
+  warm-up) with the same three tries.
 - `.github/actions/setup-kind` installs kind this way and starts the
   cluster. It replaces `helm/kind-action`, which downloaded kind on every
   run.
 - Release-time workflows that cannot rely on the script (they check out a
   tag) use `curl --retry 3 --retry-all-errors`.
+- `scripts/tests/test_ci_tool_scripts.py` tests these scripts with fake
+  commands and no network. The `linux-server-test` workflow runs it when
+  one of the scripts changes.
 - A runner image that carries the tools at the pinned versions makes the
   download step a no-op. Change the pin in `tool-versions.env` and in the
   image together.

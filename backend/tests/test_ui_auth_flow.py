@@ -549,9 +549,15 @@ def test_callback_creates_session_and_sets_cookie(monkeypatch: pytest.MonkeyPatc
     assert cookie_value not in repr(captured)
 
 
-def _console_login(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> httpx.Response:
-    """Run login then callback with a valid token; return the callback response."""
-    access_token, jwks = _mint_access_token()
+def _console_login(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, key: Any = None
+) -> httpx.Response:
+    """Run login then callback with a valid token; return the callback response.
+
+    Pass the same ``key`` to log in twice: the key is cached by its key id.
+    """
+    key = key or make_rsa_keypair("test-kid")
+    access_token, jwks = mint_token(key, sub="op-42", audience=DEFAULT_AUDIENCE), public_jwks(key)
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)
         _patch_oauth_token_transport(
@@ -586,6 +592,7 @@ def test_first_console_login_creates_the_tenant_row(monkeypatch: pytest.MonkeyPa
     client = _https_client()
     callback = _console_login(client, monkeypatch)
     assert callback.status_code == 302
+    assert SESSION_COOKIE_NAME in callback.cookies
 
     assert asyncio.run(_tenant_rows()) == [
         (f"tenant-{DEFAULT_TENANT_ID}", f"tenant-{DEFAULT_TENANT_ID}")
@@ -600,8 +607,10 @@ def test_console_login_twice_keeps_one_tenant_row_and_its_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A second login leaves exactly one row and does not rename it."""
-    client = _https_client()
-    _console_login(client, monkeypatch)
+    key = make_rsa_keypair("test-kid")
+    first = _console_login(_https_client(), monkeypatch, key)
+    assert first.status_code == 302
+    assert SESSION_COOKIE_NAME in first.cookies
 
     async def _rename() -> None:
         sessionmaker = get_sessionmaker()
@@ -611,7 +620,9 @@ def test_console_login_twice_keeps_one_tenant_row_and_its_name(
             row.name = "Chosen Name"
 
     asyncio.run(_rename())
-    _console_login(_https_client(), monkeypatch)
+    second = _console_login(_https_client(), monkeypatch, key)
+    assert second.status_code == 302
+    assert SESSION_COOKIE_NAME in second.cookies
 
     assert asyncio.run(_tenant_rows()) == [(f"tenant-{DEFAULT_TENANT_ID}", "Chosen Name")]
 

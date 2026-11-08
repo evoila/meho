@@ -3268,7 +3268,8 @@ hyphen.</p>
 <h2 id="step-3-tell-meho-the-new-group-names">Step 3: Tell MEHO the new group names<a class="headerlink" href="#step-3-tell-meho-the-new-group-names" title="Permanent link">&para;</a></h2>
 <p>MEHO checks that a person is in only one role group. It knows the role
 groups by name, from the <code>JWT_ROLE_GROUPS</code> setting. The default is the
-five <code>MEHO-*</code> groups that ship with MEHO.</p>
+five <code>MEHO-*</code> groups that ship with MEHO. Upper and lower case do not
+count: <code>meho-acme-readers</code> is the same group as <code>MEHO-acme-Readers</code>.</p>
 <p>Add the new names to the setting, through <code>extraEnv</code> in your Helm
 values. The value replaces the default, so list the five default groups
 too:</p>

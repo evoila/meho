@@ -3290,6 +3290,9 @@ MEHO finds the role groups by name in the token's <code>groups</code> claim,
 and with way B that claim holds your names (for example
 <code>SG-MEHO-Ops</code>), not the MEHO names. Set the backplane setting
 <code>JWT_ROLE_GROUPS</code> to the five MEHO names <strong>and</strong> your five names.
+Upper and lower case do not count. Also set
+<code>JWT_SELF_APPROVER_GROUP</code> to your SA-Operators group, so its
+members may approve their own changes.
 Without it, a person in two of your groups gets one of the two
 roles, and you cannot tell which.</p>
 <p>The chart has no named value for this setting yet. Set it with

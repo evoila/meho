@@ -3555,7 +3555,7 @@ first, then match the row:</p>
 <tr>
 <td><code>multiple_role_groups: …</code></td>
 <td>The person is in two or more of the five MEHO groups. Keycloak then copies the role from whichever group it finds first, so the role would be unpredictable. The message names the groups it found.</td>
-<td>Keep the person in exactly one group (<a href="../../install/keycloak-realm/#step-5-create-the-five-groups">Keycloak realm setup § groups</a>), then log out and back in. A site that renamed the groups sets <code>JWT_ROLE_GROUPS</code> on the backplane to the new names (comma-separated).</td>
+<td>Keep the person in exactly one group (<a href="../../install/keycloak-realm/#step-5-create-the-five-groups">Keycloak realm setup § groups</a>), then log out and back in. A site that renamed the groups sets <code>JWT_ROLE_GROUPS</code> on the backplane to the new names (comma-separated). Upper and lower case do not count.</td>
 </tr>
 <tr>
 <td><code>multiple_role_groups: … of the same tenant …</code></td>

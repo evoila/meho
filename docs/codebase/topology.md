@@ -681,9 +681,9 @@ bits (non-negative, fits asyncpg's signed `bigint` binding).
 credentials live in Vault (#4952).** The scheduler's system operator has
 no person's token (`raw_jwt=""`), and MEHO does not read a target's
 credentials from Vault without one (the guard in
-`connectors/_shared/vault_creds.py`). The Kubernetes connector — the
-only populator today — needs the target's kubeconfig, so every
-scheduled refresh of such a target fails with
+`connectors/_shared/vault_creds.py`). The Kubernetes connector needs
+the target's kubeconfig, and the pfSense connector needs the target's
+SSH key, so every scheduled refresh of such a target fails with
 `OperatorTokenRequiredError`. Their map entries are updated only when a
 logged-in operator runs `meho topology refresh <target>`. A deployment
 that stores credentials in GCP Secret Manager reads with its own

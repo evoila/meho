@@ -26,6 +26,9 @@
 //     Prompts for confirmation on stdin unless --confirm is set;
 //     idempotent (delete-already-missing returns 204 from the
 //     backend).
+//   - `meho kb export <directory> [--dry-run] [--json]` — writes the
+//     confirmed, generic entries as Markdown pages into a local folder
+//     via POST /api/v1/kb/export (#5730). Role: operator.
 //
 // Each verb wraps one backplane route and renders the response
 // either as a human-readable form (text table, Markdown body,
@@ -75,9 +78,9 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kb",
-		Short: "Operate the MEHO knowledge base (ingest / search / list / show / add / delete)",
+		Short: "Operate the MEHO knowledge base (ingest / search / list / show / add / delete / export)",
 		Long: "Operate the tenant-scoped knowledge base wired by G4.1. " +
-			"Ingest, search, list, show, add, and delete kb entries. " +
+			"Ingest, search, list, show, add, delete, and export kb entries. " +
 			"Write verbs (ingest / add / delete) require tenant_admin; " +
 			"read verbs are operator-level. Tenant scoping is enforced " +
 			"server-side via the JWT — no surface accepts a tenant id.",
@@ -89,6 +92,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newAddCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newExportCmd())
 	return cmd
 }
 

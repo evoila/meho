@@ -71,7 +71,7 @@ nav:
       - Back up, restore and update: install/backup-restore-update.md
       - Common problems: install/common-problems.md
       - Ways to install MEHO: install/ways-to-install.md
-      - "Your own parts: the install trail": install/index.md
+      - "The install trail: full detail and your own parts": install/index.md
       - Credential backends: install/credential-backends.md
       - Keycloak realm setup: install/keycloak-realm.md
       - Company login with authentik: install/company-login-authentik.md

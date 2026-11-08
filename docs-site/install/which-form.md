@@ -19,10 +19,6 @@ Start at the first question and stop at the first "yes".
    with no internet): use form 2, the
    [Linux server](form-2-linux-server.md).
 
-Only trying MEHO out on your laptop? Use the
-[local kind quickstart](kind-quickstart.md). It fakes the login, so it
-is not an install form.
-
 ## The three forms
 
 | Form | You bring | State |

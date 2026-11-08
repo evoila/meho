@@ -1,18 +1,13 @@
-# Your own parts: the install trail
-
-!!! note "Most people do not need this page"
-
-    The normal way is [form 3, your Kubernetes](form-3-your-kubernetes.md):
-    the chart brings its own PostgreSQL, Keycloak and OpenBao. Use this
-    page only to connect your own PostgreSQL, Keycloak or Vault.
+# The install trail
 
 This page takes you from a bare Kubernetes cluster to a running MEHO
 backplane and a successful `meho login`.
 
-!!! note "Which part to read"
+!!! note "Which page to read"
 
-    [Part A — Standard install](#part-a-standard-install) is for everyone.
-    Most people read only Part A.
+    The normal way is [form 3, your Kubernetes](form-3-your-kubernetes.md).
+    [Part A — Standard install](#part-a-standard-install) of this page is
+    the same install with more detail.
 
     Read [Part B — Bring your own parts](#part-b-bring-your-own-parts-expert-path)
     only if you want to use your own PostgreSQL, Keycloak, Vault or Google

@@ -8,11 +8,11 @@ Vault). You bring none of them. The chart connects them and makes every
 password and key.
 
 Not sure this is your form? See
-[Which install form is right for you?](which-form.md). Only looking
-around on your laptop? Use the [local kind quickstart](kind-quickstart.md).
+[Which install form is right for you?](which-form.md).
 
 To connect your own PostgreSQL, Keycloak or Vault instead, use
-[Your own parts](index.md). This chapter does not need it.
+[Bring your own parts](index.md#part-b-bring-your-own-parts-expert-path).
+This chapter does not need it.
 
 ## Step 1: Check what you need
 
@@ -137,7 +137,7 @@ helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
 Pin `--version <chart-version>` in production. Find the versions with
 `helm show chart oci://ghcr.io/evoila/meho-chart`. To deploy by digest
 and verify the signature, see
-[Step 7 of Your own parts](index.md#step-7-install-the-chart).
+[Step 3 of the install trail](index.md#step-3-install-the-chart).
 
 What happens, in order:
 

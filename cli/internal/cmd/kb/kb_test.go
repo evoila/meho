@@ -85,6 +85,7 @@ func TestNewRootCmdRegistersAllSixVerbs(t *testing.T) {
 		"show":   false,
 		"add":    false,
 		"delete": false,
+		"export": false,
 	}
 	for _, sub := range root.Commands() {
 		name := strings.SplitN(sub.Use, " ", 2)[0]
@@ -111,7 +112,7 @@ func TestRootCmdHelpListsAllVerbs(t *testing.T) {
 		t.Fatalf("`meho kb --help` failed: %v", err)
 	}
 	help := buf.String()
-	for _, want := range []string{"ingest", "search", "list", "show", "add", "delete", "tenant"} {
+	for _, want := range []string{"ingest", "search", "list", "show", "add", "delete", "export", "tenant"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("expected `meho kb --help` to mention %q; got:\n%s", want, help)
 		}

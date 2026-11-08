@@ -3,8 +3,8 @@
 
 """Create ``operation_search_record`` and ``operation_call_record``.
 
-Revision ID: 0145
-Revises: 0144
+Revision ID: 0146
+Revises: 0145
 Create Date: 2026-11-08
 
 MEHO keeps a short record of each ``search_operations`` call and of each
@@ -31,8 +31,8 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 # revision identifiers, used by Alembic.
-revision: str = "0145"
-down_revision: str | None = "0144"
+revision: str = "0146"
+down_revision: str | None = "0145"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -296,7 +296,12 @@ read), or sends the create again with `create_anyway: true`.
 
 `dry_run: true` gives the same answer and writes nothing. `would_write`
 says whether the same call without `dry_run` would write; for an
-existing slug `slug_exists` is true and the list is empty.
+existing slug `slug_exists` is true and the list is empty. The check
+runs the create's own checks first (`_checked_direct_metadata` and
+`_refuse_if_not_own` in `service.py`), so a dry run fails with the same
+error as the write would: a slug another principal owns, a reserved
+metadata key, or `shared: true` from a tenant that may not share. It
+never reports `would_write: true` for a write the service refuses.
 
 Per surface:
 
@@ -305,7 +310,7 @@ Per surface:
 | MCP `add_to_knowledge` | normal result with `written: false`, `reason: similar_entries`; summary, snippet, product, version and status are wrapped as untrusted text | same, `reason: dry_run` |
 | REST `POST /api/v1/kb` | HTTP `409` with `KbSimilarCheck` | HTTP `200` with `KbSimilarCheck` |
 | CLI `meho kb add` | lists the entries, exit code 1 (`similar_entries`) | lists them, exit code 0 |
-| Console editor and uploads | the editor modal lists the entries with a "Create anyway" box; an upload row names them | — |
+| Console editor and uploads | the editor modal and the upload result list the entries (`ui/templates/kb/_similar_entries.html`: slug, summary, product, version, status, revision, snippet, score, and whether the operator may change it) with a "Create anyway" box | — |
 
 The answer stays small: at most five entries, each text cut at 200
 characters, so it is far inside the MCP size limit.

@@ -25,7 +25,14 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.api.v1 import kb as kb_api
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.kb.schemas import KB_KIND_ENTRY, KB_SOURCE, InvalidKbSlugError
+from meho_backplane.kb.schemas import (
+    KB_KIND_ENTRY,
+    KB_SOURCE,
+    InvalidKbSlugError,
+    KbEntryNotOwnedError,
+    KbReservedMetadataError,
+    KbSharedNotAllowedError,
+)
 from meho_backplane.kb.service import KbService
 from meho_backplane.kb.similar import SIMILAR_LIMIT, check_new_entry, find_similar_entries
 from meho_backplane.main import app
@@ -393,6 +400,69 @@ async def test_bad_slug_fails_before_the_search() -> None:
     mock.assert_not_awaited()
 
 
+async def test_dry_run_on_another_authors_slug_is_refused_like_the_write() -> None:
+    """A caller limited to own entries gets the owner error, not ``would_write: true``."""
+    tenant = uuid.uuid4()
+    await _seed(tenant, "team-runbook", by="someone-else")
+    await _seed(tenant, "my-note", by="me")
+    mock = AsyncMock()
+    with patch("meho_backplane.kb.similar.retrieve", mock):
+        with pytest.raises(KbEntryNotOwnedError) as info:
+            await check_new_entry(
+                tenant,
+                "team-runbook",
+                "new text",
+                None,
+                actor_sub="me",
+                may_change_any=False,
+                dry_run=True,
+            )
+        own = await check_new_entry(
+            tenant, "my-note", "new text", None, actor_sub="me", may_change_any=False, dry_run=True
+        )
+    assert info.value.slug == "team-runbook"
+    assert own is not None
+    assert own.would_write is True
+    mock.assert_not_awaited()
+    kept = await KbService().get_entry(tenant, "team-runbook")
+    assert kept is not None
+    assert kept.body == "Stored text of team-runbook."
+
+
+async def test_dry_run_with_metadata_the_caller_may_not_set_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``shared`` the tenant may not set, or a reserved key, fails the dry run too."""
+    monkeypatch.setenv("KB_SHARED_TENANT_IDS", str(uuid.uuid4()))
+    get_settings.cache_clear()
+    tenant = uuid.uuid4()
+    mock = AsyncMock()
+    with patch("meho_backplane.kb.similar.retrieve", mock):
+        with pytest.raises(KbSharedNotAllowedError):
+            await check_new_entry(
+                tenant,
+                "fresh-topic",
+                "text",
+                {"shared": True},
+                actor_sub="a",
+                may_change_any=True,
+                dry_run=True,
+            )
+        with pytest.raises(KbReservedMetadataError) as info:
+            await check_new_entry(
+                tenant,
+                "fresh-topic",
+                "text",
+                {"shared": False},
+                actor_sub="a",
+                may_change_any=True,
+                may_set_curation_keys=False,
+                dry_run=True,
+            )
+    assert info.value.keys == frozenset({"shared"})
+    mock.assert_not_awaited()
+
+
 async def test_header_version_number_is_searched_as_text() -> None:
     """A version sent as a number is matched as the text the store keeps."""
     tenant = uuid.uuid4()
@@ -493,6 +563,36 @@ async def test_mcp_create_with_nothing_similar_works_as_before(
         created = _add(client, {"slug": "fresh-topic", "body": "New knowledge."})
     assert created["slug"] == "fresh-topic"
     assert created["body"] == "New knowledge."
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_mcp_dry_run_on_another_principals_slug_is_refused(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """An agent's dry run on a slug another principal created gets the owner refusal."""
+    client, human = client_with_operator
+    agent = human.model_copy(update={"principal_kind": PrincipalKind.AGENT})
+
+    async def _verify_agent() -> Operator:
+        return agent
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify_agent
+    await _seed(agent.tenant_id, "team-runbook", by="someone-else")
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_knowledge",
+                "arguments": {"slug": "team-runbook", "body": "new text", "dry_run": True},
+            },
+        },
+    )
+    assert response.status_code == 200
+    error = response.json()["error"]
+    assert error["data"] == {"reason": "entry_not_owned", "slug": "team-runbook"}
 
 
 def test_mcp_answer_with_long_texts_stays_small() -> None:

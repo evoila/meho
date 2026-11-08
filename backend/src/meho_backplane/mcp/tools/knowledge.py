@@ -300,6 +300,7 @@ async def _add_to_knowledge_handler(
             metadata,
             actor_sub=operator.sub,
             may_change_any=may_change_any,
+            may_set_curation_keys=operator.tenant_role == TenantRole.TENANT_ADMIN,
             create_anyway=bool(arguments.get("create_anyway", False)),
             dry_run=bool(arguments.get("dry_run", False)),
         )
@@ -562,7 +563,9 @@ register_mcp_tool(
                     "default": False,
                     "description": (
                         "Write nothing. Answer with the similar entries, "
-                        "and say whether the write would go through."
+                        "and say whether the write would go through. A "
+                        "write the tool would refuse (another principal's "
+                        "slug, a reserved metadata key) is refused here too."
                     ),
                 },
             },

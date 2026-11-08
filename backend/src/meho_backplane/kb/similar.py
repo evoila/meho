@@ -45,9 +45,13 @@ from meho_backplane.kb.schemas import (
     META_CREATED_BY_SUB,
     validate_slug,
 )
-from meho_backplane.kb.service import _hit_slug, add_shared_hits
-from meho_backplane.kb.shared import refuse_shared_slug, visible_to
-from meho_backplane.lesson_header import normalise_lesson_header
+from meho_backplane.kb.service import (
+    _checked_direct_metadata,
+    _hit_slug,
+    _refuse_if_not_own,
+    add_shared_hits,
+)
+from meho_backplane.kb.shared import visible_to
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
 from meho_backplane.settings import get_settings
 
@@ -136,6 +140,7 @@ async def check_new_entry(
     *,
     actor_sub: str | None,
     may_change_any: bool,
+    may_set_curation_keys: bool | None = None,
     create_anyway: bool = False,
     dry_run: bool = False,
 ) -> KbSimilarCheck | None:
@@ -145,20 +150,34 @@ async def check_new_entry(
     of an existing slug, a new slug with nothing similar, and
     *create_anyway*. A dry run always returns an answer.
 
-    Checks *slug*, the lesson header in *metadata* and the shared scope
-    first, with the same errors as the create (``InvalidKbSlugError``,
-    ``LessonHeaderError``, ``KbSharedSlugError``).
-    *may_change_any* and *actor_sub* decide ``may_change`` of each listed
-    entry (see :func:`find_similar_entries`).
+    Runs the checks of the create first, so a dry run refuses what the
+    write would refuse, with the same errors: *slug*
+    (``InvalidKbSlugError``), the lesson header in *metadata*
+    (``LessonHeaderError``), the curation keys when
+    *may_set_curation_keys* is off (``KbReservedMetadataError``; it
+    defaults to *may_change_any*, like the create), the shared scope
+    (``KbSharedNotAllowedError``, ``KbSharedSlugError``), and the owner
+    rule for an existing slug when *may_change_any* is off
+    (``KbEntryNotOwnedError``). *may_change_any* and *actor_sub* also
+    decide ``may_change`` of each listed entry (see
+    :func:`find_similar_entries`).
     """
     validate_slug(slug)
     header = (
-        normalise_lesson_header(metadata, allowed_reserved=frozenset({"provenance"}))
-        if metadata
-        else {}
+        await _checked_direct_metadata(
+            tenant_id,
+            slug,
+            metadata,
+            may_set_curation_keys=may_change_any
+            if may_set_curation_keys is None
+            else may_set_curation_keys,
+        )
+        or {}
     )
-    await refuse_shared_slug(tenant_id, slug)
-    if await _slug_exists(tenant_id, slug):
+    existing = await _existing_metadata(tenant_id, slug)
+    if existing is not None:
+        if not may_change_any:
+            _refuse_if_not_own(slug, existing, actor_sub)
         if not dry_run:
             return None
         return _answer(slug, "dry_run", True, True, [], _NEXT_STEP_WOULD_UPDATE)
@@ -274,13 +293,13 @@ def _best_scores(hits: list[RetrievalHit], min_score: float) -> dict[str, float]
     return best
 
 
-async def _slug_exists(tenant_id: uuid.UUID, slug: str) -> bool:
-    """Say whether the tenant itself has an entry with *slug*."""
+async def _existing_metadata(tenant_id: uuid.UUID, slug: str) -> dict[str, object] | None:
+    """Return the stored metadata of the tenant's own entry *slug*; ``None`` when there is none."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        found = (
+        row = (
             await session.execute(
-                select(Document.id)
+                select(Document.doc_metadata)
                 .where(
                     Document.tenant_id == tenant_id,
                     Document.source == KB_SOURCE,
@@ -289,7 +308,10 @@ async def _slug_exists(tenant_id: uuid.UUID, slug: str) -> bool:
                 .limit(1)
             )
         ).first()
-    return found is not None
+    if row is None:
+        return None
+    metadata: dict[str, object] = row[0] or {}
+    return metadata
 
 
 async def _heads(

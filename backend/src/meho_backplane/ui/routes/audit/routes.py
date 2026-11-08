@@ -123,6 +123,10 @@ from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.references import resolve_audit_references
 from meho_backplane.ui.roles import is_ui_tenant_admin
+from meho_backplane.ui.routes.audit.op_class_badges import (
+    OP_CLASS_BADGE_CLASSES,
+    OP_CLASS_FILTER_OPTIONS,
+)
 from meho_backplane.ui.routes.audit.trace_pane import project_trace
 from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     AGGREGATE_ONLY_OP_CLASSES,
@@ -130,10 +134,6 @@ from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     fetch_audit_row,
     is_aggregate_only,
     resolve_op_id,
-)
-from meho_backplane.ui.routes.broadcast.feed import (
-    OP_CLASS_BADGE_CLASSES,
-    OP_CLASS_FILTER_OPTIONS,
 )
 from meho_backplane.ui.templating import get_templates
 
@@ -327,11 +327,10 @@ async def _run_query(filters: AuditQueryFilters, *, tenant_id: uuid.UUID) -> Aud
 
 
 def _badge_class(op_class: str) -> str:
-    """Return the DaisyUI badge variant for *op_class* (broadcast palette).
+    """Return the DaisyUI badge variant for *op_class*.
 
-    Reuses the broadcast :data:`OP_CLASS_BADGE_CLASSES` map so audit rows
-    colour-code identically to live-feed rows; an op_class outside the closed
-    vocabulary falls back to ``badge-ghost`` (the broadcast default).
+    Reads :data:`OP_CLASS_BADGE_CLASSES`; an op_class outside the closed
+    vocabulary falls back to ``badge-ghost``.
     """
     return OP_CLASS_BADGE_CLASSES.get(op_class, "badge-ghost")
 

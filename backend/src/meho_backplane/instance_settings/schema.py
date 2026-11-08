@@ -101,7 +101,6 @@ class FlightRecorderPolicy(_Strict):
 class TenantPolicies(_Strict):
     """``spec.tenants[].policies``; ``null`` anywhere means the instance default."""
 
-    announce_gate_enabled: StrictBool | None = None
     flight_recorder: FlightRecorderPolicy | None = None
     mail_recipient_allowlist: str | None = None
     run_approval_target_kinds: StrictBool | None = None

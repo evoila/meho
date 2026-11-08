@@ -373,7 +373,7 @@ class TestHistoryReplay:
         body = response.text
         assert "rolling the cluster" in body
         assert "broadcastFeed(" in body
-        assert "Last 24h replay" in body
+        assert "of agent announcements" in body
 
     def test_history_empty_window_renders_empty_state(self) -> None:
         session_id = _seed_session_sync(tenant_id=_TENANT_A)
@@ -381,7 +381,7 @@ class TestHistoryReplay:
             client = _authenticated_client(session_id)
             response = client.get("/ui/broadcast/history")
         assert response.status_code == 200, response.text
-        assert "No activity in the last" in response.text
+        assert "No agent announcements in the last" in response.text
 
     def test_history_is_bounded_by_window_and_cap(self) -> None:
         """Rows older than the window are left out; at most the row cap renders."""

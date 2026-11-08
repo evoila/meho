@@ -10,16 +10,15 @@
   auto-processes the swapped content, so the ``sse`` extension tears
   down the prior subscription (the replaced node) and opens the new one
   pointed at ``stream_endpoint`` -- the bridge URL carrying the active
-  server-side filters (op_class/principal/target).
+  server-side filters (principal/target).
+
+  The feed shows only announcements that trusted agents publish on
+  purpose (#3736, #3762). People read them here; they cannot publish.
+  Operations are not on Broadcast: the audit log is their record.
 
   The ``broadcastFeed`` Alpine controller wraps the WHOLE fragment so a
   filter re-render replaces the SSE subscription AND resets the in-DOM
-  ``events`` array (the prior filter's rows must not linger). ``opIdFilter``
-  is the client-side op_id substring narrowing -- the stream has no op_id
-  param, so the controller filters the streamed events by ``op_id``
-  in-browser as the operator types (the filter bar mirrors the input
-  into the controller via an ``x-model``-bound hidden field; see
-  ``_filter_bar.html``).
+  ``events`` array (the prior filter's rows must not linger).
 
   Wall-monitor variant (Task #869, work item #5)
   ----------------------------------------------
@@ -27,40 +26,19 @@
   fragment renders the maximised team-room layout: the list scrolls
   within the available height and ``autoScroll`` keeps the newest event
   in view, and the rows render taller (the ``wall`` flag is forwarded to
-  ``_event_row.html``). The SSE wiring, controller, op_id filter, and
-  1000-row cap are all unchanged -- only the visual density differs.
+  ``_event_row.html``). The SSE wiring, controller and 1000-row cap
+  are all unchanged -- only the visual density differs.
   ``wall`` defaults to ``False`` so the in-chrome feed view (which never
   passes it) renders exactly as before.
 -#}
 {% set wall = wall | default(false) %}
-{#-
-  XSS hardening (review finding on PR #1044, same class as the B1
-  history fix). ``opIdFilter`` echoes the reflected ``op_id`` query
-  param. Jinja's ``| tojson`` escapes ``<`` / ``>`` / ``&`` / ``'`` and
-  U+2028/U+2029 but NOT the double-quote ``"`` -- it keeps the JSON
-  string's own ``"`` delimiters and renders an inner ``"`` as a literal
-  ``\"`` byte. Inside a DOUBLE-quoted ``x-data="..."`` those raw ``"``
-  bytes terminate the attribute early, letting a crafted ``op_id`` (e.g.
-  ``" autofocus onfocus=alert(1) x="``) inject live event handlers ->
-  reflected XSS. The ``x-data`` attribute is therefore SINGLE-quoted:
-  ``tojson`` never emits a raw ``'`` (it escapes it to ``\u0027``), so
-  single-quoted attribute cannot be broken out of by any scalar, and the
-  ``"`` bytes ride harmlessly inside it. The static config has no raw
-  ``'`` (``op_class_badge_json`` is ``json.dumps`` output -- only ``"``),
-  so the single-quote delimiter is unambiguous. Behaviour is identical:
-  the controller still receives the same ``opIdFilter`` / ``cap`` /
-  ``badgeClasses`` / ``autoScroll`` values.
--#}
 <div
   id="broadcast-feed"
   class="rounded-box border border-base-300 bg-base-100 {% if wall %}flex h-full flex-col overflow-hidden{% else %}overflow-hidden{% endif %}"
   x-data='broadcastFeed({
     cap: {{ in_dom_row_cap }},
-    badgeClasses: {{ op_class_badge_json }},
-    opIdFilter: {{ op_id_filter | tojson }},
     autoScroll: {{ wall | tojson }}
   })'
-  x-on:broadcast-op-id-changed.window="onOpIdChanged($event)"
 >
   {# ---------- SSE sink ----------
      Hidden element the sse extension binds the EventSource listener to.
@@ -100,40 +78,35 @@
     class="grid grid-cols-12 gap-2 border-b border-base-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide opacity-60"
   >
     <span class="col-span-2">Time</span>
-    <span class="col-span-2">Principal</span>
-    <span class="col-span-3">Operation</span>
-    <span class="col-span-1">Class</span>
-    <span class="col-span-1">Status</span>
-    <span class="col-span-1">Target</span>
-    <span class="col-span-2">Payload</span>
+    <span class="col-span-2">Agent</span>
+    <span class="col-span-3">Announcement</span>
+    <span class="col-span-1">Phase</span>
+    <span class="col-span-2">Targets</span>
+    <span class="col-span-2">Claim</span>
   </div>
 
   {# ---------- Empty state (work item #8) ----------
-     Shown until the first matching event lands or when the op_id filter
-     narrows everything out. ``visibleEvents`` is the op_id-filtered
-     view; an empty view (whether nothing streamed or the op_id filter
-     excluded all) renders this copy. -#}
+     Shown until the first matching announcement lands. -#}
   <div
     x-show="visibleEvents.length === 0"
     class="px-3 py-10 text-center text-sm opacity-70"
     id="broadcast-empty-state"
   >
-    No activity matching your filters. Try adjusting the op_class or
-    target filter, or wait for new events.
+    No agent announcements match your filters yet. Agents publish them when
+    they start, update or finish work. Try another principal or target, or
+    wait for new announcements.
   </div>
 
   {# ---------- Live list -- newest first ----------
      Each event renders via the server-authored row partial. ``:key``
-     keeps Alpine's DOM diff stable as rows prepend + trim. A click
-     opens the detail drawer via the row's ``hx-get`` (wired in the row
-     partial). In wall mode the list scrolls within the available height
+     keeps Alpine's DOM diff stable as rows prepend + trim. In wall mode the list scrolls within the available height
      and ``x-ref="list"`` lets the controller keep the newest (top) row
      in view as events prepend. -#}
   <ul
     x-show="visibleEvents.length > 0"
     class="divide-y divide-base-300{% if wall %} min-h-0 flex-1 overflow-y-auto{% endif %}"
     role="list"
-    aria-label="Live broadcast events"
+    aria-label="Live agent announcements"
     aria-live="polite"
     {% if wall %}x-ref="list"{% endif %}
   >

@@ -856,8 +856,8 @@ connectors' ops.
 
 The dispatcher stores this class on the audit row as `op_class`
 (`operations/_audit.py`, `descriptor_op_class`). A dispatch publishes no
-broadcast event; the class feeds the audit row, the announce gate, and the
-target activity warning.
+broadcast event; the class feeds the audit row and the dispatch-time
+advisories.
 
 ## Key types / control flow
 

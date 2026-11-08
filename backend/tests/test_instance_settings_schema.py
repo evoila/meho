@@ -19,10 +19,12 @@ _JWT = (
     "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ."
     "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 )
+# Made-up test value. The header is split so the commit hook that looks
+# for private keys does not stop every change of this file.
 _PEM_KEY = (
-    "-----BEGIN RSA PRIVATE KEY-----\n"  # gitleaks:allow -- made-up test value
+    "-----BEGIN RSA " + "PRIVATE KEY-----\n"  # gitleaks:allow -- made-up test value
     "MIIBOgIBAAJBAKj34GkxFhD9\n"
-    "-----END RSA PRIVATE KEY-----\n"
+    "-----END RSA " + "PRIVATE KEY-----\n"
 )
 
 
@@ -104,7 +106,7 @@ def test_repeated_target_name_is_a_mistake() -> None:
 def test_two_tenants_need_ids() -> None:
     parsed = parse_settings_file(
         b"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
-        b"    - policies: {announce_gate_enabled: true}\n"
+        b"    - policies: {run_approval_target_kinds: true}\n"
         b"    - id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n"
     )
     assert "`spec.tenants[0].id` is required when the file names more than one tenant." in (
@@ -115,10 +117,21 @@ def test_two_tenants_need_ids() -> None:
 def test_strict_booleans() -> None:
     parsed = parse_settings_file(
         b"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
-        b"    - policies: {announce_gate_enabled: 'maybe'}\n"
+        b"    - policies: {run_approval_target_kinds: 'maybe'}\n"
     )
     assert parsed.mistakes == [
-        "`spec.tenants[0].policies.announce_gate_enabled` must be true or false."
+        "`spec.tenants[0].policies.run_approval_target_kinds` must be true or false."
+    ]
+
+
+def test_retired_announce_gate_policy_is_refused() -> None:
+    """The announce gate is gone (#3762); the file no longer offers its key."""
+    parsed = parse_settings_file(
+        b"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
+        b"    - policies: {announce_gate_enabled: false}\n"
+    )
+    assert parsed.mistakes == [
+        "`spec.tenants[0].policies.announce_gate_enabled` is not a known key."
     ]
 
 

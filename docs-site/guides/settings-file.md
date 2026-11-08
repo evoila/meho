@@ -50,7 +50,6 @@ spec:
   tenants:
     - id: <tenant-uuid>
       policies:
-        announce_gate_enabled: false
         flight_recorder: { enabled: true, retention_days: 14, agent_readable: null }
         mail_recipient_allowlist: "@example.com"
         run_approval_target_kinds: false

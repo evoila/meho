@@ -11,8 +11,8 @@ columns, so the write lives here once. Each function:
 * binds ``audit_*`` contextvars naming field / old / new, which
   :class:`~meho_backplane.audit.AuditMiddleware` folds into this request's
   ``audit_log`` row (governance config never changes silently);
-* evicts the matching resolver cache, where there is one (flight recorder,
-  announce gate), at once and again after the session commits
+* evicts the matching resolver cache, where there is one (flight recorder),
+  at once and again after the session commits
   (:func:`~meho_backplane.db.after_commit.clear_now_and_after_commit`), so the
   saved change governs the next dispatch without waiting out the 60s TTL. A
   read between the write and the commit cannot keep the old policy in the
@@ -29,7 +29,6 @@ from typing import Any
 import structlog
 from sqlalchemy.orm import object_session
 
-from meho_backplane.broadcast.announce_gate import invalidate_announce_gate_cache
 from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.models import Tenant
 from meho_backplane.flight_recorder.config import invalidate_tenant_policy_cache
@@ -37,7 +36,6 @@ from meho_backplane.flight_recorder.config import invalidate_tenant_policy_cache
 __all__ = [
     "FLIGHT_RECORDER_FIELDS",
     "INHERIT_SENTINEL",
-    "set_announce_gate_enabled",
     "set_flight_recorder_policy",
     "set_mail_recipient_allowlist",
     "set_run_approval_target_kinds",
@@ -123,30 +121,6 @@ def set_mail_recipient_allowlist(tenant: Tenant, value: str | None) -> bool:
         audit_tenant_id=str(tenant.id),
     )
     _log.info("tenant_mail_recipient_policy_updated", tenant_id=str(tenant.id))
-    return True
-
-
-def set_announce_gate_enabled(tenant: Tenant, value: bool) -> bool:
-    """Set *tenant*'s announce-gate flag (#3133); return whether it changed.
-
-    There is no REST route for this column; the settings import is its only
-    writer besides direct seeding.
-    """
-    old_value = tenant.announce_gate_enabled
-    if old_value == value:
-        return False
-    tenant.announce_gate_enabled = value
-    structlog.contextvars.bind_contextvars(
-        audit_announce_gate_enabled_before=old_value,
-        audit_announce_gate_enabled_after=value,
-        audit_announce_gate_policy_changed=True,
-        audit_tenant_id=str(tenant.id),
-    )
-    tenant_id = tenant.id
-    clear_now_and_after_commit(
-        object_session(tenant), lambda: invalidate_announce_gate_cache(tenant_id)
-    )
-    _log.info("tenant_announce_gate_updated", tenant_id=str(tenant.id), enabled=value)
     return True
 
 

@@ -302,27 +302,35 @@ def test_work_ref_filter_matches_announcement_only() -> None:
     )
 
 
-def test_active_only_drops_expired_claim_keeps_others() -> None:
-    """``active_only`` drops an elapsed TTL claim; non-TTL events survive."""
-    now = datetime(2026, 5, 25, 12, 0, tzinfo=UTC)
-    expired = _announcement(
-        ttl_minutes=30,
-        ts=now - timedelta(minutes=60),  # expires_at = now - 30m (elapsed)
-    )
-    active = _announcement(ttl_minutes=30, ts=now - timedelta(minutes=10))
-    no_ttl = _announcement()  # not a claim -- always active
-    bev = _broadcast_event()  # audit event -- always active
+def _trusted(event: AgentAnnouncementEvent, **update: Any) -> AgentAnnouncementEvent:
+    """Make *event* a trusted claim step (#3736)."""
+    return event.model_copy(update={"claim_id": uuid4(), "owner_sub": "agent:op-test", **update})
 
-    assert not event_matches(
-        expired, op_class=None, principal=None, target=None, active_only=True, now=now
+
+def test_active_only_keeps_only_active_trusted_claim_steps() -> None:
+    """``active_only`` keeps an active trusted claim step and nothing else (#3762).
+
+    Dropped: an elapsed TTL, a step without a TTL, a ``completion`` step, a
+    legacy announcement without a trusted claim, and an operation event.
+    """
+    now = datetime(2026, 5, 25, 12, 0, tzinfo=UTC)
+    expired = _trusted(_announcement(ttl_minutes=30, ts=now - timedelta(minutes=60)))
+    active = _trusted(_announcement(ttl_minutes=30, ts=now - timedelta(minutes=10)))
+    no_ttl = _trusted(_announcement())
+    completion = _trusted(
+        _announcement(ttl_minutes=30, ts=now - timedelta(minutes=10)), phase="completion"
     )
-    assert event_matches(
-        active, op_class=None, principal=None, target=None, active_only=True, now=now
-    )
-    assert event_matches(
-        no_ttl, op_class=None, principal=None, target=None, active_only=True, now=now
-    )
-    assert event_matches(bev, op_class=None, principal=None, target=None, active_only=True, now=now)
+    legacy = _announcement(ttl_minutes=30, ts=now - timedelta(minutes=10))
+    bev = _broadcast_event()
+
+    def _active(event: Any) -> bool:
+        return event_matches(
+            event, op_class=None, principal=None, target=None, active_only=True, now=now
+        )
+
+    assert _active(active)
+    for dropped in (expired, no_ttl, completion, legacy, bev):
+        assert not _active(dropped)
 
 
 # ---------------------------------------------------------------------------
@@ -528,11 +536,13 @@ async def test_recent_active_only_excludes_expired_claim() -> None:
     """Before TTL elapses ``active_only`` surfaces the claim; after, it drops."""
     tenant_id = uuid4()
     op = _reader(tenant_id)
-    fresh = _announcement(targets=["cluster-x"], ttl_minutes=30, ts=datetime.now(UTC))
-    stale = _announcement(
-        targets=["cluster-x"],
-        ttl_minutes=30,
-        ts=datetime.now(UTC) - timedelta(minutes=90),
+    fresh = _trusted(_announcement(targets=["cluster-x"], ttl_minutes=30, ts=datetime.now(UTC)))
+    stale = _trusted(
+        _announcement(
+            targets=["cluster-x"],
+            ttl_minutes=30,
+            ts=datetime.now(UTC) - timedelta(minutes=90),
+        )
     )
     for event in (stale, fresh):
         await _archive(event.model_copy(update={"tenant_id": tenant_id}))

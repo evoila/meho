@@ -145,7 +145,6 @@ async def _seed() -> None:
                 id=_TENANT,
                 slug="tenant-a",
                 name="Tenant A",
-                announce_gate_enabled=True,
                 flight_recorder_enabled=True,
                 flight_recorder_retention_days=14,
                 mail_recipient_allowlist="@example.com",
@@ -195,7 +194,6 @@ async def _wipe_tenant_settings() -> None:
             update(Tenant)
             .where(Tenant.id == _TENANT)
             .values(
-                announce_gate_enabled=False,
                 flight_recorder_enabled=False,
                 flight_recorder_retention_days=None,
                 flight_recorder_agent_readable=None,
@@ -236,7 +234,8 @@ def test_other_roles_are_refused(client: TestClient, role: TenantRole) -> None:
 def test_tenant_admin_cannot_import_another_tenant(client: TestClient) -> None:
     content = (
         "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
-        f"spec:\n  tenants:\n    - id: {_OTHER}\n      policies: {{announce_gate_enabled: true}}\n"
+        f"spec:\n  tenants:\n    - id: {_OTHER}\n"
+        "      policies: {run_approval_target_kinds: true}\n"
     )
     key = make_rsa_keypair("kid-other")
     with respx.mock as r:
@@ -279,7 +278,6 @@ async def test_export_shape_and_no_secrets(client: TestClient) -> None:
     (tenant,) = doc["spec"]["tenants"]
     assert tenant["id"] == str(_TENANT)
     assert tenant["policies"] == {
-        "announce_gate_enabled": True,
         "flight_recorder": {"enabled": True, "retention_days": 14, "agent_readable": None},
         "mail_recipient_allowlist": "@example.com",
         "run_approval_target_kinds": False,
@@ -508,14 +506,14 @@ spec:
 def test_tenant_id_may_be_left_out_in_a_one_tenant_file(client: TestClient) -> None:
     content = (
         "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
-        "spec:\n  tenants:\n    - policies: {announce_gate_enabled: true}\n"
+        "spec:\n  tenants:\n    - policies: {run_approval_target_kinds: true}\n"
     )
     key = make_rsa_keypair("kid-noid")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = _import(client, _token(key), content, preview=True)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["diff"]["policies"]["changed"][0]["key"] == "announce_gate_enabled"
+    assert resp.json()["diff"]["policies"]["changed"][0]["key"] == "run_approval_target_kinds"
 
 
 @pytest.mark.asyncio

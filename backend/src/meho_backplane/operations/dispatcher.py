@@ -274,7 +274,6 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
-from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
 from meho_backplane.broadcast.reflex import build_reflex_advisory
 from meho_backplane.broadcast.target_advisory import build_target_activity_advisory
@@ -314,7 +313,6 @@ from meho_backplane.operations._errors import (
     is_auth_failed_status,
     is_probe_refused,
     result_ambiguous_connector,
-    result_announce_required,
     result_audit_commit_failed,
     result_awaiting_approval,
     result_blast_radius_required,
@@ -3975,37 +3973,6 @@ async def _dispatch_now(
                     error_extras=_error_extras_for_audit(denied),
                 )
                 return with_audit_receipt(denied, receipt)
-
-            # --- Opt-in announce gate (#3133) --------------------------
-            # Verdict is AUTO_EXECUTE. In a tenant that has enabled the
-            # announce gate, a caution-or-higher write-class op is rejected
-            # before execution unless the caller holds an active announce
-            # claim covering it. Off by default and fail-open, so an
-            # ordinary dispatch reaches this line and proceeds unchanged.
-            # Not run on the ``_approved`` resume path -- an operator
-            # already approved that exact call; re-gating it here would
-            # strand an approved op behind an announce it can no longer add.
-            announce_block = await announce_gate_blocks(
-                operator,
-                op_class=descriptor_op_class(descriptor),
-                safety_level=descriptor.safety_level,
-                target_name=getattr(target, "name", None),
-            )
-            if announce_block is not None:
-                duration_ms = _elapsed_ms(started)
-                receipt = await audit_safe(
-                    audit_id=uuid.uuid4(),
-                    event_class=AuditEventClass.POLICY_DECISION,
-                    operator=operator,
-                    descriptor=descriptor,
-                    target=target,
-                    params_hash=params_hash,
-                    result_status="denied",
-                    duration_ms=duration_ms,
-                )
-                return with_audit_receipt(
-                    result_announce_required(op_id, announce_block, duration_ms), receipt
-                )
         else:
             # Approval-queue resume path: the gate is skipped because an
             # operator already approved this exact call. Stamp the row with

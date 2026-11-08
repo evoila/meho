@@ -204,31 +204,6 @@ async def test_unexpected_verdict_denial_returns_its_audit_id(
 
 
 @pytest.mark.asyncio
-async def test_announce_gate_refusal_returns_its_audit_id(
-    stub_dispatch_seams: dict[str, AsyncMock], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A call refused by the announce gate carries the id of its ``denied`` row (#4669)."""
-    _no_limits(monkeypatch)
-    stub_dispatch_seams["gate"].return_value = (PermissionVerdict.AUTO_EXECUTE, None)
-    monkeypatch.setattr(
-        dispatcher, "announce_gate_blocks", AsyncMock(return_value="announce first")
-    )
-
-    result = await dispatch(
-        operator=_operator(),
-        connector_id="svc-1.0",
-        op_id="svc.read",
-        target=None,
-        params={},
-    )
-
-    assert result.status == "denied"
-    assert result.extras["error_code"] == "announce_required"
-    assert result.audit_id == _RECEIPT
-    assert stub_dispatch_seams["audit"].await_args.kwargs["result_status"] == "denied"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("writer", ["audit", "reject"])
 async def test_refusal_keeps_audit_id_null_when_the_row_did_not_commit(
     stub_dispatch_seams: dict[str, AsyncMock], monkeypatch: pytest.MonkeyPatch, writer: str

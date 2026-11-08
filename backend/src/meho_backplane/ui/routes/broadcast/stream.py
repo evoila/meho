@@ -83,7 +83,6 @@ def build_stream_router() -> APIRouter:
 
     async def _handler(
         request: Request,
-        op_class: str | None = Query(default=None, max_length=64),
         principal: str | None = Query(default=None, max_length=256),
         target: str | None = Query(default=None, max_length=256),
         since: str | None = Query(
@@ -95,7 +94,7 @@ def build_stream_router() -> APIRouter:
         """``GET /ui/broadcast/stream`` -- stream the session tenant's announcements."""
         reader = session_reader(session_ctx)
         start = resolve_feed_start(reader, request.headers.get("Last-Event-Id"), since)
-        flt = AnnouncementFilter(op_class=op_class, principal=principal, target=target)
+        flt = AnnouncementFilter(principal=principal, target=target)
         return feed_response(announcement_feed_frames(reader, start=start, flt=flt, surface="ui"))
 
     router.add_api_route(

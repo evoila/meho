@@ -65,7 +65,8 @@ was closed as not planned).
    **Read-side `filter`.** `op_class` / `principal` / `target` /
    `actor_sub` / `work_ref`, plus `active_only` on recent/watch.
    `op_class` and `actor_sub` are operation filters, so no announcement
-   matches them; the filter vocabulary is retired in #3762.
+   matches them (see *People read, agents publish*). `active_only` keeps
+   only steps that keep their claim active (#3762).
 
 **What moved off Broadcast (#3758).**
 
@@ -388,57 +389,69 @@ agent-authored text bound via `x-text`.
 ### Read path (dispatch-time target-activity advisory)
 
 On the **success path of a write-class dispatch**, the operation response
-carries a compact advisory of recent *peer* activity on the same target so
-the caller learns another principal is already active there — post-op
-awareness, not a lock or a block (pre-op checking stays the discipline's
-`meho_broadcast_recent` read step). The advisory rides
+carries a compact advisory of other agents' **active claims** on the same
+target, so the caller learns another agent is working there — awareness
+after the op, never a lock or a block (checking before the op stays the
+discipline's `meho_broadcast_recent` read step). The advisory rides
 `OperationResult.extras["target_activity_advisory"]`
 (`connectors/schemas.py`), the established envelope-extension slot.
 
+Since #3762 the advisory reads **only intentional claims from trusted
+agents** (#3736), from the `agent_announcement` archive. Automatic
+operation activity is not on Broadcast (#3758) and never appears in it.
+
 ```text
-dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
+dispatcher._reduce_and_audit_success(...)   # after the audit commit
   → build_target_activity_advisory(operator, op_class, target_name)
-      [gate — returns {} without any stream read when:]
+      [returns {} without any read when:]
         · settings.dispatch_activity_advisory_window_minutes == 0
         · op_class not in {write, credential_write, credential_mint}
           (op_class = descriptor_op_class(descriptor), the audit row's class)
         · target_name is None
-      [otherwise — one bounded, newest-first read:]
-        → XREVRANGE meho:feed:{tenant} + <since-ms> COUNT 100
-          (newest-first, so the COUNT cap keeps the newest window
-           entries — not the oldest, which an XRANGE + COUNT would)
-        → parse + event_matches(target=target_name, active_only=True)
-        → drop entries where (principal_sub, actor_sub) == the caller's
+      [otherwise — one bounded, newest-first archive read:]
+        → agent_announcement rows of the tenant with claim_id and
+          owner_sub set, created inside the window, newest first, LIMIT 100
+        → latest_claim_steps(...)        # the newest step of each claim
+        → keep claims where is_active_claim_step(step, now) and the
+          step names target_name in target / targets
+        → drop claims where (principal_sub, actor_sub) == the caller's
         → keep the newest 5, restore chronological order
   → wrap_ok_result(..., extras=advisory)
 ```
 
+**When a claim is active** (`broadcast/claim_state.py`). A claim is the
+chain of steps an agent publishes (`start`, `update`, `completion`). Its
+newest step decides. The claim is active when that step is a trusted
+claim step (`claim_id` and `owner_sub` set), is not the `completion`, and
+has a finite TTL that has not run out. Legacy rows from before trusted
+admission are history, never a claim. The same rules drive the caller's
+own claim lookup of the reflex advisory
+([reflex-advisory.md](reflex-advisory.md)) and, row by row, the
+`active_only` read filter.
+
 Design contract:
 
 - **Write-class only.** Read-class dispatches (`read` / `credential_read`
-  / `audit_query` / `other` / `approval`) short-circuit on the frozenset
-  check before any Valkey call — the hot read path pays nothing.
+  / `audit_query` / `other` / `approval`) return before any read — the
+  hot read path pays nothing.
 - **Structure only, no prose.** Each entry is
-  `{principal_sub, actor_sub?, kind (operation|announcement), op_id?/phase?, ts}`.
+  `{principal_sub, owner_sub, kind: "announcement", phase, ts, expires_at}`.
   The untrusted announcement free-text fields (`activity` / `scope` /
-  `target` / `targets`) are never projected — the untrusted-prose envelope
-  does not enter an op response (Initiative #2543, review finding 27).
-- **Self-excluded.** An entry whose `principal_sub` *and* `actor_sub` both
-  match the caller is the caller's own activity and is dropped; a sibling
-  agent under the same human (distinct `actor_sub`) is a peer and surfaces.
-- **Newest-first, so the cap keeps what matters.** The read is a single
-  `XREVRANGE` (newest-first) time-bounded by the window and capped at 100
-  entries; the newest five surviving peer entries are then re-ordered
-  chronologically. An oldest-first `XRANGE` + `COUNT` would clip the tail
-  and silently invert the "most-recent" contract on a busy target.
-- **Fail-open and bounded.** Any error in the lookup (a Valkey teardown
-  included) is swallowed and warn-logged (`target_activity_advisory_failed`),
-  yielding no advisory rather than failing the op. The lookup *is* awaited
-  on the success path, so it adds one small, bounded stream read to a
-  write dispatch's latency — it never fails the dispatch, and the cost is
-  capped by the `COUNT`.
+  `target` / `targets` / `work_ref`) are never copied — the untrusted-prose
+  envelope does not enter an op response (Initiative #2543, review
+  finding 27).
+- **Self-excluded.** A claim whose `principal_sub` *and* `actor_sub` both
+  match the caller is the caller's own and is dropped; a sibling agent
+  under the same person (another `actor_sub`) is a peer and shows up.
+- **The window bounds the read.** A claim shows up only when its newest
+  step is inside the window. The read is capped at 100 rows, newest
+  first, so the cap keeps the claims that matter now.
+- **Fail-open and bounded.** Any error in the lookup is swallowed and
+  warn-logged (`target_activity_advisory_failed`), yielding no advisory
+  rather than failing the op. The lookup *is* awaited on the success path,
+  so it adds one small, bounded archive read to a write dispatch.
 - **Disable knob.** `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default
-  `30`, `0` = off) gates the whole feature.
+  `30`, `0` = off) gates the whole feature and sets the window.
 
 Three independent extras fragments now ride the same dispatcher success
 path, merged as a clobber-free union of distinct keys
@@ -453,9 +466,8 @@ path, merged as a clobber-free union of distinct keys
    session-scoped coordination nudge (read-before-act /
    announce-before-mutate) deduped per `(session, heuristic)`; see
    [`docs/codebase/reflex-advisory.md`](reflex-advisory.md). #3133 also
-   ships the opt-in **announce gate** (`broadcast/announce_gate.py`),
-   which *rejects* — rather than nudges — a caution-or-higher write-class
-   op dispatched without an active claim in a tenant that opted in.
+   shipped an opt-in announce gate that refused a write without a claim;
+   #3762 removed it (see *People read, agents publish* below).
 
 ## Who can publish (#3736)
 
@@ -568,10 +580,43 @@ never a lock, never blocks another claim, and never blocks a write.
 stay readable as history, but no step can continue them: an `update` or
 `completion` naming such a row gets `claim_not_found`.
 
-**Not changed yet.** The read side still shows legacy entries the same
-way, `active_only` still treats a TTL-less legacy entry as active, and
-the opt-in announce gate still asks the caller for a claim. Retiring the
-human announce gate and making reads use only trusted claims is #3762.
+**People read, agents publish (#3762).** People read Broadcast under
+their tenant role (`meho_broadcast_recent`, `watch`, REST, CLI, the UI).
+Only trusted agents publish. Nothing in MEHO announces for anyone on its
+own. So nothing may wait for an announcement a person cannot make:
+
+- **No announce gate.** The opt-in per-tenant gate that refused a
+  caution-or-higher write without an active claim is gone: the module,
+  the `announce_required` refusal, the `Tenant.announce_gate_enabled`
+  model field and the `policies.announce_gate_enabled` key of the
+  settings file. A settings file that still has the key is refused with
+  "is not a known key"; delete the line. The database column stays,
+  because migrations only add ([migrations.md](migrations.md)); no code
+  reads it.
+- **Reads use trusted claims.** The target advisory and the reflex claim
+  lookup use only trusted claims, judged by their newest step (see *When
+  a claim is active* above). `active_only` keeps only steps that keep
+  their claim active: legacy rows, steps without a TTL and `completion`
+  steps no longer pass. One row cannot see a later `completion` of its
+  claim, so an earlier step of a completed claim still passes
+  `active_only` until its own TTL runs out.
+- **The UI shows readers and publishers.** `/ui/broadcast` lists agent
+  announcements only, and says that only trusted agents post and where
+  operations are recorded. The operation filters (op class, op id), the
+  "All / Operations / Announcements" switch of the history pane, the
+  operation row and the operation drawer
+  (`/ui/broadcast/event/{audit_id}`) are gone. The audit console
+  (`/ui/audit`) shows operations; its op-class badge table now lives in
+  `ui/routes/audit/op_class_badges.py`.
+- **Still there.** The `op_class` and `actor_sub` read filters of
+  `meho_broadcast_recent` / `watch`, `GET /api/v1/broadcast/recent`,
+  `GET /api/v1/feed` and the CLI stay in the contract for now; they match
+  no announcement. Removing them (or matching them against
+  `planned_op_class` / the announcement's `actor_sub`) is a separate
+  contract change.
+
+The decision record is
+[2026-11-08-broadcast-people-read-agents-publish.md](../decisions/2026-11-08-broadcast-people-read-agents-publish.md).
 
 ## Durable announcements (#2547)
 
@@ -980,7 +1025,7 @@ investigation. #1305 is the closing fix.
   - SSE UI bridge: `backend/src/meho_backplane/ui/routes/broadcast/stream.py`.
   - MCP tools: `backend/src/meho_backplane/mcp/tools/broadcast.py`.
   - Override CRUD (REST): `backend/src/meho_backplane/api/v1/broadcast_overrides.py`.
-  - Override UI tab (BFF, tenant_admin): `backend/src/meho_backplane/ui/routes/broadcast/overrides.py` — the Overrides tab on `/ui/broadcast` (#1891). Lists/creates/deletes `BroadcastOverride` rows through the REST plane's `list_overrides_impl` / `create_override_impl` / `delete_override_impl` in-process (the same impl the admin MCP tools call), gated to `tenant_admin` via `resolve_operator_or_403`; delete is a two-step `<dialog>` confirm that spells out the re-exposure consequence; the create form echoes the 422 glob-not-regex / 409 already-exists as inline errors. The sensitive-op cross-link in the event drawer (`_event_drawer.html`) pre-fills the create form's `op_id_pattern`.
+  - Override UI tab (BFF, tenant_admin): `backend/src/meho_backplane/ui/routes/broadcast/overrides.py` — the Overrides tab on `/ui/broadcast` (#1891). Lists/creates/deletes `BroadcastOverride` rows through the REST plane's `list_overrides_impl` / `create_override_impl` / `delete_override_impl` in-process (the same impl the admin MCP tools call), gated to `tenant_admin` via `resolve_operator_or_403`; delete is a two-step `<dialog>` confirm that spells out the re-exposure consequence; the create form echoes the 422 glob-not-regex / 409 already-exists as inline errors.
   - Shared read helpers (filter, parse, serialise): `backend/src/meho_backplane/broadcast/history.py`.
   - The archive reader: `backend/src/meho_backplane/broadcast/archive_reader.py`.
   - Dispatch-time target-activity advisory (#2550): `backend/src/meho_backplane/broadcast/target_advisory.py`.

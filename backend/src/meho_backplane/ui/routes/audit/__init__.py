@@ -19,8 +19,8 @@ Module layout:
   + forward-cursor pager fragment) routes. All reads dispatch the
   :func:`meho_backplane.audit_query.query_audit` substrate in-process with
   ``tenant_id`` from the validated session, the same console-BFF pattern the
-  approvals surface uses. The op_class colour palette is imported from the
-  broadcast feed so audit rows colour-code identically.
+  approvals surface uses. The op_class colour palette lives in
+  :mod:`~meho_backplane.ui.routes.audit.op_class_badges`.
 
 The umbrella :func:`build_audit_router` is mounted **before**
 :func:`meho_backplane.ui.routes.stubs.build_stubs_router` in

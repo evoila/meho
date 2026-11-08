@@ -96,8 +96,8 @@ twice: at once, and again after the commit
 (`db/after_commit.py::clear_now_and_after_commit`, a listener on the session's
 `after_commit` event). The listener waits for the outer commit: releasing a
 savepoint (the settings import writes inside `begin_nested`) also fires
-`after_commit`, but saves nothing yet. The announce gate and the broadcast
-overrides clear their 60s caches the same way.
+`after_commit`, but saves nothing yet. The broadcast overrides clear their
+60s cache the same way.
 
 A read can also start before the commit and finish after it: it reads the old
 row, awaits its session cleanup, and only then stores the value. Each cache

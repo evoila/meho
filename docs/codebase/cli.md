@@ -302,6 +302,7 @@ cli/
     │   │   ├── eval.go                 # `meho retrieval eval` (POST /api/v1/retrieve/eval) via typed client.
     │   │   ├── eval_test.go            # output-contract + URL-resolution + EvalRequest body shape tests.
     │   │   ├── usage.go                # `meho retrieval usage` (GET /api/v1/retrieve/usage) — G4.3-T5b #464, typed client.
+    │   │   ├── picks.go                # `meho retrieval picks` (GET /api/v1/retrieve/operation-picks) — #4750, typed client.
     │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing + JSON200 nil-guard tests.
     │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445, typed client. Keeps the hand-typed `ghIssueLabel` / `ghIssue` for the `gh issue list` subprocess output.
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + body-shape (null vs empty) tests.

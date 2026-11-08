@@ -53,6 +53,7 @@ from meho_backplane.api.v1._freetext_filter import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.operation_picks.recorder import recorded_call, recorded_search
 from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.operations.governed_subops import GovernedSubopsResponse
 from meho_backplane.operations.meta_tools import (
@@ -287,16 +288,19 @@ async def get_search(
                 "('query' is the deprecated alias)."
             ),
         )
+    arguments: dict[str, Any] = {
+        "connector_id": connector_id,
+        "query": search_query,
+        "group": group,
+        "limit": limit,
+        "include_scores": include_scores,
+    }
     try:
-        return await search_operations(
+        return await recorded_search(
             operator,
-            {
-                "connector_id": connector_id,
-                "query": search_query,
-                "group": group,
-                "limit": limit,
-                "include_scores": include_scores,
-            },
+            arguments,
+            transport="rest",
+            run=lambda: search_operations(operator, arguments),
         )
     except ConnectorNotIngestedError as exc:
         raise connector_not_ingested_404(exc) from exc
@@ -306,8 +310,14 @@ async def get_search(
 
 async def _exact_op_search(operator: Operator, connector_id: str, op_id: str) -> dict[str, Any]:
     """Run ``search_operations`` in exact-op mode and map its errors to ``404``."""
+    arguments = {"connector_id": connector_id, "op_id": op_id}
     try:
-        return await search_operations(operator, {"connector_id": connector_id, "op_id": op_id})
+        return await recorded_search(
+            operator,
+            arguments,
+            transport="rest",
+            run=lambda: search_operations(operator, arguments),
+        )
     except ConnectorNotIngestedError as exc:
         raise connector_not_ingested_404(exc) from exc
     except UnknownConnectorError as exc:
@@ -368,11 +378,21 @@ async def post_call(
     # an op param).
     arguments = body.model_dump(exclude={"async_"})
     if body.async_:
-        run_id = await get_operation_run_service().submit_call(operator, arguments)
+
+        async def _submit() -> dict[str, Any]:
+            run_id = await get_operation_run_service().submit_call(operator, arguments)
+            return {"run_id": str(run_id), "status": "pending", "async": True}
+
+        answer = await recorded_call(operator, arguments, transport="rest", run=_submit)
         response.status_code = http_status.HTTP_202_ACCEPTED
-        return {"run_id": str(run_id), "status": "pending", "async": True}
+        return answer
     async with watch_caller(request.receive):
-        return await call_operation(operator, arguments)
+        return await recorded_call(
+            operator,
+            arguments,
+            transport="rest",
+            run=lambda: call_operation(operator, arguments),
+        )
 
 
 class ResultQueryBody(BaseModel):

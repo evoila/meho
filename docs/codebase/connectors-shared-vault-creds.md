@@ -169,8 +169,16 @@ dispatcher's `connector_error` branch.
    It carries `target_name` and `secret_ref`, and its message has no
    Vault URL and no hvac text. The dispatcher answers it with
    `target_secret_not_found` (see `error-message-shape.md`). A ref taken
-   from an op param (`load_param_secret_data`) still raises
-   `SecretRefReadError`, with `InvalidPath` as its `cause_class`.
+   from an op param is never reported as the target's ref. Each place
+   that reads a param ref turns the not-found error into a param error:
+   - `load_param_secret_data` (for example keycloak's
+     `password_secret_ref`) and the k8s `_resolve_secret_refs`
+     (`k8s.secret.create` / `k8s.secret.update` `*_secret_ref` maps)
+     raise `SecretRefReadError`, with `InvalidPath` as its `cause_class`.
+     The dispatcher answers it with `vault_credentials_read_error`.
+   - The linux `secret_env` refs and the msad `password_ref` raise their
+     own param error (`LinuxWriteError` / `ValueError`), which says Vault
+     has no secret at that path.
 6. **Structural unwrap.** KV-v2's GET returns `{"data": {"data":
    {<secret kv>}, "metadata": {...}}}`; the secret content is the nested
    `data["data"]` (the same double-unwrap the `vault.kv.read` handler in

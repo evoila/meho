@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
+    TargetSecretNotFoundError,
     check_param_secret_ref,
     strip_credential_value,
 )
@@ -644,6 +645,11 @@ async def _resolve_secret_env(
             check_param_secret_ref(operator, path, param="secret_env")
             try:
                 secret_data = await connector._resolve_secret(stub, operator)
+            except TargetSecretNotFoundError as exc:
+                raise LinuxWriteError(
+                    f"secret_env[{name!r}] could not resolve vault reference {path}#{field}: "
+                    "Vault has no secret at that path"
+                ) from exc
             except (VaultClientError, CredentialsReadError) as exc:
                 # The underlying errors name the target / field / secret_ref
                 # path, never a credential value; add the ENV for the operator.

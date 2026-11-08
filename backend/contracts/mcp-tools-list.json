@@ -3056,6 +3056,15 @@
               "product": {
                 "type": "string"
               },
+              "secret_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "secret_ref_derived": {
+                "type": "boolean"
+              },
               "target_id": {
                 "type": "string"
               },
@@ -3068,7 +3077,9 @@
               "name",
               "product",
               "host",
-              "tenant_id"
+              "tenant_id",
+              "secret_ref",
+              "secret_ref_derived"
             ],
             "type": "object"
           },

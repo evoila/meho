@@ -266,4 +266,4 @@ key; treat the per-target opt-outs as audited, temporary exceptions.
 
 ## Back to the trail
 
-Return to [the install trail, Step 6](index.md#step-6-write-your-values-file).
+Return to [the install trail, Step 2](index.md#step-2-write-your-values-file).

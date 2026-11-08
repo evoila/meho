@@ -23,6 +23,7 @@ from meho_backplane.connectors.keycloak.ops_write_groups_schemas import (
     GROUP_WRITE_OPS,
     WHEN_TO_USE_GROUP_WRITE,
 )
+from meho_backplane.connectors.keycloak.ops_write_realm_smtp import SMTP_PASSWORD_SECRET_PROPS
 
 __all__ = ["WHEN_TO_USE_WRITE_BY_GROUP", "WRITE_OPS"]
 
@@ -39,7 +40,10 @@ _WHEN_TO_USE_REALM_WRITE = (
     "idempotent (a 409 already-exists is treated as success). "
     "``keycloak.realm.delete`` removes a whole realm for good (destructive: a "
     "second person must approve, preview first); disabling it with "
-    "``keycloak.realm.update`` and ``enabled: false`` is the reversible choice."
+    "``keycloak.realm.update`` and ``enabled: false`` is the reversible choice. "
+    "To set the realm's mail server, send ``smtpServer`` (host, port, from, "
+    "user, ...) in ``representation`` and give the SMTP password as "
+    "``smtp_password_secret_ref``; a password inside ``smtpServer`` is refused."
 )
 
 _WHEN_TO_USE_CLIENT_WRITE = (
@@ -230,7 +234,11 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
             "RealmRepresentation under ``representation``. Reads the realm, "
             "puts the given fields on top and PUTs the full realm back, so "
             "fields you do not send stay as they are; then reads it again "
-            "and reports any field that changed without being sent. "
+            "and reports any field that changed without being sent. The mail "
+            "server (SMTP) password is read from ``smtp_password_secret_ref`` "
+            "and set as ``smtpServer.password``; a password inside "
+            "``representation.smtpServer`` is refused before the call waits "
+            "for approval. "
             "requires_approval=True; dispatches via the admin-auth path."
         ),
         parameter_schema={
@@ -241,6 +249,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
                     "type": "string",
                     "description": "Realm to update (default managed_realm).",
                 },
+                **SMTP_PASSWORD_SECRET_PROPS,
             },
             "required": ["representation"],
             "additionalProperties": False,
@@ -257,7 +266,12 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
                     "Partial RealmRepresentation to merge. Keys inside a map "
                     "(attributes, smtpServer) are only added or changed; "
                     "leaving a key out does not remove it, and sending null "
-                    "does not remove it either. Send [] to empty a list."
+                    "does not remove it either. Send [] to empty a list. "
+                    "Never put a password in smtpServer."
+                ),
+                "smtp_password_secret_ref": (
+                    "Where the realm's SMTP password is stored (a Vault path or "
+                    "'<kind>:' reference). MEHO reads it and sets smtpServer.password."
                 ),
             },
             "output_shape": (

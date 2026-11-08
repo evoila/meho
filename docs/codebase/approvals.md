@@ -3021,9 +3021,10 @@ then reads the request once and prints its state, the `Run:` line
 it with `meho approvals show <id>`." With `--wait` it reads
 `GET /api/v1/approvals/{id}` every 3 seconds until `result_state` is
 `executed`, `failed` or `uncertain`, and then prints the run lines as
-before. The "outcome unknown" list ends the wait only when the CLI cannot
-check the run: while the run still goes on, a run longer than that age
-limit is still waited for. Each read is a
+before. The "outcome unknown" list does not end the wait: a run longer
+than that age limit is still waited for. When the CLI cannot check the
+run, it prints once that the run takes longer than usual and that Ctrl-C
+stops the wait (the run goes on). Each read is a
 short call, so a proxy time limit cannot cut the wait; up to 5 failed
 reads in a row are tried again. When the person may read runs (operator
 role), each read also checks the run (`GET /api/v1/operations/runs/{id}`):

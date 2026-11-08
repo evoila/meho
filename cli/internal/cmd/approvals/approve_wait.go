@@ -46,6 +46,11 @@ const lostAnswerNote = "The answer to this call was lost on the network. " +
 const runEndedNoResultNote = "The run ended, but MEHO stored no result. " +
 	uncertainAdvice
 
+// stillWaitingNote is printed once by --wait when MEHO lists the request
+// as "outcome unknown" while the CLI cannot check the run itself.
+const stillWaitingNote = "The run takes longer than usual and MEHO has no " +
+	"result yet. Still waiting. Press Ctrl-C to stop; the run goes on."
+
 // waitPollInterval is how long --wait waits between two reads. A
 // variable so tests can make it short.
 var waitPollInterval = 3 * time.Second
@@ -163,11 +168,10 @@ func printRunHint(w io.Writer, idArg string, d *api.ApprovalRequestView, endedWi
 //
 // When runID is set and this person may read runs, the run itself is
 // checked too: a run that ended without storing a result on the request
-// (a crash, a server restart) ends the wait, and the bool says so. While
-// that run is still going, the wait goes on, also after MEHO lists the
-// request as "outcome unknown" (a run that takes longer than that age
-// limit). Without the run check, the "outcome unknown" list ends the
-// wait, because then nothing tells whether the run still goes on.
+// (a crash, a server restart) ends the wait, and the bool says so.
+// The "outcome unknown" list (a run that takes longer than that age
+// limit) never ends the wait. Without the run check, the wait goes on
+// until the request has a result, and prints stillWaitingNote once.
 func waitForRun(
 	cmd *cobra.Command,
 	client *api.AuthedClient,
@@ -180,6 +184,7 @@ func waitForRun(
 		fmt.Fprintln(cmd.ErrOrStderr(), "Approved. The operation is running. Waiting until it ends ...")
 	}
 	failures := 0
+	noted := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -207,8 +212,9 @@ func waitForRun(
 			}
 			return detail, !runHasResult(detail), nil
 		}
-		if runID == nil && detail.OutcomeUnknown != nil {
-			return detail, false, nil
+		if runID == nil && detail.OutcomeUnknown != nil && !noted && !jsonOut {
+			fmt.Fprintln(cmd.ErrOrStderr(), stillWaitingNote)
+			noted = true
 		}
 	}
 }

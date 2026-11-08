@@ -1701,13 +1701,14 @@ func TestApproveWaitGoesOnPastTheOutcomeUnknownAgeWhileTheRunGoesOn(t *testing.T
 	}
 }
 
-func TestApproveWaitStopsAtOutcomeUnknownWithoutTheRunCheck(t *testing.T) {
+func TestApproveWaitGoesOnPastTheOutcomeUnknownAgeWithoutTheRunCheck(t *testing.T) {
 	get, gets := viewSequence(t,
 		viewInState(t, api.ApprovalResultStateStarted),
 		startedTooLong(t),
+		startedTooLong(t),
 		viewInState(t, api.ApprovalResultStateExecuted),
 	)
-	stdout, _, err := runApprove(t, map[string]mockHandler{
+	stdout, stderr, err := runApprove(t, map[string]mockHandler{
 		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
 		"GET /api/v1/approvals/" + stubID:              get,
 		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
@@ -1717,11 +1718,14 @@ func TestApproveWaitStopsAtOutcomeUnknownWithoutTheRunCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("approve --wait: %v", err)
 	}
-	if strings.Contains(stdout, "Run:          ok") {
-		t.Errorf("without the run check, the outcome unknown list ends the wait; got:\n%s", stdout)
+	if !strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("--wait must go on until the run has a result; got:\n%s", stdout)
 	}
-	if *gets != 2 {
-		t.Errorf("want 2 reads (until outcome unknown); got %d", *gets)
+	if *gets != 4 {
+		t.Errorf("want 4 reads (until executed); got %d", *gets)
+	}
+	if strings.Count(stderr, stillWaitingNote) != 1 {
+		t.Errorf("want the still-waiting note once; got:\n%s", stderr)
 	}
 }
 

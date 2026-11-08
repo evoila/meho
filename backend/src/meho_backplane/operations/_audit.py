@@ -378,8 +378,7 @@ def descriptor_op_class(descriptor: EndpointDescriptor) -> str:
     """Return the op class of one run of *descriptor*.
 
     The audit row stores this class, and the dispatcher hands the same
-    value to the announce gate, the announce reminder and the target
-    activity warning. See
+    value to the announce reminder and the target activity warning. See
     :func:`~meho_backplane.broadcast.events.resolve_operation_op_class`.
     A descriptor stand-in without a ``safety_level`` gets the class from
     its op id alone.

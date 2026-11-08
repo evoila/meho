@@ -84,8 +84,9 @@ spec:
   `run_approval_target_kinds` (a run approval may list a target kind; see
   [run-approvals.md](run-approvals.md)). `null` means "use the
   instance default" (`false` for the switches, inherit for the others).
-  The retired `announce_gate_enabled` key (#3762) is refused as "not a
-  known key"; delete it from an older file.
+  The retired `announce_gate_enabled` key (#3762) is still accepted, so
+  an older export imports clean, but it is ignored: never read, written
+  or exported.
   `policies: null` resets all of them.
 - `conventions[]` — keyed by `slug`. `title` and `kind` are needed when the
   convention is new. `kind` cannot change on import, the same as on

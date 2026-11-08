@@ -73,6 +73,9 @@ spec:
   parts:
     - `policies`: the tenant's switches, such as the flight recorder
       and the mail allow list. `null` means "use the default".
+      Files from older versions may have `announce_gate_enabled`.
+      MEHO accepts this key and ignores it, because that switch no
+      longer exists.
     - `conventions`: the tenant's conventions, one per `slug`.
     - `targets`: the tenant's targets, one per `name`. A target has the
       same fields as when you register it (see

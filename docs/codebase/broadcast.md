@@ -587,10 +587,10 @@ own. So nothing may wait for an announcement a person cannot make:
 
 - **No announce gate.** The opt-in per-tenant gate that refused a
   caution-or-higher write without an active claim is gone: the module,
-  the `announce_required` refusal, the `Tenant.announce_gate_enabled`
-  model field and the `policies.announce_gate_enabled` key of the
-  settings file. A settings file that still has the key is refused with
-  "is not a known key"; delete the line. The database column stays,
+  the `announce_required` refusal and the `Tenant.announce_gate_enabled`
+  model field. The settings file no longer exports
+  `policies.announce_gate_enabled`; an older file that still has the key
+  is accepted and the key is ignored. The database column stays,
   because migrations only add ([migrations.md](migrations.md)); no code
   reads it.
 - **Reads use trusted claims.** The target advisory and the reflex claim

@@ -21,9 +21,9 @@ opt-in per-tenant announce gate that refused a caution-or-higher write
 without an active claim. Only trusted agents can publish an announcement
 (#3736), so the gate could refuse a person's write for an announcement
 the person could never make. #3762 removed it: the gate module, the
-`announce_required` refusal, the `tenant.announce_gate_enabled` flag in
-the model, and the `policies.announce_gate_enabled` key of the settings
-file. The database column stays (migrations only add, see
+`announce_required` refusal, and the `tenant.announce_gate_enabled` flag in
+the model. The settings file still accepts `policies.announce_gate_enabled`
+from older files but ignores it. The database column stays (migrations only add, see
 [migrations.md](migrations.md)); no code reads it. See
 [the decision record](../decisions/2026-11-08-broadcast-people-read-agents-publish.md).
 

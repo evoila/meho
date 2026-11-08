@@ -124,15 +124,17 @@ def test_strict_booleans() -> None:
     ]
 
 
-def test_retired_announce_gate_policy_is_refused() -> None:
-    """The announce gate is gone (#3762); the file no longer offers its key."""
+def test_retired_announce_gate_policy_is_accepted_and_ignored() -> None:
+    """The announce gate is gone (#3762); older files still carry its key."""
     parsed = parse_settings_file(
         b"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
-        b"    - policies: {announce_gate_enabled: false}\n"
+        b"    - policies: {announce_gate_enabled: true}\n"
     )
-    assert parsed.mistakes == [
-        "`spec.tenants[0].policies.announce_gate_enabled` is not a known key."
-    ]
+    assert parsed.mistakes == []
+    assert parsed.model is not None
+    policies = parsed.model.spec.tenants[0].policies
+    assert policies is not None
+    assert "announce_gate_enabled" not in policies.model_dump()
 
 
 @pytest.mark.parametrize(

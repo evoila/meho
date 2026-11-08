@@ -104,6 +104,10 @@ class TenantPolicies(_Strict):
     flight_recorder: FlightRecorderPolicy | None = None
     mail_recipient_allowlist: str | None = None
     run_approval_target_kinds: StrictBool | None = None
+    # Retired with the announce gate (#3762). Files exported before then
+    # still carry this key, so it is accepted and ignored: never read,
+    # written or exported.
+    announce_gate_enabled: StrictBool | None = Field(default=None, exclude=True)
 
     @field_validator("mail_recipient_allowlist")
     @classmethod

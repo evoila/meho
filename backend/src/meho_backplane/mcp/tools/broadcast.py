@@ -135,8 +135,8 @@ def _extract_filter(arguments: dict[str, Any]) -> AnnouncementFilter:
     RFC 8693 actor, distinct from ``principal`` which matches the human
     subject (T3 #2545); ``work_ref`` narrows to any event linked to
     that opaque change-ticket reference; ``active_only`` (default
-    ``False``) drops TTL'd claims whose ``expires_at`` has already
-    elapsed.
+    ``False``) keeps only active claim steps (see
+    :mod:`meho_backplane.broadcast.claim_state`).
     """
     filter_obj = arguments.get("filter") or {}
     if not isinstance(filter_obj, dict):
@@ -302,9 +302,12 @@ register_mcp_tool(
                             "type": "boolean",
                             "default": False,
                             "description": (
-                                "When true, drop TTL'd announcement claims "
-                                "whose expires_at (ts + ttl_minutes) has "
-                                "elapsed. Non-TTL events always pass."
+                                "When true, keep only active claim steps: "
+                                "trusted announcements that are not the "
+                                "completion step and whose TTL (ts + "
+                                "ttl_minutes) has not run out. Operation "
+                                "events, older untrusted announcements and "
+                                "announcements without a TTL are left out."
                             ),
                         },
                     },
@@ -954,9 +957,12 @@ register_mcp_tool(
                             "type": "boolean",
                             "default": False,
                             "description": (
-                                "When true, drop TTL'd announcement claims "
-                                "whose expires_at (ts + ttl_minutes) has "
-                                "elapsed. Non-TTL events always pass."
+                                "When true, keep only active claim steps: "
+                                "trusted announcements that are not the "
+                                "completion step and whose TTL (ts + "
+                                "ttl_minutes) has not run out. Operation "
+                                "events, older untrusted announcements and "
+                                "announcements without a TTL are left out."
                             ),
                         },
                     },

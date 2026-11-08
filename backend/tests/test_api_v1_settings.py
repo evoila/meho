@@ -385,6 +385,36 @@ async def test_apply_records_revision_and_second_import_is_a_no_op(client: TestC
 
 
 @pytest.mark.asyncio
+async def test_older_export_with_retired_announce_gate_key_imports_clean(
+    client: TestClient,
+) -> None:
+    """A file exported before #3762 carries ``announce_gate_enabled``; it is ignored."""
+    await _seed()
+    key = make_rsa_keypair("kid-retired")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        token = _token(key)
+        exported = _export(client, token)
+        doc = yaml.safe_load(exported)
+        doc["spec"]["tenants"][0]["policies"]["announce_gate_enabled"] = True
+        older = yaml.safe_dump(doc, sort_keys=False)
+
+        preview = _import(client, token, older, preview=True)
+        applied = _import(client, token, older)
+        after = _export(client, token)
+
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["ok"] is True, body
+    for section in body["diff"].values():
+        assert section["added"] == [] and section["changed"] == []
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["applied"] is False
+    assert "announce_gate_enabled" not in after
+    assert await _rows(InstanceSettingsRevision) == []
+
+
+@pytest.mark.asyncio
 async def test_convention_history_rows_share_the_import_request(client: TestClient) -> None:
     await _seed()
     content = f"""

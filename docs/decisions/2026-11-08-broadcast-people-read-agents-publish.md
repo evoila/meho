@@ -44,10 +44,10 @@ that still assumed the mixed feed:
 ## What changed
 
 - The gate module, the `announce_required` refusal, the
-  `Tenant.announce_gate_enabled` model field and the
-  `policies.announce_gate_enabled` key of the settings file are gone. A
-  settings file that still has the key is refused with "is not a known
-  key". The database column stays, because migrations only add; no code
+  `Tenant.announce_gate_enabled` model field are gone. The settings file
+  no longer exports `policies.announce_gate_enabled`. An older file that
+  still has the key imports clean: MEHO accepts the key and ignores it.
+  The database column stays, because migrations only add; no code
   reads it.
 - The target advisory and the reflex claim lookup read trusted claims
   from the archive and judge each claim by its newest step

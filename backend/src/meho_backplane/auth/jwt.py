@@ -1435,19 +1435,37 @@ def _extract_approver(claims: Any, settings: Settings) -> bool:
 
 #: The claim that marks a login that may only import knowledge (#5728).
 KB_IMPORT_ONLY_CLAIM: str = "kb_import_only"
+#: The claim that marks a login that may only export knowledge (#5730).
+KB_EXPORT_ONLY_CLAIM: str = "kb_export_only"
 
 
 def _extract_kb_import_only(claims: Any) -> bool:
     """Return whether the token may only import knowledge (#5728).
 
-    The claim comes from a hardcoded claim mapper on the import client.
+    See :func:`_extract_limiting_flag` for how the value is read.
+    """
+    return _extract_limiting_flag(claims, KB_IMPORT_ONLY_CLAIM)
+
+
+def _extract_kb_export_only(claims: Any) -> bool:
+    """Return whether the token may only export knowledge (#5730).
+
+    See :func:`_extract_limiting_flag` for how the value is read.
+    """
+    return _extract_limiting_flag(claims, KB_EXPORT_ONLY_CLAIM)
+
+
+def _extract_limiting_flag(claims: Any, claim_name: str) -> bool:
+    """Read a claim that limits the login to one route.
+
+    The claim comes from a hardcoded claim mapper on the client.
     No claim, ``false`` or ``"false"`` gives ``False``. ``true`` or
     ``"true"`` gives ``True``. Any other value also gives ``True``: the
     flag takes rights away, so a value MEHO cannot read must keep the
     login limited, not free it. Such a value is logged under
-    ``malformed_kb_import_only_claim``.
+    ``malformed_<claim_name>_claim``.
     """
-    raw = claims.get(KB_IMPORT_ONLY_CLAIM)
+    raw = claims.get(claim_name)
     if raw is None:
         return False
     if isinstance(raw, bool):
@@ -1455,8 +1473,8 @@ def _extract_kb_import_only(claims: Any) -> bool:
     if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
         return raw.strip().lower() == "true"
     structlog.get_logger(__name__).warning(
-        "malformed_kb_import_only_claim",
-        claim_name=KB_IMPORT_ONLY_CLAIM,
+        f"malformed_{claim_name}_claim",
+        claim_name=claim_name,
         reason="not_a_boolean",
     )
     return True
@@ -1834,6 +1852,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             platform_admin=platform_admin,
             approver=approver,
             kb_import_only=_extract_kb_import_only(claims),
+            kb_export_only=_extract_kb_export_only(claims),
             conventions_drift_only=_extract_conventions_drift_only(claims),
             runner_id=runner_id,
             tenants=tenants,

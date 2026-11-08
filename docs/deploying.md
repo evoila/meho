@@ -573,6 +573,19 @@ is **not** the right flag here — it ignores Helm's ownership *annotation*
 check and adopts whole un-owned *resources*, not individual SSA *fields*,
 so it does not clear a per-field conflict.
 
+### Upgrade from a chart without a strategy (#5962)
+
+An install made with a chart before v0.46.0 has `RollingUpdate` and a
+`rollingUpdate` block on its live Deployment (Kubernetes filled them in).
+Helm 4 server-side apply does not remove that block, and Kubernetes refuses
+it together with `Recreate` (`spec.strategy.rollingUpdate: Forbidden`). The
+chart therefore runs a `pre-upgrade` Job that removes the block and sets
+`Recreate` first. It renders only when `lookup` finds the block, so Argo CD
+(which renders with `helm template`) never runs it. Recovery for a revision
+that already failed, and for Argo CD:
+[Upgrades](../docs-site/install/upgrades.md#upgrade-fails-with-specstrategyrollingupdate-forbidden).
+Details: [`codebase/devops.md`](codebase/devops.md#update-strategy-and-pod-stop-5024).
+
 ### Rollback
 
 `helm rollback meho` is supported, but **migrations are forward-only**: the
@@ -635,6 +648,7 @@ Append a row here in the same PR that carries an upgrade-relevant change
 | **v0.45.0** | When a connector states the target versions its operations work on, MEHO runs an operation only on a target inside that range. MEHO checks this each time the operation runs. Outside the range, the call is refused with `unqualified_target_version`, and the error names the range and the target's version. For an operation from an API file, MEHO first looks for the same operation on the connector version that matches the target, and runs it there when it exists and is turned on. MEHO checks the range for operations from an API file and for multi-step operations. From v0.45.0 the VMware connectors state the target versions their multi-step operations work on, so MEHO now applies the check to them. A Sensor on a connector whose range does not include the target's version can read `unknown`. A scheduled job or another saved call on such a connector is refused. | **Before the upgrade**, list your Sensors with `meho sensor list --json` and check that each one uses the connector that matches its target's version. For example, use `vmware-rest-8.0` for a vCenter 8.0.x target and `vmware-rest-9.0` for a vCenter 9.0.x target. A Sensor cannot be changed, so delete a wrong one and create it again on the right connector. Check scheduled jobs and other saved calls the same way. See [Pick the connector version that matches the target](../docs-site/guides/sensors-quickstart.md#pick-the-connector-version-that-matches-the-target). |
 | **v0.46.0** | The key of the params hashes and value fingerprints (audit rows, approval requests, secret moves) is a secret of its own: `PARAMS_HASH_KEY`, chart block `paramsHashKey`. With a built-in core part, the install makes it in the Secret `<release>-core-params-hash` (key `params_hash_key`) and keeps it on every upgrade, so a new database password keeps every hash. Without it, MEHO makes the key from `DATABASE_URL`. New audit hashes and fingerprints do not match the ones made with the key from `DATABASE_URL`. | **Built-in core:** nothing to do. **No built-in part:** store at least 32 random characters in a Kubernetes Secret and set `paramsHashKey.secretName` (and `paramsHashKey.secretKey` if the key name is not `params_hash_key`). A request that waits for approval while you set the key still matches its own params. To rotate the key later, follow "Rotating `PARAMS_HASH_KEY`" in [`codebase/approvals.md`](codebase/approvals.md). |
 | **v0.46.0** | The chart sets `progressDeadlineSeconds` on the MEHO Deployment. The default is `1200` seconds (20 minutes). Before, Kubernetes used its own default of 600 seconds. That is shorter than the 15 minutes the startup probe allows for a first start. So a slow but healthy start was reported as a failed rollout. | Nothing is required. `kubectl rollout status` and Argo CD now wait up to 20 minutes before they report a failure. If you change `probes.startup`, keep `progressDeadlineSeconds` higher than `failureThreshold` × `periodSeconds`. |
+| **v0.46.0** | The chart uses the `Recreate` update strategy (#5024). An install made with an older chart has `RollingUpdate` and a `rollingUpdate` block on its live Deployment, which Helm 4 server-side apply does not remove (#5962). | Nothing to do: a `pre-upgrade` Job removes the block first. A revision that already failed with `spec.strategy.rollingUpdate: Forbidden`: run `helm upgrade` again with the fixed chart, or see [Upgrade from a chart without a strategy](#upgrade-from-a-chart-without-a-strategy-5962). |
 
 ## Operational chart knobs
 

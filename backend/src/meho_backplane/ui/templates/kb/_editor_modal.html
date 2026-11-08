@@ -89,6 +89,9 @@
       aria-live="assertive"
     >
       <span>{{ _error }}</span>
+      {% if existing_slug | default(none) %}
+        <a href="/ui/kb/{{ existing_slug }}" class="link link-primary ml-2">Open entry &rarr;</a>
+      {% endif %}
     </div>
     {% endif %}
 

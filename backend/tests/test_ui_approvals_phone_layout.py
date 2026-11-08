@@ -30,7 +30,7 @@ from fastapi import HTTPException
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
-from meho_backplane.ui.routes.approvals.waiting import waiting_for_me_first
+from meho_backplane.ui.routes.approvals.waiting import WaitingFirstPager
 from tests.test_ui_approvals import (
     _HX_HEADERS,
     _RESOLVE_OPERATOR,
@@ -94,33 +94,41 @@ def _get_list(url: str, resolve_operator: AsyncMock) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_waiting_for_me_first_puts_approvable_rows_first_and_keeps_order() -> None:
+def test_pager_puts_approvable_rows_first_and_keeps_order() -> None:
     own_a = _row("own.a", principal_sub=_REVIEWER_SUB)
     other_a = _row("other.a")
     own_b = _row("own.b", principal_sub=_REVIEWER_SUB)
     other_b = _row("other.b")
-    operator = _operator(tenant_id=_TENANT_A)
+    pager = WaitingFirstPager(_operator(tenant_id=_TENANT_A), offset=0, size=25)
 
-    rows, waiting = waiting_for_me_first([own_a, other_a, own_b, other_b], operator)
+    pager.add([own_a, other_a])
+    pager.add([own_b, other_b])
+    rows, has_more, waiting = pager.page()
 
     assert [r.op_id for r in rows] == ["other.a", "other.b", "own.a", "own.b"]
     assert waiting == {other_a.id, other_b.id}
+    assert has_more is False
 
 
-def test_waiting_for_me_first_without_operator_keeps_order_and_marks_nothing() -> None:
-    first, second = _row("a"), _row("b")
+def test_pager_cuts_later_pages_across_both_groups() -> None:
+    others = [_row(f"other.{i}") for i in range(3)]
+    owns = [_row(f"own.{i}", principal_sub=_REVIEWER_SUB) for i in range(3)]
+    pager = WaitingFirstPager(_operator(tenant_id=_TENANT_A), offset=2, size=2)
 
-    rows, waiting = waiting_for_me_first([first, second], None)
+    pager.add(owns + others)
+    rows, has_more, waiting = pager.page()
 
-    assert rows == [first, second]
-    assert waiting == set()
+    assert [r.op_id for r in rows] == ["other.2", "own.0"]
+    assert waiting == {others[2].id}
+    assert has_more is True
 
 
-def test_waiting_for_me_first_marks_nothing_for_a_role_that_cannot_decide() -> None:
-    rows_in = [_row("a"), _row("b")]
+def test_pager_marks_nothing_for_a_role_that_cannot_decide() -> None:
     read_only = _operator(tenant_id=_TENANT_A, role=TenantRole.READ_ONLY)
+    pager = WaitingFirstPager(read_only, offset=0, size=25)
 
-    rows, waiting = waiting_for_me_first(rows_in, read_only)
+    pager.add([_row("a"), _row("b")])
+    rows, _, waiting = pager.page()
 
     assert [r.op_id for r in rows] == ["a", "b"]
     assert waiting == set()
@@ -219,19 +227,24 @@ def test_waiting_request_behind_a_full_page_comes_first_on_page_one() -> None:
     assert _WAITING_BADGE not in page_two
 
 
-def test_over_the_sort_cap_the_tab_pages_plainly_and_still_marks() -> None:
+def test_waiting_request_behind_many_batches_still_comes_first() -> None:
+    # A batch of 4 makes the 26 seeded requests span 7 queries, the same
+    # shape as 500 newer requests the person cannot approve and one they can.
     _seed_newer_others_and_one_older_waiting()
     operator = AsyncMock(return_value=_operator(tenant_id=_TENANT_A))
 
-    with patch("meho_backplane.ui.routes.approvals.routes._WAITING_SORT_CAP", 10):
+    with patch("meho_backplane.ui.routes.approvals.routes._WAITING_SCAN_BATCH", 4):
         page_one = _get_list("/ui/approvals/list?tab=pending&order=newest", operator)
         page_two = _get_list(
             "/ui/approvals/list?tab=pending&order=newest&offset=25&partial=rows", operator
         )
 
-    assert _row_ops(page_one) == [f"own.{i:02d}" for i in range(24, -1, -1)]
-    assert _WAITING_BADGE not in page_one
-    assert _waiting_ops(page_two) == ["older.waiting"]
+    ops_one = _row_ops(page_one)
+    assert ops_one[0] == "older.waiting"
+    assert _waiting_ops(page_one) == ["older.waiting"]
+    assert ops_one[1:] == [f"own.{i:02d}" for i in range(24, 0, -1)]
+    ops_two = re.findall(r'aria-label="Review approval request for ([^"]+)"', page_two)
+    assert ops_two == ["own.00"]
 
 
 # ---------------------------------------------------------------------------

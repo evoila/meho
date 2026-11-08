@@ -9,8 +9,10 @@ that need this person sit at the top. The check is
 :func:`~meho_backplane.operations.approval_rights.approve_right`, the same
 one the detail modal and the approve itself use. The order inside each
 group stays as the database returned it, so a change ticket's steps keep
-their oldest-first order. The route splits every pending request before
-it cuts the page, so "Load more" goes on with the same order.
+their oldest-first order. The route reads every pending request in
+batches and feeds each batch to a :class:`WaitingFirstPager` before it cuts
+the page, so "Load more" goes on with the same order however long the
+queue is.
 """
 
 from __future__ import annotations
@@ -22,21 +24,40 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_rights import approve_right
 
-__all__ = ["waiting_for_me_first"]
+__all__ = ["WaitingFirstPager"]
 
 
-def waiting_for_me_first(
-    rows: Sequence[ApprovalRequest],
-    operator: Operator | None,
-) -> tuple[list[ApprovalRequest], set[uuid.UUID]]:
-    """Return *rows* with the ones *operator* may approve first, and their ids.
+class WaitingFirstPager:
+    """Cut one page of "waiting for you first" out of batches of rows.
 
-    *operator* is ``None`` when the person could not be checked; then the
-    rows keep their order and none is marked, so the page never says
-    "waiting for you" without a real check.
+    The route reads the pending queue in batches and passes each one to
+    :meth:`add`, in the database order. The pager keeps only the first
+    ``offset + size + 1`` rows of each group, which is all a page at
+    *offset* can need. So memory stays small for a long queue, and a
+    request waiting for this person is still on page one when hundreds of
+    newer requests are not.
     """
-    if operator is None:
-        return list(rows), set()
-    waiting = {row.id for row in rows if approve_right(operator, row).may_approve}
-    # sorted() is stable: each group keeps the order the database returned.
-    return sorted(rows, key=lambda row: row.id not in waiting), waiting
+
+    def __init__(self, operator: Operator, *, offset: int, size: int) -> None:
+        self._operator = operator
+        self._offset = offset
+        self._size = size
+        self._keep = offset + size + 1
+        self._waiting: list[ApprovalRequest] = []
+        self._others: list[ApprovalRequest] = []
+
+    def add(self, rows: Sequence[ApprovalRequest]) -> None:
+        """Split one batch of *rows* into the two groups."""
+        for row in rows:
+            waiting = approve_right(self._operator, row).may_approve
+            group = self._waiting if waiting else self._others
+            if len(group) < self._keep:
+                group.append(row)
+
+    def page(self) -> tuple[list[ApprovalRequest], bool, set[uuid.UUID]]:
+        """Return ``(rows, has_more, waiting ids)`` for the page."""
+        ordered = (self._waiting + self._others)[: self._keep]
+        end = self._offset + self._size
+        rows = ordered[self._offset : end]
+        waiting_ids = {row.id for row in self._waiting}
+        return rows, len(ordered) > end, {row.id for row in rows if row.id in waiting_ids}

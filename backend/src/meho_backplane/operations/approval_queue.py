@@ -3689,7 +3689,8 @@ async def list_pending(
     newest request first; ``"oldest"`` lists the oldest first, which is the
     order a chain of requests under one change ticket was sent in. The
     oldest-first order breaks ties on ``id`` so it matches the step numbers
-    :func:`pending_chain_positions` gives.
+    :func:`pending_chain_positions` gives. Both orders break ties on ``id``,
+    so pages read one after another (``offset``) never skip or repeat a row.
     """
     stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
     if status is not None:
@@ -3699,7 +3700,7 @@ async def list_pending(
     if order == "oldest":
         stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
     else:
-        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc(), ApprovalRequest.id.desc())
     stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return list(result.scalars().all())

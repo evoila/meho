@@ -24,6 +24,7 @@ from kubernetes_asyncio.client.models import (
     V1Container,
     V1ContainerImage,
     V1ContainerStatus,
+    V1EphemeralContainer,
     V1ListMeta,
     V1Node,
     V1NodeCondition,
@@ -453,6 +454,44 @@ async def test_images_init_container_counts_as_use() -> None:
     assert flags[_OLD_TAG] is True
 
 
+async def test_images_debug_container_counts_as_use() -> None:
+    status = V1ContainerStatus(
+        name="debug",
+        image=_OLD_TAG,
+        image_id=f"registry.example/old/app@{_OLD_DIGEST}",
+        ready=False,
+        restart_count=0,
+    )
+    pod = V1Pod(
+        spec=V1PodSpec(
+            containers=[],
+            ephemeral_containers=[V1EphemeralContainer(name="debug", image=_OLD_TAG)],
+        ),
+        status=V1PodStatus(phase="Running", ephemeral_container_statuses=[status]),
+    )
+    result, _ = await _run("k8s_node_images", _Cluster(nodes=[_images_node()], pods=[pod]))
+    flags = {r["names"][1]: r["used_by_running_pod"] for r in result["rows"]}
+    assert flags[_OLD_TAG] is True
+    assert result["nodes"][0]["unused_size_bytes"] == 200 * 1024**2 + 118 * _GB // 10
+
+
+async def test_images_debug_container_status_alone_counts_as_use() -> None:
+    status = V1ContainerStatus(
+        name="debug",
+        image="registry.example/mirror/app:latest",
+        image_id=f"docker-pullable://registry.example/old/app@{_OLD_DIGEST}",
+        ready=False,
+        restart_count=0,
+    )
+    pod = V1Pod(
+        spec=V1PodSpec(containers=[]),
+        status=V1PodStatus(phase="Running", ephemeral_container_statuses=[status]),
+    )
+    result, _ = await _run("k8s_node_images", _Cluster(nodes=[_images_node()], pods=[pod]))
+    flags = {r["names"][1]: r["used_by_running_pod"] for r in result["rows"]}
+    assert flags[_OLD_TAG] is True
+
+
 @pytest.mark.parametrize("phase", ["Succeeded", "Failed"])
 async def test_images_of_finished_pods_are_not_in_use(phase: str) -> None:
     cluster = _Cluster(nodes=[_images_node()], pods=[_pod(_BIG_TAG, phase=phase)])
@@ -512,11 +551,35 @@ async def test_images_edge_inputs_no_images_null_size_no_names() -> None:
     assert [r["size_bytes"] for r in result["rows"]] == [5, None]
     assert result["rows"][1]["names"] == []
     assert result["rows"][1]["used_by_running_pod"] is False
+    assert result["nodes"][0]["total_size_bytes"] is None
+    assert result["nodes"][0]["unused_size_bytes"] is None
 
     empty, _ = await _run("k8s_node_images", _Cluster(nodes=[_node()]))
     assert empty["rows"] == []
     assert empty["nodes"][0]["image_count"] == 0
     assert empty["nodes"][0]["total_size_bytes"] == 0
+
+
+async def test_images_unknown_size_makes_the_total_unknown() -> None:
+    node = _node(
+        images=[V1ContainerImage(names=[_OLD_TAG], size_bytes=None), _image([_BIG_TAG], 10)]
+    )
+    result, _ = await _run("k8s_node_images", _Cluster(nodes=[node]))
+    summary = result["nodes"][0]
+    assert summary["total_size_bytes"] is None
+    assert summary["unused_count"] == 2
+    assert summary["unused_size_bytes"] is None
+
+
+async def test_images_unknown_size_of_a_used_image_keeps_the_unused_total() -> None:
+    node = _node(
+        images=[V1ContainerImage(names=[_OLD_TAG], size_bytes=None), _image([_BIG_TAG], 10)]
+    )
+    result, _ = await _run("k8s_node_images", _Cluster(nodes=[node], pods=[_pod(_OLD_TAG)]))
+    summary = result["nodes"][0]
+    assert summary["total_size_bytes"] is None
+    assert summary["unused_count"] == 1
+    assert summary["unused_size_bytes"] == 10
 
 
 async def test_images_fifty_rows_flag_a_possibly_cut_list() -> None:

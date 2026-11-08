@@ -25,8 +25,10 @@ Limits the answer states instead of hiding:
   ``unknown`` with a short ``error``. It never looks like "no data", an empty
   list or "not used". A 401 is raised, so the dispatcher can renew the login.
 * A pod counts as using an image when it is not ``Succeeded`` or ``Failed``
-  and one of its containers (also init containers) runs that image, by name or
-  by digest.
+  and one of its containers (also init and debug containers) runs that image,
+  by name or by digest.
+* A total size is ``null`` when one of the images it adds up has no size: a
+  sum without it would show less disk use than there is.
 
 References
 ----------
@@ -267,15 +269,21 @@ def _pod_image_refs(pod: Any) -> set[str]:
     """Every name and digest a running pod uses for its images."""
     refs: set[str] = set()
     spec = pod.spec
-    for container in ((spec.containers if spec else None) or []) + (
-        (spec.init_containers if spec else None) or []
-    ):
-        if container.image:
-            refs.add(container.image)
+    for attr in ("containers", "init_containers", "ephemeral_containers"):
+        for container in (getattr(spec, attr) if spec else None) or []:
+            if container.image:
+                refs.add(container.image)
     status = pod.status
-    for st in ((status.container_statuses if status else None) or []) + (
-        (status.init_container_statuses if status else None) or []
-    ):
+    statuses = [
+        st
+        for attr in (
+            "container_statuses",
+            "init_container_statuses",
+            "ephemeral_container_statuses",
+        )
+        for st in ((getattr(status, attr) if status else None) or [])
+    ]
+    for st in statuses:
         for text in (st.image, _strip_scheme(st.image_id or "")):
             if text:
                 refs.add(text)
@@ -328,6 +336,12 @@ def _image_rows(node: Any, refs: set[str] | None) -> list[dict[str, Any]]:
     return rows
 
 
+def _total_size(rows: list[dict[str, Any]]) -> int | None:
+    """The sum of the image sizes, or ``None`` when one size is not known."""
+    sizes = [r["size_bytes"] for r in rows]
+    return None if None in sizes else sum(sizes)
+
+
 async def _node_images(
     api_client: client.ApiClient, node: Any
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -348,11 +362,10 @@ async def _node_images(
         except Exception as exc:
             pods_error = _error(exc)
     rows = _image_rows(node, refs)
-    sizes = [r["size_bytes"] or 0 for r in rows]
     summary: dict[str, Any] = {
         "name": name,
         "image_count": len(rows),
-        "total_size_bytes": sum(sizes),
+        "total_size_bytes": _total_size(rows),
         "list_may_be_cut": len(rows) >= _KUBELET_DEFAULT_MAX_IMAGES,
         "pods": {"state": _UNKNOWN, "error": pods_error} if pods_error else {"state": _PRESENT},
         "unused_count": None,
@@ -361,7 +374,7 @@ async def _node_images(
     if refs is not None:
         unused = [r for r in rows if not r["used_by_running_pod"]]
         summary["unused_count"] = len(unused)
-        summary["unused_size_bytes"] = sum(r["size_bytes"] or 0 for r in unused)
+        summary["unused_size_bytes"] = _total_size(unused)
     return summary, rows
 
 

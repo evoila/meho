@@ -1217,10 +1217,12 @@ empty `rows` and `node_state: "not present"`.
   `size_bytes`), biggest first, each with `used_by_running_pod`. The flag
   comes from the pods that run on the node (field selector
   `spec.nodeName`). A pod counts unless it is `Succeeded` or `Failed`. An
-  image matches by name or by digest, also for init containers. `nodes[]`
-  holds the totals: image count, total bytes, unused count and bytes. When
-  the pods cannot be read, the flag and the unused totals are `null`, never
-  `false`, and `nodes[].pods.state` says why.
+  image matches by name or by digest, also for init containers and debug
+  (ephemeral) containers. `nodes[]` holds the totals: image count, total
+  bytes, unused count and bytes. When the pods cannot be read, the flag and
+  the unused totals are `null`, never `false`, and `nodes[].pods.state` says
+  why. A byte total is `null` when one of its images has no size, so it
+  never shows less disk use than there is.
 - The kubelet lists at most 50 images in the node status by default. A node
   with 50 or more rows carries `list_may_be_cut: true`.
 - A 401 is raised, so the dispatcher can renew the login. Long answers

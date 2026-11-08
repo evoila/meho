@@ -124,7 +124,7 @@ K8S_NODE_IMAGES_RESPONSE_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "name": {"type": ["string", "null"]},
                     "image_count": {"type": "integer"},
-                    "total_size_bytes": {"type": "integer"},
+                    "total_size_bytes": {"type": ["integer", "null"]},
                     "list_may_be_cut": {"type": "boolean"},
                     "pods": _STATE_PART,
                     "unused_count": {"type": ["integer", "null"]},
@@ -196,7 +196,8 @@ K8S_NODE_IMAGES_LLM_INSTRUCTIONS: dict[str, Any] = {
         "biggest first, per node. names holds the tags and digests of one image. "
         "list_may_be_cut true means the node lists 50 images, the kubelet default "
         "limit, so more may exist. used_by_running_pod is null (never false) when "
-        "the pods could not be read: see nodes[].pods."
+        "the pods could not be read: see nodes[].pods. total_size_bytes and "
+        "unused_size_bytes are null when an image they add up has no size."
     ),
     "next_step": (
         "Call k8s.node.disk to see free space and pressure conditions. Deleting "

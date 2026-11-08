@@ -196,7 +196,11 @@ async def _answers(client: httpx.AsyncClient, token: str) -> dict[str, Any]:
 
     live = await client.get("/api/v1/health/live", headers=auth)
     assert live.status_code == 200, live.text
-    out["live"], out["live_tenants"] = _split_tenants(live.json())
+    live_body = live.json()
+    # #5504: the server's time moves between the two rounds, so check it is
+    # there and leave it out of the before-and-after compare.
+    assert live_body.pop("server_time"), live_body
+    out["live"], out["live_tenants"] = _split_tenants(live_body)
     for name in ("operator", "admin"):
         resp = await client.get(f"/api/v1/rbac-test/{name}", headers=auth)
         out[f"rbac_{name}"] = (resp.status_code, resp.json())

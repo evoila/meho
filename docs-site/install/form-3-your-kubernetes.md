@@ -175,10 +175,15 @@ curl -fsS http://localhost:8000/healthz
 curl -sS http://localhost:8000/ready | jq .
 kill "$PF"
 
-# From outside the cluster, through the ingress:
-curl -fsS https://meho.example.com/healthz
-curl -fsS https://meho.example.com/api/v1/auth-config
+# From outside the cluster, through the ingress. With the self-signed
+# certificate, curl needs its authority, the ca.crt key of the Secret
+# meho-core-tls. With your own TLS Secret, leave out --cacert.
+kubectl -n meho get secret meho-core-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > meho-ca.crt
+curl -fsS --cacert meho-ca.crt https://meho.example.com/healthz
+curl -fsS --cacert meho-ca.crt https://meho.example.com/api/v1/auth-config
 ```
+
+Keep `meho-ca.crt`. Step 6 installs it on your workstation.
 
 If `/healthz` is green but `/ready` answers 503, MEHO may not trust a
 certificate. See
@@ -201,13 +206,8 @@ sudo install -m 0755 meho /usr/local/bin/meho
 
 With the self-signed certificate, install its authority in your
 workstation's system trust store first. The CLI checks TLS against that
-store. Get the authority from the Secret `meho-core-tls`:
-
-```bash
-kubectl -n meho get secret meho-core-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > meho-ca.crt
-```
-
-How to add it to the store is in
+store, and `meho login` has no option for a certificate file. Use the
+file `meho-ca.crt` from Step 5. How to add it to the store is in
 [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store).
 
 Then log in:

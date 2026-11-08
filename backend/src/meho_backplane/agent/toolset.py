@@ -152,6 +152,7 @@ from meho_backplane.agent.toolset_discovery import (
     build_write_meta_tools,
     keep_allowed_connectors,
 )
+from meho_backplane.agent.toolset_operations import build_operation_meta_tools
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import capability_satisfied, role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
@@ -193,12 +194,13 @@ _CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset({"call_operation", "preview_
 
 #: The connector-execution meta-tools. These three form the agent's working
 #: surface over the G0.6 substrate (CLAUDE.md "the load-bearing pattern":
-#: pick connector → list operation groups → search operations → call). The
-#: parameter schemas mirror the canonical MCP ``inputSchema`` fragments in
-#: :mod:`meho_backplane.mcp.tools.operations`; the descriptions are the
-#: model's prompt for when to reach for each tool. The full
-#: :data:`_META_TOOL_CATALOG` appends the broadcast coordination tools built
-#: by :func:`_build_broadcast_meta_tools`.
+#: pick connector → list operation groups → search operations → call). These
+#: are the older hand-written copies. They differ from the MCP tools in
+#: :mod:`meho_backplane.mcp.tools.operations` (no exact-op mode, no
+#: ``preview_hash``). With the ``agent_operation_tools_from_mcp`` setting on,
+#: :func:`_active_catalog` uses :data:`_MCP_OPERATIONS_META_TOOLS` in their
+#: place (#4754). The full :data:`_META_TOOL_CATALOG` appends the discovery,
+#: broadcast and context tools.
 _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
     MetaToolSpec(
         name="list_operation_groups",
@@ -308,6 +310,26 @@ _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
     *build_write_meta_tools(),
     *build_docs_meta_tools(),
 )
+
+#: The operation tools built from the MCP tools (#4754), by name. They take
+#: the place of the hand-written copies when the
+#: ``agent_operation_tools_from_mcp`` setting is on.
+_MCP_OPERATIONS_META_TOOLS: dict[str, MetaToolSpec] = {
+    spec.name: spec for spec in build_operation_meta_tools()
+}
+
+
+def _active_catalog() -> tuple[MetaToolSpec, ...]:
+    """Return the catalog for a run, with the operation tools the setting picks.
+
+    Off (the default): :data:`_META_TOOL_CATALOG` as it is. On: the same
+    catalog, with the three operation tools built from the MCP tools in the
+    place of the hand-written copies. Tool names and order do not change.
+    """
+    if not get_settings().agent_operation_tools_from_mcp:
+        return _META_TOOL_CATALOG
+    return tuple(_MCP_OPERATIONS_META_TOOLS.get(m.name, m) for m in _META_TOOL_CATALOG)
+
 
 #: Catalog tools a spec must name in ``meta_tools`` to get (#3759, #5852).
 #: They return stored tenant text or vendor docs, or write Memory and
@@ -620,7 +642,7 @@ def resolve_agent_toolset(
 
     tools: list[Tool[Operator]] = []
     disabled: dict[str, DisabledReason] = {}
-    for meta in _META_TOOL_CATALOG:
+    for meta in _active_catalog():
         # Side 1 — toolset spec: omitted allow-list means "all"; a present
         # list must contain the name.
         # Opt-in tools additionally need an explicit allow-list entry.

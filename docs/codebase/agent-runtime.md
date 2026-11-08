@@ -520,6 +520,54 @@ How the five added tools are wired (`agent/toolset_discovery.py`):
 - Each call writes the agent tool call row, with the MCP tool's `op_class`
   (`write` for the two add tools).
 
+### Operation tools from the MCP tools (#4754)
+
+The three operation tools (`list_operation_groups`, `search_operations`,
+`call_operation`) have two forms. A setting picks one for every hosted run:
+
+- **Off (the default):** the older hand-written copies in `agent/toolset.py`.
+  They have no exact-op mode (`op_id` on `search_operations`) and no
+  `preview_hash` or `idempotency_key` on `call_operation`.
+- **On (`AGENT_OPERATION_TOOLS_FROM_MCP=true`):** `agent/toolset_operations.py`
+  builds the three tools from the MCP tools. The input schema is the MCP wire
+  schema, the text is the MCP text, and the role floor is the MCP floor. The
+  handlers are the same shared handlers as before, so the approval wait of
+  `call_operation` does not change.
+
+The setting stays off until model tests show the new form helps. Tool names
+do not change, so a definition's `meta_tools` list works with both forms.
+
+Left out of the hosted `call_operation` when the setting is on
+(`LEFT_OUT_FIELDS` in `agent/toolset_operations.py`, with the reason next to
+it):
+
+| Field | Why a hosted run does not get it |
+|---|---|
+| `work_ref` | MEHO sets the run's change reference itself, from the trigger that started the run. The model must not replace it on the audit rows. The same rule holds for `work_ref` on `broadcast_announce`. |
+| `async`, `run_id`, `wait_seconds` | The hosted tool waits until each call ends, also while the call waits for an approval. A background call and its status check are not needed. |
+
+`list_operation_groups` and `search_operations` leave out nothing. The
+hosted `call_operation` text is the MCP text without the part about `async`,
+plus one sentence that says each call waits until it ends.
+
+Two checks run before each handler:
+
+- The arguments are checked against the MCP input schema without the
+  left-out fields. A bad argument, or `search_operations` with neither
+  `query` nor `op_id`, goes back to the model as a retry.
+- An unknown `op_id` in exact-op mode goes back to the model as a failed tool
+  result with `reason: unknown_op` and the next step. The run goes on.
+
+Destructive operations: with the setting on, a hosted run can call a
+`destructive` operation the same way an MCP client can. It must first call
+`preview_operation` with the same arguments and pass the `preview_hash`.
+Then the call waits until a person approves it. With the setting off, the
+hosted `call_operation` has no `preview_hash` field, so MEHO refuses every
+destructive call from a hosted run.
+
+A test (`tests/test_agent_toolset_operations.py`) checks that each hosted
+schema is the MCP wire schema minus the fields above.
+
 Known gap: the delivery receipt lists a tool the role may not use
 (`role_below_floor`), but not a docs tool left out for `capability_missing`.
 The `agent_toolset_resolved` log line shows both.

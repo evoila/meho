@@ -11891,7 +11891,7 @@
           "approvals"
         ],
         "summary": "Decide Approval Request",
-        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.\n\nAn approval needs a fresh approval sign-in (#3979, #5515), the same\ncheck as ``/approve``: otherwise the route answers 401 with\n``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\nand ``max_age`` (RFC 9470), and the request stays pending. A rejection\nneeds no fresh sign-in.",
+        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.\n\nAn approval needs a fresh approval sign-in (#3979, #5515), the same\ncheck as ``/approve``: otherwise the route answers 401 with\n``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\nand ``max_age`` (RFC 9470), and the request stays pending. A rejection\nneeds no fresh sign-in.\n\nWith ``async: true`` an approval answers at once (#5110): the decision\nis saved and audited as above, the operation starts in the background\nthrough the same resume path (same run claim, same audit), and the\nanswer is HTTP 202 with the run id (:class:`DecideAcceptedBody`).",
         "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
         "parameters": [
           {
@@ -11932,6 +11932,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DecideResponseBody"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Approved; the operation runs in the background (async: true).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecideAcceptedBody"
                 }
               }
             }
@@ -21899,6 +21909,94 @@
         }
       }
     },
+    "/ui/approvals/{request_id}/run": {
+      "get": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approval Run State",
+        "description": "The run part of the outcome card, as it is now.",
+        "operationId": "approval_run_state_ui_approvals__request_id__run_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/approvals/{request_id}/row": {
+      "get": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approval History Row",
+        "description": "One row of the approvals list, as it is now.",
+        "operationId": "approval_history_row_ui_approvals__request_id__row_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/approvals/{request_id}/outcome-check": {
       "post": {
         "tags": [
@@ -21929,6 +22027,54 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runs/notices": {
+      "get": {
+        "tags": [
+          "ui-run-notices"
+        ],
+        "summary": "Run Notices",
+        "description": "One notice per ended run of *run_id*; a hidden marker for an unknown one.",
+        "operationId": "run_notices_ui_runs_notices_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "default": [],
+              "title": "Run Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -31212,6 +31358,67 @@
         "title": "DbStatus",
         "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe.\n\n``revision``, ``head`` and ``detail`` (#4830) carry the probe's\nvalues, so an operator can confirm an upgrade from ``meho status``\nwithout a shell into the pod: ``revision`` is the revision stamped\nin the database, ``head`` the revision this build expects, and\n``detail`` the same text ``/ready`` shows for the ``db`` check.\n``revision`` is ``None`` when the database has no revision or could\nnot be read; ``head`` is ``None`` when the migration scripts could\nnot be loaded. After a rollback ``revision`` is newer than ``head``\nwhile ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,\n\"Rollback contract\"). The defaults keep older response decoders\nworking."
       },
+      "DecideAcceptedBody": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "decided_by": {
+            "type": "string",
+            "nullable": true,
+            "title": "Decided By"
+          },
+          "decided_by_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Decided By Name"
+          },
+          "self_approved": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Self Approved"
+          },
+          "approval_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Approval Rule"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "pending"
+          },
+          "async": {
+            "type": "boolean",
+            "title": "Async",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "decision",
+          "reason",
+          "run_id"
+        ],
+        "title": "DecideAcceptedBody",
+        "description": "Answer of ``/decide`` with ``async: true`` on an approval (HTTP 202, #5110).\n\nThe decision is saved and audited. The operation runs in the\nbackground: ``run_id`` names that run. Read the request with\n``GET /api/v1/approvals/{id}`` until ``result_state`` is no longer\n``started`` or ``not_started``. The decision fields mean the same as\nin :class:`DecideResponseBody`."
+      },
       "DecideRequestBody": {
         "properties": {
           "decision": {
@@ -31225,6 +31432,12 @@
             "title": "Reason",
             "description": "Optional rationale recorded on the decision audit row. End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.",
             "default": ""
+          },
+          "async": {
+            "type": "boolean",
+            "title": "Async",
+            "description": "Answer at once (#5110). When true and the decision is 'approved', MEHO saves the decision, starts the operation in the background and answers HTTP 202 with a run id. Read the request with GET /api/v1/approvals/{id} to see the run end (result_state). Ignored on a rejection. Default false: the answer comes after the operation ends, as before.",
+            "default": false
           }
         },
         "additionalProperties": false,

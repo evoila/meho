@@ -78,8 +78,10 @@ Route inventory
   and no Approve/Deny actions. Mints + re-sets the ``meho_csrf`` cookie so
   the modal's own ``hx-headers`` echo lines up with the cookie (the modal
   render rotates it -- #1693 / #1754).
-* ``POST /ui/approvals/{id}/approve`` -- approve in-process, re-dispatch
-  the parked op, record the add-on step event.
+* ``POST /ui/approvals/{id}/approve`` -- approve in-process, start the
+  parked op in the background and answer at once (#5110), record the
+  add-on step event. ``GET /ui/approvals/{id}/run`` and ``.../row``
+  (:mod:`.run_watch`) show the run as it is now.
 * ``POST /ui/approvals/{id}/reject`` -- reject in-process, publish.
 
 The ``params`` / ``params_hash`` columns are internal (swap-defence +
@@ -177,7 +179,6 @@ from meho_backplane.operations.approval_queue import (
     pending_chain_positions,
     record_approval_step_event,
     reject_request,
-    resume_dispatch_after_approval,
 )
 from meho_backplane.operations.approval_rights import (
     WEB_APPROVAL_HINT,
@@ -197,9 +198,13 @@ from meho_backplane.ui.routes.approvals.render import (
     RESULT_STATE_PILL,
     STATUS_PILL_CLASS,
     project_request_to_view,
-    project_run_result,
-    project_stored_run_result,
     set_csrf_cookie,
+)
+from meho_backplane.ui.routes.approvals.run_watch import (
+    POLL_SECONDS,
+    build_run_watch_router,
+    live_runs_for,
+    start_approved_run,
 )
 from meho_backplane.ui.templating import get_templates
 
@@ -584,6 +589,8 @@ def build_approvals_router() -> APIRouter:
         """Reject a pending request in-process (delegates below)."""
         return await _decide(request, session, request_id, decision="rejected", reason=reason)
 
+    # The card and the list ask these again while a run is going (#5110).
+    router.include_router(build_run_watch_router())
     return router
 
 
@@ -683,15 +690,21 @@ async def _build_history_context(
             target_names = await resolve_target_names(
                 db_session, tenant_id=session.tenant_id, requests=rows
             )
+    # Where each approved run is now; a running row asks again (#5110).
+    live = await live_runs_for(session.tenant_id, rows)
     return {
         "requests": [
-            project_request_to_view(
-                row,
-                chain=positions.get(row.id),
-                target_name=target_names.get(row.target_id) if row.target_id else None,
-            )
+            {
+                **project_request_to_view(
+                    row,
+                    chain=positions.get(row.id),
+                    target_name=target_names.get(row.target_id) if row.target_id else None,
+                ),
+                "live": live.get(row.id),
+            }
             for row in rows
         ],
+        "poll_seconds": POLL_SECONDS,
         "order": resolved_order,
         "order_choice": order_choice,
         "status_pill_class": STATUS_PILL_CLASS,
@@ -849,9 +862,10 @@ async def _decide(
     and an ``HX-Trigger`` response header fires ``meho:approval-decided`` so
     the app-shell bell decrements its count and closes the dialog (the
     issue's "modal closes and the badge decrements"). An approve additionally
-    re-dispatches the parked op via the shared
-    :func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`
-    helper (the existing approve path), exactly as the REST route does.
+    starts the parked op in the background
+    (:func:`~meho_backplane.ui.routes.approvals.run_watch.start_approved_run`,
+    #5110) and answers within a second: a quick run shows its result, a
+    long one shows "running" and the card asks again until it ends.
 
     A recoverable decision failure (self-approval 403, already-decided 409,
     role 403, not-found 404, a sign-in too old to approve 401) re-renders
@@ -899,28 +913,13 @@ async def _decide(
             error_hint=WEB_APPROVAL_HINT if approve_refused else None,
         )
 
-    # Approve re-dispatches the parked op (the committed approval is the
-    # authorization). Reject does not. Mirrors the REST /approve route; the
-    # service helper owns target re-hydration + the fail-closed branches.
+    # Approve starts the parked op in the background (the committed approval
+    # is the authorization) and answers within a second, however long the
+    # op runs (#5110). Reject runs nothing. The card asks again until the
+    # run ends.
     run: dict[str, object] | None = None
     if decision == "approved":
-        dispatch_result = await resume_dispatch_after_approval(
-            operator=operator, request=approval, params=None
-        )
-        log.info(
-            "ui_approval_redispatched",
-            approval_request_id=str(request_id),
-            op_id=approval.op_id,
-            dispatch_status=dispatch_result.status,
-            operator_sub=operator.sub,
-        )
-        run = project_run_result(dispatch_result, parked_op_id=approval.op_id)
-        if run is None:
-            # Another resumer (usually the waiting requester) won the run
-            # claim. It may have refused the run or run it and failed, so
-            # the card reads the stored result instead of saying the
-            # operation was re-dispatched.
-            run = await project_stored_run_result(approval)
+        run = await start_approved_run(operator, approval)
 
     context: dict[str, object] = {
         # The reason already passed validation in the service, so this
@@ -933,6 +932,7 @@ async def _decide(
         "self_approval_message": self_approval_confirmation(
             getattr(approval, "_approval_rule", None)
         ),
+        "poll_seconds": POLL_SECONDS,
     }
     response = get_templates().TemplateResponse(request, "approvals/_decided.html", context)
     # Drive the app-shell bell: decrement the live count + close the modal.

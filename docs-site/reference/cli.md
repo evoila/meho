@@ -413,6 +413,7 @@ meho approvals approve <id> [<id>...] | --filter-work-ref REF --in-order [flags]
 - `--in-order` — approve every pending request of --filter-work-ref oldest first; stop at the first failure
 - `--json` — emit raw JSON response instead of summary
 - `--reason` — optional rationale for the approval; the command help explains the Instructed-by: layout
+- `--wait` — wait until the approved operation has ended, then print how it ended (asks again every few seconds)
 
 ### `meho approvals list`
 

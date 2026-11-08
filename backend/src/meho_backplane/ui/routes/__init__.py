@@ -115,6 +115,7 @@ from meho_backplane.ui.routes.memory import build_memory_router
 from meho_backplane.ui.routes.operations import build_operations_router
 from meho_backplane.ui.routes.pairing import build_pairing_router
 from meho_backplane.ui.routes.retrieval import build_retrieval_router
+from meho_backplane.ui.routes.run_notices import build_run_notices_router
 from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.runners import build_runners_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
@@ -252,6 +253,8 @@ def build_router() -> APIRouter:
     router.include_router(build_approvals_router())
     # Mark a run with an unknown outcome as checked (#5026).
     router.include_router(build_outcome_check_router())
+    # The "the run has ended" notice on every page (#5110).
+    router.include_router(build_run_notices_router())
     # Scheduler lands ``/ui/scheduler`` + ``/ui/scheduler/{trigger_id}`` +
     # the literal ``/ui/scheduler/create`` + ``/ui/scheduler/validate-cron``
     # + ``/ui/scheduler/{id}/cancel`` write routes (G10.8-T6 #1826); the

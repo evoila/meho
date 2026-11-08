@@ -201,9 +201,9 @@ asks for it. No grant lets a delete run without that approval. An agent
 can never approve: approval is a human decision in the web console or
 the CLI.
 
-One exception: a member of the `MEHO-SA-Operators` group may approve
-their own changes at every risk level, deletes included. Everyone else
-needs a second person.
+One exception: a member of the `MEHO-SA-Operators` or the `MEHO-Admins`
+group may approve their own changes at every risk level, deletes
+included. Everyone else needs a second person.
 
 1. **Preview first.** Call `preview_operation` with the same params. It
    shows what will be deleted and returns a `preview_hash`. Nothing is
@@ -211,7 +211,7 @@ needs a second person.
 2. **Ask for approval.** Call `call_operation` with the same params and
    the `preview_hash`. The request then waits until a person approves it.
    You cannot approve your own delete, unless you are in
-   `MEHO-SA-Operators`.
+   `MEHO-SA-Operators` or `MEHO-Admins`.
 3. **The delete runs** after the approval. MEHO reports `deleted: true`
    only after a read of the object answers 404.
 

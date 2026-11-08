@@ -105,12 +105,14 @@ def _reducer() -> JsonFluxReducer:
     assemble path does not read app settings (``get_settings()``) in this
     pure-module test; it sizes the envelope's inline sample, not the collapse
     decision. The explicit admission guard keeps the pre-threshold payload
-    walk equally configuration-free.
+    walk equally configuration-free, and so does ``answer_ready=False`` (the
+    default of the ``JSONFLUX_ANSWER_READY`` setting).
     """
     return JsonFluxReducer(
         byte_threshold=_BYTE_THRESHOLD,
         sample_byte_budget=_BYTE_THRESHOLD,
         admission_guard=AdmissionGuard(),
+        answer_ready=False,
     )
 
 

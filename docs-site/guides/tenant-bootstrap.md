@@ -122,7 +122,8 @@ hyphen.
 
 MEHO checks that a person is in only one role group. It knows the role
 groups by name, from the `JWT_ROLE_GROUPS` setting. The default is the
-five `MEHO-*` groups that ship with MEHO.
+five `MEHO-*` groups that ship with MEHO. Upper and lower case do not
+count: `meho-acme-readers` is the same group as `MEHO-acme-Readers`.
 
 Add the new names to the setting, through `extraEnv` in your Helm
 values. The value replaces the default, so list the five default groups

@@ -52,9 +52,12 @@ image. Skips when Docker is missing or the container cannot start.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import secrets
+import struct
 import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -86,6 +89,7 @@ from meho_backplane.core.keycloak import (
     TenantPlan,
     finish_realm,
 )
+from meho_backplane.core.keycloak_recovery import ADD_RECOVERY_CODES, RECOVERY_STEP
 from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
@@ -109,6 +113,10 @@ class _Keycloak:
     env: dict[str, str]
     first_login: dict[str, str] = field(default_factory=dict)
     output: str = ""
+    # The secret of each person's code app, and the last code sent for it:
+    # Keycloak takes a code only once.
+    code_secrets: dict[str, str] = field(default_factory=dict)
+    last_code: dict[str, int] = field(default_factory=dict)
 
 
 class _FakeStore:
@@ -308,6 +316,22 @@ async def test_first_run_makes_the_people_and_removes_the_first_start_account(
     approver = _user(keycloak, "approver")
     assert approver["groups"] == ["MEHO-SA-Operators"]
     assert sorted(approver["requiredActions"]) == ["CONFIGURE_TOTP", "UPDATE_PASSWORD"]
+    assert "recovery codes: set" in keycloak.output
+    assert _recovery_settings(keycloak) == ("true", "ALTERNATIVE")
+
+
+_AUTHENTICATION = "/admin/realms/meho/authentication"
+
+
+def _recovery_settings(kc: _Keycloak) -> tuple[str | None, str]:
+    """The "Add recovery codes" option of "Configure OTP" and the recovery step's requirement."""
+    headers = _master_headers(kc)
+    action = httpx.get(
+        f"{kc.base_url}{_AUTHENTICATION}/required-actions/CONFIGURE_TOTP", headers=headers
+    ).json()
+    steps = httpx.get(f"{kc.base_url}{_AUTHENTICATION}/flows/browser/executions", headers=headers)
+    step = next(s for s in steps.json() if s.get("providerId") == RECOVERY_STEP)
+    return (action.get("config") or {}).get(ADD_RECOVERY_CODES), step["requirement"]
 
 
 def _allow_password_grant_on_cli(kc: _Keycloak) -> None:
@@ -320,18 +344,42 @@ def _allow_password_grant_on_cli(kc: _Keycloak) -> None:
     httpx.put(f"{admin}/clients/{client['id']}", headers=headers, json=client).raise_for_status()
 
 
-def _password_login(kc: _Keycloak, username: str, password: str) -> httpx.Response:
-    return _token(
-        kc,
-        "meho",
-        {
-            "grant_type": "password",
-            "client_id": "meho-cli",
-            "username": username,
-            "password": password,
-            "scope": "openid",
-        },
-    )
+def _code_at(secret: str, counter: int) -> str:
+    """The code an authenticator app shows in 30-second step *counter* (TOTP,
+    SHA-1, 6 digits; Keycloak takes the secret's bytes as the key)."""
+    digest = hmac.new(secret.encode(), struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    number = int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFFFFFF
+    return f"{number % 1_000_000:06d}"
+
+
+def _one_time_code(kc: _Keycloak, username: str) -> str:
+    """The person's current code; waits for the next one when this one was sent already."""
+    counter = int(time.time()) // 30
+    if kc.last_code.get(username) == counter:
+        time.sleep(30 - time.time() % 30 + 1)
+        counter = int(time.time()) // 30
+    kc.last_code[username] = counter
+    return _code_at(kc.code_secrets[username], counter)
+
+
+def _password_login(
+    kc: _Keycloak, username: str, password: str, code: str | None = None
+) -> httpx.Response:
+    data = {
+        "grant_type": "password",
+        "client_id": "meho-cli",
+        "username": username,
+        "password": password,
+        "scope": "openid",
+    }
+    if code is not None:
+        data["totp"] = code
+    return _token(kc, "meho", data)
+
+
+def _login_with_code(kc: _Keycloak, username: str, password: str) -> httpx.Response:
+    return _password_login(kc, username, password, _one_time_code(kc, username))
 
 
 def _finish_first_login(kc: _Keycloak, username: str) -> dict[str, Any]:
@@ -340,22 +388,55 @@ def _finish_first_login(kc: _Keycloak, username: str) -> dict[str, Any]:
     Keycloak refuses a direct login while a required action is pending or
     the profile is incomplete ("Account is not fully set up"): the realm's
     user profile wants a first name, a last name and an email, which the
-    person types in at the first browser login.
+    person types in at the first browser login. The person also sets up a
+    code app: here a code secret made up by the test, kept in *kc*.
     """
     admin = f"{kc.base_url}/admin/realms/meho"
     headers = _admin_headers(kc)
     user = _user(kc, username)
+    code_secret = secrets.token_urlsafe(20)
     user_rep = httpx.get(f"{admin}/users/{user['id']}", headers=headers).json()
     user_rep["requiredActions"] = []
     user_rep.update({"firstName": "Test", "lastName": username, "email": f"{username}@example.com"})
+    user_rep["credentials"] = [
+        {
+            "type": "otp",
+            "userLabel": "authenticator app",
+            "secretData": json.dumps({"value": code_secret}),
+            "credentialData": json.dumps(
+                {
+                    "subType": "totp",
+                    "digits": 6,
+                    "counter": 0,
+                    "period": 30,
+                    "algorithm": "HmacSHA1",
+                }
+            ),
+        }
+    ]
     httpx.put(f"{admin}/users/{user['id']}", headers=headers, json=user_rep).raise_for_status()
+    kc.code_secrets[username] = code_secret
     return user
+
+
+def _check_the_code_is_needed(kc: _Keycloak, username: str, password: str) -> None:
+    """The password alone, or with a wrong code, does not log the person in.
+
+    The pauses keep two failed logins more than a second apart: closer ones
+    make Keycloak's brute force guard lock the account for a minute.
+    """
+    old_code = _code_at(kc.code_secrets[username], int(time.time()) // 30 - 120)
+    for code in (None, old_code):
+        time.sleep(1.5)
+        refused = _password_login(kc, username, password, code)
+        assert refused.status_code in (400, 401), refused.text
+        assert refused.json()["error"] == "invalid_grant", refused.text
 
 
 async def _operator_for(
     kc: _Keycloak, username: str, password: str, monkeypatch: pytest.MonkeyPatch
 ) -> Any:
-    resp = _password_login(kc, username, password)
+    resp = _login_with_code(kc, username, password)
     assert resp.status_code == 200, resp.text
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{kc.base_url}/realms/meho")
     get_settings.cache_clear()
@@ -380,6 +461,7 @@ async def test_first_admin_must_change_the_password_then_is_a_platform_admin(
     # Once the first login's steps are done, the password from the Secret is
     # the one Keycloak holds, and the login carries the first admin's claims.
     _finish_first_login(keycloak, "admin")
+    _check_the_code_is_needed(keycloak, "admin", first_login["admin_password"])
     operator = await _operator_for(keycloak, "admin", first_login["admin_password"], monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is TenantRole.TENANT_ADMIN
@@ -393,6 +475,7 @@ async def test_second_person_is_an_operator(
     first_login = keycloak.first_login
     assert first_login["approver_username"] == "approver"
     _finish_first_login(keycloak, "approver")
+    _check_the_code_is_needed(keycloak, "approver", first_login["approver_password"])
 
     operator = await _operator_for(
         keycloak, "approver", first_login["approver_password"], monkeypatch
@@ -713,12 +796,12 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
     from meho_backplane.main import app
 
     first_login = keycloak.first_login
-    admin_token = _password_login(keycloak, "admin", first_login["admin_password"]).json()[
+    admin_token = _login_with_code(keycloak, "admin", first_login["admin_password"]).json()[
         "access_token"
     ]
-    approver_token = _password_login(keycloak, "approver", first_login["approver_password"]).json()[
-        "access_token"
-    ]
+    approver_token = _login_with_code(
+        keycloak, "approver", first_login["approver_password"]
+    ).json()["access_token"]
 
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
@@ -954,3 +1037,63 @@ async def test_a_run_as_meho_admin_without_the_console_admin_does_not_fail(
     assert "created" not in output
     assert older.created == []
     assert sorted(u["id"] for u in _master_users(keycloak)) == master_before
+
+
+def _turn_recovery_codes_off(kc: _Keycloak) -> None:
+    """Put the two settings back as a realm made before recovery codes has them."""
+    headers = _master_headers(kc)
+    url = f"{kc.base_url}{_AUTHENTICATION}/required-actions/CONFIGURE_TOTP"
+    action = httpx.get(url, headers=headers).json()
+    action["config"] = {**(action.get("config") or {}), ADD_RECOVERY_CODES: "false"}
+    httpx.put(url, headers=headers, json=action).raise_for_status()
+    url = f"{kc.base_url}{_AUTHENTICATION}/flows/browser/executions"
+    step = next(
+        s for s in httpx.get(url, headers=headers).json() if s.get("providerId") == RECOVERY_STEP
+    )
+    httpx.put(url, headers=headers, json={**step, "requirement": "DISABLED"}).raise_for_status()
+
+
+def _manage_realm_of_meho_admin(kc: _Keycloak) -> tuple[str, list[dict[str, Any]]]:
+    """The role-mapping URL of meho-admin's service account and the ``manage-realm`` role."""
+    admin = f"{kc.base_url}/admin/realms/meho"
+    headers = _master_headers(kc)
+
+    def client_id(name: str) -> str:
+        found = httpx.get(f"{admin}/clients", headers=headers, params={"clientId": name}).json()
+        return str(found[0]["id"])
+
+    account = httpx.get(
+        f"{admin}/clients/{client_id('meho-admin')}/service-account-user", headers=headers
+    ).json()
+    management = client_id("realm-management")
+    role = httpx.get(f"{admin}/clients/{management}/roles/manage-realm", headers=headers).json()
+    return f"{admin}/users/{account['id']}/role-mappings/clients/{management}", [role]
+
+
+async def test_an_older_install_gets_recovery_codes_once_meho_admin_may_change_login_settings(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """An upgrade with the rights of an existing install, then the first way of the docs."""
+    _turn_recovery_codes_off(keycloak)
+    capfd.readouterr()
+
+    await _run_stage(keycloak, store)
+
+    output = capfd.readouterr().out
+    assert "login: meho-admin" in output
+    assert (
+        "recovery codes: not checked (no right to read login settings); see "
+        "docs-site/install/keycloak-realm.md, 'Recovery codes on an older install'"
+    ) in output
+    assert _recovery_settings(keycloak) == ("false", "DISABLED")
+
+    url, roles = _manage_realm_of_meho_admin(keycloak)
+    httpx.post(url, headers=_master_headers(keycloak), json=roles).raise_for_status()
+    try:
+        await _run_stage(keycloak, store)
+        assert "recovery codes: set" in capfd.readouterr().out
+        assert _recovery_settings(keycloak) == ("true", "ALTERNATIVE")
+    finally:
+        httpx.request(
+            "DELETE", url, headers=_master_headers(keycloak), json=roles
+        ).raise_for_status()

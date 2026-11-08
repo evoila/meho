@@ -119,6 +119,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newApproveCmd())
 	cmd.AddCommand(newRejectCmd())
 	cmd.AddCommand(newWithdrawCmd())
+	cmd.AddCommand(newRunsCmd())
 	cmd.AddCommand(newMarkCheckedCmd())
 	return cmd
 }

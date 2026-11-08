@@ -238,6 +238,7 @@ def _resolve_default_ttl(body: RememberBody) -> datetime | None:
         body.scope,
         expires_at_was_set="expires_at" in body.model_fields_set,
         explicit_expires_at=body.expires_at,
+        metadata=body.metadata,
     )
 
 

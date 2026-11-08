@@ -333,7 +333,10 @@ hash by building the preview again, so they stay in step.
   the preview shows the `proposed_effect` and the `preview_hash`, and the
   run form sends that hash with the call (#5015). Editing the target or the
   params aborts a preview still in flight and clears the shown preview, so a
-  late response cannot bring back a stale hash.
+  late response cannot bring back a stale hash. A blank Target field sends
+  no target, the same as the CLI and MCP: an op that needs no target
+  previews and runs, and an op that needs one answers `target_required`
+  (#5705).
 
 ## Dependencies
 

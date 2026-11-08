@@ -180,7 +180,7 @@ async def export_dashboard(tenant_id: uuid.UUID, name: str) -> DashboardFile | N
             dashboard=DashboardFileSettings(
                 name=row.name,
                 description=row.description,
-                notify_min_state=cast("NotifyMinState", row.notify_min_state),
+                notify_min_state=cast(NotifyMinState, row.notify_min_state),
                 investigator_prompt=row.investigator_prompt,
             ),
             sensors=[_file_sensor(s) for s in sensors],

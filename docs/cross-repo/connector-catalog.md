@@ -92,7 +92,6 @@ backplane.
 | `k8s` 1.x | typed | n/a (typed) | none (typed; per-minor OpenAPI ingest is a future Goal #214 investigation) |
 | `bind9` 9.x | typed | n/a (typed) | none (SSH-only; no REST surface) |
 | `mehoauto` 0.1.0 | generic, profile-backed | `spec-only` | none in the catalog. Ingest the add-on's own `/openapi.json` with `--spec`. The row ships an auth profile and an `op_allowlist` that keeps six operations. |
-| `_fixture` 1.0 | test fixture | `supported` | a small shipped spec and profile (`spec_resource` + `profile_resource`). Not a real connector; it checks the shipped-file path at start. |
 
 `spec_info_version` and `sha256` are populated only after a connector's
 spec has been ingest-verified through MEHO, not from desk research. The

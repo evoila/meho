@@ -126,10 +126,9 @@ func refusedAsyncField(err error) bool {
 	return strings.Contains(body, `"async"`) && strings.Contains(body, "extra")
 }
 
-// runHasEnded reports whether the request needs no more waiting: it is
-// not approved, its run has a result, or MEHO lists it as "outcome
-// unknown".
-func runHasEnded(d *api.ApprovalRequestView) bool {
+// runHasResult reports whether the request is not approved or its run
+// has a stored result.
+func runHasResult(d *api.ApprovalRequestView) bool {
 	if d.ResultState == nil {
 		return true
 	}
@@ -137,7 +136,13 @@ func runHasEnded(d *api.ApprovalRequestView) bool {
 	case api.ApprovalResultStateExecuted, api.ApprovalResultStateFailed, api.ApprovalResultStateUncertain:
 		return true
 	}
-	return d.OutcomeUnknown != nil
+	return false
+}
+
+// runHasEnded reports whether the request needs no "running" hint: its
+// run has a result, or MEHO lists it as "outcome unknown".
+func runHasEnded(d *api.ApprovalRequestView) bool {
+	return runHasResult(d) || d.OutcomeUnknown != nil
 }
 
 // printRunHint tells the person where the run is when it has not ended.
@@ -158,7 +163,11 @@ func printRunHint(w io.Writer, idArg string, d *api.ApprovalRequestView, endedWi
 //
 // When runID is set and this person may read runs, the run itself is
 // checked too: a run that ended without storing a result on the request
-// (a crash, a server restart) ends the wait, and the bool says so.
+// (a crash, a server restart) ends the wait, and the bool says so. While
+// that run is still going, the wait goes on, also after MEHO lists the
+// request as "outcome unknown" (a run that takes longer than that age
+// limit). Without the run check, the "outcome unknown" list ends the
+// wait, because then nothing tells whether the run still goes on.
 func waitForRun(
 	cmd *cobra.Command,
 	client *api.AuthedClient,
@@ -187,7 +196,7 @@ func waitForRun(
 		}
 		failures = 0
 		detail := again
-		if runHasEnded(detail) {
+		if runHasResult(detail) {
 			return detail, false, nil
 		}
 		if runID != nil && runEndedElsewhere(ctx, client, *runID, &runID) {
@@ -196,7 +205,10 @@ func waitForRun(
 			if last, err := fetchDetail(ctx, client, requestID); err == nil {
 				detail = last
 			}
-			return detail, !runHasEnded(detail), nil
+			return detail, !runHasResult(detail), nil
+		}
+		if runID == nil && detail.OutcomeUnknown != nil {
+			return detail, false, nil
 		}
 	}
 }

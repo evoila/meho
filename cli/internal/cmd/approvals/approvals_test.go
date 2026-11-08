@@ -1665,6 +1665,66 @@ func TestApproveWaitGoesOnWithoutTheRunCheckAndAfterAFailedRead(t *testing.T) {
 	}
 }
 
+// startedTooLong is a started view that MEHO lists as "outcome unknown":
+// its run started longer ago than the age limit of that list.
+func startedTooLong(t *testing.T) api.ApprovalRequestView {
+	v := viewInState(t, api.ApprovalResultStateStarted)
+	v.OutcomeUnknown = &api.OutcomeUnknownView{
+		Advice: "Check the target.",
+		Reason: api.OutcomeUnknownReasonStartedNoResult,
+	}
+	return v
+}
+
+func TestApproveWaitGoesOnPastTheOutcomeUnknownAgeWhileTheRunGoesOn(t *testing.T) {
+	get, gets := viewSequence(t,
+		viewInState(t, api.ApprovalResultStateStarted),
+		startedTooLong(t),
+		startedTooLong(t),
+		viewInState(t, api.ApprovalResultStateExecuted),
+	)
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, map[string]any{"status": "running"})
+		},
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if !strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("--wait must go on while the run goes on; got:\n%s", stdout)
+	}
+	if *gets != 4 {
+		t.Errorf("want 4 reads (until executed); got %d", *gets)
+	}
+}
+
+func TestApproveWaitStopsAtOutcomeUnknownWithoutTheRunCheck(t *testing.T) {
+	get, gets := viewSequence(t,
+		viewInState(t, api.ApprovalResultStateStarted),
+		startedTooLong(t),
+		viewInState(t, api.ApprovalResultStateExecuted),
+	)
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		},
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("without the run check, the outcome unknown list ends the wait; got:\n%s", stdout)
+	}
+	if *gets != 2 {
+		t.Errorf("want 2 reads (until outcome unknown); got %d", *gets)
+	}
+}
+
 // closeConnection drops the connection without an answer: the request
 // reached MEHO, its answer is lost.
 func closeConnection(t *testing.T) mockHandler {

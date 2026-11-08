@@ -227,7 +227,7 @@ func runDecision(
 		fmt.Fprintln(cmd.OutOrStdout(), lostAnswerNote)
 	}
 	endedWithoutResult := false
-	if opts.Wait && verb == "approve" && !runHasEnded(detail) {
+	if opts.Wait && verb == "approve" && !runHasResult(detail) {
 		detail, endedWithoutResult, err = waitForRun(cmd, client, requestID, answer.runID(), jsonOut)
 		if err != nil {
 			return routeRequestError(cmd, backplaneURL, err, jsonOut)

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Test data. A tiny valid OpenAPI 3.1 file for the `_fixture/1.0` row of
+# the test catalog (catalog.yaml in this folder). Tests use it to check the
+# shipped-spec path: the start-up check parses it with the same
+# parse_openapi the live ingest uses, and the catalog ingest route loads
+# its text into SpecSource.content. It has one operation: GET /things.
+openapi: "3.1.0"
+info:
+  title: MEHO shipped-spec fixture
+  version: "1.0.0"
+paths:
+  /things:
+    get:
+      operationId: listThings
+      summary: List things
+      responses:
+        "200":
+          description: A list of things.

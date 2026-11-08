@@ -299,17 +299,30 @@ def _ssh_subclasses(cls: type[SshConnector]) -> Iterator[type[SshConnector]]:
         yield from _ssh_subclasses(sub)
 
 
-def test_product_list_matches_ssh_connectors() -> None:
-    """The script's list names every built-in connector that uses SSH."""
+def _built_in_ssh_products() -> set[str]:
+    """Return the products of the SSH connectors that ship in the connectors package.
+
+    It imports every connector module first, so the answer does not depend on
+    what else the test run imported. Other test files define their own
+    ``SshConnector`` subclasses; those live outside the package and are left out.
+    """
     for mod in pkgutil.walk_packages(connectors_pkg.__path__, connectors_pkg.__name__ + "."):
         if mod.name.endswith(".connector"):
             importlib.import_module(mod.name)
-    # Count only real connectors. Test files define their own small
-    # SshConnector subclasses without a product; skip those.
     prefix = connectors_pkg.__name__ + "."
-    products = {
+    return {
         sub.product for sub in _ssh_subclasses(SshConnector) if sub.__module__.startswith(prefix)
     }
+
+
+def test_product_list_matches_ssh_connectors() -> None:
+    """The script's list names every built-in connector that uses SSH."""
+
+    class _TestOnlySsh(SshConnector):  # a test-only subclass must not count
+        product = "test-only-ssh"
+
+    products = _built_in_ssh_products()
+    assert "test-only-ssh" not in products
 
     match = re.search(r"^SSH_PRODUCTS=\(([^)]*)\)$", _SCRIPT.read_text(), re.MULTILINE)
     assert match is not None

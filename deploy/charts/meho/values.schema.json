@@ -460,7 +460,7 @@
         },
         "uiKeycloakClientId": {
           "type": "string",
-          "description": "Public `client_id` of the confidential `meho-web` client the operator-console (`/ui/*`) browser BFF login runs its OAuth 2.1 authorization-code grant against (#2594, Goal #336), rendered unconditionally as the `UI_KEYCLOAK_CLIENT_ID` env var. NOT a secret (the confidential `client_secret` + session key are wired via `secretKeyRef` from `uiConsole.secretName`). Default `\"\"` — deliberately absent from `config.required` and carrying no `minLength` so a chassis-only / API-only install validates with the browser console left dark; the console gate (`meho_backplane.features._ui_surface_block`) needs this AND the two `uiConsole` secrets non-empty, so an empty value here keeps `/ui/auth/login` at `503 ui_oauth_not_configured` without touching `/api/*` or the `meho login` CLI. When `uiConsole.enabled: true` the root-level `allOf` requires this non-empty — the console is all-or-nothing. See `docs/cross-repo/keycloak-web-client.md`."
+          "description": "Public `client_id` of the confidential `meho-web` client the operator-console (`/ui/*`) browser BFF login runs its OAuth 2.1 authorization-code grant against (#2594, Goal #336), rendered unconditionally as the `UI_KEYCLOAK_CLIENT_ID` env var. NOT a secret (the confidential `client_secret` + session key are wired via `secretKeyRef` from `uiConsole.secretName`). Default `\"\"` — deliberately absent from `config.required` and carrying no `minLength` so a chassis-only / API-only install validates with the browser console left dark; the console gate (`meho_backplane.features._ui_surface_block`) needs this AND the two `uiConsole` secrets non-empty, so an empty value here keeps `/ui/auth/login` at `503 ui_oauth_not_configured` without touching `/api/*` or the `meho login` CLI. When `uiConsole.enabled: true` with a bring-your-own Keycloak, the root-level `allOf` requires this non-empty — the console is all-or-nothing. With the built-in Keycloak, leave it empty or set `meho-web`. See `docs/cross-repo/keycloak-web-client.md`."
         },
         "approvalAllowSelfApproval": {
           "type": "string",
@@ -630,13 +630,13 @@
     "checkRunner": {
       "type": "object",
       "additionalProperties": false,
-      "description": "In-process check-runner service principal (#2642). The sensor check-runner dispatches on a background tick with no calling operator, so it presents no bearer token and a target whose credentials need an operator-context read fails closed. When `enabled: true` the chart wires `CHECK_RUNNER_CLIENT_ID` as plain env and `CHECK_RUNNER_CLIENT_SECRET` via `secretKeyRef`, and the runner mints a `client_credentials` token for that confidential Keycloak client and dispatches under it. Required in practice on a `credentialBackend: gsm` install using per-operator WIF with no ambient pod identity — that token is the subject token exchanged at `sts.googleapis.com`, and without it no credentialed Sensor can evaluate. The schema enforces non-empty `clientId` + `clientSecret.secretName` under `enabled: true`. Default `enabled: false` renders nothing and preserves the pre-#2642 behaviour (background dispatch carries no token; such Sensors read `unknown`). Distinct from the #2415 satellite-runner principals, which authenticate external runners *to* MEHO.",
+      "description": "In-process check-runner service principal (#2642). The sensor check-runner dispatches on a background tick with no calling operator, so it presents no bearer token and a target whose credentials need an operator-context read fails closed. When `enabled: true` the chart wires `CHECK_RUNNER_CLIENT_ID` as plain env and `CHECK_RUNNER_CLIENT_SECRET` via `secretKeyRef`, and the runner mints a `client_credentials` token for that confidential Keycloak client and dispatches under it. Required in practice on a `credentialBackend: gsm` install using per-operator WIF with no ambient pod identity — that token is the subject token exchanged at `sts.googleapis.com`, and without it no credentialed Sensor can evaluate. The root-level `allOf` requires non-empty `clientId` + `clientSecret.secretName` under `enabled: true` for a bring-your-own Keycloak; with the built-in Keycloak the chart fills both in. Default `enabled: false` renders nothing and preserves the pre-#2642 behaviour (background dispatch carries no token; such Sensors read `unknown`). Distinct from the #2415 satellite-runner principals, which authenticate external runners *to* MEHO.",
       "required": ["enabled"],
       "properties": {
         "enabled": { "type": "boolean" },
         "clientId": {
           "type": "string",
-          "description": "`client_id` of the confidential Keycloak client the check-runner authenticates as. Plain env (`CHECK_RUNNER_CLIENT_ID`). Required (non-empty) when `checkRunner.enabled: true`."
+          "description": "`client_id` of the confidential Keycloak client the check-runner authenticates as. Plain env (`CHECK_RUNNER_CLIENT_ID`). Required (non-empty) when `checkRunner.enabled: true`, unless `coreKeycloak.enabled` is true: then leave it empty or set `meho-check-runner`."
         },
         "clientSecret": {
           "type": "object",
@@ -645,7 +645,7 @@
           "properties": {
             "secretName": {
               "type": "string",
-              "description": "Name of the Kubernetes Secret holding the client secret. Referenced by name only — provisioning is the consumer's responsibility (an ExternalSecret, a sealed-secret, or a directly-applied Secret), mirroring `uiConsole.secretName`. Required (non-empty) when `checkRunner.enabled: true`."
+              "description": "Name of the Kubernetes Secret holding the client secret. Referenced by name only — provisioning is the consumer's responsibility (an ExternalSecret, a sealed-secret, or a directly-applied Secret), mirroring `uiConsole.secretName`. Required (non-empty) when `checkRunner.enabled: true`, unless `coreKeycloak.enabled` is true: then leave it empty or set `<release>-core-check-runner`."
             },
             "secretKey": {
               "type": "string",
@@ -654,28 +654,7 @@
             }
           }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["clientId", "clientSecret"],
-            "properties": {
-              "clientId": { "type": "string", "minLength": 1 },
-              "clientSecret": {
-                "type": "object",
-                "required": ["secretName"],
-                "properties": {
-                  "secretName": { "type": "string", "minLength": 1 }
-                }
-              }
-            }
-          }
-        }
-      ]
+      }
     },
     "keycloak": {
       "type": "object",
@@ -753,17 +732,17 @@
     "keycloakAdmin": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Keycloak Admin API credentials (G11.2 #803) that gate agent-principal registration. When `enabled: true`, the chart wires `KEYCLOAK_ADMIN_URL` + `KEYCLOAK_ADMIN_CLIENT_ID` as plain env and `KEYCLOAK_ADMIN_CLIENT_SECRET` via `secretKeyRef` into the backplane Deployment. The schema enforces non-empty `url` and `clientId` under `enabled: true` (operator config that the chart can validate locally). The Secret-name resolution for the admin client secret mirrors `agent` — explicit `clientSecret.secretName` when set, otherwise the `<release>-keycloak-admin` Secret rendered by `eso.keycloakAdmin.enabled: true`. When neither path resolves a name, the chart-template gate fails at `helm template` time. `meho_backplane.features._agent_runtime_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false`, `POST /api/v1/agent-principals` returns `503 keycloak_admin_not_configured` (same posture as a chart that doesn't ship this block).",
+      "description": "Keycloak Admin API credentials (G11.2 #803) that gate agent-principal registration. When `enabled: true`, the chart wires `KEYCLOAK_ADMIN_URL` + `KEYCLOAK_ADMIN_CLIENT_ID` as plain env and `KEYCLOAK_ADMIN_CLIENT_SECRET` via `secretKeyRef` into the backplane Deployment. The root-level `allOf` requires non-empty `url` and `clientId` under `enabled: true` for a bring-your-own Keycloak. With the built-in Keycloak (`coreKeycloak.enabled`) the Keycloak admin is always on and `enabled` is not needed. The Secret-name resolution for the admin client secret mirrors `agent` — explicit `clientSecret.secretName` when set, otherwise the `<release>-keycloak-admin` Secret rendered by `eso.keycloakAdmin.enabled: true`. When neither path resolves a name, the chart-template gate fails at `helm template` time. `meho_backplane.features._agent_runtime_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false`, `POST /api/v1/agent-principals` returns `503 keycloak_admin_not_configured` (same posture as a chart that doesn't ship this block).",
       "required": ["enabled"],
       "properties": {
         "enabled": { "type": "boolean" },
         "url": {
           "type": "string",
-          "description": "Admin REST API base URL for the realm managing MEHO principals, e.g. `https://keycloak.example.com/admin/realms/meho`. Plain env (`KEYCLOAK_ADMIN_URL`). Required (non-empty, `http(s)://` URL) when `keycloakAdmin.enabled: true`."
+          "description": "Admin REST API base URL for the realm managing MEHO principals, e.g. `https://keycloak.example.com/admin/realms/meho`. Plain env (`KEYCLOAK_ADMIN_URL`). Required (non-empty, `http(s)://` URL) when `keycloakAdmin.enabled: true` and `coreKeycloak.enabled` is not true. With the built-in Keycloak, leave it empty: the chart connects to the `meho-admin` client through the Keycloak Service."
         },
         "clientId": {
           "type": "string",
-          "description": "`client_id` of the confidential Keycloak client backing the Admin REST API. Plain env (`KEYCLOAK_ADMIN_CLIENT_ID`). Required (non-empty) when `keycloakAdmin.enabled: true`."
+          "description": "`client_id` of the confidential Keycloak client backing the Admin REST API. Plain env (`KEYCLOAK_ADMIN_CLIENT_ID`). Required (non-empty) when `keycloakAdmin.enabled: true` and `coreKeycloak.enabled` is not true. With the built-in Keycloak, leave it empty or set `meho-admin`."
         },
         "clientSecret": {
           "type": "object",
@@ -781,27 +760,7 @@
             }
           }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["url", "clientId"],
-            "properties": {
-              "url": {
-                "type": "string",
-                "minLength": 1,
-                "format": "uri",
-                "pattern": "^https?://"
-              },
-              "clientId": { "type": "string", "minLength": 1 }
-            }
-          }
-        }
-      ]
+      }
     },
     "sandboxMode": {
       "type": "object",
@@ -816,13 +775,13 @@
     "uiConsole": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Operator-console (`/ui/*`) browser BFF confidential credentials (#2594, Goal #336). When `enabled: true`, the chart wires `UI_KEYCLOAK_CLIENT_SECRET` (the confidential `meho-web` client secret) and `UI_SESSION_ENCRYPTION_KEY` (the BFF session-cookie Fernet key) into the backplane Deployment via `secretKeyRef` — never plaintext — both sourced from the single `secretName` Secret under the `clientSecretKey` / `sessionEncryptionKey` keys, mirroring the `postgres.credentialsSecret` by-name reference. The public `client_id` is the plain `config.uiKeycloakClientId` env. The schema enforces a non-empty `secretName` under `enabled: true`, and the root-level `allOf` additionally requires a non-empty `config.uiKeycloakClientId` — so a half-configured console fails at `helm install` rather than 503-ing at first browser login. `meho_backplane.features._ui_surface_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false` (the default), no env is rendered and `GET /ui/auth/login` returns `503 ui_oauth_not_configured` with no effect on `/api/*` or the `meho login` CLI — same posture as a chart that doesn't ship this block.",
+      "description": "Operator-console (`/ui/*`) browser BFF confidential credentials (#2594, Goal #336). When `enabled: true`, the chart wires `UI_KEYCLOAK_CLIENT_SECRET` (the confidential `meho-web` client secret) and `UI_SESSION_ENCRYPTION_KEY` (the BFF session-cookie Fernet key) into the backplane Deployment via `secretKeyRef` — never plaintext — both sourced from the single `secretName` Secret under the `clientSecretKey` / `sessionEncryptionKey` keys, mirroring the `postgres.credentialsSecret` by-name reference. The public `client_id` is the plain `config.uiKeycloakClientId` env. For a bring-your-own Keycloak the root-level `allOf` requires a non-empty `secretName` and a non-empty `config.uiKeycloakClientId` under `enabled: true` (with the built-in Keycloak the chart fills both in) — so a half-configured console fails at `helm install` rather than 503-ing at first browser login. `meho_backplane.features._ui_surface_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false` (the default), no env is rendered and `GET /ui/auth/login` returns `503 ui_oauth_not_configured` with no effect on `/api/*` or the `meho login` CLI — same posture as a chart that doesn't ship this block.",
       "required": ["enabled"],
       "properties": {
         "enabled": { "type": "boolean" },
         "secretName": {
           "type": "string",
-          "description": "Name of the Kubernetes Secret holding BOTH the confidential web client secret (under `clientSecretKey`) and the session encryption key (under `sessionEncryptionKey`). Referenced by name only — provisioning is the consumer's responsibility (a GSM-synced ExternalSecret, a sealed-secret, or a directly-applied Secret for a no-Vault deploy). Empty when `uiConsole.enabled: true` fails the schema."
+          "description": "Name of the Kubernetes Secret holding BOTH the confidential web client secret (under `clientSecretKey`) and the session encryption key (under `sessionEncryptionKey`). Referenced by name only — provisioning is the consumer's responsibility (a GSM-synced ExternalSecret, a sealed-secret, or a directly-applied Secret for a no-Vault deploy). Empty when `uiConsole.enabled: true` fails the schema, unless `coreKeycloak.enabled` is true: then leave it empty or set `<release>-core-ui-auth`, which the install makes."
         },
         "clientSecretKey": {
           "type": "string",
@@ -834,21 +793,7 @@
           "minLength": 1,
           "description": "Key within `secretName` whose value is the url-safe base64 32-byte Fernet session-cookie encryption key, wired into `UI_SESSION_ENCRYPTION_KEY`. Defaults to `session_encryption_key`."
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["secretName"],
-            "properties": {
-              "secretName": { "type": "string", "minLength": 1 }
-            }
-          }
-        }
-      ]
+      }
     },
     "approvalHandoff": {
       "type": "object",
@@ -1945,29 +1890,6 @@
       }
     },
     {
-      "description": "When the operator console is enabled (`uiConsole.enabled: true`), the browser BFF login needs a non-empty public `client_id` as well as the confidential secret — so `config.uiKeycloakClientId` must be non-empty. This makes enabling the console all-or-nothing: a half-configured console (secret wired, client_id blank) fails at `helm install` rather than 503-ing at first login (#2594).",
-      "if": {
-        "properties": {
-          "uiConsole": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          }
-        },
-        "required": ["uiConsole"]
-      },
-      "then": {
-        "properties": {
-          "config": {
-            "required": ["uiKeycloakClientId"],
-            "properties": {
-              "uiKeycloakClientId": { "type": "string", "minLength": 1 }
-            }
-          }
-        },
-        "required": ["config"]
-      }
-    },
-    {
       "description": "The built-in Keycloak keeps its data in the built-in PostgreSQL, so `coreKeycloak.enabled: true` needs `corePostgres.enabled: true`.",
       "if": {
         "properties": {
@@ -2028,7 +1950,83 @@
               }
             }
           }
-        }
+        },
+        "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "uiConsole": {
+                    "properties": { "enabled": { "const": true } },
+                    "required": ["enabled"]
+                  }
+                },
+                "required": ["uiConsole"]
+              },
+              "then": {
+                "properties": {
+                  "uiConsole": {
+                    "required": ["secretName"],
+                    "properties": { "secretName": { "type": "string", "minLength": 1 } }
+                  },
+                  "config": {
+                    "required": ["uiKeycloakClientId"],
+                    "properties": { "uiKeycloakClientId": { "type": "string", "minLength": 1 } }
+                  }
+                },
+                "required": ["uiConsole", "config"]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "checkRunner": {
+                    "properties": { "enabled": { "const": true } },
+                    "required": ["enabled"]
+                  }
+                },
+                "required": ["checkRunner"]
+              },
+              "then": {
+                "properties": {
+                  "checkRunner": {
+                    "required": ["clientId", "clientSecret"],
+                    "properties": {
+                      "clientId": { "type": "string", "minLength": 1 },
+                      "clientSecret": {
+                        "type": "object",
+                        "required": ["secretName"],
+                        "properties": { "secretName": { "type": "string", "minLength": 1 } }
+                      }
+                    }
+                  }
+                },
+                "required": ["checkRunner"]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "keycloakAdmin": {
+                    "properties": { "enabled": { "const": true } },
+                    "required": ["enabled"]
+                  }
+                },
+                "required": ["keycloakAdmin"]
+              },
+              "then": {
+                "properties": {
+                  "keycloakAdmin": {
+                    "required": ["url", "clientId"],
+                    "properties": {
+                      "url": { "type": "string", "minLength": 1, "format": "uri", "pattern": "^https?://" },
+                      "clientId": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "required": ["keycloakAdmin"]
+              }
+            }
+          ]
       }
     },
     {

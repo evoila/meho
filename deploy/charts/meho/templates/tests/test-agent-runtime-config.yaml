@@ -10,7 +10,8 @@
     * `KEYCLOAK_ADMIN_CLIENT_SECRET` resolves via `secretKeyRef` to the
       configured Secret + key.
 
-  Renders only when both `agent.enabled` and `keycloakAdmin.enabled`
+  Renders only when `agent.enabled` and either `keycloakAdmin.enabled` or
+  `coreKeycloak.enabled`
   are true — the gate the test was written to cover. A deploy with
   only one (or neither) of the two enabled exercises a different
   shape and this Pod is not what proves that path; the chart's
@@ -31,7 +32,8 @@
   controller refuses to start a Pod whose `secretKeyRef.name` /
   `.key` doesn't resolve.
 */}}
-{{- if and .Values.agent.enabled .Values.keycloakAdmin.enabled }}
+{{- if and .Values.agent.enabled (or .Values.keycloakAdmin.enabled .Values.coreKeycloak.enabled) }}
+{{- $kc := include "meho.keycloakSettings" . | fromYaml }}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -66,14 +68,14 @@ spec:
               name: {{ include "meho.agentSecretName" . | quote }}
               key: {{ .Values.agent.secretKey | quote }}
         - name: KEYCLOAK_ADMIN_URL
-          value: {{ .Values.keycloakAdmin.url | quote }}
+          value: {{ $kc.adminUrl | quote }}
         - name: KEYCLOAK_ADMIN_CLIENT_ID
-          value: {{ .Values.keycloakAdmin.clientId | quote }}
+          value: {{ $kc.adminClientId | quote }}
         - name: KEYCLOAK_ADMIN_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
-              name: {{ include "meho.keycloakAdminSecretName" . | quote }}
-              key: {{ .Values.keycloakAdmin.clientSecret.secretKey | quote }}
+              name: {{ $kc.adminSecretName | quote }}
+              key: {{ $kc.adminSecretKey | quote }}
       command:
         - sh
         - -c

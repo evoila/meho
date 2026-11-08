@@ -10,6 +10,7 @@
 #   pull_request -> main : lint + template + kubeconform; NO push (validation gate).
 #   push to main         : push :0.1.<YYYYMMDD>-<short-sha>   (calver, immutable).
 #   push tag v*          : push :<x.y.z>                       (semver, immutable).
+#   workflow_dispatch    : the rollback drill only (`rollback-drill`); NO push.
 #
 # The artefact name `meho-chart` (not `meho`) is derived from the chart's
 # `name` field in deploy/charts/meho/Chart.yaml. The umbrella sets
@@ -80,6 +81,15 @@ on:
   # queue entry never packages or pushes a chart to GHCR. Same rationale
   # as ci.yml's merge_group trigger (#769).
   merge_group:
+  # Started by hand for a release: runs only the `rollback-drill` job
+  # (docs/RELEASING.md section 6b). `changes` skips on this event, so the
+  # jobs that need it skip too, and the gate below skips.
+  workflow_dispatch:
+    inputs:
+      prior:
+        description: "The release to roll back to, for example v0.44.0 (v0.39.0 or later)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -122,6 +132,7 @@ jobs:
     # The two values files of the form-2 download count as chart changes:
     # the `validate` job renders the chart with them, as the download build
     # does (#4820).
+    if: github.event_name != 'workflow_dispatch'
     permissions:
       contents: read
       pull-requests: read
@@ -1883,6 +1894,401 @@ jobs:
           echo "=== kind cluster loaded images ==="
           docker exec meho-helm-test-control-plane crictl images || true
 
+  rollback-drill:
+    # The rollback drill of docs/RELEASING.md section 6b, as a job a person
+    # starts by hand (Actions > chart > Run workflow). It answers one
+    # question: if an upgrade fails after its migration ran, does the prior
+    # release still start on the newer database?
+    #
+    #   - "prior" (the input) is a published release, for example v0.44.0:
+    #     its chart from oci://ghcr.io/evoila/meho-chart and its image from
+    #     ghcr.io/evoila/meho.
+    #   - The candidate is the commit the run starts on (main, a branch or a
+    #     tag): the chart in the checkout and the image built from it.
+    #
+    # The job uses the bring-your-own PostgreSQL way, as `helm-test-byo`
+    # does, so the `pre-upgrade` hook Job migrates the database before the
+    # pods change. The setup steps are the same as in `helm-test-byo`. Two
+    # differences:
+    #
+    #   - Helm 4, because the drill uses `--rollback-on-failure` (Helm 4's
+    #     name for the deprecated `--atomic`).
+    #   - One values file for every install and upgrade, as in a normal
+    #     install (`--values`, never `--reuse-values`). Only `image.tag`
+    #     and the broken readiness path are set on the command line. The
+    #     chart's schema refuses unknown keys, so the file holds only keys
+    #     that the charts from v0.39.0 on know.
+    #
+    # Steps: install the prior release, upgrade to the candidate with a
+    # readiness path that answers 404 (the migration runs, the rollout
+    # fails, Helm rolls back), start a brand new prior pod and check that
+    # its `db` check reports `db_ahead=true`, then roll forward. A release
+    # without a new migration fails the `db_ahead` check, because then the
+    # drill proves nothing.
+    #
+    # There is no Keycloak and no Vault here, so `/ready` answers 503. The
+    # readiness probe uses `/healthz`, and the job reads the `db` check in
+    # the body of `/ready`, as `helm-test-byo` does. Logins are not tested.
+    name: Rollback drill (started by hand)
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRIOR: ${{ inputs.prior }}
+      VALUES: ${{ github.workspace }}/rollback-drill-values.yaml
+    steps:
+      - name: Check the input
+        run: |
+          set -euo pipefail
+          if ! [[ "$PRIOR" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::prior must be a release tag such as v0.44.0, got '${PRIOR}'"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        with:
+          version: v4.3.1
+
+      - name: Create kind cluster
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
+        with:
+          cluster_name: meho-helm-test
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: Restore fastembed model cache (#1623)
+        # Same as in `helm-test-byo`.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: |
+            fastembed-model-${{ runner.os }}-
+
+      - name: Pre-seed fastembed snapshot into the build context (#1623)
+        # Same as in `helm-test-byo`.
+        run: |
+          if [ -d "${{ github.workspace }}/.fastembed-cache" ] \
+             && [ -n "$(ls -A "${{ github.workspace }}/.fastembed-cache" 2>/dev/null)" ]; then
+            echo ">> fastembed cache restored; staging into backend/.model-preseed/"
+            cp -a "${{ github.workspace }}/.fastembed-cache/." backend/.model-preseed/
+          else
+            echo ">> fastembed cache MISS (cold path); warm RUN will download once"
+          fi
+
+      - name: Build the candidate image locally (load into Docker, not push)
+        # Same as in `helm-test-byo`: reads the shared build cache only.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: backend
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/evoila/meho:test
+          cache-from: type=gha
+
+      - name: Load images into kind
+        # As in `helm-test-byo`, plus the prior release's image, and the
+        # PostgreSQL and Valkey images of both charts (the prior chart may
+        # pin other ones). Each Docker Hub image is pulled by its digest and
+        # loaded by its tag.
+        run: |
+          set -euo pipefail
+          helm show values oci://ghcr.io/evoila/meho-chart --version "${PRIOR#v}" > prior-values.yaml
+          images=(ghcr.io/evoila/meho:test "ghcr.io/evoila/meho:${PRIOR}")
+          docker pull --platform linux/amd64 "ghcr.io/evoila/meho:${PRIOR}"
+          for values in deploy/charts/meho/values.yaml prior-values.yaml; do
+            for part in corePostgres broadcast; do
+              repo=$(yq ".${part}.image.repository" "$values")
+              tag=$(yq ".${part}.image.tag" "$values")
+              digest=$(yq ".${part}.image.digest" "$values")
+              docker pull --platform linux/amd64 "${repo}@${digest}"
+              docker tag "${repo}@${digest}" "${repo}:${tag}"
+              images+=("${repo}:${tag}")
+            done
+          done
+          for img in $(printf '%s\n' "${images[@]}" | sort -u); do
+            docker save "$img" | docker exec --privileged -i meho-helm-test-control-plane \
+              ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
+          done
+
+      - name: Create the namespace and a namespace admin (#4099)
+        # Same as in `helm-test-byo`.
+        run: |
+          set -euo pipefail
+          kubectl create namespace meho-test
+          kubectl label namespace meho-test \
+            pod-security.kubernetes.io/enforce=baseline \
+            pod-security.kubernetes.io/warn=restricted \
+            pod-security.kubernetes.io/audit=restricted
+          kubectl -n meho-test create rolebinding meho-installer \
+            --clusterrole=admin --user=meho-installer
+          if kubectl auth can-i create clusterrolebindings --as=meho-installer; then
+            echo "::error::meho-installer has cluster-wide rights; the namespace-admin install proves nothing"
+            exit 1
+          fi
+
+      - name: Start a bring-your-own PostgreSQL outside the release (#5412)
+        # Same as in `helm-test-byo`: the candidate chart's PostgreSQL
+        # objects, applied with kubectl, so they are in neither release.
+        run: |
+          set -euo pipefail
+          meho_pw=$(openssl rand -hex 16)
+          kubectl -n meho-test create secret generic meho-test-core-postgres-superuser \
+            --from-literal=password="$(openssl rand -hex 16)"
+          kubectl -n meho-test create secret generic meho-test-core-postgres-meho \
+            --from-literal=password="$meho_pw" \
+            --from-literal=url="postgresql+asyncpg://meho:${meho_pw}@meho-test-postgres:5432/meho"
+          app_pw=$(openssl rand -hex 16)
+          kubectl -n meho-test create secret generic meho-test-core-postgres-meho-app \
+            --from-literal=password="$app_pw" \
+            --from-literal=url="postgresql+asyncpg://meho_app:${app_pw}@meho-test-postgres:5432/meho"
+          kubectl -n meho-test create secret generic meho-test-core-postgres-keycloak \
+            --from-literal=password="$(openssl rand -hex 16)"
+          helm template meho-test ./deploy/charts/meho \
+            --namespace meho-test \
+            --set image.tag=test \
+            --set ingress.enabled=false \
+            --set networkPolicy.enabled=false \
+            --set postgres.credentialsSecret=meho-test-core-postgres-meho \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set config.backplaneUrl=https://meho-test.test \
+            --set corePostgres.enabled=true \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
+            --set corePostgres.image.digest= \
+            --show-only charts/corePostgres/templates/configmap.yaml \
+            --show-only charts/corePostgres/templates/service.yaml \
+            --show-only charts/corePostgres/templates/networkpolicy.yaml \
+            --show-only charts/corePostgres/templates/statefulset.yaml \
+            | kubectl -n meho-test apply -f -
+          kubectl -n meho-test rollout status statefulset/meho-test-postgres --timeout=180s
+
+      - name: Write the values file of the drill
+        # The same settings as the `--set` flags of `helm-test-byo`. Every
+        # install and upgrade below uses this one file.
+        run: |
+          cat > "$VALUES" <<'YAML'
+          ingress:
+            enabled: false
+          networkPolicy:
+            enabled: false
+          broadcast:
+            networkPolicy:
+              enabled: false
+            auth:
+              enabled: false
+            image:
+              digest: ""
+          corePostgres:
+            enabled: false
+            image:
+              digest: ""
+          coreKeycloak:
+            enabled: false
+          coreVault:
+            enabled: false
+          postgres:
+            credentialsSecret: meho-test-core-postgres-meho
+          vault:
+            address: https://vault.test
+          keycloak:
+            issuer: https://keycloak.test/realms/meho
+          config:
+            keycloakIssuerUrl: https://keycloak.test/realms/meho
+            keycloakAudience: meho-backplane
+            vaultAddr: https://vault.test
+            backplaneUrl: https://meho-test.test
+          probes:
+            readiness:
+              httpGet:
+                path: /healthz
+          retrieval:
+            modelCache:
+              enabled: false
+          YAML
+
+      - name: "Drill 1: install the prior release"
+        run: |
+          set -euo pipefail
+          helm install meho-test oci://ghcr.io/evoila/meho-chart \
+            --version "${PRIOR#v}" \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --values "$VALUES" \
+            --set image.tag="${PRIOR}" \
+            --wait \
+            --wait-for-jobs \
+            --timeout 10m
+          rev=$(kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \
+            psql -X -tA -h /var/run/postgresql -U postgres -d meho \
+            -c "SELECT version_num FROM alembic_version")
+          echo ">> database revision of the prior release: ${rev}"
+          echo "DB_PRIOR=${rev}" >> "$GITHUB_ENV"
+
+      - name: "Drill 2: upgrade to the candidate with readiness broken"
+        # The hook Job migrates the database to the candidate's newest
+        # revision first. Then the new pod never gets Ready, the upgrade
+        # times out, and `--rollback-on-failure` rolls the manifests back.
+        # The migration stays. The upgrade must fail.
+        run: |
+          set -euo pipefail
+          if helm upgrade meho-test ./deploy/charts/meho \
+              --namespace meho-test \
+              --kube-as-user meho-installer \
+              --values "$VALUES" \
+              --set image.tag=test \
+              --set probes.readiness.httpGet.path=/definitely-404 \
+              --rollback-on-failure \
+              --timeout 5m; then
+            echo "::error::the upgrade with a broken readiness probe succeeded; the drill injected no failure"
+            exit 1
+          fi
+          # Guard against a failure for another reason (for example a
+          # manifest the cluster refuses): the candidate's pods must have
+          # been made, so the broken probe is what failed the upgrade.
+          made=$(kubectl -n meho-test get replicasets \
+            -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test -o json \
+            | jq '[.items[].spec.template.spec.containers[] | select(.image == "ghcr.io/evoila/meho:test")] | length')
+          if [ "$made" -eq 0 ]; then
+            reason=$(helm history meho-test --namespace meho-test --kube-as-user meho-installer -o json \
+              | jq -r '[.[] | select(.status == "failed")] | last | .description')
+            echo "::error::the upgrade failed before the candidate's pods were made, so not because of the broken probe: ${reason}"
+            exit 1
+          fi
+          echo ">> the upgrade failed on the broken probe, as planned"
+          # Guard against a drill that proves nothing: the hook Job must have
+          # moved the database to a newer revision before the rollout failed.
+          rev=$(kubectl -n meho-test exec meho-test-postgres-0 -c postgres -- \
+            psql -X -tA -h /var/run/postgresql -U postgres -d meho \
+            -c "SELECT version_num FROM alembic_version")
+          echo ">> database revision after the failed upgrade: ${rev}"
+          if [ "$rev" = "$DB_PRIOR" ]; then
+            echo "::error::the database is still at ${rev}. Either the candidate has no new migration since ${PRIOR} (then the drill is not needed), or the hook Job failed."
+            exit 1
+          fi
+
+      - name: "Drill 3: check that Helm rolled back to the prior release"
+        run: |
+          set -euo pipefail
+          history=$(helm history meho-test --namespace meho-test --kube-as-user meho-installer -o json)
+          echo "$history" | jq .
+          jq -e 'any(.[]; .status == "failed")' <<<"$history" >/dev/null \
+            || { echo "::error::helm history shows no failed revision"; exit 1; }
+          last=$(jq -r 'max_by(.revision) | .status' <<<"$history")
+          test "$last" = deployed \
+            || { echo "::error::the newest revision is '${last}', not a deployed rollback"; exit 1; }
+          image=$(kubectl -n meho-test get deployment meho-test \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="backplane")].image}')
+          test "$image" = "ghcr.io/evoila/meho:${PRIOR}" \
+            || { echo "::error::after the rollback the Deployment runs '${image}', not the prior release"; exit 1; }
+
+      - name: "Drill 4: start a brand new prior pod on the newer database"
+        # A pod that was already running proves nothing, so delete it. Its
+        # replacement starts the prior image on the migrated database. Its
+        # `db` check must be ok with `db_ahead=true`: the database is at a
+        # revision the prior image does not know. No `alembic` command runs.
+        run: |
+          set -euo pipefail
+          sel=app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test
+          kubectl -n meho-test rollout status deployment/meho-test --timeout=5m
+          old=$(kubectl -n meho-test get pods -l "$sel" -o json \
+            | jq -r '.items[] | select(.metadata.deletionTimestamp == null and .metadata.ownerReferences[0].kind == "ReplicaSet") | .metadata.name')
+          test -n "$old" || { echo "::error::no backplane pod runs after the rollback"; exit 1; }
+          echo ">> deleting the running pod(s): ${old}"
+          # shellcheck disable=SC2086  # one name per word
+          kubectl -n meho-test delete pod $old --wait=true
+          pod=""
+          for _ in $(seq 60); do
+            pod=$(kubectl -n meho-test get pods -l "$sel" -o json \
+              | jq -r '.items[] | select(.metadata.deletionTimestamp == null and .metadata.ownerReferences[0].kind == "ReplicaSet") | .metadata.name')
+            if [ -n "$pod" ] && [ "$(wc -w <<<"$pod")" -eq 1 ] \
+              && kubectl -n meho-test wait --for=condition=Ready "pod/${pod}" --timeout=10s; then
+              break
+            fi
+            pod=""
+            sleep 5
+          done
+          test -n "$pod" || { echo "::error::no new prior pod got Ready on the newer database"; exit 1; }
+          image=$(kubectl -n meho-test get pod "$pod" \
+            -o jsonpath='{.spec.containers[?(@.name=="backplane")].image}')
+          test "$image" = "ghcr.io/evoila/meho:${PRIOR}" \
+            || { echo "::error::the new pod runs '${image}', not the prior release"; exit 1; }
+          kubectl -n meho-test exec "$pod" -c backplane -- python -c '
+          import json, sys, urllib.error, urllib.request
+          try:
+              body = urllib.request.urlopen("http://127.0.0.1:8000/ready", timeout=10).read()
+          except urllib.error.HTTPError as exc:
+              body = exc.read()
+          db = next(c for c in json.loads(body)["checks"] if c["name"] == "db")
+          print(">> /ready db check:", json.dumps(db))
+          if not db["ok"] or "db_ahead=true" not in db["detail"]:
+              print("::error::the db check is not ok with db_ahead=true; is there a new migration between the two versions?")
+              sys.exit(1)
+          '
+          echo "Way back: works. A new ${PRIOR} pod got Ready on the database of the candidate (db_ahead=true)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Drill 5: roll forward to the candidate"
+        # The database is already at the candidate's revision, so the hook
+        # Job runs the migration as a no-op. The new version's `db` check
+        # reports `revision=<head>`.
+        run: |
+          set -euo pipefail
+          helm upgrade meho-test ./deploy/charts/meho \
+            --namespace meho-test \
+            --kube-as-user meho-installer \
+            --values "$VALUES" \
+            --set image.tag=test \
+            --rollback-on-failure \
+            --wait-for-jobs \
+            --timeout 10m
+          last_run=$(helm status meho-test --namespace meho-test --kube-as-user meho-installer -o json \
+            | jq -c '.hooks[]? | select(.kind == "Job" and .name == "meho-test-migrate") | .last_run')
+          echo ">> migration hook Job, last run: ${last_run}"
+          test "$(jq -r '.phase' <<<"$last_run")" = Succeeded \
+            || { echo "::error::the migration hook Job did not succeed on the roll forward"; exit 1; }
+          kubectl -n meho-test exec deploy/meho-test -c backplane -- python -c '
+          import json, sys, urllib.error, urllib.request
+          try:
+              body = urllib.request.urlopen("http://127.0.0.1:8000/ready", timeout=10).read()
+          except urllib.error.HTTPError as exc:
+              body = exc.read()
+          db = next(c for c in json.loads(body)["checks"] if c["name"] == "db")
+          print(">> /ready db check:", json.dumps(db))
+          sys.exit(0 if db["ok"] and db["detail"].startswith("revision=") else 1)
+          '
+          echo "Way forward: works. The candidate is back, its db check reports the newest revision." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "The drill failed: the way back does not work, or the drill could not run. Read the log of the failed step." >> "$GITHUB_STEP_SUMMARY"
+          echo "=== Helm release history ==="
+          helm history meho-test --namespace meho-test || true
+          echo "=== Pods ==="
+          kubectl -n meho-test get pods -o wide || true
+          echo "=== Namespace events (sorted by lastTimestamp) ==="
+          kubectl -n meho-test get events --sort-by=.lastTimestamp || true
+          echo "=== Migration hook Job ==="
+          kubectl -n meho-test describe job/meho-test-migrate || true
+          kubectl -n meho-test logs -l job-name=meho-test-migrate --tail=-1 || true
+          echo "=== Backplane ==="
+          kubectl -n meho-test describe pods \
+            -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=meho-test || true
+          kubectl -n meho-test logs deploy/meho-test -c backplane --tail=200 || true
+          echo "=== Bring-your-own PostgreSQL ==="
+          kubectl -n meho-test logs pod/meho-test-postgres-0 -c postgres || true
+
   helm-test-gate:
     # The REQUIRED branch-protection context. It `always()` runs and explicitly
     # evaluates the upstream job results so the gate fails CLOSED: a skipped
@@ -1894,7 +2300,9 @@ jobs:
     # bring-your-own PostgreSQL, #5412) to all have succeeded.
     # Refs #349; GitHub "Troubleshooting required status checks" + actions/runner#2566.
     name: helm install + helm test (pgvector preflight)
-    if: always()
+    # A started-by-hand run is the rollback drill only, and `changes` skips
+    # there. The gate skips too, so it does not fail on the skipped `changes`.
+    if: always() && github.event_name != 'workflow_dispatch'
     needs: [changes, validate, helm-test, helm-test-byo]
     runs-on: ubuntu-latest
     timeout-minutes: 5

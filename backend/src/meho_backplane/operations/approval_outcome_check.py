@@ -70,6 +70,7 @@ __all__ = [
     "outcome_check",
     "outcome_unknown",
     "outcome_unknown_after",
+    "run_started_at",
 ]
 
 
@@ -145,8 +146,12 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-def _run_started_at(request: ApprovalRequest) -> datetime | None:
-    """When the latest run started: the latest re-run, else the first run."""
+def run_started_at(request: ApprovalRequest) -> datetime | None:
+    """When the latest run started: the latest re-run, else the first run.
+
+    ``None`` before the first run. The console shows this time as the start
+    of the run, so a re-run shows its own start, not the first attempt's.
+    """
     started = request.rerun_started_at or request.resumed_at
     return _as_utc(started) if started is not None else None
 
@@ -161,7 +166,7 @@ def _unknown_reason(
         if envelope_is_uncertain(request.resume_result):
             return OutcomeUnknownReason.UNCERTAIN
         return None
-    started = _run_started_at(request)
+    started = run_started_at(request)
     if started is None:
         return None
     cutoff = (now or datetime.now(UTC)) - (after if after is not None else outcome_unknown_after())
@@ -174,7 +179,7 @@ def _check_covers(request: ApprovalRequest, reason: OutcomeUnknownReason) -> boo
     """True when a check recorded *reason* during the latest run."""
     if request.outcome_checked_at is None or request.outcome_check_reason != reason.value:
         return False
-    started = _run_started_at(request)
+    started = run_started_at(request)
     return started is None or _as_utc(request.outcome_checked_at) >= started
 
 
@@ -191,7 +196,7 @@ def outcome_unknown(
     reason = _unknown_reason(request, now=now, after=after)
     if reason is None or _check_covers(request, reason):
         return None
-    started = _run_started_at(request)
+    started = run_started_at(request)
     started_at = started.isoformat() if started is not None else None
     if reason is OutcomeUnknownReason.UNCERTAIN:
         return OutcomeUnknown(reason, UNCERTAIN_ADVICE, started_at)
@@ -215,11 +220,11 @@ def _outcome_unknown_clause(cutoff: datetime) -> Any:
     # "No result" is SQL NULL, or a JSON ``null`` (a row written with an
     # explicit ``None``); both load as ``None`` in Python.
     no_result = or_(result.is_(None), cast(result, Text) == "null")
-    run_started_at = func.coalesce(ApprovalRequest.rerun_started_at, ApprovalRequest.resumed_at)
+    started_at = func.coalesce(ApprovalRequest.rerun_started_at, ApprovalRequest.resumed_at)
     started_no_result = and_(
         no_result,
-        run_started_at.is_not(None),
-        run_started_at <= cutoff,
+        started_at.is_not(None),
+        started_at <= cutoff,
     )
 
     def covered(reason: OutcomeUnknownReason) -> Any:
@@ -227,8 +232,8 @@ def _outcome_unknown_clause(cutoff: datetime) -> Any:
             ApprovalRequest.outcome_checked_at.is_not(None),
             func.coalesce(ApprovalRequest.outcome_check_reason, "") == reason.value,
             or_(
-                run_started_at.is_(None),
-                ApprovalRequest.outcome_checked_at >= run_started_at,
+                started_at.is_(None),
+                ApprovalRequest.outcome_checked_at >= started_at,
             ),
         )
 
@@ -340,7 +345,7 @@ async def mark_outcome_checked(
     request.outcome_check_reason = reason.value
     await session.flush()
 
-    started = _run_started_at(request)
+    started = run_started_at(request)
     audit_id = uuid.uuid4()
     await _write_audit_row(
         session,

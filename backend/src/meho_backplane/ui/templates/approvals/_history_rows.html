@@ -24,6 +24,10 @@
     status_pill_class -- dict[str, str]: status -> DaisyUI badge modifier
     result_state_pill -- dict[str, tuple[str, str]]: run state of an
                          approved request -> (label, badge modifier) (#3543)
+
+  A row on the "outcome unknown" list (#5026, ``req.outcome_unknown`` set)
+  gets a second line: the target (``req.target_name``, else
+  ``req.target_id``), when the latest run started, and what to check.
 -#}
 {% from "_references.html" import subject %}
 {% for req in requests %}
@@ -106,6 +110,20 @@
           <span class="font-mono">{{ req.work_ref }}</span>
         {% endif %}
       </p>
+      {#- Outcome unknown (#5026): what to check, where, and since when. The
+          time is the start of the latest run (a re-run, else the first run),
+          the time the minutes of the list count from. -#}
+      {% if req.outcome_unknown %}
+        <p class="text-xs" data-testid="approval-outcome-unknown-row" data-outcome-unknown-reason="{{ req.outcome_unknown.reason }}">
+          <span>target {% if req.target_name %}<span class="font-medium">{{ req.target_name }}</span>{% elif req.target_id %}<span class="font-mono">{{ req.target_id }}</span>{% else %}none{% endif %}</span>
+          {% if req.outcome_unknown.run_started_at %}
+            <span aria-hidden="true">&middot;</span>
+            <span>run started <time datetime="{{ req.outcome_unknown.run_started_at }}" class="font-mono">{{ req.outcome_unknown.run_started_at }}</time></span>
+          {% endif %}
+          <span aria-hidden="true">&middot;</span>
+          <span>{{ req.outcome_unknown.advice }}</span>
+        </p>
+      {% endif %}
     </div>
     <button
       type="button"

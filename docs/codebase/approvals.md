@@ -1811,7 +1811,11 @@ the latest re-run, else the first run; the minutes count from this time),
 who asked (`principal_sub`), who approved (`reviewed_by`) and what to check.
 The REST and MCP views carry `outcome_unknown: {reason, advice,
 run_started_at}` on every listed request (and on show), `null` on all
-others. `resume_outcome.resumed_at` stays the start of the first run. The advice of an
+others. `resume_outcome.resumed_at` stays the start of the first run. The
+console row carries a second line with the target (its name in this tenant,
+else its id), the start of the latest run and the advice; the console
+modal's "Run started" is the start of the latest run too
+(`run_started_at` in `ui/routes/approvals/render.py`). The advice of an
 `uncertain` run is the same advice as above. A run with no result gets: "The
 run started and stored no result. MEHO does not know if the change
 happened. Do not run it again. Check the target first."

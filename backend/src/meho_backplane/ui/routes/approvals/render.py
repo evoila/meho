@@ -26,7 +26,11 @@ from meho_backplane.operations.approval_outcome import (
     resume_outcome_from_envelope,
     with_approval_guidance,
 )
-from meho_backplane.operations.approval_outcome_check import outcome_check, outcome_unknown
+from meho_backplane.operations.approval_outcome_check import (
+    outcome_check,
+    outcome_unknown,
+    run_started_at,
+)
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
@@ -189,6 +193,7 @@ def project_request_to_view(
     row: ApprovalRequest,
     delegation: Delegation | None = None,
     chain: ChainPosition | None = None,
+    target_name: str | None = None,
 ) -> dict[str, Any]:
     """Project an :class:`ApprovalRequest` ORM row into a template dict.
 
@@ -243,8 +248,9 @@ def project_request_to_view(
     release the request was made under. The reason keys are ``None`` for a
     request that is not expired.
 
-    ``outcome_unknown`` and ``outcome_check`` (#5026): see
-    :func:`_project_outcome_check`.
+    ``target_id``, ``target_name`` and ``run_started_at`` (#5026): see
+    :func:`_project_target_and_run_start`. ``outcome_unknown`` and
+    ``outcome_check`` (#5026): see :func:`_project_outcome_check`.
     """
     result_state = approval_result_state(row)
     expired_reason = approval_expired_reason(row)
@@ -273,15 +279,40 @@ def project_request_to_view(
         "expired_reason": expired_reason.value if expired_reason else None,
         "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
         "release_id": row.release_id,
+        **_project_target_and_run_start(row, target_name),
         **_project_outcome_check(row),
+    }
+
+
+def _project_target_and_run_start(row: ApprovalRequest, target_name: str | None) -> dict[str, Any]:
+    """The target and latest-run keys of the template dict (#5026).
+
+    ``run_started_at`` is when the latest run started: the latest re-run,
+    else the first run. ``None`` before the first run. The modal shows it
+    as the start of the run, so a re-run shows its own start.
+    ``outcome.resumed_at`` stays the start of the first run.
+
+    ``target_id`` is the id of the target the request names, or ``None``.
+    ``target_name`` is its name in this tenant, when the caller resolved it
+    (the "outcome unknown" list does, with
+    :func:`~meho_backplane.operations.approval_context.resolve_target_names`);
+    else ``None``, and the row falls back to the id.
+    """
+    started = run_started_at(row)
+    return {
+        "target_id": str(row.target_id) if row.target_id else None,
+        "target_name": target_name,
+        "run_started_at": started.isoformat() if started is not None else None,
     }
 
 
 def _project_outcome_check(row: ApprovalRequest) -> dict[str, Any]:
     """The two outcome-unknown keys of the template dict (#5026).
 
-    ``outcome_unknown`` is ``{"reason", "advice"}`` when the request is on
-    the "outcome unknown" list, else ``None``. ``outcome_check`` is
+    ``outcome_unknown`` is ``{"reason", "advice", "run_started_at"}`` when
+    the request is on the "outcome unknown" list, else ``None``.
+    ``run_started_at`` is the start of the latest run, the time the minutes
+    of the list count from. ``outcome_check`` is
     ``{"verdict", "note", "checker", "checked_at"}`` once a person marked it
     as checked, else ``None``.
     """
@@ -289,7 +320,13 @@ def _project_outcome_check(row: ApprovalRequest) -> dict[str, Any]:
     check = outcome_check(row)
     return {
         "outcome_unknown": (
-            {"reason": unknown.reason.value, "advice": unknown.advice} if unknown else None
+            {
+                "reason": unknown.reason.value,
+                "advice": unknown.advice,
+                "run_started_at": unknown.run_started_at,
+            }
+            if unknown
+            else None
         ),
         "outcome_check": (
             {

@@ -4,6 +4,8 @@
 """Console: the "Outcome unknown" tab and "Mark as checked" (#5026).
 
 * The tab lists the same approved requests as the service list.
+* Each listed row names the target, the start of the latest run and what
+  to check. The modal shows the start of the latest run too.
 * The detail modal of such a request says what to check and offers the
   form; after the check it shows what the person recorded.
 * The POST records the check, runs nothing, and refuses a request that is
@@ -22,7 +24,10 @@ import respx
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
-from meho_backplane.operations.approval_outcome_check import list_outcome_unknown
+from meho_backplane.operations.approval_outcome_check import (
+    STARTED_NO_RESULT_ADVICE,
+    list_outcome_unknown,
+)
 from meho_backplane.operations.uncertain_outcome import result_interrupted_by_restart
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME
 from tests.test_ui_approvals import (
@@ -36,6 +41,7 @@ from tests.test_ui_approvals import (
     _operator,
     _seed_request,
     _seed_session_sync,
+    _seed_target_sync,
     _seed_tenant,
 )
 
@@ -181,6 +187,74 @@ def test_request_back_on_the_list_offers_the_check_again() -> None:
     assert "Earlier check" in modal.text
     assert "nothing on the host" in modal.text
     assert 'data-testid="approval-outcome-check-form"' in modal.text
+
+
+def test_rows_and_modal_show_the_target_and_the_start_of_the_latest_run() -> None:
+    """A re-run shows its own start, not the first attempt's.
+
+    The listed row names the target, when the latest run started and what
+    to check. The modal's "Run started" is the latest run too.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = uuid.uuid4()
+    _seed_target_sync(
+        tenant_id=_TENANT_A,
+        target_id=target_id,
+        name="vcenter-blue",
+        product="vmware",
+        version="8.0",
+    )
+    first_run = datetime(2026, 6, 15, 10, 0, tzinfo=UTC)
+    rerun = datetime(2026, 6, 15, 12, 30, tzinfo=UTC)
+    rid = _approved(op_id="op.rerun.times", resumed_at=first_run)
+    _set_columns(rid, target_id=target_id, rerun_count=1, rerun_started_at=rerun)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A)
+
+    with (
+        respx.mock(assert_all_called=False),
+        patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+    ):
+        client = _authenticated_client(session_id)
+        rows = client.get("/ui/approvals/list?tab=outcome_unknown")
+        modal = client.get(f"/ui/approvals/{rid}")
+
+    assert rows.status_code == 200, rows.text
+    assert 'data-testid="approval-outcome-unknown-row"' in rows.text
+    assert "vcenter-blue" in rows.text
+    assert str(target_id) not in rows.text
+    assert "2026-06-15T12:30:00+00:00" in rows.text
+    assert "2026-06-15T10:00:00" not in rows.text
+    assert STARTED_NO_RESULT_ADVICE in rows.text
+    assert modal.status_code == 200, modal.text
+    assert 'data-testid="approval-run-started-at"' in modal.text
+    assert "2026-06-15T12:30:00+00:00" in modal.text
+    assert "2026-06-15T10:00:00" not in modal.text
+    assert "vcenter-blue" in modal.text
+
+
+def test_a_row_without_a_target_name_shows_the_target_id() -> None:
+    """A target of another tenant is not named: the row shows the bare id."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    target_id = uuid.uuid4()
+    _seed_target_sync(
+        tenant_id=_TENANT_B,
+        target_id=target_id,
+        name="vcenter-green",
+        product="vmware",
+        version=None,
+    )
+    rid = _approved(op_id="op.no.target.name", resumed_at=_ago(30))
+    _set_columns(rid, target_id=target_id)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        rows = _authenticated_client(session_id).get("/ui/approvals/list?tab=outcome_unknown")
+
+    assert rows.status_code == 200, rows.text
+    assert str(target_id) in rows.text
+    assert "vcenter-green" not in rows.text
 
 
 def test_mark_as_checked_records_the_check_and_runs_nothing() -> None:

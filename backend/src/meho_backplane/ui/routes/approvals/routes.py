@@ -149,6 +149,7 @@ from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_context import (
     ReviewerContext,
     resolve_reviewer_context,
+    resolve_target_names,
 )
 from meho_backplane.operations.approval_outcome_check import list_outcome_unknown
 from meho_backplane.operations.approval_queue import (
@@ -674,8 +675,23 @@ async def _build_history_context(
         order=resolved_order,
         outcome_unknown=tab == _OUTCOME_UNKNOWN_TAB,
     )
+    # The "outcome unknown" rows name the target to check (#5026); the
+    # other tabs show the target in the modal only.
+    target_names: dict[uuid.UUID, str] = {}
+    if tab == _OUTCOME_UNKNOWN_TAB:
+        async with sessionmaker() as db_session:
+            target_names = await resolve_target_names(
+                db_session, tenant_id=session.tenant_id, requests=rows
+            )
     return {
-        "requests": [project_request_to_view(row, chain=positions.get(row.id)) for row in rows],
+        "requests": [
+            project_request_to_view(
+                row,
+                chain=positions.get(row.id),
+                target_name=target_names.get(row.target_id) if row.target_id else None,
+            )
+            for row in rows
+        ],
         "order": resolved_order,
         "order_choice": order_choice,
         "status_pill_class": STATUS_PILL_CLASS,

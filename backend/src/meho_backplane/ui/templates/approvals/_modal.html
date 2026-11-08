@@ -296,11 +296,13 @@
             <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
               <dt class="opacity-70">Run</dt>
               <dd><span class="badge badge-sm {{ run_class }}" data-result-state="{{ request.result_state }}">{{ run_label }}</span></dd>
+              {#- The start of the latest run (#5026): a re-run after a
+                  failed run shows its own start, not the first attempt's. -#}
+              {% if request.run_started_at %}
+                <dt class="opacity-70">Run started</dt>
+                <dd><time datetime="{{ request.run_started_at }}" class="font-mono text-xs" data-testid="approval-run-started-at">{{ request.run_started_at }}</time></dd>
+              {% endif %}
               {% if request.outcome %}
-                {% if request.outcome.resumed_at %}
-                  <dt class="opacity-70">Run started</dt>
-                  <dd><time datetime="{{ request.outcome.resumed_at }}" class="font-mono text-xs">{{ request.outcome.resumed_at }}</time></dd>
-                {% endif %}
                 {% if request.outcome.result_status %}
                   <dt class="opacity-70">Result status</dt>
                   <dd class="font-mono">{{ request.outcome.result_status }}</dd>

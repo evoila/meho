@@ -256,7 +256,9 @@ no REST or MCP route for it yet.
 
 `recall` is a natural-key SELECT; `list_memories` pulls a wider
 candidate window (`limit * 4`, min 200) ordered by `updated_at
-DESC`, then post-filters through the RBAC matrix on `user_sub`. Both
+DESC`, then post-filters through the RBAC matrix on `user_sub`. Its
+`target_name` argument keeps only the notes of that target, in SQL;
+recall before an operation uses it ([recall.md](recall.md)). Both
 paths project via `document_to_entry`, so the returned timestamps
 are the real DB column values.
 
@@ -441,6 +443,23 @@ with full snippets stay far below the default, so `partial` shows up
 only with a lowered limit or very long slugs or target names. There is
 no Memory-specific store, handle, or query grammar: the next step after
 a hit is always the selected read on its `locator`.
+
+### Retrievals and the weekly upkeep
+
+`search_memory` records each hit it delivers to a session in the
+`lesson_retrieval` table (`lessons/retrievals.py`; see
+[reflex-adoption.md](reflex-adoption.md#learning-numbers)). The weekly
+knowledge upkeep (`lessons/upkeep.py`, see
+[kb.md](kb.md#weekly-upkeep-lessonsupkeeppy)) sets `confirmed_at` again on a
+memory entry with `status: confirmed` that a session used. That write
+adds a revision with `written_by_sub = system:knowledge-upkeep`. The
+upkeep does not merge or retire memory entries: the expiry sweeper above
+already deletes expired ones.
+
+Only a reviewer or a tenant admin may write `status: confirmed` on a
+memory entry (`MemoryService.remember`, the rule of
+[kb.md](kb.md#lesson-header-and-shared-scope-lesson_headerpy-kbsharedpy)). Any other caller, such as an agent, gets
+a permission refusal (REST 403) and nothing is written.
 
 ### Promote path
 

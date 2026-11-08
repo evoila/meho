@@ -457,10 +457,19 @@ const (
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
+// Defines values for KbImportPageResultAction.
+const (
+	KbImportPageResultActionCreate    KbImportPageResultAction = "create"
+	KbImportPageResultActionSkip      KbImportPageResultAction = "skip"
+	KbImportPageResultActionUnchanged KbImportPageResultAction = "unchanged"
+	KbImportPageResultActionUpdate    KbImportPageResultAction = "update"
+)
+
 // Defines values for KbProvenanceSourceKind.
 const (
 	KbProvenanceSourceKindDirect    KbProvenanceSourceKind = "direct"
 	KbProvenanceSourceKindDirectory KbProvenanceSourceKind = "directory"
+	KbProvenanceSourceKindImport    KbProvenanceSourceKind = "import"
 )
 
 // Defines values for KbProvenanceState.
@@ -4727,6 +4736,21 @@ type ConventionUpdate struct {
 	Title    *string `json:"title"`
 }
 
+// ConventionsDriftResponse The drift check's answer. “in_sync“ is true only when nothing differs.
+//
+// “added“: “{slug, value}“, a rule in the file that MEHO does not have.
+// “changed“: “{slug, before, after}“, only the fields an import would
+// change. “only_in_meho“: “{slug}“, an operational convention the file
+// does not have. All three are empty when “mistakes“ is not.
+type ConventionsDriftResponse struct {
+	Added      []map[string]interface{} `json:"added"`
+	Changed    []map[string]interface{} `json:"changed"`
+	InSync     bool                     `json:"in_sync"`
+	Mistakes   []string                 `json:"mistakes"`
+	Ok         bool                     `json:"ok"`
+	OnlyInMeho []map[string]interface{} `json:"only_in_meho"`
+}
+
 // CriterionResult One row of the per-surface checklist.
 //
 // Frozen + “extra="forbid"“ so the structured output is stable for
@@ -7013,6 +7037,49 @@ type KbEntryPreview struct {
 	UpdatedAt string                 `json:"updated_at"`
 }
 
+// KbImportPage One page the caller sends: its path in the wiki and its full text.
+type KbImportPage struct {
+	// Content The whole page: the YAML lesson header, then the text.
+	Content string `json:"content"`
+
+	// Path Path of the page in the wiki, relative, ending in .md.
+	Path string `json:"path"`
+}
+
+// KbImportPageResult What the import did, or would do in a dry run, with one page.
+type KbImportPageResult struct {
+	Action KbImportPageResultAction `json:"action"`
+	Path   string                   `json:"path"`
+
+	// Reason Why the page was skipped. Set for every skipped page.
+	Reason *string `json:"reason"`
+	Slug   *string `json:"slug"`
+}
+
+// KbImportPageResultAction defines model for KbImportPageResult.Action.
+type KbImportPageResultAction string
+
+// KbImportRequest POST body for “/api/v1/kb/import“.
+type KbImportRequest struct {
+	// DryRun Show what the import would do, and write nothing.
+	DryRun *bool `json:"dry_run,omitempty"`
+
+	// IncludeCandidates Also import pages with status: candidate. Off: they are skipped.
+	IncludeCandidates *bool          `json:"include_candidates,omitempty"`
+	Pages             []KbImportPage `json:"pages"`
+}
+
+// KbImportResult The answer of one import: one row per page, sorted by path.
+type KbImportResult struct {
+	Conflicts      []KbIngestConflict   `json:"conflicts"`
+	CreatedCount   int                  `json:"created_count"`
+	DryRun         bool                 `json:"dry_run"`
+	Pages          []KbImportPageResult `json:"pages"`
+	SkippedCount   int                  `json:"skipped_count"`
+	UnchangedCount int                  `json:"unchanged_count"`
+	UpdatedCount   int                  `json:"updated_count"`
+}
+
 // KbIngestConflict Two or more files in one directory ingest claim the same slug.
 //
 // “relative_paths“ lists every file that claims “slug“, sorted,
@@ -7148,6 +7215,25 @@ type KbSimilarEntryMatch string
 // stable, and an out-of-enum value fails Pydantic validation at the HTTP
 // boundary with a 422 rather than silently filtering nothing.
 type KindFilterValue string
+
+// LearningMetrics The four numbers that show whether stored lessons help.
+//
+// For one tenant and window. Each ratio comes with its count and its
+// base, and is “null“ when the base is 0. The median time is in
+// seconds.
+type LearningMetrics struct {
+	FirstCorrectActionMedianSeconds *float32 `json:"first_correct_action_median_seconds"`
+	FirstCorrectActionSessions      int      `json:"first_correct_action_sessions"`
+	HitRatePct                      *float32 `json:"hit_rate_pct"`
+	HitRateRetrievals               int      `json:"hit_rate_retrievals"`
+	HitRateUsed                     int      `json:"hit_rate_used"`
+	PrecisionJudged                 int      `json:"precision_judged"`
+	PrecisionPct                    *float32 `json:"precision_pct"`
+	PrecisionRight                  int      `json:"precision_right"`
+	RepeatMistakeFailures           int      `json:"repeat_mistake_failures"`
+	RepeatMistakePct                *float32 `json:"repeat_mistake_pct"`
+	RepeatMistakeRepeats            int      `json:"repeat_mistake_repeats"`
+}
 
 // LivenessResponse “GET /api/v1/health/live“ response body.
 //
@@ -8407,7 +8493,16 @@ type ReassignRunResponse struct {
 // empty window (both surfaces present with zero-valued / “None“
 // metrics). “tenant_id“ is the scope the report was computed for
 // (the operator's own tenant, or a “platform_admin“ filter).
+// “learning“ holds the four numbers that show whether stored lessons
+// help (:mod:`meho_backplane.lessons.metrics`); they are not split by
+// surface, because each one is about agent sessions.
 type ReflexReport struct {
+	// Learning The four numbers that show whether stored lessons help.
+	//
+	// For one tenant and window. Each ratio comes with its count and its
+	// base, and is ``null`` when the base is 0. The median time is in
+	// seconds.
+	Learning LearningMetrics     `json:"learning"`
 	Since    time.Time           `json:"since"`
 	Surfaces []SurfaceMetrics    `json:"surfaces"`
 	TenantId *openapi_types.UUID `json:"tenant_id"`
@@ -12475,6 +12570,11 @@ type CreateKbApiV1KbPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ImportKbPagesApiV1KbImportPostParams defines parameters for ImportKbPagesApiV1KbImportPost.
+type ImportKbPagesApiV1KbImportPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // IngestKbApiV1KbIngestPostParams defines parameters for IngestKbApiV1KbIngestPost.
 type IngestKbApiV1KbIngestPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -12921,6 +13021,11 @@ type EndRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdEndPostParams 
 
 // RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams defines parameters for RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost.
 type RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ConventionsDriftApiV1SettingsConventionsDriftPostParams defines parameters for ConventionsDriftApiV1SettingsConventionsDriftPost.
+type ConventionsDriftApiV1SettingsConventionsDriftPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -13623,6 +13728,9 @@ type ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody = GatewayRes
 
 // CreateKbApiV1KbPostJSONRequestBody defines body for CreateKbApiV1KbPost for application/json ContentType.
 type CreateKbApiV1KbPostJSONRequestBody = KbEntryCreate
+
+// ImportKbPagesApiV1KbImportPostJSONRequestBody defines body for ImportKbPagesApiV1KbImportPost for application/json ContentType.
+type ImportKbPagesApiV1KbImportPostJSONRequestBody = KbImportRequest
 
 // IngestKbApiV1KbIngestPostJSONRequestBody defines body for IngestKbApiV1KbIngestPost for application/json ContentType.
 type IngestKbApiV1KbIngestPostJSONRequestBody = IngestKbRequest
@@ -16274,6 +16382,11 @@ type ClientInterface interface {
 
 	CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ImportKbPagesApiV1KbImportPostWithBody request with any body
+	ImportKbPagesApiV1KbImportPostWithBody(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ImportKbPagesApiV1KbImportPost(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// IngestKbApiV1KbIngestPostWithBody request with any body
 	IngestKbApiV1KbIngestPostWithBody(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -16530,6 +16643,9 @@ type ClientInterface interface {
 	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBody(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ConventionsDriftApiV1SettingsConventionsDriftPostWithBody request with any body
+	ConventionsDriftApiV1SettingsConventionsDriftPostWithBody(ctx context.Context, params *ConventionsDriftApiV1SettingsConventionsDriftPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ExportApiV1SettingsExportGet request
 	ExportApiV1SettingsExportGet(ctx context.Context, params *ExportApiV1SettingsExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19310,6 +19426,30 @@ func (c *Client) CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1K
 	return c.Client.Do(req)
 }
 
+func (c *Client) ImportKbPagesApiV1KbImportPostWithBody(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportKbPagesApiV1KbImportPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportKbPagesApiV1KbImportPost(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportKbPagesApiV1KbImportPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) IngestKbApiV1KbIngestPostWithBody(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewIngestKbApiV1KbIngestPostRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
@@ -20452,6 +20592,18 @@ func (c *Client) RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalI
 
 func (c *Client) RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostRequest(c.Server, runApprovalId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ConventionsDriftApiV1SettingsConventionsDriftPostWithBody(ctx context.Context, params *ConventionsDriftApiV1SettingsConventionsDriftPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewConventionsDriftApiV1SettingsConventionsDriftPostRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -32061,6 +32213,61 @@ func NewCreateKbApiV1KbPostRequestWithBody(server string, params *CreateKbApiV1K
 	return req, nil
 }
 
+// NewImportKbPagesApiV1KbImportPostRequest calls the generic ImportKbPagesApiV1KbImportPost builder with application/json body
+func NewImportKbPagesApiV1KbImportPostRequest(server string, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewImportKbPagesApiV1KbImportPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewImportKbPagesApiV1KbImportPostRequestWithBody generates requests for ImportKbPagesApiV1KbImportPost with any type of body
+func NewImportKbPagesApiV1KbImportPostRequestWithBody(server string, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/kb/import")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewIngestKbApiV1KbIngestPostRequest calls the generic IngestKbApiV1KbIngestPost builder with application/json body
 func NewIngestKbApiV1KbIngestPostRequest(server string, params *IngestKbApiV1KbIngestPostParams, body IngestKbApiV1KbIngestPostJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -36649,6 +36856,50 @@ func NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePo
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/service-principals/run-approvals/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewConventionsDriftApiV1SettingsConventionsDriftPostRequestWithBody generates requests for ConventionsDriftApiV1SettingsConventionsDriftPost with any type of body
+func NewConventionsDriftApiV1SettingsConventionsDriftPostRequestWithBody(server string, params *ConventionsDriftApiV1SettingsConventionsDriftPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/settings/conventions-drift")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -50495,6 +50746,11 @@ type ClientWithResponsesInterface interface {
 
 	CreateKbApiV1KbPostWithResponse(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateKbApiV1KbPostResponse, error)
 
+	// ImportKbPagesApiV1KbImportPostWithBodyWithResponse request with any body
+	ImportKbPagesApiV1KbImportPostWithBodyWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error)
+
+	ImportKbPagesApiV1KbImportPostWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error)
+
 	// IngestKbApiV1KbIngestPostWithBodyWithResponse request with any body
 	IngestKbApiV1KbIngestPostWithBodyWithResponse(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestKbApiV1KbIngestPostResponse, error)
 
@@ -50751,6 +51007,9 @@ type ClientWithResponsesInterface interface {
 	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBodyWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse, error)
 
 	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse, error)
+
+	// ConventionsDriftApiV1SettingsConventionsDriftPostWithBodyWithResponse request with any body
+	ConventionsDriftApiV1SettingsConventionsDriftPostWithBodyWithResponse(ctx context.Context, params *ConventionsDriftApiV1SettingsConventionsDriftPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ConventionsDriftApiV1SettingsConventionsDriftPostResponse, error)
 
 	// ExportApiV1SettingsExportGetWithResponse request
 	ExportApiV1SettingsExportGetWithResponse(ctx context.Context, params *ExportApiV1SettingsExportGetParams, reqEditors ...RequestEditorFn) (*ExportApiV1SettingsExportGetResponse, error)
@@ -54239,6 +54498,29 @@ func (r CreateKbApiV1KbPostResponse) StatusCode() int {
 	return 0
 }
 
+type ImportKbPagesApiV1KbImportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *KbImportResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ImportKbPagesApiV1KbImportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ImportKbPagesApiV1KbImportPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type IngestKbApiV1KbIngestPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -55738,6 +56020,29 @@ func (r RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePo
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ConventionsDriftApiV1SettingsConventionsDriftPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ConventionsDriftResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ConventionsDriftApiV1SettingsConventionsDriftPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ConventionsDriftApiV1SettingsConventionsDriftPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -62734,6 +63039,23 @@ func (c *ClientWithResponses) CreateKbApiV1KbPostWithResponse(ctx context.Contex
 	return ParseCreateKbApiV1KbPostResponse(rsp)
 }
 
+// ImportKbPagesApiV1KbImportPostWithBodyWithResponse request with arbitrary body returning *ImportKbPagesApiV1KbImportPostResponse
+func (c *ClientWithResponses) ImportKbPagesApiV1KbImportPostWithBodyWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error) {
+	rsp, err := c.ImportKbPagesApiV1KbImportPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportKbPagesApiV1KbImportPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ImportKbPagesApiV1KbImportPostWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error) {
+	rsp, err := c.ImportKbPagesApiV1KbImportPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportKbPagesApiV1KbImportPostResponse(rsp)
+}
+
 // IngestKbApiV1KbIngestPostWithBodyWithResponse request with arbitrary body returning *IngestKbApiV1KbIngestPostResponse
 func (c *ClientWithResponses) IngestKbApiV1KbIngestPostWithBodyWithResponse(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestKbApiV1KbIngestPostResponse, error) {
 	rsp, err := c.IngestKbApiV1KbIngestPostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -63565,6 +63887,15 @@ func (c *ClientWithResponses) RevokeRunApprovalApiV1ServicePrincipalsRunApproval
 		return nil, err
 	}
 	return ParseRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse(rsp)
+}
+
+// ConventionsDriftApiV1SettingsConventionsDriftPostWithBodyWithResponse request with arbitrary body returning *ConventionsDriftApiV1SettingsConventionsDriftPostResponse
+func (c *ClientWithResponses) ConventionsDriftApiV1SettingsConventionsDriftPostWithBodyWithResponse(ctx context.Context, params *ConventionsDriftApiV1SettingsConventionsDriftPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ConventionsDriftApiV1SettingsConventionsDriftPostResponse, error) {
+	rsp, err := c.ConventionsDriftApiV1SettingsConventionsDriftPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseConventionsDriftApiV1SettingsConventionsDriftPostResponse(rsp)
 }
 
 // ExportApiV1SettingsExportGetWithResponse request returning *ExportApiV1SettingsExportGetResponse
@@ -70367,6 +70698,39 @@ func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostR
 	return response, nil
 }
 
+// ParseImportKbPagesApiV1KbImportPostResponse parses an HTTP response from a ImportKbPagesApiV1KbImportPostWithResponse call
+func ParseImportKbPagesApiV1KbImportPostResponse(rsp *http.Response) (*ImportKbPagesApiV1KbImportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ImportKbPagesApiV1KbImportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KbImportResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseIngestKbApiV1KbIngestPostResponse parses an HTTP response from a IngestKbApiV1KbIngestPostWithResponse call
 func ParseIngestKbApiV1KbIngestPostResponse(rsp *http.Response) (*IngestKbApiV1KbIngestPostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -72462,6 +72826,39 @@ func ParseRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevoke
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest RunApprovalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseConventionsDriftApiV1SettingsConventionsDriftPostResponse parses an HTTP response from a ConventionsDriftApiV1SettingsConventionsDriftPostWithResponse call
+func ParseConventionsDriftApiV1SettingsConventionsDriftPostResponse(rsp *http.Response) (*ConventionsDriftApiV1SettingsConventionsDriftPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ConventionsDriftApiV1SettingsConventionsDriftPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConventionsDriftResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

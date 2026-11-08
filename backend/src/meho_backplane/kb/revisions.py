@@ -110,6 +110,7 @@ __all__ = [
     "current_revision_id",
     "delete_entry_rows",
     "get_revision",
+    "update_head_metadata",
     "write_entry",
 ]
 
@@ -447,6 +448,34 @@ async def _refresh_passage_metadata(
         updated = {**metadata, META_KB_PASSAGE: row.doc_metadata[META_KB_PASSAGE]}
         if updated != row.doc_metadata:
             row.doc_metadata = updated
+
+
+async def update_head_metadata(
+    session: AsyncSession,
+    doc: Document,
+    metadata: dict[str, Any],
+) -> None:
+    """Replace the metadata of the head *doc* and of its passages; the body stays.
+
+    For a change of the metadata alone, such as a new ``status``. When
+    the metadata differs, a new revision is added with the same body,
+    as for any write that changes the metadata. So a write that names
+    the revision read before this change is refused as stale. The
+    caller holds the head row (``SELECT ... FOR UPDATE`` on PostgreSQL)
+    and commits.
+    """
+    changed = metadata_changed_keys(doc.doc_metadata or {}, metadata)
+    doc.doc_metadata = metadata
+    doc.updated_at = datetime.now(UTC)
+    await _refresh_passage_metadata(session, doc.tenant_id, doc.id, metadata)
+    if changed:
+        latest = await session.scalar(
+            select(KbRevision.revision_number)
+            .where(KbRevision.entry_id == doc.id)
+            .order_by(KbRevision.revision_number.desc())
+            .limit(1)
+        )
+        _add_revision(session, doc, doc.body, uuid.uuid4(), (latest or 0) + 1)
 
 
 def _add_revision(

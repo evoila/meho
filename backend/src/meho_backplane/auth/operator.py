@@ -357,6 +357,16 @@ class Operator(BaseModel):
     scopes: frozenset[str] = frozenset()
     platform_admin: bool = False
     approver: bool = False
+    #: The login may only import knowledge (``kb_import_only`` claim, #5728).
+    #: Such a token reaches ``POST /api/v1/kb/import`` and nothing else:
+    #: :func:`~meho_backplane.middleware.verify_jwt_and_bind` refuses it on
+    #: every other REST route, and the MCP seam refuses it on every call.
+    kb_import_only: bool = False
+    #: The login may only run the conventions drift check
+    #: (``conventions_drift_only`` claim). Such a token reaches
+    #: ``POST /api/v1/settings/conventions-drift`` and nothing else, in the
+    #: same way as :attr:`kb_import_only`.
+    conventions_drift_only: bool = False
     runner_id: UUID | None = None
     check_runner_dispatch: bool = False
     #: The ``auth_time`` claim: when the person last entered their

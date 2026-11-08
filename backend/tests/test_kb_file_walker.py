@@ -202,6 +202,33 @@ def test_strict_mode_propagates_yaml_parse_error(tmp_path: Path) -> None:
         list(walk_kb_directory(tmp_path))
 
 
+@pytest.mark.parametrize(
+    ("header", "reason"),
+    [
+        ("content: extra", None),
+        ("handler: extra", None),
+        ("on: push", "key(s) True in odd.md are not text"),
+    ],
+)
+def test_a_header_field_the_parser_chokes_on_fails_only_that_file(
+    tmp_path: Path, header: str, reason: str | None
+) -> None:
+    """A field named like a parser argument, or a key that is not text, never stops the walk."""
+    _write(tmp_path / "odd.md", f"---\n{header}\n---\nBody.\n")
+    _write(tmp_path / "good.md", "Good.")
+    errors: list[str] = []
+    records = {record.slug: record for record in walk_kb_directory(tmp_path, errors=errors)}
+    assert "good" in records
+    if reason is None:
+        assert records["odd"].metadata == {header.split(":")[0]: "extra"}
+        assert errors == []
+    else:
+        assert "odd" not in records
+        assert len(errors) == 1 and reason in errors[0]
+        with pytest.raises(KbFileParseError, match="not text"):
+            list(walk_kb_directory(tmp_path))
+
+
 def test_best_effort_mode_continues_past_bad_files(tmp_path: Path) -> None:
     """With an errors list, per-file failures are appended and iteration continues."""
     _write(tmp_path / "good-one.md", "Good.")

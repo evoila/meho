@@ -8,7 +8,9 @@
 The knowledge-base (`kb`) service is the persistent, tenant-scoped
 durable-team-knowledge layer. It has four callers:
 
-- **REST** under `/api/v1/kb/...` (G4.1-T2).
+- **REST** under `/api/v1/kb/...` (G4.1-T2). This includes
+  `POST /api/v1/kb/import`, which the team wiki's CI job calls after
+  each merge (#5728, see [Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728)).
 - **MCP** via the `search_knowledge` + `add_to_knowledge` meta-tools
   in [`mcp/tools/knowledge.py`](../../backend/src/meho_backplane/mcp/tools/knowledge.py)
   (G4.1-T3).
@@ -71,14 +73,14 @@ keys surface on every read surface that already returns `metadata`.
 ### `KbRevision` (`db/models.py`) and `KbEntryRevision` (`kb/schemas.py`)
 
 `KbRevision` is the ORM row in `kb_revision` (migration `0110`; migration
-`0145` adds `entry_metadata`):
+`0146` adds `entry_metadata`):
 `id` (revision UUID), `tenant_id`, `entry_id` (the `documents.id`,
 `ON DELETE CASCADE`), `revision_number` (1, 2, 3, ... per entry; unique
 per entry; the highest is current), `body`, `body_hash`, `provenance`
 (the write's provenance block, or `NULL`), `origin`, `embedding_model`,
 `chunker_version` (`kb-md-heading-v1` for revisions written since
 #3761), `entry_metadata` (the entry's metadata as of this revision;
-`NULL` on a row stored before `0145`) and `created_at`.
+`NULL` on a row stored before `0146`) and `created_at`.
 
 `origin` is `write` for a row stored by a kb write, or
 `backfill-current` for the one row migration `0110` copied from each
@@ -128,10 +130,11 @@ gives the same result on every run.
 ### `KbProvenance` (`kb/schemas.py`, written by `kb/provenance.py`)
 
 Where an entry came from. `state` is `"recorded"` or `"legacy"`.
-For recorded rows, `source_kind` is `"directory"` (directory ingest)
-or `"direct"` (REST / MCP / console create), `relative_path` is the
-file path relative to the ingest directory (`None` for direct
-writes), and `ingested_at` is the UTC write time. Rows written before
+For recorded rows, `source_kind` is `"directory"` (directory ingest),
+`"direct"` (REST / MCP / console create) or `"import"` (a page sent to
+`POST /api/v1/kb/import`), `relative_path` is the file path relative
+to the ingest directory or the page path the caller sent (`None` for
+direct writes), and `ingested_at` is the UTC write time. Rows written before
 provenance existed, or rows whose `provenance` key has another shape,
 read as `state="legacy"` with every other field `None`.
 
@@ -160,6 +163,10 @@ before returning. Seven verbs:
 | `delete_entry(tenant_id, slug)` | Delete the head and all its revisions in one transaction; returns whether a row existed. | Database errors propagate; nothing is removed |
 | `search_entries(tenant_id, query, *, filters=None, limit=10, time_window=None, scope="all")` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. `time_window` limits `confirmed_at` and the last write; `scope` is `all`, `tenant` or `shared`. | `ValueError` on negative `limit` |
 | `ingest_directory(directory, tenant_id, dry_run=False)` | Read every `.md` file in sorted order, report slug conflicts without writing them, ingest the rest; idempotent. Per-file failures counted, run continues. | `KbIngestRootError` outside `KB_INGEST_ROOT` |
+
+`kb/page_import.py::import_pages(request, *, tenant_id, actor_sub)` is
+not a `KbService` method: the import route calls it directly. See
+[Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728).
 
 ### `walk_kb_directory` (`kb/file_walker.py`)
 
@@ -478,6 +485,167 @@ hit's `doc_metadata` is the same JSONB column).
 The REST route binds `audit_conflict_count` with the other counters.
 The CLI prints a `conflicted:` counter and a `conflicts` list.
 
+### Import of pages sent in the request (#5728)
+
+`POST /api/v1/kb/import` (`kb/page_import.py::import_pages`) takes the
+pages in the request body. The caller has the pages on its own machine.
+MEHO reads no folder on the server and fetches nothing, so it never
+holds Git credentials. The first caller is a CI job in the team wiki
+repo: after every merge to main it sends the wiki's product pages with
+`applies_to: product-and-version` and `status: confirmed`. The job
+lives in the team wiki repo, not here.
+
+Body (`KbImportRequest`, unknown fields are a `422`):
+
+```json
+{"pages": [{"path": "products/<product>/<page>.md",
+            "content": "---\ntype: fact\napplies_to: product-and-version\nstatus: confirmed\n---\nText."}],
+ "dry_run": false,
+ "include_candidates": false}
+```
+
+At most 1000 pages per request (`MAX_PAGES`) and 1,000,000 characters
+per page (`MAX_PAGE_CHARS`). The whole request body must also stay
+under `HTTP_MAX_REQUEST_BODY_BYTES` (32 MiB by default); a bigger body
+gets `413`. A bigger wiki sends several requests. Two pages with the
+same slug are found only when they sit in the same request.
+
+Each page goes through these checks, in this order. A page that fails
+one is skipped (`action: "skip"`), and `reason` says why:
+
+1. **Path.** A relative path that ends in `.md`, with no `..`, no
+   leading `/` and no `\`.
+2. **Secret check** (`kb/secret_check.py::find_secret`). The generic
+   secret shapes of the redaction engine (`redaction.md`): login
+   headers, bearer tokens, JWTs, labelled passwords and keys
+   (`api_key`), private key blocks, password hashes, Ceph keys, BIND key
+   secrets and secrets in links. A placeholder such as `<password>` or
+   `${TOKEN}` is not a secret, but only when the whole value is one
+   placeholder, with at most quotes around it and punctuation after it:
+   `password: "<password>",` passes, `password=made-up-value:${TOKEN}`,
+   `password: made-up-value:${TOKEN}` and `password=Q7<k9Tz2LmN>p4` are
+   still secrets, and a private key block is never a placeholder. Only
+   the credential label or the header name in front of the value comes
+   off before the check, never a part of the value. The reason names the pattern and
+   the line, never the value. MEHO holds no list of customer names, host
+   names or addresses: the team wiki's CI job checks its own
+   identifier list before it sends the pages, and refuses and reports a
+   page with a listed identifier there.
+3. **Lesson header.** The page starts with a YAML header that has
+   `type`, `applies_to` and `status`. The header is read with
+   `frontmatter.parse`, not `frontmatter.loads`, so a field named
+   `content` or `handler` is an ordinary field; a key that is not text
+   (an unquoted `on:` is the YAML value `true`) skips the page. Header fields with an empty value
+   (`source:`, `summary: ""`, `tags: []`) are dropped first, so a page
+   made from a template with empty fields is accepted. The values are
+   checked as in [Lesson header and shared scope](#lesson-header-and-shared-scope-lesson_headerpy-kbsharedpy);
+   `slug`, `kind` and `scope` are refused (`provenance` is replaced).
+   An unquoted date stays a date (#5703).
+4. **Candidates.** A page with `status: candidate` is skipped unless the
+   request has `include_candidates: true`. An imported candidate gets the
+   six-month expiry like any candidate.
+5. **Customer facts.** A page with `applies_to: customer` is skipped when
+   the caller's tenant is listed in `KB_SHARED_TENANT_IDS`, or when the
+   page sets `shared: true`. Such facts live in the engagement's project
+   folder.
+6. **Slug.** The file name without `.md` (`products/vcenter/snapshot-limits.md`
+   becomes `snapshot-limits`). A page whose `source` is
+   `meho://kb/<slug>` goes to that entry instead, so a lesson that left
+   MEHO through the export and comes back inside a wiki page is stored
+   once. The slug must match the slug rule; another tenant's shared slug
+   is refused (`KbSharedSlugError`).
+7. **Text.** The page has text below the header.
+
+**Conflicts.** When two or more pages end up with the same slug, all of
+them are skipped and listed once in `conflicts` (`KbIngestConflict`:
+slug and paths). A stored entry with that slug stays unchanged.
+
+**Update by slug, safe to run twice.** Each remaining page is compared
+with the stored entry of its slug in the caller's tenant:
+
+- `create`: no entry yet.
+- `update`: the body or a header field differs.
+- `unchanged`: same body and same header. Nothing is written, so a
+  second run of the same pages adds no revision and does not move
+  `updated_at`.
+
+A write stores the header, a provenance block with `source_kind:
+"import"` and the page path, and the owner keys: `created_by_sub` stays
+the entry's first author (the import login for a new entry), and
+`last_updated_by_sub` is the caller. A write that fails skips that page
+with the error type (not its message); the other pages go on.
+
+**Dry run.** `dry_run: true` runs every check and the comparison, and
+writes nothing. The answer is the same as a real run would give: one
+row per page (`create`, `update`, `unchanged` or `skip` with the reason),
+sorted by path.
+
+**Answer** (`KbImportResult`): `dry_run`, `created_count`,
+`updated_count`, `unchanged_count`, `skipped_count`, `pages` and
+`conflicts`. The audit row has op id `kb.import`, class `write`,
+`dry_run` and the four counters, never the page text.
+
+#### The import login
+
+The route admits a `tenant_admin`, or a login whose token carries the
+claim `kb_import_only: true` (`Operator.kb_import_only`,
+`auth/jwt.py::_extract_kb_import_only`). Such a login can do nothing
+else:
+
+- every other REST route, and every method but `POST` on the import
+  path, answers `403 kb_import_only_scope_violation`
+  (`middleware.py::_reject_kb_import_only_elsewhere`, keyed on
+  `KB_IMPORT_ROUTE`, the pair `POST` + `KB_IMPORT_PATH`), whatever role
+  the token names;
+- every MCP call answers the same `403` (`mcp/auth.py::verify_mcp_jwt_and_bind`);
+- the console needs an interactive sign-in, which a client-credentials
+  login cannot do.
+
+The claim takes rights away, so it fails closed the other way round: a
+value MEHO cannot read (a number, a list, `"yes"`) also limits the
+login. Only no claim, `false` or `"false"` leaves a login unlimited.
+
+Set the login up in Keycloak as a confidential client with only
+**Service accounts** on (client credentials; no standard flow, no
+direct access grants), and these mappers on the client (the same kind
+as in `docs/cross-repo/keycloak-agent-client.md`):
+
+| Mapper | Claim | Value |
+|---|---|---|
+| Audience | `aud` | the backplane audience (`KEYCLOAK_AUDIENCE`) |
+| Hardcoded claim | `tenant_id` | the one tenant the pages go to |
+| Hardcoded claim | `tenant_role` | `read_only` |
+| Hardcoded claim | `principal_kind` | `service` |
+| Hardcoded claim (JSON type boolean) | `kb_import_only` | `true` |
+
+The client gets no `meho_tenants` claim, so the login works in one
+tenant only. The client secret lives in the team wiki repo's CI
+secrets, never in MEHO.
+
+#### The call from the CI job
+
+The job gets a token with the client credentials grant, then sends the
+pages. A dry run first is a good habit: it shows every page that would
+be skipped, with the reason.
+
+```bash
+TOKEN=$(curl -s -d grant_type=client_credentials \
+  -d client_id="$MEHO_IMPORT_CLIENT_ID" -d client_secret="$MEHO_IMPORT_CLIENT_SECRET" \
+  "$KEYCLOAK_ISSUER_URL/protocol/openid-connect/token" | jq -r .access_token)
+
+# One {"path", "content"} object per page; the job picks the pages
+# (confirmed, product-and-version) and runs its identifier check first.
+find products -name '*.md' | sort | while read -r f; do
+  jq -n --arg path "$f" --rawfile content "$f" '{path: $path, content: $content}'
+done | jq -s '{pages: ., dry_run: false}' > import.json
+
+curl -sf -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data @import.json "$MEHO_URL/api/v1/kb/import" | jq '.pages[] | select(.action == "skip")'
+```
+
+The job fails when the call fails. It reports the skipped pages from
+the answer.
+
 ### Provenance
 
 `metadata["provenance"]` is owned by the service. Each write replaces
@@ -525,12 +693,74 @@ override it always was.
 stored one, else now) and, when it names no `expires_at`, an
 `expires_at` six months after `learned_at`. A re-write or re-import of
 the same note keeps these dates. A confirmed entry gets no expiry.
-Nothing deletes or hides an expired entry yet: the date is recorded and
-returned on every read surface. The console entry page shows every
-header field the entry has in a "Lesson header" list
-(`lesson_header.py::header_rows`).
+Nothing deletes or hides an expired entry: the weekly upkeep job (below)
+sets its `status` to `retired`, and the entry stays readable. The
+console entry page shows every header field the entry has in a "Lesson
+header" list (`lesson_header.py::header_rows`).
 
 **Owner.** The owner is `created_by_sub` (see above).
+
+**Who confirms.** Only a reviewer (a person who can decide approvals in
+the tenant, see the owner rule above) or a tenant admin may write
+`status: confirmed` (`lesson_header.py::may_confirm`). The MCP
+`add_to_knowledge` tool refuses it for any other caller, also for the
+owner of the entry, with a permission refusal,
+`reason: confirm_needs_reviewer`, and nothing is written. The memory
+service applies the same rule to every memory write (REST, MCP and the
+console). REST
+`POST /api/v1/kb` and the directory import are tenant admin only, so an
+import carries the status a reviewer set in the team wiki. The upkeep
+job never confirms a candidate.
+
+### Weekly upkeep (`lessons/upkeep.py`)
+
+A background job keeps the store clean. It runs once per
+`KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default), counted from
+its last recorded run, and can be turned off with
+`KNOWLEDGE_UPKEEP_ENABLED=false`. On PostgreSQL an advisory lock lets
+one replica at a time run it. Each run:
+
+1. **Merges duplicates.** Entries of one tenant with exactly the same
+   body are one entry. Case and spaces count, because `MODE=prod` and
+   `MODE=PROD` say different things. The job keeps a `confirmed` copy
+   first, else the oldest, and gives each other copy `status: replaced`
+   and `replaced_by: <slug of the kept entry>`. Before the change it
+   locks both entries and reads them again. When either was edited or
+   deleted after the scan, it leaves both as they are.
+2. **Retires expired entries.** An entry whose `expires_at` has passed
+   gets `status: retired`.
+3. **Refreshes used confirmed entries.** A `confirmed` knowledge or
+   memory entry that a session used in the last interval gets
+   `confirmed_at` set to the time of that use. "Used" is defined in
+   [reflex-adoption.md](reflex-adoption.md#learning-numbers): a search
+   gave the entry to a session, and the session then ran an operation
+   that succeeded.
+4. **Lists used candidates for a reviewer**, with the number of
+   different sessions and different targets that used each one. Copies
+   of one story are not independent proof, so two searches in one
+   session count once.
+5. **Measures** the four learning numbers for the interval.
+
+The job changes only metadata, through `kb/revisions.py::update_head_metadata`
+(head and passages, under the row lock). A change of the metadata adds
+a new revision with the same body, as for any write that changes the
+metadata, so a write that names the revision read before it is refused
+as stale. It deletes no entry. It deletes recorded
+retrievals older than 180 days.
+
+**The report.** One `INTERNAL` audit row per tenant, with
+`operator_sub = system:knowledge-upkeep` and `path = knowledge.upkeep`.
+The payload lists what was merged (`merged`: slug and `into`), retired
+(`retired`), refreshed (`refreshed`) and what waits for a reviewer
+(`for_review`), each list at most 100 items with full counts
+(`merged_count` and so on), plus the four numbers (`numbers`). Read it
+with `meho audit query` and the principal `system:knowledge-upkeep`. A
+row with the totals goes to the system tenant
+`00000000-0000-0000-0000-000000005733`; the schedule reads it as the
+last run. A tenant's changes and its report row commit in one
+transaction. When the report cannot be written, the changes roll back
+too, so the next run makes and reports them. The row with the totals is
+written only when every tenant committed.
 
 **Shared scope.** An entry with `shared: true` in its metadata is
 readable from every tenant on the instance, if its owner tenant is
@@ -707,10 +937,12 @@ Direct:
 - `meho_backplane.retrieval.retriever.retrieve` for `search_entries`.
 - `python-frontmatter` (transitive via `kb/file_walker.py`) for
   `.md` front-matter parsing.
+- `meho_backplane.redaction.patterns` for the secret check of the page
+  import (`kb/secret_check.py`).
 
 Transports that call into this service:
 
-- `meho_backplane.api.v1.kb` (REST, G4.1-T2).
+- `meho_backplane.api.v1.kb` (REST, G4.1-T2), also for the page import.
 - `meho_backplane.mcp.tools.knowledge` (MCP, G4.1-T3).
 - `meho_backplane.ui.routes.kb.routes` (console).
 - The Go CLI in `cli/internal/cmd/kb/` calls the REST routes, not this

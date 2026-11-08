@@ -6195,7 +6195,7 @@
           "knowledge"
         ],
         "summary": "Export Kb Pages",
-        "description": "Return the caller's confirmed, generic entries as Markdown pages (#5730).\n\nThe team wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
+        "description": "Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).\n\nThe team wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
         "operationId": "export_kb_pages_api_v1_kb_export_post",
         "parameters": [
           {
@@ -34413,6 +34413,55 @@
         "title": "KbSimilarEntry",
         "description": "One existing entry that is similar to the entry about to be created."
       },
+      "KbWikiSearch": {
+        "properties": {
+          "collection": {
+            "type": "string",
+            "title": "Collection"
+          },
+          "searched": {
+            "type": "boolean",
+            "title": "Searched"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "docs_addon_off",
+              "not_entitled",
+              "unknown_collection",
+              "collection_not_ready",
+              "index_unavailable",
+              "filtered"
+            ],
+            "nullable": true,
+            "title": "Reason"
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "title": "Message"
+          },
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/DocsChunk"
+            },
+            "type": "array",
+            "title": "Hits"
+          },
+          "duplicate_count": {
+            "type": "integer",
+            "title": "Duplicate Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "collection",
+          "searched"
+        ],
+        "title": "KbWikiSearch",
+        "description": "What the wiki part of one knowledge search did.\n\n``searched`` is false when the wiki was not searched; then ``reason``\nand ``message`` say why and ``hits`` is empty. ``hits`` are the wiki's\nhits, best first, each with ``collection`` set and its ``source_url``\n(the source link the index sent). ``duplicate_count`` counts the wiki\nhits left out because the store's hits already hold their imported copy."
+      },
       "KindFilterValue": {
         "type": "string",
         "enum": [
@@ -37359,6 +37408,11 @@
           "query_duration_ms": {
             "type": "number",
             "title": "Query Duration Ms"
+          },
+          "wiki": {
+            "$ref": "#/components/schemas/KbWikiSearch",
+            "nullable": true,
+            "description": "Only with source='kb' on a tenant that keeps its lessons in a team wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
           }
         },
         "type": "object",

@@ -167,6 +167,39 @@ Re-adding the same slug **updates in place** — a body-hash short-circuit
 means an unchanged body costs only an `updated_at` bump (no re-embed), so
 an agent can call it freely as "remember this."
 
+## Lessons in a team wiki
+
+A team can keep its lessons as pages in a Git wiki. Then a lesson lives
+in two places: the wiki is the source of truth, and MEHO keeps a copy.
+
+To set it up:
+
+1. Load the wiki into a knowledge index and add it to MEHO as a docs
+   collection (see [Grounded docs search](#grounded-docs-search-add-on)).
+2. Give the tenant the capability `meho-docs:<collection>`.
+3. Set `knowledge_wiki_collection: <collection>` under the tenant's
+   `policies` in the [settings file](settings-file.md). Leave it out or
+   set it to `null` to keep lessons in MEHO only.
+
+What changes for the tenant:
+
+- `search_knowledge` and `meho kb search` also search the wiki. A wiki
+  hit has `source: wiki`, its `collection` and its `source_url` (the link
+  to the page). The answer's `wiki` says whether the wiki was searched.
+  When it was not, `wiki.message` says why: no docs add-on, no capability,
+  the collection is not ready, the knowledge index did not answer, or the
+  search used filters, a time window or scope `shared`, which the wiki
+  cannot apply. The knowledge hits still come back.
+- When MEHO holds an imported copy of a wiki page, the page is shown once,
+  as the knowledge hit.
+- `add_to_knowledge` still stores the lesson in MEHO. Its answer has a
+  `wiki` part: the collection, and whether the lesson also goes to the
+  wiki. A lesson with `applies_to: product-and-version`, a full lesson
+  header and status `candidate` reaches the wiki as a candidate page
+  through the knowledge export, and a person reviews it there.
+- A person can also write the wiki page directly. The import brings it
+  into MEHO after the merge.
+
 ## The discipline: search before you write
 
 Both `add_*` tools say the same thing, and it is the single most

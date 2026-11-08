@@ -497,6 +497,16 @@ const (
 	KbSimilarEntryMatchSameProductVersion KbSimilarEntryMatch = "same_product_version"
 )
 
+// Defines values for KbWikiSearchReason.
+const (
+	KbWikiSearchReasonCollectionNotReady KbWikiSearchReason = "collection_not_ready"
+	KbWikiSearchReasonDocsAddonOff       KbWikiSearchReason = "docs_addon_off"
+	KbWikiSearchReasonFiltered           KbWikiSearchReason = "filtered"
+	KbWikiSearchReasonIndexUnavailable   KbWikiSearchReason = "index_unavailable"
+	KbWikiSearchReasonNotEntitled        KbWikiSearchReason = "not_entitled"
+	KbWikiSearchReasonUnknownCollection  KbWikiSearchReason = "unknown_collection"
+)
+
 // Defines values for KindFilterValue.
 const (
 	KindFilterValueCron   KindFilterValue = "cron"
@@ -7248,6 +7258,25 @@ type KbSimilarEntry struct {
 // KbSimilarEntryMatch defines model for KbSimilarEntry.Match.
 type KbSimilarEntryMatch string
 
+// KbWikiSearch What the wiki part of one knowledge search did.
+//
+// “searched“ is false when the wiki was not searched; then “reason“
+// and “message“ say why and “hits“ is empty. “hits“ are the wiki's
+// hits, best first, each with “collection“ set and its “source_url“
+// (the source link the index sent). “duplicate_count“ counts the wiki
+// hits left out because the store's hits already hold their imported copy.
+type KbWikiSearch struct {
+	Collection     string              `json:"collection"`
+	DuplicateCount *int                `json:"duplicate_count,omitempty"`
+	Hits           *[]DocsChunk        `json:"hits,omitempty"`
+	Message        *string             `json:"message"`
+	Reason         *KbWikiSearchReason `json:"reason"`
+	Searched       bool                `json:"searched"`
+}
+
+// KbWikiSearchReason defines model for KbWikiSearch.Reason.
+type KbWikiSearchReason string
+
 // KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
 //
 // Mirrors the wire-level :data:`~meho_backplane.scheduler.schemas.KindFilter`
@@ -8979,6 +9008,15 @@ type RetrieveRequest struct {
 type RetrieveResponse struct {
 	Hits            []RetrievalHit `json:"hits"`
 	QueryDurationMs float32        `json:"query_duration_ms"`
+
+	// Wiki What the wiki part of one knowledge search did.
+	//
+	// ``searched`` is false when the wiki was not searched; then ``reason``
+	// and ``message`` say why and ``hits`` is empty. ``hits`` are the wiki's
+	// hits, best first, each with ``collection`` set and its ``source_url``
+	// (the source link the index sent). ``duplicate_count`` counts the wiki
+	// hits left out because the store's hits already hold their imported copy.
+	Wiki *KbWikiSearch `json:"wiki,omitempty"`
 }
 
 // ReviewerContextView Redacted, human-legible context for judging a parked request (#3353).

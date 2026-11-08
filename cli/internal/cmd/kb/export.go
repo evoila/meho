@@ -23,7 +23,7 @@ import (
 )
 
 // exportResponseBodyCap bounds the export answer. The export returns
-// every confirmed, generic entry with its full text in one answer, so
+// every confirmed or candidate generic entry with its full text in one answer, so
 // it gets more room than the 1 MiB of the other kb verbs.
 const exportResponseBodyCap int64 = 64 << 20
 
@@ -44,11 +44,12 @@ func newExportCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "export <directory>",
-		Short: "Write the confirmed, generic kb entries as Markdown pages into a local folder (operator)",
+		Short: "Write the generic kb entries as Markdown pages into a local folder (operator)",
 		Long: "export calls POST /api/v1/kb/export and writes the answer into <directory> " +
 			"on this machine, for example a folder of the team wiki repo.\n\n" +
-			"The answer holds the entries of your tenant with status: confirmed and " +
-			"applies_to: product-and-version that were written in MEHO. Entries that " +
+			"The answer holds the entries of your tenant with status: confirmed or " +
+			"candidate and applies_to: product-and-version that were written in MEHO. " +
+			"A candidate keeps status: candidate, so a person reviews it. Entries that " +
 			"came in through an import are left out. Each entry becomes <slug>.md, " +
 			"with the lesson header and the text. The file of an entry with status: " +
 			"retired or replaced is removed. No other file in the folder is touched.\n\n" +

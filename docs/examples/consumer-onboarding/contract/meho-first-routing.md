@@ -161,7 +161,9 @@ A **verified** outcome goes back to the right store, through the backplane,
 so the next session inherits it:
 
 - a **reusable lesson** → MEHO's knowledge store (`add_to_knowledge`), never
-  a file in a repo's knowledge folder;
+  a file in a repo's knowledge folder. When the tenant keeps its lessons in a
+  team wiki, MEHO also sends the lesson there as a candidate page, and a
+  person reviews it. A person can also write the wiki page directly;
 - a **personal preference or note** → stays in the engineer's laptop memory.
   When it turns out to be a team fact, move it to MEHO's knowledge store
   (`add_to_knowledge`);
@@ -251,6 +253,9 @@ operational facts for this tenant. Prefer it over local `kb/` files.
   whole knowledge store.
 - `meho kb show <slug>` — full body of one entry; `meho kb list` —
   enumerate entries.
+- When the tenant keeps its lessons in a team wiki, the same search also
+  searches the wiki. A wiki hit has `source: wiki`, its collection and its
+  source link. When the wiki was not searched, the answer says why.
 <!-- fragment:END kb-find -->
 
 <!-- fragment:START kb-record -->
@@ -262,6 +267,10 @@ operational facts for this tenant. Prefer it over local `kb/` files.
   tenant.
 - `meho kb delete <slug>` — remove an entry; `meho kb ingest <directory>` —
   bulk-import an existing directory of markdown facts.
+- When the tenant keeps its lessons in a team wiki, a lesson lives in both
+  places: the wiki (a Git repo) is the source of truth, and MEHO keeps a
+  copy. `add_to_knowledge` still stores the lesson. Its answer (`wiki`) says
+  whether the lesson also goes to the wiki as a candidate page for review.
 <!-- fragment:END kb-record -->
 
 <!-- fragment:START kb-docs -->

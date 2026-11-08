@@ -1,0 +1,518 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Knowledge search reads the team wiki through the knowledge index (#5976).
+
+A tenant setting (``tenant.knowledge_wiki_collection``) names one docs
+collection where the tenant keeps its lessons. These tests cover:
+
+* with the setting empty, ``search_knowledge`` and ``add_to_knowledge``
+  answer as before (no ``wiki`` key, the docs backend is never called);
+* with the setting and the entitlement, the wiki's hits come next to the
+  store's hits, with their collection and source link, and the audit row
+  names the collection;
+* without the docs add-on, without the entitlement, with an unknown or
+  not-ready collection, with the index down, or with filters, the store's
+  hits still come back and ``wiki`` says why the wiki was not searched;
+* a wiki page that the store holds as an imported copy is shown once;
+* ``add_to_knowledge`` stores the lesson as a direct write and its answer
+  names the collection and says whether the lesson goes to the wiki;
+* the setting is per tenant;
+* ``POST /api/v1/retrieve`` with ``source="kb"`` (``meho kb search``)
+  gives the same wiki result.
+
+The docs backend is faked at the ``corpus-http`` transport seam, the same
+seam ``tests/test_mcp_tools_docs.py`` patches. The store search is faked
+at the retriever, as in ``tests/test_mcp_tools_knowledge.py``.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from meho_backplane.api.v1.retrieve import router as retrieve_router
+from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, CorpusUnavailable
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog, Tenant
+from meho_backplane.instance_settings.schema import parse_settings_file
+from meho_backplane.kb.provenance import stamp_provenance
+from meho_backplane.kb.service import KbService
+from meho_backplane.main import app
+from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.mcp.tools.knowledge import (
+    _add_to_knowledge_handler,
+    _search_knowledge_handler,
+)
+from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.retrieval.retriever import RetrievalHit
+from meho_backplane.untrusted_text import BLOCK_START
+from tests._kb_embedding_stub import fake_embedding_service
+from tests.mcp_test_fixtures import (
+    OPERATOR_TENANT_ID,
+    isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
+    post_mcp,
+    required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seed_doc_collection,
+)
+
+_WIKI = "team-wiki"
+_ENTITLED = frozenset({"meho-docs", f"meho-docs:{_WIKI}"})
+_CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
+_STORE_SEAM = "meho_backplane.kb.service.retrieve"
+_REST_STORE_SEAM = "meho_backplane.api.v1.retrieve.retrieve"
+_TENANT_B = uuid.UUID("00000000-0000-0000-0000-00000000b0b0")
+_PAGE_PATH = "products/vcenter/snapshot-limits.md"
+_WIKI_CHUNK = CorpusChunk(
+    chunk_id="wiki-snapshot-limits-0001",
+    title="Snapshot limits",
+    content="Keep at most 32 snapshots per VM.",
+    source_url=f"https://git.example.com/team/wiki/-/blob/abc123/{_PAGE_PATH}",
+    score=0.9,
+)
+_LESSON = {"type": "lesson", "applies_to": "product-and-version", "status": "candidate"}
+
+
+@pytest.fixture(autouse=True)
+def stub_embedding() -> Iterator[AsyncMock]:
+    fake = fake_embedding_service()
+    with patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake):
+        yield fake.encode_one
+
+
+async def _seed_tenant(tenant_id: uuid.UUID, wiki: str | None) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            Tenant(
+                id=tenant_id,
+                slug=f"tenant-{tenant_id.hex[-4:]}",
+                name="Test tenant",
+                knowledge_wiki_collection=wiki,
+            )
+        )
+
+
+def _operator(
+    tenant_id: uuid.UUID = OPERATOR_TENANT_ID,
+    capabilities: frozenset[str] = _ENTITLED,
+) -> Operator:
+    return Operator(
+        sub="op-test",
+        name="Test",
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+        capabilities=capabilities,
+    )
+
+
+def _store_hit(
+    tenant_id: uuid.UUID = OPERATOR_TENANT_ID,
+    slug: str = "vcenter-snapshot-notes",
+    metadata: dict[str, Any] | None = None,
+) -> RetrievalHit:
+    ts = datetime(2026, 11, 8, tzinfo=UTC)
+    return RetrievalHit(
+        document_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        source="kb",
+        source_id=slug,
+        kind="kb-entry",
+        body="Snapshot notes from the store.",
+        doc_metadata=metadata or {},
+        created_at=ts,
+        updated_at=ts,
+        fused_score=0.5,
+        bm25_score=0.5,
+        cosine_score=0.5,
+        bm25_rank=1,
+        cosine_rank=1,
+    )
+
+
+def _corpus(*chunks: CorpusChunk) -> AsyncMock:
+    return AsyncMock(return_value=CorpusSearchResponse(chunks=list(chunks)))
+
+
+async def _search(
+    operator: Operator,
+    *,
+    store: list[RetrievalHit] | None = None,
+    corpus: AsyncMock | None = None,
+    **arguments: Any,
+) -> tuple[dict[str, Any], AsyncMock]:
+    corpus = corpus if corpus is not None else _corpus(_WIKI_CHUNK)
+    hits = store if store is not None else [_store_hit(operator.tenant_id)]
+    with (
+        patch(_STORE_SEAM, new=AsyncMock(return_value=hits)),
+        patch(_CORPUS_SEAM, new=corpus),
+    ):
+        response = await _search_knowledge_handler(operator, {"query": "snapshot", **arguments})
+    return response, corpus
+
+
+# --- the setting in the settings file -------------------------------------------
+
+
+def test_the_setting_is_one_short_key() -> None:
+    too_long = "w" * 129
+    parsed = parse_settings_file(
+        b"apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n"
+        + f"    - policies: {{knowledge_wiki_collection: {too_long}}}\n".encode()
+    )
+    assert len(parsed.mistakes) == 1
+    assert "knowledge_wiki_collection" in parsed.mistakes[0]
+    assert too_long not in parsed.mistakes[0]
+
+
+# --- the setting is empty: as before ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_without_the_setting_both_tools_answer_as_before() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, None)
+    await seed_doc_collection(collection_key=_WIKI)
+    operator = _operator()
+    response, corpus = await _search(operator)
+    assert "wiki" not in response
+    assert [hit["slug"] for hit in response["hits"]] == ["vcenter-snapshot-notes"]
+    corpus.assert_not_called()
+
+    added = await _add_to_knowledge_handler(
+        operator, {"slug": "new-lesson", "body": "A lesson.", "metadata": dict(_LESSON)}
+    )
+    assert "wiki" not in added
+    assert added["slug"] == "new-lesson"
+
+
+@pytest.mark.asyncio
+async def test_a_tenant_without_a_row_answers_as_before() -> None:
+    response, corpus = await _search(_operator())
+    assert "wiki" not in response
+    corpus.assert_not_called()
+
+
+# --- the setting is set and the entitlement held ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wiki_hits_come_next_to_the_store_hits() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    response, corpus = await _search(_operator())
+
+    assert corpus.await_args is not None
+    assert corpus.await_args.args[1] == "snapshot"
+    store_hit, wiki_hit = response["hits"]
+    assert store_hit["slug"] == "vcenter-snapshot-notes"
+    assert "source" not in store_hit
+    assert wiki_hit["source"] == "wiki"
+    assert wiki_hit["collection"] == _WIKI
+    assert wiki_hit["source_url"].endswith(f"/blob/abc123/{_PAGE_PATH}")
+    assert wiki_hit["title"] == "Snapshot limits"
+    assert wiki_hit["content"].startswith(BLOCK_START)
+    assert response["wiki"] == {
+        "collection": _WIKI,
+        "searched": True,
+        "reason": None,
+        "message": None,
+        "hit_count": 1,
+        "duplicate_count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_imported_copy_of_a_wiki_page_is_shown_once() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    imported = stamp_provenance(
+        {"status": "confirmed"},
+        source_kind="import",
+        relative_path=_PAGE_PATH,
+        ingested_at=datetime(2026, 11, 8, tzinfo=UTC),
+    )
+    other_page = _WIKI_CHUNK.model_copy(
+        update={
+            "chunk_id": "wiki-other-0001",
+            "source_url": "https://git.example.com/team/wiki/-/blob/abc123/products/x/limits.md",
+        }
+    )
+    response, _ = await _search(
+        _operator(),
+        store=[_store_hit(slug="snapshot-limits", metadata=imported)],
+        corpus=_corpus(_WIKI_CHUNK, other_page),
+    )
+    assert [hit.get("slug") or hit["chunk_id"] for hit in response["hits"]] == [
+        "snapshot-limits",
+        "wiki-other-0001",
+    ]
+    assert response["wiki"]["hit_count"] == 1
+    assert response["wiki"]["duplicate_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_page_only_named_alike_is_not_a_copy() -> None:
+    """``limits.md`` is not ``snapshot-limits.md``: only a whole path matches."""
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    imported = stamp_provenance(
+        {},
+        source_kind="import",
+        relative_path="limits.md",
+        ingested_at=datetime(2026, 11, 8, tzinfo=UTC),
+    )
+    response, _ = await _search(_operator(), store=[_store_hit(metadata=imported)])
+    assert response["wiki"]["duplicate_count"] == 0
+    assert response["wiki"]["hit_count"] == 1
+
+
+# --- the wiki is not searched: the answer says why ----------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capabilities", "status", "seed", "reason", "words"),
+    [
+        (frozenset(), "ready", True, "docs_addon_off", "capability `meho-docs`"),
+        (frozenset({"meho-docs"}), "ready", True, "not_entitled", f"meho-docs:{_WIKI}"),
+        (_ENTITLED, "ready", False, "unknown_collection", "no docs collection"),
+        (_ENTITLED, "rebuilding", True, "collection_not_ready", "not ready"),
+        (_ENTITLED, "disabled", True, "collection_not_ready", "turned off"),
+    ],
+)
+async def test_store_hits_come_back_and_the_answer_says_why(
+    capabilities: frozenset[str], status: str, seed: bool, reason: str, words: str
+) -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    if seed:
+        await seed_doc_collection(collection_key=_WIKI, status=status)
+    response, corpus = await _search(_operator(capabilities=capabilities))
+    corpus.assert_not_called()
+    assert [hit["slug"] for hit in response["hits"]] == ["vcenter-snapshot-notes"]
+    wiki = response["wiki"]
+    assert (wiki["searched"], wiki["reason"], wiki["hit_count"]) == (False, reason, 0)
+    assert f"docs collection `{_WIKI}`) was not searched" in wiki["message"]
+    assert words in wiki["message"]
+
+
+@pytest.mark.asyncio
+async def test_index_down_returns_store_hits_and_says_why() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    down = AsyncMock(side_effect=CorpusUnavailable("corpus unreachable: ConnectError"))
+    response, _ = await _search(_operator(), corpus=down)
+    assert [hit["slug"] for hit in response["hits"]] == ["vcenter-snapshot-notes"]
+    assert response["wiki"]["reason"] == "index_unavailable"
+    assert "did not answer" in response["wiki"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"product": "vcenter"},
+        {"filters": {"kind": "kb-entry"}},
+        {"scope": "shared"},
+        {"updated_after": "2026-11-01"},
+    ],
+)
+async def test_filters_skip_the_wiki_and_say_so(arguments: dict[str, Any]) -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    response, corpus = await _search(_operator(), **arguments)
+    corpus.assert_not_called()
+    assert response["wiki"]["reason"] == "filtered"
+    assert "cannot apply filters" in response["wiki"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_scope_tenant_still_searches_the_wiki() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    response, _ = await _search(_operator(), scope="tenant")
+    assert response["wiki"]["searched"] is True
+
+
+# --- the setting is per tenant --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_each_tenant_gets_its_own_wiki() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await _seed_tenant(_TENANT_B, "other-wiki")
+    await seed_doc_collection(collection_key=_WIKI)
+    await seed_doc_collection(collection_key="other-wiki")
+    tenant_c = uuid.UUID("00000000-0000-0000-0000-00000000c0c0")
+    await _seed_tenant(tenant_c, None)
+    caps = frozenset({"meho-docs", f"meho-docs:{_WIKI}", "meho-docs:other-wiki"})
+
+    a, _ = await _search(_operator(OPERATOR_TENANT_ID, caps))
+    b, _ = await _search(_operator(_TENANT_B, caps))
+    c, corpus_c = await _search(_operator(tenant_c, caps))
+
+    assert a["wiki"]["collection"] == _WIKI
+    assert a["hits"][1]["collection"] == _WIKI
+    assert b["wiki"]["collection"] == "other-wiki"
+    assert b["hits"][1]["collection"] == "other-wiki"
+    assert "wiki" not in c
+    corpus_c.assert_not_called()
+
+
+# --- add_to_knowledge on a wiki tenant -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_to_knowledge_stores_and_says_the_lesson_goes_to_the_wiki() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    operator = _operator()
+    added = await _add_to_knowledge_handler(
+        operator,
+        {"slug": "snapshot-revert", "body": "Revert snapshots one by one.", "metadata": _LESSON},
+    )
+    assert added["provenance"]["source_kind"] == "direct"
+    assert added["wiki"]["collection"] == _WIKI
+    assert added["wiki"]["export"] == "page"
+    assert added["wiki"]["message"] == (
+        "Stored. This tenant keeps its lessons in the wiki behind collection "
+        f"`{_WIKI}`. This lesson will also appear there as a candidate page for review."
+    )
+    stored = await KbService().get_entry(tenant_id=OPERATOR_TENANT_ID, slug="snapshot-revert")
+    assert stored is not None
+    assert stored.provenance.source_kind == "direct"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata", "export", "words"),
+    [
+        (None, "none", "This lesson stays in MEHO"),
+        ({**_LESSON, "applies_to": "customer"}, "none", "This lesson stays in MEHO"),
+        ({"applies_to": "product-and-version", "status": "candidate"}, "skip", "missing: type"),
+    ],
+)
+async def test_add_to_knowledge_says_when_the_lesson_does_not_go_to_the_wiki(
+    metadata: dict[str, Any] | None, export: str, words: str
+) -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    added = await _add_to_knowledge_handler(
+        _operator(), {"slug": "a-lesson", "body": "Text.", "metadata": metadata}
+    )
+    assert added["slug"] == "a-lesson"
+    assert added["wiki"]["export"] == export
+    assert f"collection `{_WIKI}`" in added["wiki"]["message"]
+    assert words in added["wiki"]["message"]
+
+
+# --- the audit row --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_audit_row_names_the_wiki_collection() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    operator = _operator()
+
+    async def _fake_verify() -> Operator:
+        return operator
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with (
+            TestClient(app) as client,
+            patch(_STORE_SEAM, new=AsyncMock(return_value=[_store_hit()])),
+            patch(_CORPUS_SEAM, new=_corpus(_WIKI_CHUNK)),
+        ):
+            response = post_mcp(
+                client,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "search_knowledge", "arguments": {"query": "snapshot"}},
+                },
+            )
+    finally:
+        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+    assert response.json()["result"]["isError"] is False
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["wiki"]["hit_count"] == 1
+
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(AuditLog))).scalars().all()
+    row = next(r for r in rows if r.method == "MCP")
+    assert row.payload["op_id"] == "search_knowledge"
+    assert row.payload["collection"] == _WIKI
+    assert row.payload["wiki_status"] == "searched"
+    assert row.payload["wiki_hit_count"] == 1
+    assert "snapshot" not in json.dumps(row.payload)
+
+
+# --- meho kb search (POST /api/v1/retrieve) ------------------------------------
+
+
+def _retrieve_client(operator: Operator) -> TestClient:
+    rest = FastAPI()
+    rest.include_router(retrieve_router)
+
+    async def _fake_verify() -> Operator:
+        return operator
+
+    rest.dependency_overrides[verify_jwt_and_bind] = _fake_verify
+    return TestClient(rest)
+
+
+@pytest.mark.asyncio
+async def test_kb_search_over_rest_gives_the_same_wiki_result() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    client = _retrieve_client(_operator())
+    with (
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[_store_hit()])),
+        patch(_CORPUS_SEAM, new=_corpus(_WIKI_CHUNK)),
+    ):
+        response = client.post("/api/v1/retrieve", json={"query": "snapshot", "source": "kb"})
+    assert response.status_code == 200
+    body = response.json()
+    assert [hit["source_id"] for hit in body["hits"]] == ["vcenter-snapshot-notes"]
+    wiki = body["wiki"]
+    assert (wiki["collection"], wiki["searched"], wiki["duplicate_count"]) == (_WIKI, True, 0)
+    assert wiki["hits"][0]["collection"] == _WIKI
+    assert wiki["hits"][0]["source_url"].endswith(f"/blob/abc123/{_PAGE_PATH}")
+
+
+@pytest.mark.asyncio
+async def test_kb_search_over_rest_says_why_the_wiki_was_not_searched() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    client = _retrieve_client(_operator(capabilities=frozenset({"meho-docs"})))
+    with patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[])):
+        response = client.post("/api/v1/retrieve", json={"query": "snapshot", "source": "kb"})
+    wiki = response.json()["wiki"]
+    assert (wiki["searched"], wiki["reason"], wiki["hits"]) == (False, "not_entitled", [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["kb", "memory", None])
+async def test_rest_without_the_setting_has_no_wiki(source: str | None) -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, None)
+    client = _retrieve_client(_operator())
+    corpus = _corpus(_WIKI_CHUNK)
+    with (
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[])),
+        patch(_CORPUS_SEAM, new=corpus),
+    ):
+        response = client.post("/api/v1/retrieve", json={"query": "snapshot", "source": source})
+    assert response.status_code == 200
+    assert response.json()["wiki"] is None
+    corpus.assert_not_called()

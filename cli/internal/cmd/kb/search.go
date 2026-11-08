@@ -51,7 +51,9 @@ func newSearchCmd() *cobra.Command {
 			"capped at 2000 chars and the result limit at 50 by the " +
 			"backend (G0.4-T5 contract). The route audits the query " +
 			"hash but not the raw query (decision #3 in " +
-			"docs/decisions/locked-decisions.md).",
+			"docs/decisions/locked-decisions.md). When your tenant keeps " +
+			"its lessons in a team wiki, the wiki's hits follow the table, " +
+			"or a line says why the wiki was not searched.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -140,6 +142,7 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
 	}
 	printSearchTable(cmd.OutOrStdout(), resp.JSON200)
+	printWikiHits(cmd.OutOrStdout(), resp.JSON200.Wiki)
 	return nil
 }
 

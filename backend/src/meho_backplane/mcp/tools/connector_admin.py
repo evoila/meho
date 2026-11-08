@@ -133,6 +133,7 @@ from meho_backplane.mcp.tools._connector_shared import (
     raise_invalid_params_for_edit_value_error,
     raise_invalid_params_for_legacy_tenant_copy,
 )
+from meho_backplane.operations._catalog_guard import catalog_refuses_target
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
@@ -298,6 +299,10 @@ _NOT_LISTED_HINT: Final[str] = (
     "No connector in this list fits the target. The `status` or `product` "
     "filter may hide the one a call would use: ask again without them."
 )
+_REFUSED_HINT: Final[str] = (
+    "The connectors for the target's product do not accept the target's "
+    "version, so a call on this target fails."
+)
 
 
 def _registry_key(item: ConnectorListItem) -> tuple[str, str, str]:
@@ -325,11 +330,14 @@ def connectors_for_target(
     * ``compatible`` — the resolver finds one. The rows are every listed
       connector that fits the target (:func:`connector_serves_target`), or,
       when none does, the listed rows of the class the resolver picked
-      (it picked the class's entry that accepts every version).
+      (it picked the class's entry that accepts every version). A row
+      whose catalog refuses the target in its own check (the check a call
+      runs, :func:`~meho_backplane.operations._catalog_guard.catalog_refuses_target`)
+      is left out.
 
     ``compatible`` never comes with an empty list: when the class the
-    resolver picked is not listed either, the answer is ``no_connector``
-    with a hint that a filter may hide it.
+    resolver picked is not listed either, or every row's catalog refuses
+    the target, the answer is ``no_connector`` with a hint that says why.
     """
     product = getattr(target, "product", None) or None
     version = resolve_target_version(target)
@@ -367,15 +375,36 @@ def _compatible_rows(
 ) -> tuple[str, str | None, list[ConnectorListItem]]:
     """Return ``(result, hint, rows)`` when the resolver found *resolved*.
 
-    ``hint`` is ``None`` for the plain ``compatible`` hint.
+    ``hint`` is ``None`` for the plain ``compatible`` hint. A row whose
+    catalog refuses the target (:func:`_catalog_refuses`) is left out; when
+    that leaves no row, the answer is ``no_connector``.
     """
-    fitting = [item for item in connectors if connector_serves_target(*_registry_key(item), target)]
+    hint: str | None = None
+    serving = [item for item in connectors if connector_serves_target(*_registry_key(item), target)]
+    if not serving:
+        serving = [
+            item for item in connectors if get_connector_v2(*_registry_key(item)) is resolved
+        ]
+        hint = _FALLBACK_HINT
+    fitting = [item for item in serving if not _catalog_refuses(item, target)]
     if fitting:
-        return "compatible", None, fitting
-    same_class = [item for item in connectors if get_connector_v2(*_registry_key(item)) is resolved]
-    if same_class:
-        return "compatible", _FALLBACK_HINT, same_class
+        return "compatible", hint, fitting
+    if serving:
+        return "no_connector", _REFUSED_HINT, []
     return "no_connector", _NOT_LISTED_HINT, []
+
+
+def _catalog_refuses(item: ConnectorListItem, target: Any) -> bool:
+    """True when the catalog's own target check refuses *target*.
+
+    The same check a call on an ingested operation of the catalog runs, so
+    a row the call would refuse with ``unqualified_target_version`` is not
+    shown as fitting.
+    """
+    product, version, impl_id = _registry_key(item)
+    return catalog_refuses_target(
+        product=product, version=version, impl_id=impl_id, source_kind="ingested", target=target
+    )
 
 
 async def _load_target(operator: Operator, name: str) -> Any:

@@ -1989,6 +1989,27 @@ class _Argo3(_FitConnector):
     supported_version_range = ">=3.0,<4.0"
 
 
+class _Gitea2(_FitConnector):
+    """A connector whose catalog checks the target itself: 2.x only."""
+
+    product = "gitea"
+    supported_version_range = ">=2.0,<3.0"
+    enforces_catalog_target_compatibility = True
+
+    @classmethod
+    def catalog_target_incompatibility(
+        cls,
+        *,
+        descriptor_source_kind: str,
+        target_product: str | None,
+        target_version: str | None,
+        selected_target_connector: type[Connector] | None,
+    ) -> str | None:
+        if target_version is not None and target_version.startswith("2."):
+            return None
+        return "this catalog serves gitea 2.x only"
+
+
 _FIT_REGISTRY: dict[tuple[str, str, str], type[Connector]] = {
     ("vmware", "9.0", "vmware-rest"): _Vmware9,
     ("vmware", "8.0", "vmware-rest"): _Vmware8,
@@ -1997,6 +2018,8 @@ _FIT_REGISTRY: dict[tuple[str, str, str], type[Connector]] = {
     ("argo", "3.x", "argo-api"): _Argo3,
     # The entry that accepts every version, as many typed connectors have.
     ("argo", "", ""): _Argo3,
+    ("gitea", "2.x", "gitea-api"): _Gitea2,
+    ("gitea", "", ""): _Gitea2,
 }
 
 
@@ -2045,6 +2068,8 @@ _FIT_TARGETS = {
     "nsx-one": _fit_target("nsx-one", "nsx", probed="4.1.2"),
     "nsx-pinned": _fit_target("nsx-pinned", "nsx", probed="4.1.2", preferred_impl_id="nsx-b"),
     "argo-old": _fit_target("argo-old", "argo", probed="2.9.1"),
+    "gitea-new": _fit_target("gitea-new", "gitea", probed="2.1.0"),
+    "gitea-old": _fit_target("gitea-old", "gitea", probed="1.9.0"),
 }
 
 
@@ -2053,6 +2078,7 @@ def fit_world(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the resolver at the fit registry, and the list at the fit rows."""
     import meho_backplane.connectors.resolver as resolver_mod
     import meho_backplane.mcp.tools.connector_admin as ca_mod
+    import meho_backplane.operations._catalog_guard as guard_mod
 
     async def _rows(**_kwargs: Any) -> list[ConnectorListItem]:
         return list(_FIT_ROWS)
@@ -2062,6 +2088,7 @@ def fit_world(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(resolver_mod, "all_connectors_v2", lambda: dict(_FIT_REGISTRY))
     monkeypatch.setattr(ca_mod, "get_connector_v2", lambda *key: _FIT_REGISTRY.get(key))
+    monkeypatch.setattr(guard_mod, "get_connector_v2", lambda *key: _FIT_REGISTRY.get(key))
     monkeypatch.setattr(ca_mod, "list_ingested_connectors", _rows)
     monkeypatch.setattr(ca_mod, "_load_target", _load)
 
@@ -2198,6 +2225,26 @@ async def test_connector_list_target_with_filters(fit_world: None) -> None:
 
     assert result["connectors"] == []
     assert result["target_fit"]["result"] == "fingerprint_unknown"
+
+
+async def test_connector_list_target_fit_checks_the_catalog_guard(fit_world: None) -> None:
+    """A row whose catalog refuses the target is not shown as fitting.
+
+    ``gitea-old`` is outside the 2.x range, so the resolver picks the entry
+    that accepts every version, but the catalog's own check refuses 1.9: a
+    call fails with ``unqualified_target_version``. ``gitea-new`` passes.
+    """
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    op = build_operator(TenantRole.OPERATOR)
+    refused = await ca_mod.list_connector_rows(op, {"target": "gitea-old"})
+    accepted = await ca_mod.list_connector_rows(op, {"target": "gitea-new"})
+
+    assert refused["connectors"] == []
+    assert refused["target_fit"]["result"] == "no_connector"
+    assert "do not accept the target's version" in refused["target_fit"]["hint"]
+    assert accepted["target_fit"]["result"] == "compatible"
+    assert [row["connector_id"] for row in accepted["connectors"]] == ["gitea-api-2.x"]
 
 
 async def test_connector_list_unknown_target_is_invalid_params(

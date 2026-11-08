@@ -76,6 +76,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.features import FEATURE_MATURITY
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "MCP_ADMIN_SCOPE",
@@ -102,6 +103,7 @@ __all__ = [
     "role_at_least",
     "surface_visible",
     "tool_role_gate_met",
+    "tool_surface",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -259,6 +261,25 @@ def surface_visible(operator: Operator, surface: ToolSurface) -> bool:
     if surface is ToolSurface.WORKING:
         return True
     return MCP_ADMIN_SCOPE in operator.scopes
+
+
+#: The one working-surface tool an operator can move off the default list,
+#: with ``MCP_TOPOLOGY_OFF_DEFAULT_LIST`` (:attr:`Settings.mcp_topology_off_default_list`).
+_TOPOLOGY_TOOL: Final[str] = "query_topology"
+
+
+def tool_surface(defn: ToolDefinition) -> ToolSurface:
+    """Return the surface *defn* is on in this deploy.
+
+    This is :attr:`ToolDefinition.surface`, except for ``query_topology``
+    when the operator turned on ``MCP_TOPOLOGY_OFF_DEFAULT_LIST``: then the
+    tool is on :attr:`ToolSurface.OPERATOR`, so only an ``mcp:admin``
+    session lists and calls it. The list filter and the call-time check
+    both use this function, so the two always agree.
+    """
+    if defn.name == _TOPOLOGY_TOOL and get_settings().mcp_topology_off_default_list:
+        return ToolSurface.OPERATOR
+    return defn.surface
 
 
 def addon_family_active(
@@ -786,7 +807,7 @@ def all_tools_for(
         for defn, _ in _TOOLS.values()
         if tool_role_gate_met(operator, defn)
         and capability_satisfied(operator, defn.required_capability)
-        and surface_visible(operator, defn.surface)
+        and surface_visible(operator, tool_surface(defn))
         and addon_family_active(active_addon_families, defn.required_addon_family)
     ]
 

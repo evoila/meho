@@ -108,6 +108,7 @@ from meho_backplane.mcp.registry import (
     registered_tool_names,
     role_at_least,
     surface_visible,
+    tool_surface,
 )
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.mcp.server import mcp_session_id_capture_mode
@@ -900,12 +901,12 @@ async def _surface_summary(operator: Operator) -> SurfaceSummary:
     expected = sorted(
         name
         for name in registered_tool_names()
-        if (entry := get_tool(name)) is not None and entry[0].surface is ToolSurface.WORKING
+        if (entry := get_tool(name)) is not None and tool_surface(entry[0]) is ToolSurface.WORKING
     )
     listed = sorted(
         defn.name
         for defn in all_tools_for(operator, active_addon_families=active_families)
-        if defn.surface is ToolSurface.WORKING
+        if tool_surface(defn) is ToolSurface.WORKING
     )
     listed_set = set(listed)
     return SurfaceSummary(

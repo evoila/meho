@@ -39,7 +39,7 @@ The default agent surface. No elevation required.
 | `meho_runbook_start` | beta | — | Start a new runbook run. |
 | `meho_status` | — | — | Returns the operator's identity (sub, name, email, tenant_id, tenant_role) plus the MEHO backplane's dependency status: Vault federation chain (reachable + KV read OK?), DB migration state with the database's revision and the revision this build expects, the readiness checks /ready reports (name, ok, detail), the approval settings in force (approval key state, whether a second person must approve), the gated features and the setting names they still need, the OAuth scopes this session holds, and which working-surface tools it should see versus the ones it lists. |
 | `preview_operation` | ga | — | Preview an operation WITHOUT running it. |
-| `query_topology` | beta | — | Read the topology graph: what depends on what. |
+| `query_topology` | beta | — | Read the topology graph: what depends on what, in your tenant. |
 | `read_docs` | experimental | capability `meho-docs` | Read more around a vendor-document hit: the text before and after it, the whole page, or the section it sits in. |
 | `result_query` | ga | — | Read the full data behind a result handle. |
 | `search_docs` | experimental | capability `meho-docs` | Search a vendor-document collection (manuals, KB articles, guides) for a vendor fact, e.g. 'NSX config maximums for 9.0' or 'vSphere 8.0 supported snapshot depth'. |

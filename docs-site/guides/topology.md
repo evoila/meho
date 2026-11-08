@@ -13,6 +13,16 @@ This guide covers the model, how tenant scoping keeps it isolated, the
 traversals you will actually run, and how a resource gets *into* the
 graph in the first place.
 
+!!! note "Taking the tool off the default MCP tool list"
+
+    Every MCP session lists `query_topology` by default. If your agents
+    do not use it, set `MCP_TOPOLOGY_OFF_DEFAULT_LIST=true` on the
+    backplane (on a Helm install, through `extraEnv`). Then a session
+    lists and calls it only when it asks for the `mcp:admin` scope
+    (`MEHO_MCP_SCOPES=mcp:admin` in the Claude Code plugin, or the
+    `scopes` setting of the `.mcpb` bundle). This makes the tool list of
+    every other session shorter. The CLI and REST routes do not change.
+
 !!! note "Prerequisites, roles, and maturity"
 
     - A running backplane and an authenticated session

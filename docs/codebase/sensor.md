@@ -395,7 +395,7 @@ change.
 
 A person can acknowledge a Sensor that is not green: until when, why
 and who. Code: `checks/acknowledgement.py`, table
-`sensor_acknowledgements` (migration `0142`), model
+`sensor_acknowledgements` (migration `0143`), model
 `SensorAcknowledgement`.
 
 - **Create.** `POST /api/v1/sensors/{id}/acknowledgement`

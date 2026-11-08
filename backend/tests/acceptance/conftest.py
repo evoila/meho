@@ -276,7 +276,7 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # (also a sensor-FK, no tenant_id) is listed below.
     "sensor_results",
     # ``sensor_acknowledgements`` FKs ``sensor`` with ``ondelete=CASCADE``
-    # (migration ``0142``, #4128). No ``tenant_id`` FK; listed for the same
+    # (migration ``0143``, #4128). No ``tenant_id`` FK; listed for the same
     # reason as ``sensor_results`` above.
     "sensor_acknowledgements",
     # ``check_dashboards.tenant_id`` is a real ``REFERENCES tenant(id)`` FK

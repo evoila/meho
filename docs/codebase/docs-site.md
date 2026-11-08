@@ -25,6 +25,8 @@ force nav curation of files that were never written for outsiders.
 | `docs-site/` | repo root | Page sources; one directory per top-level nav section, `index.md` each |
 | `.github/workflows/docs-site.yml` | workflows | PR check (`mkdocs build --strict`) + tag-push deploy (mike → gh-pages) |
 | `scripts/ci/docs_deploy.sh` | scripts/ci | The deploy step: which version a tag publishes under, and whether it moves `latest` |
+| `scripts/ci/docs_republish.sh` | scripts/ci | The republish step: publishes main again under the newest final release's version and moves `latest` |
+| `scripts/ci/docs_pages.sh` | scripts/ci | Shared by both scripts: fetches `gh-pages` and tries again when a push is refused |
 | `backend/pyproject.toml` `[dependency-groups].docs` | backend | Locked toolchain pins (mkdocs-material, mike) riding `uv.lock` + Dependabot |
 | `gh-pages` branch | remote only | mike-managed publish target; never edited by hand |
 
@@ -58,13 +60,14 @@ One docs version **per minor**, with a `latest` alias:
 ## Control flow (deploy)
 
 1. `v*` tag push triggers the `deploy` job (`docs-site.yml`).
-2. Job fetches `gh-pages` if it exists (mike commits onto the local
-   ref), configures the `github-actions[bot]` committer identity, and
+2. Job configures the `github-actions[bot]` committer identity and
    installs the locked toolchain via `uv sync --locked --only-group
    docs` in `backend/`.
-3. `mike deploy` builds the site (strict — `strict: true` in
-   `mkdocs.yml` applies to mike's internal build too) and pushes the
-   version + alias to `gh-pages`.
+3. `scripts/ci/docs_deploy.sh` fetches `gh-pages` if it exists (mike
+   commits onto the local branch). `mike deploy` builds the site
+   (strict — `strict: true` in `mkdocs.yml` applies to mike's internal
+   build too) and commits the version + alias. A plain `git push` sends
+   it to `gh-pages`.
 4. GitHub Pages serves the branch. A job-level concurrency group
    (`docs-site-gh-pages`, no cancel) serialises publishes so two tags
    can't race the branch update.
@@ -80,7 +83,44 @@ One docs version **per minor**, with a `latest` alias:
    — into a red run.
 
 PRs touching the site (or the toolchain lock) get a `mkdocs build
---strict` check instead; nothing deploys from PRs or main pushes.
+--strict` check instead; nothing deploys from PRs.
+
+## Control flow (republish from main)
+
+A docs fix is on the public site the same week, with no hand step.
+
+1. A push to `main` that changes `docs-site/**` or `mkdocs.yml` runs the
+   same `deploy` job (a manual run of the workflow on `main` does too).
+2. The deploy step runs `scripts/ci/docs_republish.sh`. It finds the
+   newest final tag (`vMAJOR.MINOR.PATCH`, no `-`) with `git ls-remote`
+   and takes its `MAJOR.MINOR` as the version.
+3. `mike deploy --update-aliases <version> latest` builds main and
+   commits it onto the local `gh-pages` branch. `latest` points at that
+   version, so it shows the docs of the newest release, built from main.
+   When main is on a minor that has no final release yet, its docs still
+   go out under the newest final release's version.
+4. Guards before the plain `git push` (they run again after a retry):
+   - no push when the pages are the same as on the remote branch (the
+     build time line does not count), so no empty commit;
+   - no push when a file outside the republished version folder would
+     be deleted (other versions, `versions.json`, the site root). Inside
+     that folder the pages follow main: a page that main moved or
+     removed goes away there, and the script lists it;
+   - both file counts are printed.
+5. The reachability gate runs as for a tag. It is skipped when nothing
+   was pushed.
+
+A tag deploy keeps the `docs-site-gh-pages`
+concurrency group and is never cancelled. The main republish has its own
+group (`docs-site-gh-pages-main`), because GitHub keeps only one waiting
+run per group and a later main run would replace a waiting tag deploy.
+The two can overlap. So when a push is refused because `gh-pages` moved,
+both scripts fetch it again, build again and push again
+(`scripts/ci/docs_pages.sh`). Before each try they read the tags again:
+the republish takes the newest final release again (a release tagged
+during the run gets `latest`), and a release candidate checks again
+whether its minor has a final tag. The republish also checks its guards
+again. Each script tries at most 3 times, then fails with a message.
 
 ## Local development
 

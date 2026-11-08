@@ -928,6 +928,25 @@ Ready with the `db` check `db_ahead=true`. Then it rolls forward and
 checks `revision=<head>`. On this event `changes` skips, so the other
 kind jobs and `helm-test-gate` skip too.
 
+A fourth kind job, `upgrade-from-release` (#5963), runs on every
+same-repo pull request that touches the chart. It answers one question:
+does an install made with the last release upgrade to this chart with
+Helm 4 and server-side apply? `helm-test` and `helm-test-byo` cannot see
+this, because they install and upgrade the same new chart with Helm 3.
+The job reuses the setup of `rollback-drill`. It finds the newest GitHub
+release, installs that release's published chart and image with a plain
+`helm install` (Helm 4), then upgrades to the chart of the pull request
+with a plain `helm upgrade`, and again with `--server-side=auto
+--force-conflicts=true`, which is how the Helm job of RKE2 and k3s runs
+it. Each upgrade must finish, the Deployment must run the new image and
+the pod must be Ready. The second upgrade starts from the already
+upgraded release, so it proves the flags work, not a second jump from the
+old chart. `helm-test-gate` needs this job, so a failed upgrade blocks
+the merge. The gate asks for it only on a same-repo pull request, because
+other events skip it on purpose. Both charts can pin different Valkey
+images under one tag, so the job loads the last release's Valkey under
+its own tag, `<tag>-prior`.
+
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 
 The install can bring its own Keycloak, the login server, so nobody sets
@@ -1747,7 +1766,7 @@ What it costs:
 
 | Trigger | Jobs run | Side effects |
 | --- | --- | --- |
-| `pull_request` against `main` (same-repo PRs only) | `changes`, `validate`, `helm-test`, `helm-test-byo`, `helm-test-gate` (the kind jobs skip when no chart file changed) | Lint + render + kubeconform + kind install; no push, no sign |
+| `pull_request` against `main` (same-repo PRs only) | `changes`, `validate`, `helm-test`, `helm-test-byo`, `upgrade-from-release`, `helm-test-gate` (the kind jobs skip when no chart file changed) | Lint + render + kubeconform + kind install; no push, no sign |
 | `merge_group` | `changes`, `validate`, `helm-test`, `helm-test-byo`, `helm-test-gate` | Full kind install on the merge result; no push, no sign |
 | `push` to `main` (every commit) | `validate` -> `publish` -> `verify-anonymous-pull` | Push at calver `0.1.YYYYMMDD-<short-sha>`, cosign-sign, anonymous-pull check |
 | `push` of a `v*` tag | `validate` -> `publish` -> `verify-anonymous-pull` | Push at plain semver `<x.y.z>` (leading `v` stripped), cosign-sign, anonymous-pull check |

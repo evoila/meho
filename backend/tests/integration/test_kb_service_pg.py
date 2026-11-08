@@ -289,8 +289,15 @@ async def test_kb_search_ranks_current_passages_without_duplicates(pg_engine: No
         patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake),
     ):
         entry, _ = await service.create_entry(tenant_id, "long-runbook", long_body)
-        await service.create_entry(tenant_id, "swap-entry", "Old body mentions oldtermxyz.")
-        await service.create_entry(tenant_id, "swap-entry", "New body mentions newtermxyz.")
+        old, _ = await service.create_entry(
+            tenant_id, "swap-entry", "Old body mentions oldtermxyz."
+        )
+        await service.create_entry(
+            tenant_id,
+            "swap-entry",
+            "New body mentions newtermxyz.",
+            expected_revision=old.revision_id,
+        )
         await index_document(
             tenant_id=tenant_id,
             source="kb",
@@ -467,9 +474,11 @@ async def test_delete_that_waits_for_a_write_removes_what_the_write_added(
         patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake),
         patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake),
     ):
-        await service.create_entry(tenant_id, slug, "Old body mentions oldtermxyz.")
+        old, _ = await service.create_entry(tenant_id, slug, "Old body mentions oldtermxyz.")
         with patch.object(revisions, "_snapshot_in", pausing_snapshot_in):
-            write = asyncio.create_task(service.create_entry(tenant_id, slug, new_body))
+            write = asyncio.create_task(
+                service.create_entry(tenant_id, slug, new_body, expected_revision=old.revision_id)
+            )
             await asyncio.wait_for(write_paused.wait(), timeout=10)
             deletion = asyncio.create_task(service.delete_entry(tenant_id, slug))
             await _wait_for_a_lock_waiter()

@@ -89,9 +89,9 @@ jobs:
           SC_VER=v0.11.0
           SC_SHA=b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
           SC_TAR="${RUNNER_TEMP}/shellcheck.tar.gz"
-          curl -fsSL -o "${SC_TAR}" \
-            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.gz"
-          echo "${SC_SHA}  ${SC_TAR}" | sha256sum -c -
+          "${GITHUB_WORKSPACE}/scripts/ci/fetch_with_retry.sh" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.gz" \
+            "${SC_TAR}" "${SC_SHA}"
           tar -xzf "${SC_TAR}" -C "${RUNNER_TEMP}" "shellcheck-${SC_VER}/shellcheck"
           mkdir -p "${HOME}/.local/bin"
           install -m 0755 "${RUNNER_TEMP}/shellcheck-${SC_VER}/shellcheck" "${HOME}/.local/bin/shellcheck"
@@ -106,8 +106,8 @@ jobs:
           HELM_VER=v3.16.4
           HELM_SHA=fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
           HELM_TAR="${RUNNER_TEMP}/helm.tar.gz"
-          curl -fsSL -o "${HELM_TAR}" "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz"
-          echo "${HELM_SHA}  ${HELM_TAR}" | sha256sum -c -
+          "${GITHUB_WORKSPACE}/scripts/ci/fetch_with_retry.sh" \
+            "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz" "${HELM_TAR}" "${HELM_SHA}"
           tar -xzf "${HELM_TAR}" -C "${RUNNER_TEMP}" linux-amd64/helm
           install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" "${HOME}/.local/bin/helm"
           "${HOME}/.local/bin/helm" version --short
@@ -127,9 +127,11 @@ jobs:
       - name: Check that the test fixture is the upstream local-path manifest
         run: |
           set -euo pipefail
-          curl -fsSL \
+          work=$(mktemp -d)
+          "${GITHUB_WORKSPACE}/scripts/ci/fetch_with_retry.sh" \
             https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml \
-            | cmp - deploy/linux-server/tests/fixtures/local-path-storage-v0.0.37.yaml
+            "${work}/local-path-storage.yaml"
+          cmp "${work}/local-path-storage.yaml" deploy/linux-server/tests/fixtures/local-path-storage-v0.0.37.yaml
 
       - name: Check the CIS fixtures and the Traefik rule of the pinned RKE2
         # The install's pod security file is RKE2's own file for its CIS
@@ -148,7 +150,7 @@ jobs:
           fixtures=deploy/linux-server/tests/fixtures
           work=$(mktemp -d)
           for file in pkg/rke2/psa.go pkg/rke2/np.go bundle/share/rke2/rke2-cis-sysctl.conf; do
-            curl -fsSL -o "${work}/${file##*/}" "${base}/${file}"
+            "${GITHUB_WORKSPACE}/scripts/ci/fetch_with_retry.sh" "${base}/${file}" "${work}/${file##*/}"
           done
           awk '/psRestrictedConfig := `/ { on = 1; sub(/.*`/, ""); print; next }
                on && /`/ { sub(/`.*/, ""); print; exit }

@@ -1,0 +1,39 @@
+name: Set up a kind cluster
+description: >-
+  Start a kind cluster. The kind program comes from the runner, then from
+  the cache (keyed by its version), and is downloaded with retries only as
+  the last choice. The kind version is pinned in scripts/ci/tool-versions.env.
+inputs:
+  cluster-name:
+    description: Name of the cluster.
+    required: false
+    default: meho-helm-test
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the kind program from the cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/.cache/meho-ci-tools
+        key: ci-tools-kind-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
+    - name: Install kind
+      shell: bash
+      # The version and the checksum are in scripts/ci/tool-versions.env.
+      run: |
+        set -euo pipefail
+        # shellcheck source=/dev/null
+        source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+        VERSION_ARG=version "${GITHUB_WORKSPACE}/scripts/ci/install_tool.sh" kind "${KIND_VER}" \
+          "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VER}/kind-linux-amd64" \
+          "${KIND_SHA}"
+
+    - name: Create the cluster
+      shell: bash
+      env:
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+      run: |
+        set -euo pipefail
+        kind create cluster --name="${CLUSTER_NAME}" --wait=60s
+        kubectl version --client=true

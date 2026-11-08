@@ -202,11 +202,31 @@ def _json_type(value: Any) -> str:
     return "array" if isinstance(value, list) else "object"
 
 
+def _same_number(value: Any) -> Any:
+    """Return *value* with every whole float as an int, the way JSON Schema compares.
+
+    In JSON Schema ``1.0`` equals ``1`` and is an integer. A boolean is not
+    a number, so ``true`` stays ``true`` and never equals ``1``.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, list):
+        return [_same_number(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _same_number(item) for key, item in value.items()}
+    return value
+
+
+def _enum_text(value: Any) -> str:
+    """Return the JSON text of an ``enum`` value; equal JSON Schema values get equal texts."""
+    return json.dumps(_same_number(value), sort_keys=True)
+
+
 def _enum_texts(branch: Any) -> set[str] | None:
     """Return the ``enum`` values of *branch* as JSON texts, or None without an ``enum``."""
     if not isinstance(branch, dict) or not isinstance(branch.get("enum"), list):
         return None
-    return {json.dumps(value, sort_keys=True) for value in branch["enum"]}
+    return {_enum_text(value) for value in branch["enum"]}
 
 
 def _accepted_by_both(first: Any, second: Any) -> frozenset[str]:
@@ -349,7 +369,8 @@ def _compare_enum(
         return []
     if "enum" not in head:
         return []
-    removed = [value for value in base["enum"] if value not in head["enum"]]
+    kept = {_enum_text(value) for value in head["enum"]}
+    removed = [value for value in base["enum"] if _enum_text(value) not in kept]
     return [f"{where}: enum value {value!r} removed" for value in removed]
 
 

@@ -67,6 +67,8 @@ with an `enum` accepts only the values it lists, so two `enum` branches
 overlap only on a value both list, and an `enum` branch overlaps a plain
 branch only when one of its values has a type the plain branch accepts. An
 integer is also a number, and a branch without `type` accepts every type.
+Enum values compare the JSON Schema way: `1` and `1.0` are the same value
+(an integer), `true` is not `1`, and the string `"1"` is not the number `1`.
 `anyOf` has no such rule: more branches only accept more.
 
 A new tool, a new optional argument, a new output field and a new enum

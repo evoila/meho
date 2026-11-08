@@ -408,6 +408,63 @@ def test_one_of_enum_branches_that_start_to_overlap_are_breaking(
     assert f"both accept {accepted} now" in found[0]
 
 
+@pytest.mark.parametrize(
+    ("old", "new_branch"),
+    [
+        # In JSON Schema 1.0 equals 1, so the input 1 fits both enum branches.
+        ([{"enum": [1]}], {"enum": [1.0]}),
+        # 1 is an integer, and the integer branch takes every integer.
+        ([{"type": "integer"}], {"enum": [1]}),
+        # 1.0 is an integer too.
+        ([{"type": "integer"}], {"type": "number", "enum": [1.0]}),
+    ],
+)
+def test_one_of_number_enums_compare_the_json_schema_way(
+    old: list[Any], new_branch: dict[str, Any]
+) -> None:
+    found = _one_of_changed(old, [*old, new_branch])
+    assert len(found) == 1
+    assert "both accept the values [1] now" in found[0]
+
+
+@pytest.mark.parametrize(
+    "new_branch",
+    [
+        # True is a boolean, not the number 1.
+        {"enum": [True]},
+        # The string "1" is not the number 1.
+        {"enum": ["1"]},
+        # 1.5 is not an integer.
+        {"type": "number", "enum": [1.5]},
+    ],
+)
+def test_one_of_enums_of_another_json_type_do_not_overlap_a_number(
+    new_branch: dict[str, Any],
+) -> None:
+    for old in ({"enum": [1]}, {"type": "integer"}):
+        assert _one_of_changed([old], [old, new_branch]) == []
+
+
+def test_enum_value_written_as_float_is_not_removed() -> None:
+    """``1`` becoming ``1.0`` is the same value; ``true`` replacing ``1`` is a removal."""
+
+    def same(t: dict[str, Any]) -> None:
+        t["inputSchema"]["properties"]["limit"] = {"type": "number", "enum": [1.0]}
+
+    def other(t: dict[str, Any]) -> None:
+        t["inputSchema"]["properties"]["limit"] = {"enum": [True]}
+
+    base = _tool()
+    base["inputSchema"]["properties"]["limit"] = {"type": "number", "enum": [1]}
+    for edit, expected in (
+        (same, []),
+        (other, ["MCP tool list_things input.limit: enum value 1 removed"]),
+    ):
+        head = copy.deepcopy(base)
+        edit(head)
+        assert compat.mcp_breaking(_snap(base), _snap(head)) == expected
+
+
 def _reverse_branches(t: dict[str, Any]) -> None:
     t["outputSchema"]["oneOf"].reverse()
     t["inputSchema"]["properties"]["query"]["anyOf"].reverse()

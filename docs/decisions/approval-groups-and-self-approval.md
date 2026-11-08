@@ -80,6 +80,7 @@ The groups come from the login ([login-role-groups.md](login-role-groups.md)).
   - a fresh browser sign-in, at most 5 minutes old. The 5 minutes is a setting. One sign-in allows exactly one approval.
     **Changed on 31 Oct 2026 ([#5515](https://github.com/evoila/meho/issues/5515)):** the sign-in must come from the approval client (`meho-cli-approve`). One such sign-in covers approvals for 15 minutes (a setting). An operation marked `destructive` still needs a sign-in of its own, at most 5 minutes old.
   - a one-time code from the person's authenticator app (a Keycloak one-time password).
+- **A passkey tap counts as a fresh sign-in.** Added on 8 Nov 2026 ([#6006](https://github.com/evoila/meho/issues/6006)): a sign-in with a passkey (Face ID, Touch ID, a fingerprint or Windows Hello) is a fresh sign-in, in the web interface and on the command line, with the same time limits. Who may approve does not change.
 - **A plain API token never approves.** MEHO refuses such an approval with a clear message.
 - **Reject needs no fresh sign-in.** A reject never runs anything.
 - **Approve and reject have no MCP path.** They stay human-only (v0.1-spec §7, `backend/src/meho_backplane/mcp/human_only.py`).

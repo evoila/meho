@@ -128,10 +128,12 @@ one. Anything else skips that request.
 **Approving asks you to sign in again.** An approval must come from a
 person who is present, so MEHO checks the sign-in behind every approval.
 The web interface is the normal place to approve. There, your sign-in
-must be at most 15 minutes old and must have asked for your password.
-When it is older, the request shows **Sign in to approve** instead of
-**Approve**: click it, sign in with your password (and your
-authenticator code or passkey), then open the request again and approve.
+must be at most 15 minutes old and must have asked for your password
+or a passkey. When it is older, the request shows **Sign in to approve**
+instead of **Approve**: click it, sign in with your password (and your
+authenticator code) or with a passkey, then open the request again and
+approve. A passkey is one tap with Face ID, Touch ID, a fingerprint or
+Windows Hello ([how to add one](phone-and-laptop.md#sign-in-with-a-passkey)).
 
 On the command line and REST, MEHO needs a fresh sign-in made only for
 approvals. So `meho approvals approve` opens your browser and asks for

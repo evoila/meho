@@ -91,6 +91,19 @@ def test_passkeys_are_on_and_need_user_verification(realm: dict[str, Any]) -> No
     assert realm["webAuthnPolicyPasswordlessResidentKey"] == "required"
 
 
+def test_login_page_and_account_page_offer_passkeys(realm: dict[str, Any]) -> None:
+    # Keycloak makes its own browser flow at the import. That flow shows
+    # "Sign in with Passkey" on the login page and skips the one-time code
+    # after a passkey. The account page offers passkey registration while
+    # the required action "webauthn-register-passwordless" is on, as it is
+    # by default. So the realm file must not replace or turn off either.
+    assert "browserFlow" not in realm
+    assert "browser" not in {flow["alias"] for flow in realm["authenticationFlows"]}
+    for action in realm.get("requiredActions", []):
+        if action["alias"] == "webauthn-register-passwordless":
+            assert action["enabled"] is True
+
+
 def test_passkeys_do_not_use_the_old_discoverable_credential_field(
     realm: dict[str, Any],
 ) -> None:

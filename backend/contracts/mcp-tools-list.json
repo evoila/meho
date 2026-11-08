@@ -9,6 +9,14 @@
             "minLength": 1,
             "type": "string"
           },
+          "create_anyway": {
+            "default": false,
+            "type": "boolean"
+          },
+          "dry_run": {
+            "default": false,
+            "type": "boolean"
+          },
           "metadata": {
             "additionalProperties": true,
             "type": [
@@ -266,6 +274,37 @@
               "running"
             ],
             "type": "string"
+          },
+          "team_knowledge": {
+            "properties": {
+              "left_out": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": "string"
+              },
+              "shown": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "status": {
+                "enum": [
+                  "found",
+                  "none",
+                  "unavailable"
+                ],
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "note"
+            ],
+            "type": "object"
           }
         },
         "required": [
@@ -1182,6 +1221,10 @@
             "default": 0,
             "minimum": 0,
             "type": "integer"
+          },
+          "outcome_unknown": {
+            "default": false,
+            "type": "boolean"
           },
           "status": {
             "default": "pending",
@@ -3754,6 +3797,37 @@
               "unavailable"
             ],
             "type": "string"
+          },
+          "team_knowledge": {
+            "properties": {
+              "left_out": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": "string"
+              },
+              "shown": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "status": {
+                "enum": [
+                  "found",
+                  "none",
+                  "unavailable"
+                ],
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "note"
+            ],
+            "type": "object"
           }
         },
         "required": [
@@ -4689,6 +4763,20 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "confirmed_after": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirmed_before": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "filters": {
             "additionalProperties": true,
             "properties": {
@@ -4708,14 +4796,80 @@
             "minimum": 1,
             "type": "integer"
           },
+          "product": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "query": {
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
           },
+          "scope": {
+            "default": "all",
+            "enum": [
+              "all",
+              "tenant",
+              "shared",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "slug": {
             "minLength": 1,
             "type": "string"
+          },
+          "status": {
+            "enum": [
+              "candidate",
+              "confirmed",
+              "disputed",
+              "replaced",
+              "retired",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "updated_after": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_before": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -4728,11 +4882,32 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "confirmed_after": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirmed_before": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "limit": {
             "default": 10,
             "maximum": 50,
             "minimum": 1,
             "type": "integer"
+          },
+          "product": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "query": {
             "maxLength": 256,
@@ -4748,6 +4923,52 @@
               "target",
               null
             ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "candidate",
+              "confirmed",
+              "disputed",
+              "replaced",
+              "retired",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "updated_after": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_before": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "minLength": 1,
             "type": [
               "string",
               "null"

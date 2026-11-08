@@ -100,7 +100,7 @@ Singleton-style service: holds a `MemoryRbacResolver` and a
 `structlog` logger; opens a fresh `AsyncSession` per method. No
 shared cursor / connection state across calls. Public methods:
 `remember`, `recall`, `read_by_id`, `forget`, `list_memories`,
-`search_memories`, `promote`.
+`search_memories`, `promote`, `revisions`.
 
 ### `resolve_default_expires_at` (`memory/ttl.py`)
 
@@ -183,10 +183,18 @@ The three semantic branches are:
 
 | Caller shape | `expires_at_was_set` | `explicit_expires_at` | Resolver returns |
 |---|---|---|---|
+| Field omitted, `metadata.expires_at` is a date (REST; lesson header) | `False` | (n/a) | the header date |
 | Field omitted, `scope=user` | `False` | (n/a) | `now + memory_user_default_ttl_days` |
 | Field omitted, non-`user` scope | `False` | (n/a) | `None` |
 | Field present, value `null` (CLI `--persist`) | `True` | `None` | `None` |
 | Field present, value `<ISO-8601>` | `True` | the parsed datetime | the parsed datetime |
+
+The header row comes first: a note that carries `expires_at` in its
+lesson header keeps that date when it moves from knowledge to memory.
+An explicit `expires_at` (or `ttl`), also an explicit `null`, still
+wins over the header. A header value that is not a date is left to the
+header check, which refuses the write. The MCP `add_to_memory` tool has
+no `metadata` argument, so only REST passes a header.
 
 Why this matters: before G0.9.1-T3 (#775) the MCP path always passed
 `expires_at` explicitly to `MemoryService.remember` — including
@@ -209,15 +217,40 @@ operator console persisted `expires_at = null` and the expiry sweeper
    `tenant_admin`. Any other operator can write the three user-flavoured
    scopes and `target`.
 3. Compute `source_id` via `encode_source_id`.
-4. Build merged `doc_metadata` (caller keys + service-owned
-   `scope` / `user_sub` / `target_name` / `expires_at`).
-5. Call `meho_backplane.retrieval.indexer.index_document`, which
-   upserts the row (insert-or-update on the
+4. Check the caller `metadata` as a lesson header
+   (`meho_backplane/lesson_header.py`, the same header as knowledge;
+   see `kb.md`, "Lesson header and shared scope"). A wrong value raises
+   `LessonHeaderError` (a `ValueError`: REST `422`, MCP invalid params).
+   The names `slug`, `provenance` and `kind` are refused; `scope` is
+   overwritten with the real scope. Then build merged `doc_metadata`
+   (caller keys + service-owned `scope` / `user_sub` / `target_name` /
+   `expires_at`).
+5. Write the row and its revision in one transaction
+   (`memory/revisions.py::write_entry`). It locks the head row on
+   PostgreSQL (`SELECT ... FOR UPDATE`), so writes to the same entry run
+   one after the other; then it calls
+   `meho_backplane.retrieval.indexer.index_document` with that session,
+   which upserts the row (insert-or-update on the
    `(tenant_id, source, source_id)` unique index) and computes the
    384-dim embedding inline.
-6. SELECT the row back and project to `MemoryEntry` via
-   `document_to_entry`, which pulls `created_at` / `updated_at`
-   straight from the ORM row.
+6. In the same transaction, add a revision (`add_revision`): one
+   `memory_revision` row with the body and metadata, unless the newest
+   revision already has the same body and metadata. When anything fails,
+   neither the row nor the revision is saved. A write that clashes with
+   another one (a first write of the same entry, or a taken revision
+   number) runs again, at most three times. `promote` adds the revision
+   of the new target row in its own transaction too; `forget`, the
+   expiry sweeper and a moving promote delete the revisions of the
+   entries they delete.
+7. Project the row to `MemoryEntry` via `document_to_entry`, which pulls
+   `created_at` / `updated_at` straight from the ORM row, and lifts
+   `source` out of the metadata (`MemoryEntry.source`, `None` when the
+   writer gave none).
+
+`MemoryService.revisions(operator, document_id)` returns the retained
+versions, oldest first, under the same read rules as `read_by_id`
+(`None` for a missing, foreign, other-owner or expired row). There is
+no REST or MCP route for it yet.
 
 ### Read path — direct (`recall` / `list_memories`)
 
@@ -297,7 +330,8 @@ candidate slot from one they may see.
    * the per-principal predicate: a user-scoped kind needs
      `metadata->>'user_sub' = principal`; tenant and target kinds are
      shared across the tenant;
-   * the expiry predicate (below).
+   * the expiry predicate (below);
+   * the search filters, when the caller gave any (#5726, below).
 4. The service maps each hit to a bounded `MemoryEntrySearchHit`
    (`_hit_to_search_result`): it cuts the body to a query snippet with
    `query_snippet` and numbers the hits with `rank`. It does **not**
@@ -306,6 +340,21 @@ candidate slot from one they may see.
 
 "No match" and "only rows you may not see" give the same answer: an
 empty `hits` list, with no count.
+
+**Search filters (#5726).** MCP `search_memory` takes the same lesson
+header filters as `search_knowledge`: `product`, `version`, `status`
+(exact value), `tags` (every listed tag), `confirmed_after` /
+`confirmed_before` (the header `confirmed_at`) and `updated_after` /
+`updated_before` (the last write, the row's `updated_at`). The tool
+turns them into `metadata_filters` and a `TimeWindow`
+(`retrieval/time_window.py`) and `search_memories` passes both to the
+same `retrieve` call. They run in the candidate SQL next to the
+eligibility rule, so they only narrow what the caller may see, and a
+filtered-out row never takes a candidate slot. A memory without a
+readable `confirmed_at` is left out by a confirmed limit. The rules
+and the time format are in [`kb.md`](./kb.md#search-filters-5726).
+The tag filter of `list_memories` (`tag`, one tag) is unchanged. The
+REST route and `meho recall` do not take these filters yet.
 
 **Expiry predicate (PostgreSQL 16).** It uses the database's `now()`,
 never a client clock, and runs for every `source='memory'` row in

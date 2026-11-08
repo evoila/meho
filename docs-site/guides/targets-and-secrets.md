@@ -102,6 +102,26 @@ Mapping rules the importer applies:
 
 You can leave `secret_ref` out entirely — see the next section.
 
+### The record schema
+
+One entry of the `targets:` list has a published JSON Schema:
+[`docs/schemas/target-record-v1.schema.json`](https://github.com/evoila/meho/blob/main/docs/schemas/target-record-v1.schema.json).
+The toolkit repos and MEHO use the same description, so a file that
+passes the schema imports without edits. The fields are the keys listed
+above, plus `fingerprint`: the detected product and version (`vendor`,
+`product`, `version`, `build`, `edition`, `reachable`, `probed_at`,
+`probe_method` and `extras`). A file may carry `fingerprint`. The import
+skips it with a warning, because only a probe writes it.
+
+The schema allows keys it does not list. The import keeps them in
+`extras` and warns. The CLI import and the console import map the same
+keys.
+
+The schema has the same limits as the API. A name or alias has no
+spaces, line breaks or `/`. `secret_field_map` holds at most 50
+entries. A CA pin (`tls_ca_pin`) does not go together with
+`verify_tls: false`. `version` is text, for example `"8.0"`, or `null`.
+
 ### Use a secret with different field names
 
 A connector reads fixed field names from the secret. For example, SSH

@@ -87,10 +87,34 @@ agent_run loop ─►│ AgentRun.start / .result    │
                └─────────────────────────────────────┘
 ```
 
-A **failed** run skips steps 1-4 entirely; `agent_run.cost` stays NULL
-and no budget rows materialise. Future enforcement may opt to charge
-best-effort partial usage on failure, but the v0.2 contract is
-"failed runs cost nothing".
+A **failed** or **cancelled** run is charged for the model requests it
+finished: the runtime keeps the per-request usage current while the loop
+runs (`AgentRunHandle.request_usages`, the `usage_sink` of
+`stream_events`), and `_finalize_run` runs steps 1-4 with it. A run
+that made no model request costs nothing. When the row is already
+terminal (cancelled), the status is left alone and the charge is still
+applied.
+
+A run that has started and not ended is not charged yet. The pre-run
+gate counts each such run of the person as one request, and
+`_create_run_row` takes a per-person lock (`pg_advisory_xact_lock` on
+PostgreSQL) around that count and the insert of the new run row. So
+with a cap of one request, a second start while the first run is still
+going is refused.
+
+A cancelled run also counts as one request until its charge is saved.
+Its loop may still be making a call on another worker, which stops at
+its next heartbeat. The charge writes a cost on the row (zero when the
+run made no model call), and then the run stops counting. A cancelled
+row with no cost stops counting after the lease time
+(`AGENT_RUN_LEASE_TTL_SECONDS`), so a worker that died does not block
+the person.
+
+The final charge runs in its own task (`_finish_despite_cancel`). A
+cancel of the loop task while the charge is being saved does not stop
+it, so the charge commits once. A caller that waits on a run (the REST
+call and the scheduler) gets the stored `cancelled` outcome when the
+run is cancelled during the wait.
 
 ## The pricing table
 

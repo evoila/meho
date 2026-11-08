@@ -96,6 +96,24 @@ dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
   reflects a fresh incident with up to `retry_times ×
   (retry_backoff_seconds + one runner tick)` of added latency — the
   cost of not nudging every caller about a one-reading flap.
+- **Acknowledged findings (#4128).** In the same session the builder
+  reads the acknowledgement state of the non-green Dashboards
+  (`checks/acknowledgement.py` `acknowledged_dashboards`, a
+  `DashboardAckState` per Dashboard that has any acknowledgement). A
+  Dashboard whose every non-green member
+  (`check_dashboard_sensors.last_member_state` in `degraded`/`critical`)
+  is under an active acknowledgement gets an entry with
+  `"acknowledged": true` and `"acknowledged_until"` (the earliest end
+  time), under the key segment `{state}:acknowledged:{end time}`. So a
+  caller hears "acknowledged" once per acknowledgement instead of the
+  warning. When an acknowledgement of a member has ended, the warning
+  uses the key segment `{state}:after:{latest end time}`. No caller has
+  claimed that key yet, so the warning comes back at once after the end,
+  also for a caller who heard it before the acknowledgement and whose
+  plain key is still claimed. A Dashboard that never had an
+  acknowledgement keeps the plain `{state}` key. A Dashboard with a
+  member that is not acknowledged, or with no member state on record,
+  keeps the normal warning. The note text is never in the entry.
 - **Fail-open, advisory-only.** A broad guard swallows any DB/Valkey
   error, warn-logs `checks_alert_advisory_failed`, and returns `{}`.
   Never gates, blocks, or fails a dispatch.

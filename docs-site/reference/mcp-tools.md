@@ -43,8 +43,8 @@ The default agent surface. No elevation required.
 | `read_docs` | experimental | capability `meho-docs` | Read more around a vendor-document hit: the text before and after it, the whole page, or the section it sits in. |
 | `result_query` | ga | — | Read the full data behind a result handle. |
 | `search_docs` | experimental | capability `meho-docs` | Search a vendor-document collection (manuals, KB articles, guides) for a vendor fact, e.g. 'NSX config maximums for 9.0' or 'vSphere 8.0 supported snapshot depth'. |
-| `search_knowledge` | ga | — | Search the tenant's knowledge base for distilled operator knowledge: vendor API patterns, lab conventions, known-good runbooks, post-incident learnings. |
-| `search_memory` | ga | — | Search the operator's accessible memories (own user-scoped entries + tenant-shared + target-shared entries visible to this operator). |
+| `search_knowledge` | ga | — | Search the tenant's knowledge base: vendor API patterns, lab conventions, known-good runbooks, post-incident learnings. |
+| `search_memory` | ga | — | Search the memories this operator can read. |
 | `search_operations` | ga | — | Hybrid BM25 + cosine retrieval over a connector's enabled operations. |
 
 ### Add-on working tools

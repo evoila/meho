@@ -33,6 +33,12 @@
 //     Role: tenant_admin.
 //   - `meho dashboard delete <dashboard_id> [--tenant <id>] [--json]` —
 //     DELETE /api/v1/checks/dashboards/{id}. Role: tenant_admin.
+//   - `meho dashboard export <name> [--output <file>]` — write the dashboard
+//     and its sensors as one file (GET /api/v1/checks/dashboard-files/export).
+//     Role: operator.
+//   - `meho dashboard import <file> --map-target <placeholder>=<target> ...
+//     [--dry-run] [--force]` — create or update them from a file
+//     (POST /api/v1/checks/dashboard-files/import). Role: tenant_admin.
 //
 // Every verb drives the generated `api.ClientWithResponses` surface
 // directly (the G0.12-T13 typed-client discipline): consumer-side struct
@@ -63,7 +69,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dashboard",
-		Short: "Manage deterministic-check dashboards (list / show / create / edit / delete)",
+		Short: "Manage deterministic-check dashboards (list / show / create / edit / delete / export / import)",
 		Long: "Manage tenant-scoped dashboards wired by the deterministic " +
 			"check layer (Initiative #2416). A dashboard composes registered " +
 			"Sensors into a single rolled-up \"is everything OK?\" answer: the " +
@@ -82,6 +88,8 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newEditCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newExportCmd())
+	cmd.AddCommand(newImportCmd())
 	return cmd
 }
 
@@ -406,6 +414,18 @@ func printDashboardSummary(w io.Writer, d *api.DashboardDetail) {
 	// whitespace-only prompt as unset and renders no operator section.
 	if prompt := derefString(d.InvestigatorPrompt); strings.TrimSpace(prompt) != "" {
 		fmt.Fprintf(w, "%-18s\n%s\n", "investigator_prompt:", indentBlock(prompt))
+	}
+	// Last alert mail result. Absent until the first attempt. A failure
+	// prints its reason so a blocked mail port shows here, not only in logs.
+	if d.LastMailAt != nil {
+		result := "sent"
+		if d.LastMailSent != nil && !*d.LastMailSent {
+			result = "not sent"
+			if reason := derefString(d.LastMailReason); reason != "" {
+				result += " (" + sanitizeCell(reason) + ")"
+			}
+		}
+		fmt.Fprintf(w, "%-18s %s, %s\n", "last_mail:", formatTime(d.LastMailAt), result)
 	}
 	fmt.Fprintf(w, "%-18s %d\n", "member_count:", d.MemberCount)
 	fmt.Fprintf(w, "%-18s %s\n", "created_by:", d.CreatedBySub)

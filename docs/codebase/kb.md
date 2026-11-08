@@ -71,14 +71,14 @@ keys surface on every read surface that already returns `metadata`.
 ### `KbRevision` (`db/models.py`) and `KbEntryRevision` (`kb/schemas.py`)
 
 `KbRevision` is the ORM row in `kb_revision` (migration `0110`; migration
-`0140` adds `entry_metadata`):
+`0145` adds `entry_metadata`):
 `id` (revision UUID), `tenant_id`, `entry_id` (the `documents.id`,
 `ON DELETE CASCADE`), `revision_number` (1, 2, 3, ... per entry; unique
 per entry; the highest is current), `body`, `body_hash`, `provenance`
 (the write's provenance block, or `NULL`), `origin`, `embedding_model`,
 `chunker_version` (`kb-md-heading-v1` for revisions written since
 #3761), `entry_metadata` (the entry's metadata as of this revision;
-`NULL` on a row stored before `0140`) and `created_at`.
+`NULL` on a row stored before `0145`) and `created_at`.
 
 `origin` is `write` for a row stored by a kb write, or
 `backfill-current` for the one row migration `0110` copied from each
@@ -106,6 +106,9 @@ per-signal scores of its best passage (`fused_score`, `bm25_score`,
   `meho://kb/id/{entry}/revision/{revision}`.
 - `coverage` — `complete` when `passages` hold every passage of the
   revision, else `partial`.
+- `tenant_id` and `shared` (#5726) — the tenant that owns the entry,
+  and whether the entry is in the shared knowledge scope. A hit from
+  another tenant is always a shared one.
 
 `snippet` is the first ~200 characters of the best passage
 (`_SNIPPET_CHARS`). An entry indexed before passages existed comes
@@ -150,12 +153,12 @@ before returning. Seven verbs:
 
 | Verb | What it does | Throws |
 |---|---|---|
-| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug |
-| `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. | – |
+| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False, may_set_curation_keys=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, checks the lesson header, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug; `LessonHeaderError` on a wrong header value; `KbSharedNotAllowedError`, `KbSharedSlugError` (shared scope) |
+| `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. Also finds a shared entry of another tenant. | – |
 | `get_revision(tenant_id, entry_id, revision_id)` | Exact retained read. Returns `KbEntryRevision` only when the revision belongs to the entry and both belong to the tenant; otherwise `None`, without saying why. | – |
 | `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0, order="slug")` | List entries; slug-sorted by default, `order="newest"` sorts by `updated_at`, newest first; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
 | `delete_entry(tenant_id, slug)` | Delete the head and all its revisions in one transaction; returns whether a row existed. | Database errors propagate; nothing is removed |
-| `search_entries(tenant_id, query, *, filters=None, limit=10)` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. | `ValueError` on negative `limit` |
+| `search_entries(tenant_id, query, *, filters=None, limit=10, time_window=None, scope="all")` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. `time_window` limits `confirmed_at` and the last write; `scope` is `all`, `tenant` or `shared`. | `ValueError` on negative `limit` |
 | `ingest_directory(directory, tenant_id, dry_run=False)` | Read every `.md` file in sorted order, report slug conflicts without writing them, ingest the rest; idempotent. Per-file failures counted, run continues. | `KbIngestRootError` outside `KB_INGEST_ROOT` |
 
 ### `walk_kb_directory` (`kb/file_walker.py`)
@@ -301,6 +304,77 @@ win.
 Directory ingest uses a different rule (below): it never lets file
 order pick a winner.
 
+### Similar entries at write time (`kb/similar.py`)
+
+A create of a **new slug** first looks for entries that already say
+something similar. This keeps duplicates out of the store. The surfaces
+call `check_new_entry(...)` before `create_entry`: MCP
+`add_to_knowledge`, REST `POST /api/v1/kb`, CLI `meho kb add`, and the
+console editor and uploads. `create_entry` itself does not change.
+Directory ingest (`meho kb ingest`) and the import job do not run the
+check; they keep their own dry run.
+
+How it decides:
+
+1. The slug, the lesson header and the shared scope are checked first,
+   with the same errors as the create.
+2. When the tenant already has the slug, the write is an update. The
+   check does not run, and the write goes on as before.
+3. Otherwise it searches the kb passages of the tenant and of the shared
+   scope (`retrieve` plus `add_shared_hits`) with the summary and the
+   start of the body. When the header names `product` and `version`, a
+   first search is narrowed to those values. Those entries are listed
+   first (`match: same_product_version`), then the others
+   (`match: close_meaning`), best score first, at most five
+   (`SIMILAR_LIMIT`).
+4. An entry counts only when its best passage has a cosine score of at
+   least `KB_SIMILAR_MIN_SCORE` (setting `kb_similar_min_score`,
+   default `0.85`). With the default embedding model a reworded copy
+   scores about 0.9 and a different note on the same product about 0.8.
+
+When similar entries exist, **nothing is written**. The answer
+(`KbSimilarCheck`) lists each entry with its slug, entry id, current
+`revision_id`, summary, product, version, status, a 200-character
+snippet, the score, and `may_change`. `may_change` follows the owner
+rule: the entry is in the caller's own tenant, and the caller may
+change any entry (tenant admin, reviewer) or created it. A shared entry
+of another tenant is listed with `may_change: false`. The writer then
+updates one of the entries (the `revision_id` names the revision it
+read), or sends the create again with `create_anyway: true`.
+
+`dry_run: true` gives the same answer and writes nothing. `would_write`
+says whether the same call without `dry_run` would write; for an
+existing slug `slug_exists` is true and the list is empty. The check
+runs the create's own checks first (`_checked_direct_metadata` and
+`_refuse_if_not_own` in `service.py`), so a dry run fails with the same
+error as the write would: a slug another principal owns, a reserved
+metadata key, `shared: true` from a tenant that may not share, or a
+missing or old `expected_revision` (`refuse_stale_revision` in
+`stale_revision.py`; the write checks it again under the head lock).
+It never reports `would_write: true` for a write the service refuses.
+
+Per surface:
+
+| Surface | Similar entries found | Dry run |
+|---|---|---|
+| MCP `add_to_knowledge` | normal result with `written: false`, `reason: similar_entries`; summary, snippet, product, version and status are wrapped as untrusted text | same, `reason: dry_run` |
+| REST `POST /api/v1/kb` | HTTP `409` with `KbSimilarCheck` | HTTP `200` with `KbSimilarCheck` |
+| CLI `meho kb add` | lists the entries, exit code 1 (`similar_entries`) | lists them, exit code 0 |
+| Console editor and uploads | the editor modal and the upload result list the entries (`ui/templates/kb/_similar_entries.html`: slug, summary, product, version, status, revision, snippet, score, and whether the operator may change it) with a "Create anyway" box | — |
+
+The answer stays small: at most five entries, each text cut at 200
+characters, so it is far inside the MCP size limit.
+
+The check is advice at write time, not a lock. Two writers that create
+similar entries at the same moment both get through. The weekly upkeep
+merges such duplicates later.
+
+Tests: the default test database is SQLite, which cannot run the
+search. `tests/conftest.py::_no_similar_kb_entries` makes the search
+find nothing in every test, unless the test requests the
+`real_similar_check` fixture and mocks `retrieve` itself
+(`tests/test_kb_similar.py`).
+
 ### Cross-principal write & delete semantics (#1845)
 
 kb rows are **tenant-shared**. Any `tenant_admin` in a tenant may
@@ -316,17 +390,32 @@ no-op).
 
 An `operator` writes only through the MCP `add_to_knowledge` tool
 (REST `POST /api/v1/kb` needs `tenant_admin`). The tool calls
-`create_entry(..., own_entries_only=True)` for every caller below
-`tenant_admin`, and then the service:
+`create_entry(..., own_entries_only=True)` for every caller that may
+not change any entry, and then the service. Who may change any entry
+(the owner rule, `_may_change_any_entry` in `mcp/tools/knowledge.py`):
+the owner of the entry, a `tenant_admin`, or a **reviewer**. A reviewer
+is a person who can decide approvals in the tenant: a human principal
+that is `operator` or higher, or has the `approver` capability (the
+same rule as `_check_reviewer_role` in the approvals queue, one list
+for approvals and reviews). Agent, service and runner principals are
+never reviewers. A `read_only` reviewer passes the tool's role gate
+too: the tool is registered with `approver_may_call=True`, so
+`mcp/registry.py::tool_role_gate_met` lets a human with the `approver`
+capability list and call it. Other `read_only` callers stay blocked.
+REST `POST /api/v1/kb` and the console editor stay `tenant_admin` only.
+Only a `tenant_admin` may set the curation keys
+(`may_set_curation_keys`). For every other caller the service:
 
 - refuses to overwrite an entry whose `created_by_sub` is missing or
   is another principal (`KbEntryNotOwnedError`; the tool answers with
   a permission refusal, `reason: entry_not_owned`, and nothing is
-  written). A row with no `created_by_sub` (directory ingest, or a row
+  written). The message says how to propose a change: save it under a
+  new slug, or ask a reviewer or tenant admin. A row with no `created_by_sub` (directory ingest, or a row
   from before attribution) belongs to nobody, so an operator cannot
   change it either;
 - refuses caller `metadata` with a key from `CURATION_METADATA_KEYS`
-  (`source_kind`, the key the curated-slice search filter scopes to;
+  (`source_kind`, the key the curated-slice search filter scopes to,
+  and `shared`, see "Lesson header and shared scope";
   `KbReservedMetadataError`, `reason: reserved_metadata`). So an
   operator's entry cannot look curated.
 
@@ -405,10 +494,77 @@ or `..` paths. Older directory-ingested rows may still carry a
 read as `provenance.state="legacy"`, and the next ingest of the same
 file replaces their metadata (dropping `source_path`).
 
+### Lesson header and shared scope (`lesson_header.py`, `kb/shared.py`)
+
+Knowledge and memory entries accept the same header in `metadata`
+(`meho_backplane/lesson_header.py`). A wrong value raises
+`LessonHeaderError` (REST `422`, MCP invalid params, a counted error
+for a file in a directory import) and nothing is written.
+
+| Field | Values |
+|---|---|
+| `type` | `fact`, `lesson`, `decision`, `rule`, `person-and-role`, `preference`, `observation` |
+| `applies_to` | `tenant`, `customer`, `target`, `product-and-version`, `team`, `person` |
+| `status` | `candidate`, `confirmed`, `disputed`, `replaced`, `retired` |
+| `learned_at`, `confirmed_at`, `expires_at` | a date, a datetime or ISO 8601 text; stored as ISO 8601 text with a time zone |
+| `product`, `version`, `source`, `author`, `summary` | text (a number such as `9.0` is stored as text) |
+| `tags` | a list of text |
+
+An `observation` is a story of what happened, such as a lab field
+note. It is never a confirmed lesson. Fields that are absent stay
+absent. A directory import carries the header from the YAML
+front-matter; quote dates or leave them unquoted, both work.
+
+MEHO keeps four names for itself: `slug`, `provenance`, `kind` and
+`scope`. The header never uses them. A direct write refuses `slug`,
+`kind` and `scope` in the metadata (`provenance` is replaced, as
+before); a directory import also lets `slug` through, as the slug
+override it always was.
+
+**Expiry.** An entry with `status: candidate` gets `learned_at` (the
+stored one, else now) and, when it names no `expires_at`, an
+`expires_at` six months after `learned_at`. A re-write or re-import of
+the same note keeps these dates. A confirmed entry gets no expiry.
+Nothing deletes or hides an expired entry yet: the date is recorded and
+returned on every read surface. The console entry page shows every
+header field the entry has in a "Lesson header" list
+(`lesson_header.py::header_rows`).
+
+**Owner.** The owner is `created_by_sub` (see above).
+
+**Shared scope.** An entry with `shared: true` in its metadata is
+readable from every tenant on the instance, if its owner tenant is
+listed in `KB_SHARED_TENANT_IDS` (comma-separated tenant ids; empty by
+default, so nothing is shared). Only reading is shared:
+
+- the entry stays in its owner tenant (`KbEntry.tenant_id` is the
+  owner's id);
+- `get_entry`, `list_entries`, `search_entries` and `get_revision` of
+  another tenant include it (`kb/shared.py::visible_to`; search asks
+  each owner tenant for its `shared` rows and merges by score, in
+  `kb/service.py::add_shared_hits`);
+- `POST /api/v1/retrieve` with `source="kb"` (what `meho kb search`
+  calls) adds the same shared hits through `add_shared_hits`;
+- a caller filter `shared` other than `true` (for example
+  `filters={"shared": false}`) leaves out every shared entry of another
+  tenant;
+- when a tenant has the same slug itself, its own entry wins;
+- a tenant that is not listed cannot set `shared: true`
+  (`KbSharedNotAllowedError`, REST `403`);
+- no other tenant can write a slug that is a shared entry of the owner
+  (`KbSharedSlugError`, REST `403`), and `delete_entry` only ever
+  touches the caller's own tenant;
+- only the JSON value `true` counts. The SQL test (`_IsShared`) does not
+  cast, so an old row with text under `shared` cannot fail a query.
+
+`shared` is a curation key: an operator on the MCP tool cannot set it.
+Customer facts never go into the shared scope. They belong in the
+customer's own tenant or instance.
+
 ### Read path — `get_entry` / `list_entries`
 
 Both are natural SQL — no retrieval. `get_entry` is a natural-key
-SELECT; `list_entries` is `SELECT ... WHERE tenant_id=? AND
+SELECT; `list_entries` is `SELECT ... WHERE visible_to(tenant) AND
 source='kb' ORDER BY source_id LIMIT ? OFFSET ?`, with an optional
 `AND source_id LIKE :pattern` clause. Both add a correlated subquery
 (`current_revision_id()`) for the highest-numbered revision, which
@@ -470,19 +626,63 @@ until the entry is deleted.
      drops the entry. The retriever checks this with PostgreSQL
      `metadata @> filters`.
    - **Values are simple values:** text, a number, `true` / `false`,
-     or `null`. The check compares top-level keys only.
+     or `null`, or a list. A list matches an entry that holds every
+     listed item: `{"tags": ["vm", "snapshot"]}` keeps entries that have
+     both tags (and maybe more). The check compares top-level keys only.
    - Example: `{"kind": "kb-entry", "source_kind": "evoila-distilled"}`
      keeps only curated kb entries. `{"product": "vsphere",
      "version": 8}` keeps only entries whose metadata has both
      `product: "vsphere"` and `version: 8`.
 2. Call `meho_backplane.retrieval.retriever.retrieve` with
-   `source=KB_SOURCE`, the query, the `kind` filter and
-   `limit=CANDIDATE_LIMIT` (50). The retriever maps `source="kb"` (and
+   `source=KB_SOURCE`, the query, the `kind` filter, the `time_window`
+   and `limit=CANDIDATE_LIMIT` (50). The retriever maps `source="kb"` (and
    `kind="kb-entry"`) to the current passage rows and drops a head
-   once its entry has passages, so no entry shows twice.
-3. `_group_by_entry` folds the ranked rows into one `KbEntrySearchHit`
+   once its entry has passages, so no entry shows twice. The time
+   window is checked in the same SQL, before the `LIMIT` (see
+   [Search filters](#search-filters-5726)).
+3. Unless `scope="tenant"`, add the hits of the shared scope
+   (`add_shared_hits`, with the same filters and time window). With
+   `scope="shared"` the own tenant is searched only for its `shared`
+   rows, and not at all when the tenant is not a listed owner.
+4. `_group_by_entry` folds the ranked rows into one `KbEntrySearchHit`
    per entry, best first, up to `limit` entries, each with up to 3
    passages and their locators.
+
+### Search filters (#5726)
+
+`search_knowledge` and `search_memory` take the same named filters on
+the lesson header (`mcp/tools/_search_filters.py`):
+
+| Filter | Meaning | How it is checked |
+|---|---|---|
+| `product`, `version`, `status` | The header field has exactly this value. | Metadata containment (`@>`). |
+| `tags` | The entry has every listed tag. | Metadata containment with a list. |
+| `confirmed_after`, `confirmed_before` | The header `confirmed_at` is in this range (both ends included). An entry without a readable `confirmed_at` is left out. | `_TIME_WINDOW_PREDICATE_SQL` in the retriever. |
+| `updated_after`, `updated_before` | The last write is in this range (both ends included). | The `updated_at` column, same predicate. For knowledge this is the passage row, which every write of the entry refreshes. |
+
+`search_knowledge` also takes `scope`: `all` (default), `tenant` or
+`shared`. A named filter wins over the same key in `filters`.
+
+Example: the confirmed lessons for one product version from the last
+90 days are `status="confirmed"`, `product`, `version` and
+`confirmed_after=<the date 90 days ago>`.
+
+The tool texts only say that the filters run before ranking and that a
+date alone is midnight UTC. The default MCP tool list has a size limit
+(`tests/test_mcp_tool_text_budget.py`), so the details stay here.
+
+A time limit is ISO 8601 text. A date alone means midnight UTC; a time
+without an offset is UTC. An unreadable value, or an `after` later
+than its `before`, is refused with JSON-RPC `-32602`. Every filter runs
+inside the candidate SQL, before ranking cuts the candidates, so a
+filtered-out entry never pushes a match out of the top 50.
+
+The `confirmed_at` check reads stored text. Like the Memory expiry
+check, it tests the ISO 8601 shape and `pg_input_is_valid` before any
+cast, so an old row with an odd date cannot fail the query.
+
+The REST and CLI search (`POST /api/v1/retrieve`, `meho kb search`)
+and the console search do not take the named filters yet.
 
 `search_knowledge` (MCP) wraps every snippet, passage text and
 heading title (`locator.heading_path`) as untrusted text and keeps its response inside

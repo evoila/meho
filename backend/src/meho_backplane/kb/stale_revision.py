@@ -47,6 +47,7 @@ __all__ = [
     "KbStaleRevisionError",
     "build_stale_detail",
     "metadata_changed_keys",
+    "refuse_stale_revision",
 ]
 
 #: The body difference shows at most this many lines and characters.
@@ -222,6 +223,43 @@ async def build_stale_detail(
         body_diff=diff,
         body_diff_truncated=truncated,
     )
+
+
+async def refuse_stale_revision(
+    tenant_id: uuid.UUID,
+    slug: str,
+    expected_revision_id: uuid.UUID | None,
+) -> None:
+    """Raise :class:`KbStaleRevisionError` when a write naming *expected_revision_id* would fail.
+
+    The same rule as the write: a slug that exists needs its current
+    revision, and a slug that does not exist needs no revision. Used
+    before the write by answers that write nothing (a dry run, the
+    similar-entries check), so they refuse what the write would refuse.
+    The write checks again under the row lock.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        head_id = await session.scalar(
+            select(Document.id).where(
+                Document.tenant_id == tenant_id,
+                Document.source == KB_SOURCE,
+                Document.source_id == slug,
+            )
+        )
+        current = None
+        if head_id is not None:
+            current = await session.scalar(
+                select(KbRevision.id)
+                .where(KbRevision.entry_id == head_id)
+                .order_by(KbRevision.revision_number.desc())
+                .limit(1)
+            )
+    if (head_id is None and expected_revision_id is None) or (
+        head_id is not None and current == expected_revision_id
+    ):
+        return
+    raise KbStaleRevisionError(await build_stale_detail(tenant_id, slug, expected_revision_id))
 
 
 def _detail(

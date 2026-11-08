@@ -168,11 +168,11 @@ rather than re-implementing decide).
 
 ## Known issues / out of scope
 
-- The cancel is not synchronous: the proxy records the durable cancel
-  intent (via `invoker.cancel`) and the run's loop observes the
-  `cancelled` status on its next turn boundary. The console flips to the
-  `cancelled` pill and closes the `EventSource` immediately; the run's own
-  termination follows on the backend.
+- The cancel records the durable `cancelled` state (via `invoker.cancel`)
+  and stops the run's loop: the loop task is cancelled at once on the
+  worker that runs it, and a loop on another worker stops when its
+  heartbeat finds the lease gone. The console flips to the `cancelled`
+  pill and closes the `EventSource` immediately.
 - The run list has no cancel button. Only the run console can stop a
   run.
 - The run list for all agents is `GET /ui/agents/runs`, with `status`

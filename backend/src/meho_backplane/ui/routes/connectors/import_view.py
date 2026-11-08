@@ -99,6 +99,7 @@ _KNOWN_TOP_LEVEL: frozenset[str] = frozenset(
         "aliases",
         "auth_model",
         "extras",
+        "flight_recorder_capture",
         "fqdn",
         "host",
         "name",
@@ -106,7 +107,12 @@ _KNOWN_TOP_LEVEL: frozenset[str] = frozenset(
         "port",
         "preferred_impl_id",
         "product",
+        "secret_field_map",
         "secret_ref",
+        "tls_ca_pin",
+        "tls_server_name",
+        "verify_tls",
+        "version",
         "vpn_required",
     }
 )

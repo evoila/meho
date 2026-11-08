@@ -20,6 +20,9 @@
                 status    str   -- "success" | "error"
                 message   str   -- human-readable detail
                 entry     KbEntry | None -- on success only
+                similar   list[KbSimilarEntry] -- only on a row that
+                          similar entries stopped; shown in full by
+                          ``_similar_entries.html``
     bulk   -- bool: True for bulk (multi-file) path
 
   Design:
@@ -91,6 +94,12 @@
         {% endif %}
       </span>
     </div>
+    {% if row.similar is defined and row.similar %}
+    <div class="mt-2 text-sm" id="upload-similar">
+      <p class="font-medium">Similar entries</p>
+      {% with similar=row.similar %}{% include "kb/_similar_entries.html" %}{% endwith %}
+    </div>
+    {% endif %}
   {% endif %}
 
 {# ---- Bulk response (bulk=True or multiple rows) ---- #}
@@ -136,6 +145,11 @@
                     <span class="badge badge-error badge-sm" title="{{ row.message }}" aria-label="Error: {{ row.message }}">
                       &#x2717; {{ row.message | truncate(40) }}
                     </span>
+                    {% if row.similar is defined and row.similar %}
+                    <div class="mt-1 text-sm">
+                      {% with similar=row.similar %}{% include "kb/_similar_entries.html" %}{% endwith %}
+                    </div>
+                    {% endif %}
                   {% endif %}
                 </td>
               </tr>

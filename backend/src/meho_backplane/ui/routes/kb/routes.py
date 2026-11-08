@@ -151,8 +151,10 @@ from fastapi.responses import HTMLResponse, Response
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.kb import KbEntry, KbEntrySearchHit, KbService
-from meho_backplane.kb.schemas import InvalidKbSlugError
+from meho_backplane.kb.schemas import InvalidKbSlugError, KbSharedSlugError
+from meho_backplane.kb.similar import KbSimilarEntry, check_new_entry
 from meho_backplane.kb.stale_revision import KbStaleRevisionError
+from meho_backplane.lesson_header import header_rows
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
@@ -334,6 +336,35 @@ def _filename_to_slug(filename: str) -> str:
 # `/ui/kb*` route as a closure over shared deps. #1776 only *removes* three
 # `ready=False` literals from it (net smaller); splitting the factory is a
 # sibling-surface refactor out of scope. code-quality-allow: pre-existing oversize factory
+#: Banner of the editor modal when similar entries stop a save.
+_SIMILAR_EDITOR_MESSAGE: Final[str] = (
+    "Similar entries exist, so nothing was saved. Open one of them to update it, "
+    'or tick "Create anyway" and save again.'
+)
+
+
+def _similar_upload_row(
+    filename: str, slug: str, similar: list[KbSimilarEntry]
+) -> dict[str, object]:
+    """Return the upload result row of a file that similar entries stopped.
+
+    ``similar`` carries the entries, so the result shows each one in
+    full (``_similar_entries.html``) and the operator can choose.
+    """
+    return {
+        "filename": filename,
+        "slug": slug,
+        "status": "error",
+        "message": (
+            "Similar entries exist: "
+            + ", ".join(entry.slug for entry in similar)
+            + '. Nothing was saved. Tick "Create anyway" to upload it.'
+        ),
+        "entry": None,
+        "similar": similar,
+    }
+
+
 def build_kb_router() -> APIRouter:
     """Construct the ``/ui/kb*`` :class:`APIRouter`.
 
@@ -536,6 +567,7 @@ def build_kb_router() -> APIRouter:
             "code_css": code_css,
             "source_path": source_path,
             "body_hash": body_hash,
+            "header_rows": header_rows(entry.metadata),
             "operator_sub": session.operator_sub,
             "csrf_token": csrf_token,
             "active_surface": "knowledge",
@@ -619,6 +651,7 @@ def build_kb_router() -> APIRouter:
         slug: str = Form(..., max_length=_MAX_SLUG_LENGTH),
         body: str = Form(..., max_length=_MAX_EDITOR_BODY_LENGTH),
         tags: str = Form(default="", max_length=_MAX_TAGS_LENGTH),
+        create_anyway: bool = Form(default=False),
     ) -> Response:
         """Save a new KB entry from the editor modal.
 
@@ -640,6 +673,9 @@ def build_kb_router() -> APIRouter:
         (``"tag-a, tag-b"``); individual values are stripped of
         whitespace and empty strings are dropped. Tags are stored as
         ``metadata["tags"]`` on the entry.
+
+        A new slug with similar entries is not saved: the modal comes back
+        with the list and a "Create anyway" box (``create_anyway``).
         """
         await _require_tenant_admin(session)
 
@@ -653,15 +689,29 @@ def build_kb_router() -> APIRouter:
         error_message: str | None = None
         existing_slug: str | None = None
         entry: KbEntry | None = None
+        similar: list[KbSimilarEntry] = []
         try:
-            entry, _created = await kb.create_entry(
-                tenant_id=session.tenant_id,
-                slug=slug.strip(),
-                body=body,
-                metadata=metadata if metadata else None,
+            check = await check_new_entry(
+                session.tenant_id,
+                slug.strip(),
+                body,
+                metadata or None,
                 actor_sub=session.operator_sub,
+                may_change_any=True,
+                create_anyway=create_anyway,
             )
-        except InvalidKbSlugError as exc:
+            if check is not None:
+                similar = check.similar
+                error_message = _SIMILAR_EDITOR_MESSAGE
+            else:
+                entry, _created = await kb.create_entry(
+                    tenant_id=session.tenant_id,
+                    slug=slug.strip(),
+                    body=body,
+                    metadata=metadata if metadata else None,
+                    actor_sub=session.operator_sub,
+                )
+        except (InvalidKbSlugError, KbSharedSlugError) as exc:
             error_message = str(exc)
         except KbStaleRevisionError as exc:
             error_message = exists_message(exc)
@@ -690,6 +740,7 @@ def build_kb_router() -> APIRouter:
             "slug": slug,
             "body": body,
             "tags": tags,
+            "similar": similar,
             "csrf_token": csrf_token,
         }
         # The fragment is returned as 200, not the semantically-matching 422:
@@ -727,6 +778,7 @@ def build_kb_router() -> APIRouter:
         session: UISessionContext = _require_admin,
         file: UploadFile = File(...),
         slug: str = Form(default=""),
+        create_anyway: bool = Form(default=False),
     ) -> HTMLResponse:
         """Single-file upload endpoint. Returns the ``_upload_progress.html`` partial.
 
@@ -743,6 +795,7 @@ def build_kb_router() -> APIRouter:
             [slug],
             tenant_id=session.tenant_id,
             actor_sub=session.operator_sub,
+            create_anyway=create_anyway,
         )
         context = {
             "rows": rows,
@@ -755,6 +808,7 @@ def build_kb_router() -> APIRouter:
         request: Request,
         session: UISessionContext = _require_admin,
         file: list[UploadFile] = File(...),
+        create_anyway: bool = Form(default=False),
     ) -> HTMLResponse:
         """Bulk upload endpoint. Returns the ``_upload_progress.html`` partial.
 
@@ -771,6 +825,7 @@ def build_kb_router() -> APIRouter:
             [""] * len(file),
             tenant_id=session.tenant_id,
             actor_sub=session.operator_sub,
+            create_anyway=create_anyway,
         )
         context = {
             "rows": rows,
@@ -784,6 +839,7 @@ def build_kb_router() -> APIRouter:
         *,
         tenant_id: object,
         actor_sub: str,
+        create_anyway: bool = False,
     ) -> list[dict[str, object]]:
         # code-quality-allow: function-size — pre-existing oversized helper;
         # #1845 only adds the actor_sub kwarg + threads it to create_entry.
@@ -792,7 +848,8 @@ def build_kb_router() -> APIRouter:
         Each entry in the returned list is a dict with:
         ``filename``, ``slug``, ``status`` (``"success"`` / ``"error"``),
         ``message`` (human-readable detail), and optionally ``entry``
-        (:class:`~meho_backplane.kb.KbEntry`) on success for the OOB swap.
+        (:class:`~meho_backplane.kb.KbEntry`) on success for the OOB swap,
+        or ``similar`` (the entries that stopped the file).
 
         Errors are caught per-file; the list length always equals
         ``len(files)`` so the template can render every row.
@@ -864,6 +921,18 @@ def build_kb_router() -> APIRouter:
                 audit_op_class="write",
             )
             try:
+                check = await check_new_entry(
+                    tenant_id,  # type: ignore[arg-type]
+                    effective_slug,
+                    body,
+                    None,
+                    actor_sub=actor_sub,
+                    may_change_any=True,
+                    create_anyway=create_anyway,
+                )
+                if check is not None:
+                    rows.append(_similar_upload_row(filename, effective_slug, check.similar))
+                    continue
                 entry, _created = await kb.create_entry(
                     tenant_id,  # type: ignore[arg-type]
                     effective_slug,
@@ -871,7 +940,7 @@ def build_kb_router() -> APIRouter:
                     metadata={"source_filename": filename},
                     actor_sub=actor_sub,
                 )
-            except InvalidKbSlugError as exc:
+            except (InvalidKbSlugError, KbSharedSlugError) as exc:
                 rows.append(
                     {
                         "filename": filename,

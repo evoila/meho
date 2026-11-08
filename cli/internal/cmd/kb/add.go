@@ -26,6 +26,7 @@ import (
 //	  --body @file.md|@-|<inline-text> \
 //	  [--metadata key=value,key=value] \
 //	  [--expected-revision <revision-id>] \
+//	  [--create-anyway] [--dry-run] \
 //	  [--json] \
 //	  [--backplane <url>]
 //
@@ -48,8 +49,14 @@ import (
 // shows the current revision and what changed. To update an entry, read
 // it (`meho kb show <slug> --json`) and pass its revision_id here.
 //
+// A new slug is first checked for similar entries. When some exist,
+// nothing is written (HTTP 409): the command lists them and exits 1.
+// --create-anyway writes the entry anyway; --dry-run writes nothing
+// and lists the similar entries (exit 0).
+//
 // Exit codes:
-//   - 0   entry created (201) or updated (200)
+//   - 0   entry created (201) or updated (200), or a dry run
+//   - 1   similar_entries: nothing written, similar entries listed
 //   - 2   auth_expired
 //   - 3   unreachable
 //   - 4   unexpected_response (incl. 422 invalid_slug / missing body)
@@ -60,6 +67,8 @@ func newAddCmd() *cobra.Command {
 		metadata          string
 		expectedRevision  string
 		jsonOut           bool
+		createAnyway      bool
+		dryRun            bool
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
@@ -86,8 +95,16 @@ func newAddCmd() *cobra.Command {
 			"same refusal applies when the entry changed after the " +
 			"revision you named. A change to the metadata alone counts " +
 			"as a change.\n\n" +
+			"A new slug is first checked for similar entries (same " +
+			"product and version, then close in meaning). When some " +
+			"exist, nothing is written: the command lists them and exits " +
+			"1. Update one of them (`meho kb add <their-slug> " +
+			"--expected-revision <revision_id>`), or run " +
+			"again with --create-anyway. --dry-run writes nothing and " +
+			"lists the similar entries.\n\n" +
 			"Exit code 0 means the entry was created (HTTP 201) or " +
-			"updated (HTTP 200). The summary line says which one happened.",
+			"updated (HTTP 200), or the dry run finished. The summary " +
+			"line says which one happened.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -98,6 +115,8 @@ func newAddCmd() *cobra.Command {
 				MetadataArg:       metadata,
 				ExpectedRevision:  expectedRevision,
 				JSONOut:           jsonOut,
+				CreateAnyway:      createAnyway,
+				DryRun:            dryRun,
 				BackplaneOverride: backplaneOverride,
 			})
 		},
@@ -108,6 +127,10 @@ func newAddCmd() *cobra.Command {
 		"comma-separated key=value pairs to attach as entry metadata (e.g. owner=ops,source=runbook)")
 	cmd.Flags().StringVar(&expectedRevision, "expected-revision", "",
 		"revision_id of the entry as you read it (required to update an existing slug)")
+	cmd.Flags().BoolVar(&createAnyway, "create-anyway", false,
+		"create the new entry even when similar entries exist")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
+		"write nothing; list the similar entries and say whether the write would go through")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw KbEntry JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -121,6 +144,8 @@ type addOptions struct {
 	MetadataArg       string
 	ExpectedRevision  string
 	JSONOut           bool
+	CreateAnyway      bool
+	DryRun            bool
 	BackplaneOverride string
 }
 
@@ -151,9 +176,19 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	resp, err := postAdd(cmd.Context(), backplaneURL, opts.Slug, body, metadata, expected)
+	reqBody := buildAddBody(opts.Slug, body, metadata, expected)
+	if opts.CreateAnyway {
+		reqBody.CreateAnyway = &opts.CreateAnyway
+	}
+	if opts.DryRun {
+		reqBody.DryRun = &opts.DryRun
+	}
+	resp, err := postAdd(cmd.Context(), backplaneURL, reqBody)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if handled, err := renderSimilarCheck(cmd, backplaneURL, resp, opts); handled {
+		return err
 	}
 	// The backplane answers 201 for a new slug and 200 when it
 	// overwrote an existing slug in place (#1845). Both are a
@@ -166,7 +201,7 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 	case http.StatusCreated:
 		entry, verb = resp.JSON201, "created"
 	case http.StatusOK:
-		entry, verb = resp.JSON200, "updated"
+		entry, verb = decodeJSONBody[api.KbEntry](resp.HTTPResponse, resp.Body), "updated"
 	default:
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
@@ -221,15 +256,13 @@ func buildAddBody(
 
 func postAdd(
 	ctx context.Context,
-	backplaneURL, slug, body string,
-	metadata map[string]any,
-	expected *openapi_types.UUID,
+	backplaneURL string,
+	reqBody api.KbEntryCreate,
 ) (*api.CreateKbApiV1KbPostResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	reqBody := buildAddBody(slug, body, metadata, expected)
 	return retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.CreateKbApiV1KbPostResponse, error) {
 			return authed.CreateKbApiV1KbPostWithResponse(

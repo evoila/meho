@@ -32,6 +32,7 @@ from pydantic import (
     field_validator,
 )
 
+from meho_backplane.checks.acknowledgement import SensorAcknowledgementRead
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.db.models import SensorSeverity, SensorStatus
 
@@ -220,6 +221,10 @@ class DashboardMemberView(BaseModel):
     last_evidence: dict[str, object] | None
     last_evaluated_at: datetime | None
     next_fire_at: datetime | None
+    #: The active acknowledgement (#4128): who, until when and why. ``None``
+    #: when nobody acknowledged the member. The states above stay the real
+    #: ones.
+    acknowledgement: SensorAcknowledgementRead | None = None
 
 
 class DashboardRead(BaseModel):
@@ -256,6 +261,11 @@ class DashboardRead(BaseModel):
     #: would turn a row that somehow got past the boundary into a 500 on an
     #: unrelated list call.
     investigator_prompt: str | None
+    #: Result of the last alert mail attempt: when, whether it was sent, and
+    #: the failure reason. All NULL until the first attempt.
+    last_mail_at: datetime | None = None
+    last_mail_sent: bool | None = None
+    last_mail_reason: str | None = None
     created_by_sub: str
     created_at: datetime
     updated_at: datetime

@@ -608,3 +608,33 @@ empty follow-up page. The REST route avoids this by over-fetching
 - #134 (preview serialized once, on `handle.sample_rows`); #1312 (REST
   `limit + 1` over-fetch); #1641 (cross-tenant listing gated to
   `platform_admin`).
+
+## Target record schema (toolkit targets file)
+
+- One record of the toolkit's `targets.yaml` is described by
+  `TargetRecord` in `backend/src/meho_backplane/targets/file_schema.py`.
+  It covers the product, the version and the `fingerprint` fields
+  (vendor, product, version, build, edition, reachable, probed_at,
+  probe_method, extras).
+- The schema carries the limits of `TargetCreate`: the length limits, the
+  name rule (no whitespace, control character or `/`, also for aliases),
+  at most 50 entries in `secret_field_map`, and no `tls_ca_pin` together
+  with `verify_tls: false`. The host rule is only stated in words, because
+  a port or path after the host is allowed. `version` may be `null`; the
+  CLI, the console and the API all accept it.
+- The schema is published as `docs/schemas/target-record-v1.schema.json`.
+  Make it again with
+  `cd backend && uv run python scripts/generate_targets_file_schema.py`.
+- The model is for the schema file and for tests. The import does not
+  use it. `meho targets import` (`cli/internal/cmd/targets/import.go`)
+  and the console import (`ui/routes/connectors/import_view.py`) map keys
+  on their own. The console import had no `version`, `verify_tls`,
+  `tls_ca_pin`, `tls_server_name`, `secret_field_map` or
+  `flight_recorder_capture`, so those keys went into `extras`. It maps
+  them to columns now.
+- `backend/tests/test_targets_file_schema.py` keeps the schema, the CLI
+  key list and the console key list the same, and imports the made-up
+  toolkit file `backend/tests/fixtures/toolkit-targets-v1.yaml`. The Go
+  test `TestToolkitTargetsFileImportsWithoutEdits` reads the same file.
+- A record still needs `host`. A toolkit entry without one (a cloud
+  project reached by project id) is refused by both imports.

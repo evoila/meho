@@ -135,7 +135,8 @@ Backup/restore and observability guides land on this site with MEHO's
 disaster-recovery workstream. Until then: PostgreSQL is MEHO's durable
 *application* store and the thing to back up first (see the
 [reference architecture](../architecture.md#state-postgresql-pgvector));
-the Valkey activity feed is ephemeral by design.
+the Valkey activity feed is ephemeral by design. For the knowledge store,
+see [Back up and restore the knowledge store](#back-up-and-restore-the-knowledge-store).
 
 A PostgreSQL restore alone does not rebuild a working deployment. The
 target credentials themselves live in Vault or Google Secret Manager,
@@ -143,3 +144,98 @@ realm and client configuration lives in Keycloak, and your TLS Secrets
 and Helm values live in the cluster and in whatever you keep them under
 version control in. Each needs its own backup or reprovisioning path
 until the full guide lands.
+
+## Back up and restore the knowledge store
+
+MEHO keeps its knowledge in the backplane database (PostgreSQL). One
+database backup holds all of it. There is no other copy.
+
+### What the database holds
+
+| What | Where | What it is |
+|---|---|---|
+| Entries | table `documents`, rows with `source = 'kb'` | One row per entry. It holds the latest text and the metadata. |
+| Revisions | table `kb_revision` | One row per stored text of an entry. Older texts stay readable here. |
+| Passages and embeddings | table `documents`, rows with `source = 'kb-passage'` | The pieces of text that search ranks, with their embeddings. An embedding is a list of numbers for search by meaning. It is stored with the `pgvector` extension. |
+
+The tenant settings file is **not** a backup of the knowledge store. It
+holds policies, conventions and targets, and no knowledge. See
+[Backup and the settings](ways-to-install.md#backup-and-the-settings).
+
+### Take a backup
+
+Run `pg_dump` against the backplane database, with the custom format.
+Run it from a machine or pod that has the PostgreSQL client tools. Use
+the same major version as the server, or a newer one:
+
+```bash
+pg_dump --format=custom --file=meho-backplane.dump \
+  "postgresql://<user>@<host>:5432/<database>"
+```
+
+Store the file somewhere that survives the loss of the server. Take the
+backup on a schedule, and take one before each upgrade.
+
+### Restore into an empty database
+
+1. Create an empty database on a PostgreSQL server where the `vector`
+   extension is available (the database image of the MEHO chart has it).
+2. Restore the dump into it:
+
+   ```bash
+   createdb -h <host> -U <user> <new-database>
+   pg_restore --no-owner --exit-on-error \
+     --dbname="postgresql://<user>@<host>:5432/<new-database>" \
+     meho-backplane.dump
+   ```
+
+   The dump contains the line that creates the `vector` extension, so
+   the restore creates it. If your database user may not create
+   extensions, ask a database administrator to run
+   `CREATE EXTENSION vector;` in the new database first, and leave out
+   `--exit-on-error`. `pg_restore` then reports one "already exists"
+   error for that line. It is safe to ignore.
+3. Point MEHO at the new database (the `DATABASE_URL` setting) and start it.
+
+A restore of the database alone does not bring back credentials,
+Keycloak or the Helm values. See the notes above.
+
+### Check after a restore
+
+Pick one entry that you know:
+
+1. **The entry:** `meho kb show <slug>` returns the latest text.
+2. **Its revisions:** in the new database, this lists every stored text:
+
+   ```sql
+   SELECT r.revision_number, left(r.body, 60)
+   FROM kb_revision r JOIN documents d ON d.id = r.entry_id
+   WHERE d.source = 'kb' AND d.source_id = '<slug>'
+   ORDER BY r.revision_number;
+   ```
+
+   An agent reads one older text through the MCP resource
+   `meho://kb/id/<entry>/revision/<revision>`.
+3. **A search hit:** `meho kb search "<words from that entry>"` lists
+   the entry.
+
+A test in the MEHO code (`test_kb_backup_restore_pg.py`) takes a dump
+with `pg_dump`, restores it with `pg_restore`, and checks the same three
+things.
+
+### If the restored MEHO uses another embedding model
+
+The dump keeps the embeddings that the old model made. Search compares
+the question, which the new model embeds, with these stored numbers.
+Numbers from two different models do not match well, so search results
+get worse.
+
+To fix it, write each entry again with the same text. MEHO sees that
+the passages came from another model and builds them again. The
+easiest way is `meho kb ingest` over the source files of your entries.
+An entry that has no source file can be written again with
+`meho kb add <slug> --body @<file>`.
+
+A new model must give vectors of the same size (384 numbers). The
+database column has that size fixed. A model with another size needs a
+database migration first.

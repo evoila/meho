@@ -121,17 +121,11 @@ _ALL_ON = [
     "--set",
     "keycloakAdmin.enabled=true",
     "--set",
-    "keycloakAdmin.url=https://keycloak.test",
-    "--set",
-    "keycloakAdmin.clientId=admin",
-    "--set",
     "keycloakAdmin.clientSecret.secretName=test-core-keycloak-admin",
     "--set",
     "uiConsole.enabled=true",
     "--set",
     "uiConsole.secretName=test-core-ui-auth",
-    "--set",
-    "config.uiKeycloakClientId=ui",
 ]
 
 # The pods that render with `_ALL_ON`, so a part that silently stops

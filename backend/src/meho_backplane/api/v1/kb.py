@@ -26,7 +26,10 @@ Route inventory
   only creates: for an existing slug it answers **409**
   ``stale_revision``, like a write that names an older revision. The
   answer holds the current revision, who changed it and when, and what
-  changed since the revision the writer read. Role: ``tenant_admin``.
+  changed since the revision the writer read. A new slug with similar
+  entries answers **409** and writes nothing, unless ``create_anyway``
+  is set; ``dry_run`` answers **200** and writes nothing (both with
+  :class:`KbSimilarCheck`). Role: ``tenant_admin``.
 * ``DELETE /api/v1/kb/{slug}`` -- delete an entry. Returns 204 on
   success **and** when the row was already absent (idempotent
   semantics per the acceptance criteria; T6 documents the
@@ -128,7 +131,7 @@ from typing import Any, Final
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from meho_backplane.api.v1._freetext_filter import (
@@ -143,9 +146,15 @@ from meho_backplane.kb import (
     KbIngestRootError,
     KbService,
 )
-from meho_backplane.kb.schemas import InvalidKbSlugError
+from meho_backplane.kb.schemas import (
+    InvalidKbSlugError,
+    KbSharedNotAllowedError,
+    KbSharedSlugError,
+)
 from meho_backplane.kb.service import KbListOrder
+from meho_backplane.kb.similar import KbSimilarCheck, check_new_entry
 from meho_backplane.kb.stale_revision import KbStaleRevisionError
+from meho_backplane.lesson_header import LessonHeaderError
 
 __all__ = ["router"]
 
@@ -217,6 +226,17 @@ class KbEntryCreate(BaseModel):
             "The `revision_id` a read of this entry returned. Required to "
             "update an existing slug. Leave it out to create a new slug; if "
             "the slug exists, the write is refused with 409 stale_revision."
+        ),
+    )
+    create_anyway: bool = Field(
+        default=False,
+        description="Create a new slug even when similar entries exist.",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "Write nothing. Answer 200 with the similar entries and whether the write would go "
+            "through."
         ),
     )
 
@@ -432,15 +452,22 @@ async def show_kb(
     status_code=http_status.HTTP_201_CREATED,
     responses={
         http_status.HTTP_200_OK: {
-            "model": KbEntry,
+            "model": KbEntry | KbSimilarCheck,
             "description": (
                 "An existing entry with this slug was updated in "
                 "place (id + created_at preserved, updated_at bumped). "
-                "201 is returned only for a genuinely-new slug."
+                "201 is returned only for a genuinely-new slug. With "
+                "`dry_run`, the answer is a KbSimilarCheck and nothing "
+                "is written."
             ),
         },
         http_status.HTTP_409_CONFLICT: {
+            "model": KbSimilarCheck,
             "description": (
+                "Nothing was written. Either the slug is new and similar "
+                "entries exist (a KbSimilarCheck): update one of the "
+                "listed entries, or send the create again with "
+                "`create_anyway`. Or `detail.error` is "
                 "`stale_revision`: the entry changed after the revision "
                 "named in `expected_revision`, or the slug exists and no "
                 "revision was named. The detail holds the current revision, "
@@ -453,7 +480,7 @@ async def create_kb(
     body: KbEntryCreate,
     response: Response,
     operator: Operator = _require_admin,
-) -> KbEntry:
+) -> KbEntry | JSONResponse:
     """Create or update one kb entry under the operator's tenant.
 
     An update names the revision it read in ``expected_revision``;
@@ -492,6 +519,12 @@ async def create_kb(
     that was created. The body content is NOT bound -- the audit
     row is for the operation, not the document content (which lives
     in the ``documents`` table and is recoverable via ``kb.show``).
+
+    A new slug is first checked for similar entries
+    (:func:`~meho_backplane.kb.similar.check_new_entry`). When some exist
+    and ``create_anyway`` is not set, nothing is written and the answer
+    is **409** with a :class:`KbSimilarCheck`. ``dry_run`` writes nothing
+    and answers **200** with a :class:`KbSimilarCheck`.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_KB_OP_IDS["create"],
@@ -500,6 +533,27 @@ async def create_kb(
     )
     service = KbService()
     try:
+        check = await check_new_entry(
+            operator.tenant_id,
+            body.slug,
+            body.body,
+            body.metadata,
+            actor_sub=operator.sub,
+            may_change_any=True,
+            create_anyway=body.create_anyway,
+            dry_run=body.dry_run,
+            expected_revision=body.expected_revision,
+        )
+        if check is not None:
+            structlog.contextvars.bind_contextvars(
+                audit_created=False, audit_similar_count=len(check.similar)
+            )
+            return JSONResponse(
+                status_code=http_status.HTTP_200_OK
+                if body.dry_run
+                else http_status.HTTP_409_CONFLICT,
+                content=check.model_dump(mode="json"),
+            )
         entry, created = await service.create_entry(
             tenant_id=operator.tenant_id,
             slug=body.slug,
@@ -508,7 +562,7 @@ async def create_kb(
             actor_sub=operator.sub,
             expected_revision=body.expected_revision,
         )
-    except InvalidKbSlugError as exc:
+    except (InvalidKbSlugError, LessonHeaderError) as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
@@ -517,6 +571,11 @@ async def create_kb(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=exc.detail.to_payload(),
+        ) from exc
+    except (KbSharedNotAllowedError, KbSharedSlugError) as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
         ) from exc
     if not created:
         response.status_code = http_status.HTTP_200_OK

@@ -922,6 +922,17 @@ class Tenant(Base):
         nullable=True,
         default=None,
     )
+    # Tenant setting of the run approval (#4126). ``True`` lets a run
+    # approval list a target kind (a product, for example ``vcenter``) in
+    # place of one target, so targets the run registers itself are covered.
+    # ``False`` (default): every entry names one target or no target.
+    # ``server_default=false`` in migration ``0143`` backfills existing rows.
+    run_approval_target_kinds_enabled: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
+    )
 
     __table_args__ = (
         Index(
@@ -1193,6 +1204,57 @@ class KbRevision(Base):
         sa.CheckConstraint(
             "origin IN ('write', 'backfill-current')",
             name="ck_kb_revision_origin",
+        ),
+    )
+
+
+class MemoryRevision(Base):
+    """One retained version of a memory entry (body and metadata).
+
+    The :class:`Document` row with ``source="memory"`` stays the latest
+    head. Each time a memory write changes the body or the metadata, the
+    service adds one row here. A row is never updated. Rows go with the
+    entry: ``ON DELETE CASCADE``, and the memory delete paths remove them
+    explicitly (SQLite does not enforce the foreign key).
+
+    ``revision_number`` counts 1, 2, 3, ... per entry and is unique per
+    entry. ``written_by_sub`` is the OIDC ``sub`` of the writer, or
+    ``None`` when the write had no principal.
+    """
+
+    __tablename__ = "memory_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    doc_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
+    written_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "memory_revision_entry_number_idx",
+            "entry_id",
+            "revision_number",
+            unique=True,
         ),
     )
 
@@ -6138,6 +6200,75 @@ class ServicePrincipalReadScope(Base):
     )
 
 
+class RunApproval(Base):
+    """A person's approval of the operation list of one automation run (#4126).
+
+    A service principal (the automation add-on) asks for it with its run
+    reference (``work_ref``) and the list of operations the run may use.
+    Each entry is a ``connector_id``, an ``op_id`` and one target, a target
+    kind (``target_product``, only when the tenant setting
+    :attr:`Tenant.run_approval_target_kinds_enabled` is on), or no target.
+    A person approves the whole list once. Then a call of that principal
+    with that ``Meho-Work-Ref`` that matches an entry runs without a new
+    approval; the policy gate writes one ``approval.decision`` audit row
+    that names this row
+    (:func:`meho_backplane.operations.run_approvals.consult_and_record_run_approval`).
+
+    The approval is keyed on the token subject (``principal_sub``), never
+    on a client name. A row is live while it is approved, not revoked, not
+    ended and before ``expires_at``. Rows are never deleted, so the history
+    stays visible. Destructive operations are never covered.
+
+    ``expired_at`` is written by the next request of the same run, when the
+    row is past ``expires_at``. Until then the dead row still holds the
+    run's slot in ``run_approval_open_run_idx``, the partial unique index
+    that lets one run hold at most one open row (not revoked, not ended,
+    not recorded as expired). Two requests for the same run that arrive at
+    the same time both pass the check in the service; the index lets only
+    one of them insert
+    (:meth:`meho_backplane.operations.run_approvals.RunApprovalService.request`).
+    """
+
+    __tablename__ = "run_approval"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("tenant.id"), nullable=False)
+    # JWT ``sub`` of the service principal that asked. Soft reference, no FK
+    # -- same discipline as ServicePrincipalGrant.principal_sub.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    work_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    entries: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("run_approval_lookup_idx", "tenant_id", "principal_sub", "work_ref"),
+        # Matches migration 0143: at most one open row per (tenant, token
+        # subject, run reference).
+        Index(
+            "run_approval_open_run_idx",
+            "tenant_id",
+            "principal_sub",
+            "work_ref",
+            unique=True,
+            postgresql_where=sa.text(
+                "revoked_at IS NULL AND ended_at IS NULL AND expired_at IS NULL"
+            ),
+            sqlite_where=sa.text("revoked_at IS NULL AND ended_at IS NULL AND expired_at IS NULL"),
+        ),
+    )
+
+
 class SandboxModeState(Base):
     """The stored sandbox mode: exactly one row, fixed for the database (#4622).
 
@@ -6696,6 +6827,15 @@ class ApprovalRequestStatus(StrEnum):
 #: literal. The drift guard asserts equality so the two never diverge.
 _APPROVAL_REQUEST_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalRequestStatus)
 
+#: What an operator found when they checked the target of an approved run
+#: whose outcome MEHO does not know (#5026). Kept equal to
+#: ``OutcomeCheckVerdict`` in ``operations/approval_outcome_check.py``.
+_APPROVAL_OUTCOME_CHECK_VERDICTS: tuple[str, ...] = ("happened", "did_not_happen")
+
+#: Why a checked request was on the "outcome unknown" list (#5026). Kept
+#: equal to ``OutcomeUnknownReason`` in ``operations/approval_outcome_check.py``.
+_APPROVAL_OUTCOME_CHECK_REASONS: tuple[str, ...] = ("uncertain", "started_no_result")
+
 
 class ApprovalRequest(Base):
     """One pending (or decided) approval request for a ``requires_approval`` op.
@@ -7138,6 +7278,15 @@ class ApprovalRequest(Base):
     rerun_count: Mapped[int] = mapped_column(
         sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
     )
+    # When the latest re-run started (#5026). NULL until the first re-run.
+    # Until then, the latest run is the first run, which started at
+    # ``resumed_at``. The re-run claim sets it
+    # in the same UPDATE that adds one to ``rerun_count``. The "outcome
+    # unknown" list counts its minutes from the start of the latest run.
+    # Added by migration ``0142``.
+    rerun_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     # The target's connection settings when the request was made. See the
     # class docstring. Added by migration ``0130``.
     target_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
@@ -7146,6 +7295,23 @@ class ApprovalRequest(Base):
     reveal_secret: Mapped[bool] = mapped_column(
         sa.Boolean(), nullable=False, default=False, server_default=sa.false()
     )
+    # An operator checked the target of an approved run whose outcome MEHO
+    # does not know, and wrote down what they found (#5026): the verdict
+    # (``happened`` / ``did_not_happen``), a note, who and when. NULL until
+    # someone marks the request as checked. ``outcome_check_reason`` is why
+    # the request was on the list at that time (``uncertain`` /
+    # ``started_no_result``). A check covers only that reason and the run that
+    # was the latest at that time, so a later re-run or a later ``uncertain``
+    # result puts the request back on the list. The stored result is never
+    # changed, and nothing runs. Added by migration ``0142``.
+    outcome_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    outcome_checked_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_checked_by_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_verdict: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_note: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         Index(
@@ -7188,6 +7354,14 @@ class ApprovalRequest(Base):
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),
             name="ck_approval_request_status",
+        ),
+        sa.CheckConstraint(
+            _ck_in("outcome_check_verdict", _APPROVAL_OUTCOME_CHECK_VERDICTS),
+            name="ck_approval_request_outcome_check_verdict",
+        ),
+        sa.CheckConstraint(
+            _ck_in("outcome_check_reason", _APPROVAL_OUTCOME_CHECK_REASONS),
+            name="ck_approval_request_outcome_check_reason",
         ),
     )
 
@@ -9106,6 +9280,14 @@ class CheckDashboard(Base):
     # and a boundary rejection names the field and its limit where a CHECK
     # violation would surface as an opaque 500.
     investigator_prompt: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Result of the last alert mail attempt, written by ``checks.mail_result``.
+    # All three are NULL until the first attempt. ``last_mail_reason`` is the
+    # failure reason code and stays NULL when the mail was sent.
+    last_mail_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    last_mail_sent: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    last_mail_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -9200,6 +9382,77 @@ class CheckDashboardSensor(Base):
         sa.CheckConstraint(
             _ck_in("last_member_state", _CHECK_DASHBOARD_ROLLUP_STATES),
             name="ck_check_dashboard_sensors_last_member_state",
+        ),
+    )
+
+
+#: Why a person acknowledged a Sensor finding (#4128). A closed set, so a
+#: report can count the reasons; the short text says the rest.
+SENSOR_ACK_REASONS: tuple[str, ...] = ("accepted_risk", "fix_planned", "false_alarm")
+
+#: The Sensor states a person can acknowledge: every state that is not green.
+#: ``skip`` is never a Sensor's own state (only a rollup derivation).
+SENSOR_ACK_STATES: tuple[str, ...] = ("unknown", "degraded", "critical")
+
+#: Why an acknowledgement ended before or at its end time.
+SENSOR_ACK_END_REASONS: tuple[str, ...] = ("expired", "state_worse")
+
+
+class SensorAcknowledgement(Base):
+    """A person's acknowledgement of one Sensor finding, for a set time (#4128).
+
+    While it is active (``ended_at IS NULL`` and ``expires_at`` is in the
+    future), the in-band advisory says "acknowledged" and the warning mails
+    for this Sensor are not sent again. The Sensor keeps running and its
+    real state stays visible.
+
+    It ends at ``expires_at`` (``end_reason='expired'``), or early when the
+    Sensor's state gets worse than ``acked_state``
+    (``end_reason='state_worse'``). ``checks.acknowledgement`` writes the
+    end and its audit row in the same transaction as the Sensor result that
+    caused it. A partial unique index allows one open row per Sensor.
+    """
+
+    __tablename__ = "sensor_acknowledgements"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    sensor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("sensor.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # The Sensor's state when the person acknowledged it. A later state
+    # worse than this one ends the acknowledgement early.
+    acked_state: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    end_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+    __table_args__ = (
+        Index(
+            "sensor_acknowledgements_open_idx",
+            "sensor_id",
+            unique=True,
+            postgresql_where=sa.text("ended_at IS NULL"),
+            sqlite_where=sa.text("ended_at IS NULL"),
+        ),
+        sa.CheckConstraint(
+            _ck_in("acked_state", SENSOR_ACK_STATES),
+            name="ck_sensor_acknowledgements_acked_state",
+        ),
+        sa.CheckConstraint(
+            _ck_in("reason", SENSOR_ACK_REASONS),
+            name="ck_sensor_acknowledgements_reason",
+        ),
+        sa.CheckConstraint(
+            _ck_in("end_reason", SENSOR_ACK_END_REASONS),
+            name="ck_sensor_acknowledgements_end_reason",
         ),
     )
 

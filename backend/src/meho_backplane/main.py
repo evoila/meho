@@ -83,6 +83,9 @@ from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
 from meho_backplane.api.v1.checks import router as api_v1_checks_router
+from meho_backplane.api.v1.checks_dashboard_files import (
+    router as api_v1_checks_dashboard_files_router,
+)
 from meho_backplane.api.v1.checks_dashboards import (
     router as api_v1_checks_dashboards_router,
 )
@@ -115,6 +118,7 @@ from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
 from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
+from meho_backplane.api.v1.run_approvals import router as api_v1_run_approvals_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
 from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
 from meho_backplane.api.v1.runner_principals import (
@@ -122,6 +126,9 @@ from meho_backplane.api.v1.runner_principals import (
 )
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
+from meho_backplane.api.v1.sensor_acknowledgements import (
+    router as api_v1_sensor_acknowledgements_router,
+)
 from meho_backplane.api.v1.sensors import router as api_v1_sensors_router
 from meho_backplane.api.v1.service_grants import router as api_v1_service_grants_router
 from meho_backplane.api.v1.service_read_scopes import (
@@ -163,6 +170,7 @@ from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
+from meho_backplane.first_start import router as first_start_router
 from meho_backplane.flight_recorder.reaper import (
     start_flight_recorder_reaper,
     stop_flight_recorder_reaper,
@@ -1014,6 +1022,7 @@ app.add_middleware(RequestBodyLimitMiddleware)
 app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
 
 app.include_router(health_router)
+app.include_router(first_start_router)
 app.include_router(version_router)
 app.include_router(api_v1_auth_config_router)
 app.include_router(api_v1_health_router)
@@ -1337,6 +1346,9 @@ app.include_router(api_v1_scheduler_router)
 # JWT; platform_admin may pass tenant_filter / a body tenant_id to act
 # cross-tenant. Every mutation writes an audit row under op_class=write.
 app.include_router(api_v1_sensors_router)
+# #4128 -- POST /sensors/{id}/acknowledgement: a person acknowledges a
+# Sensor finding until an end time, with a reason. Operator role, people only.
+app.include_router(api_v1_sensor_acknowledgements_router)
 # I2416-T2506 -- Dashboard admin surface (five-state worst-of rollup). POST
 # /checks/dashboards (create, tenant_admin; 422 sensor_not_found on a foreign
 # member id), GET /checks/dashboards (list, operator-level; each row carries
@@ -1346,6 +1358,8 @@ app.include_router(api_v1_sensors_router)
 # cross-tenant. Distinct module from api_v1_checks_router (the #2415 gateway
 # assignment/result surface) -- the ``dashboards`` sub-path does not collide.
 app.include_router(api_v1_checks_dashboards_router)
+# Export a Dashboard and its Sensors to a file, and import it at another site.
+app.include_router(api_v1_checks_dashboard_files_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``
@@ -1361,6 +1375,8 @@ app.include_router(api_v1_approvals_router)
 app.include_router(api_v1_service_grants_router)
 # #4992 -- the targets a service principal may read (set by a person).
 app.include_router(api_v1_service_read_scopes_router)
+# #4126 -- a person approves the operation list of one automation run once.
+app.include_router(api_v1_run_approvals_router)
 # #3025 -- add-on pairing handshake (pair / unpair / list / heartbeat): a
 # sibling add-on product paired as a scoped Keycloak service principal over a
 # versioned integration contract (Initiative #2900 foundation).

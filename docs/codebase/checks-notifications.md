@@ -171,6 +171,32 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    only the shown members, never one the `_MAX_MEMBER_LINES` cut dropped;
    a Dashboard mail that lost its claim mails its `member_changes` riders
    one by one as "new problem" notices instead (see below).
+   Since #4128 a warning (a notice whose state is `unknown`,
+   `degraded` or `critical`) is skipped before the flap window when every
+   Sensor it is about has an active acknowledgement: the member of a
+   "new problem" notice, or the non-green members of a Dashboard notice.
+   A notice with no member is never skipped. The log is
+   `checks_notify_skipped_acknowledged`. An all-clear is still sent. If
+   the acknowledgement read fails, the mail is sent
+   (`checks_notify_acknowledgement_read_failed`). The acknowledgement
+   ends when the Sensor gets worse, in the same transaction as that
+   result, before this check runs, so the worse state mails. When the
+   acknowledgement's time is up and the Sensor still fails, no memo
+   moves, so the runner tells the transition detector
+   (`investigate_on_transition(acknowledgement_expired=True)`), which
+   builds an "acknowledgement ended" change (`MemberChange` with
+   `acknowledgement_ended`, both states the member's counted state) for
+   each of the Sensor's Dashboards: its own notice when the Dashboard
+   state did not move, a rider on the Dashboard mail when it did. The
+   mail reads "acknowledgement ended, `<member>` still `<state>`" and
+   runs the same gates as a "new problem" notice, with one difference:
+   the flap window never holds it back. The warning that was
+   acknowledged claimed the member's window before the acknowledgement,
+   so a short acknowledgement would end inside it. The notice still
+   claims that window when it is free, but it is sent whether or not
+   the claim wins. The runner sends it once per ended acknowledgement.
+   A member that is green as the Dashboard counts it, or that also got
+   worse with that result, gets no such change.
 4. **Outcome logging.** `checks_notify_sent` (info, with
    `recipient_count`) on delivery; `checks_notify_failed` (warning, with
    the transport's stable reason code) on a `sent=False` result or an
@@ -423,6 +449,45 @@ Fire-and-forget in two senses:
   failure — contract parity with `investigate_on_transition` — and a
   broken MTA cannot cost the tenant the noise-suppression policy write
   the finding mail is ordered after.
+
+## When alert mails fail: where to look
+
+A failed alert mail is not only a log line. Check these, in order:
+
+1. **`meho dashboard show <dashboard>`**. The `last_mail:` line gives the
+   time of the last mail attempt, and either `sent` or
+   `not sent (<reason>)`. The console page of the Dashboard shows the same
+   line (`Last alert mail`). No line means the Dashboard never tried to
+   send a mail.
+2. **The metric `checks_alert_mail_total{result=...}`** on `/metrics`. It
+   counts every attempt: `result="sent"`, or the reason of the failure.
+   Alert on a rising count of any other result.
+3. **The log line `checks_notify_failed`**, which carries the same reason
+   and the Dashboard id.
+
+The stored result is the last attempt only. A later success replaces a
+failure. The code is `checks/mail_result.py`; the columns are
+`check_dashboards.last_mail_at`, `last_mail_sent` and `last_mail_reason`.
+
+Reasons you can see:
+
+| Reason | What it means |
+|---|---|
+| `smtp_connect_error` | MEHO could not reach the mail server (refused, name not found, or timeout). A blocked mail port gives this. |
+| `smtp_auth_error` | The mail server refused the login. |
+| `smtp_auth_requires_tls` | A user name is set but the connection is not encrypted. |
+| `smtp_tls_error` | The mail server certificate was not accepted. |
+| `smtp_recipients_refused` | The mail server refused every recipient. |
+| `smtp_error` | Any other mail server error. |
+| `smtp_unconfigured` | The SMTP host or the sender address is not set. |
+| `not_in_recipient_allowlist` | The transport refused a recipient. |
+| `no_allowed_recipients` | Every recipient of the Dashboard is outside the allowlist, so nothing was sent. |
+| `unexpected_error` | An unexpected error in MEHO. See the log for the trace. |
+
+Only the Dashboard mail (including the "new problem" mail) is recorded.
+Mails that are skipped on purpose (no recipient, below the threshold, held
+back by the flap window) are not attempts. The finding mail is not recorded
+yet; its failure is still only a log line (`checks_finding_email_failed`).
 
 Delivery and the claim are independent: the memo advances whether or not
 the mail lands. That is deliberate — re-deriving "did anyone get told"

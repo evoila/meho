@@ -16,7 +16,7 @@ accounts (Active Directory, Entra ID, …) to the groups, follow
 [Company login](login/index.md) after this page.
 
 **Where this fits:** you arrived from
-[the install trail, Step 4](index.md#step-4-set-up-the-keycloak-realm).
+[the install trail, Set up the Keycloak realm](index.md#set-up-the-keycloak-realm).
 Work through this page top to bottom, run the verification block at
 the end, then return to the trail.
 
@@ -491,9 +491,13 @@ they do not come from realm `meho`.
     ```bash
     kubectl -n <namespace> get secret <release>-core-console-admin \
       -o jsonpath='{.data.username}' | base64 -d; echo
+    # macOS; on Linux use `xclip -selection clipboard` or `wl-copy` instead of `pbcopy`
     kubectl -n <namespace> get secret <release>-core-console-admin \
-      -o jsonpath='{.data.password}' | base64 -d; echo
+      -o jsonpath='{.data.password}' | base64 -d | pbcopy
     ```
+
+    The password goes to the clipboard so it does not show on screen. Clear
+    the clipboard after the first login.
 
 3. Open `https://<host>/auth/admin/master/console/#/meho` and log in
    with that name. Keycloak asks for a new password, a name and an
@@ -523,21 +527,12 @@ An install made before the console admin existed has no console admin,
 and the bootstrap Job cannot make one: the temporary first-start account
 was removed on the first run, and `meho-admin` cannot make users in realm
 `master`. The Job does not fail. It says in its log that there is no
-console admin and points here. Make one once by hand
-([Keycloak: recovering the admin account](https://www.keycloak.org/server/bootstrap-admin-recovery)):
+console admin and points here. Make one once by hand:
 
 1. Make a temporary admin in realm `master`. Skip this if you already
-   have a `master` admin. In the running Keycloak pod, which already has
-   the database settings (port 9001, because the server uses 9000):
-
-    ```bash
-    kubectl -n <namespace> exec -it <release>-keycloak-0 -- \
-      /opt/keycloak/bin/kc.sh bootstrap-admin user \
-      --username temp-admin --http-management-port 9001
-    ```
-
-    It asks for a password. This starts a second Java process in the
-    pod, so the pod needs some spare memory.
+   have a `master` admin. Keycloak must be stopped for this, so follow
+   [Keycloak break-glass](keycloak-break-glass.md), steps 1 to 3. Then
+   come back here.
 
 2. With `exposeAdmin: true` (see above), open
    `https://<host>/auth/admin/master/console/` and log in as `temp-admin`.
@@ -565,6 +560,53 @@ console admin and points here. Make one once by hand
    `master` admin.
 
 Then log in as in [The console admin](#the-console-admin).
+
+Lost the login of every Keycloak admin? Follow
+[Keycloak break-glass](keycloak-break-glass.md).
+
+### Recovery codes on an older install
+
+On a new install, the first admin and the second person set up an
+authenticator app at their first login, and Keycloak shows them twelve
+recovery codes once. Each recovery code works one time, instead of the code
+from the app. Two realm settings turn the recovery codes on, and the
+bootstrap Job sets them on every run.
+
+On an install made before this, the Job cannot set them. Changing login
+settings needs the realm-management role `manage-realm`. The first-start
+account had it, but the first run removed that account. `meho-admin` has
+it only when the company login is on. The Job does not fail. Its log
+says `recovery codes: not checked` and points here. Turn them on once, in
+one of two ways.
+
+**Way 1: let the Job do it.** Give `meho-admin` the role, then run the
+upgrade again:
+
+1. Log in to the admin console as the console admin (see
+   [The console admin](#the-console-admin)) and pick realm `meho`.
+2. **Clients → meho-admin → Service account roles → Assign role →
+   Filter by clients**, search for `realm-management`, select
+   `manage-realm`, **Assign**.
+3. Run `helm upgrade` again. The Job's log says `recovery codes: set`.
+
+With this role, the backplane, which uses `meho-admin`, can also change
+the login settings of realm `meho`. It could already change people and
+groups. If you do not want that, use way 2.
+
+**Way 2: by hand.** As the console admin, in realm `meho`:
+
+1. **Authentication → Required actions.** Open the settings of
+   **Configure OTP** and turn on **Add recovery codes**. **Save**.
+2. **Authentication → Flows → browser.** Set **Recovery Authentication
+   Code Form** to **Alternative**.
+
+The Job's log keeps saying `recovery codes: not checked`. That is expected:
+it cannot read the settings.
+
+**People who exist already.** The Job does not change the required actions
+of people who exist already. To make a person set up an authenticator app
+at the next login, open **Users →** the person **→ Details → Required user
+actions**, add **Configure OTP**, and **Save**.
 
 ## The MCP client (`meho-mcp`)
 
@@ -922,7 +964,7 @@ again.
 ## Wire it into Helm
 
 Tell the chart which client the CLI should use (already shown in
-[the install trail, Step 6](index.md#step-6-write-your-values-file)):
+[the install trail, Values file for your own parts](index.md#values-file-for-your-own-parts)):
 
 ```yaml
 config:
@@ -976,7 +1018,7 @@ jq -r '.entries[].access_token' \
 ```
 
 When all four pass, return to
-[the install trail, Step 5](index.md#step-5-decide-ingress-tls-and-trust).
+[the install trail, Part A, Step 1](index.md#step-1-decide-ingress-tls-and-trust).
 
 ## If login fails
 

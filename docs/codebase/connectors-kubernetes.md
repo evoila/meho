@@ -466,6 +466,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
 | `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
 | `k8s.secret.delete`    | **destructive** | `CoreV1Api.delete_namespaced_secret`. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_secret_write.py`. |
+| `k8s.finalizer.remove` | **destructive** | `ApiClient.call_api` JSON Patch: tests the finalizer list, then writes it without the named finalizer, on one object that already has a deletion time. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_finalizer.py`. |
 
 **`k8s.cronjob.run` (`ops_cronjob.py`).** Starts a CronJob's job without
 waiting for its schedule, the way `kubectl create job <name>
@@ -731,6 +732,43 @@ removal of a Secret use the two ops in `ops_secret_write.py`, in the
   nothing waits for approval.
 
 Tests: `tests/test_connectors_k8s_secret_write.py`.
+
+### Free a stuck object -- `k8s.finalizer.remove`
+
+A finalizer is a hold: Kubernetes keeps an object that has a deletion time
+until every finalizer is gone. When the controller's clean-up can never
+succeed, the object stays "being deleted". `k8s.finalizer.remove`
+(`ops_finalizer.py`, destructive, `requires_approval=True`, group `config`)
+removes exactly one named finalizer from exactly one named object, through
+approval and the audit log.
+
+- Takes `group` (empty for a core kind), `version`, `plural`, optional
+  `namespace`, `name`, `finalizer`, and optional `expected_finalizers`.
+  Result: `{group, version, plural, namespace, name, finalizer, removed,
+  remaining_finalizers}`.
+- It refuses, and writes nothing, when the object is missing, has no deletion
+  time, does not have the named finalizer, or its finalizer list differs from
+  the list on the approval card (or from `expected_finalizers`). A core `secrets` object is refused (the API answer
+  carries the values); use `k8s.secret.delete`.
+- The write is a JSON Patch (`application/json-patch+json`): a `test` step on
+  the whole `/metadata/finalizers` list, then a `replace` without the named
+  finalizer. If the list changes between the read and the write, the API
+  server answers 422 and the op reports "changed while the call ran". Other
+  finalizers stay. It goes through `ApiClient.call_api`, so one code path
+  covers core kinds (`/api/...`) and custom resources (`/apis/...`).
+- The preview builder runs the same read and checks, so a refusal fails the
+  preview and nothing waits for approval. The `blast_radius.object` shows the
+  kind, name, deletion time and finalizers, and the preview carries a warning
+  that the controller's clean-up is skipped. `children` is empty and
+  `irreversibility` is `permanent`.
+- The preview hash covers the params only, so the handler checks the list
+  itself. In the approved run it reads the card the approver saw
+  (`approved_preview`) and refuses when the live list is different, so a
+  change while the request waited never removes a finalizer. A card without
+  a finalizer list is refused too. Outside an approved run, the optional
+  `expected_finalizers` (the list the preview showed) does the same check.
+
+Tests: `tests/test_connectors_k8s_finalizer_remove.py`.
 
 ### Governed guest-cluster kubeconfig read -- `k8s.secret.read_to_ref` (#3496)
 

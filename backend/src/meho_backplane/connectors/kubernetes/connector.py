@@ -1849,6 +1849,17 @@ class KubernetesConnector(Connector):
 
         return await k8s_secret_delete(self, target, operator, params)
 
+    async def k8s_finalizer_remove(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.finalizer.remove``."""
+        from meho_backplane.connectors.kubernetes.ops_finalizer import k8s_finalizer_remove
+
+        return await k8s_finalizer_remove(self, target, operator, params)
+
     async def k8s_auth_can_i(
         self,
         operator: Operator,

@@ -188,6 +188,39 @@ async def test_a_preview_on_a_known_target_shows_the_matching_lesson() -> None:
 
 
 @pytest.mark.usefixtures("_stub_operations")
+async def test_an_own_entry_wins_its_slug_whatever_its_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared entry is not shown when the tenant has the slug itself.
+
+    The own entry has no product header, so the product filter does not
+    read it. Its uri still reads the own entry, so showing the shared text
+    under that uri would give the agent one advice and link another.
+    """
+    monkeypatch.setenv("KB_SHARED_TENANT_IDS", str(_OTHER_TENANT))
+    get_settings.cache_clear()
+    await _target()
+    await _kb("ops-rule", summary="The tenant's own rule, without a product.")
+    await _kb(
+        "ops-rule",
+        tenant_id=_OTHER_TENANT,
+        product="vcenter",
+        shared=True,
+        summary="The shared rule for every tenant.",
+    )
+    await _kb(
+        "shared-tip", tenant_id=_OTHER_TENANT, product="vcenter", shared=True, summary="Shared tip."
+    )
+
+    block = (await _preview())[RECALL_KEY]
+
+    assert block["status"] == "found"
+    assert "Shared tip." in block["text"]
+    assert "ops-rule" not in block["text"]
+    assert "shared rule" not in block["text"]
+
+
+@pytest.mark.usefixtures("_stub_operations")
 async def test_the_probed_version_picks_the_lessons() -> None:
     """A probed target with no typed version matches on its fingerprint version."""
     await _target(version=None, fingerprint={"product": "vcenter", "version": "8.0.2"})
@@ -284,6 +317,40 @@ async def test_a_call_carries_the_block_and_the_data_notice() -> None:
 
     assert "data_notice" in answer
     assert "A tip for calls." in answer[RECALL_KEY]["text"]
+
+
+@pytest.mark.usefixtures("_stub_operations")
+async def test_a_background_call_carries_the_block_on_its_first_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``async: true`` answers ``pending`` at once; the block comes with that answer."""
+    await _target()
+    await _kb("vc-tip", product="vcenter", summary="A tip before a long call.")
+
+    async def submit(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert "async" not in arguments
+        return {
+            "status": "pending",
+            "op_id": arguments["op_id"],
+            "result": None,
+            "error": None,
+            "duration_ms": 1.0,
+            "audit_id": None,
+            "delivery": None,
+            "handle": None,
+            "extras": {"run_id": str(uuid.uuid4()), "async": True},
+        }
+
+    monkeypatch.setattr(operations_tools, "submit_async_call", submit)
+
+    answer = await operations_tools._call_operation_handler(_operator(), {**_args(), "async": True})
+
+    assert answer["status"] == "pending"
+    assert "data_notice" in answer
+    assert "A tip before a long call." in answer[RECALL_KEY]["text"]
+    tool = get_tool("call_operation")
+    assert tool is not None and tool[0].outputSchema is not None
+    jsonschema.validate(answer, tool[0].outputSchema)
 
 
 async def test_a_call_answer_over_the_wire_limit_goes_out_without_the_block() -> None:

@@ -48,7 +48,9 @@ Which entries:
   is missing, or the target has no version, or the target's version
   equals it or starts with it and a dot (`8.0` and `8.x` match `8.0.2`). The
   tenant's own entries and the shared entries it may read
-  (`kb/shared.py`); its own entry wins on the same slug. Confirmed
+  (`kb/shared.py`); its own entry wins on the same slug, also when that
+  own entry has another product header or none (its uri reads the own
+  entry, so the shared one is never shown in its place). Confirmed
   entries come first, then the newest.
 - **Memory:** at most 2 notes with the target's exact name, from the
   `target` and `user-target` scopes. The memory read rules apply
@@ -61,8 +63,10 @@ When the block is added:
 
 - Only when the call names a target that resolves. No target, or an
   unknown target, gives no block.
-- Not on a `rate_limited` answer, and not on the background forms of
-  `call_operation` (`async: true`, or a check with `run_id`).
+- Not on a `rate_limited` answer, and not on a check of a background
+  call (`run_id`). A call started with `async: true` gets the block on
+  its first answer, the `pending` one, so the agent sees it before the
+  long operation ends.
 - A `call_operation` answer keeps its wire limit
   (`result_complete_response_wire_max_bytes`): when the block would push
   the answer over it, the answer goes out without the block. The block

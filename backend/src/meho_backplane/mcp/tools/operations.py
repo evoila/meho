@@ -163,8 +163,10 @@ async def _call_operation_handler(
     dispatch arguments, so they are taken out before the call reaches
     :func:`call_operation`. Every answer carries ``data_notice``: the
     result holds text a vendor system returned, and that text is data.
-    A call that runs at once and names a target also carries
-    ``team_knowledge`` (:mod:`meho_backplane.mcp.tools._operation_recall`).
+    A call that names a target also carries ``team_knowledge``
+    (:mod:`meho_backplane.mcp.tools._operation_recall`), also when it
+    starts in the background with ``async: true``. A check of a run with
+    ``run_id`` does not.
     """
     call_arguments = dict(arguments)
     run_async = bool(call_arguments.pop("async", False))
@@ -185,8 +187,9 @@ async def _call_operation_handler(
             await poll_call(operator, call_arguments, str(run_id), wait_seconds=wait_seconds or 0)
         )
     if run_async:
-        return with_data_notice(await submit_async_call(operator, call_arguments))
-    answer = with_data_notice(await call_operation(operator, call_arguments))
+        answer = with_data_notice(await submit_async_call(operator, call_arguments))
+    else:
+        answer = with_data_notice(await call_operation(operator, call_arguments))
     return await with_recall(
         operator,
         call_arguments,

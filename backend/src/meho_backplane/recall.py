@@ -48,6 +48,7 @@ from typing import Any, Final, Literal
 
 import structlog
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.resolver import resolve_target_version
@@ -195,6 +196,25 @@ def _item(
     )
 
 
+async def _own_slugs(
+    session: AsyncSession, tenant_id: uuid.UUID, docs: Sequence[Document]
+) -> set[str]:
+    """Return the slugs of the shared entries in *docs* that *tenant_id* has itself.
+
+    Read from the whole kb, not from *docs*: an own entry with another
+    product header, or none, is not in *docs* but still wins its slug.
+    """
+    shared_slugs = {doc.source_id for doc in docs if doc.tenant_id != tenant_id}
+    if not shared_slugs:
+        return set()
+    stmt = select(Document.source_id).where(
+        Document.tenant_id == tenant_id,
+        Document.source == KB_SOURCE,
+        Document.source_id.in_(shared_slugs),
+    )
+    return set((await session.execute(stmt)).scalars().all())
+
+
 async def _knowledge_items(
     tenant_id: uuid.UUID, product: str, version: str | None
 ) -> list[RecallItem]:
@@ -202,7 +222,9 @@ async def _knowledge_items(
 
     Reads the tenant's own entries and the shared ones it may read
     (:func:`~meho_backplane.kb.shared.visible_to`). The tenant's own entry
-    wins over a shared one with the same slug, as on every kb read.
+    wins over a shared one with the same slug, as on every kb read. That
+    holds whatever the own entry's product header says: its uri reads the
+    own entry, so the shared one is never shown in its place.
     """
     stmt = (
         select(Document)
@@ -217,7 +239,7 @@ async def _knowledge_items(
     )
     async with get_sessionmaker()() as session:
         docs = list((await session.execute(stmt)).scalars().all())
-    own_slugs = {doc.source_id for doc in docs if doc.tenant_id == tenant_id}
+        own_slugs = await _own_slugs(session, tenant_id, docs)
     kept = [
         doc
         for doc in docs

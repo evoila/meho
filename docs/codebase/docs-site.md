@@ -25,6 +25,7 @@ force nav curation of files that were never written for outsiders.
 | `docs-site/` | repo root | Page sources; one directory per top-level nav section, `index.md` each |
 | `.github/workflows/docs-site.yml` | workflows | PR check (`mkdocs build --strict`) + tag-push deploy (mike → gh-pages) |
 | `scripts/ci/docs_deploy.sh` | scripts/ci | The deploy step: which version a tag publishes under, and whether it moves `latest` |
+| `scripts/ci/docs_republish.sh` | scripts/ci | The republish step: publishes main again under the newest final release's version and moves `latest` |
 | `backend/pyproject.toml` `[dependency-groups].docs` | backend | Locked toolchain pins (mkdocs-material, mike) riding `uv.lock` + Dependabot |
 | `gh-pages` branch | remote only | mike-managed publish target; never edited by hand |
 
@@ -80,7 +81,29 @@ One docs version **per minor**, with a `latest` alias:
    — into a red run.
 
 PRs touching the site (or the toolchain lock) get a `mkdocs build
---strict` check instead; nothing deploys from PRs or main pushes.
+--strict` check instead; nothing deploys from PRs.
+
+## Control flow (republish from main)
+
+A docs fix is on the public site the same week, with no hand step.
+
+1. A push to `main` that changes `docs-site/**` or `mkdocs.yml` runs the
+   same `deploy` job (a manual run of the workflow on `main` does too).
+2. The deploy step runs `scripts/ci/docs_republish.sh`. It finds the
+   newest final tag (`vMAJOR.MINOR.PATCH`, no `-`) with `git ls-remote`
+   and takes its `MAJOR.MINOR` as the version.
+3. `mike deploy --update-aliases <version> latest` builds main and
+   commits it onto the local `gh-pages` branch. `latest` points at that
+   version, so it shows the docs of the newest release, built from main.
+4. Guards before the plain `git push`: no push when the pages are the
+   same as on the remote branch (the build time line does not count), so
+   no empty commit; no push when the file count of `gh-pages` would
+   drop. Both file counts are printed.
+5. The reachability gate runs as for a tag. It is skipped when nothing
+   was pushed.
+
+The tag deploy is unchanged. Both paths share the `docs-site-gh-pages`
+concurrency group, so they never push at the same time.
 
 ## Local development
 

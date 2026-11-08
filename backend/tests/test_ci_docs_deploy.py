@@ -30,6 +30,7 @@ import pytest
 # backend/tests/<this> -> parents[2] == repo root
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO_ROOT / "scripts" / "ci" / "docs_deploy.sh"
+_REPUBLISH = _REPO_ROOT / "scripts" / "ci" / "docs_republish.sh"
 _MIKE = Path(sys.executable).parent / "mike"
 # Git without the machine's own config (hooks, signing, default branch), so
 # the test sees only what it sets up.
@@ -143,3 +144,70 @@ def test_malformed_tag_publishes_nothing(site: Path) -> None:
     assert "not a vMAJOR.MINOR" in result.stderr
     assert _output_version(site) == ""
     assert _git(site, "ls-remote", "--heads", "origin", "gh-pages") == ""
+
+
+def _republish(site: Path, page: str | None) -> subprocess.CompletedProcess[str]:
+    """Commit a page that names ``page`` on main (when given), run the republish."""
+    if page is not None:
+        (site / "docs" / "index.md").write_text(f"Docs of {page} end.\n")
+        _git(site, "add", "-A")
+        _git(site, "commit", "-q", "-m", page)
+        _git(site, "push", "-q", "origin", "main")
+    output = site / "github_output"
+    output.write_text("")
+    env = {**_GIT_ENV, "MIKE": str(_MIKE), "GITHUB_OUTPUT": str(output)}
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(_REPUBLISH)],
+        cwd=site,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _pages_head(site: Path) -> str:
+    return _git(site, "ls-remote", "origin", "refs/heads/gh-pages").split()[0]
+
+
+def test_republish_publishes_main_under_the_newest_final_release(site: Path) -> None:
+    assert _deploy(site, "v0.9.0").returncode == 0
+    assert _deploy(site, "v1.0.0").returncode == 0
+    # A release candidate is not the newest final release.
+    assert _deploy(site, "v1.1.0-rc.1").returncode == 0
+
+    result = _republish(site, "main-fix")
+    assert result.returncode == 0, result.stderr
+    assert _output_version(site) == "version=1.0"
+    pages = _published(site)
+    assert _shows(pages, "latest", "main-fix")
+    assert _shows(pages, "1.0", "main-fix")
+    # The other versions are untouched.
+    assert _shows(pages, "0.9", "v0.9.0")
+    assert _shows(pages, "1.1", "v1.1.0-rc.1")
+    versions = {
+        v["version"]: v["aliases"] for v in json.loads((pages / "versions.json").read_text())
+    }
+    assert versions["1.0"] == ["latest"]
+
+
+def test_republish_pushes_nothing_when_the_site_is_the_same(site: Path) -> None:
+    assert _deploy(site, "v1.0.0").returncode == 0
+    assert _republish(site, "main-fix").returncode == 0
+    head = _pages_head(site)
+
+    result = _republish(site, None)
+    assert result.returncode == 0, result.stderr
+    assert "nothing to push" in result.stdout
+    assert _pages_head(site) == head
+    assert _output_version(site) == ""
+
+
+def test_republish_without_a_final_release_publishes_nothing(site: Path) -> None:
+    assert _deploy(site, "v1.0.0-rc.1").returncode == 0
+    head = _pages_head(site)
+
+    result = _republish(site, "main-fix")
+    assert result.returncode == 1
+    assert "No final release tag" in result.stderr
+    assert _pages_head(site) == head

@@ -23,7 +23,7 @@ automatically on the tag push:
 | Claude Desktop `.mcpb` bundle | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | `clients/claude-desktop-mcpb/build.sh` stamps the tag version |
 | Form-2 download `meho-linux-X.Y.Z-amd64.tar` (Linux server, no internet), with `SHA256SUMS-linux` and its `.cosign.bundle` | [releases](https://github.com/evoila/meho/releases) | [`linux-download.yml`](../.github/workflows/linux-download.yml), called by `cli-release.yml` | `deploy/linux-server/build-download.sh` takes the tag's chart, image and CLI, and writes `VERSION` |
 | Operation catalog `operation-catalog.json` and `operation-catalog-changes.json`, each with its `.cosign.bundle` | [releases](https://github.com/evoila/meho/releases) | [`operation-catalog.yml`](../.github/workflows/operation-catalog.yml), called by `cli-release.yml` | `backend/scripts/operation_catalog.py` writes the tag into the file |
-| Docs site version | <https://evoila.github.io/meho/> | [`docs-site.yml`](../.github/workflows/docs-site.yml) | mike publishes the tag's `MAJOR.MINOR` + moves `latest` |
+| Docs site version | <https://evoila.github.io/meho/> | [`docs-site.yml`](../.github/workflows/docs-site.yml) | mike publishes the tag's `MAJOR.MINOR` + moves `latest`; a docs merge on main publishes the newest release's version again |
 
 The Desktop `.mcpb` bundle rides `cli-release.yml`, attached to the same
 GitHub Release as the CLI tarballs. Four workflows fire on the tag

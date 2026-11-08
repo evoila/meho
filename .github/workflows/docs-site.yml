@@ -21,6 +21,17 @@
 #                      scripts/ci/docs_deploy.sh. The docs join
 #                      the image / chart / CLI as the fourth artefact a
 #                      `v*` tag publishes (docs/RELEASING.md).
+#   push to main     : when the push changes docs-site/ or mkdocs.yml, the
+#                      docs of the newest final release are published
+#                      again from main under that release's MAJOR.MINOR,
+#                      and `latest` points at it. A docs fix that merges
+#                      on Monday is on the public site the same week, with
+#                      no hand step. The newest final tag is found by
+#                      scripts/ci/docs_republish.sh. It pushes nothing
+#                      when the site is the same as on gh-pages, and it
+#                      refuses a push that would remove files. The tag
+#                      deploy above is unchanged. A manual run of this
+#                      workflow on main does the same publish.
 #
 # One-time setup (mirrors image.yml's GHCR-visibility precedent — a
 # maintainer does this once, CI cannot safely mutate repo settings):
@@ -64,11 +75,17 @@ on:
   # (~seconds), so the redundant queue runs are negligible.
   merge_group:
   push:
-    # Tag-driven deploy only. Docs versions are cut per release, like
-    # the image / chart / CLI artefacts — a main push without a tag has
-    # no version to publish under. Pre-release tags (v1.0.0-rc.1)
-    # publish too, but never move `latest` (see the deploy step).
+    # A tag publishes a new docs version, like the image / chart / CLI
+    # artefacts. Pre-release tags (v1.0.0-rc.1) publish too, but never
+    # move `latest` (see the deploy step).
     tags: ['v*']
+    # A push to main that changes the docs publishes them again under
+    # the newest final release's version (see the deploy step). The
+    # `paths` filter applies to branch pushes only, not to tags.
+    branches: [main]
+    paths:
+      - 'mkdocs.yml'
+      - 'docs-site/**'
   workflow_dispatch:
 
 # Read-only by default; the deploy job elevates to the minimum it
@@ -112,10 +129,14 @@ jobs:
   deploy:
     name: mike deploy (versioned Pages publish)
     # Covers the tag push AND a manual workflow_dispatch pointed at a
-    # tag ref (re-publish after a transient failure). A dispatch on a
-    # branch ref only runs the build job above — there is no version
-    # to publish under.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # tag ref (re-publish after a transient failure). It also covers a
+    # push to main (docs changes only, see `on.push.paths`) and a manual
+    # run on main: those publish the newest release's version again from
+    # main. A dispatch on any other branch only runs the build job above.
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      || (github.ref == 'refs/heads/main'
+          && (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))
     runs-on: ubuntu-latest
     # mike build/push runs a few minutes and the reachability gate below
     # waits up to 10; 20 keeps a genuinely stuck job from burning the
@@ -169,7 +190,16 @@ jobs:
         # (#3860). The script header lists the cases; it fails on a ref
         # that is not a vMAJOR.MINOR tag, and hands the published
         # version to the reachability check below.
-        run: bash scripts/ci/docs_deploy.sh "${GITHUB_REF_NAME}"
+        # On main, scripts/ci/docs_republish.sh publishes the docs of main
+        # under the version of the newest final release tag, moves
+        # `latest` there (`mike --update-aliases`), and pushes nothing
+        # when the site is unchanged.
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            bash scripts/ci/docs_deploy.sh "${GITHUB_REF_NAME}"
+          else
+            bash scripts/ci/docs_republish.sh
+          fi
 
       - name: Verify published docs are reachable
         # A green `mike deploy` only means the built site was committed
@@ -185,6 +215,10 @@ jobs:
           VERSION: ${{ steps.deploy.outputs.version }}
         run: |
           set -euo pipefail
+          if [ -z "${VERSION}" ] && [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "Nothing was published from main (the site was already the same)."
+            exit 0
+          fi
           if [ -z "${VERSION}" ]; then
             echo "::error::No published version resolved from the deploy step; cannot verify reachability." >&2
             exit 1

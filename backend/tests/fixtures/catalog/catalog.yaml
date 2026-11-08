@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Test catalog: one profile-backed row with a shipped spec and a shipped
+# profile. It checks the spec_resource / profile_resource path end to end.
+# It is test data, not a connector, so it is not in MEHO's own catalog.
+# Tests load it with tests.fixtures.catalog.load_fixture_catalog(), which
+# reads the two files from this folder.
+
+entries:
+  - product: _fixture
+    version: "1.0"
+    impl_id: fixture-rest
+    # Profile-backed row: requires_connector_class names the profiled class
+    # that the start-up stamp builds from the profile. It need not be in the
+    # registry before, so validate_catalog_registry_coverage skips the class
+    # and triple checks for a row with a profile_resource.
+    requires_connector_class: ProfiledRestConnector_fixture_1_0
+    # No upstream: the spec comes from spec_resource, not from a fetch.
+    upstream: null
+    spec_resource: fixture_spec.yaml
+    profile_resource: fixture_profile.yaml
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      Test fixture, not a connector. Checks the shipped-spec and
+      shipped-profile path end to end.

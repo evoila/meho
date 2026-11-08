@@ -237,7 +237,7 @@
  "keycloak.realm.create": "write",
  "keycloak.realm.delete": "write",
  "keycloak.realm.get": "read",
- "keycloak.realm.update": "write",
+ "keycloak.realm.update": "credential_write",
  "keycloak.role.list": "read",
  "keycloak.role.users": "other",
  "keycloak.role_mapping.assign": "write",

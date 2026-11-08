@@ -886,6 +886,21 @@ stops a chart PR. The render tests (the golden render,
 `backend/tests/migrations/test_migrate_runner.py` still cover the Job's
 render and its runner.
 
+A third kind job, `rollback-drill`, runs only when a person starts it
+(`workflow_dispatch`, input `prior`, for example `v0.44.0`). It is the
+rollback drill of `docs/RELEASING.md` section 6b. It reuses the setup of
+`helm-test-byo` (kind, loaded images, the database outside the release),
+uses Helm 4, and passes one values file to every install and upgrade.
+It installs the prior release's published chart and image, then
+upgrades to the chart and image of the chosen commit with a readiness
+path that answers 404, so the hook Job migrates and
+`--rollback-on-failure` rolls the manifests back. It checks that the
+upgrade failed on that probe and not for another reason, that the
+database moved, that Helm rolled back, and that a new prior pod gets
+Ready with the `db` check `db_ahead=true`. Then it rolls forward and
+checks `revision=<head>`. On this event `changes` skips, so the other
+kind jobs and `helm-test-gate` skip too.
+
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 
 The install can bring its own Keycloak, the login server, so nobody sets
@@ -1046,7 +1061,14 @@ newer.
 With `coreKeycloak.enabled` on, the chart sets every Keycloak setting of the
 backplane itself (helper `meho.keycloakSettings` in
 `templates/_core-keycloak.tpl`). The values come from the subchart and the
-realm file, not from `config.*` or `keycloakAdmin.*`:
+realm file, not from `config.*` or `keycloakAdmin.*`. The chart also
+fills in the Secret names and the check runner client id, so the web
+console, the check runner and the Keycloak admin each turn on with one
+switch (#4766): `uiConsole.enabled` (with `UI_KEYCLOAK_CLIENT_ID` and the
+Secret `<release>-core-ui-auth`), `checkRunner.enabled` (with
+`CHECK_RUNNER_CLIENT_ID=meho-check-runner` and the Secret
+`<release>-core-check-runner`). `keycloakAdmin.enabled` is not needed:
+
 
 | Setting | Value |
 | --- | --- |
@@ -1082,13 +1104,24 @@ Keycloak:
 - `corePostgres.existingSecrets.keycloak`,
   `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` or
   `checkRunner.clientSecret.secretName` names a Secret other than the
-  matching `<release>-core-…` one, for example
+  matching `<release>-core-…` one;
+- `config.uiKeycloakClientId`, `checkRunner.clientId`, `keycloakAdmin.url`
+  or `keycloakAdmin.clientId` is set to anything but the value in the table
+  above (or `meho-check-runner` for the check runner). For example
   `uiConsole.secretName must be empty or "meho-core-ui-auth" while
-  coreKeycloak.enabled is on: the built-in Keycloak reads only that
-  Secret.`
+  coreKeycloak.enabled is on: the chart sets it itself.`
+
+Each of these keys is empty by default, so the operator sets none of them.
 
 The schema needs `keycloak.issuer`, `config.keycloakIssuerUrl` and
-`config.keycloakAudience` only while the built-in Keycloak is off.
+`config.keycloakAudience` only while the built-in Keycloak is off. It needs
+`uiConsole.secretName` and `config.uiKeycloakClientId` (with
+`uiConsole.enabled`), `checkRunner.clientId` and
+`checkRunner.clientSecret.secretName` (with `checkRunner.enabled`), and
+`keycloakAdmin.url` and `keycloakAdmin.clientId` (with
+`keycloakAdmin.enabled`) only while it is off. The helm test pod
+`test-agent-runtime-config` also runs with the built-in Keycloak and
+`agent.enabled`.
 
 **HTTPS inside the cluster.** The realm keeps `sslRequired: external`, and
 pods still call the Service over plain HTTP. That works for every pod
@@ -1184,7 +1217,7 @@ docs/codebase/core-vault-init.md.
 
 | Object | Shape |
 | --- | --- |
-| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao-ubi:2.7.1` pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data`; a second container `unseal` (below) |
+| StatefulSet `<release>-vault` | one pod, `quay.io/openbao/openbao:2.7.1` (the plain image, which runs on x86-64-v2 CPUs) pinned by digest, the image's start script with `server` and `SKIP_CHOWN=true`; a 10Gi disk (`persistence.size`) at `/openbao/data`; a second container `unseal` (below) |
 | ConfigMap `<release>-vault-config` | `server.hcl` at `/openbao/config`: raft storage, a plain-HTTP listener on 8200 (`tls_disable`), `ui = false`, the `file` audit device with `file_path = "stdout"`. A changed config restarts the pod (checksum annotation) |
 | Service `<release>-vault` | port 8200; `publishNotReadyAddresses: true` |
 | Service `<release>-vault-internal` | headless, ports 8200 and 8201; `publishNotReadyAddresses: true`. It gives the pod its DNS name, which sets `BAO_API_ADDR` and `BAO_CLUSTER_ADDR` |
@@ -1639,7 +1672,7 @@ The chart is packaged, pushed to OCI, and cosign-signed by
 `.github/workflows/chart.yml`. Its `publish` and `verify-anonymous-pull` jobs run on `meho-runners-ci`
 (the project's self-hosted runner pool on a dedicated CI cluster,
 introduced by #160 + #167). It shares the
-hardening conventions of `image.yml`: job-level fork-PR guard (the `validate` job runs on GitHub-hosted `ubuntu-24.04`),
+hardening conventions of `image.yml`: job-level fork-PR guard (the `validate` job runs on GitHub-hosted `ubuntu-latest`),
 SHA-pinned actions with `# vX.Y.Z` comments, a minimum `permissions:`
 block (the workflow default is `contents: read`; only the `publish` job
 adds `packages: write` and `id-token: write`), per-job
@@ -1689,6 +1722,7 @@ What it costs:
 | `merge_group` | `changes`, `validate`, `helm-test`, `helm-test-byo`, `helm-test-gate` | Full kind install on the merge result; no push, no sign |
 | `push` to `main` (every commit) | `validate` -> `publish` -> `verify-anonymous-pull` | Push at calver `0.1.YYYYMMDD-<short-sha>`, cosign-sign, anonymous-pull check |
 | `push` of a `v*` tag | `validate` -> `publish` -> `verify-anonymous-pull` | Push at plain semver `<x.y.z>` (leading `v` stripped), cosign-sign, anonymous-pull check |
+| `workflow_dispatch` (started by hand) | `rollback-drill` | kind rollback drill (RELEASING section 6b); no push, no sign |
 | Fork PR | (skipped at job level) | None — `head.repo.full_name != github.repository` short-circuits |
 
 The `push:` block intentionally has no `paths:` filter — path filtering
@@ -2725,7 +2759,7 @@ their isolation posture:
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
 | `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
-| `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-24.04`; publish/verify jobs are `push`-only |
+| `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
 | `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **hosted runner** for every event (#4626); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |

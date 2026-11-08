@@ -8,6 +8,8 @@ values, so the parent checks:
 - the four Secret-name keys whose Secrets Keycloak reads are empty or name
   the `<release>-core-…` Secret. Keycloak reads only the core names, so any
   other name would leave the core Secret unmade and the pod waiting forever;
+- the client ids and the admin URL are empty or the value the chart uses
+  (the realm has exactly one client for each, #4766);
 - the database settings fit the PostgreSQL in use: with the built-in
   PostgreSQL the `database` keys keep their defaults; with your own
   PostgreSQL (`corePostgres.enabled: false`) the host is required, and so is
@@ -42,14 +44,14 @@ values, so the parent checks:
 {{- fail "coreKeycloak.database.passwordSecret.name is empty: with your own PostgreSQL, name the Secret with the password of Keycloak's database role, or set create.enabled to true so the chart makes the role and the database." -}}
 {{- end -}}
 {{- end -}}
-{{- $named := dict "keycloakAdmin.clientSecret.secretName" (list .Values.keycloakAdmin.clientSecret.secretName "keycloak-admin") "uiConsole.secretName" (list .Values.uiConsole.secretName "ui-auth") "checkRunner.clientSecret.secretName" (list .Values.checkRunner.clientSecret.secretName "check-runner") -}}
+{{- $kc := include "meho.keycloakSettings" . | fromYaml -}}
+{{- $named := dict "keycloakAdmin.clientSecret.secretName" (list .Values.keycloakAdmin.clientSecret.secretName $kc.adminSecretName) "uiConsole.secretName" (list .Values.uiConsole.secretName $kc.uiSecretName) "checkRunner.clientSecret.secretName" (list .Values.checkRunner.clientSecret.secretName $kc.checkRunnerSecretName) "config.uiKeycloakClientId" (list .Values.config.uiKeycloakClientId $kc.uiClientId) "checkRunner.clientId" (list .Values.checkRunner.clientId $kc.checkRunnerClientId) "keycloakAdmin.url" (list .Values.keycloakAdmin.url $kc.adminUrl) "keycloakAdmin.clientId" (list .Values.keycloakAdmin.clientId $kc.adminClientId) -}}
 {{- if .Values.corePostgres.enabled -}}
-{{- $_ := set $named "corePostgres.existingSecrets.keycloak" (list .Values.corePostgres.existingSecrets.keycloak "postgres-keycloak") -}}
+{{- $_ := set $named "corePostgres.existingSecrets.keycloak" (list .Values.corePostgres.existingSecrets.keycloak (printf "%s-core-postgres-keycloak" .Release.Name)) -}}
 {{- end -}}
 {{- range $key, $pair := $named -}}
-{{- $want := printf "%s-core-%s" $.Release.Name (index $pair 1) -}}
-{{- if and (index $pair 0) (ne (index $pair 0) $want) -}}
-{{- fail (printf "%s must be empty or %q while coreKeycloak.enabled is on: the built-in Keycloak reads only that Secret." $key $want) -}}
+{{- if and (index $pair 0) (ne (index $pair 0) (index $pair 1)) -}}
+{{- fail (printf "%s must be empty or %q while coreKeycloak.enabled is on: the chart sets it itself." $key (index $pair 1)) -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
@@ -76,12 +78,18 @@ adminUrl: {{ printf "%s/admin/realms/meho" $service | quote }}
 adminClientId: meho-admin
 adminSecretName: {{ printf "%s-core-keycloak-admin" .Release.Name | quote }}
 adminSecretKey: client_secret
+uiSecretName: {{ printf "%s-core-ui-auth" .Release.Name | quote }}
+checkRunnerClientId: meho-check-runner
+checkRunnerSecretName: {{ printf "%s-core-check-runner" .Release.Name | quote }}
 {{- else -}}
 issuerUrl: {{ .Values.config.keycloakIssuerUrl | quote }}
 audience: {{ .Values.config.keycloakAudience | quote }}
 cliClientId: {{ .Values.config.keycloakCliClientId | quote }}
 cliApproveClientId: {{ .Values.config.keycloakCliApproveClientId | quote }}
 uiClientId: {{ .Values.config.uiKeycloakClientId | quote }}
+uiSecretName: {{ .Values.uiConsole.secretName | quote }}
+checkRunnerClientId: {{ .Values.checkRunner.clientId | quote }}
+checkRunnerSecretName: {{ .Values.checkRunner.clientSecret.secretName | quote }}
 {{- if .Values.keycloakAdmin.enabled }}
 adminUrl: {{ .Values.keycloakAdmin.url | quote }}
 adminClientId: {{ .Values.keycloakAdmin.clientId | quote }}

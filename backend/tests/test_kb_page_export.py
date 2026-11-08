@@ -6,9 +6,10 @@
 Covers the rules of :mod:`meho_backplane.kb.page_export`: only confirmed,
 generic entries that an operator wrote give a page; retired and replaced
 entries give a page to remove; imported entries are left out; the page
-has the lesson header and a stable file name; the secret check; the
-caller's tenant only; and that the import takes the exported page back
-to the same entry.
+has the lesson header and a stable file name; an entry without the
+complete header is skipped; the secret check; the caller's tenant only;
+and that the import takes the exported page back to the same entry and
+keeps it shared.
 """
 
 from __future__ import annotations
@@ -169,6 +170,21 @@ async def test_an_empty_tenant_gives_an_empty_export() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_a_confirmed_entry_without_the_complete_header_is_skipped() -> None:
+    no_type = {"applies_to": "product-and-version", "status": "confirmed"}
+    await KbService().create_entry(TENANT, "no-type", "Text.", no_type, actor_sub="person-1")
+    await KbService().create_entry(
+        TENANT, "no-type-retired", "Text.", {**no_type, "status": "retired"}, actor_sub="person-1"
+    )
+    await _add("complete")
+    result = await export_pages(TENANT)
+    assert [page.slug for page in result.pages] == ["complete"]
+    assert [(row.slug, row.status) for row in result.remove] == [("no-type-retired", "retired")]
+    assert [row.slug for row in result.skipped] == ["no-type"]
+    assert "no complete lesson header (missing: type)" in result.skipped[0].reason
+
+
 # --- pages to remove ---------------------------------------------------------
 
 
@@ -287,6 +303,29 @@ async def test_the_import_takes_an_exported_page_back_to_the_same_entry() -> Non
         actor_sub="service-account-kb-import",
     )
     assert [(row.slug, row.action) for row in result.pages] == [("snapshot-limits", "update")]
+
+
+@pytest.mark.asyncio
+async def test_the_round_trip_keeps_a_shared_entry_shared(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KB_SHARED_TENANT_IDS", str(TENANT))
+    get_settings.cache_clear()
+    other = uuid.uuid4()
+    await _add("team-rule", body="Shared with every tenant.", shared=True)
+    page = (await export_pages(TENANT)).pages[0]
+    assert "shared" not in page.content
+    result = await import_pages(
+        KbImportRequest(pages=[KbImportPage(path="rules/team-rule.md", content=page.content)]),
+        tenant_id=TENANT,
+        actor_sub="service-account-kb-import",
+    )
+    assert [(row.slug, row.action) for row in result.pages] == [("team-rule", "update")]
+    entry = await KbService().get_entry(TENANT, "team-rule")
+    assert entry is not None
+    assert entry.metadata["shared"] is True
+    assert entry.metadata["source"] == "meho://kb/team-rule"
+    seen_by_other = await KbService().get_entry(other, "team-rule")
+    assert seen_by_other is not None
+    assert seen_by_other.body.strip() == "Shared with every tenant."
 
 
 def test_render_page_leaves_out_empty_values() -> None:

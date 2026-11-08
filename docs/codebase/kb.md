@@ -529,8 +529,12 @@ with the stored entry of its slug in the caller's tenant:
 A write stores the header, a provenance block with `source_kind:
 "import"` and the page path, and the owner keys: `created_by_sub` stays
 the entry's first author (the import login for a new entry), and
-`last_updated_by_sub` is the caller. A write that fails skips that page
-with the error type (not its message); the other pages go on.
+`last_updated_by_sub` is the caller. `shared` is a MEHO setting that
+the export leaves out of the page, so it stays as stored when the page
+does not name it; a page that names `shared` sets it (and the usual
+rule applies: only a tenant in `KB_SHARED_TENANT_IDS` may set it to
+true). A write that fails skips that page with the error type (not its
+message); the other pages go on.
 
 **Dry run.** `dry_run: true` runs every check and the comparison, and
 writes nothing. The answer is the same as a real run would give: one
@@ -619,8 +623,14 @@ would hide an entry with the slug `export` from `GET /api/v1/kb/{slug}`.
 another tenant), and only entries with `applies_to:
 product-and-version`. Then, by `status`:
 
-- `confirmed`: a page.
-- `retired` or `replaced`: a page to remove (`remove`).
+- `confirmed`: a page, when the entry has the complete lesson header
+  (`type`, `applies_to` and `status`, the fields the import needs:
+  `page_import.py::REQUIRED_HEADER_FIELDS`). A confirmed entry without
+  one of them (a direct write may leave out `type`) is listed in
+  `skipped` with the missing fields. Set the field in MEHO to export
+  it. So the import never refuses an exported page.
+- `retired` or `replaced`: a page to remove (`remove`). The header
+  does not matter here.
 - any other status (`candidate`, `disputed`) or no status: neither.
   The page in the wiki stays as it was. A deleted entry gives no page
   to remove either.
@@ -664,7 +674,12 @@ the added `source`), the import updates the entry. It then has
 `source_kind: "import"`, so the next export leaves it out until an
 operator changes it in MEHO again. When the page is the same, the
 import writes nothing, and the next export gives the same bytes, so the
-wiki sees no change.
+wiki sees no change. The entry's `shared` setting stays as it was in
+both cases: the page does not carry it, and the import keeps the
+stored value when a page does not name it (see
+[the import](#import-of-pages-sent-in-the-request-5728), "Update by
+slug"). So a lesson that every tenant can read stays readable after
+the round trip.
 
 #### The export login
 

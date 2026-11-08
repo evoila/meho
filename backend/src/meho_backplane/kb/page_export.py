@@ -21,10 +21,17 @@ Which entries of the caller's tenant take part:
 * ``status: confirmed`` gives a page. ``status: retired`` or
   ``status: replaced`` gives a page to remove. Any other status gives
   neither.
+* A page needs the complete lesson header: ``type``, ``applies_to`` and
+  ``status``, the fields the import needs. A confirmed entry without
+  one of them (a direct write may leave out ``type``) is listed in
+  ``skipped`` with the missing fields, so the import never refuses an
+  exported page.
 
 Each page is ``<slug>.md``: the lesson header, then the entry's text.
 The header holds only the lesson header fields, in a fixed order, so a
-second export of the same entries gives the same bytes. A page whose
+second export of the same entries gives the same bytes. MEHO's own
+settings (``shared``, provenance, owner) stay in MEHO; the import keeps
+``shared`` as stored when the page comes back without it. A page whose
 entry names no ``source`` gets ``source: meho://kb/<slug>``: the import
 maps such a page back to the same entry, also when a reviewer moves the
 file in the wiki.
@@ -46,7 +53,7 @@ from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
-from meho_backplane.kb.page_import import SOURCE_ENTRY_PREFIX
+from meho_backplane.kb.page_import import REQUIRED_HEADER_FIELDS, SOURCE_ENTRY_PREFIX
 from meho_backplane.kb.provenance import read_provenance
 from meho_backplane.kb.schemas import KB_KIND_ENTRY, KB_SOURCE
 from meho_backplane.kb.secret_check import find_secret
@@ -149,6 +156,16 @@ async def export_pages(tenant_id: uuid.UUID) -> KbExportResult:
         status = metadata["status"]
         if status != "confirmed":
             remove.append(KbExportRemoval(path=f"{slug}.md", slug=slug, status=status))
+            continue
+        missing = [name for name in REQUIRED_HEADER_FIELDS if metadata.get(name) in (None, "")]
+        if missing:
+            skipped.append(
+                KbExportSkip(
+                    slug=slug,
+                    reason="the entry has no complete lesson header"
+                    f" (missing: {', '.join(missing)}); set it in MEHO to export it",
+                )
+            )
             continue
         content = render_page(slug, body, metadata)
         secret = find_secret(content)

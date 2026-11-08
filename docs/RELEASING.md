@@ -12,7 +12,7 @@ The `/release` skill walks these same steps interactively.
 ## What a release is
 
 A release is **a `v*` git tag**. The tag is the single source of truth
-for the version — six artefacts derive from it, all published
+for the version — seven artefacts derive from it, all published
 automatically on the tag push:
 
 | Artefact | Where | Workflow | Version source |
@@ -22,12 +22,14 @@ automatically on the tag push:
 | CLI tarballs + GitHub Release | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | GoReleaser bakes `{{.Tag}}` into `version.Version` |
 | Claude Desktop `.mcpb` bundle | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | `clients/claude-desktop-mcpb/build.sh` stamps the tag version |
 | Form-2 download `meho-linux-X.Y.Z-amd64.tar` (Linux server, no internet), with `SHA256SUMS-linux` and its `.cosign.bundle` | [releases](https://github.com/evoila/meho/releases) | [`linux-download.yml`](../.github/workflows/linux-download.yml), called by `cli-release.yml` | `deploy/linux-server/build-download.sh` takes the tag's chart, image and CLI, and writes `VERSION` |
+| Operation catalog `operation-catalog.json` and `operation-catalog-changes.json`, each with its `.cosign.bundle` | [releases](https://github.com/evoila/meho/releases) | [`operation-catalog.yml`](../.github/workflows/operation-catalog.yml), called by `cli-release.yml` | `backend/scripts/operation_catalog.py` writes the tag into the file |
 | Docs site version | <https://evoila.github.io/meho/> | [`docs-site.yml`](../.github/workflows/docs-site.yml) | mike publishes the tag's `MAJOR.MINOR` + moves `latest` |
 
 The Desktop `.mcpb` bundle rides `cli-release.yml`, attached to the same
 GitHub Release as the CLI tarballs. Four workflows fire on the tag
 (`image.yml`, `chart.yml`, `cli-release.yml`, `docs-site.yml`), and
-`cli-release.yml` calls the fifth, `linux-download.yml`. All
+`cli-release.yml` calls two more, `linux-download.yml` and
+`operation-catalog.yml`. All
 four fire on `tags: ['v*']` (image/chart have **no** path filter
 on tags — a tag always publishes). `cli-release.yml` is **tag-only**: a
 main push never cuts a release. Docs versions are cut **per minor** — a
@@ -39,6 +41,12 @@ The form-2 download is the sixth artefact. After its `release` job,
 image of the tag (at most 60 minutes). Then it builds the download, checks
 it, and attaches it to the same Release
 ([`docs/codebase/linux-server-download.md`](codebase/linux-server-download.md)).
+
+The operation catalog is the seventh artefact. After its `release` job,
+`cli-release.yml` also calls `operation-catalog.yml`. It writes the list of
+every built-in operation and the list of changes since the previous release
+tag, signs both and attaches them to the same Release
+([`docs/codebase/operation-catalog-file.md`](codebase/operation-catalog-file.md)).
 
 ## Supply-chain and CI baseline
 
@@ -350,7 +358,7 @@ git push origin vX.Y.Z
 
 The push fans out to `cli-release.yml`, `image.yml`, `chart.yml` and
 `docs-site.yml`. `cli-release.yml` then calls `linux-download.yml` for the
-form-2 download.
+form-2 download and `operation-catalog.yml` for the operation catalog.
 
 **Release tags are protected.** A tag ruleset refuses to create, move or delete any `v*` tag, final or rc. Only members of the evoila team `release-cutters` may push one. GitHub logs each of their pushes as a bypass in the ruleset's Rule insights.
 
@@ -390,6 +398,23 @@ form-2 download.
   If the job failed, read its `[FAIL]` line. The most likely one is the
   size limit (1.9 GiB): the design's answer is to split the download into
   two release files.
+- [ ] The operation catalog `operation-catalog.json`,
+  `operation-catalog-changes.json` and their two `.cosign.bundle` files are
+  attached (job `operation-catalog` of `cli-release.yml` green). The
+  signature names `operation-catalog.yml`. Check it:
+
+  ```bash
+  TAG=vX.Y.Z
+  BASE=https://github.com/evoila/meho/releases/download/$TAG
+  for FILE in operation-catalog.json operation-catalog-changes.json; do
+    curl -fLO "$BASE/$FILE"
+    curl -fLO "$BASE/$FILE.cosign.bundle"
+    cosign verify-blob \
+      --certificate-identity "https://github.com/evoila/meho/.github/workflows/operation-catalog.yml@refs/tags/$TAG" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --bundle "$FILE.cosign.bundle" "$FILE"
+  done
+  ```
 
 #### Maintainer one-time setup — GHCR package visibility
 
@@ -677,13 +702,13 @@ your own values. Use Helm 4. Run it in the mode the release targets:
 The road to v1.0.0 ([#2661](https://github.com/evoila/meho/issues/2661),
 milestone "v0.29 — contract freeze (rc series)") is the first time MEHO
 ships release candidates. An rc is a **real release** — the same `v*`
-tag, the same publish workflows, the same six artefacts — whose
+tag, the same publish workflows, the same seven artefacts — whose
 version carries a SemVer pre-release identifier. Everything in steps
 1–7 applies; this section carries only the deltas. No rc tag has ever
 been pushed (`git tag -l 'v*-rc.*'` is empty as of v0.45.0), so every
-workflow behaviour below is read from the YAML, cited by file and line,
-and must be confirmed on the first rc — the unconfirmed points are
-collected under [Known gaps](#r9--known-gaps-rc-tags-in-the-pipeline).
+workflow behaviour below is read from the YAML and must be confirmed on
+the first rc. The gaps that are left are listed under
+[Known gaps](#r9--known-gaps-rc-tags-in-the-pipeline).
 
 ### R1 — Version scheme
 
@@ -773,7 +798,7 @@ Run step 1 as written (Tasks closed; **real** `success` on the
     PR-triggered, so check it on the PRs that carried migrations since
     the previous tag rather than on the `main` run.
 - [ ] **Contract diff since the previous tag is classified.** There is
-  no automated breaking-vs-additive gate yet (Known gap 3), so do it by
+  no automated breaking-vs-additive gate yet (Known gap 2), so do it by
   hand and record the classification on #2661:
 
   ```bash
@@ -839,19 +864,20 @@ pre-release identifier, read from the YAML:
 
 | Artefact | What `v1.0.0-rc.N` produces | Where |
 |---|---|---|
-| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. `[Unreleased]` must therefore be audited and non-empty; an empty body here is the step-2 failure mode, not a quirk of rcs. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) L264–269; [`cli-release.yml`](../.github/workflows/cli-release.yml) L171–187, L218–223 |
+| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. The body starts with a one-line header: "**Release candidate.** `v1.0.0-rc.N` is a test version before `v1.0.0`. The notes below list all changes since `<last final tag>`." When both sections are empty (or hold only blank lines), the step **fails** and no Release is made: fill `[Unreleased]` and cut `rc.N+1`. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) `prerelease: auto`; [`cli-release.yml`](../.github/workflows/cli-release.yml) step "Extract release notes from CHANGELOG.md" |
 | CLI tarballs | `meho_1.0.0-rc.N_<os>_<arch>.tar.gz` (`{{ .Version }}` strips the `v`); `meho version` prints `v1.0.0-rc.N` (`{{.Tag}}` keeps it). The cosign identity regex `refs/tags/v.+` covers rc tags, so the step-5 verify recipe is unchanged. | `.goreleaser.yaml` L104, L117, L157; `cli-release.yml` L421 |
 | `.mcpb` bundle | `meho-claude-desktop-1.0.0-rc.N.mcpb`, attached as the fifth asset. `mcpb pack` accepts a pre-release semver — the PR dry-run already packs `0.0.0-pr<N>` on every bundle PR. | `cli-release.yml` L308–320; [`mcpb-bundle.yml`](../.github/workflows/mcpb-bundle.yml) L90–94 |
 | Form-2 download | `meho-linux-1.0.0-rc.N-amd64.tar`, `SHA256SUMS-linux` and `SHA256SUMS-linux.cosign.bundle` on the pre-release. The build waits for the rc's chart `1.0.0-rc.N` and image `:v1.0.0-rc.N`. The cosign identity is `linux-download.yml@refs/tags/v1.0.0-rc.N`, so the step-5 recipe works with `TAG=v1.0.0-rc.N`. | [`linux-download.yml`](../.github/workflows/linux-download.yml); `cli-release.yml` job `linux-download` |
-| Backplane image | Alias `ghcr.io/evoila/meho:v1.0.0-rc.N` — `type=semver,pattern={{raw}}` is the only tag-push pattern; `:main` is not emitted on a tag (`enable={{is_default_branch}}`). Quarantine build → trivy gate → promote → cosign sign → SBOM attest run unchanged, so the rc's promoted **digest** is what the lab deploy pins (R5). | [`image.yml`](../.github/workflows/image.yml) L190–193, L200–307, L342–466 |
+| Backplane image | Alias `ghcr.io/evoila/meho:v1.0.0-rc.N` — `type=semver,pattern={{raw}}` is the only tag-push pattern, and `{{raw}}` keeps the pre-release part; `:main` is not emitted on a tag (`enable={{is_default_branch}}`). The step "Check the release tag is in the image tags" fails the run before the build when the tags do not include `:<tag name>`. Quarantine build → trivy gate → promote → cosign sign → SBOM attest run unchanged, so the rc's promoted **digest** is what the lab deploy pins (R5). | [`image.yml`](../.github/workflows/image.yml) L190–193, L200–307, L342–466 |
 | Helm chart | Version `1.0.0-rc.N` (`VERSION="${REF#refs/tags/v}"`), `appVersion` = the git SHA; pushed to `oci://ghcr.io/evoila/meho-chart:1.0.0-rc.N` and anonymously pulled back by exact version. Hyphenated chart versions are already the norm for `main` pushes (`0.1.<date>-<sha>`), so the push path is proven. Always pass the exact `--version 1.0.0-rc.N` when installing. | [`chart.yml`](../.github/workflows/chart.yml) L1805–1823, L1867, L1998 |
-| Docs site | Publishes under **`1.0`** and **moves `latest` + the site default to it**: the `v[0-9]*.[0-9]*` case matches, `sed` truncates to MAJOR.MINOR, then `mike deploy --push --update-aliases 1.0 latest` and `mike set-default --push latest`. Deploying under the minor is intended ("the rc docs are that minor's docs in progress"); moving `latest` before GA is **Known gap 1**. | [`docs-site.yml`](../.github/workflows/docs-site.yml) L60–66, L156–183 |
+| Docs site | **Never moves `latest` or the site default**, so the public site keeps showing the last final release. While the minor has no final tag (`v1.0.0-rc.N` before `v1.0.0`), the rc publishes under **`1.0`**: the rc docs are that minor's docs in progress. Once the minor has a final tag (`v1.0.1-rc.1` after `v1.0.0`), the rc publishes under its own name (`1.0.1-rc.1`), because `latest` serves the `1.0` folder. A maintainer can remove an old rc entry with `mike delete --push <name>`. | [`docs-site.yml`](../.github/workflows/docs-site.yml) step "Deploy versioned docs"; [`scripts/ci/docs_deploy.sh`](../scripts/ci/docs_deploy.sh) |
 
 Verify per step 5, with these substitutions: the Release **is** marked
 pre-release; `meho version` → `v1.0.0-rc.N`; image alias
 `:v1.0.0-rc.N`; chart `1.0.0-rc.N`; bundle
 `meho-claude-desktop-1.0.0-rc.N.mcpb`; docs at
-`https://evoila.github.io/meho/1.0/`. Do **not** add a `whats-new.md`
+`https://evoila.github.io/meho/1.0/` (the deploy step prints the
+version it published). Do **not** add a `whats-new.md`
 section for an rc — the single `[v1.0.0]` section at promotion covers
 the series (the rc docs publish whatever `whats-new.md` holds at the
 tagged commit, which is fine).
@@ -958,34 +984,25 @@ Steps 2–7 as written, with `PREV` = the last **final** tag (R1
   every upgrade-relevant change since `PREV`.
 - [ ] Tag `v1.0.0` on `REL_SHA` per step 4. Verify per step 5 — the
   Release is **not** marked pre-release; `meho version` → `v1.0.0`;
-  chart `1.0.0`; docs republish `1.0` in place (`latest` already points
-  there since `rc.1`).
+  chart `1.0.0`; docs republish `1.0` in place, and this final tag
+  moves `latest` and the site default to `1.0` (the rc tags did not).
 - [ ] #2661 definition of done: all five gates recorded as holding on
   the promoted rc; the rc tags stay (they are the audit trail of what
   was measured).
 
 ### R9 — Known gaps: rc tags in the pipeline
 
-Read from the YAML; nothing here is fixed by this document. Each is a
-follow-up task.
+The tag-driven workflows now handle rc tags (#3860): the docs site
+keeps `latest` on the last final release, the rc Release has an rc
+header and fails when its notes are empty, the image workflow checks
+the `:v1.0.0-rc.N` tag, and the README guard skips rc tags. Two gaps
+are left. Each is a follow-up task.
 
-1. **Docs site moves `latest` to the rc's minor.**
-   `.github/workflows/docs-site.yml` L172–173: `mike deploy --push
-   --update-aliases "${VERSION}" latest` then `mike set-default --push
-   latest` run for any `v*` tag, so `v1.0.0-rc.1` re-points the public
-   site root at the `1.0` docs before GA. The header (L63–65) intends
-   the minor publish; it does not intend the alias move. Suggested
-   fix: when `GITHUB_REF_NAME` contains `-`, deploy the version without
-   the `latest` alias and skip `set-default`.
-2. **`git describe --tags --abbrev=0` returns the rc.** Used by this
-   runbook's step 2.1 (`PREV`) and step 3, the `/release` skill's
-   Phase 0, and `.github/workflows/readme-version-check.yml` L103. This
-   section fixes the runbook (R1 `--exclude`); the skill needs the same
-   edit. The README guard is harmless today — `README.md` L11 carries
-   no `vX.Y` token and the self-updating badge (L6) short-circuits the
-   check at L93–97 — but reintroducing a `**Status:** vX.Y` token while
-   an rc is the latest tag would fail it on every merge-queue admission.
-3. **No automated compatibility-diff gate.** #2662 closed 2026-08-30
+1. **The `/release` skill still uses `git describe --tags --abbrev=0`
+   without `--exclude`.** Once an rc exists, that returns the rc.
+   This runbook already excludes rcs where it derives `PREV` (R1); the
+   skill needs the same edit (tracked separately).
+2. **No automated compatibility-diff gate.** #2662 closed 2026-08-30
    ("All children shipped; contract-freeze gates live in CI"), but the
    mechanisms its body lists — an oasdiff-class compat gate on the
    public OpenAPI snapshot, a committed `tools/list` snapshot, an
@@ -997,20 +1014,6 @@ follow-up task.
    documented here when it lands". Until they exist, gate 4 is the R3
    hand-classification plus those gates. Suggested fix: file the
    missing children (at minimum the compat-diff gate) before `rc.1`.
-4. **Image alias for a pre-release tag is not asserted in the YAML.**
-   `.github/workflows/image.yml` L190–193 configures
-   `type=semver,pattern={{raw}}`; the header (L10, L183) documents only
-   the `v<x.y.z>` shape. The expected alias is `:v1.0.0-rc.N`; confirm
-   it on `rc.1`'s run and, if `docker/metadata-action` drops
-   pre-releases from the `semver` type, add `type=raw,value={{ref}}`
-   (or equivalent) for tag pushes.
-5. **The rc Release body is the raw `[Unreleased]` block.**
-   `.github/workflows/cli-release.yml` L218–223 — by design, but
-   nothing labels it as cumulative rc notes, and the GoReleaser git-log
-   fallback (L231) kicks in silently if `[Unreleased]` is empty.
-   Suggested fix: prepend a one-line "Release candidate `rc.N` for
-   1.0.0 — cumulative notes since `PREV`" header when the tag contains
-   a hyphen, and fail the step (not warn) when both sections are empty.
 
 ## Checklist
 
@@ -1033,7 +1036,8 @@ follow-up task.
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published; form-2 download + SHA256SUMS-linux
-       attached, signature and checksum checked
+       attached, signature and checksum checked; operation catalog and
+       change file attached, signatures checked
 [ ] 6. Deployed to the lab cluster; smoke-green
 [ ] 6a. Post-deploy enablement — for each gate in /ready features:
         configure the env vars per the cited doc; verify gate

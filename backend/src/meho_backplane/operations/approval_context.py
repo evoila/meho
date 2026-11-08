@@ -75,6 +75,7 @@ so a single failed sub-resolution cannot take down the whole context.
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -91,11 +92,14 @@ from meho_backplane.db.models import (
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
     "ReviewerContext",
     "resolve_reviewer_context",
+    "resolve_target_names",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -219,6 +223,31 @@ async def resolve_reviewer_context(
             blast_radius=None,
             summary=None,
         )
+
+
+async def resolve_target_names(
+    session: AsyncSession, *, tenant_id: uuid.UUID, requests: Iterable[ApprovalRequest]
+) -> dict[uuid.UUID, str]:
+    """Resolve the ``target_id`` of each request to the target's name (#5026).
+
+    One query for a page of rows, tenant-scoped like :func:`_resolve_target`:
+    a target of another tenant is left out, so its name is never shown. A
+    request with no target, or a target id that does not resolve, has no
+    entry; the list view then shows the bare id. Fails open to an empty map.
+    """
+    target_ids = {request.target_id for request in requests if request.target_id is not None}
+    if not target_ids:
+        return {}
+    try:
+        rows = await session.execute(
+            sa.select(Target.id, Target.name).where(
+                Target.id.in_(target_ids), Target.tenant_id == tenant_id
+            )
+        )
+    except Exception:
+        _log.warning("approval_target_names_failed", tenant_id=str(tenant_id), exc_info=True)
+        return {}
+    return {row.id: row.name for row in rows}
 
 
 async def _resolve_target(

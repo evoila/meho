@@ -65,7 +65,7 @@ misleading `0.0`. `ReflexReport.learning` is a `LearningMetrics`
 its count and base, `None` when the base is 0. They are not split by
 surface: each one is about agent sessions.
 
-### `LessonRetrieval` (`lesson_retrieval` table, migration `0142`)
+### `LessonRetrieval` (`lesson_retrieval` table, migration `0143`)
 
 One row for each knowledge or memory entry that `search_knowledge` (a
 search, or a read by `slug`) or `search_memory` gave to a session

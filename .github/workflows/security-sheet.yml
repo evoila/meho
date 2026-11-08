@@ -255,20 +255,33 @@ jobs:
             '{tag: $tag, commit: $commit, image_digest: $image_digest, chart_digest: $chart_digest, made_on: $made_on}' \
             > "${DATA}/facts.json"
 
-      - name: Write the sheet
+      - name: Fetch the sheet that is already on the release
+        # A new run keeps the test-install results of that sheet. The asset
+        # list comes from its own command: when the lookup fails, the step
+        # stops here. A failed lookup is not "no sheet yet". Treated as one,
+        # the upload would replace the sheet and its test-install results.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/assets"
           sheet="meho-security-sheet-${TAG}.md"
-          # A new run keeps the test-install results of the sheet that is
-          # already on the release. The script stops when it cannot read them.
-          previous=()
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name' \
-              | grep -Fxq "${sheet}"; then
+          assets=$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
+          if grep -Fxq "${sheet}" <<<"${assets}"; then
             gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
               --pattern "${sheet}" --output "${DATA}/previous-sheet.md"
+            echo "The release has a sheet. The new sheet keeps its test-install results."
+          else
+            echo "The release has no sheet yet."
+          fi
+
+      - name: Write the sheet
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/assets"
+          sheet="meho-security-sheet-${TAG}.md"
+          # The script stops when it cannot read the previous sheet.
+          previous=()
+          if [[ -f "${DATA}/previous-sheet.md" ]]; then
             previous=(--previous "${DATA}/previous-sheet.md")
           fi
           python3 tool/scripts/release/security_sheet.py \

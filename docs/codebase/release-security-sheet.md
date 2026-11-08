@@ -88,6 +88,9 @@ the data artifact.
 A new run of the release job (for example by hand after a fix) keeps
 these three parts. Before it writes the sheet, it downloads the sheet that
 is already on the release and gives it to the script as `--previous`.
+When the job cannot read the release's asset list, it stops: a failed
+lookup does not count as "no sheet yet", because the upload would then
+replace the sheet and its test-install results.
 Without `--lab`, the script takes the three parts from it. Each part sits
 between two HTML comments, `<!-- lab_ports -->` and `<!-- end lab_ports -->`
 (a Markdown page does not show them), so the script finds them even when

@@ -13,12 +13,14 @@ that the sheet never reads as "nothing found" when the data is broken.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+import yaml
 
 
 def _repo_root() -> Path:
@@ -27,6 +29,7 @@ def _repo_root() -> Path:
 
 _SCRIPT = _repo_root() / "scripts" / "release" / "security_sheet.py"
 _TEMPLATE = _repo_root() / "docs" / "security" / "security-sheet-template.md"
+_WORKFLOW = _repo_root() / ".github" / "workflows" / "security-sheet.yml"
 
 _IMAGE_DIGEST = "sha256:" + "a" * 64
 _CHART_DIGEST = "sha256:" + "b" * 64
@@ -519,3 +522,139 @@ def test_template_and_script_agree(tmp_path: Path) -> None:
     proc, _ = _run(data, "--template", str(short))
     assert proc.returncode == 2
     assert "does not use" in proc.stderr
+
+
+# --- The release job's steps around the previous sheet ------------------------
+#
+# The job fetches the sheet that is already on the release in one step and
+# writes the new sheet in the next. The tests run the real step scripts from
+# the workflow file, the way the runner starts a ``run:`` step, with a
+# stand-in for ``gh`` on PATH.
+
+_FAKE_GH = """#!/bin/bash
+# A stand-in for gh. `release view` prints the asset names in FAKE_ASSETS,
+# one per line, or fails when FAKE_VIEW_FAILS is set. `release download`
+# writes a sheet to the --output path.
+case "$1 $2" in
+  "release view")
+    if [[ -n "${FAKE_VIEW_FAILS:-}" ]]; then
+      echo "HTTP 502: Bad Gateway" >&2
+      exit 1
+    fi
+    for name in ${FAKE_ASSETS:-}; do echo "${name}"; done
+    ;;
+  "release download")
+    while [[ $# -gt 0 ]]; do
+      [[ "$1" == "--output" ]] && out="$2"
+      shift
+    done
+    echo "the sheet of the release" > "${out}"
+    ;;
+  *)
+    echo "unexpected gh call: $*" >&2
+    exit 1
+    ;;
+esac
+"""
+
+
+def _step_script(name: str) -> str:
+    workflow = cast("dict[str, Any]", yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8")))
+    for step in workflow["jobs"]["sheet"]["steps"]:
+        if step.get("name") == name:
+            return cast("str", step["run"])
+    raise AssertionError(f"step {name!r} not found in security-sheet.yml")
+
+
+def _run_step(
+    tmp_path: Path, name: str, data: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Run one step as the runner does: ``bash --noprofile --norc -eo pipefail``."""
+    tools = tmp_path / "bin"
+    tools.mkdir(exist_ok=True)
+    gh = tools / "gh"
+    gh.write_text(_FAKE_GH, encoding="utf-8")
+    gh.chmod(0o755)
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir(exist_ok=True)
+    script = tmp_path / "step.sh"
+    script.write_text(_step_script(name), encoding="utf-8")
+    full_env = {
+        "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+        "TAG": "v1.0.0",
+        "GITHUB_REPOSITORY": "example/meho",
+        "GH_TOKEN": "fake",
+        "DATA": str(data),
+        "RUNNER_TEMP": str(runner_temp),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
+        **env,
+    }
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+        cwd=tmp_path,
+        env=full_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+_FETCH = "Fetch the sheet that is already on the release"
+_WRITE = "Write the sheet"
+
+
+def test_fetch_step_stops_when_the_release_lookup_fails(tmp_path: Path) -> None:
+    """A failed lookup is not "no sheet yet": the job must not go on and replace it."""
+    data = _data(tmp_path)
+    proc = _run_step(tmp_path, _FETCH, data, {"FAKE_VIEW_FAILS": "1"})
+    assert proc.returncode != 0
+    assert "HTTP 502" in proc.stderr
+    assert not (data / "previous-sheet.md").exists()
+
+
+def test_fetch_step_downloads_the_sheet_of_the_release(tmp_path: Path) -> None:
+    data = _data(tmp_path)
+    assets = "meho-sbom-v1.0.0.spdx.json meho-security-sheet-v1.0.0.md"
+    proc = _run_step(tmp_path, _FETCH, data, {"FAKE_ASSETS": assets})
+    assert proc.returncode == 0, proc.stderr
+    assert (data / "previous-sheet.md").read_text(encoding="utf-8") == "the sheet of the release\n"
+    assert "keeps its test-install results" in proc.stdout
+
+
+@pytest.mark.parametrize("assets", ["", "meho-sbom-v1.0.0.spdx.json meho-security-sheet-v1.0.1.md"])
+def test_fetch_step_leaves_no_file_when_the_release_has_no_sheet(
+    tmp_path: Path, assets: str
+) -> None:
+    data = _data(tmp_path)
+    proc = _run_step(tmp_path, _FETCH, data, {"FAKE_ASSETS": assets})
+    assert proc.returncode == 0, proc.stderr
+    assert not (data / "previous-sheet.md").exists()
+    assert "no sheet yet" in proc.stdout
+
+
+def _tool_checkout(tmp_path: Path) -> None:
+    """The write step runs the script from the ``tool/`` checkout."""
+    (tmp_path / "tool").symlink_to(_repo_root(), target_is_directory=True)
+
+
+def test_write_step_keeps_the_lab_results_of_the_previous_sheet(tmp_path: Path) -> None:
+    data = _data(tmp_path)
+    proc, first = _run(data, "--lab", str(_lab(tmp_path)))
+    assert proc.returncode == 0, proc.stderr
+    assert first is not None
+    (data / "previous-sheet.md").write_text(first, encoding="utf-8")
+    _tool_checkout(tmp_path)
+    step = _run_step(tmp_path, _WRITE, data, {})
+    assert step.returncode == 0, step.stderr
+    sheet = tmp_path / "runner-temp" / "assets" / "meho-security-sheet-v1.0.0.md"
+    assert sheet.read_text(encoding="utf-8") == first
+    assert (tmp_path / "runner-temp" / "assets" / "meho-vulnerability-scan-v1.0.0.json").exists()
+
+
+def test_write_step_without_a_previous_sheet_says_not_measured(tmp_path: Path) -> None:
+    data = _data(tmp_path)
+    _tool_checkout(tmp_path)
+    step = _run_step(tmp_path, _WRITE, data, {})
+    assert step.returncode == 0, step.stderr
+    sheet = tmp_path / "runner-temp" / "assets" / "meho-security-sheet-v1.0.0.md"
+    assert sheet.read_text(encoding="utf-8").count("Not measured for this release yet.") == 3

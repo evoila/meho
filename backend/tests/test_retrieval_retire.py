@@ -57,7 +57,7 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.middleware import RequestContextMiddleware
-from meho_backplane.retrieval.eval import EvalResult, SurfaceResult
+from meho_backplane.retrieval.eval import EvalResult, QueryResult, SurfaceResult
 from meho_backplane.retrieval.retire import (
     EVAL_PRECISION_GREEN,
     MIN_DAYS_SINCE_FIRST_USE,
@@ -452,6 +452,44 @@ def test_criterion3_zero_query_count_red() -> None:
     assert result.verdict == "red"
 
 
+def test_criterion3_not_run_questions_red_with_reasons() -> None:
+    """Questions that could not run are not an absent corpus (#4752)."""
+    reason = "connector 'github-rest-1.0' has no enabled operations"
+    result = _evaluate_eval_precision(
+        precision_at_5=None,
+        query_count=0,
+        not_run_reasons=[reason, reason, reason],
+    )
+    assert result.verdict == "red"
+    assert result.observed_value == "3 questions not run"
+    assert "no corpus" not in result.observed_value
+    assert result.notes is not None
+    assert reason in result.notes
+    # The same reason is named once.
+    assert result.notes.count(reason) == 1
+    assert "ship the surface corpus" not in result.notes
+
+
+def test_criterion3_scored_with_not_run_questions_names_them() -> None:
+    """Scored questions keep their band; the note names the questions not run."""
+    result = _evaluate_eval_precision(
+        precision_at_5=0.85,
+        query_count=4,
+        not_run_reasons=["the code of connector 'x-1.0' is not installed"],
+    )
+    assert result.verdict == "green"
+    assert result.notes is not None
+    assert "1 eval questions not run" in result.notes
+
+
+def test_criterion3_not_run_note_fits_note_limit() -> None:
+    """Many distinct reasons are cut so the note stays a valid row."""
+    reasons = [f"connector 'product-{i}-1.0' has no enabled operations" for i in range(20)]
+    result = _evaluate_eval_precision(precision_at_5=None, query_count=0, not_run_reasons=reasons)
+    assert result.notes is not None
+    assert len(result.notes) <= 256
+
+
 # ---------------------------------------------------------------------------
 # Criterion 4 — MEHO vs baseline
 # ---------------------------------------------------------------------------
@@ -699,6 +737,58 @@ async def test_compute_retire_red_when_any_blocker_open() -> None:
                 now=_NOW,
             )
     assert report.overall_verdict == "NOT YET"
+
+
+@pytest.mark.asyncio
+async def test_compute_retire_operations_not_run_is_not_an_absent_corpus() -> None:
+    """An eval whose operations questions could not run names the reason (#4752).
+
+    The operations corpus shipped, but its connector is disabled here,
+    so no question was scored. The checklist must not tell the operator
+    to ship a corpus; it stays red and says why the questions did not run.
+    """
+    reason = "connector 'github-rest-1.0' has no enabled operations"
+    not_run_rows = [
+        QueryResult(
+            query=f"question {i}",
+            expected_hits=["GET:/repos/{owner}/{repo}/issues"],
+            meho_hits=[],
+            precision_at_5=0.0,
+            reciprocal_rank=0.0,
+            coverage_at_5=0.0,
+            not_run_reason=reason,
+        )
+        for i in range(2)
+    ]
+    stub = _stub_eval_result()
+    operations = SurfaceResult(
+        surface="operations",
+        query_count=0,
+        precision_at_5=0.0,
+        mrr=0.0,
+        coverage=0.0,
+        verdict="green",
+        not_run_count=len(not_run_rows),
+        queries=not_run_rows,
+    )
+    eval_result = stub.model_copy(update={"surfaces": [*stub.surfaces[:2], operations]})
+    fake_eval = AsyncMock(return_value=eval_result)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        with patch("meho_backplane.retrieval.retire.eval_all", new=fake_eval):
+            report = await compute_retire_checklist(
+                session=session,
+                surfaces=["operations"],
+                tenant_id=_FIXED_TENANT,
+                blocker_counts={"operations": 0},
+                now=_NOW,
+            )
+    precision = next(c for c in report.surfaces[0].criteria if c.name == "eval_precision")
+    assert precision.verdict == "red"
+    assert precision.observed_value == "2 questions not run"
+    assert precision.notes is not None
+    assert reason in precision.notes
+    assert report.surfaces[0].verdict == "NOT YET"
 
 
 @pytest.mark.asyncio

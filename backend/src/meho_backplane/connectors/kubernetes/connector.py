@@ -1757,6 +1757,28 @@ class KubernetesConnector(Connector):
 
         return await k8s_meho_release_info(self, target, operator, params)
 
+    async def k8s_node_disk(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.node.disk``."""
+        from meho_backplane.connectors.kubernetes.ops_node_disk import k8s_node_disk
+
+        return await k8s_node_disk(self, target, operator, params)
+
+    async def k8s_node_images(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.node.images``."""
+        from meho_backplane.connectors.kubernetes.ops_node_disk import k8s_node_images
+
+        return await k8s_node_images(self, target, operator, params)
+
     async def k8s_secret_read_to_ref(
         self,
         operator: Operator,

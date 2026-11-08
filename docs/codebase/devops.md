@@ -101,6 +101,7 @@ deploy/charts/meho/
 │   ├── serviceaccount.yaml # Pod identity
 │   ├── networkpolicy.yaml  # default-deny + explicit egress (broadcast / result-cache egress conditional)
 │   ├── migration-job.yaml  # pre-install/pre-upgrade Helm hook (alembic upgrade head)
+│   ├── update-strategy-job.yaml # pre-upgrade hook: removes an old rollingUpdate block before Recreate (#5962)
 │   ├── _core-secrets.tpl   # built-in core: hook account name, core Secret names, the secrets Job's plan
 │   ├── core-secrets-rbac.yaml # built-in core: hook ServiceAccount + Role + RoleBinding (weight -40)
 │   ├── core-secrets-job.yaml  # built-in core: makes missing <release>-core-* Secrets (weight -30)
@@ -312,6 +313,29 @@ the order on a kind cluster, and the rollback after a start that fails
 right after it wrote its operation rows (the test-only setting
 `MEHO_TEST_FAIL_START_AFTER_REGISTRATION`, see
 [rollback.md](../acceptance/rollback.md)).
+
+**Upgrade from a chart without a strategy (#5962).** A chart before #5024
+set no strategy, so Kubernetes filled in `RollingUpdate` and a
+`rollingUpdate` block on the live Deployment. Helm 4 upgrades with
+server-side apply. Helm never set that block, so the apply does not remove
+it, and Kubernetes refuses `Recreate` together with a `rollingUpdate`
+block (`spec.strategy.rollingUpdate: Forbidden`). Helm 3 (client-side
+apply) removes the block itself. So `templates/update-strategy-job.yaml`
+adds a `pre-upgrade` hook: a Job (weight -5, after the migration Job) that
+runs `python -m meho_backplane.update_strategy`. It sends one merge patch,
+`{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}`, with the
+field manager `meho-update-strategy`. The pod template does not change, so
+no pod restarts. Its own ServiceAccount, Role (`get` and `patch` on this one
+Deployment) and RoleBinding come at weight -6, and Helm removes all four
+objects once the Job succeeds. The chart renders them only when
+`updateStrategy.type` is `Recreate` and `lookup` finds the live Deployment
+with a `rollingUpdate` block. So a new install, `helm template` and every
+later upgrade render nothing. Argo CD renders with `helm template`, so it
+never gets this Job. Render tests:
+`backend/tests/test_chart_update_strategy_job.py` (a copy of the chart in
+which `lookup` returns a fixed Deployment); Job tests:
+`backend/tests/test_update_strategy.py`. The CI check that upgrades from the
+last release with Helm 4 server-side apply is #5963.
 
 ### Security context
 

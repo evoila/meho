@@ -29,9 +29,9 @@
 #                      no hand step. The newest final tag is found by
 #                      scripts/ci/docs_republish.sh. It pushes nothing
 #                      when the site is the same as on gh-pages, and it
-#                      refuses a push that would remove files. The tag
-#                      deploy above is unchanged. A manual run of this
-#                      workflow on main does the same publish.
+#                      refuses a push that would remove files outside the
+#                      version it publishes. A manual run of this workflow
+#                      on main does the same publish.
 #
 # One-time setup (mirrors image.yml's GHCR-visibility precedent — a
 # maintainer does this once, CI cannot safely mutate repo settings):
@@ -47,7 +47,8 @@
 #
 # mike's CI requirements (https://github.com/jimporter/mike):
 #   * the gh-pages branch must be fetched locally before deploying —
-#     mike commits the built site onto it;
+#     mike commits the built site onto it. Both deploy scripts fetch it
+#     themselves, on every attempt (scripts/ci/docs_pages.sh);
 #   * a git committer identity must be configured — we use the
 #     github-actions[bot] identity, matching the commits GitHub's own
 #     actions produce.
@@ -152,21 +153,14 @@ jobs:
       # tag pushes would otherwise race mike's branch update. Never
       # cancel a publish in flight. GitHub keeps one waiting run per
       # group, so a main republish has its own group: a waiting tag
-      # deploy is never replaced by it. When a main run and a tag run
-      # overlap, docs_republish.sh fetches gh-pages again and retries.
+      # deploy is never replaced by it. A main run and a tag run can
+      # overlap: then the second push is refused, and both
+      # docs_deploy.sh and docs_republish.sh fetch gh-pages again,
+      # build again and push again (scripts/ci/docs_pages.sh).
       group: ${{ github.ref_type == 'tag' && 'docs-site-gh-pages' || 'docs-site-gh-pages-main' }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Fetch gh-pages
-        # mike commits onto the local gh-pages ref. Absent on the very
-        # first deploy — mike then creates it — so guard the fetch on
-        # remote existence rather than swallowing all fetch errors.
-        run: |
-          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
-            git fetch origin gh-pages --depth=1
-          fi
 
       - name: Configure git identity
         run: |

@@ -413,9 +413,12 @@ header" list (`lesson_header.py::header_rows`).
 
 **Who confirms.** Only a reviewer (a person who can decide approvals in
 the tenant, see the owner rule above) or a tenant admin may write
-`status: confirmed`. The MCP `add_to_knowledge` tool refuses it for any
-other caller, also for the owner of the entry, with a permission
-refusal, `reason: confirm_needs_reviewer`, and nothing is written. REST
+`status: confirmed` (`lesson_header.py::may_confirm`). The MCP
+`add_to_knowledge` tool refuses it for any other caller, also for the
+owner of the entry, with a permission refusal,
+`reason: confirm_needs_reviewer`, and nothing is written. The memory
+service applies the same rule to every memory write (REST, MCP and the
+console). REST
 `POST /api/v1/kb` and the directory import are tenant admin only, so an
 import carries the status a reviewer set in the team wiki. The upkeep
 job never confirms a candidate.
@@ -428,10 +431,13 @@ its last recorded run, and can be turned off with
 `KNOWLEDGE_UPKEEP_ENABLED=false`. On PostgreSQL an advisory lock lets
 one replica at a time run it. Each run:
 
-1. **Merges duplicates.** Entries of one tenant with the same body
-   (spaces and case do not count) are one entry. The job keeps a
-   `confirmed` copy first, else the oldest, and gives each other copy
-   `status: replaced` and `replaced_by: <slug of the kept entry>`.
+1. **Merges duplicates.** Entries of one tenant with exactly the same
+   body are one entry. Case and spaces count, because `MODE=prod` and
+   `MODE=PROD` say different things. The job keeps a `confirmed` copy
+   first, else the oldest, and gives each other copy `status: replaced`
+   and `replaced_by: <slug of the kept entry>`. Before the change it
+   locks both entries and reads them again. When either was edited or
+   deleted after the scan, it leaves both as they are.
 2. **Retires expired entries.** An entry whose `expires_at` has passed
    gets `status: retired`.
 3. **Refreshes used confirmed entries.** A `confirmed` knowledge or
@@ -460,7 +466,10 @@ The payload lists what was merged (`merged`: slug and `into`), retired
 with `meho audit query` and the principal `system:knowledge-upkeep`. A
 row with the totals goes to the system tenant
 `00000000-0000-0000-0000-000000005733`; the schedule reads it as the
-last run.
+last run. A tenant's changes and its report row commit in one
+transaction. When the report cannot be written, the changes roll back
+too, so the next run makes and reports them. The row with the totals is
+written only when every tenant committed.
 
 **Shared scope.** An entry with `shared: true` in its metadata is
 readable from every tenant on the instance, if its owner tenant is

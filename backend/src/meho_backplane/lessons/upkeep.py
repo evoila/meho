@@ -6,10 +6,13 @@
 Too many old or doubled entries make the agent worse. Once per interval
 (``KNOWLEDGE_UPKEEP_INTERVAL_SECONDS``, one week by default) this job:
 
-1. **Merges duplicates.** Knowledge entries of one tenant with the same
-   body (spaces and case do not count) are one entry. The job keeps one:
-   a ``confirmed`` entry first, else the oldest. Each other copy gets
-   ``status: replaced`` and ``replaced_by: <slug of the kept entry>``.
+1. **Merges duplicates.** Knowledge entries of one tenant with exactly
+   the same body are one entry. Case and spaces count: ``MODE=prod`` and
+   ``MODE=PROD`` say different things. The job keeps one: a ``confirmed``
+   entry first, else the oldest. Each other copy gets ``status: replaced``
+   and ``replaced_by: <slug of the kept entry>``. Before the change the job
+   locks both entries and reads them again. When either was edited or
+   deleted after the scan, it leaves both as they are.
 2. **Retires expired entries.** A knowledge entry whose ``expires_at`` has
    passed gets ``status: retired``. A candidate gets an ``expires_at`` six
    months after it was learned (:mod:`meho_backplane.lesson_header`).
@@ -37,8 +40,11 @@ The report
 One ``INTERNAL`` audit row per tenant, ``operator_sub`` =
 :data:`SYSTEM_OPERATOR_SUB`, ``path`` = :data:`UPKEEP_PATH`, with the
 :class:`UpkeepReport` as payload (each list holds at most
-:data:`REPORT_LIST_LIMIT` items; the counts are complete). One more row
-with the totals goes to the system tenant :data:`UPKEEP_SYSTEM_TENANT_ID`.
+:data:`REPORT_LIST_LIMIT` items; the counts are complete). A tenant's
+changes and its report row commit in one transaction: when the report
+cannot be written, the changes roll back too, and the next run makes and
+reports them. One more row with the totals goes to the system tenant
+:data:`UPKEEP_SYSTEM_TENANT_ID`, only when every tenant committed.
 The schedule reads that row as the last run
 (:func:`~meho_backplane.loop_schedule.wait_until_first_run`), so a restart
 does not start the week again. On PostgreSQL an advisory lock lets only
@@ -55,15 +61,23 @@ import uuid
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Final
 
 import structlog
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditEventClass, Document, LessonRetrieval, Tenant
+from meho_backplane.db.models import (
+    AuditEventClass,
+    AuditLog,
+    Document,
+    LessonRetrieval,
+    Tenant,
+)
 from meho_backplane.kb.revisions import update_head_metadata
 from meho_backplane.kb.schemas import KB_SOURCE
 from meho_backplane.lesson_header import header_expires_at
@@ -82,6 +96,7 @@ __all__ = [
     "SYSTEM_OPERATOR_SUB",
     "UPKEEP_PATH",
     "UPKEEP_SYSTEM_TENANT_ID",
+    "UpkeepIncompleteError",
     "UpkeepReport",
     "run_upkeep",
     "start_knowledge_upkeep",
@@ -161,6 +176,26 @@ class _Changes:
         self.for_review: dict[uuid.UUID, list[ReviewCandidate]] = defaultdict(list)
 
 
+class _Seen(BaseModel):
+    """One entry as the scan read it, before any lock."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: uuid.UUID
+    source_id: str
+    body: str
+    metadata: dict[str, Any]
+
+
+class _Plan:
+    """What the scan found to do, per owner tenant. Each step checks again under a lock."""
+
+    def __init__(self) -> None:
+        self.merges: dict[uuid.UUID, list[tuple[_Seen, _Seen]]] = defaultdict(list)
+        self.retires: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
+        self.refreshes: dict[uuid.UUID, list[tuple[Any, datetime]]] = defaultdict(list)
+
+
 def _status(metadata: dict[str, Any] | None) -> object:
     return (metadata or {}).get("status")
 
@@ -171,35 +206,38 @@ def _slug(source: str, source_id: str) -> str:
 
 
 def _body_key(tenant_id: uuid.UUID, body: str) -> tuple[uuid.UUID, str]:
-    normalised = " ".join(body.split()).casefold()
-    return tenant_id, hashlib.sha256(normalised.encode()).hexdigest()
+    # The exact body: a change of case or spaces can change what a lesson says.
+    return tenant_id, hashlib.sha256(body.encode()).hexdigest()
+
+
+async def _store_metadata(session: AsyncSession, doc: Document, metadata: dict[str, Any]) -> None:
+    """Write *metadata* to *doc*; also its passages (knowledge) or a new revision (memory)."""
+    if doc.source == KB_SOURCE:
+        await update_head_metadata(session, doc, metadata)
+    else:
+        doc.doc_metadata = metadata
+        doc.updated_at = datetime.now(UTC)
+        await add_memory_revision(session, doc, SYSTEM_OPERATOR_SUB)
 
 
 async def _change_metadata(
+    session: AsyncSession,
     doc_id: uuid.UUID,
     change: Callable[[dict[str, Any]], dict[str, Any] | None],
 ) -> Document | None:
     """Apply *change* to one entry's metadata under a row lock; return the row if changed.
 
     *change* sees the metadata as stored now and returns ``None`` when
-    nothing is to be done. A knowledge entry gets its passages updated
-    too; a memory entry gets a new revision.
+    nothing is to be done. The caller commits.
     """
-    async with get_sessionmaker()() as session:
-        doc = await session.scalar(select(Document).where(Document.id == doc_id).with_for_update())
-        if doc is None:
-            return None
-        new = change(dict(doc.doc_metadata or {}))
-        if new is None:
-            return None
-        if doc.source == KB_SOURCE:
-            await update_head_metadata(session, doc, new)
-        else:
-            doc.doc_metadata = new
-            doc.updated_at = datetime.now(UTC)
-            await add_memory_revision(session, doc, SYSTEM_OPERATOR_SUB)
-        await session.commit()
-        return doc
+    doc = await session.scalar(select(Document).where(Document.id == doc_id).with_for_update())
+    if doc is None:
+        return None
+    new = change(dict(doc.doc_metadata or {}))
+    if new is None:
+        return None
+    await _store_metadata(session, doc, new)
+    return doc
 
 
 async def _read(stmt: Any) -> list[Any]:
@@ -208,8 +246,8 @@ async def _read(stmt: Any) -> list[Any]:
         return list((await session.execute(stmt)).all())
 
 
-async def _merge_duplicates(changes: _Changes) -> set[uuid.UUID]:
-    """Mark every copy but one of each knowledge body ``replaced``; return their ids."""
+async def _plan_merges(plan: _Plan) -> None:
+    """Plan to mark every copy but one of each knowledge body ``replaced``."""
     rows = await _read(
         select(
             Document.id,
@@ -224,52 +262,69 @@ async def _merge_duplicates(changes: _Changes) -> set[uuid.UUID]:
     for row in rows:
         if _status(row.doc_metadata) not in _CLOSED:
             groups[_body_key(row.tenant_id, row.body)].append(row)
-    replaced: set[uuid.UUID] = set()
     for copies in groups.values():
         if len(copies) < 2:
             continue
         copies.sort(
             key=lambda r: (_status(r.doc_metadata) != "confirmed", aware(r.created_at), r.source_id)
         )
-        keeper = copies[0].source_id
-        for copy in copies[1:]:
-
-            def mark(metadata: dict[str, Any], into: str = keeper) -> dict[str, Any] | None:
-                if _status(metadata) in _CLOSED:
-                    return None
-                return {**metadata, "status": "replaced", "replaced_by": into}
-
-            if await _change_metadata(copy.id, mark) is not None:
-                replaced.add(copy.id)
-                changes.merged[copy.tenant_id].append(MergedEntry(slug=copy.source_id, into=keeper))
-    return replaced
+        seen = [
+            _Seen(id=r.id, source_id=r.source_id, body=r.body, metadata=dict(r.doc_metadata or {}))
+            for r in copies
+        ]
+        plan.merges[copies[0].tenant_id].extend((copy, seen[0]) for copy in seen[1:])
 
 
-async def _retire_expired(changes: _Changes, *, now: datetime, skip: set[uuid.UUID]) -> None:
-    """Set ``status: retired`` on knowledge entries whose ``expires_at`` has passed."""
+async def _mark_replaced(session: AsyncSession, copy: _Seen, keeper: _Seen) -> bool:
+    """Mark *copy* replaced by *keeper*, if neither changed since the scan.
+
+    Both rows are locked first (in id order, so two jobs cannot wait on
+    each other). An entry edited or deleted after the scan is left as it is.
+    """
+    docs = {
+        doc.id: doc
+        for doc in await session.scalars(
+            select(Document)
+            .where(Document.id.in_((copy.id, keeper.id)))
+            .order_by(Document.id)
+            .with_for_update()
+        )
+    }
+    for seen in (copy, keeper):
+        doc = docs.get(seen.id)
+        if doc is None or doc.body != seen.body or dict(doc.doc_metadata or {}) != seen.metadata:
+            return False
+    await _store_metadata(
+        session,
+        docs[copy.id],
+        {**copy.metadata, "status": "replaced", "replaced_by": keeper.source_id},
+    )
+    return True
+
+
+async def _plan_retires(plan: _Plan, *, now: datetime) -> None:
+    """Plan to set ``status: retired`` on knowledge entries whose ``expires_at`` has passed."""
     rows = await _read(
-        select(Document.id, Document.tenant_id, Document.source_id, Document.doc_metadata).where(
+        select(Document.id, Document.tenant_id, Document.doc_metadata).where(
             Document.source == KB_SOURCE
         )
     )
-
-    def retire(metadata: dict[str, Any]) -> dict[str, Any] | None:
-        expires_at = header_expires_at(metadata)
-        if _status(metadata) in _CLOSED or expires_at is None or expires_at >= now:
-            return None
-        return {**metadata, "status": "retired"}
-
     for row in rows:
-        if row.id in skip or retire(dict(row.doc_metadata or {})) is None:
-            continue
-        if await _change_metadata(row.id, retire) is not None:
-            changes.retired[row.tenant_id].append(row.source_id)
+        if _retire(dict(row.doc_metadata or {}), now) is not None:
+            plan.retires[row.tenant_id].append(row.id)
 
 
-async def _refresh_and_list_candidates(
-    changes: _Changes, *, since: datetime, now: datetime
+def _retire(metadata: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+    expires_at = header_expires_at(metadata)
+    if _status(metadata) in _CLOSED or expires_at is None or expires_at >= now:
+        return None
+    return {**metadata, "status": "retired"}
+
+
+async def _plan_refreshes_and_list_candidates(
+    plan: _Plan, changes: _Changes, *, since: datetime, now: datetime
 ) -> None:
-    """Set ``confirmed_at`` on used confirmed entries; list used candidates."""
+    """Plan ``confirmed_at`` for used confirmed entries; list used candidates."""
     async with get_sessionmaker()() as session:
         retrievals = await fetch_retrievals(session, since=since, until=now, tenant_id=None)
         uses = await find_uses(session, retrievals, until=now)
@@ -304,7 +359,7 @@ async def _refresh_and_list_candidates(
                 )
             )
         elif status == "confirmed":
-            await _refresh(doc, max(at for _, _, at in entry_uses), changes)
+            plan.refreshes[doc.tenant_id].append((doc, max(at for _, _, at in entry_uses)))
 
 
 def _parse_date(value: object) -> datetime | None:
@@ -316,7 +371,7 @@ def _parse_date(value: object) -> datetime | None:
         return None
 
 
-async def _refresh(doc: Any, used_at: datetime, changes: _Changes) -> None:
+async def _refresh(session: AsyncSession, doc: Any, used_at: datetime, changes: _Changes) -> None:
     def refresh(metadata: dict[str, Any]) -> dict[str, Any] | None:
         if _status(metadata) != "confirmed":
             return None
@@ -325,7 +380,7 @@ async def _refresh(doc: Any, used_at: datetime, changes: _Changes) -> None:
             return None
         return {**metadata, "confirmed_at": used_at.isoformat()}
 
-    if await _change_metadata(doc.id, refresh) is not None:
+    if await _change_metadata(session, doc.id, refresh) is not None:
         changes.refreshed[doc.tenant_id].append(
             RefreshedEntry(
                 store=doc.source, slug=_slug(doc.source, doc.source_id), confirmed_at=used_at
@@ -333,18 +388,67 @@ async def _refresh(doc: Any, used_at: datetime, changes: _Changes) -> None:
         )
 
 
+async def _run_tenant(
+    tenant_id: uuid.UUID,
+    plan: _Plan,
+    changes: _Changes,
+    *,
+    since: datetime,
+    now: datetime,
+) -> UpkeepReport:
+    """Make one tenant's changes and write its report in one transaction.
+
+    When the report cannot be written, the changes roll back with it, so
+    the next run finds them again and reports them then.
+    """
+    started = time.perf_counter()
+    async with get_sessionmaker()() as session:
+        for copy, keeper in plan.merges[tenant_id]:
+            if await _mark_replaced(session, copy, keeper):
+                changes.merged[tenant_id].append(
+                    MergedEntry(slug=copy.source_id, into=keeper.source_id)
+                )
+        for doc_id in plan.retires[tenant_id]:
+            doc = await _change_metadata(session, doc_id, lambda m: _retire(m, now))
+            if doc is not None:
+                changes.retired[tenant_id].append(doc.source_id)
+        for doc, used_at in plan.refreshes[tenant_id]:
+            await _refresh(session, doc, used_at, changes)
+        report = _report(
+            tenant_id,
+            changes,
+            since=since,
+            now=now,
+            numbers=await compute_learning_metrics(
+                session, since=since, until=now, tenant_id=tenant_id
+            ),
+        )
+        session.add(
+            _report_row(
+                tenant_id,
+                report.model_dump(mode="json"),
+                (time.perf_counter() - started) * 1000.0,
+            )
+        )
+        await session.commit()
+    return report
+
+
 async def run_upkeep(*, now: datetime | None = None) -> dict[uuid.UUID, UpkeepReport]:
     """Run the job once over every tenant; return the report of each tenant.
 
-    Writes the audit rows (see the module docstring). Safe to run twice:
-    a second run finds nothing more to merge, retire or refresh.
+    Writes each tenant's report row together with its changes. Safe to run
+    twice: a second run finds nothing more to merge, retire or refresh.
+    Raises :class:`UpkeepIncompleteError` after the other tenants when a
+    tenant failed.
     """
     now = now or datetime.now(UTC)
     since = now - timedelta(seconds=get_settings().knowledge_upkeep_interval_seconds)
+    plan = _Plan()
     changes = _Changes()
-    replaced = await _merge_duplicates(changes)
-    await _retire_expired(changes, now=now, skip=replaced)
-    await _refresh_and_list_candidates(changes, since=since, now=now)
+    await _plan_merges(plan)
+    await _plan_retires(plan, now=now)
+    await _plan_refreshes_and_list_candidates(plan, changes, since=since, now=now)
     async with get_sessionmaker()() as session:
         await session.execute(
             delete(LessonRetrieval).where(
@@ -352,20 +456,27 @@ async def run_upkeep(*, now: datetime | None = None) -> dict[uuid.UUID, UpkeepRe
             )
         )
         await session.commit()
-        tenant_ids = list((await session.scalars(select(Tenant.id))).all())
-        reports = {
-            tenant_id: _report(
-                tenant_id,
-                changes,
-                since=since,
-                now=now,
-                numbers=await compute_learning_metrics(
-                    session, since=since, until=now, tenant_id=tenant_id
-                ),
-            )
-            for tenant_id in tenant_ids
-        }
+        tenant_ids = set((await session.scalars(select(Tenant.id))).all())
+    tenant_ids |= {*plan.merges, *plan.retires, *plan.refreshes}
+    reports: dict[uuid.UUID, UpkeepReport] = {}
+    failed: list[uuid.UUID] = []
+    for tenant_id in sorted(tenant_ids):
+        try:
+            reports[tenant_id] = await _run_tenant(tenant_id, plan, changes, since=since, now=now)
+        except Exception:
+            _log.exception("knowledge_upkeep_tenant_failed", tenant_id=str(tenant_id))
+            failed.append(tenant_id)
+    if failed:
+        raise UpkeepIncompleteError(failed)
     return reports
+
+
+class UpkeepIncompleteError(RuntimeError):
+    """The changes or the report of some tenants did not commit; they rolled back."""
+
+    def __init__(self, tenant_ids: list[uuid.UUID]) -> None:
+        self.tenant_ids = tenant_ids
+        super().__init__(f"knowledge upkeep failed for {len(tenant_ids)} tenant(s)")
 
 
 def _report(
@@ -395,37 +506,41 @@ def _report(
     )
 
 
-async def _write_reports(reports: dict[uuid.UUID, UpkeepReport], duration_ms: float) -> None:
-    """Write one audit row per tenant and one with the totals; log write errors."""
-    rows: list[tuple[uuid.UUID, dict[str, Any]]] = [
-        (tenant_id, report.model_dump(mode="json")) for tenant_id, report in reports.items()
-    ]
-    rows.append(
-        (
-            UPKEEP_SYSTEM_TENANT_ID,
-            {
-                "tenants": len(reports),
-                "merged_count": sum(r.merged_count for r in reports.values()),
-                "retired_count": sum(r.retired_count for r in reports.values()),
-                "refreshed_count": sum(r.refreshed_count for r in reports.values()),
-                "for_review_count": sum(r.for_review_count for r in reports.values()),
-            },
-        )
+def _report_row(tenant_id: uuid.UUID, payload: dict[str, Any], duration_ms: float) -> AuditLog:
+    """Build one report row, the same shape as :func:`write_internal_audit_row` writes."""
+    return AuditLog(
+        id=uuid.uuid4(),
+        occurred_at=datetime.now(UTC),
+        operator_sub=SYSTEM_OPERATOR_SUB,
+        tenant_id=tenant_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        method=INTERNAL_METHOD,
+        path=UPKEEP_PATH,
+        status_code=200,
+        request_id=None,
+        duration_ms=Decimal(str(duration_ms)),
+        payload=payload,
     )
-    for tenant_id, payload in rows:
-        try:
-            await write_internal_audit_row(
-                event_class=AuditEventClass.OPERATION_EXECUTION,
-                operator_sub=SYSTEM_OPERATOR_SUB,
-                tenant_id=tenant_id,
-                method=INTERNAL_METHOD,
-                path=UPKEEP_PATH,
-                status_code=200,
-                duration_ms=duration_ms,
-                payload=payload,
-            )
-        except Exception:
-            _log.exception("knowledge_upkeep_audit_write_failed", tenant_id=str(tenant_id))
+
+
+async def _write_total(reports: dict[uuid.UUID, UpkeepReport], duration_ms: float) -> None:
+    """Write the row with the totals: the schedule reads it as the last complete run."""
+    await write_internal_audit_row(
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        operator_sub=SYSTEM_OPERATOR_SUB,
+        tenant_id=UPKEEP_SYSTEM_TENANT_ID,
+        method=INTERNAL_METHOD,
+        path=UPKEEP_PATH,
+        status_code=200,
+        duration_ms=duration_ms,
+        payload={
+            "tenants": len(reports),
+            "merged_count": sum(r.merged_count for r in reports.values()),
+            "retired_count": sum(r.retired_count for r in reports.values()),
+            "refreshed_count": sum(r.refreshed_count for r in reports.values()),
+            "for_review_count": sum(r.for_review_count for r in reports.values()),
+        },
+    )
 
 
 async def _run_one_tick() -> None:
@@ -437,7 +552,7 @@ async def _run_one_tick() -> None:
         started = time.perf_counter()
         reports = await run_upkeep()
         duration_ms = (time.perf_counter() - started) * 1000.0
-        await _write_reports(reports, duration_ms)
+        await _write_total(reports, duration_ms)
     _log.info(
         "knowledge_upkeep_done",
         tenants=len(reports),

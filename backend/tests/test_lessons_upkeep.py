@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -28,6 +29,7 @@ from meho_backplane.lessons.upkeep import (
     SYSTEM_OPERATOR_SUB,
     UPKEEP_PATH,
     UPKEEP_SYSTEM_TENANT_ID,
+    UpkeepIncompleteError,
     run_upkeep,
     start_knowledge_upkeep,
     stop_knowledge_upkeep,
@@ -72,11 +74,9 @@ async def _status(slug: str) -> dict[str, object]:
 @pytest.mark.asyncio
 async def test_duplicates_merge_into_the_confirmed_copy() -> None:
     service = KbService()
+    await service.create_entry(TENANT, "a-old", "Restart the agent first.", {"status": "candidate"})
     await service.create_entry(
-        TENANT, "a-old", "Restart  the agent\nfirst.", {"status": "candidate"}
-    )
-    await service.create_entry(
-        TENANT, "b-confirmed", "restart the agent first.", {"status": "confirmed"}
+        TENANT, "b-confirmed", "Restart the agent first.", {"status": "confirmed"}
     )
     await service.create_entry(TENANT, "c-other", "Something else.")
 
@@ -324,24 +324,126 @@ async def test_a_merge_twice_changes_nothing_more() -> None:
     assert second[TENANT].merged_count == 0
 
 
+def _after_scan(edit: Callable[[], Awaitable[object]]) -> object:
+    """Patch the scan so *edit* runs once, after the job read the entries."""
+    real_read = upkeep._read
+    done = False
+
+    async def read_then_edit(stmt: object) -> list[object]:
+        nonlocal done
+        rows = await real_read(stmt)
+        if not done:
+            done = True
+            await edit()
+        return rows
+
+    return patch.object(upkeep, "_read", read_then_edit)
+
+
 @pytest.mark.asyncio
 async def test_an_entry_confirmed_after_the_read_is_not_retired() -> None:
     past = (NOW - timedelta(days=1)).isoformat()
     await KbService().create_entry(
         TENANT, "old", "old", {"status": "candidate", "expires_at": past}
     )
-    real_change = upkeep._change_metadata
 
-    async def reviewer_writes_first(doc_id: uuid.UUID, change: object) -> object:
-        # A reviewer confirms the entry between the job's read and its write.
+    async def reviewer_confirms() -> None:
         await KbService().create_entry(TENANT, "old", "old", {"status": "confirmed"})
-        return await real_change(doc_id, change)  # type: ignore[arg-type]
 
-    with patch.object(upkeep, "_change_metadata", reviewer_writes_first):
+    with _after_scan(reviewer_confirms):
         reports = await run_upkeep(now=NOW)
 
     assert reports[TENANT].retired == []
     assert (await _status("old"))["status"] == "confirmed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param("Set MODE=PROD.", "Set MODE=prod.", id="case"),
+        pytest.param("if ok:\n    run()\nstop()", "if ok:\n    run()\n    stop()", id="indent"),
+        pytest.param("a  b", "a b", id="spaces"),
+    ],
+)
+async def test_bodies_that_differ_in_case_or_spaces_are_not_merged(first: str, second: str) -> None:
+    await KbService().create_entry(TENANT, "one", first)
+    await KbService().create_entry(TENANT, "two", second)
+    reports = await run_upkeep(now=NOW)
+    assert reports[TENANT].merged == []
+    assert "status" not in await _status("one")
+    assert "status" not in await _status("two")
+
+
+@pytest.mark.asyncio
+async def test_a_copy_edited_after_the_scan_is_not_replaced() -> None:
+    await KbService().create_entry(TENANT, "a", "same")
+    await KbService().create_entry(TENANT, "b", "same")
+
+    async def edit_copy() -> None:
+        await KbService().create_entry(TENANT, "b", "a new, different lesson")
+
+    with _after_scan(edit_copy):
+        reports = await run_upkeep(now=NOW)
+
+    assert reports[TENANT].merged == []
+    assert "status" not in await _status("b")
+
+
+@pytest.mark.asyncio
+async def test_a_copy_is_not_replaced_when_the_kept_entry_changed_or_is_gone() -> None:
+    await KbService().create_entry(TENANT, "a", "same")
+    await KbService().create_entry(TENANT, "b", "same")
+    await KbService().create_entry(TENANT, "c", "other")
+    await KbService().create_entry(TENANT, "d", "other")
+
+    async def edit_and_delete_keepers() -> None:
+        await KbService().create_entry(TENANT, "a", "a new body")
+        assert await KbService().delete_entry(TENANT, "c")
+
+    with _after_scan(edit_and_delete_keepers):
+        reports = await run_upkeep(now=NOW)
+
+    assert reports[TENANT].merged == []
+    assert "status" not in await _status("b")
+    assert "status" not in await _status("d")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_report_rolls_back_the_changes_and_writes_no_total() -> None:
+    await KbService().create_entry(TENANT, "copy-1", "same")
+    await KbService().create_entry(TENANT, "copy-2", "same")
+    real_row = upkeep._report_row
+
+    def broken_row(*args: Any) -> AuditLog:
+        row = real_row(*args)
+        row.path = None  # type: ignore[assignment]  # NOT NULL: the commit fails
+        return row
+
+    with patch.object(upkeep, "_report_row", broken_row), pytest.raises(UpkeepIncompleteError):
+        await upkeep._run_one_tick()
+
+    assert "status" not in await _status("copy-2")
+    assert await _upkeep_rows() == {}
+
+    await upkeep._run_one_tick()
+
+    assert (await _status("copy-2"))["status"] == "replaced"
+    rows = await _upkeep_rows()
+    assert rows[TENANT]["merged"] == [{"slug": "copy-2", "into": "copy-1"}]
+    assert rows[UPKEEP_SYSTEM_TENANT_ID]["merged_count"] == 1
+
+
+async def _upkeep_rows() -> dict[uuid.UUID, Any]:
+    async with get_sessionmaker()() as session:
+        rows = (
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.path == UPKEEP_PATH, AuditLog.operator_sub == SYSTEM_OPERATOR_SUB
+                )
+            )
+        ).all()
+    return {row.tenant_id: row.payload for row in rows}
 
 
 def test_report_lists_are_cut_but_counts_are_complete() -> None:

@@ -1503,7 +1503,8 @@ _FIREWALL_LOAD_OP = LinuxOp(
             "backend": "Optional; nft (default) or iptables.",
             "rollback_after_seconds": (
                 "60 to 1800. Leave time for your checks and for a person to approve "
-                "linux.firewall.confirm."
+                "linux.firewall.confirm. Only one timed change per host can wait for "
+                "its confirm at a time; a second load is refused until then."
             ),
         },
         "output_shape": (

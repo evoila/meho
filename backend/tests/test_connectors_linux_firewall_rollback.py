@@ -38,6 +38,7 @@ from meho_backplane.connectors.linux.ops_firewall_rollback import (
     bound_rollback_seconds,
     build_firewall_confirm_script,
     build_firewall_load_with_rollback_script,
+    build_restore_command,
     linux_firewall_confirm,
     parse_confirm_output,
     parse_load_with_rollback_output,
@@ -274,11 +275,22 @@ name="$(basename "$0")"
 case "$name $1" in
   "nft list") echo "table inet old {}"; exit "${NFT_LIST_RC:-0}" ;;
   "nft -c")
-    case "$3" in *new.rules) exit "${NFT_CHECK_NEW_RC:-0}" ;; esac
+    case "$3" in
+      *new.rules)
+        if [ -n "${DUE_ON_CHECK:-}" ]; then printf %s "$DUE_ON_CHECK" > "$(dirname "$3")/due"; fi
+        exit "${NFT_CHECK_NEW_RC:-0}" ;;
+    esac
     exit "${NFT_CHECK_SAVED_RC:-0}" ;;
-  "nft -f") exit "${NFT_LOAD_RC:-0}" ;;
+  "nft -f")
+    case "$2" in *new.rules) exit "${NFT_LOAD_RC:-0}" ;; esac
+    exit "${NFT_LOAD_SAVED_RC:-0}" ;;
+  "iptables-save "*) printf '*filter\\n:INPUT DROP [0:0]\\nCOMMIT\\n' ;;
+  "iptables-restore --test") cat > /dev/null ;;
+  "iptables-restore "*)
+    data="$(cat)"; printf '%s\\n' "$data" >> "$FAKE_LOG.loaded"
+    case "$data" in *"${IPT_FAIL_ON:-@none@}"*) exit 1 ;; esac ;;
   "systemd-run "*) exit "${SYSTEMD_RUN_RC:-0}" ;;
-  "systemctl is-active") exit "${TIMER_ACTIVE_RC:-0}" ;;
+  "systemctl is-active") exit "${SERVICE_ACTIVE_RC:-3}" ;;
   "systemctl stop") exit "${STOP_RC:-0}" ;;
 esac
 exit 0
@@ -320,16 +332,16 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Host:
     systemd_dir.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for tool in ("nft", "systemd-run", "systemctl"):
+    for tool in ("nft", "iptables-save", "iptables-restore", "systemd-run", "systemctl"):
         path = bin_dir / tool
         path.write_text(_FAKE_TOOL)
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return _Host(tmp_path, state_root, systemd_dir, bin_dir, tmp_path / "calls.log")
 
 
-def _load_script(seconds: int = 300) -> str:
+def _load_script(seconds: int = 300, rollback_id: str = _ROLLBACK_ID) -> str:
     return build_firewall_load_with_rollback_script(
-        _NEW_RULES, "nft", rollback_id=_ROLLBACK_ID, seconds=seconds
+        _NEW_RULES, "nft", rollback_id=rollback_id, seconds=seconds
     )
 
 
@@ -402,15 +414,34 @@ def test_timed_load_bad_new_rules_start_no_timer(host: _Host) -> None:
     assert result["applied"] is False
 
 
-def test_timed_load_failed_load_stops_the_timer(host: _Host) -> None:
+def test_timed_load_failed_load_restores_the_saved_rules_then_stops_the_timer(
+    host: _Host,
+) -> None:
     done = host.run(_load_script(), NFT_LOAD_RC="1")
     assert done.returncode == 4
-    assert f"systemctl stop meho-fw-rollback-{_ROLLBACK_ID}.timer" in host.calls()
+    calls = host.calls()
+    restore = next(i for i, c in enumerate(calls) if c.startswith("nft -f") and "saved" in c)
+    stop = calls.index(f"systemctl stop meho-fw-rollback-{_ROLLBACK_ID}.timer")
+    assert restore < stop
+    assert not (host.state_root / _ROLLBACK_ID).exists()
     result = parse_load_with_rollback_output(
         _proc(stdout=done.stdout, stderr=done.stderr, exit_status=4), "nft", _ROLLBACK_ID
     )
     assert result["applied"] is False
-    assert "timer was stopped" in result["error"]
+    assert "loaded the saved rules again" in result["error"]
+
+
+def test_timed_load_failed_load_and_failed_restore_keeps_the_timer(host: _Host) -> None:
+    done = host.run(_load_script(), NFT_LOAD_RC="1", NFT_LOAD_SAVED_RC="1")
+    assert done.returncode == 4
+    assert not any(c.startswith("systemctl stop") for c in host.calls())
+    state = host.state_root / _ROLLBACK_ID
+    assert (state / "saved.rules").exists()
+    assert (state / "due").exists()
+    with pytest.raises(LinuxWriteError, match="timer still runs"):
+        parse_load_with_rollback_output(
+            _proc(stdout=done.stdout, stderr=done.stderr, exit_status=4), "nft", _ROLLBACK_ID
+        )
 
 
 def test_timed_load_refuses_a_host_without_systemd(host: _Host) -> None:
@@ -431,6 +462,119 @@ def test_timed_load_iptables_saves_with_iptables_save(host: _Host) -> None:
     assert 'iptables-save > "$saved"' in script
     assert 'iptables-restore --test < "$saved"' in script
     assert "iptables-restore < " in script
+
+
+def test_timed_load_iptables_saved_copy_clears_a_table_the_new_rules_add(host: _Host) -> None:
+    new_rules = "*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n*raw\n-A PREROUTING -j DROP\nCOMMIT\n"
+    script = build_firewall_load_with_rollback_script(
+        new_rules, "iptables", rollback_id=_ROLLBACK_ID, seconds=60
+    )
+    done = host.run(script)
+    assert done.returncode == 0, done.stderr
+    saved = (host.state_root / _ROLLBACK_ID / "saved.rules").read_text()
+    assert saved.count("*filter") == 1
+    assert "*raw\n:PREROUTING ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n" in saved
+    loaded_log = Path(f"{host.log}.loaded")
+    loaded_log.unlink()
+    restored = host.run(build_restore_command("iptables", _ROLLBACK_ID))
+    assert restored.returncode == 0, restored.stderr
+    assert loaded_log.read_text() == saved
+    assert (host.state_root / _ROLLBACK_ID / "restored").exists()
+
+
+def test_timed_load_iptables_partial_load_is_undone_with_the_saved_rules(host: _Host) -> None:
+    # Legacy iptables commits table by table: here filter is in, then raw fails.
+    new_rules = "*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n*raw\n-A PREROUTING -j DROP\nCOMMIT\n"
+    script = build_firewall_load_with_rollback_script(
+        new_rules, "iptables", rollback_id=_ROLLBACK_ID, seconds=60
+    )
+    done = host.run(script, IPT_FAIL_ON="-j DROP")
+    assert done.returncode == 4
+    loaded = Path(f"{host.log}.loaded").read_text()
+    last_load = loaded.rsplit("*filter\n:INPUT DROP", 1)[1]
+    assert "-j DROP" not in last_load
+    assert "*raw\n:PREROUTING ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT" in last_load
+    assert f"systemctl stop meho-fw-rollback-{_ROLLBACK_ID}.timer" in host.calls()
+    result = parse_load_with_rollback_output(
+        _proc(stdout=done.stdout, stderr=done.stderr, exit_status=4), "iptables", _ROLLBACK_ID
+    )
+    assert "loaded the saved rules again" in result["error"]
+
+
+def test_timed_load_refuses_an_iptables_table_it_cannot_put_back() -> None:
+    with pytest.raises(LinuxWriteSafetyError, match="not one MEHO can put back"):
+        build_firewall_load_with_rollback_script(
+            "*broute\nCOMMIT\n", "iptables", rollback_id=_ROLLBACK_ID, seconds=60
+        )
+
+
+_OTHER_ID = "fedcba9876543210"
+
+
+def _parse_load(done: subprocess.CompletedProcess[str], rollback_id: str) -> dict[str, Any]:
+    return parse_load_with_rollback_output(
+        _proc(stdout=done.stdout, stderr=done.stderr, exit_status=done.returncode),
+        "nft",
+        rollback_id,
+    )
+
+
+def test_timed_load_refuses_while_another_change_waits(host: _Host) -> None:
+    assert host.run(_load_script()).returncode == 0
+    calls_before = len(host.calls())
+    second = host.run(_load_script(rollback_id=_OTHER_ID))
+    assert second.returncode == 4
+    assert host.calls()[calls_before:] == []
+    assert not (host.state_root / _OTHER_ID).exists()
+    assert (host.state_root / _ROLLBACK_ID / "saved.rules").exists()
+    with pytest.raises(LinuxWriteError, match="still waits"):
+        _parse_load(second, _OTHER_ID)
+
+
+def test_timed_load_works_again_after_the_first_change_is_confirmed(host: _Host) -> None:
+    assert host.run(_load_script()).returncode == 0
+    assert _confirm(host)["confirmed"] is True
+    second = host.run(_load_script(rollback_id=_OTHER_ID))
+    assert second.returncode == 0, second.stderr
+    assert _parse_load(second, _OTHER_ID)["rollback_id"] == _OTHER_ID
+
+
+def test_timed_load_refuses_while_the_restore_of_another_change_runs(host: _Host) -> None:
+    _prepare_state(host, seconds_left=-120)
+    second = host.run(_load_script(rollback_id=_OTHER_ID), SERVICE_ACTIVE_RC="0")
+    assert second.returncode == 4
+    with pytest.raises(LinuxWriteError, match="still waits"):
+        _parse_load(second, _OTHER_ID)
+    # Once that restore is done, a new load may start.
+    (host.state_root / _ROLLBACK_ID / "restored").write_text("")
+    assert host.run(_load_script(rollback_id=_OTHER_ID)).returncode == 0
+
+
+def _hold_lock(host: _Host) -> subprocess.Popen[bytes]:
+    host.state_root.mkdir(parents=True, exist_ok=True)
+    lock = host.state_root / ".lock"
+    holder = subprocess.Popen(["flock", str(lock), "sleep", "30"])
+    for _ in range(100):
+        probe = subprocess.run(["flock", "-n", str(lock), "true"], check=False)
+        if probe.returncode != 0:
+            return holder
+        subprocess.run(["sleep", "0.05"], check=True)
+    holder.kill()
+    raise AssertionError("the lock holder did not start")
+
+
+def test_timed_load_waits_for_the_host_lock(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rollback, "LOCK_WAIT_SECONDS", 1)
+    holder = _hold_lock(host)
+    try:
+        done = host.run(_load_script())
+    finally:
+        holder.kill()
+        holder.wait()
+    assert done.returncode == 4
+    assert not any(c.startswith(("nft", "systemd-run")) for c in host.calls())
+    with pytest.raises(LinuxWriteError, match="holds the lock"):
+        _parse_load(done, _ROLLBACK_ID)
 
 
 def _prepare_state(host: _Host, *, seconds_left: int, restored: bool = False) -> Path:
@@ -498,13 +642,77 @@ def test_confirm_refuses_an_unknown_rollback_id(host: _Host) -> None:
 def test_confirm_after_the_timer_ran_says_the_old_rules_are_back(host: _Host) -> None:
     _prepare_state(host, seconds_left=-5, restored=True)
     with pytest.raises(LinuxFirewallConfirmError, match="old rules are back"):
-        _confirm(host, TIMER_ACTIVE_RC="3")
+        _confirm(host)
 
 
 def test_confirm_after_the_timer_ran_without_restore_mark_is_unclear(host: _Host) -> None:
     _prepare_state(host, seconds_left=-5)
     with pytest.raises(LinuxFirewallConfirmError, match="cannot see"):
-        _confirm(host, TIMER_ACTIVE_RC="3")
+        _confirm(host)
+
+
+def test_confirm_while_the_restore_waits_to_run_says_it_is_too_late(host: _Host) -> None:
+    _prepare_state(host, seconds_left=-5)
+    with pytest.raises(LinuxFirewallConfirmError, match="old rules are coming back"):
+        _confirm(host, SERVICE_ACTIVE_RC="0")
+    assert not any(c.startswith("systemctl stop") for c in host.calls())
+
+
+def test_confirm_checks_the_time_again_after_the_rules_check(host: _Host) -> None:
+    state = _prepare_state(host, seconds_left=200)
+    almost_over = str(int(datetime.now().timestamp()) + 5)
+    with pytest.raises(LinuxFirewallConfirmError, match="old rules are coming back"):
+        _confirm(host, str(host.root / "nftables.conf"), DUE_ON_CHECK=almost_over)
+    assert not any(c.startswith("systemctl stop") for c in host.calls())
+    assert not (state / "keep").exists()
+    restored = host.run(build_restore_command("nft", _ROLLBACK_ID))
+    assert restored.returncode == 0, restored.stderr
+    assert (state / "restored").exists()
+
+
+def test_restore_after_confirm_does_nothing(host: _Host) -> None:
+    _prepare_state(host, seconds_left=200)
+    assert _confirm(host)["confirmed"] is True
+    done = host.run(build_restore_command("nft", _ROLLBACK_ID))
+    assert done.returncode == 0, done.stderr
+    assert not any(c.startswith("nft -f") for c in host.calls())
+
+
+def test_restore_skips_a_change_marked_keep(host: _Host) -> None:
+    state = _prepare_state(host, seconds_left=200)
+    (state / "keep").write_text("")
+    host.run(build_restore_command("nft", _ROLLBACK_ID))
+    assert not any(c.startswith("nft -f") for c in host.calls())
+    assert not (state / "restored").exists()
+
+
+def test_restore_waits_for_a_confirm_that_holds_the_lock(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rollback, "_RESTORE_LOCK_WAIT_SECONDS", 1)
+    _prepare_state(host, seconds_left=200)
+    holder = _hold_lock(host)
+    try:
+        assert "flock -w 1 9" in build_restore_command("nft", _ROLLBACK_ID)
+        started = datetime.now()
+        host.run(build_restore_command("nft", _ROLLBACK_ID))
+        assert (datetime.now() - started).total_seconds() >= 0.9
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_confirm_waits_for_the_host_lock(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rollback, "LOCK_WAIT_SECONDS", 1)
+    _prepare_state(host, seconds_left=200)
+    holder = _hold_lock(host)
+    try:
+        with pytest.raises(LinuxFirewallConfirmError, match="holds the lock"):
+            _confirm(host)
+    finally:
+        holder.kill()
+        holder.wait()
+    assert not any(c.startswith("systemctl stop") for c in host.calls())
 
 
 def test_confirm_install_check_failure_keeps_the_timer(host: _Host) -> None:
@@ -515,9 +723,10 @@ def test_confirm_install_check_failure_keeps_the_timer(host: _Host) -> None:
 
 
 def test_confirm_stop_failure_is_an_error(host: _Host) -> None:
-    _prepare_state(host, seconds_left=200)
+    state = _prepare_state(host, seconds_left=200)
     with pytest.raises(LinuxFirewallConfirmError, match="could not stop the timer"):
         _confirm(host, STOP_RC="1")
+    assert not (state / "keep").exists()
 
 
 def test_confirm_install_failure_reports_the_timer_is_stopped(host: _Host) -> None:

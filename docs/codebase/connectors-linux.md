@@ -359,31 +359,43 @@ a console login can fix it. So `linux.firewall.load` takes an optional
 before. With it, one root script (`ops_firewall_rollback.py`) runs these
 steps in this order:
 
-1. Save the live rules to `/var/lib/meho/firewall-rollback/<rollback_id>/`
+1. Take the host lock (`flock` on `/var/lib/meho/firewall-rollback/.lock`).
+   Refuse when another timed change still waits for its confirm or its
+   timer. Only one timed change can wait at a time.
+2. Save the live rules to `/var/lib/meho/firewall-rollback/<rollback_id>/`
    (a root-only folder) and check the syntax of the saved file. The nft
-   copy starts with `flush ruleset`, so loading it replaces the rules.
-2. Check the syntax of the new rules.
-3. Start a timer with `systemd-run --on-active=<seconds>`. When it ends, it
-   loads the saved rules and writes a `restored` mark.
-4. Load the new rules.
+   copy starts with `flush ruleset`, so loading it replaces the rules. For
+   iptables, each table that the new rules use but the live rules do not
+   goes into the saved copy as an empty table. So loading the saved copy
+   also clears a table that the new rules added.
+3. Check the syntax of the new rules.
+4. Start a timer with `systemd-run --on-active=<seconds>`. When it ends, it
+   takes the lock, loads the saved rules and writes a `restored` mark.
+5. Load the new rules.
 
 If the save or the timer fails, the script stops before any change and the
-call is an error. A host without systemd is refused. If the load itself
-fails, the script stops the timer. The answer adds `rollback_id` and
-`rollback_due_at` (UTC, from the host clock).
+call is an error. A host without systemd or `flock` is refused. If the load
+itself fails (iptables can stop after some tables are in), the script loads
+the saved rules at once. Only when that works does it stop the timer. If it
+does not work, the timer stays and tries again when it ends. The answer
+adds `rollback_id` and `rollback_due_at` (UTC, from the host clock).
 
 `linux.firewall.confirm` keeps the new rules:
 
 - It opens a **new** SSH connection, not one from the pool. A pooled
   connection stays open under the new rules, so it proves nothing.
+- It holds the same lock as the load and the timer, so it never runs at
+  the same time as the restore.
 - It refuses an unknown `rollback_id`, a timer that already ran, and a
-  timer that ends in less than 20 seconds (stopping it then races with
-  the timer). The error says whether the old rules are back or coming
-  back.
-- It stops the timer. With `install_path` it first checks the new rules,
-  then writes them to that file, so they survive a reboot. The path must
-  be inside the write roots of `linux.file.write`. An existing file keeps
-  its mode.
+  timer that ends in less than 20 seconds. It checks the time left again
+  right before it stops the timer. The error says whether the old rules
+  are back or coming back.
+- It writes a `keep` mark, then stops the timer. The restore does nothing
+  when it finds `keep`, so a restore that started just before the stop
+  cannot undo the confirm. With `install_path` it first checks the new
+  rules, then writes them to that file, so they survive a reboot. The path
+  must be inside the write roots of `linux.file.write`. An existing file
+  keeps its mode.
 
 `linux.firewall.confirm` is `caution` with `requires_approval=true`. The
 operation contract check asks every operation that is not `safe` to wait

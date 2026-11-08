@@ -7,26 +7,34 @@ A firewall rule with good syntax can still cut the SSH path to the host.
 Then only a console login can fix it. So ``linux.firewall.load`` can start a
 timer on the host before it loads new rules (``rollback_after_seconds``):
 
-1. save the live rules to a root-only folder, and check the saved file;
-2. check the new rules;
-3. start a ``systemd-run`` timer that loads the saved rules again;
-4. load the new rules.
+1. take the host lock and refuse when another timed change still waits;
+2. save the live rules to a root-only folder, and check the saved file;
+3. check the new rules;
+4. start a ``systemd-run`` timer that loads the saved rules again;
+5. load the new rules.
 
 If the save or the timer fails, the script stops before any change. A host
-without systemd is refused.
+without systemd or ``flock`` is refused. If the new rules do not load, the
+script loads the saved rules at once; only when that works does it stop the
+timer.
+
+One lock file (``.lock`` in the state folder, held with ``flock``) keeps the
+load, the confirm and the timer's restore apart, so they never run at the
+same time.
 
 ``linux.firewall.confirm`` stops the timer, so the new rules stay. It opens a
 new SSH connection for this: a pooled connection stays open under the new
 rules and proves nothing. With ``install_path`` it also writes the new rules
 to the file the host loads at boot. It refuses when the timer ends in less
-than :data:`CONFIRM_MIN_SECONDS_LEFT` seconds, because stopping it then races
-with the timer.
+than :data:`CONFIRM_MIN_SECONDS_LEFT` seconds. Before it stops the timer it
+writes a ``keep`` mark; the restore checks for that mark under the lock, so a
+restore that the timer started just before the stop does nothing.
 
 The host keeps the state of one change in
 ``/var/lib/meho/firewall-rollback/<rollback_id>/``: ``saved.rules`` (the old
 rules), ``new.rules``, ``backend``, ``due`` (the end of the timer, in Unix
-seconds of the host clock) and ``restored`` (written by the timer after it put
-the old rules back).
+seconds of the host clock), ``restored`` (written by the timer after it put
+the old rules back) and ``keep`` (written by the confirm).
 """
 
 from __future__ import annotations
@@ -63,12 +71,14 @@ if TYPE_CHECKING:
 __all__ = [
     "CONFIRM_MIN_SECONDS_LEFT",
     "FIREWALL_ROLLBACK_OPS",
+    "LOCK_WAIT_SECONDS",
     "ROLLBACK_MAX_SECONDS",
     "ROLLBACK_MIN_SECONDS",
     "LinuxFirewallConfirmError",
     "bound_rollback_seconds",
     "build_firewall_confirm_script",
     "build_firewall_load_with_rollback_script",
+    "build_restore_command",
     "linux_firewall_confirm",
     "load_firewall_with_rollback",
     "validate_rollback_id",
@@ -83,6 +93,26 @@ CONFIRM_MIN_SECONDS_LEFT: int = 20
 
 #: Root-only folder on the host that holds the state of each timed change.
 ROLLBACK_STATE_ROOT: str = "/var/lib/meho/firewall-rollback"
+
+#: How long the load and the confirm wait for the host lock.
+LOCK_WAIT_SECONDS: int = 10
+
+#: How long the timer's restore waits for the host lock before it runs anyway.
+_RESTORE_LOCK_WAIT_SECONDS: int = 300
+
+#: A change counts as pending until this many seconds after its timer ends,
+#: so a timer that is about to start its restore still blocks a new load.
+_PENDING_GRACE_SECONDS: int = 30
+
+#: The built-in chains of each iptables table. A table that the new rules add
+#: goes into the saved copy as an empty table, so the restore clears it.
+_IPTABLES_BUILTIN_CHAINS: dict[str, tuple[str, ...]] = {
+    "filter": ("INPUT", "FORWARD", "OUTPUT"),
+    "nat": ("PREROUTING", "INPUT", "OUTPUT", "POSTROUTING"),
+    "mangle": ("PREROUTING", "INPUT", "FORWARD", "OUTPUT", "POSTROUTING"),
+    "raw": ("PREROUTING", "OUTPUT"),
+    "security": ("INPUT", "FORWARD", "OUTPUT"),
+}
 
 _UNIT_PREFIX: str = "meho-fw-rollback-"
 _ROLLBACK_ID_PATTERN: str = r"^[0-9a-f]{16}$"
@@ -129,6 +159,47 @@ def _state_dir(rollback_id: str) -> str:
     return f"{ROLLBACK_STATE_ROOT}/{rollback_id}"
 
 
+def _lock_file() -> str:
+    return f"{ROLLBACK_STATE_ROOT}/.lock"
+
+
+def _iptables_tables(ruleset: str) -> list[str]:
+    """Return the tables that *ruleset* names (``*filter`` lines), in order."""
+    tables: list[str] = []
+    for line in ruleset.splitlines():
+        line = line.strip()
+        if line.startswith("*"):
+            name = line[1:].strip()
+            if name not in _IPTABLES_BUILTIN_CHAINS:
+                raise LinuxWriteSafetyError(
+                    f"iptables table {name!r} is not one MEHO can put back with the timer"
+                )
+            if name not in tables:
+                tables.append(name)
+    return tables
+
+
+def _empty_iptables_table(table: str) -> str:
+    chains = "".join(f":{chain} ACCEPT [0:0]\n" for chain in _IPTABLES_BUILTIN_CHAINS[table])
+    return f"*{table}\n{chains}COMMIT\n"
+
+
+def build_restore_command(backend: str, rollback_id: str) -> str:
+    """Render the shell command the timer runs to load the saved rules again.
+
+    It waits for the host lock, so it never runs while a load or a confirm
+    does. It does nothing when the confirm wrote ``keep`` or removed the
+    state folder.
+    """
+    _, _, load_cmd = _backend_commands(backend)
+    state = _state_dir(rollback_id)
+    return (
+        f"exec 9>>{_lock_file()}; flock -w {_RESTORE_LOCK_WAIT_SECONDS} 9; "
+        f"if [ -f {state}/saved.rules ] && [ ! -e {state}/keep ]; then "
+        f"{load_cmd} {state}/saved.rules && touch {state}/restored; fi"
+    )
+
+
 def _backend_commands(backend: str) -> tuple[str, str, str]:
     """Return the (save, check, load) shell parts for *backend*.
 
@@ -156,28 +227,51 @@ def build_firewall_load_with_rollback_script(
     """Render the root script: save, check, start the timer, then load.
 
     Every value is fixed by MEHO (*rollback_id* is hex, *seconds* an int,
-    *backend* a member of the allow-list) or base64-carried (*ruleset*).
-    Any failure before the load removes the state folder and stops the
-    script; a failure of the load itself also stops the timer.
+    *backend* a member of the allow-list, iptables table names from
+    :data:`_IPTABLES_BUILTIN_CHAINS`) or base64-carried (*ruleset*). Any
+    failure before the load removes the state folder and stops the script.
+    When the load fails, the script loads the saved rules; it stops the
+    timer only when that works.
     """
     save_cmd, check_cmd, load_cmd = _backend_commands(backend)
+    new_tables = _iptables_tables(ruleset) if backend == "iptables" else []
     state = _state_dir(rollback_id)
     unit = f"{_UNIT_PREFIX}{rollback_id}"
-    restore = f"{load_cmd} {state}/saved.rules && touch {state}/restored"
+    restore = build_restore_command(backend, rollback_id)
+    err = _LOAD_ERR_PREFIX
     lines = [
         "set -u",
         "umask 077",
+        f"root={shlex.quote(ROLLBACK_STATE_ROOT)}",
         f"dir={shlex.quote(state)}",
         f"unit={shlex.quote(unit)}",
         'saved="$dir/saved.rules"',
         'new="$dir/new.rules"',
-        f'fail() {{ rm -rf -- "$dir"; echo "{_LOAD_ERR_PREFIX}$1===" >&2; exit 4; }}',
+        f'fail() {{ rm -rf -- "$dir"; echo "{err}$1===" >&2; exit 4; }}',
         "if [ ! -d /run/systemd/system ] || ! command -v systemd-run >/dev/null 2>&1; then",
         f'  echo "{_LOAD_NO_SYSTEMD}" >&2; exit 5',
         "fi",
-        f'mkdir -p -m 0700 {shlex.quote(ROLLBACK_STATE_ROOT)} || {{ echo "{_LOAD_ERR_PREFIX}mkdir===" >&2; exit 4; }}',  # noqa: E501
-        f'mkdir -m 0700 "$dir" || {{ echo "{_LOAD_ERR_PREFIX}mkdir===" >&2; exit 4; }}',
+        f'command -v flock >/dev/null 2>&1 || {{ echo "{err}no_flock===" >&2; exit 4; }}',
+        f'mkdir -p -m 0700 "$root" || {{ echo "{err}mkdir===" >&2; exit 4; }}',
+        f'exec 9>>"$root/.lock" || {{ echo "{err}busy===" >&2; exit 4; }}',
+        f'flock -w {LOCK_WAIT_SECONDS} 9 || {{ echo "{err}busy===" >&2; exit 4; }}',
+        "now=$(date +%s)",
+        'for d in "$root"/*/; do',
+        '  [ -f "${d}due" ] && [ ! -f "${d}restored" ] || continue',
+        f'  if [ "$now" -le $(( $(cat "${{d}}due") + {_PENDING_GRACE_SECONDS} )) ] || '
+        f'systemctl is-active --quiet "{_UNIT_PREFIX}$(basename "$d").service"; then',
+        f'    echo "{err}pending===" >&2; exit 4',
+        "  fi",
+        "done",
+        f'mkdir -m 0700 "$dir" || {{ echo "{err}mkdir===" >&2; exit 4; }}',
         f"{save_cmd} || fail save",
+    ]
+    for table in new_tables:
+        lines.append(
+            f'grep -qx {shlex.quote("*" + table)} "$saved" || '
+            f'printf %s {shlex.quote(_empty_iptables_table(table))} >> "$saved" || fail save'
+        )
+    lines += [
         f'{check_cmd} "$saved" || fail save_check',
         f'printf %s {shlex.quote(_b64(ruleset))} | base64 -d > "$new" || fail decode',
         f'if ! {check_cmd} "$new"; then rm -rf -- "$dir"; echo "{_LOAD_VALIDATE_FAILED}" >&2; exit 3; fi',  # noqa: E501
@@ -188,9 +282,12 @@ def build_firewall_load_with_rollback_script(
         f"--timer-property=AccuracySec=1s --collect -- /bin/sh -c {shlex.quote(restore)} "
         "|| fail timer",
         f'if ! {load_cmd} "$new"; then',
-        '  systemctl stop "$unit.timer" >/dev/null 2>&1',
-        '  rm -rf -- "$dir"',
-        f'  echo "{_LOAD_ERR_PREFIX}apply===" >&2; exit 4',
+        f'  if {load_cmd} "$saved"; then',
+        '    systemctl stop "$unit.timer" >/dev/null 2>&1',
+        '    rm -rf -- "$dir"',
+        f'    echo "{err}apply===" >&2; exit 4',
+        "  fi",
+        f'  echo "{err}apply_restore_failed===" >&2; exit 4',
         "fi",
         f'echo "{_LOAD_DUE_PREFIX}$due"',
         f'echo "{_LOAD_OK}"',
@@ -216,6 +313,16 @@ _STAGE_TEXT: dict[str, str] = {
     "decode": "could not write the new rules to the host; nothing was changed",
     "state": "could not write the timer state; nothing was changed",
     "timer": "could not start the timer with systemd-run; nothing was changed",
+    "no_flock": "the host has no flock tool, which the timer needs; nothing was changed",
+    "busy": (
+        "another firewall step on this host holds the lock; nothing was changed. Try again "
+        "in a moment."
+    ),
+    "pending": (
+        "another timed firewall change on this host still waits for linux.firewall.confirm "
+        "or for its timer. Confirm it, or wait until its timer has put the old rules back, "
+        "then load again; nothing was changed"
+    ),
 }
 
 
@@ -261,8 +368,17 @@ def parse_load_with_rollback_output(proc: Any, backend: str, rollback_id: str) -
             "applied": False,
             "backend": backend,
             "validated": True,
-            "error": "the new rules did not load; the timer was stopped and the old rules stay",
+            "error": (
+                "the new rules did not load; MEHO loaded the saved rules again and stopped "
+                "the timer"
+            ),
         }
+    if stage == "apply_restore_failed":
+        raise LinuxWriteError(
+            "the new rules did not load, and loading the saved rules again also failed. The "
+            f"timer still runs and tries once more when it ends (rollback_id {rollback_id}). "
+            "Check the live rules with linux.firewall.show."
+        )
     raise LinuxWriteError(
         "the firewall load did not finish, and MEHO cannot tell how far it got. If it "
         f"started the timer, the old rules come back within {ROLLBACK_MAX_SECONDS} seconds. "
@@ -298,27 +414,35 @@ async def load_firewall_with_rollback(
 def build_firewall_confirm_script(rollback_id: str, install_path: str | None) -> str:
     """Render the root script that stops the timer and maybe installs the rules.
 
-    Order: refuse an unknown id, a timer that already ran, or a timer that
-    ends in less than :data:`CONFIRM_MIN_SECONDS_LEFT` seconds; check the new
-    rules when they are to be installed; stop the timer; install. Each step
+    All steps run under the host lock, so the timer's restore cannot run
+    at the same time. Order: refuse an unknown id, a timer that already ran,
+    or a timer that ends in less than :data:`CONFIRM_MIN_SECONDS_LEFT`
+    seconds; check the new rules when they are to be installed; check the
+    time left again; write ``keep``; stop the timer; install. Each step
     prints one ``MEHO_FWC=<state>`` line.
     """
     state = _state_dir(rollback_id)
     unit = f"{_UNIT_PREFIX}{rollback_id}"
     p = _CONFIRM_PREFIX
+    too_late = (
+        f'left=$(( $(cat "$dir/due") - $(date +%s) )); '
+        f'if [ "$left" -lt {CONFIRM_MIN_SECONDS_LEFT} ]; then echo "{p}too_late:$left"; exit 0; fi'
+    )
     lines = [
         "set -u",
         "umask 077",
         f"dir={shlex.quote(state)}",
         f"unit={shlex.quote(unit)}",
         f'if [ ! -f "$dir/due" ]; then echo "{p}unknown"; exit 0; fi',
-        'if ! systemctl is-active --quiet "$unit.timer"; then',
-        f'  if [ -f "$dir/restored" ]; then echo "{p}expired_restored"; rm -rf -- "$dir";',
-        f'  else echo "{p}expired_unclear"; fi',
-        "  exit 0",
+        f'exec 9>>{shlex.quote(_lock_file())} || {{ echo "{p}busy"; exit 4; }}',
+        f'flock -w {LOCK_WAIT_SECONDS} 9 || {{ echo "{p}busy"; exit 4; }}',
+        f'if [ ! -f "$dir/due" ]; then echo "{p}unknown"; exit 0; fi',
+        f'if [ -f "$dir/restored" ]; then echo "{p}expired_restored"; rm -rf -- "$dir"; exit 0; fi',
+        'if [ $(( $(cat "$dir/due") - $(date +%s) )) -lt 0 ] && '
+        '! systemctl is-active --quiet "$unit.service"; then',
+        f'  echo "{p}expired_unclear"; exit 0',
         "fi",
-        'left=$(( $(cat "$dir/due") - $(date +%s) ))',
-        f'if [ "$left" -lt {CONFIRM_MIN_SECONDS_LEFT} ]; then echo "{p}too_late:$left"; exit 0; fi',
+        too_late,
     ]
     if install_path is not None:
         lines += [
@@ -328,9 +452,13 @@ def build_firewall_confirm_script(rollback_id: str, install_path: str | None) ->
             'else nft -c -f "$1"; fi; }',
             f'if [ -d "$path" ] || ! check "$dir/new.rules"; then echo "{p}install_check_failed"; '
             "exit 0; fi",
+            too_late,
         ]
     lines += [
-        f'systemctl stop "$unit.timer" || {{ echo "{p}stop_failed"; exit 4; }}',
+        f'touch "$dir/keep" || {{ echo "{p}stop_failed"; exit 4; }}',
+        'if ! systemctl stop "$unit.timer"; then',
+        f'  rm -f -- "$dir/keep"; echo "{p}stop_failed"; exit 4',
+        "fi",
         f'echo "{p}stopped"',
     ]
     if install_path is not None:
@@ -412,6 +540,11 @@ def parse_confirm_output(proc: Any, rollback_id: str, install_path: str | None) 
         raise LinuxFirewallConfirmError(
             f"the timer ends in less than {CONFIRM_MIN_SECONDS_LEFT} seconds, so MEHO did "
             "not stop it. The old rules are coming back."
+        )
+    if first == "busy":
+        raise LinuxFirewallConfirmError(
+            "another firewall step on this host holds the lock, so MEHO did not stop the "
+            "timer. Try again before the timer ends, or the old rules come back."
         )
     if first == "install_check_failed":
         raise LinuxFirewallConfirmError(

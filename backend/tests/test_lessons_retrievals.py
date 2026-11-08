@@ -171,6 +171,34 @@ async def test_the_own_entry_wins_over_a_shared_one_with_the_same_slug() -> None
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("in_session")
+async def test_a_shared_only_search_records_the_shared_entry_not_the_own_one() -> None:
+    own, _ = await KbService().create_entry(TENANT, "rule", "own rule")
+    shared, _ = await KbService().create_entry(OWNER, "rule", "shared rule", {"shared": True})
+    hit = _kb_hit("rule").model_copy(update={"tenant_id": OWNER, "shared": True})
+    with patch.object(KbService, "search_entries", AsyncMock(return_value=[hit])):
+        await _search_knowledge_handler(_operator(), {"query": "rule", "scope": "shared"})
+    (row,) = await _rows()
+    assert row.entry_id == shared.id
+    assert row.entry_id != own.id
+    assert row.entry_tenant_id == OWNER
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("in_session")
+async def test_a_search_with_both_entries_records_each_one() -> None:
+    own, _ = await KbService().create_entry(TENANT, "rule", "own rule")
+    shared, _ = await KbService().create_entry(OWNER, "rule", "shared rule", {"shared": True})
+    hits = [
+        _kb_hit("rule").model_copy(update={"tenant_id": TENANT}),
+        _kb_hit("rule").model_copy(update={"tenant_id": OWNER, "shared": True}),
+    ]
+    with patch.object(KbService, "search_entries", AsyncMock(return_value=hits)):
+        await _search_knowledge_handler(_operator(), {"query": "rule"})
+    assert {row.entry_id for row in await _rows()} == {own.id, shared.id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("in_session")
 async def test_a_failed_record_does_not_fail_the_search() -> None:
     await KbService().create_entry(TENANT, "fresh", "fresh body")
     with (

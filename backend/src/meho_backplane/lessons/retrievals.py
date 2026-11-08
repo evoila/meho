@@ -33,7 +33,7 @@ from __future__ import annotations
 import bisect
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -98,22 +98,42 @@ def aware(moment: datetime) -> datetime:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
-async def record_kb_retrievals(tenant_id: uuid.UUID, slugs: Sequence[str]) -> None:
-    """Record the knowledge entries *slugs* that a search of *tenant_id* returned.
+async def record_kb_retrievals(
+    tenant_id: uuid.UUID, entries: Sequence[tuple[str, uuid.UUID | None]]
+) -> None:
+    """Record the knowledge entries that a search of *tenant_id* returned.
 
-    A slug resolves like a read: the tenant's own entry first, else a
-    shared entry of another tenant.
+    Each entry is a ``(slug, owner tenant)`` pair. The owner names the
+    exact entry the search returned, because the caller's own entry and
+    a shared entry of another tenant can have the same slug. With no
+    owner the slug resolves like a read: the tenant's own entry first,
+    else a shared entry of another tenant.
     """
-    if not slugs:
+    if not entries:
         return
     query = select(
         Document.id, Document.tenant_id, Document.source_id, Document.doc_metadata
     ).where(
         Document.source == KB_SOURCE,
-        Document.source_id.in_(set(slugs)),
+        Document.source_id.in_({slug for slug, _ in entries}),
         visible_to(tenant_id),
     )
-    await _record(tenant_id, KB_SOURCE, query, own_first=True)
+
+    def choose(rows: Sequence[Any]) -> list[Any]:
+        by_key = {(row.source_id, row.tenant_id): row for row in rows}
+        chosen: dict[uuid.UUID, Any] = {}
+        for slug, owner in entries:
+            if owner is not None:
+                row = by_key.get((slug, owner))
+            else:
+                row = by_key.get((slug, tenant_id)) or next(
+                    (r for r in rows if r.source_id == slug), None
+                )
+            if row is not None:
+                chosen[row.id] = row
+        return list(chosen.values())
+
+    await _record(tenant_id, KB_SOURCE, query, choose)
 
 
 async def record_memory_retrievals(tenant_id: uuid.UUID, entry_ids: Sequence[uuid.UUID]) -> None:
@@ -127,11 +147,16 @@ async def record_memory_retrievals(tenant_id: uuid.UUID, entry_ids: Sequence[uui
         Document.id.in_(set(entry_ids)),
         Document.tenant_id == tenant_id,
     )
-    await _record(tenant_id, MEMORY_SOURCE, query, own_first=False)
+    await _record(tenant_id, MEMORY_SOURCE, query, list)
 
 
-async def _record(tenant_id: uuid.UUID, store: str, query: Any, *, own_first: bool) -> None:
-    """Insert one row per entry *query* finds; log and swallow any error."""
+async def _record(
+    tenant_id: uuid.UUID,
+    store: str,
+    query: Any,
+    choose: Callable[[Sequence[Any]], list[Any]],
+) -> None:
+    """Insert one row per entry that *choose* picks from *query*; log and swallow any error."""
     session_id = resolve_agent_session_id()
     if session_id is None:
         return
@@ -139,12 +164,7 @@ async def _record(tenant_id: uuid.UUID, store: str, query: Any, *, own_first: bo
         now = datetime.now(UTC)
         async with get_sessionmaker()() as session:
             rows = (await session.execute(query)).all()
-            chosen: dict[str, Any] = {}
-            for row in rows:
-                held = chosen.get(row.source_id)
-                if held is None or (own_first and row.tenant_id == tenant_id):
-                    chosen[row.source_id] = row
-            for row in chosen.values():
+            for row in choose(rows):
                 session.add(_retrieval_row(tenant_id, store, session_id, row, now))
             await session.commit()
     except Exception as exc:

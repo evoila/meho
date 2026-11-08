@@ -190,7 +190,7 @@ async def _search_knowledge_handler(
     slug = arguments.get("slug")
     if slug is not None:
         entry = await read_kb_entry(operator, slug)
-        await record_kb_retrievals(operator.tenant_id, [slug])
+        await record_kb_retrievals(operator.tenant_id, [(slug, None)])
         return {"entry": entry}
     query = arguments.get("query")
     if query is None:
@@ -214,7 +214,7 @@ async def _search_knowledge_handler(
         get_settings().result_complete_response_wire_max_bytes,
     )
     delivered = hits[: len(response["hits"])]
-    await record_kb_retrievals(operator.tenant_id, [hit.slug for hit in delivered])
+    await record_kb_retrievals(operator.tenant_id, [(hit.slug, hit.tenant_id) for hit in delivered])
     return response
 
 

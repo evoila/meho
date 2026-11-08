@@ -72,7 +72,11 @@ search, or a read by `slug`) or `search_memory` gave to a session
 (`meho_backplane.lessons.retrievals`). It keeps the reading tenant, the
 store (`kb` or `memory`), the entry id and its owner tenant, the
 session id, the time, and the entry's header `status` and whether it had
-expired at that moment. A call without a session id is not recorded.
+expired at that moment. A search records the exact entry it returned,
+by slug and owner tenant, so a shared entry is not mixed up with the
+caller's own entry of the same slug. A read by `slug` records the entry
+the read returned: the caller's own entry first, else a shared one.
+A call without a session id is not recorded.
 Recording never fails the search. The entry id has no foreign key, so a
 row stays when its entry is deleted. The upkeep job deletes rows older
 than 180 days.

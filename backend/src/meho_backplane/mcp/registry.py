@@ -435,6 +435,14 @@ class ToolDefinition(BaseModel):
     people are the tenant's reviewers. ``False`` by default.
     MEHO-internal: dropped from the wire shape like the RBAC fields.
 
+    ``caller_check`` (#5770) is an optional check of who calls. The
+    dispatcher runs it after the role, capability, surface and add-on gates
+    and before the input check, so a caller the tool always refuses gets
+    that refusal on the first try, not an input error. It raises
+    :class:`~meho_backplane.mcp.server.McpInvalidParamsError` to refuse.
+    ``None`` by default. MEHO-internal: dropped from the wire shape like the
+    RBAC fields.
+
     ``annotations`` (#4202) are the MCP tool hints, see
     :class:`ToolAnnotations`. A tool that only reads passes
     :data:`READ_ONLY`. ``meta`` is the MCP ``_meta`` object of the tool, for
@@ -457,6 +465,7 @@ class ToolDefinition(BaseModel):
     required_addon_family: str | None = None
     broadcast_omit_args: frozenset[str] = frozenset()
     approver_may_call: bool = False
+    caller_check: Callable[[Operator], None] | None = None
     annotations: ToolAnnotations | None = None
     meta: dict[str, Any] | None = None
 

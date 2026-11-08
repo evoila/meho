@@ -437,6 +437,9 @@ async def _session_instructions(operator: Operator) -> str | None:
     :func:`_session_can_announce`). A ``read_only`` session cannot call
     the broadcast tools, so its instructions do not name them.
 
+    #5770: a session that is not an agent gets the reader form of that band
+    (read the feed, do not post), because MEHO refuses its announcements.
+
     #5729: the caller's newest Memory notes follow the preamble
     (:func:`meho_backplane.recall.memory_band`).
     """
@@ -444,6 +447,7 @@ async def _session_instructions(operator: Operator) -> str | None:
     # → conventions.preamble → db → ... → mcp.server). The cost of one
     # function-local import per ``initialize`` call is negligible (the
     # module is already loaded by the time any handshake arrives).
+    from meho_backplane.auth.agent_admission import is_agent_caller
     from meho_backplane.conventions.preamble import assemble_preamble_detailed
     from meho_backplane.conventions.schemas import (
         DEFAULT_MAX_PREAMBLE_TOKENS,
@@ -461,6 +465,7 @@ async def _session_instructions(operator: Operator) -> str | None:
         operator.sub,
         capabilities=operator.capabilities,
         include_broadcast=_session_can_announce(operator),
+        broadcast_can_post=is_agent_caller(operator),
     )
     if preamble.dropped_slugs:
         # Loud, not silent -- the dropped-slug list is part of the

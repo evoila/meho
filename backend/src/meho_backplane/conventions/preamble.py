@@ -93,6 +93,7 @@ __all__ = [
     "BROADCAST_BLOCK_END",
     "BROADCAST_BLOCK_START",
     "BROADCAST_DISCIPLINE_BAND",
+    "BROADCAST_READER_BAND",
     "GUARD_PREFIX",
     "PreambleAssembly",
     "PreambleResult",
@@ -153,6 +154,34 @@ BROADCAST_DISCIPLINE_BAND: Final[str] = "\n".join(
         "not block work on a missing announcement. Announce meaningful "
         "transitions rather than looping -- announces are rate-limited "
         "per principal.",
+        BROADCAST_BLOCK_END,
+    ],
+)
+
+
+#: The broadcast band for a session that cannot post (#5770): a person's
+#: login, or any login outside a hosted agent run that is not an agent.
+#: People read the feed; only agents post. So this band keeps the "read the
+#: feed first" step of :data:`BROADCAST_DISCIPLINE_BAND` and tells the
+#: session to skip ``meho_broadcast_announce``, which always refuses it.
+BROADCAST_READER_BAND: Final[str] = "\n".join(
+    [
+        BROADCAST_BLOCK_START,
+        "## Broadcast coordination discipline",
+        "",
+        "This tenant shares a live feed where agents announce their work, "
+        "so people and agents avoid crossfire. People read the feed; only "
+        "agents post.",
+        "",
+        "Before starting work on a target, call `meho_broadcast_recent` "
+        "(optionally with `filter.target`) to check for conflicting "
+        "in-flight activity; if an agent is already working the target, "
+        "surface the conflict before proceeding. `meho_broadcast_watch` "
+        "long-polls the same feed for live tailing.",
+        "",
+        "Your login is not an agent, so it cannot post announcements: skip "
+        "`meho_broadcast_announce`. Your operations are already recorded in "
+        "the audit log.",
         BROADCAST_BLOCK_END,
     ],
 )
@@ -304,6 +333,7 @@ async def assemble_preamble(
     max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
     conventions_only: bool = False,
     include_broadcast: bool = True,
+    broadcast_can_post: bool = True,
 ) -> PreambleResult:
     """Assemble the session preamble for *tenant_id* + *operator_sub* up to *max_tokens*.
 
@@ -359,6 +389,14 @@ async def assemble_preamble(
     ``read_only`` session), so the text does not name tools the session
     cannot call. The default ``True`` keeps every other caller unchanged.
 
+    #5770 added the optional ``broadcast_can_post`` keyword. When ``False``
+    the broadcast band is :data:`BROADCAST_READER_BAND` instead of
+    :data:`BROADCAST_DISCIPLINE_BAND`: it keeps the "read the feed first"
+    step and drops the "announce" steps. The MCP ``initialize`` path passes
+    ``False`` for a session that is not an agent, because MEHO refuses an
+    announcement from it. It has no effect when ``include_broadcast`` is
+    ``False``.
+
     Delegates to :func:`assemble_preamble_detailed` and discards the
     verbose fields -- the MCP read path only needs ``text`` and
     ``dropped_slugs``. The G0.14-T8 (#1149) post-write inclusion
@@ -373,6 +411,7 @@ async def assemble_preamble(
         max_tokens=max_tokens,
         conventions_only=conventions_only,
         include_broadcast=include_broadcast,
+        broadcast_can_post=broadcast_can_post,
     )
     return PreambleResult(detailed.text, detailed.dropped_slugs)
 
@@ -386,6 +425,7 @@ async def assemble_preamble_detailed(
     session: AsyncSession | None = None,
     conventions_only: bool = False,
     include_broadcast: bool = True,
+    broadcast_can_post: bool = True,
 ) -> PreambleAssembly:
     """Assemble the preamble (verbose pack record + runbook priming band).
 
@@ -422,8 +462,8 @@ async def assemble_preamble_detailed(
     shrink the priming surface. Treating them as a single shared
     budget would force a tradeoff that neither caller wants.
 
-    For ``conventions_only`` (#3759) and ``include_broadcast`` (#4113)
-    see :func:`assemble_preamble`.
+    For ``conventions_only`` (#3759), ``include_broadcast`` (#4113) and
+    ``broadcast_can_post`` (#5770) see :func:`assemble_preamble`.
     """
     conventions = await _load_conventions(session, tenant_id)
     # An empty list renders as ``text=""`` with empty receipt fields, so a
@@ -461,11 +501,9 @@ async def assemble_preamble_detailed(
     if capabilities is not None:
         catalogue = await assemble_doc_catalogue(capabilities, tenant_id)
         catalogue_text = catalogue.text
-
+    band = _broadcast_band(include_broadcast=include_broadcast, can_post=broadcast_can_post)
     return PreambleAssembly(
-        text=_combine_bands(
-            rendered.text, priming.text, catalogue_text, include_broadcast=include_broadcast
-        ),
+        text=_combine_bands(rendered.text, priming.text, catalogue_text, broadcast_band=band),
         dropped_slugs=rendered.dropped_slugs,
         kept_slugs=rendered.kept_slugs,
         token_counts=rendered.token_counts,
@@ -497,12 +535,19 @@ async def _load_conventions(
     return await _fetch_operational_conventions(session, tenant_id)
 
 
+def _broadcast_band(*, include_broadcast: bool, can_post: bool) -> str:
+    """Pick the broadcast band: none, the reader band, or the full discipline."""
+    if not include_broadcast:
+        return ""
+    return BROADCAST_DISCIPLINE_BAND if can_post else BROADCAST_READER_BAND
+
+
 def _combine_bands(
     conventions_text: str,
     priming_text: str,
     catalogue_text: str = "",
     *,
-    include_broadcast: bool = True,
+    broadcast_band: str = BROADCAST_DISCIPLINE_BAND,
 ) -> str:
     """Stitch the broadcast, conventions, priming, and catalogue bands together.
 
@@ -516,11 +561,12 @@ def _combine_bands(
 
     The broadcast band leads because it is MEHO-wide coordination
     protocol that frames all subsequent work. It is static (no data
-    source), so when *include_broadcast* is ``True`` (the default) it is
-    present exactly once, even for a tenant with no operational
-    conventions and an operator with no in-progress runs (#2546). When
-    *include_broadcast* is ``False`` (#4113: the session cannot use the
-    broadcast tools) it is left out and the other bands keep their order.
+    source), so by default it is present exactly once, even for a tenant
+    with no operational conventions and an operator with no in-progress
+    runs (#2546). *broadcast_band* is chosen by :func:`_broadcast_band`:
+    ``""`` when the session cannot use the broadcast tools (#4113; the band
+    is left out and the other bands keep their order), or
+    :data:`BROADCAST_READER_BAND` when the session cannot post (#5770).
 
     Byte-identity invariants the tests pin (relative to the broadcast
     band, which is the first band when included):
@@ -542,7 +588,7 @@ def _combine_bands(
     bands = [
         band
         for band in (
-            BROADCAST_DISCIPLINE_BAND if include_broadcast else "",
+            broadcast_band,
             conventions_text,
             priming_text,
             catalogue_text,

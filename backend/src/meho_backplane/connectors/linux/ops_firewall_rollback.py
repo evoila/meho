@@ -20,7 +20,7 @@ timer.
 
 One lock file (``.lock`` in the state folder, held with ``flock``) keeps the
 load, the confirm and the timer's restore apart, so they never run at the
-same time.
+same time. The restore waits for the lock as long as it takes.
 
 ``linux.firewall.confirm`` stops the timer, so the new rules stay. It opens a
 new SSH connection for this: a pooled connection stays open under the new
@@ -97,11 +97,10 @@ ROLLBACK_STATE_ROOT: str = "/var/lib/meho/firewall-rollback"
 #: How long the load and the confirm wait for the host lock.
 LOCK_WAIT_SECONDS: int = 10
 
-#: How long the timer's restore waits for the host lock before it runs anyway.
-_RESTORE_LOCK_WAIT_SECONDS: int = 300
-
 #: A change counts as pending until this many seconds after its timer ends,
 #: so a timer that is about to start its restore still blocks a new load.
+#: The load also asks systemd whether the timer still waits, because the
+#: host clock can move while the timer counts.
 _PENDING_GRACE_SECONDS: int = 30
 
 #: The built-in chains of each iptables table. A table that the new rules add
@@ -187,14 +186,15 @@ def _empty_iptables_table(table: str) -> str:
 def build_restore_command(backend: str, rollback_id: str) -> str:
     """Render the shell command the timer runs to load the saved rules again.
 
-    It waits for the host lock, so it never runs while a load or a confirm
-    does. It does nothing when the confirm wrote ``keep`` or removed the
-    state folder.
+    It waits for the host lock as long as it takes, so it never runs while
+    a load or a confirm does, and it still runs once they are done. Without
+    the lock it loads nothing. It does nothing when the confirm wrote
+    ``keep`` or removed the state folder.
     """
     _, _, load_cmd = _backend_commands(backend)
     state = _state_dir(rollback_id)
     return (
-        f"exec 9>>{_lock_file()}; flock -w {_RESTORE_LOCK_WAIT_SECONDS} 9; "
+        f"exec 9>>{_lock_file()} || exit 1; flock 9 || exit 1; "
         f"if [ -f {state}/saved.rules ] && [ ! -e {state}/keep ]; then "
         f"{load_cmd} {state}/saved.rules && touch {state}/restored; fi"
     )
@@ -258,8 +258,11 @@ def build_firewall_load_with_rollback_script(
         "now=$(date +%s)",
         'for d in "$root"/*/; do',
         '  [ -f "${d}due" ] && [ ! -f "${d}restored" ] || continue',
+        f'  u="{_UNIT_PREFIX}$(basename "$d")"',
+        '  t=$(systemctl show --value -p SubState "$u.timer" 2>/dev/null)',
         f'  if [ "$now" -le $(( $(cat "${{d}}due") + {_PENDING_GRACE_SECONDS} )) ] || '
-        f'systemctl is-active --quiet "{_UNIT_PREFIX}$(basename "$d").service"; then',
+        '[ "$t" = waiting ] || [ "$t" = running ] || '
+        'systemctl is-active --quiet "$u.service"; then',
         f'    echo "{err}pending===" >&2; exit 4',
         "  fi",
         "done",

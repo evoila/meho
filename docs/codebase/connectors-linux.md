@@ -361,7 +361,10 @@ steps in this order:
 
 1. Take the host lock (`flock` on `/var/lib/meho/firewall-rollback/.lock`).
    Refuse when another timed change still waits for its confirm or its
-   timer. Only one timed change can wait at a time.
+   timer. Only one timed change can wait at a time. To tell, the script
+   asks systemd whether the other timer still waits or its restore runs,
+   and it also checks the saved end time. So a change of the host clock
+   does not let a second change start.
 2. Save the live rules to `/var/lib/meho/firewall-rollback/<rollback_id>/`
    (a root-only folder) and check the syntax of the saved file. The nft
    copy starts with `flush ruleset`, so loading it replaces the rules. For
@@ -371,6 +374,8 @@ steps in this order:
 3. Check the syntax of the new rules.
 4. Start a timer with `systemd-run --on-active=<seconds>`. When it ends, it
    takes the lock, loads the saved rules and writes a `restored` mark.
+   It waits for the lock as long as a load or a confirm holds it, and it
+   loads nothing without the lock.
 5. Load the new rules.
 
 If the save or the timer fails, the script stops before any change and the

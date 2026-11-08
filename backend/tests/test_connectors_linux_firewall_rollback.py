@@ -291,6 +291,7 @@ case "$name $1" in
     case "$data" in *"${IPT_FAIL_ON:-@none@}"*) exit 1 ;; esac ;;
   "systemd-run "*) exit "${SYSTEMD_RUN_RC:-0}" ;;
   "systemctl is-active") exit "${SERVICE_ACTIVE_RC:-3}" ;;
+  "systemctl show") echo "${TIMER_SUBSTATE:-dead}" ;;
   "systemctl stop") exit "${STOP_RC:-0}" ;;
 esac
 exit 0
@@ -305,20 +306,25 @@ class _Host:
     bin_dir: Path
     log: Path
 
-    def run(self, script: str, **env: str) -> subprocess.CompletedProcess[str]:
-        script = script.replace("/run/systemd/system", str(self.systemd_dir))
-        full_env = {
+    def _env(self, env: dict[str, str]) -> dict[str, str]:
+        return {
             "PATH": f"{self.bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
             "FAKE_LOG": str(self.log),
             **env,
         }
+
+    def run(self, script: str, **env: str) -> subprocess.CompletedProcess[str]:
+        script = script.replace("/run/systemd/system", str(self.systemd_dir))
         return subprocess.run(
             ["/bin/bash", "-c", script],
             capture_output=True,
             text=True,
-            env=full_env,
+            env=self._env(env),
             check=False,
         )
+
+    def start(self, script: str) -> subprocess.Popen[bytes]:
+        return subprocess.Popen(["/bin/sh", "-c", script], env=self._env({}))
 
     def calls(self) -> list[str]:
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -524,7 +530,7 @@ def test_timed_load_refuses_while_another_change_waits(host: _Host) -> None:
     calls_before = len(host.calls())
     second = host.run(_load_script(rollback_id=_OTHER_ID))
     assert second.returncode == 4
-    assert host.calls()[calls_before:] == []
+    assert not any(c.startswith(("nft", "systemd-run")) for c in host.calls()[calls_before:])
     assert not (host.state_root / _OTHER_ID).exists()
     assert (host.state_root / _ROLLBACK_ID / "saved.rules").exists()
     with pytest.raises(LinuxWriteError, match="still waits"):
@@ -550,10 +556,34 @@ def test_timed_load_refuses_while_the_restore_of_another_change_runs(host: _Host
     assert host.run(_load_script(rollback_id=_OTHER_ID)).returncode == 0
 
 
+@pytest.mark.parametrize("timer_state", ["waiting", "running"])
+def test_timed_load_refuses_while_the_timer_waits_after_a_clock_jump(
+    host: _Host, timer_state: str
+) -> None:
+    # The host clock moved forward past the saved end time, but systemd's
+    # timer counts from its start and has not fired yet.
+    _prepare_state(host, seconds_left=-600)
+    second = host.run(_load_script(rollback_id=_OTHER_ID), TIMER_SUBSTATE=timer_state)
+    assert second.returncode == 4
+    assert f"systemctl show --value -p SubState meho-fw-rollback-{_ROLLBACK_ID}.timer" in (
+        host.calls()
+    )
+    assert not (host.state_root / _OTHER_ID).exists()
+    with pytest.raises(LinuxWriteError, match="still waits"):
+        _parse_load(second, _OTHER_ID)
+
+
+def test_timed_load_after_an_elapsed_timer_works_again(host: _Host) -> None:
+    _prepare_state(host, seconds_left=-600)
+    second = host.run(_load_script(rollback_id=_OTHER_ID), TIMER_SUBSTATE="elapsed")
+    assert second.returncode == 0, second.stderr
+
+
 def _hold_lock(host: _Host) -> subprocess.Popen[bytes]:
     host.state_root.mkdir(parents=True, exist_ok=True)
     lock = host.state_root / ".lock"
-    holder = subprocess.Popen(["flock", str(lock), "sleep", "30"])
+    # One process holds the lock, so killing it frees the lock.
+    holder = subprocess.Popen(["/bin/bash", "-c", f'exec 9>>"{lock}"; flock 9; exec sleep 30'])
     for _ in range(100):
         probe = subprocess.run(["flock", "-n", str(lock), "true"], check=False)
         if probe.returncode != 0:
@@ -686,20 +716,33 @@ def test_restore_skips_a_change_marked_keep(host: _Host) -> None:
     assert not (state / "restored").exists()
 
 
-def test_restore_waits_for_a_confirm_that_holds_the_lock(
-    host: _Host, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(rollback, "_RESTORE_LOCK_WAIT_SECONDS", 1)
-    _prepare_state(host, seconds_left=200)
+def test_restore_loads_nothing_while_another_step_holds_the_lock(host: _Host) -> None:
+    state = _prepare_state(host, seconds_left=-5)
     holder = _hold_lock(host)
+    restore = host.start(build_restore_command("nft", _ROLLBACK_ID))
     try:
-        assert "flock -w 1 9" in build_restore_command("nft", _ROLLBACK_ID)
-        started = datetime.now()
-        host.run(build_restore_command("nft", _ROLLBACK_ID))
-        assert (datetime.now() - started).total_seconds() >= 0.9
+        with pytest.raises(subprocess.TimeoutExpired):
+            restore.wait(timeout=1.5)
+        assert not any(c.startswith("nft -f") for c in host.calls())
+        assert not (state / "restored").exists()
     finally:
         holder.kill()
         holder.wait()
+    # Once the lock is free, the restore still runs.
+    assert restore.wait(timeout=10) == 0
+    assert any(c.startswith("nft -f") and "saved.rules" in c for c in host.calls())
+    assert (state / "restored").exists()
+
+
+def test_restore_without_the_lock_loads_nothing(host: _Host) -> None:
+    state = _prepare_state(host, seconds_left=-5)
+    fake_flock = host.bin_dir / "flock"
+    fake_flock.write_text("#!/bin/sh\nexit 1\n")
+    fake_flock.chmod(0o755)
+    done = host.run(build_restore_command("nft", _ROLLBACK_ID))
+    assert done.returncode != 0
+    assert not any(c.startswith("nft -f") for c in host.calls())
+    assert not (state / "restored").exists()
 
 
 def test_confirm_waits_for_the_host_lock(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:

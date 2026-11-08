@@ -487,3 +487,95 @@ def test_helm_chart_list_item_annotation_values_are_redacted() -> None:
     assert set(annotations) == {LAST_APPLIED_ANNOTATION, "owner"}
     assert all(value.startswith(REDACTED_PREFIX) for value in annotations.values())
     assert _CHART_VALUES_TEXT not in json.dumps(out)
+
+
+# ---------------------------------------------------------------------------
+# Wired handler path -- k8s.cr.info / k8s.cr.list projecting a HelmChart
+# ---------------------------------------------------------------------------
+
+_CHART_CR_PARAMS = {"group": "helm.cattle.io", "version": "v1", "plural": "helmcharts"}
+
+
+def _assert_chart_row_has_no_values(row: dict[str, Any]) -> None:
+    """The row keeps the chart's name, version and keys, but no values text."""
+    assert row["kind"] == "HelmChart"
+    assert row["name"] == "meho"
+    spec = json.loads(row["spec_excerpt"])
+    assert spec["version"] == "1.4.0"
+    assert spec["targetNamespace"] == "meho"
+    assert spec["valuesContent"] == redact_secret_value(_CHART_VALUES_TEXT)
+    assert set(spec["set"]) == {"image.tag", "adminPassword"}
+    assert spec["set"]["adminPassword"] == redact_secret_value(_CHART_SET_VALUE)
+    assert set(row["annotations"]) == {"owner"}
+    assert row["annotations"]["owner"] == redact_secret_value("platform-group")
+    blob = json.dumps(row)
+    assert _CHART_VALUES_TEXT not in blob
+    assert _CHART_SET_VALUE not in blob
+    assert "platform-group" not in blob
+
+
+def test_custom_resource_row_helm_chart_masks_values_and_annotations() -> None:
+    _assert_chart_row_has_no_values(custom_resource_row(_chart_with_saved_manifest()))
+
+
+def test_custom_resource_row_helm_chart_without_kind_is_not_masked_by_name() -> None:
+    """Only the ``kind`` decides; a list item gets it from the envelope first."""
+    row = custom_resource_row(_chart_with_saved_manifest(with_kind=False))
+    assert row["kind"] is None
+    assert _CHART_VALUES_TEXT in row["spec_excerpt"]
+
+
+@pytest.mark.asyncio
+async def test_cr_info_of_helm_chart_returns_no_values_text() -> None:
+    connector = _make_connector()
+    api_client = MagicMock(close=AsyncMock())
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=api_client,
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    ):
+        co_cls.return_value.get_namespaced_custom_object = AsyncMock(
+            return_value=_chart_with_saved_manifest()
+        )
+        result = await connector.k8s_cr_info(
+            _make_operator(),
+            _TARGET,
+            {**_CHART_CR_PARAMS, "name": "meho", "namespace": "kube-system"},
+        )
+
+    _assert_chart_row_has_no_values(result)
+
+
+@pytest.mark.asyncio
+async def test_cr_list_of_helm_charts_returns_no_values_text_in_envelope() -> None:
+    connector = _make_connector()
+    # The API server leaves ``kind`` off the items of a HelmChartList;
+    # only the list carries it. The rows must still be masked.
+    list_resp = {
+        "apiVersion": "helm.cattle.io/v1",
+        "kind": "HelmChartList",
+        "metadata": {"continue": ""},
+        "items": [
+            _chart_with_saved_manifest(with_kind=False),
+            _chart_with_saved_manifest(),
+        ],
+    }
+    api_client = MagicMock(close=AsyncMock())
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=api_client,
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    ):
+        co_cls.return_value.list_cluster_custom_object = AsyncMock(return_value=list_resp)
+        result = await connector.k8s_cr_list(_make_operator(), _TARGET, dict(_CHART_CR_PARAMS))
+
+    assert result["total"] == 2
+    for row in result["rows"]:
+        _assert_chart_row_has_no_values(row)
+    assert _CHART_VALUES_TEXT not in json.dumps(result)

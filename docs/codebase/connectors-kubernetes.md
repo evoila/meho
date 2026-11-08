@@ -1224,11 +1224,16 @@ recorder (next paragraph) records the answer only in this masked form.
 
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
-`k8s.cr.info` share, so a dynamic read pointed at core Secrets
-(`group=""` / `version="v1"` / `plural="secrets"`) is scrubbed before
-JSONFlux / audit / broadcast. For a list read, each item first gets
-`kind: Secret` from its `SecretList` (see "Built-in kinds" above),
-because the API server leaves `kind` off list items. The dedicated way
+`k8s.cr.info` share. It runs on every `kind: Secret` and every
+`kind: HelmChart` object, so a dynamic read pointed at core Secrets
+(`group=""` / `version="v1"` / `plural="secrets"`) or at the charts
+(`group="helm.cattle.io"` / `version="v1"` / `plural="helmcharts"`) is
+scrubbed before JSONFlux / audit / broadcast: a chart row's spec excerpt
+and annotations carry placeholders, never the values text. For a list
+read, each item first gets its `kind` from the list envelope
+(`Secret` from a `SecretList`, `HelmChart` from a `HelmChartList`; see
+"Built-in kinds" above), because the API server leaves `kind` off list
+items. The dedicated way
 to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
 section), which also run this redactor as a second net.
 

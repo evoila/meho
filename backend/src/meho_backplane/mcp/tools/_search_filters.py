@@ -35,59 +35,36 @@ _TIME_NAMES: Final[tuple[str, ...]] = (
 
 
 def _time_property(what: str) -> dict[str, Any]:
-    return {
-        "type": ["string", "null"],
-        "minLength": 1,
-        "description": f"{what} ISO 8601 date or time, inclusive.",
-    }
+    return {"type": ["string", "null"], "minLength": 1, "description": what}
 
 
 #: JSON schema properties of the shared filters, added to both tools' input schema.
+#: Kept short: the default tool list has a size limit (#4112).
 FILTER_PROPERTIES: Final[dict[str, Any]] = {
-    "product": {
-        "type": ["string", "null"],
-        "minLength": 1,
-        "description": "Only entries whose header `product` is exactly this text.",
-    },
-    "version": {
-        "type": ["string", "null"],
-        "minLength": 1,
-        "description": (
-            "Only entries whose header `version` is exactly this text (for example '9.0')."
-        ),
-    },
+    "product": {"type": ["string", "null"], "minLength": 1, "description": "Exact header product."},
+    "version": {"type": ["string", "null"], "minLength": 1, "description": "Exact header version."},
     "status": {
         "type": ["string", "null"],
         "enum": [*sorted(LESSON_STATUSES), None],
-        "description": "Only entries with this header `status`.",
+        "description": "Header status.",
     },
     "tags": {
         "type": ["array", "null"],
         "items": {"type": "string", "minLength": 1},
         "minItems": 1,
-        "description": "Only entries that have every one of these tags.",
+        "description": "Has every tag.",
     },
-    "confirmed_after": _time_property(
-        "Only entries whose header `confirmed_at` is on or after this."
-    ),
-    "confirmed_before": _time_property(
-        "Only entries whose header `confirmed_at` is on or before this."
-    ),
-    "updated_after": _time_property("Only entries last written on or after this."),
-    "updated_before": _time_property("Only entries last written on or before this."),
+    "confirmed_after": _time_property("confirmed_at on or after this."),
+    "confirmed_before": _time_property("confirmed_at on or before this."),
+    "updated_after": _time_property("Last write on or after this."),
+    "updated_before": _time_property("Last write on or before this."),
 }
 
-#: The sentence both tool descriptions use to name the filters.
+#: The sentence both tool descriptions use to name the filters. The long
+#: example lives in ``docs/codebase/kb.md``.
 FILTER_TOOL_TEXT: Final[str] = (
-    "Filters work in the search itself, before ranking: `product`, "
-    "`version` and `status` match the lesson header exactly, `tags` "
-    "needs every listed tag, `confirmed_after`/`confirmed_before` limit "
-    "the header's `confirmed_at` (an entry without it is left out), and "
-    "`updated_after`/`updated_before` limit the time of the last write "
-    "(ISO 8601; a date alone is midnight UTC, no offset means UTC). "
-    "Example: confirmed lessons for one version from the last 90 days = "
-    "`status='confirmed'`, `product`, `version`, `confirmed_after=<date "
-    "90 days ago>`. "
+    "The header filters run in the search, before ranking. Times are "
+    "ISO 8601; a date alone is midnight UTC. "
 )
 
 

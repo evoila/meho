@@ -545,6 +545,14 @@ the lesson header (`mcp/tools/_search_filters.py`):
 `search_knowledge` also takes `scope`: `all` (default), `tenant` or
 `shared`. A named filter wins over the same key in `filters`.
 
+Example: the confirmed lessons for one product version from the last
+90 days are `status="confirmed"`, `product`, `version` and
+`confirmed_after=<the date 90 days ago>`.
+
+The tool texts only say that the filters run before ranking and that a
+date alone is midnight UTC. The default MCP tool list has a size limit
+(`tests/test_mcp_tool_text_budget.py`), so the details stay here.
+
 A time limit is ISO 8601 text. A date alone means midnight UTC; a time
 without an offset is UTC. An unreadable value, or an `after` later
 than its `before`, is refused with JSON-RPC `-32602`. Every filter runs

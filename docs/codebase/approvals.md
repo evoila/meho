@@ -3025,7 +3025,10 @@ short call, so a proxy time limit cannot cut the wait; up to 5 failed
 reads in a row are tried again. When the person may read runs (operator
 role), each read also checks the run (`GET /api/v1/operations/runs/{id}`):
 a run that ended without storing a result on the request ends the wait
-with "The run ended, but MEHO stored no result." `--json` prints the
+with "The run ended, but MEHO stored no result." A run that only found
+that another caller runs the operation (`succeeded` with result status
+`already_resumed`) does not end the wait: the CLI stops reading that run
+and waits on the request alone. `--json` prints the
 request view (`ApprovalRequestView`) after the approve, or with `--wait`
 after the run ended. When the answer to `/decide` is lost on the network
 (a transport error, not an HTTP answer), the CLI reads the request again:
@@ -3108,8 +3111,10 @@ stored request and its latest background run (`operation_run` rows with
   the reaper turned into `uncertain`, a cancel) is `ended_no_result` ("no
   result: check it"). So nothing shows "running" forever.
 - When another caller (usually the waiting requester) runs the operation,
-  the request is `started` until its result is stored, and the asking stops
-  once the request is on the "outcome unknown" list.
+  the request is `started` until its result is stored. The asking stops
+  once the run is older than the "outcome unknown" time
+  (`approval_outcome_unknown_after_minutes`). Only the age counts, so a
+  request that someone marked as checked does not start asking again.
 
 The card part (`_run_state.html`) and each list row (`_history_row.html`)
 carry `hx-get` + `hx-trigger="every 3s"` + `hx-swap="outerHTML"` while
@@ -3127,7 +3132,7 @@ while the page is visible), asks `GET /ui/runs/notices?run_id=...`
 (`runs/_ended_notices.html`) per ended run, added to `#meho-run-notices`
 in the corner of every page (`base.html`). Each notice says how the run
 ended and, for an approval run, has a "View request" button that opens the
-request. Only the person who started a run gets its notice: a run of
+request. The route reads all asked runs in one query. Only the person who started a run gets its notice: a run of
 another person or tenant, or an unknown id, gets a hidden marker, and the
 script stops asking for it. A final state shown in an open dialog carries
 `data-meho-run-seen`, so the notice does not repeat it. The Close button

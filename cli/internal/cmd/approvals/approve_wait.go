@@ -202,8 +202,10 @@ func waitForRun(
 }
 
 // runEndedElsewhere reports whether the background run has ended. When
-// this person may not read runs (or the read fails for good), it clears
-// *runID so the wait goes on with the request alone.
+// this person may not read runs (or the read fails for good), or when the
+// run only found that another caller runs the operation
+// ("already_resumed"), it clears *runID so the wait goes on with the
+// request alone.
 func runEndedElsewhere(ctx context.Context, client *api.AuthedClient, runID uuid.UUID, keep **uuid.UUID) bool {
 	resp, err := client.GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse(
 		ctx, runID, &api.GetOperationRunStatusApiV1OperationsRunsHandleGetParams{})
@@ -214,7 +216,15 @@ func runEndedElsewhere(ctx context.Context, client *api.AuthedClient, runID uuid
 		*keep = nil
 		return false
 	}
-	switch resp.JSON200.Status {
+	run := resp.JSON200
+	if run.Status == api.OperationRunStatusSucceeded && run.Result != nil &&
+		(*run.Result)["status"] == "already_resumed" {
+		// Another caller (usually the waiting requester) won the run, so
+		// this run says nothing about the operation. Wait on the request.
+		*keep = nil
+		return false
+	}
+	switch run.Status {
 	case api.OperationRunStatusSucceeded, api.OperationRunStatusFailed,
 		api.OperationRunStatusCancelled, api.OperationRunStatusUncertain:
 		return true

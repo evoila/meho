@@ -1606,6 +1606,37 @@ func TestApproveWaitStopsWhenTheRunEndedWithoutAResult(t *testing.T) {
 	}
 }
 
+func TestApproveWaitGoesOnWhenAnotherCallerRunsTheOperation(t *testing.T) {
+	started := viewInState(t, api.ApprovalResultStateStarted)
+	get, _ := viewSequence(t, started, started, started,
+		viewInState(t, api.ApprovalResultStateExecuted))
+	runReads := 0
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+		// The background run lost the run claim: the requester runs it.
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			runReads++
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"status": "succeeded",
+				"result": map[string]any{"status": "already_resumed"},
+			})
+		},
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if strings.Contains(stdout, runEndedNoResultNote) {
+		t.Errorf("an already_resumed run is not the real run; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("--wait must go on until the request has its result; got:\n%s", stdout)
+	}
+	if runReads != 1 {
+		t.Errorf("after an already_resumed run the wait must read only the request; run reads = %d", runReads)
+	}
+}
+
 func TestApproveWaitGoesOnWithoutTheRunCheckAndAfterAFailedRead(t *testing.T) {
 	reads := 0
 	stdout, _, err := runApprove(t, map[string]mockHandler{

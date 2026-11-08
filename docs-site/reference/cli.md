@@ -2949,7 +2949,7 @@ meho k8s service list [flags]
 
 ## `meho kb`
 
-Operate the MEHO knowledge base (ingest / search / list / show / add / delete)
+Operate the MEHO knowledge base (ingest / search / list / show / add / delete / export)
 
 ```
 meho kb
@@ -2981,6 +2981,18 @@ meho kb delete <slug> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--confirm` — skip the stdin confirmation prompt
 - `--json` — emit a machine-readable success envelope instead of the human line
+
+### `meho kb export`
+
+Write the confirmed, generic kb entries as Markdown pages into a local folder (operator)
+
+```
+meho kb export <directory> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--dry-run` — list what would be added, changed and removed, and write nothing
+- `--json` — emit the plan as JSON instead of the human summary
 
 ### `meho kb ingest`
 

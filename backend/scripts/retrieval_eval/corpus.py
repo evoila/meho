@@ -74,9 +74,8 @@ class KbCorpusQuery(BaseModel):
     Attributes
     ----------
     query
-        The natural-language phrasing an operator would type. Sourced
-        from operator Slack history + recent Claude session logs (see
-        per-entry ``notes`` for the originating context).
+        The natural-language phrasing an operator would type (see
+        per-entry ``notes`` for the context).
     expected_hits
         Ordered list of ``kb`` slugs (without the ``.md`` suffix) the
         operator would consider a correct hit. The first entry is the

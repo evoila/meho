@@ -522,8 +522,8 @@ def _target_name_for(scope: MemoryScope, slug: str) -> str | None:
 
     Target-flavoured scopes require ``target_name`` at the write
     boundary (service-layer guard). The memory eval corpus's slugs
-    encode the target in the prefix (``rdc-vcenter-vpn-setup``,
-    ``holodeck-lab-known-issues``); we derive the target from the
+    encode the target in the prefix (``acme-vcenter-vpn-setup``,
+    ``acme-holodeck-known-issues``); we derive the target from the
     slug's first hyphen-separated segment. The mapping doesn't need
     to be perfect -- the canary only requires *some* deterministic
     ``target_name`` so the write succeeds + the natural key encodes
@@ -534,8 +534,8 @@ def _target_name_for(scope: MemoryScope, slug: str) -> str | None:
     # Map slug prefixes to canonical target names. Keep this table
     # in sync with the slug prefixes the eval corpus YAML uses.
     slug_to_target: dict[str, str] = {
-        "rdc-vcenter": "rdc-vcenter",
-        "holodeck-lab": "holodeck-lab",
+        "acme-vcenter": "acme-vcenter",
+        "acme-holodeck": "acme-holodeck",
     }
     for prefix, target in slug_to_target.items():
         if slug.startswith(prefix):

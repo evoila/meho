@@ -1,10 +1,9 @@
 # MEHO retrieval eval — KB seed corpus (G4.3-T1, #440).
 #
-# 10 queries covering the per-product mix of the consumer's kb/ at
-# evoila-bosnia/claude-rdc-hetzner-dc/kb/. Sourced from operator
-# Slack history + recent claude-rdc-hetzner-dc Claude session logs.
-# Per-entry `notes` records the originating context — keep when
-# editing so human review on regression has the why.
+# 10 queries covering the per-product mix of a consumer's kb/
+# directory, phrased the way an operator would ask. Per-entry `notes`
+# records why each slug ranks where it does — keep when editing so
+# human review on regression has the why.
 #
 # Schema: scripts.retrieval_eval.corpus.KbCorpusQuery.
 #
@@ -29,7 +28,7 @@
     - esxi-9.0-esxcli
     - esxi-9.0-disk-operations
   notes: >-
-    operator phrasing from Claude session log 2026-04 — they wanted to
+    operator wants to
     inspect storage state via the host shell rather than vCenter UI.
     esxcli is the canonical entry; disk-operations is the acceptable
     near-neighbour because it covers the same ESXi shell surface.
@@ -50,8 +49,7 @@
     - vault-1.x-backup-restore
     - vault-1.x-overview
   notes: >-
-    operator phrasing from #vault Slack thread 2026-03 (raft snapshot
-    rotation runbook). The version-pinned 1.21 entry is the exact
+    operator question about a raft snapshot rotation runbook. The version-pinned 1.21 entry is the exact
     answer; vault-1.x-backup-restore is the acceptable broader
     version-agnostic guide; vault-1.x-overview is the long-tail
     acceptable hit.
@@ -87,7 +85,7 @@
     - argocd-3.x-ssa-ignoredifferences-pattern
     - argocd-3.3-helm-oci-url-bug
   notes: >-
-    operator phrasing from #argocd Slack — they hit the SSA conflict
+    operator hit the SSA conflict
     on a Helm chart. The SSA-ignoredifferences pattern entry is the
     exact answer; the Helm OCI URL bug entry is the acceptable
     near-neighbour because it surfaces in the same Helm-on-Argo flow.
@@ -97,7 +95,7 @@
     - rke2-canal-pod-mtu
     - gcs-workload-identity-from-private-rke2
   notes: >-
-    operator phrasing from #networking — the MTU mismatch surfaced as
+    operator question — the MTU mismatch surfaced as
     GCS upload failures from in-cluster pods. The MTU entry is the
     direct cause; the GCS-from-private-RKE2 entry is the acceptable
     adjacent because it covers the upload path the symptom appeared
@@ -122,7 +120,7 @@
     - holodeck-9.0-overview
     - holodeck-9.0-known-issues
   notes: >-
-    operator phrasing from #holodeck Slack thread on a fresh deploy.
+    operator question on a fresh deploy.
     The runbook is the exact answer; the overview is the acceptable
     context-setting alternative; known-issues is the acceptable
     long-tail (operators almost always re-read this during a

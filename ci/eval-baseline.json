@@ -237,14 +237,14 @@
           "baseline_reciprocal_rank": null,
           "coverage_at_5": 1.0,
           "expected_hits": [
-            "user-tenant/rdc-internal-runbook-quirks",
-            "tenant/rdc-internal-runbook"
+            "user-tenant/acme-ops-runbook-quirks",
+            "tenant/acme-ops-runbook"
           ],
           "meho_hits": [
-            "user-tenant/rdc-internal-runbook-quirks"
+            "user-tenant/acme-ops-runbook-quirks"
           ],
           "precision_at_5": 1.0,
-          "query": "my notes on the rdc-internal tenant runbook quirks",
+          "query": "my notes on the acme-ops tenant runbook quirks",
           "reciprocal_rank": 1.0
         },
         {
@@ -254,13 +254,13 @@
           "baseline_reciprocal_rank": null,
           "coverage_at_5": 1.0,
           "expected_hits": [
-            "user-tenant/standup-template-rdc-internal"
+            "user-tenant/standup-template-acme-ops"
           ],
           "meho_hits": [
-            "user-tenant/standup-template-rdc-internal"
+            "user-tenant/standup-template-acme-ops"
           ],
           "precision_at_5": 1.0,
-          "query": "how I structure my Slack standup for rdc-internal",
+          "query": "how I structure my Slack standup for acme-ops",
           "reciprocal_rank": 1.0
         },
         {
@@ -270,14 +270,14 @@
           "baseline_reciprocal_rank": null,
           "coverage_at_5": 1.0,
           "expected_hits": [
-            "user-target/rdc-vcenter-vpn-steps",
-            "target/rdc-vcenter-vpn-setup"
+            "user-target/acme-vcenter-vpn-steps",
+            "target/acme-vcenter-vpn-setup"
           ],
           "meho_hits": [
-            "user-target/rdc-vcenter-vpn-steps"
+            "user-target/acme-vcenter-vpn-steps"
           ],
           "precision_at_5": 1.0,
-          "query": "VPN steps I use for rdc-vcenter",
+          "query": "VPN steps I use for acme-vcenter",
           "reciprocal_rank": 1.0
         },
         {
@@ -287,14 +287,14 @@
           "baseline_reciprocal_rank": null,
           "coverage_at_5": 1.0,
           "expected_hits": [
-            "user-target/holodeck-lab-personal-gotchas",
-            "target/holodeck-lab-known-issues"
+            "user-target/acme-holodeck-personal-gotchas",
+            "target/acme-holodeck-known-issues"
           ],
           "meho_hits": [
-            "user-target/holodeck-lab-personal-gotchas"
+            "user-target/acme-holodeck-personal-gotchas"
           ],
           "precision_at_5": 1.0,
-          "query": "gotchas I hit deploying to holodeck-lab",
+          "query": "gotchas I hit deploying to acme-holodeck",
           "reciprocal_rank": 1.0
         },
         {
@@ -310,7 +310,7 @@
             "tenant/k8s-namespace-naming"
           ],
           "precision_at_5": 1.0,
-          "query": "rdc-internal tenant naming convention for K8s namespaces",
+          "query": "acme-ops tenant naming convention for K8s namespaces",
           "reciprocal_rank": 1.0
         },
         {
@@ -337,14 +337,14 @@
           "baseline_reciprocal_rank": null,
           "coverage_at_5": 1.0,
           "expected_hits": [
-            "target/rdc-vcenter-vpn-setup",
-            "user-target/rdc-vcenter-vpn-steps"
+            "target/acme-vcenter-vpn-setup",
+            "user-target/acme-vcenter-vpn-steps"
           ],
           "meho_hits": [
-            "target/rdc-vcenter-vpn-setup"
+            "target/acme-vcenter-vpn-setup"
           ],
           "precision_at_5": 1.0,
-          "query": "VPN setup for rdc-vcenter",
+          "query": "VPN setup for acme-vcenter",
           "reciprocal_rank": 1.0
         },
         {
@@ -354,14 +354,14 @@
           "baseline_reciprocal_rank": null,
           "coverage_at_5": 1.0,
           "expected_hits": [
-            "target/holodeck-lab-known-issues",
-            "target/holodeck-lab-overview"
+            "target/acme-holodeck-known-issues",
+            "target/acme-holodeck-overview"
           ],
           "meho_hits": [
-            "target/holodeck-lab-known-issues"
+            "target/acme-holodeck-known-issues"
           ],
           "precision_at_5": 1.0,
-          "query": "known issues with holodeck-lab",
+          "query": "known issues with acme-holodeck",
           "reciprocal_rank": 1.0
         }
       ],

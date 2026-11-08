@@ -12,6 +12,8 @@
 //     GET /api/v1/operations/search.
 //   - `meho operation call <connector_id> <op_id> --target <slug> [--params ...]`
 //     — invoke the dispatcher via POST /api/v1/operations/call.
+//   - `meho operation run-status <run_id> [--wait]` — read a background run
+//     started by `call --async` via GET /api/v1/operations/runs/{run_id}.
 //   - `meho operation result-query <handle_id> [--offset N] [--limit N]`
 //     — page rows back from a JSONFlux result handle via
 //     POST /api/v1/operations/result-query (#3179), the REST twin of the
@@ -41,6 +43,7 @@ import (
 	"os"
 	"strings"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
@@ -55,12 +58,13 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "operation",
-		Short:        "G0.6 operation meta-tool surface (groups / search / call / preview / result-query / subops)",
+		Short:        "G0.6 operation meta-tool surface (groups / search / call / run-status / preview / result-query / subops)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newGroupsCmd())
 	cmd.AddCommand(newSearchCmd())
 	cmd.AddCommand(newCallCmd())
+	cmd.AddCommand(newRunStatusCmd())
 	cmd.AddCommand(newPreviewCmd())
 	cmd.AddCommand(newResultQueryCmd())
 	cmd.AddCommand(newSubopsCmd())
@@ -113,6 +117,12 @@ type operationsAPI interface {
 		body api.PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody,
 		reqEditors ...api.RequestEditorFn,
 	) (*http.Response, error)
+	GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse(
+		ctx context.Context,
+		handle openapi_types.UUID,
+		params *api.GetOperationRunStatusApiV1OperationsRunsHandleGetParams,
+		reqEditors ...api.RequestEditorFn,
+	) (*api.GetOperationRunStatusApiV1OperationsRunsHandleGetResponse, error)
 	Refresh(ctx context.Context) error
 }
 

@@ -106,6 +106,21 @@
           {% endif %}
         </dl>
 
+        {% if header_rows %}
+          <h2 class="card-title text-sm font-semibold uppercase opacity-60 tracking-wider mt-4">
+            Lesson header
+          </h2>
+          <dl
+            class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm mt-2"
+            aria-label="Lesson header"
+          >
+            {% for name, value in header_rows %}
+              <dt class="opacity-60 whitespace-nowrap font-mono text-xs">{{ name }}</dt>
+              <dd class="break-words">{{ value }}</dd>
+            {% endfor %}
+          </dl>
+        {% endif %}
+
         <div class="divider my-2"></div>
 
         <a

@@ -41,7 +41,7 @@ authenticates, and maturity.
   [`docs/cross-repo/vault-provisioning.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md).
 - The `vault.address`, `vault.role`, `vault.paths.kv` values (plus the
   mirrored `config.vaultAddr`) — shown on
-  [the install trail, Step 6](index.md#step-6-write-your-values-file).
+  [the install trail, Values file for your own parts](index.md#values-file-for-your-own-parts).
 
 One behaviour to know about up front: target secret references are
 **tenant-scoped by default**. A schemeless reference like
@@ -192,4 +192,4 @@ doubt and on-prem, choose Vault.
 
 ## Back to the trail
 
-Return to [the install trail, Step 3](index.md#step-3-provision-the-database-credentials-secret).
+Return to [the install trail, Part B](index.md#part-b-bring-your-own-parts-expert-path).

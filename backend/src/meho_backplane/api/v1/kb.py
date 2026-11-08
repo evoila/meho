@@ -137,8 +137,13 @@ from meho_backplane.kb import (
     KbIngestRootError,
     KbService,
 )
-from meho_backplane.kb.schemas import InvalidKbSlugError
+from meho_backplane.kb.schemas import (
+    InvalidKbSlugError,
+    KbSharedNotAllowedError,
+    KbSharedSlugError,
+)
 from meho_backplane.kb.service import KbListOrder
+from meho_backplane.lesson_header import LessonHeaderError
 
 __all__ = ["router"]
 
@@ -479,9 +484,14 @@ async def create_kb(
             metadata=body.metadata,
             actor_sub=operator.sub,
         )
-    except InvalidKbSlugError as exc:
+    except (InvalidKbSlugError, LessonHeaderError) as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    except (KbSharedNotAllowedError, KbSharedSlugError) as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
     if not created:

@@ -20,6 +20,9 @@ install are coming: the install on a plain Linux server is available
 and in testing, and a VMware appliance is in progress. See
 [Ways to install MEHO](install/ways-to-install.md).
 
+For a short answer to "what can MEHO do for us?", see
+[What MEHO can do](can-do/index.md).
+
 ## The problem it solves
 
 AI agents are getting good enough to *do* infrastructure work — roll a

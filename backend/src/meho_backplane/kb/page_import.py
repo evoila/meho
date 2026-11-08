@@ -26,6 +26,11 @@ Pages that claim the same slug are all skipped and listed as a conflict.
 Then each page is compared with the stored entry: ``create``,
 ``update`` or ``unchanged``. An unchanged page is not written, so the
 import is safe to run twice. A dry run stops before any write.
+
+``shared`` is a MEHO setting, and the export leaves it out of the page.
+So an update keeps the stored ``shared`` value when the page does not
+name it: a lesson that goes to the wiki and comes back stays visible to
+the other tenants. A page that names ``shared`` sets it.
 """
 
 from __future__ import annotations
@@ -76,6 +81,7 @@ from meho_backplane.retrieval.indexer import compute_body_hash
 __all__ = [
     "MAX_PAGES",
     "MAX_PAGE_CHARS",
+    "REQUIRED_HEADER_FIELDS",
     "SOURCE_ENTRY_PREFIX",
     "KbImportPage",
     "KbImportPageResult",
@@ -92,7 +98,8 @@ MAX_PAGE_CHARS: Final[int] = 1_000_000
 SOURCE_ENTRY_PREFIX: Final[str] = "meho://kb/"
 
 #: The header fields a page must have to count as having a lesson header.
-_REQUIRED_HEADER: Final[tuple[str, ...]] = ("type", "applies_to", "status")
+#: The export checks the same fields before it gives a page.
+REQUIRED_HEADER_FIELDS: Final[tuple[str, ...]] = ("type", "applies_to", "status")
 #: Stored keys that a page does not set, so the "unchanged" check skips them.
 _NOT_COMPARED: Final[frozenset[str]] = frozenset({META_PROVENANCE, META_LAST_UPDATED_BY_SUB})
 
@@ -275,7 +282,7 @@ def _read_header(item: KbImportPage) -> tuple[dict[str, Any], str]:
     except KbFileParseError as exc:
         raise _PageSkippedError(str(exc)) from exc
     header = {key: value for key, value in raw.items() if not _is_empty(value)}
-    missing = [name for name in _REQUIRED_HEADER if name not in header]
+    missing = [name for name in REQUIRED_HEADER_FIELDS if name not in header]
     if missing:
         raise _PageSkippedError(
             "the page has no lesson header: it needs type, applies_to and status"
@@ -369,8 +376,14 @@ async def _classify(
 def _stored_metadata(
     page: _Page, existing: dict[str, Any] | None, actor_sub: str, now: datetime
 ) -> dict[str, Any]:
-    """The metadata a write of *page* stores: header, owner, provenance."""
+    """The metadata a write of *page* stores: header, owner, provenance, ``shared``.
+
+    ``shared`` stays as stored when the page does not name it (see the
+    module docstring).
+    """
     metadata = add_candidate_expiry(page.metadata, existing=existing, now=now)
+    if existing is not None and META_SHARED in existing and META_SHARED not in metadata:
+        metadata = {**metadata, META_SHARED: existing[META_SHARED]}
     attributed = merge_attribution(
         caller_metadata=metadata,
         existing_metadata=existing,

@@ -163,16 +163,23 @@ meho kb add vcenter-session-auth --body @./vcenter-session-auth.md
  "metadata": {}, "created_at": "…", "updated_at": "…"}
 ```
 
-Re-adding the same slug **updates in place** — a body-hash short-circuit
-means an unchanged body costs only an `updated_at` bump (no re-embed), so
-an agent can call it freely as "remember this."
+Every update names the revision it read. A read of an entry returns
+`revision_id`; send it as `expected_revision` (`meho kb add --expected-revision
+<id>`). A write without it only creates. If the slug exists, or the entry
+changed after the revision you named, MEHO writes nothing and answers
+`409 stale_revision` (MCP: the same reason in the error). The answer shows
+the current revision, who changed it and when, and what changed. Read the
+entry again, merge your change, and retry. A change to the header
+(metadata) counts as a change. A write that changes neither body nor
+metadata costs only an `updated_at` bump (no re-embed).
 
 ## The discipline: search before you write
 
 Both `add_*` tools say the same thing, and it is the single most
 important habit: **`search_*` first.** Re-adding a note under a new slug
 fragments the corpus and dilutes future retrieval. If a matching entry
-exists, extend it (read it, merge, re-add with the same slug) instead of
+exists, extend it (read it, merge, re-add with the same slug and the
+`revision_id` you read) instead of
 creating a near-duplicate. The mirror habit on the read side: `search_*`
 **before asking the operator** a question the corpus may already answer.
 

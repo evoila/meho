@@ -18,6 +18,11 @@
 #                               folder, so writing the rc into 1.0 would
 #                               show rc pages to every reader of `latest`.
 #
+# mike commits locally; the script pushes with a plain `git push`. When the
+# push is refused because a main republish (docs_republish.sh) moved
+# gh-pages, it fetches gh-pages again, picks the version again and builds
+# again, at most 3 times (scripts/ci/docs_pages.sh).
+#
 # Usage: docs_deploy.sh <tag name>
 # Prints the published version and, when GITHUB_OUTPUT is set, writes
 # `version=<it>` there for the reachability check.
@@ -38,23 +43,35 @@ case "${TAG}" in
 esac
 MINOR=$(printf '%s' "${TAG#v}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 
-case "${TAG}" in
-  *-*)
-    # A failed read must stop the deploy, not count as "no final tag".
-    TAGS=$(git ls-remote --tags origin "refs/tags/v${MINOR}.*")
-    if printf '%s\n' "${TAGS}" | awk '{print $2}' | grep -q -v -e '-' -e '^$'; then
-      VERSION="${TAG#v}"
-    else
+# shellcheck source=scripts/ci/docs_pages.sh
+. "$(dirname "${BASH_SOURCE[0]}")/docs_pages.sh"
+
+attempt_deploy() {
+  pages_fetch || return 1
+  case "${TAG}" in
+    *-*)
+      # Read on every attempt: the final tag of the minor can arrive while
+      # this run waits. A failed read must stop the deploy, not count as
+      # "no final tag".
+      TAGS=$(git ls-remote --tags origin "refs/tags/v${MINOR}.*") || return 1
+      if printf '%s\n' "${TAGS}" | awk '{print $2}' | grep -q -v -e '-' -e '^$'; then
+        VERSION="${TAG#v}"
+      else
+        VERSION="${MINOR}"
+      fi
+      "${MIKE[@]}" deploy "${VERSION}" || return 1
+      ;;
+    *)
       VERSION="${MINOR}"
-    fi
-    "${MIKE[@]}" deploy --push "${VERSION}"
-    ;;
-  *)
-    VERSION="${MINOR}"
-    "${MIKE[@]}" deploy --push --update-aliases "${VERSION}" latest
-    "${MIKE[@]}" set-default --push latest
-    ;;
-esac
+      "${MIKE[@]}" deploy --update-aliases "${VERSION}" latest || return 1
+      "${MIKE[@]}" set-default latest || return 1
+      ;;
+  esac
+  git push origin gh-pages || return 2
+}
+
+VERSION=""
+pages_publish attempt_deploy
 
 echo "Published docs version ${VERSION}."
 if [ -n "${GITHUB_OUTPUT:-}" ]; then

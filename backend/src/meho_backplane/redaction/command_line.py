@@ -18,9 +18,11 @@ words stay, so the approver still reads what runs. Hidden are:
 * tokens with a known vendor prefix (``ghp_...``).
 
 :func:`hide_shell_script` runs all of these over a whole shell script. There
-``-p`` is a secret flag only for programs that take a password with it
-(``sshpass``, ``mysql``, ``mariadb``), and a password glued to it
-(``mysql -pVALUE``) is hidden too.
+``-p`` is a secret flag only in a command that takes a password with it
+(``sshpass``, ``mysql*``, ``mariadb*``, ``mongo*``, and any command with the
+word ``login``, such as ``docker login``), and a password glued to it
+(``mysql -pVALUE``) is hidden too. A password glued to ``-u``
+(``curl -uuser:password``) is hidden in a script as well.
 """
 
 from __future__ import annotations
@@ -280,8 +282,9 @@ def _hide_word(
         return f"{word[0]}{inner}{word[0]}", waiting
     if assignment is not None:
         return _hide_assignment(value, assignment), None
-    if p_rule == _P_GLUED and word.startswith("-p") and len(word) > 2:
-        return f"-p{HIDDEN}", None
+    glued = _hide_glued_value(word, p_rule=p_rule, script_mode=p_programs is not None)
+    if glued is not None:
+        return glued, None
     flag = _FLAG.match(word)
     if flag is None:
         return None, None
@@ -292,9 +295,26 @@ def _hide_word(
     return None, "secret" if p_secret or _secret_shaped_name(name) else None
 
 
-#: The programs whose ``-p`` takes a password in a shell script, also glued
-#: to it (``sshpass -pVALUE``, ``mysql -pVALUE``, ``mysqldump``, ``mariadb``).
-_SCRIPT_P_PROGRAMS = re.compile(r"sshpass|mysql[A-Za-z0-9_-]*|mariadb[A-Za-z0-9_-]*")
+def _hide_glued_value(word: str, *, p_rule: str, script_mode: bool) -> str | None:
+    """A short flag with a secret glued to it, hidden; ``None`` for any other word.
+
+    ``-pVALUE`` when *p_rule* allows a glued ``-p``. In a shell script also
+    ``-uuser:password`` (``curl -uuser:password``): the password is hidden.
+    """
+    if p_rule == _P_GLUED and word.startswith("-p") and len(word) > 2:
+        return f"-p{HIDDEN}"
+    if script_mode and word.startswith("-u") and ":" in word:
+        return f"-u{_hide_user_password(word[2:])}"
+    return None
+
+
+#: The words that make ``-p`` take a password in a shell script, also glued
+#: to it: ``sshpass``, ``mysql*`` (``mysqldump``), ``mariadb*``, ``mongo*``
+#: (``mongosh``, ``mongodump``), and ``login`` (``docker login``,
+#: ``podman login``, ``helm registry login``).
+_SCRIPT_P_PROGRAMS = re.compile(
+    r"sshpass|mysql[A-Za-z0-9_-]*|mariadb[A-Za-z0-9_-]*|mongo[A-Za-z0-9_-]*|login"
+)
 
 
 def hide_shell_script(script: str) -> str:

@@ -7,7 +7,10 @@
 * Values that look like secrets are hidden in the text, also the shell
   shapes (``PGPASSWORD=...``, ``sshpass -p ...``, ``curl -u user:...``,
   ``mysql -p...``); then the preview says so and leaves out the SHA-256.
-  Common short flags (``mkdir -p``, ``ssh -p 22``) stay as they are.
+  ``-p`` hides its value for ``sshpass``, ``mysql*``, ``mariadb*``,
+  ``mongo*`` and a ``login`` command (``docker login``). Common short
+  flags (``mkdir -p``, ``cp -p``, ``ssh -p 22``, ``docker run -p``) stay
+  as they are.
 * A long script is cut and marked; the SHA-256 is of the full script.
 * The optional ``script_ref`` and ``expected_sha256`` give "matches" or
   "does not match"; the handler refuses a script that does not match.
@@ -55,6 +58,7 @@ from tests.test_connectors_linux_write import (
 _SCRIPT = "#!/bin/bash\nset -eu\nuname -a\ndf -h /\n"
 # Made-up value, shaped so the default redaction policy hides it.
 _FAKE_VALUE = "made-up-value-not-real-4471"
+_USER = "admin"
 
 
 def _sha(text: str) -> str:
@@ -125,6 +129,15 @@ def test_values_that_look_like_secrets_are_hidden_and_no_hash_is_shown(line: str
         f"mysql -u app -p{_FAKE_VALUE} -e 'select 1'",
         f"mysql -u app -p'{_FAKE_VALUE} two' appdb",
         f"/usr/bin/mysqldump \\\n  -p{_FAKE_VALUE} appdb > dump.sql",
+        # The password after -p of mongo tools and of a login command.
+        f"mongo -u admin -p {_FAKE_VALUE} appdb",
+        f"mongosh -u admin -p {_FAKE_VALUE}",
+        f"mongodump -u admin -p{_FAKE_VALUE} --out /tmp/dump",
+        f"docker login -u bot -p {_FAKE_VALUE} registry.example.invalid",
+        f"podman login -u bot -p {_FAKE_VALUE} registry.example.invalid",
+        f"helm registry login registry.example.invalid -u bot -p {_FAKE_VALUE}",
+        # The password glued to -u.
+        f"curl -u{_USER}:{_FAKE_VALUE} https://example.invalid/api",
     ],
 )
 def test_shell_command_secrets_are_hidden_and_no_hash_is_shown(line: str) -> None:
@@ -142,6 +155,8 @@ def test_common_short_flags_keep_the_script_as_it_is() -> None:
         "mkdir -p /tmp/work\n"
         "cp -p a.conf /tmp/work/\n"
         "ssh -p 22 deploy@host uptime\n"
+        "docker run -d -p 8080:80 nginx\n"
+        "curl -u admin https://example.invalid/api\n"
         "find /tmp/work -print\n"
         'for f in /tmp/work/*; do\n  echo "$f"\ndone\n'
         "mysql -u app -p\n"

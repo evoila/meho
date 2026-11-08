@@ -6,8 +6,10 @@
 * Without ``p_programs`` (the ``k8s.job.create`` command line), ``-p`` is a
   secret flag after any program.
 * ``hide_shell_script`` (the ``linux.script.run`` script) treats ``-p`` as a
-  secret flag only for ``sshpass``, ``mysql`` and ``mariadb``, also with the
-  value glued to it, and a new line ends the command.
+  secret flag only for ``sshpass``, ``mysql*``, ``mariadb*``, ``mongo*``
+  and a command with the word ``login``, also with the value glued to it,
+  and a new line ends the command. It also hides a password glued to
+  ``-u`` (``curl -uuser:password``).
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from meho_backplane.redaction.command_line import (
 )
 
 _FAKE = "made-up-value-not-real-4471"
+_USER = "admin"
 
 
 def test_command_line_reads_dash_p_as_a_secret_flag_after_any_program() -> None:
@@ -49,3 +52,25 @@ def test_shell_script_reads_dash_p_inside_a_bash_c_string() -> None:
     shown = hide_shell_script(script)
     assert _FAKE not in shown
     assert "mkdir -p /tmp/x" in shown
+
+
+def test_shell_script_reads_dash_p_for_mongo_tools_and_login_commands() -> None:
+    script = (
+        f"mongosh -u admin -p {_FAKE}\n"
+        f"docker login -u bot -p{_FAKE} registry.example.invalid\n"
+        f"helm registry login registry.example.invalid -u bot -p {_FAKE}\n"
+        "docker run -d -p 8080:80 nginx\n"
+    )
+    assert hide_shell_script(script) == (
+        f"mongosh -u admin -p {HIDDEN}\n"
+        f"docker login -u bot -p{HIDDEN} registry.example.invalid\n"
+        f"helm registry login registry.example.invalid -u bot -p {HIDDEN}\n"
+        "docker run -d -p 8080:80 nginx\n"
+    )
+
+
+def test_shell_script_hides_a_password_glued_to_dash_u() -> None:
+    script = f"curl -u{_USER}:{_FAKE} https://example.invalid/api\ncurl -uadmin https://example.invalid\n"
+    assert hide_shell_script(script) == (
+        f"curl -u{_USER}:{HIDDEN} https://example.invalid/api\ncurl -uadmin https://example.invalid\n"
+    )

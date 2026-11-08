@@ -83,7 +83,7 @@ All types are Pydantic v2 frozen models, defined in
 | `SecretFinder` | `patterns.py` | A named pattern written as code: `secret_spans(text)` returns the spans to replace. `patterns.secret_spans(pattern, text)` gives the spans of any named pattern, regex or finder |
 | `BindKeySecretFinder` | `bind_secret.py` | The `bind_key_secret` finder: reads BIND comments and quoted strings the way BIND does |
 | `UrlSecretFinder` | `url_secret.py` | The `url_secret` finder: reports the user part and the secret query values of each URL in a text |
-| `hide_command_text` / `hide_shell_script` | `command_line.py` | Hide secret values on a command line or in a shell script, word by word (`PGPASSWORD=...`, `--password x`, `curl -u user:...`). Used by the `k8s.job.create` / `k8s.cronjob.run` and `linux.script.run` approval previews |
+| `hide_command_text` / `hide_shell_script` | `command_line.py` | Hide secret values on a command line or in a shell script, word by word (`PGPASSWORD=...`, `--password x`, `curl -u user:...`). Used by the `k8s.job.create` / `k8s.cronjob.run` and `linux.script.run` approval previews. In a script, `-p` is a secret flag only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` and a command with the word `login` (`docker login`) |
 
 `PATTERN_NAMES` (`patterns.py`) is the source of truth for the named
 catalogue; the policy schema validates `rule.pattern` against it at

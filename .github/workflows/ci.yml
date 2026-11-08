@@ -400,9 +400,9 @@ jobs:
               return 1
             fi
             rc=0
-            grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/spec_shelf\.sh$)' "${non_md}" || rc=$?
+            grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/(spec_shelf\.sh|install_spacy_model\.sh|tool-versions\.env)$)' "${non_md}" || rc=$?
             case "${rc}" in
-              0) c_backend_python=true; echo "backend/, ci.yml or spec-shelf list change detected -> backend_python=true (full run)" ;;
+              0) c_backend_python=true; echo "backend/, ci.yml, spec-shelf list or spaCy model pin change detected -> backend_python=true (full run)" ;;
               1) c_backend_python=false; echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)" ;;
               *) reason="backend check failed (grep exit ${rc})"; return 1 ;;
             esac
@@ -946,6 +946,14 @@ jobs:
         run: |
           "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m meho_backplane.retrieval.warm
 
+      - name: Restore the spaCy model from the cache
+        # install_spacy_model.sh uses the model when it is installed at the
+        # pinned version, then this cache, and downloads (three tries) last.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
       - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
         # G11.4-T3 (#1072) ships the Tier-2 Presidio NER adapter
         # (capability-flagged per policy). The acceptance gate
@@ -961,8 +969,8 @@ jobs:
         # accepting either model -- so this step suffices for the
         # unit lane's correctness signal without paying the ``lg``
         # download wall every run. Each shard provisions the sm model
-        # (its file set may include the Tier-2 lanes); the ~12 MB
-        # download is cheap enough to not warrant caching.
+        # (its file set may include the Tier-2 lanes). The model version
+        # is pinned in scripts/ci/tool-versions.env.
         #
         # ``MEHO_REDACTION_SPACY_MODEL`` is the runtime override the
         # presidio.py adapter reads; setting it here pins the unit
@@ -970,7 +978,9 @@ jobs:
         # adapter's default. Production deployments leave the env
         # unset and let the adapter pick the documented default.
         run: |
-          "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m spacy download en_core_web_sm
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          "${GITHUB_WORKSPACE}/scripts/ci/install_spacy_model.sh" en_core_web_sm "${SPACY_MODEL_VER}" "${SPACY_MODEL_SHA}"
           # Smoke-test the import path so a presidio<->spacy model-
           # version mismatch fails THIS PR, not the integration lane.
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
@@ -1795,11 +1805,21 @@ jobs:
         run: |
           "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m meho_backplane.retrieval.warm
 
+      - name: Restore the spaCy model from the cache
+        # install_spacy_model.sh uses the model when it is installed at the
+        # pinned version, then this cache, and downloads (three tries) last.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
       - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
         # Same model the unit lane provisions — the Tier-2 redaction tests in
         # the unit sweep need it, and this job re-runs that sweep.
         run: |
-          "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m spacy download en_core_web_sm
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          "${GITHUB_WORKSPACE}/scripts/ci/install_spacy_model.sh" en_core_web_sm "${SPACY_MODEL_VER}" "${SPACY_MODEL_SHA}"
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 

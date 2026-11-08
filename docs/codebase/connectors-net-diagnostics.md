@@ -562,6 +562,14 @@ It runs four read-only checks at the same time:
 - **SSH banner** on port 22: the first line the server sends. MEHO sends
   nothing.
 
+Both HTTP reads (`_read_bounded`) take the bytes as they come off the
+wire, before any decompression, and stop at 64 KiB. MEHO asks for an
+uncompressed answer (`Accept-Encoding: identity`). A server that still
+compresses (gzip or deflate) gets its answer expanded to at most the same
+64 KiB with a bounded `zlib` call, so a small compressed body cannot grow
+large in memory. Any other encoding, or a body that does not expand, is
+no answer (`reason: unsupported_encoding` or `bad_encoding`).
+
 The decision is in `fingerprint_rules.py`, with no network code. Each
 rule looks at one field and names one product, with a weight: the "about"
 answer 3, a page title 2, a certificate field 1. The weights add up per
@@ -585,6 +593,13 @@ Limits:
   target's credentials. This op has neither.
 - The rules are tested with recorded answers. A check against real
   appliances is still open, so a rule may need a change after it.
+- The `product` in the result names the system. It is not always the
+  product token `targets.register` needs: a vCenter is detected as
+  `vcenter`, but its connector is registered under `vmware`. The
+  guidance tells the agent to take the token from the `product` field
+  of `meho_connector_list`. `targets.register` refuses a wrong token with
+  `unknown_product` and the list of valid tokens
+  (`test_detected_product_is_not_the_token_targets_register_needs`).
 
 ## `net.tls_inspect` — full presented certificate chain (T2, #2407)
 

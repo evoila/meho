@@ -12,6 +12,7 @@ SSH banner. A check against real appliances is not part of these tests.
 from __future__ import annotations
 
 import asyncio
+import gzip
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -39,8 +40,13 @@ from meho_backplane.connectors.net.fingerprint_rules import (
     parse_vsphere_about,
 )
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.connectors.targets.ops import (
+    TARGETS_REGISTER_OP_ID,
+    TARGETS_REGISTRY_CONNECTOR_ID,
+    register_targets_registry_operations,
+)
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor, Tenant
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
@@ -133,6 +139,24 @@ async def _dispatch(params: dict[str, Any], tenant: UUID = _TENANT) -> Operation
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
+class _Stream(httpx.AsyncByteStream):
+    """A body that arrives in small pieces, like from a real transport."""
+
+    def __init__(self, body: bytes, piece: int = 4096) -> None:
+        self._body = body
+        self._piece = piece
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for start in range(0, len(self._body), self._piece):
+            yield self._body[start : start + self._piece]
+
+
+def _response(
+    status: int, body: bytes = b"", headers: dict[str, str] | None = None
+) -> httpx.Response:
+    return httpx.Response(status, stream=_Stream(body), headers=headers or {})
+
+
 def _system(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -172,7 +196,7 @@ def _system(
 def _routes(root: tuple[int, bytes], sdk: tuple[int, bytes]) -> Handler:
     def _handler(request: httpx.Request) -> httpx.Response:
         status, body = sdk if request.url.path == "/sdk" else root
-        return httpx.Response(status, content=body, headers={"server": "test-server"})
+        return _response(status, body, {"server": "test-server"})
 
     return _handler
 
@@ -309,10 +333,10 @@ async def test_sddc_manager_identified_after_same_host_redirect(
 
     def _handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/":
-            return httpx.Response(302, headers={"location": "/ui/"})
+            return _response(302, headers={"location": "/ui/"})
         if request.url.path == "/ui/":
-            return httpx.Response(200, content=SDDC_PAGE)
-        return httpx.Response(404)
+            return _response(200, SDDC_PAGE)
+        return _response(404)
 
     _system(monkeypatch, http=_handler)
 
@@ -368,8 +392,8 @@ async def test_redirect_to_other_host_is_not_followed(monkeypatch: pytest.Monkey
     def _handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == _HOST, "a request went to another host"
         if request.url.path == "/":
-            return httpx.Response(302, headers={"location": "https://198.51.100.7/ui/"})
-        return httpx.Response(404)
+            return _response(302, headers={"location": "https://198.51.100.7/ui/"})
+        return _response(404)
 
     _system(monkeypatch, http=_handler)
 
@@ -382,7 +406,7 @@ async def test_redirect_to_other_host_is_not_followed(monkeypatch: pytest.Monkey
 
 async def test_endless_same_host_redirects_stop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "192.0.2.0/24")
-    seen = _system(monkeypatch, http=lambda _r: httpx.Response(302, headers={"location": "/"}))
+    seen = _system(monkeypatch, http=lambda _r: _response(302, headers={"location": "/"}))
 
     result = await _run()
 
@@ -414,6 +438,125 @@ async def test_large_page_is_read_only_up_to_the_limit(monkeypatch: pytest.Monke
 
     assert result["evidence"]["http"]["title"] is None
     assert result["product"] == "unknown"
+
+
+def _compressed(body: bytes, status: int = 200) -> Handler:
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return _response(status, gzip.compress(body), {"content-encoding": "gzip"})
+
+    return _handler
+
+
+async def test_compressed_page_is_expanded_only_up_to_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small compressed answer that expands to 8 MiB stays within the limit in memory."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "192.0.2.0/24")
+    page = b"\0" * (8 * 1024 * 1024) + b"<title>VMware NSX</title>"
+    assert len(gzip.compress(page)) < fp._MAX_BODY_BYTES
+    _system(monkeypatch, http=_compressed(page))
+    expanded: list[int] = []
+    real_inflate = fp._inflate_bounded
+
+    def _spy(data: bytes, encoding: str) -> bytes:
+        out = real_inflate(data, encoding)
+        expanded.append(len(out))
+        return out
+
+    monkeypatch.setattr(fp, "_inflate_bounded", _spy)
+
+    result = await _run()
+
+    assert expanded and max(expanded) <= fp._MAX_BODY_BYTES
+    assert result["evidence"]["http"]["checked"] is True
+    assert result["evidence"]["http"]["title"] is None
+    assert result["product"] == "unknown"
+
+
+async def test_small_compressed_page_is_still_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "192.0.2.0/24")
+    _system(monkeypatch, http=_compressed(NSX_LOGIN_PAGE, status=200))
+
+    result = await _run()
+
+    assert result["evidence"]["http"]["title"] == "VMware NSX | Login"
+    assert result["product"] == "nsx"
+
+
+@pytest.mark.parametrize(
+    ("headers", "body", "reason"),
+    [
+        ({"content-encoding": "br"}, b"not read", "unsupported_encoding"),
+        ({"content-encoding": "gzip"}, b"this is not gzip", "bad_encoding"),
+    ],
+)
+async def test_an_answer_meho_cannot_expand_is_no_answer(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str], body: bytes, reason: str
+) -> None:
+    """Both HTTP reads (the page and the vSphere call) report the encoding, not a guess."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "192.0.2.0/24")
+    _system(monkeypatch, http=lambda _r: _response(200, body, headers))
+
+    result = await _run()
+
+    assert result["evidence"]["http"]["checked"] is False
+    assert result["evidence"]["http"]["reason"] == reason
+    assert result["evidence"]["vsphere_about"]["checked"] is False
+    assert result["evidence"]["vsphere_about"]["reason"] == reason
+    assert result["product"] == "unknown"
+
+
+async def test_client_asks_for_an_uncompressed_answer() -> None:
+    async with fp._make_client(2.0) as client:
+        assert client.headers["accept-encoding"] == "identity"
+
+
+# ---------------------------------------------------------------------------
+# Handoff to targets.register
+# ---------------------------------------------------------------------------
+
+
+async def test_detected_product_is_not_the_token_targets_register_needs(
+    monkeypatch: pytest.MonkeyPatch, _registered_op: None
+) -> None:
+    """The guidance must not tell an agent to pass the detected product as it is.
+
+    ``vcenter`` names the system; the connector for it is registered under
+    another token. ``targets.register`` refuses the detected name, and the
+    guidance says where the right token comes from.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "192.0.2.0/24")
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "192.0.2.0/24")
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+    await register_targets_registry_operations(embedding_service=service)
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(Tenant(id=_TENANT, slug="fp-tenant", name="Fingerprint tenant"))
+    _system(monkeypatch, http=_routes((200, VCENTER_PAGE), (200, VCENTER_ABOUT)))
+    admin = _operator().model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "web_session": True}
+    )
+
+    detected = await net_fingerprint(admin, None, {"host": _HOST, "timeout_seconds": 2})
+    assert detected["product"] == "vcenter"
+
+    registered = await dispatch(
+        operator=admin,
+        connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
+        op_id=TARGETS_REGISTER_OP_ID,
+        target=None,
+        params={"name": "vc-01", "product": detected["product"], "host": _HOST},
+    )
+
+    assert registered.status == "error", registered
+    assert registered.extras["error_code"] == "connector_error"
+    assert "unknown_product" in registered.extras["exception_message"]
+    next_step = fp._NET_FINGERPRINT_LLM_INSTRUCTIONS["next_step"]
+    assert "`meho_connector_list`" in next_step
+    assert "`product` field" in next_step
+    assert "'vcenter'" in next_step and "'vmware'" in next_step
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import zlib
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -71,8 +72,20 @@ _HTTPS_PORT: Final[int] = 443
 _SSH_PORT: Final[int] = 22
 
 #: The most bytes MEHO reads from one HTTP answer. Enough for a page title
-#: or the vSphere "about" answer; the rest is never read.
+#: or the vSphere "about" answer; the rest is never read. The limit holds
+#: twice: for the bytes read from the wire, and for the bytes a compressed
+#: answer is expanded to.
 _MAX_BODY_BYTES: Final[int] = 64 * 1024
+
+#: The content encodings MEHO can expand, with the zlib window settings to
+#: try in order (47 reads a gzip or a zlib header; -15 reads a bare deflate
+#: stream, which some servers send as "deflate"). Any other encoding is not
+#: read. MEHO asks for an uncompressed answer, so this is a fallback.
+_INFLATE_WBITS: Final[dict[str, tuple[int, ...]]] = {
+    "gzip": (47,),
+    "x-gzip": (47,),
+    "deflate": (47, -15),
+}
 
 #: Redirects to the same host that MEHO follows to find the page title.
 _MAX_SAME_HOST_REDIRECTS: Final[int] = 3
@@ -281,15 +294,29 @@ _NET_FINGERPRINT_LLM_INSTRUCTIONS: dict[str, Any] = {
     "result_scalars": {"keys": ["reachable", "product", "confidence", "version"]},
     "next_step": (
         "When the product is known, register the address as a target with "
-        "`targets.register` using that product. When it is 'unknown', do not "
-        "guess: look at the evidence, or ask an operator. For the full "
-        "certificate chain call `net.tls_inspect`."
+        "`targets.register`. Do not pass the product from this result as it "
+        "is: it names the system, and the product token `targets.register` "
+        "needs can differ. For example, a vCenter is detected as 'vcenter', "
+        "but its connector is registered under 'vmware'. Call "
+        "`meho_connector_list`, pick the connector for the detected product, "
+        "and pass its `product` field. A wrong token is refused with "
+        "'unknown_product' and the list of valid tokens. When the product is "
+        "'unknown', do not guess: look at the evidence, or ask an operator. "
+        "For the full certificate chain call `net.tls_inspect`."
     ),
 }
 
 
 def _no_answer(reason: str, **fields: Any) -> dict[str, Any]:
     return {"checked": False, "reason": reason, **fields}
+
+
+class _BodyNotReadableError(Exception):
+    """The answer's body came in an encoding MEHO does not read, or was not valid."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 async def _check_tls(operator: Operator, host: str, timeout: float) -> dict[str, Any]:
@@ -323,16 +350,40 @@ def _make_client(timeout: float) -> httpx.AsyncClient:
         follow_redirects=False,
         trust_env=False,
         timeout=httpx.Timeout(timeout),
+        headers={"Accept-Encoding": "identity"},
     )
 
 
 async def _read_bounded(response: httpx.Response) -> bytes:
-    data = bytearray()
-    async for chunk in response.aiter_bytes():
-        data.extend(chunk)
-        if len(data) >= _MAX_BODY_BYTES:
+    """Return at most :data:`_MAX_BODY_BYTES` of the answer's body.
+
+    The bytes are taken as they come off the wire, before any
+    decompression, and the read stops at the limit. A compressed answer is
+    then expanded to at most the same limit, so a small compressed body
+    cannot grow into a large one in memory.
+    """
+    raw = bytearray()
+    async for chunk in response.aiter_raw():
+        raw.extend(chunk[: _MAX_BODY_BYTES - len(raw)])
+        if len(raw) >= _MAX_BODY_BYTES:
             break
-    return bytes(data[:_MAX_BODY_BYTES])
+    encoding = response.headers.get("content-encoding", "identity").strip().lower()
+    if encoding in ("", "identity"):
+        return bytes(raw)
+    return _inflate_bounded(bytes(raw), encoding)
+
+
+def _inflate_bounded(data: bytes, encoding: str) -> bytes:
+    """Expand *data* to at most :data:`_MAX_BODY_BYTES`; the rest is dropped."""
+    wbits_options = _INFLATE_WBITS.get(encoding)
+    if wbits_options is None:
+        raise _BodyNotReadableError("unsupported_encoding")
+    for wbits in wbits_options:
+        try:
+            return zlib.decompressobj(wbits=wbits).decompress(data, _MAX_BODY_BYTES)
+        except zlib.error:
+            continue
+    raise _BodyNotReadableError("bad_encoding")
 
 
 def _transport_reason(exc: Exception) -> str:
@@ -382,6 +433,8 @@ async def _check_http(host: str, timeout: float) -> dict[str, Any]:
             return await asyncio.wait_for(_http_title_walk(client, start, host), timeout)
     except (TimeoutError, httpx.HTTPError, httpx.InvalidURL) as exc:
         return _no_answer(_transport_reason(exc), status=None, title=None, server=None, path=None)
+    except _BodyNotReadableError as exc:
+        return _no_answer(exc.reason, status=None, title=None, server=None, path=None)
 
 
 async def _vsphere_about_call(client: httpx.AsyncClient, url: httpx.URL) -> dict[str, Any]:
@@ -402,6 +455,8 @@ async def _check_vsphere_about(host: str, timeout: float) -> dict[str, Any]:
             return await asyncio.wait_for(_vsphere_about_call(client, url), timeout)
     except (TimeoutError, httpx.HTTPError, httpx.InvalidURL) as exc:
         return _no_answer(_transport_reason(exc))
+    except _BodyNotReadableError as exc:
+        return _no_answer(exc.reason)
 
 
 async def _read_banner(host: str) -> bytes:

@@ -306,6 +306,27 @@ async def test_discover_topology_failed_vswitch_detail_raises() -> None:
             await connector.discover_topology(_StubTarget(), operator=_operator())
 
 
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {},
+        {"vswitch": {"name": "backend lan", "vlan": 4000}},
+        {"id": 9999, "name": "backend lan", "vlan": 4000, "server": []},
+        {"vswitch": {"id": None}},
+    ],
+)
+async def test_discover_topology_incomplete_vswitch_detail_raises(detail: Any) -> None:
+    connector = HetznerRobotConnector(credentials_loader=_RecordingLoader())
+
+    async with respx.mock(base_url=_BASE) as mock:
+        mock.get("/server").respond(200, json=_SERVERS)
+        mock.get("/subnet").respond(200, json=_SUBNETS)
+        mock.get("/vswitch").respond(200, json=_VSWITCH_LIST)
+        mock.get("/vswitch/4321").respond(200, json=detail)
+        with pytest.raises(RuntimeError, match="/vswitch/4321"):
+            await connector.discover_topology(_StubTarget(), operator=_operator())
+
+
 async def test_discover_topology_401_stops_after_one_request() -> None:
     connector = HetznerRobotConnector(credentials_loader=_RecordingLoader())
 
@@ -373,6 +394,43 @@ def test_server_node_names_disambiguates_shared_and_empty_names() -> None:
         4: "server-4",
         5: "app",
     }
+
+
+def test_server_node_names_stay_unique_when_a_name_looks_like_a_suffix() -> None:
+    # Two servers share "db", and a third is really named "db #1". The
+    # third must not take the first server's place on the map.
+    servers = [
+        {"server_number": 3, "server_name": "db #1"},
+        {"server_number": 1, "server_name": "db"},
+        {"server_number": 2, "server_name": "db"},
+        {"server_number": 4, "server_name": "db #2 #4"},
+        {"server_number": 5, "server_name": "db #2"},
+    ]
+    names = server_node_names(servers)
+
+    assert names == {1: "db #1", 2: "db #2", 3: "db #1 #3", 4: "db #2 #4", 5: "db #2 #5"}
+    assert len(set(names.values())) == len(names)
+    # The input order does not change the names.
+    assert server_node_names(list(reversed(servers))) == names
+
+
+def test_build_topology_hints_keeps_every_server_when_names_collide() -> None:
+    servers = [
+        {"server_number": 1, "server_name": "db", "server_ip": "192.0.2.1"},
+        {"server_number": 2, "server_name": "db", "server_ip": "192.0.2.2"},
+        {"server_number": 3, "server_name": "db #1", "server_ip": "192.0.2.3"},
+    ]
+    vswitches = [{"id": 9, "server": [{"server_number": 3, "status": "ready"}]}]
+    hints = build_topology_hints("acct", servers, [], vswitches)
+
+    hosts = {n.name: dict(n.properties) for n in hints.nodes if n.kind == "host"}
+    assert {name: p["server_number"] for name, p in hosts.items()} == {
+        "db #1": 1,
+        "db #2": 2,
+        "db #1 #3": 3,
+    }
+    assert ("host", "db #1 #3", "routes-through", "network", "vswitch-9") in _edges(hints)
+    assert ("host", "db #1", "routes-through", "network", "vswitch-9") not in _edges(hints)
 
 
 def test_build_topology_hints_skips_entries_without_identity() -> None:
@@ -493,3 +551,51 @@ async def test_refresh_writes_robot_nodes_with_source_and_time() -> None:
         assert edge.source == "auto"
         assert edge.discovered_by == "hetzner"
         assert edge.last_seen is not None
+
+
+async def _robot_rows(tenant_id: UUID) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        nodes = (
+            (await session.execute(select(GraphNode).where(GraphNode.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+        edges = (
+            (await session.execute(select(GraphEdge).where(GraphEdge.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+    node_rows = sorted((n.id, n.kind, n.name, n.last_seen, dict(n.properties)) for n in nodes)
+    edge_rows = sorted((e.id, e.from_node_id, e.to_node_id, e.kind, e.last_seen) for e in edges)
+    return node_rows, edge_rows
+
+
+async def test_refresh_keeps_map_when_vswitch_detail_is_incomplete() -> None:
+    tenant_id, target = await _seed_target()
+    operator = _operator(tenant_id)
+
+    with patch(
+        "meho_backplane.connectors.hetzner_robot.connector.load_credentials_from_vault",
+        new=_RecordingLoader(),
+    ):
+        reset_connector_instance_cache()
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            _mock_account(mock)
+            first = await refresh_target_topology(target, operator)
+        before_nodes, before_edges = await _robot_rows(tenant_id)
+
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            _mock_account(mock)
+            mock.get("/vswitch/4321").respond(200, json={})
+            with pytest.raises(RuntimeError, match="/vswitch/4321"):
+                await refresh_target_topology(target, operator)
+
+    after_nodes, after_edges = await _robot_rows(tenant_id)
+    assert first.added_nodes == 6
+    assert after_nodes == before_nodes
+    assert after_edges == before_edges
+    vswitch_rows = [row for row in after_nodes if row[1:3] == ("network", "vswitch-4321")]
+    assert len(vswitch_rows) == 1
+    assert vswitch_rows[0][3] is not None
+    assert all(row[4] is not None for row in after_edges)

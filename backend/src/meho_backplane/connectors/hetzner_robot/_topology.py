@@ -147,24 +147,42 @@ async def discover_robot_topology(
                 "Hetzner Robot GET /vswitch returned a vSwitch without a numeric id; "
                 "the topology refresh stopped."
             )
-        detail = await get_json(f"/vswitch/{vswitch_id}")
-        if isinstance(detail, Mapping) and isinstance(detail.get("vswitch"), Mapping):
-            detail = detail["vswitch"]
-        if not isinstance(detail, Mapping):
-            raise RuntimeError(
-                f"Hetzner Robot GET /vswitch/{vswitch_id} did not return an object; "
-                "the topology refresh stopped."
-            )
-        vswitches.append(dict(detail))
+        vswitches.append(await _read_vswitch_detail(get_json, vswitch_id))
     return build_topology_hints(target_name, servers, subnets, vswitches, now=now)
 
 
+async def _read_vswitch_detail(get_json: RobotGet, vswitch_id: int) -> dict[str, Any]:
+    """Read ``GET /vswitch/{id}`` and check that the answer is that vSwitch.
+
+    An answer without the id, or with another id, is a partial or wrong
+    read. It raises, so the refresh keeps the last good state instead of
+    dropping the vSwitch and its links from the map.
+    """
+    path = f"/vswitch/{vswitch_id}"
+    detail = await get_json(path)
+    if isinstance(detail, Mapping) and isinstance(detail.get("vswitch"), Mapping):
+        detail = detail["vswitch"]
+    if not isinstance(detail, Mapping):
+        raise RuntimeError(
+            f"Hetzner Robot GET {path} did not return an object; the topology refresh stopped."
+        )
+    if _int_or_none(detail.get("id")) != vswitch_id:
+        raise RuntimeError(
+            f"Hetzner Robot GET {path} did not return vSwitch {vswitch_id} "
+            f"(got id {detail.get('id')!r}); the topology refresh stopped."
+        )
+    return dict(detail)
+
+
 def server_node_names(servers: list[dict[str, Any]]) -> dict[int, str]:
-    """Map each server number to its node name.
+    """Map each server number to its node name. The names are unique.
 
     The name is ``server_name``, or ``server-<number>`` when it is empty.
     Robot does not keep server names unique, so a name that two servers
-    share gets `` #<number>`` on both.
+    share gets `` #<number>`` on both. Servers are handled in number
+    order, and a name that an earlier server already holds gets
+    `` #<number>`` too, until it is free. So a server named ``db #1``
+    never takes the place of the first of two servers named ``db``.
     """
     base: dict[int, str] = {}
     for server in servers:
@@ -175,9 +193,17 @@ def server_node_names(servers: list[dict[str, Any]]) -> dict[int, str]:
         name = raw_name.strip() if isinstance(raw_name, str) else ""
         base[number] = name or f"server-{number}"
     counts = Counter(base.values())
-    return {
-        number: name if counts[name] == 1 else f"{name} #{number}" for number, name in base.items()
-    }
+    names: dict[int, str] = {}
+    taken: set[str] = set()
+    for number in sorted(base):
+        name = base[number]
+        if counts[name] > 1:
+            name = f"{name} #{number}"
+        while name in taken:
+            name = f"{name} #{number}"
+        names[number] = name
+        taken.add(name)
+    return names
 
 
 def subnet_node_name(subnet: Mapping[str, Any]) -> str | None:

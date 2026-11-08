@@ -260,7 +260,7 @@ topology map (code: `_topology.py`). The refresh service calls it on
    | Node | Kind | Name | Properties |
    |---|---|---|---|
    | The Robot account | `target` | the target name | vendor, product |
-   | Each dedicated server | `host` | `server_name`; `server-<number>` when empty; `<name> #<number>` when two servers share a name | server number, main addresses (`server_ip`, `server_ipv6_net`, `ip`), product, data center, status, cancelled, the server's own subnets |
+   | Each dedicated server | `host` | `server_name`; `server-<number>` when empty; `<name> #<number>` when two servers share a name, and ` #<number>` once more while the name is still taken, so names are unique | server number, main addresses (`server_ip`, `server_ipv6_net`, `ip`), product, data center, status, cancelled, the server's own subnets |
    | Each subnet | `network` | `<ip>/<mask>` | gateway, routed-to server, failover, locked, IP version |
    | Each vSwitch | `network` | `vswitch-<id>` | vSwitch id, vSwitch name, VLAN, cancelled |
 
@@ -274,8 +274,9 @@ topology map (code: `_topology.py`). The refresh service calls it on
 4. The refresh stores each row with `source='auto'`, `discovered_by='hetzner'`
    and the time it saw the row (`first_seen`, `last_seen`).
 5. A failed or odd read (a 401, a 5xx, a body that is not a list of
-   objects, a vSwitch without an id) raises, so the refresh rolls back and
-   the map keeps its last good state. Only Robot's documented "none found"
+   objects, a vSwitch without an id, a vSwitch detail without its id or
+   with another id) raises, so the refresh rolls back and the map keeps
+   its last good state. Only Robot's documented "none found"
    answers count as empty: 404 `SERVER_NOT_FOUND` on `GET /server` and 404
    `NOT_FOUND` on `GET /subnet`. A 401 stops after one request, as in the
    rest of the connector.

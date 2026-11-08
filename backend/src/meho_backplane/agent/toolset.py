@@ -155,6 +155,7 @@ from meho_backplane.agent.toolset_discovery import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import capability_satisfied, role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
+from meho_backplane.operation_picks.recorder import recorded_meta_tool
 from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED, ROLE_INSUFFICIENT
 from meho_backplane.operations.meta_tools import (
     call_operation,
@@ -520,7 +521,13 @@ def _make_meta_tool(
             )
         call_arguments = dict(arguments)
         with connector_errors_reach_model():
-            result = await handler(ctx.deps, call_arguments)
+            # #4750: a search or call writes its record; other tools do not.
+            result = await recorded_meta_tool(
+                meta.name,
+                ctx.deps,
+                call_arguments,
+                run=lambda: handler(ctx.deps, call_arguments),
+            )
         if is_connector_list:
             result = await _finish_connector_list(ctx.deps, result, allowed_connectors)
         if is_call_operation and result.get("status") == "awaiting_approval":

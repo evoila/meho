@@ -13,13 +13,15 @@ What these tests prove:
   finalizers stay.
 * **Refusals, nothing written:** an object that is not being deleted, a
   finalizer the object does not have, a missing object, a changed list
-  (``expected_finalizers``), a list that changes during the call (422), a
-  core ``secrets`` object. Other API errors propagate.
+  (``expected_finalizers``, or the list on the approval card in the
+  approved run), a list that changes during the call (422), a core
+  ``secrets`` object. Other API errors propagate.
 * **The preview** shows the object, its deletion time and finalizers, and
   fails for every refusal; it declines without a connector.
 * **The governed flow.** A call without the bound ``preview_hash`` is
   refused, an agent's call is refused, a refusal in the preview stops the
-  call before it waits for approval.
+  call before it waits for approval, and a list that changes while the
+  request waits refuses the approved run.
 
 All names are obvious fakes.
 """
@@ -63,6 +65,7 @@ from meho_backplane.operations._preview import (
     build_proposed_effect,
 )
 from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations.approval_queue import composite_resume_binding
 from meho_backplane.settings import get_settings
 
 _OP = "k8s.finalizer.remove"
@@ -284,6 +287,57 @@ async def test_expected_finalizers_that_match_are_accepted() -> None:
     assert len(_patch_calls(api)) == 1
 
 
+def _approved(preview: dict[str, Any], op_id: str = _OP) -> Any:
+    """Run as the approved re-run of *op_id* whose card stored *preview*."""
+    return composite_resume_binding(
+        subop_op_id=op_id,
+        subop_params_hash="h",
+        resume_parent=None,
+        proposed_effect={"op_class": "write", "preview": preview},
+    )
+
+
+def _card(finalizers: list[str]) -> dict[str, Any]:
+    return {"blast_radius": {"object": {"name": "old-widget", "finalizers": finalizers}}}
+
+
+async def test_approved_run_refuses_a_list_that_changed_since_the_card() -> None:
+    # The approver saw two finalizers; another controller removed the other
+    # one while the request waited. Removing ours now would free the object.
+    api = _api(_stuck([_HOLD]))
+    with (
+        _approved(_card([_HOLD, _OTHER])),
+        pytest.raises(KubernetesFinalizerError, match="changed since you looked"),
+    ):
+        await _remove(api, dict(_CR_PARAMS))
+    assert _patch_calls(api) == []
+
+
+async def test_approved_run_with_the_same_list_patches_against_that_list() -> None:
+    api = _api(_stuck([_HOLD, _OTHER]))
+    with _approved(_card([_HOLD, _OTHER])):
+        await _remove(api, dict(_CR_PARAMS))
+    (call,) = _patch_calls(api)
+    assert call.kwargs["body"][0]["value"] == [_HOLD, _OTHER]
+
+
+async def test_approved_run_whose_card_has_no_list_is_refused() -> None:
+    api = _api(_stuck([_HOLD]))
+    with (
+        _approved({}),
+        pytest.raises(KubernetesFinalizerError, match="shows no finalizer list"),
+    ):
+        await _remove(api, dict(_CR_PARAMS))
+    assert _patch_calls(api) == []
+
+
+async def test_card_of_another_op_is_not_read() -> None:
+    api = _api(_stuck([_HOLD]))
+    with _approved(_card([_HOLD, _OTHER]), op_id="k8s.secret.delete"):
+        await _remove(api, dict(_CR_PARAMS))
+    assert len(_patch_calls(api)) == 1
+
+
 @pytest.mark.parametrize("status", [409, 422])
 async def test_list_changed_during_the_call_is_a_clear_error(status: int) -> None:
     api = _api(_stuck([_HOLD]), patch_error=ApiException(status=status, reason="x"))
@@ -499,3 +553,31 @@ async def test_agent_cannot_remove_a_finalizer(
     assert result.status == "denied", result
     assert _patch_calls(api) == []
     assert await _pending_count() == 0
+
+
+async def test_list_that_changes_while_the_request_waits_refuses_the_approved_run(
+    _registered_ops: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = _api(_stuck([_HOLD, _OTHER]))
+    _fake_api(monkeypatch, api)
+    preview = await _preview_of(dict(_CR_PARAMS))
+    result = await _call(dict(_CR_PARAMS), preview_hash=preview["preview_hash"])
+    assert result.status == "awaiting_approval", result
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, UUID(result.extras["approval_request_id"]))
+        assert row is not None
+        effect = dict(row.proposed_effect)
+
+    # Another controller removes its finalizer while the request waits.
+    changed = _api(_stuck([_HOLD]))
+    with (
+        composite_resume_binding(
+            subop_op_id=_OP,
+            subop_params_hash="h",
+            resume_parent=None,
+            proposed_effect=effect,
+        ),
+        pytest.raises(KubernetesFinalizerError, match="changed since you looked"),
+    ):
+        await _remove(changed, dict(_CR_PARAMS))
+    assert _patch_calls(changed) == []

@@ -748,7 +748,7 @@ approval and the audit log.
   remaining_finalizers}`.
 - It refuses, and writes nothing, when the object is missing, has no deletion
   time, does not have the named finalizer, or its finalizer list differs from
-  `expected_finalizers`. A core `secrets` object is refused (the API answer
+  the list on the approval card (or from `expected_finalizers`). A core `secrets` object is refused (the API answer
   carries the values); use `k8s.secret.delete`.
 - The write is a JSON Patch (`application/json-patch+json`): a `test` step on
   the whole `/metadata/finalizers` list, then a `replace` without the named
@@ -761,9 +761,12 @@ approval and the audit log.
   kind, name, deletion time and finalizers, and the preview carries a warning
   that the controller's clean-up is skipped. `children` is empty and
   `irreversibility` is `permanent`.
-- The preview hash covers the params only. Pass `expected_finalizers` (the
-  list the preview showed) to make the call fail when the list changed after
-  the approver looked.
+- The preview hash covers the params only, so the handler checks the list
+  itself. In the approved run it reads the card the approver saw
+  (`approved_preview`) and refuses when the live list is different, so a
+  change while the request waited never removes a finalizer. A card without
+  a finalizer list is refused too. Outside an approved run, the optional
+  `expected_finalizers` (the list the preview showed) does the same check.
 
 Tests: `tests/test_connectors_k8s_finalizer_remove.py`.
 

@@ -19,8 +19,9 @@ log. This op closes that gap.
     * the object does not exist,
     * the object is not being deleted (it has no deletion time),
     * the object does not have the named finalizer,
-    * ``expected_finalizers`` is given and the list on the object differs
-      from it (the list changed after the approver looked).
+    * the list on the object differs from the list on the approval card
+      the approver saw (the list changed while the request waited), or
+      from ``expected_finalizers`` when that is given.
 
     The write is a JSON Patch with a ``test`` step on the whole finalizer
     list. If the list changes between the read and the write, the API
@@ -53,7 +54,11 @@ from typing import TYPE_CHECKING, Any
 from kubernetes_asyncio.client.exceptions import ApiException
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    approved_preview,
+    register_preview_builder,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -141,12 +146,33 @@ def _refuse_secrets(params: dict[str, Any]) -> None:
         )
 
 
+def _approved_finalizers(label: str) -> list[str] | None:
+    """The finalizer list on the approval card, during the approved run of this op.
+
+    ``None`` when the call is not the approved run of a request. An
+    approved run whose card has no finalizer list is refused: MEHO cannot
+    tell whether the list changed while the request waited.
+    """
+    preview = approved_preview(_OP_ID)
+    if preview is None:
+        return None
+    obj = (preview.get("blast_radius") or {}).get("object") or {}
+    finalizers = obj.get("finalizers")
+    if not isinstance(finalizers, list):
+        raise KubernetesFinalizerError(
+            f"The approval card of {label} shows no finalizer list, so MEHO cannot "
+            "check that the list is unchanged. Nothing was changed. Send a new request."
+        )
+    return [str(f) for f in finalizers]
+
+
 async def read_stuck_object(api_client: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Read the object and check it can be freed; return its metadata view.
 
     Raises :class:`KubernetesFinalizerError` for a missing object, an
     object that is not being deleted, a finalizer it does not have, or a
-    list that differs from ``expected_finalizers``. Returns
+    list that differs from ``expected_finalizers`` or from the approval
+    card of the approved run. Returns
     ``{kind, deletion_timestamp, finalizers}``.
     """
     _refuse_secrets(params)
@@ -170,12 +196,12 @@ async def read_stuck_object(api_client: Any, params: dict[str, Any]) -> dict[str
             f"{label} has no finalizer {params['finalizer']!r}. Its finalizers: "
             f"{finalizers or 'none'}."
         )
-    expected = params.get("expected_finalizers")
-    if expected is not None and list(expected) != finalizers:
-        raise KubernetesFinalizerError(
-            f"The finalizers of {label} changed since you looked: now {finalizers}. "
-            "Run the preview again and check the list."
-        )
+    for expected in (params.get("expected_finalizers"), _approved_finalizers(label)):
+        if expected is not None and list(expected) != finalizers:
+            raise KubernetesFinalizerError(
+                f"The finalizers of {label} changed since you looked: now {finalizers}. "
+                "Run the preview again and check the list."
+            )
     return {
         "kind": obj.get("kind"),
         "deletion_timestamp": str(deletion),

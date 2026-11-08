@@ -151,9 +151,10 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 
 `linux.about` is the identity canary (its handler wraps `fingerprint`).
 `linux.firewall.show` reads the rules as root. When the login is not root,
-it runs the read under sudo: with the `sudo_password` (or `password`) of
-the target's secret through `_sudo.py`, or with `sudo -n` when the secret
-holds no password. It checks the exit status and keeps the error text. A
+it runs the read under sudo through `_sudo.py`, with the `sudo_password`
+(or `password`) of the target's secret. When the secret holds no password,
+it sends an empty one: a login that may use sudo without a password still
+reads, and any other login gets `permission_denied`. It checks the exit status and keeps the error text. A
 read that fails is an error that starts with `permission_denied` or
 `read_failed`, never `rows: []`. `backend: none` means only that the host
 has neither `nft` nor `iptables-save`.

@@ -13,15 +13,15 @@ discriminator; the row list spills to a ``result_query`` handle above the
 JSONFlux threshold.
 
 A login that is not root cannot read the ruleset. Then the read runs under
-sudo: with the sudo password of the target's secret through the shared sudo
-path (:mod:`~meho_backplane.connectors.linux._sudo`), or with ``sudo -n``
-when the secret holds no password. A read that fails raises
+sudo, through the shared sudo path
+(:mod:`~meho_backplane.connectors.linux._sudo`), with the sudo password of
+the target's secret (an empty one when the secret holds none, for a login
+that may use sudo without a password). A read that fails raises
 :class:`LinuxFirewallReadError`; it never answers "no rules".
 """
 
 from __future__ import annotations
 
-import shlex
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.auth.operator import Operator
@@ -112,22 +112,19 @@ async def linux_firewall_show(
     del params  # declared empty in schema; intentionally ignored
     secret = await connector._resolve_secret(target, operator)
     username = strip_credential_value(secret.get("username", "root"))
-    sudo_password = secret.get("sudo_password") or secret.get("password")
     if username == "root":
         proc = await connector._run_command(target, FIREWALL_SHOW_COMMAND, operator=operator)
-    elif sudo_password:
+    else:
+        # No password in the secret: send an empty one. sudo does not read it
+        # when the login may use sudo without a password; else it refuses, and
+        # the refusal is reported as permission_denied below.
+        sudo_password = secret.get("sudo_password") or secret.get("password") or ""
         proc = await run_remote_bash_with_sudo(
             connector,
             target,
             FIREWALL_SHOW_COMMAND,
             operator=operator,
             sudo_password=strip_credential_value(sudo_password),
-        )
-    else:
-        proc = await connector._run_command(
-            target,
-            f"sudo -n /bin/sh -c {shlex.quote(FIREWALL_SHOW_COMMAND)}",
-            operator=operator,
         )
     stdout = _text(proc, "stdout")
     exit_status = getattr(proc, "exit_status", None)

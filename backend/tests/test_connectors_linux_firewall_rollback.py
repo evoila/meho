@@ -123,19 +123,24 @@ async def test_show_non_root_reads_through_sudo() -> None:
 
 
 @pytest.mark.asyncio
-async def test_show_non_root_without_password_uses_sudo_n() -> None:
+async def test_show_non_root_without_password_sends_an_empty_one() -> None:
     connector = _connector({"username": "ops", "ssh_private_key": "k"})
-    with patch.object(connector, "_run_command", new_callable=AsyncMock) as plain:
-        plain.return_value = _proc(stdout="MEHO_BACKEND=iptables\n*filter\nCOMMIT\n")
+    sudo = AsyncMock(return_value=_proc(stdout="MEHO_BACKEND=iptables\n*filter\nCOMMIT\n"))
+    with (
+        patch("meho_backplane.connectors.linux.ops_firewall.run_remote_bash_with_sudo", sudo),
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as plain,
+    ):
         result = await connector.firewall_show(_TARGET, {})
     assert result["backend"] == "iptables"
     assert result["total"] == 2
-    assert plain.await_args.args[1].startswith("sudo -n /bin/sh -c ")
+    plain.assert_not_awaited()
+    assert sudo.await_args is not None
+    assert sudo.await_args.kwargs["sudo_password"] == ""
 
 
 @pytest.mark.asyncio
 async def test_show_failed_read_is_an_error_not_empty_rows() -> None:
-    connector = _connector({"username": "ops", "ssh_private_key": "k"})
+    connector = _connector({"username": "root", "ssh_private_key": "k"})
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as plain:
         plain.return_value = _proc(
             stdout="MEHO_BACKEND=nftables\n",
@@ -152,10 +157,14 @@ async def test_show_failed_read_is_an_error_not_empty_rows() -> None:
 @pytest.mark.asyncio
 async def test_show_sudo_refusal_is_permission_denied() -> None:
     connector = _connector({"username": "ops", "ssh_private_key": "k"})
-    with patch.object(connector, "_run_command", new_callable=AsyncMock) as plain:
-        plain.return_value = _proc(stderr="sudo: a password is required\n", exit_status=1)
-        with pytest.raises(LinuxFirewallReadError, match=r"^permission_denied"):
-            await connector.firewall_show(_TARGET, {})
+    sudo = AsyncMock(
+        return_value=_proc(stderr="sudo: 1 incorrect password attempt\n", exit_status=1)
+    )
+    with (
+        patch("meho_backplane.connectors.linux.ops_firewall.run_remote_bash_with_sudo", sudo),
+        pytest.raises(LinuxFirewallReadError, match=r"^permission_denied"),
+    ):
+        await connector.firewall_show(_TARGET, {})
 
 
 @pytest.mark.asyncio

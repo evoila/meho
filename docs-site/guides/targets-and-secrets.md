@@ -34,9 +34,17 @@ which is why this is the first guide.
 
 Create, edit and delete on REST are for people only. A service login
 gets `403 human_principal_required`, also with the **tenant_admin**
-role. It registers a target with the `targets.register` operation and
-removes one with `targets.remove` (connector `targets-registry-1.x`).
-MEHO checks both against the approval rules.
+role. It registers a target with the `targets.register` operation,
+changes one with `targets.update` and removes one with `targets.remove`
+(connector `targets-registry-1.x`). MEHO checks them against the
+approval rules.
+
+**The CLI and REST wait for approval.** A change made with your login
+token (`meho targets add`, `update`, `delete`, `import`, or a script on
+REST) waits until a person approves it. The command prints the approval
+id and exits 0; approving the request makes the change. Find it with
+`meho approvals list`, or in the console under approvals. A change you
+make in the operator console runs at once.
 
 **Register targets on the operator surfaces above.** Registration is an
 operator-trust decision. For agents, the default MCP tools only read
@@ -288,7 +296,8 @@ meho targets import targets.yaml --dry-run
 
 # 2. Apply. Default mode aborts before any write if a name already exists:
 meho targets import targets.yaml
-#   Applied: 2 created, 0 updated.
+#   Applied: 0 created, 0 updated, 2 waiting for approval.
+#   Each target is created when a person approves its request.
 
 # 3. Iterate later with --update: PATCHes existing names, creates new ones.
 #    The PATCH is sparse — fields your YAML omits are left untouched.

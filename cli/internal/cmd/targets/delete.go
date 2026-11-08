@@ -16,6 +16,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -62,6 +63,7 @@ func newDeleteCmd() *cobra.Command {
 		Long: "delete calls DELETE /api/v1/targets/{name}. MEHO stops using the " +
 			"target, but keeps its row so the audit log still points at it. " +
 			"The system itself and its Vault secret are not touched.\n\n" +
+			dispatch.RESTWriteApprovalNote +
 			"When topology nodes still point at the target, the server " +
 			"refuses and the command says how many. `--force` deletes it " +
 			"anyway: the nodes stay, but they point at a deleted target.\n\n" +
@@ -110,7 +112,8 @@ func runDelete(cmd *cobra.Command, name string, force, confirm, jsonOut bool, ba
 	if force {
 		path += "?force=true"
 	}
-	if _, err := doAuthedRequest(cmd.Context(), backplaneURL, http.MethodDelete, path, nil); err != nil {
+	raw, err := doAuthedRequest(cmd.Context(), backplaneURL, http.MethodDelete, path, nil)
+	if err != nil {
 		var he *httpError
 		if errors.As(err, &he) && he.StatusCode == http.StatusConflict {
 			if refs, ok := parseHasReferences(he.Body); ok {
@@ -119,6 +122,9 @@ func runDelete(cmd *cobra.Command, name string, force, confirm, jsonOut bool, ba
 			}
 		}
 		return renderImportRequestError(cmd, backplaneURL, err, jsonOut)
+	}
+	if parked, err := dispatch.RenderRESTParked(cmd.OutOrStdout(), raw, jsonOut); parked {
+		return err
 	}
 	result.Status = "deleted"
 	if jsonOut {

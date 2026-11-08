@@ -95,6 +95,7 @@ from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
+from tests._rest_write_helpers import run_writes_at_once
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -672,6 +673,7 @@ def _rest_client() -> tuple[TestClient, _Caller]:
     rest_app.include_router(_probe)
     caller = _Caller()
     rest_app.dependency_overrides[verify_jwt_and_bind] = caller
+    run_writes_at_once(rest_app)
     return TestClient(rest_app, raise_server_exceptions=False), caller
 
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -100,6 +101,7 @@ func newUpdateCmd() *cobra.Command {
 		Long: "update changes one target via PATCH /api/v1/targets/{name}. " +
 			"Only the flags you pass are sent; every other field keeps its " +
 			"current value. The flags match `meho targets add`.\n\n" +
+			dispatch.RESTWriteApprovalNote +
 			"`--alias` replaces the whole alias list, and `--extra " +
 			"key=value` replaces the whole `extras` map (pass every key " +
 			"you want to keep). `--clear <field>` (repeatable) removes a " +
@@ -286,6 +288,9 @@ func runUpdate(cmd *cobra.Command, name string, body map[string]any, jsonOut boo
 		"/api/v1/targets/"+pathEscape(name), payload)
 	if err != nil {
 		return renderImportRequestError(cmd, backplaneURL, err, jsonOut)
+	}
+	if parked, err := dispatch.RenderRESTParked(cmd.OutOrStdout(), raw, jsonOut); parked {
+		return err
 	}
 	var t api.Target
 	if err := json.Unmarshal(raw, &t); err != nil {

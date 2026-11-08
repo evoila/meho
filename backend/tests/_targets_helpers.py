@@ -42,6 +42,7 @@ from meho_backplane.settings import get_settings
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import DEFAULT_TENANT_ID, mint_token
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
+from ._rest_write_helpers import run_writes_at_once
 
 
 @pytest.fixture(autouse=True)
@@ -74,12 +75,14 @@ def _empty_connector_registry() -> Iterator[None]:
     clear_registry()
 
 
-def _build_app() -> FastAPI:
+def _build_app(*, web_session: bool = True) -> FastAPI:
     app = FastAPI()
     app.add_middleware(AuditMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(targets_router)
-    return app
+    # Tests check what a write does, so they run it as the console does.
+    # ``web_session=False`` keeps the token rule (``_rest_write_helpers``).
+    return run_writes_at_once(app) if web_session else app
 
 
 def _admin_token(key: Any, tenant_id: str = DEFAULT_TENANT_ID) -> str:

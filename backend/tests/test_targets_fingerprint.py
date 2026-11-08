@@ -79,6 +79,7 @@ from ._oidc_jwt_helpers import (
     public_jwks,
 )
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
+from ._rest_write_helpers import run_writes_at_once
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -121,7 +122,7 @@ def _build_app() -> FastAPI:
     app.add_middleware(AuditMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(targets_router)
-    return app
+    return run_writes_at_once(app)
 
 
 @pytest.fixture

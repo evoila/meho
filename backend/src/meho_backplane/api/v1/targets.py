@@ -19,9 +19,15 @@
 The three writes (``POST``, ``PATCH``, ``DELETE``) are for people only.
 A service or runner login with ``tenant_admin`` gets 403
 ``human_principal_required``; an agent login, capped at ``operator``, gets
-403 ``insufficient_role``. A machine login registers and removes targets
-with the ``targets.register`` and ``targets.remove`` operations, which go
-through the approval check (:mod:`meho_backplane.connectors.targets.ops`).
+403 ``insufficient_role``. A machine login registers, changes and removes
+targets with the ``targets.register``, ``targets.update`` and
+``targets.remove`` operations, which go through the approval check
+(:mod:`meho_backplane.connectors.targets.ops`).
+
+A person's write runs at once only in the web interface. A person's call
+made with a token (the ``meho`` CLI, scripts) goes to the same typed
+operation through the dispatcher and waits for approval: the route answers
+202 with the approval request id (:mod:`meho_backplane.api.v1._wait_for_approval`).
 
 All routes are tenant-scoped via ``operator.tenant_id`` extracted from the
 JWT by :func:`~meho_backplane.middleware.verify_jwt_and_bind`. Cross-tenant
@@ -149,12 +155,18 @@ from typing import Any, Final, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import object_session
 
+from meho_backplane.api.v1._wait_for_approval import (
+    AWAITING_APPROVAL_RESPONSES,
+    dispatch_rest_write,
+    runs_at_once,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
@@ -223,9 +235,10 @@ _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 MACHINE_TARGET_WRITE_REMEDIATION: Final[str] = (
     "target writes on REST are for people. A machine login (agent, service "
     "or runner) registers a target with call_operation(connector_id="
-    "'targets-registry-1.x', op_id='targets.register') and removes one with "
-    "op_id='targets.remove'; MEHO checks both against the approval rules. A "
-    "person changes a target in the operator console or with the meho CLI."
+    "'targets-registry-1.x', op_id='targets.register'), changes one with "
+    "op_id='targets.update' and removes one with op_id='targets.remove'; MEHO "
+    "checks them against the approval rules. A person changes a target in the "
+    "operator console or with the meho CLI."
 )
 
 
@@ -1556,7 +1569,6 @@ def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
     return product
 
 
-@router.post("", response_model=Target, status_code=201)
 async def create_target(
     body: TargetCreate,
     operator: Operator = _require_admin_person_dep,
@@ -1763,7 +1775,6 @@ def _validate_update_body_fields(
         )
 
 
-@router.patch("/{name}", response_model=Target)
 async def update_target(
     name: str,
     body: TargetUpdate,
@@ -1866,65 +1877,6 @@ async def update_target(
     return _to_full(t)
 
 
-@router.delete(
-    "/{name}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    response_class=Response,
-    responses={
-        # 409 ``target_has_references`` -- declared explicitly so
-        # FastAPI's autogen OpenAPI surfaces the cascade-conflict shape
-        # to SDK clients. The route handler below raises ``HTTPException(
-        # 409, detail={"kind": "target_has_references", ...})`` when the
-        # target is wired into the topology graph and ``?force=true`` is
-        # not set. Without this declaration the spec only lists 204 + 422
-        # and clients have no schema-driven signal for the recoverable
-        # cascade-conflict (the operator's first-line "retry with
-        # ?force=true" remediation). Mirrors the
-        # ``GET /api/v1/topology/history/{name}`` convention from
-        # ``api/v1/topology.py`` -- structured ``detail`` shape with a
-        # snake_case ``kind`` discriminator and an inline content schema
-        # so the regen'd Go client lands a typed JSON409 wrapper.
-        409: {
-            "description": (
-                "Target is referenced by ``graph_node`` rows; "
-                "retry with ``?force=true`` to soft-delete anyway "
-                "(``graph_node.target_id`` is ``ON DELETE SET NULL`` so "
-                "the topology rows survive). See "
-                "``docs/codebase/error-message-shape.md`` for the "
-                "convention."
-            ),
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "detail": {
-                                "type": "object",
-                                "properties": {
-                                    "kind": {
-                                        "type": "string",
-                                        "enum": ["target_has_references"],
-                                    },
-                                    "graph_node_refs": {
-                                        "type": "integer",
-                                        "minimum": 1,
-                                    },
-                                    "message": {"type": "string"},
-                                },
-                                "required": [
-                                    "kind",
-                                    "graph_node_refs",
-                                    "message",
-                                ],
-                            },
-                        },
-                        "required": ["detail"],
-                    },
-                },
-            },
-        },
-    },
-)
 async def delete_target(
     name: str,
     force: bool = Query(default=False),
@@ -1988,6 +1940,26 @@ async def count_graph_node_refs(session: AsyncSession, target_id: uuid.UUID) -> 
     return int((await session.execute(count_stmt)).scalar_one())
 
 
+def _raise_target_has_references(t: TargetORM, graph_node_ref_count: int) -> NoReturn:
+    """Raise the 409 ``target_has_references`` of a delete without ``force``."""
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "kind": "target_has_references",
+            "graph_node_refs": graph_node_ref_count,
+            "message": (
+                f"target {t.name!r} is referenced by "
+                f"{graph_node_ref_count} graph_node row(s); "
+                f"retry with ?force=true to delete anyway "
+                f"(graph_node.target_id is ON DELETE SET NULL "
+                f"so the topology rows survive). "
+                f"See docs/codebase/error-message-shape.md for "
+                f"the convention."
+            ),
+        },
+    )
+
+
 async def soft_delete_target(
     session: AsyncSession,
     t: TargetORM,
@@ -2010,22 +1982,7 @@ async def soft_delete_target(
     graph_node_ref_count = await count_graph_node_refs(session, t.id)
 
     if graph_node_ref_count > 0 and not force:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "kind": "target_has_references",
-                "graph_node_refs": graph_node_ref_count,
-                "message": (
-                    f"target {t.name!r} is referenced by "
-                    f"{graph_node_ref_count} graph_node row(s); "
-                    f"retry with ?force=true to delete anyway "
-                    f"(graph_node.target_id is ON DELETE SET NULL "
-                    f"so the topology rows survive). "
-                    f"See docs/codebase/error-message-shape.md for "
-                    f"the convention."
-                ),
-            },
-        )
+        _raise_target_has_references(t, graph_node_ref_count)
 
     t.deleted_at = datetime.now(UTC)
     await session.flush()
@@ -2038,3 +1995,171 @@ async def soft_delete_target(
         force=force,
     )
     return graph_node_ref_count
+
+
+# ---------------------------------------------------------------------------
+# The REST write routes. A person in the web interface runs a write at once;
+# every call made with a token waits for approval, like ``call_operation``
+# (``api/v1/_wait_for_approval.py``). The console and the typed operations
+# call the functions above in process, so this check does not apply to them.
+# ---------------------------------------------------------------------------
+
+
+async def _dispatch_targets_write(
+    operator: Operator, op_id: str, params: dict[str, Any]
+) -> JSONResponse:
+    """Send a token call to the matching ``targets.*`` typed operation."""
+    # Imported here: connectors.targets.ops imports this module.
+    from meho_backplane.connectors.targets.ops import TARGETS_REGISTRY_CONNECTOR_ID
+
+    return await dispatch_rest_write(
+        operator, connector_id=TARGETS_REGISTRY_CONNECTOR_ID, op_id=op_id, params=params
+    )
+
+
+@router.post(
+    "",
+    response_model=Target,
+    status_code=201,
+    operation_id="create_target_api_v1_targets_post",
+    summary="Create Target",
+    responses=AWAITING_APPROVAL_RESPONSES,
+)
+async def create_target_route(
+    body: TargetCreate,
+    operator: Operator = _require_admin_person_dep,
+    session: AsyncSession = Depends(get_session),
+) -> Target | JSONResponse:
+    """Create a new target in the requesting tenant (``tenant_admin``, a person).
+
+    A person in the web interface creates it at once (201). A call made
+    with a token is checked first (product, ``preferred_impl_id``,
+    ``secret_ref`` scope, Vault login keys) and then waits for approval as
+    ``targets.register`` (202 with the approval request id). Returns 409
+    when the name already exists in the tenant.
+    """
+    if runs_at_once(operator):
+        return await create_target(body=body, operator=operator, session=session)
+    _validate_create_body_fields(body, operator)
+    _resolve_create_secret_ref(body, operator)
+    return await _dispatch_targets_write(
+        operator, "targets.register", body.model_dump(mode="json", exclude_unset=True)
+    )
+
+
+@router.patch(
+    "/{name}",
+    response_model=Target,
+    operation_id="update_target_api_v1_targets__name__patch",
+    summary="Update Target",
+    responses=AWAITING_APPROVAL_RESPONSES,
+)
+async def update_target_route(
+    name: str,
+    body: TargetUpdate,
+    operator: Operator = _require_admin_person_dep,
+    session: AsyncSession = Depends(get_session),
+) -> Target | JSONResponse:
+    """Change a target (``tenant_admin``, a person). Only the sent fields change.
+
+    The path value is a name, an alias or an id. A person in the web
+    interface changes the target at once (200). A call made with a token is
+    checked first and then waits for approval as ``targets.update``, with
+    the id of the target, so the approved change goes to this target even
+    when a name or alias changes later (202 with the approval request id).
+    """
+    if runs_at_once(operator):
+        return await update_target(name=name, body=body, operator=operator, session=session)
+    t = await resolve_route_target(session, operator.tenant_id, name)
+    updates = body.model_dump(mode="json", exclude_unset=True)
+    _validate_update_body_fields(dict(updates), t, operator)
+    return await _dispatch_targets_write(
+        operator, "targets.update", {"target_id": str(t.id), **updates}
+    )
+
+
+@router.delete(
+    "/{name}",
+    operation_id="delete_target_api_v1_targets__name__delete",
+    summary="Delete Target",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    responses={
+        **AWAITING_APPROVAL_RESPONSES,
+        # 409 ``target_has_references`` -- declared explicitly so
+        # FastAPI's autogen OpenAPI surfaces the cascade-conflict shape
+        # to SDK clients. The route handler below raises ``HTTPException(
+        # 409, detail={"kind": "target_has_references", ...})`` when the
+        # target is wired into the topology graph and ``?force=true`` is
+        # not set. Without this declaration the spec only lists 204 + 422
+        # and clients have no schema-driven signal for the recoverable
+        # cascade-conflict (the operator's first-line "retry with
+        # ?force=true" remediation). Mirrors the
+        # ``GET /api/v1/topology/history/{name}`` convention from
+        # ``api/v1/topology.py`` -- structured ``detail`` shape with a
+        # snake_case ``kind`` discriminator and an inline content schema
+        # so the regen'd Go client lands a typed JSON409 wrapper.
+        409: {
+            "description": (
+                "Target is referenced by ``graph_node`` rows; "
+                "retry with ``?force=true`` to soft-delete anyway "
+                "(``graph_node.target_id`` is ``ON DELETE SET NULL`` so "
+                "the topology rows survive). See "
+                "``docs/codebase/error-message-shape.md`` for the "
+                "convention."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["target_has_references"],
+                                    },
+                                    "graph_node_refs": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                    },
+                                    "message": {"type": "string"},
+                                },
+                                "required": [
+                                    "kind",
+                                    "graph_node_refs",
+                                    "message",
+                                ],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+    },
+)
+async def delete_target_route(
+    name: str,
+    force: bool = Query(default=False),
+    operator: Operator = _require_admin_person_dep,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Soft-delete a target (``tenant_admin``, a person).
+
+    The path value is a name, an alias or an id. A person in the web
+    interface deletes it at once (204). A call made with a token waits for
+    approval as ``targets.remove``, with the id of the target (202 with the
+    approval request id). Both answer 409 ``target_has_references`` first
+    when topology rows point at the target and ``force`` is not set.
+    """
+    if runs_at_once(operator):
+        return await delete_target(name=name, force=force, operator=operator, session=session)
+    t = await resolve_route_target(session, operator.tenant_id, name)
+    refs = await count_graph_node_refs(session, t.id)
+    if refs > 0 and not force:
+        _raise_target_has_references(t, refs)
+    return await _dispatch_targets_write(
+        operator, "targets.remove", {"target_id": str(t.id), "force": force}
+    )

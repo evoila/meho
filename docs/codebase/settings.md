@@ -220,8 +220,8 @@ file yet.
   rule as `authorize_tenant_scope` (`auth/rbac.py`). Tests:
   `tests/test_tenant_scope_person_only.py`.
 - Open, decided by 2026-10-24 (#3325 rule 1): whether an import from the
-  command line writes at once, as the target routes do today, or waits for
-  someone to approve it in the web console. Today it writes at once.
+  command line writes at once or waits for someone to approve it, as the
+  target routes do for a call made with a token. Today it writes at once.
 
 ## Endpoints
 

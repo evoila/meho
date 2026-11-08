@@ -11,8 +11,9 @@
   ``insufficient_role`` (MEHO caps its role at ``operator``). Nothing is
   written in any case.
 * **Reads** -- a service login still lists the edges.
-* **People** -- a ``tenant_admin`` person (the CLI uses these routes)
-  still writes and deletes edges and nodes.
+* **People** -- a ``tenant_admin`` person in the web interface writes and
+  deletes edges and nodes at once. A person's token call waits for
+  approval (``test_rest_token_writes_wait_for_approval.py``).
 * **Wrong role** -- a person with the ``operator`` role still gets
   ``insufficient_role``.
 
@@ -53,6 +54,7 @@ from ._oidc_jwt_helpers import (
     mock_discovery_and_jwks,
     public_jwks,
 )
+from ._rest_write_helpers import run_writes_at_once
 
 _TENANT_ID = uuid.UUID(DEFAULT_TENANT_ID)
 _WRITES = ["POST /edges", "POST /edges/bulk", "DELETE /edges", "DELETE /nodes"]
@@ -84,7 +86,7 @@ def client() -> Iterator[TestClient]:
     app.add_middleware(AuditMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(topology_router)
-    yield TestClient(app)
+    yield TestClient(run_writes_at_once(app))
 
 
 def _token(key: Any, *, kind: str | None, role: TenantRole) -> str:
@@ -222,7 +224,9 @@ def test_a_service_login_still_lists_edges(client: TestClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_person_writes_and_deletes_edges_and_nodes(client: TestClient) -> None:
+async def test_a_person_in_the_web_interface_writes_and_deletes_edges_and_nodes(
+    client: TestClient,
+) -> None:
     ids = await _seed_graph()
     key = make_rsa_keypair("kid-A")
     token = _token(key, kind=None, role=TenantRole.TENANT_ADMIN)

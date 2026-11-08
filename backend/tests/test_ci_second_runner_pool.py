@@ -438,16 +438,70 @@ def test_watchdog_treats_other_statuses_as_waiting(tmp_path: Path, status: str) 
     assert len(_cancels(calls)) == 1
 
 
-def test_watchdog_never_cancels_when_it_cannot_read_the_jobs(tmp_path: Path) -> None:
-    result, calls = _watch(tmp_path, ["FAIL"])
+_WAITING = _shards(s4="queued", s5="queued", s6="queued")
+_STARTED = _shards(s4="in_progress", s5="in_progress", s6="in_progress")
+# The watchdog reads the jobs once a minute for 30 minutes.
+_POLLS = 30
+
+
+def _assert_read_right_before_each_cancel(calls: list[str]) -> None:
+    for index, call in enumerate(calls):
+        if call.startswith("run cancel"):
+            assert calls[index - 1].startswith("api "), calls
+
+
+def test_watchdog_reads_the_jobs_right_before_it_cancels(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, [_WAITING])
+    assert result.returncode == 0
+    assert len(_cancels(calls)) == 1
+    assert len(calls) == _POLLS + 2, "the polls, one fresh read and the cancel"
+    _assert_read_right_before_each_cancel(calls)
+
+
+def test_watchdog_leaves_shards_that_started_during_the_last_wait(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + [_STARTED])
     assert result.returncode == 0
     assert _cancels(calls) == []
-    assert "no shard is known to be stuck" in result.stdout
+    assert "has a runner now" in result.stdout
 
 
-def test_watchdog_never_cancels_on_an_unreadable_answer(tmp_path: Path) -> None:
-    result, calls = _watch(tmp_path, ["not json"])
+def test_watchdog_does_not_cancel_from_old_status_when_the_read_fails(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + ["FAIL"])
+    assert result.returncode == 1
+    assert _cancels(calls) == []
+    assert "could not read" in result.stdout
+    assert "Could not stop this run, or could not read its jobs" in result.stdout
+
+
+def test_watchdog_does_not_cancel_from_old_status_on_an_odd_answer(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + ["not json"])
+    assert result.returncode == 1
+    assert _cancels(calls) == []
+
+
+def test_watchdog_failed_reads_during_the_wait_do_not_count(tmp_path: Path) -> None:
+    """A good read, then failures, then shards that have started."""
+    result, calls = _watch(tmp_path, [_WAITING] + ["FAIL"] * (_POLLS - 1) + [_STARTED])
     assert result.returncode == 0
+    assert _cancels(calls) == []
+
+
+def test_watchdog_tries_the_last_read_again(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + ["FAIL", _WAITING])
+    assert result.returncode == 0
+    assert len(_cancels(calls)) == 1
+    _assert_read_right_before_each_cancel(calls)
+
+
+def test_watchdog_retry_sees_shards_that_have_started(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + ["FAIL", _STARTED])
+    assert result.returncode == 0
+    assert _cancels(calls) == []
+
+
+def test_watchdog_never_cancels_when_it_cannot_read_the_jobs(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, ["FAIL"])
+    assert result.returncode == 1
     assert _cancels(calls) == []
 
 
@@ -455,21 +509,14 @@ def test_watchdog_never_cancels_while_a_shard_is_not_listed(tmp_path: Path) -> N
     result, calls = _watch(tmp_path, [_shards(s4="queued", s5="queued")])
     assert result.returncode == 0
     assert _cancels(calls) == []
-
-
-def test_watchdog_uses_the_last_good_answer_after_a_read_failure(tmp_path: Path) -> None:
-    result, calls = _watch(tmp_path, [_shards(s4="queued", s5="queued", s6="queued"), "FAIL"])
-    assert result.returncode == 0
-    assert len(_cancels(calls)) == 1
-    assert "3 unit shard(s) waited" in result.stdout
+    assert "no shard is known to be stuck" in result.stdout
 
 
 def test_watchdog_reports_when_it_cannot_stop_the_run(tmp_path: Path) -> None:
-    result, calls = _watch(
-        tmp_path, [_shards(s4="queued", s5="queued", s6="queued")], cancel_exit=1
-    )
+    result, calls = _watch(tmp_path, [_WAITING], cancel_exit=1)
     assert result.returncode == 1
     assert len(_cancels(calls)) == 3
+    _assert_read_right_before_each_cancel(calls)
     assert "Could not stop this run" in result.stdout
 
 
@@ -491,6 +538,7 @@ def _smoke(
     *reach: str,
     site: str = "extra",
     exits: dict[str, int] | None = None,
+    resolved: str = "0.000100",
     connected: str = "0.000000",
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the smoke check with a fake curl.
@@ -508,7 +556,7 @@ def _smoke(
         f"""echo "$*" >> "{calls}"
 for url; do :; done
 code=0
-if [[ "$*" == *--write-out* ]]; then code=28; printf '%s' '{connected}'; fi
+if [[ "$*" == *--write-out* ]]; then code=28; printf '%s %s' '{resolved}' '{connected}'; fi
 case "$url" in
 {rules}
 esac
@@ -568,7 +616,31 @@ def test_smoke_fails_on_a_timeout_after_the_connection_was_made(tmp_path: Path) 
     result, _ = _smoke(tmp_path, _ADDRESS, _REACH, connected="0.031000")
     assert result.returncode == 1
     assert "Address 1 of 1: exit code 28" in result.stdout
+    assert "connection was made" in result.stdout
     _assert_private(result, _ADDRESS)
+
+
+def test_smoke_fails_on_a_dns_timeout(tmp_path: Path) -> None:
+    """curl ends with 28 here too, but no connection was tried."""
+    result, _ = _smoke(tmp_path, _ADDRESS, _REACH, resolved="0.000000")
+    assert result.returncode == 1
+    assert "Address 1 of 1: exit code 28" in result.stdout
+    assert "never resolved" in result.stdout
+    assert "passed" not in result.stdout
+    _assert_private(result, _ADDRESS)
+
+
+def test_smoke_fails_when_curl_reports_no_times(tmp_path: Path) -> None:
+    result, _ = _smoke(tmp_path, _ADDRESS, _REACH, resolved="", connected="")
+    assert result.returncode == 1
+    assert "never resolved" in result.stdout
+
+
+@pytest.mark.parametrize("resolved", ["0.000014", "0.000331", "0.115978"])
+def test_smoke_passes_on_a_timeout_after_the_lookup(tmp_path: Path, resolved: str) -> None:
+    """The measured times: an IP address, a hosts file name, a real DNS name."""
+    result, _ = _smoke(tmp_path, _ADDRESS, _REACH, resolved=resolved)
+    assert result.returncode == 0, result.stdout
 
 
 def test_smoke_checks_every_address(tmp_path: Path) -> None:
@@ -597,6 +669,7 @@ def test_smoke_deny_probe_has_the_right_flags(tmp_path: Path) -> None:
     assert deny_call.endswith(_ADDRESS_URL)
     assert "--connect-timeout 5" in deny_call
     assert "--noproxy *" in deny_call
+    assert "%{time_namelookup} %{time_connect}" in deny_call
     for call in calls:
         assert "--insecure" not in call
         assert " -k " not in call

@@ -10,6 +10,8 @@
 # one must end in a curl timeout (exit code 28). Every other result fails the
 # check: a success, a refused connection or a certificate error means the
 # packets got through, and any other error means the check proved nothing.
+# curl also ends with 28 when a name lookup times out. No connection was tried
+# then, so a timeout counts only after the name was resolved.
 #
 # The logs of this public repository are public. So each address is masked
 # with ::add-mask:: before it is used, and only its position and the exit code
@@ -23,6 +25,12 @@ reach_max_seconds=30
 fail() {
   echo "::error title=Second runner pool smoke::${1}"
   exit 1
+}
+
+# True for a curl time of zero, which means that step never finished. Also
+# true for an empty value.
+is_zero() {
+  [[ "${1}" =~ ^0*(\.0*)?$ ]]
 }
 
 if [[ "${MEHO_CI_SITE:-}" != "extra" ]]; then
@@ -80,18 +88,26 @@ for (( i = 0; i < total; i++ )); do
   # No --insecure: a certificate error must count as "got through".
   # --noproxy: this checks the runner's own network path.
   # stderr is dropped because curl's error text can hold the address.
-  connected="$(curl --silent --noproxy '*' --connect-timeout "${connect_seconds}" \
-    --max-time "${deny_max_seconds}" --output /dev/null --write-out '%{time_connect}' \
-    "${deny_urls[$i]}" 2>/dev/null)"
+  timings="$(curl --silent --noproxy '*' --connect-timeout "${connect_seconds}" \
+    --max-time "${deny_max_seconds}" --output /dev/null \
+    --write-out '%{time_namelookup} %{time_connect}' "${deny_urls[$i]}" 2>/dev/null)"
   code=$?
-  # A timeout after the TCP connection was made still means the packets got
-  # through: curl also ends with 28 when a host accepts and then says nothing.
-  if [[ "${code}" -eq 28 && "${connected}" =~ ^0*(\.0*)?$ ]]; then
-    echo "address $(( i + 1 )) of ${total}: exit code ${code}"
+  read -r resolved connected <<<"${timings}"
+  # An IP address also shows a lookup time above zero. Measured on curl 7.81
+  # and 8.18: only a lookup that never finished shows zero.
+  if [[ "${code}" -ne 28 ]]; then
+    why="Only a timeout (28) shows this pool cannot reach it."
+  elif is_zero "${resolved}"; then
+    why="The name was never resolved, so no connection was tried."
+  elif ! is_zero "${connected}"; then
+    # curl also ends with 28 when a host accepts and then says nothing.
+    why="The connection was made, so the packets got through."
   else
-    echo "::error title=Second runner pool smoke::Address $(( i + 1 )) of ${total}: exit code ${code}. Only a timeout (28) shows this pool cannot reach it."
-    bad=1
+    echo "address $(( i + 1 )) of ${total}: exit code ${code}"
+    continue
   fi
+  echo "::error title=Second runner pool smoke::Address $(( i + 1 )) of ${total}: exit code ${code}. ${why}"
+  bad=1
 done
 
 if [[ "${bad}" -ne 0 ]]; then

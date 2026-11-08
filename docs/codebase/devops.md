@@ -2130,8 +2130,10 @@ minutes while the pool is on. It fails unless the runner:
 
 Only a curl timeout (exit code 28) counts as "cannot reach". A success, a
 refused connection or a certificate error means the packets got through, and
-every other error means the check proved nothing, so the check fails. The
-network of the pool must therefore drop these packets, not reject them, and
+every other error means the check proved nothing, so the check fails. A
+name lookup that times out also ends with 28, but no connection was tried
+then, so it fails too. The network of the pool must drop these packets, not
+reject them, and
 each entry must be an address the check can try: an IP address, or a name
 the pod can resolve.
 
@@ -2143,8 +2145,10 @@ grows old and CI goes back to today's pool.
 
 **If the pool dies after a good smoke check.** The job
 `extra-pool-watchdog` (`scripts/ci/extra_pool_watchdog.sh`) stops the run
-when one of shards 4-6 still waits for a runner after 30 minutes. The
-required check then goes red instead of hanging. Without this, GitHub waits
+when one of shards 4-6 still waits for a runner after 30 minutes. It reads
+the jobs again right before it stops the run, and it does not stop the run
+when that read fails. The required check then goes red instead of hanging.
+Without this, GitHub waits
 up to 24 hours for a runner. A re-run always uses today's pool. A very full
 pool looks the same as a dead one, and the shards then also move to today's
 pool on the re-run.

@@ -38,7 +38,7 @@ from tests._targets_helpers import _insert_target
 
 _TENANT = uuid.UUID("5729aaaa-0000-4000-8000-000000000001")
 _OTHER_TENANT = uuid.UUID("5729bbbb-0000-4000-8000-000000000002")
-_TARGET = "lab-vc"
+_TARGET = "vc-1"
 
 
 @pytest.fixture(autouse=True)

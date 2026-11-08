@@ -52,6 +52,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_agent_toolset_working_surface.py",
     "tests/test_api_v1_operations_preview_response.py",
     "tests/test_api_v1_settings.py",
+    "tests/test_broadcast_person_guidance.py",
     "tests/test_chart_approval_handoff.py",
     "tests/test_chart_bring_your_own_render.py",
     "tests/test_chart_broadcast_hardening.py",

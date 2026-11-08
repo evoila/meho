@@ -164,6 +164,13 @@ dispatcher's `connector_error` branch.
    raise_on_deleted_version=False)`. Login-phase failures
    (`VaultUnreachableError` / `VaultRoleDeniedError`) propagate verbatim.
    The per-request Vault token is revoked on context exit.
+   When Vault has no secret at the path (hvac `InvalidPath`), the shared
+   loader raises `TargetSecretNotFoundError` (a `VaultCredentialsReadError`).
+   It carries `target_name` and `secret_ref`, and its message has no
+   Vault URL and no hvac text. The dispatcher answers it with
+   `target_secret_not_found` (see `error-message-shape.md`). A ref taken
+   from an op param (`load_param_secret_data`) still raises
+   `SecretRefReadError`, with `InvalidPath` as its `cause_class`.
 6. **Structural unwrap.** KV-v2's GET returns `{"data": {"data":
    {<secret kv>}, "metadata": {...}}}`; the secret content is the nested
    `data["data"]` (the same double-unwrap the `vault.kv.read` handler in

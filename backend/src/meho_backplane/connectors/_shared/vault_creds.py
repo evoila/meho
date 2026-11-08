@@ -124,6 +124,7 @@ __all__ = [
     "OperatorTokenRequiredError",
     "SecretRefReadError",
     "SecretRefScopeError",
+    "TargetSecretNotFoundError",
     "VaultCredentialBackend",
     "VaultCredentialsReadError",
     "check_param_secret_ref",
@@ -313,6 +314,24 @@ class SecretRefScopeError(SecretRefReadError):
         self.cause_class = type(self).__name__
         VaultCredentialsReadError.__init__(
             self, f"{param} at {self.ref_prefix!r} was refused before any read: {reason}"
+        )
+
+
+class TargetSecretNotFoundError(VaultCredentialsReadError):
+    """Vault has no secret at the target's own ``secret_ref``.
+
+    Raised by the shared loader when the KV-v2 read of ``target.secret_ref``
+    answers "not found" (hvac ``InvalidPath``). The dispatcher turns it into
+    the ``target_secret_not_found`` result, which names the target and the
+    ref and says how to fix it. The message never carries the Vault URL or
+    the hvac text.
+    """
+
+    def __init__(self, *, target_name: str, secret_ref: str) -> None:
+        self.target_name = target_name
+        self.secret_ref = secret_ref
+        super().__init__(
+            f"Vault has no secret at secret_ref {secret_ref!r} of target {target_name!r}"
         )
 
 
@@ -607,9 +626,12 @@ async def _resolve_and_load(
         # the readiness probe's own probe secret stays outside the rule.
         check_gsm_target_ref(store_ref, target_name=target.name)
     backend = resolve_credential_backend(kind)
-    secret_data = await backend.load_secret_data(
-        store_ref, operator, target_name=target.name, mount=mount
-    )
+    try:
+        secret_data = await backend.load_secret_data(
+            store_ref, operator, target_name=target.name, mount=mount
+        )
+    except hvac.exceptions.InvalidPath as exc:
+        raise TargetSecretNotFoundError(target_name=target.name, secret_ref=ref) from exc
     return store_ref, secret_data
 
 
@@ -879,6 +901,13 @@ async def load_param_secret_data(
     check_param_secret_ref(operator, target.secret_ref or "", param=param, mount=mount)
     try:
         return await load_vault_secret_data(target, operator, mount=mount)
+    except TargetSecretNotFoundError as exc:
+        # The ref came from a param, not from the target: report it as a
+        # param read error, with the hvac class as its cause.
+        cause = exc.__cause__ if exc.__cause__ is not None else exc
+        raise SecretRefReadError(
+            param=param, secret_ref=target.secret_ref or "", cause=cause
+        ) from cause
     except (
         hvac.exceptions.VaultError,
         VaultClientError,

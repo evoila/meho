@@ -193,8 +193,33 @@ TARGETS_REGISTER_RESPONSE_SCHEMA: dict[str, Any] = {
                 "impossible)."
             ),
         },
+        "secret_ref": {
+            "type": ["string", "null"],
+            "description": (
+                "The secret_ref MEHO stored: the Vault path it reads the "
+                "target's credential from. `null` when the target has no "
+                "credential."
+            ),
+        },
+        "secret_ref_derived": {
+            "type": "boolean",
+            "description": (
+                "True when MEHO built secret_ref from the target name "
+                "(`tenants/<tenant_id>/<name>`), because no secret_ref was "
+                "given. Store the credential at that path, or set the path "
+                "where it is."
+            ),
+        },
     },
-    "required": ["target_id", "name", "product", "host", "tenant_id"],
+    "required": [
+        "target_id",
+        "name",
+        "product",
+        "host",
+        "tenant_id",
+        "secret_ref",
+        "secret_ref_derived",
+    ],
 }
 
 

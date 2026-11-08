@@ -391,6 +391,45 @@ not in the tenant is 422 `sensor_not_found`; more than 200 members is 422
 `before` / `after`, with `sensor_ids` as sorted lists when the members
 change.
 
+### Export and import as a file
+
+A Dashboard and its Sensors can move to another site as one JSON file
+(`checks/dashboard_file.py`, `checks/dashboard_file_schemas.py`, routes in
+`api/v1/checks_dashboard_files.py`).
+
+- **Export** (`GET /api/v1/checks/dashboard-files/export?name=<name>`,
+  `meho dashboard export <name> [--output <file>]`, role `operator`): the
+  file (`format: meho-dashboard/1`) holds the Dashboard's description,
+  `notify_min_state` and `investigator_prompt`, and for each member Sensor
+  the fields of a create: operation, params, rule, cadence, severity,
+  `for_seconds` and the retry settings. It holds no ids, no state and no
+  mail address. Each Sensor's target is a placeholder: its target name at
+  this site. Other keys of a stored target are left out.
+- **Import** (`POST /api/v1/checks/dashboard-files/import`,
+  `meho dashboard import <file> --map-target <placeholder>=<target>`, role
+  `tenant_admin`): MEHO checks the whole file first and refuses it, with
+  422 and one entry per problem, when a placeholder has no entry in
+  `target_map` (`dashboard_import_unmapped_target`), a mapped target is not
+  found (`dashboard_import_target_not_found`), an operation is not found or
+  is not a safe read (`dashboard_import_unknown_operation` /
+  `dashboard_import_unsafe_operation`), or a connector does not fit its
+  target (`dashboard_import_connector_mismatch`, unless `force`). Nothing is
+  written then.
+- Then, in one transaction with the shared connector-usage lock, Sensors and
+  the Dashboard are matched by name in the tenant. A missing one is created,
+  a different one is updated (like an edit: due at once, the soft-state
+  window cleared), an equal one is not written. The Dashboard's members
+  become the Sensors of the file; a member that is not in the file leaves
+  the Dashboard but is not deleted. The Dashboard's mail address stays. So
+  the same file imported twice changes nothing the second time
+  (`changed: false`). A name taken by a parallel write is 409
+  `dashboard_import_conflict`; running the import again is safe.
+- `dry_run` answers with the same result (what would be created, updated or
+  left) and writes nothing; the request counts as a preview for the audit.
+- The audit row (`op_id=dashboard.import`) carries the Dashboard name and
+  id, `dry_run`, the `target_map` and what happened to each Sensor and to
+  the members. It carries no params.
+
 ## Dependencies
 
 - **#2504** `meho_backplane.checks.assertions` — `AssertionSpec` (embedded

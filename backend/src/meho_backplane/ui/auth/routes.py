@@ -106,6 +106,7 @@ from fastapi.responses import RedirectResponse
 from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.settings import Settings, get_settings
+from meho_backplane.tenancy import ensure_tenant
 from meho_backplane.ui.auth.flow import (
     AUTHORIZATION_FLOW_TTL_SECONDS,
     MISSING_CLIENT_SECRET_DETAIL,
@@ -615,6 +616,9 @@ async def _persist_session_from_tokens(
     lifetime = timedelta(seconds=max(tokens.expires_in - SESSION_TTL_MARGIN_SECONDS, 60))
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
+        # Same as the first /api call: a fresh install has no tenant row
+        # yet, and the console header reads it on every page.
+        await ensure_tenant(operator.tenant_id, session)
         decrypted = await create_session(
             session,
             operator_sub=operator.sub,

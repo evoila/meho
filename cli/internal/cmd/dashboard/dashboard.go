@@ -33,6 +33,12 @@
 //     Role: tenant_admin.
 //   - `meho dashboard delete <dashboard_id> [--tenant <id>] [--json]` —
 //     DELETE /api/v1/checks/dashboards/{id}. Role: tenant_admin.
+//   - `meho dashboard export <name> [--output <file>]` — write the dashboard
+//     and its sensors as one file (GET /api/v1/checks/dashboard-files/export).
+//     Role: operator.
+//   - `meho dashboard import <file> --map-target <placeholder>=<target> ...
+//     [--dry-run] [--force]` — create or update them from a file
+//     (POST /api/v1/checks/dashboard-files/import). Role: tenant_admin.
 //
 // Every verb drives the generated `api.ClientWithResponses` surface
 // directly (the G0.12-T13 typed-client discipline): consumer-side struct
@@ -63,7 +69,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dashboard",
-		Short: "Manage deterministic-check dashboards (list / show / create / edit / delete)",
+		Short: "Manage deterministic-check dashboards (list / show / create / edit / delete / export / import)",
 		Long: "Manage tenant-scoped dashboards wired by the deterministic " +
 			"check layer (Initiative #2416). A dashboard composes registered " +
 			"Sensors into a single rolled-up \"is everything OK?\" answer: the " +
@@ -82,6 +88,8 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newEditCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newExportCmd())
+	cmd.AddCommand(newImportCmd())
 	return cmd
 }
 

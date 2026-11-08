@@ -1100,6 +1100,22 @@ async def _apply_reconcile(
             now=now,
             audit_id=audit_id,
         )
+        # Imported here: refresh_links reuses this module's edge writers.
+        from meho_backplane.topology.refresh_links import reconcile_links
+
+        link_counts = await reconcile_links(
+            session,
+            tenant_id=tenant_id,
+            discovered_by=discovered_by,
+            links=hints.links,
+            live_node_key_to_id=live_key_to_id,
+            all_node_key_to_id=all_key_to_id,
+            now=now,
+            audit_id=audit_id,
+        )
+        added_edges += link_counts[0]
+        updated_edges += link_counts[1]
+        removed_edges += link_counts[2]
         result = RefreshResult(
             target_id=target_id,
             added_nodes=added_nodes,

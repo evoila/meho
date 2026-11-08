@@ -3,10 +3,11 @@
 This page takes you from a bare Kubernetes cluster to a running MEHO
 backplane and a successful `meho login`.
 
-!!! note "Which part to read"
+!!! note "Which page to read"
 
-    [Part A — Standard install](#part-a-standard-install) is for everyone.
-    Most people read only Part A.
+    The normal way is [form 3, your Kubernetes](form-3-your-kubernetes.md).
+    [Part A — Standard install](#part-a-standard-install) of this page is
+    the same install with more detail.
 
     Read [Part B — Bring your own parts](#part-b-bring-your-own-parts-expert-path)
     only if you want to use your own PostgreSQL, Keycloak, Vault or Google
@@ -296,8 +297,10 @@ resulting token in your OS keyring.
 **Who logs in.** The install made two users with temporary passwords: the first admin (`admin`) and a second person
 who can approve the admin's changes (`approver`). Both are in the
 Secret `meho-core-first-login`. Keycloak asks for a new password, a
-name and an email at the first login. Read the admin's user name, and copy
-the password to the clipboard so it does not show on screen:
+name and an email at the first login. Then it asks you to set up an
+authenticator app, and shows twelve recovery codes once. Save them: each
+works one time, instead of the code from the app. Read the admin's user name,
+and copy the password to the clipboard so it does not show on screen:
 
 ```bash
 kubectl -n meho get secret meho-core-first-login \

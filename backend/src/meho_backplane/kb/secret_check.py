@@ -16,7 +16,10 @@ from, and that repo's own CI job checks it before it sends the pages
 (#5728).
 
 A placeholder such as ``<password>`` or ``${TOKEN}`` is not a secret,
-so a page can show what a setting looks like.
+so a page can show what a setting looks like. A value is a placeholder
+only when nothing secret-shaped is left once its placeholders are taken
+out: ``password=made-up-value:${TOKEN}`` is still a secret. A private
+key block is never a placeholder.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-from meho_backplane.redaction.patterns import get_pattern, secret_spans
+from meho_backplane.redaction.patterns import SecretFinder, get_pattern, secret_spans
 
 __all__ = ["SECRET_PATTERNS", "find_secret"]
 
@@ -45,7 +48,9 @@ SECRET_PATTERNS: Final[tuple[str, ...]] = (
 )
 
 _PLACEHOLDER: Final[re.Pattern[str]] = re.compile(r"<[^<>\s]+>|\$\{[^{}\s]+\}")
-_VALUE_SPLIT: Final[re.Pattern[str]] = re.compile(r"[\s=:]+")
+#: A key block cut off before its ``END`` line runs to the end of the
+#: text, so its last word says nothing about the block. It is never exempt.
+_NEVER_A_PLACEHOLDER: Final[frozenset[str]] = frozenset({"pem_private_key"})
 
 
 def find_secret(text: str) -> str | None:
@@ -55,21 +60,25 @@ def find_secret(text: str) -> str | None:
     ``"api_key on line 12"``. It never holds the secret itself.
     """
     for name in SECRET_PATTERNS:
-        for start, end in secret_spans(get_pattern(name), text):
-            if _is_placeholder(text[start:end]):
+        pattern = get_pattern(name)
+        for start, end in secret_spans(pattern, text):
+            if name not in _NEVER_A_PLACEHOLDER and _is_placeholder(pattern, text[start:end]):
                 continue
             line = text.count("\n", 0, start) + 1
             return f"{name} on line {line}"
     return None
 
 
-def _is_placeholder(found: str) -> bool:
-    """Return whether the value part of *found* is only a placeholder.
+def _is_placeholder(pattern: re.Pattern[str] | SecretFinder, found: str) -> bool:
+    """Return whether *found* matches *pattern* only because of its placeholders.
 
-    The value is the last part after a space, ``=`` or ``:``, without
-    quotes and without a full stop or comma after it.
-    ``password: <password>`` and ``Bearer ${TOKEN}.`` are placeholders;
-    ``password=abc<x>`` is not.
+    A regex reports the label and the value. The placeholders are taken
+    out of *found*, and the rest is checked against *pattern* again.
+    ``password: <password>`` leaves ``password: ``, which is no secret.
+    ``password=made-up-value:${TOKEN}`` leaves ``password=made-up-value:``,
+    which still is one. A :class:`SecretFinder` reports only the value,
+    so the whole value must be one placeholder.
     """
-    value = _VALUE_SPLIT.split(found.strip())[-1].strip("\"'.,;")
-    return _PLACEHOLDER.fullmatch(value) is not None
+    if isinstance(pattern, re.Pattern):
+        return not secret_spans(pattern, _PLACEHOLDER.sub("", found))
+    return _PLACEHOLDER.fullmatch(found.strip("\"'")) is not None

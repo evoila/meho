@@ -402,13 +402,19 @@ one is skipped (`action: "skip"`), and `reason` says why:
    headers, bearer tokens, JWTs, labelled passwords and keys
    (`api_key`), private key blocks, password hashes, Ceph keys, BIND key
    secrets and secrets in links. A placeholder such as `<password>` or
-   `${TOKEN}` is not a secret. The reason names the pattern and the
-   line, never the value. MEHO holds no list of customer names, host
+   `${TOKEN}` is not a secret, but only when nothing secret-shaped is
+   left once the placeholders are taken out of the match:
+   `password=made-up-value:${TOKEN}` is still a secret, and a private
+   key block is never a placeholder. The reason names the pattern and
+   the line, never the value. MEHO holds no list of customer names, host
    names or addresses: the team wiki's CI job checks its own
    identifier list before it sends the pages, and refuses and reports a
    page with a listed identifier there.
 3. **Lesson header.** The page starts with a YAML header that has
-   `type`, `applies_to` and `status`. Header fields with an empty value
+   `type`, `applies_to` and `status`. The header is read with
+   `frontmatter.parse`, not `frontmatter.loads`, so a field named
+   `content` or `handler` is an ordinary field; a key that is not text
+   (an unquoted `on:` is the YAML value `true`) skips the page. Header fields with an empty value
    (`source:`, `summary: ""`, `tags: []`) are dropped first, so a page
    made from a template with empty fields is accepted. The values are
    checked as in [Lesson header and shared scope](#lesson-header-and-shared-scope-lesson_headerpy-kbsharedpy);

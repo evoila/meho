@@ -197,15 +197,57 @@ def test_your_own_password_secret_is_checked_not_made() -> None:
 
 
 def test_tls_mode_reaches_keycloak_and_the_job() -> None:
-    docs = _render(*_CREATE, "--set", "coreKeycloak.database.sslMode=verify-full")
-    env = _env(_statefulset(docs)["spec"]["template"]["spec"]["containers"][0])
-    assert env["KC_DB_URL_PROPERTIES"]["value"] == "?sslmode=verify-full"
+    docs = _render(*_CREATE, "--set", "coreKeycloak.database.sslMode=require")
+    pod = _statefulset(docs)["spec"]["template"]["spec"]
+    env = _env(pod["containers"][0])
+    assert env["KC_DB_URL_PROPERTIES"]["value"] == "?sslmode=require"
+    assert "database-ca" not in {v["name"] for v in pod["volumes"]}
     job = _database_job(docs)
     assert job is not None
-    assert (
-        _env(job["spec"]["template"]["spec"]["containers"][0])["PGSSLMODE"]["value"]
-        == "verify-full"
+    job_pod = job["spec"]["template"]["spec"]
+    job_env = _env(job_pod["containers"][0])
+    assert job_env["PGSSLMODE"]["value"] == "require"
+    assert "PGSSLROOTCERT" not in job_env
+    assert "volumes" not in job_pod
+
+
+@pytest.mark.parametrize("mode", ["verify-ca", "verify-full"])
+def test_verified_tls_mounts_the_ca_into_keycloak_and_the_job(mode: str) -> None:
+    docs = _render(
+        *_CREATE,
+        "--set",
+        f"coreKeycloak.database.sslMode={mode}",
+        "--set",
+        "coreKeycloak.database.caBundle.configMapName=pg-ca",
+        "--set",
+        "coreKeycloak.database.caBundle.key=root.pem",
     )
+    pod = _statefulset(docs)["spec"]["template"]["spec"]
+    env = _env(pod["containers"][0])
+    # The JDBC driver reads the CA from `sslrootcert`, not from the Java truststore.
+    assert env["KC_DB_URL_PROPERTIES"]["value"] == (
+        f"?sslmode={mode}&sslrootcert=/opt/keycloak/conf/database-ca/root.pem"
+    )
+    mounts = {m["name"]: m for m in pod["containers"][0]["volumeMounts"]}
+    assert mounts["database-ca"]["mountPath"] == "/opt/keycloak/conf/database-ca"
+    assert mounts["database-ca"]["readOnly"] is True
+    volume = next(v for v in pod["volumes"] if v["name"] == "database-ca")
+    assert volume["configMap"] == {
+        "name": "pg-ca",
+        "items": [{"key": "root.pem", "path": "root.pem"}],
+    }
+    job = _database_job(docs)
+    assert job is not None
+    job_pod = job["spec"]["template"]["spec"]
+    job_env = _env(job_pod["containers"][0])
+    assert job_env["PGSSLMODE"]["value"] == mode
+    assert job_env["PGSSLROOTCERT"]["value"] == "/etc/meho/database-ca/root.pem"
+    job_mounts = {m["name"]: m for m in job_pod["containers"][0]["volumeMounts"]}
+    assert job_mounts["database-ca"]["mountPath"] == "/etc/meho/database-ca"
+    assert next(v for v in job_pod["volumes"] if v["name"] == "database-ca")["configMap"] == {
+        "name": "pg-ca",
+        "items": [{"key": "root.pem", "path": "root.pem"}],
+    }
 
 
 def test_no_tls_setting_without_a_tls_mode() -> None:
@@ -264,6 +306,52 @@ def test_database_job_is_not_a_backplane_pod_and_keycloak_policy_has_no_egress()
         ),
         ([*_NAMED, "--set", "coreKeycloak.database.sslMode=maybe"], "sslMode"),
         ([*_NAMED, "--set", "coreKeycloak.database.user=Kc-User"], "user"),
+        # The made Secret has only the key `password`.
+        (
+            [*_CREATE, "--set", "coreKeycloak.database.passwordSecret.key=pw"],
+            'passwordSecret.key must be "password"',
+        ),
+        (
+            [
+                *_HOST,
+                "--set",
+                f"coreKeycloak.database.passwordSecret.name={_RELEASE}-core-postgres-keycloak",
+                "--set",
+                "coreKeycloak.database.passwordSecret.key=pw",
+            ],
+            'passwordSecret.key must be "password"',
+        ),
+        # A verified TLS mode needs the CA, and the CA needs a verified mode.
+        (
+            [*_CREATE, "--set", "coreKeycloak.database.sslMode=verify-full"],
+            "caBundle.configMapName is empty",
+        ),
+        (
+            [*_NAMED, "--set", "coreKeycloak.database.sslMode=verify-ca"],
+            "caBundle.configMapName is empty",
+        ),
+        (
+            [
+                *_NAMED,
+                "--set",
+                "coreKeycloak.database.sslMode=require",
+                "--set",
+                "coreKeycloak.database.caBundle.configMapName=pg-ca",
+            ],
+            "caBundle.configMapName is set but sslMode",
+        ),
+        (
+            [
+                *_NAMED,
+                "--set",
+                "coreKeycloak.database.sslMode=verify-full",
+                "--set",
+                "coreKeycloak.database.caBundle.configMapName=pg-ca",
+                "--set",
+                "coreKeycloak.database.caBundle.key=a&b",
+            ],
+            "caBundle",
+        ),
     ],
     ids=[
         "no-host",
@@ -273,6 +361,12 @@ def test_database_job_is_not_a_backplane_pod_and_keycloak_policy_has_no_egress()
         "bad-secret-name",
         "bad-tls-mode",
         "bad-user",
+        "made-secret-other-key",
+        "made-secret-by-name-other-key",
+        "verify-full-without-ca",
+        "verify-ca-without-ca",
+        "ca-without-verify",
+        "bad-ca-key",
     ],
 )
 def test_bad_values_stop_the_render_with_a_plain_message(extra: list[str], message: str) -> None:
@@ -287,8 +381,10 @@ def test_bad_values_stop_the_render_with_a_plain_message(extra: list[str], messa
         "coreKeycloak.database.name=other",
         "coreKeycloak.database.user=other",
         "coreKeycloak.database.passwordSecret.name=other",
+        "coreKeycloak.database.passwordSecret.key=pw",
         "coreKeycloak.database.create.enabled=true",
         "coreKeycloak.database.sslMode=require",
+        "coreKeycloak.database.caBundle.configMapName=pg-ca",
     ],
 )
 def test_database_keys_are_refused_with_the_built_in_postgres(setting: str) -> None:

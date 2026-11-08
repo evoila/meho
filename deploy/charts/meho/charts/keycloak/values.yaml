@@ -112,12 +112,21 @@ database:
     # makes. With your own PostgreSQL and `create.enabled: false`, name your
     # own Secret here: it is required then.
     name: ""
-    # -- Key in that Secret that holds the password.
+    # -- Key in that Secret that holds the password. Only for your own
+    # Secret: the made Secret has the key `password`.
     key: password
   # -- TLS mode of the connection to PostgreSQL: one of `disable`, `allow`,
   # `prefer`, `require`, `verify-ca`, `verify-full`. Empty = the driver's
-  # default. It applies to Keycloak and to the `create` Job.
+  # default. It applies to Keycloak and to the `create` Job. `verify-ca`
+  # and `verify-full` check the server's certificate against `caBundle`,
+  # which is required then.
   sslMode: ""
+  # -- Only with `sslMode: verify-ca` or `verify-full`: a ConfigMap in the
+  # release namespace with the CA certificate (PEM) of your PostgreSQL.
+  # Keycloak and the `create` Job trust it for the database connection.
+  caBundle:
+    configMapName: ""
+    key: ca.crt
   create:
     # -- Only with `corePostgres.enabled: false`. When true, a Job makes the
     # role and the database on your PostgreSQL before Keycloak starts. It

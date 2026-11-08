@@ -13,7 +13,9 @@ values, so the parent checks:
 - the database settings fit the PostgreSQL in use: with the built-in
   PostgreSQL the `database` keys keep their defaults; with your own
   PostgreSQL (`corePostgres.enabled: false`) the host is required, and so is
-  a password Secret or an admin Secret for the Job that makes the database.
+  a password Secret or an admin Secret for the Job that makes the database;
+  a made password Secret keeps the key `password`; a verified TLS mode
+  needs the CA ConfigMap, and the CA ConfigMap needs a verified TLS mode.
 */}}
 {{- define "meho.coreKeycloakChecks" -}}
 {{- if and .Values.ingress.enabled (ne .Values.coreKeycloak.hostname .Values.ingress.host) -}}
@@ -26,12 +28,22 @@ values, so the parent checks:
 {{- end -}}
 {{- $db := .Values.coreKeycloak.database -}}
 {{- if .Values.corePostgres.enabled -}}
-{{- if or (ne $db.name "keycloak") (ne $db.user "keycloak") $db.passwordSecret.name $db.create.enabled $db.sslMode -}}
-{{- fail "coreKeycloak.database.name, user, passwordSecret.name, sslMode and create.enabled are only for your own PostgreSQL: leave them unset while corePostgres.enabled is on (the built-in PostgreSQL makes the database and the role itself)." -}}
+{{- if or (ne $db.name "keycloak") (ne $db.user "keycloak") $db.passwordSecret.name (ne $db.passwordSecret.key "password") $db.create.enabled $db.sslMode $db.caBundle.configMapName -}}
+{{- fail "coreKeycloak.database.name, user, passwordSecret.name, passwordSecret.key, sslMode, caBundle.configMapName and create.enabled are only for your own PostgreSQL: leave them unset while corePostgres.enabled is on (the built-in PostgreSQL makes the database and the role itself)." -}}
 {{- end -}}
 {{- else -}}
 {{- if not $db.host -}}
 {{- fail "coreKeycloak.database.host is empty: with corePostgres.enabled off, the built-in Keycloak needs the host of your PostgreSQL." -}}
+{{- end -}}
+{{- /* The made Secret has the key `password`; the pods read the key named here. */ -}}
+{{- if and (ne $db.passwordSecret.key "password") (or (not $db.passwordSecret.name) (eq $db.passwordSecret.name (printf "%s-core-postgres-keycloak" .Release.Name))) -}}
+{{- fail (printf "coreKeycloak.database.passwordSecret.key must be \"password\" while the install makes the Secret (passwordSecret.name empty or %q): the made Secret has only that key. Keep the key, or name your own Secret in passwordSecret.name." (printf "%s-core-postgres-keycloak" .Release.Name)) -}}
+{{- end -}}
+{{- if and (has $db.sslMode (list "verify-ca" "verify-full")) (not $db.caBundle.configMapName) -}}
+{{- fail (printf "coreKeycloak.database.caBundle.configMapName is empty: sslMode %s checks the server's certificate, so name a ConfigMap with the CA certificate (PEM) of your PostgreSQL, or use sslMode require." $db.sslMode) -}}
+{{- end -}}
+{{- if and $db.caBundle.configMapName (not (has $db.sslMode (list "verify-ca" "verify-full"))) -}}
+{{- fail (printf "coreKeycloak.database.caBundle.configMapName is set but sslMode is %q: the CA certificate is checked only with sslMode verify-ca or verify-full." $db.sslMode) -}}
 {{- end -}}
 {{- if $db.create.enabled -}}
 {{- if not $db.create.adminSecret.name -}}

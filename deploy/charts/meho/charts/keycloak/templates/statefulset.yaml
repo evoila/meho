@@ -80,8 +80,11 @@ spec:
                   name: {{ include "coreKeycloak.databasePasswordSecret" . }}
                   key: {{ .Values.database.passwordSecret.key | quote }}
             {{- with .Values.database.sslMode }}
+            # The JDBC driver's own TLS settings. With `verify-ca` or
+            # `verify-full` it checks the server against the CA file below:
+            # it does not use the Java truststore.
             - name: KC_DB_URL_PROPERTIES
-              value: {{ printf "?sslmode=%s" . | quote }}
+              value: {{ include "coreKeycloak.databaseUrlProperties" $ | quote }}
             {{- end }}
             - name: KC_DB_POOL_INITIAL_SIZE
               value: "2"
@@ -196,6 +199,11 @@ spec:
               mountPath: /opt/keycloak/conf/company-login-ca
               readOnly: true
             {{- end }}
+            {{- if .Values.database.caBundle.configMapName }}
+            - name: database-ca
+              mountPath: /opt/keycloak/conf/database-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: realm
           configMap:
@@ -207,6 +215,16 @@ spec:
             items:
               - key: {{ .Values.companyLogin.caBundle.key }}
                 path: {{ .Values.companyLogin.caBundle.key }}
+        {{- end }}
+        {{- with .Values.database.caBundle }}
+        {{- if .configMapName }}
+        - name: database-ca
+          configMap:
+            name: {{ .configMapName }}
+            items:
+              - key: {{ .key }}
+                path: {{ .key }}
+        {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

@@ -620,7 +620,8 @@ coreKeycloak:
 
 **You name them in values.** Your database team makes the database and
 the role. Put the role's password in a Secret with the key `password`
-(or name another key in `passwordSecret.key`).
+(or name another key in `passwordSecret.key`; that works only for your
+own Secret, because the Secret the install makes has the key `password`).
 
 ```yaml
 corePostgres:
@@ -643,10 +644,28 @@ login the rights to manage the role, or make the role yourself and use the
 
 Both ways accept `coreKeycloak.database.port` (default `5432`) and
 `coreKeycloak.database.sslMode` (`require`, `verify-full` and so on) for
-a TLS connection. Without a host, or without a password Secret or an
-admin Secret, Helm stops with a message that names the key. These keys
-work only with your own PostgreSQL. Moving the data of an existing
-install from the built-in PostgreSQL to yours is not covered here.
+a TLS connection. With `verify-ca` or `verify-full`, Keycloak and the Job
+check the server's certificate against a CA certificate you give them.
+Put the CA certificate (PEM) in a ConfigMap and name it:
+
+```bash
+kubectl create configmap postgres-ca --from-file=ca.crt=<path to the CA file>
+```
+
+```yaml
+coreKeycloak:
+  database:
+    sslMode: verify-full
+    caBundle:
+      configMapName: postgres-ca
+      key: ca.crt               # default
+```
+
+Without a host, or without a password Secret or an admin Secret, Helm
+stops with a message that names the key. So does a `verify-ca` or
+`verify-full` mode without the CA ConfigMap. These keys work only with
+your own PostgreSQL. Moving the data of an existing install from the
+built-in PostgreSQL to yours is not covered here.
 
 ### Values file for your own parts
 

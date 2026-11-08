@@ -74,6 +74,10 @@ spec:
             - name: PGSSLMODE
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.database.caBundle.configMapName }}
+            - name: PGSSLROOTCERT
+              value: {{ include "coreKeycloak.databaseCaPath" (dict "root" . "dir" "/etc/meho/database-ca") | quote }}
+            {{- end }}
             - name: PGUSER
               valueFrom:
                 secretKeyRef:
@@ -97,6 +101,23 @@ spec:
             {{- toYaml .Values.waitForDatabase.resources | nindent 12 }}
           securityContext:
             {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.waitForDatabase.securityContext "global" .Values.global) | nindent 12 }}
+          {{- if .Values.database.caBundle.configMapName }}
+          volumeMounts:
+            - name: database-ca
+              mountPath: /etc/meho/database-ca
+              readOnly: true
+          {{- end }}
+      {{- with .Values.database.caBundle }}
+      {{- if .configMapName }}
+      volumes:
+        - name: database-ca
+          configMap:
+            name: {{ .configMapName }}
+            items:
+              - key: {{ .key }}
+                path: {{ .key }}
+      {{- end }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

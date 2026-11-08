@@ -940,8 +940,10 @@ database and role there. Either `coreKeycloak.database.create.enabled`
 makes them (a `pre-install,pre-upgrade` hook Job, `database-job.yaml`, safe
 to run twice, with an admin login from `create.adminSecret.name`), or your
 database team makes them and you name them in `database.name`, `user` and
-`passwordSecret`. `database.sslMode` sets the TLS mode. The built-in
-PostgreSQL keeps the fixed names, so its render does not change. See
+`passwordSecret`. `database.sslMode` sets the TLS mode; `verify-ca` and
+`verify-full` also need `database.caBundle`, a ConfigMap with the CA
+certificate that both pods mount. The built-in PostgreSQL keeps the fixed
+names, so its render does not change. See
 [core-secrets.md](core-secrets.md).
 
 **What it renders.**

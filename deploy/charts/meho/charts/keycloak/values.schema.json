@@ -218,14 +218,30 @@
             "key": {
               "type": "string",
               "minLength": 1,
-              "description": "Key in that Secret that holds the password."
+              "description": "Key in that Secret that holds the password. Must stay `password` while the install makes the Secret."
             }
           }
         },
         "sslMode": {
           "type": "string",
           "enum": ["", "disable", "allow", "prefer", "require", "verify-ca", "verify-full"],
-          "description": "TLS mode of the connection to PostgreSQL. Empty = the driver's default."
+          "description": "TLS mode of the connection to PostgreSQL. Empty = the driver's default. `verify-ca` and `verify-full` need `caBundle`."
+        },
+        "caBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "configMapName": {
+              "type": "string",
+              "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$",
+              "description": "ConfigMap with the CA certificate (PEM) of your PostgreSQL. Required with `sslMode` `verify-ca` or `verify-full`."
+            },
+            "key": {
+              "type": "string",
+              "pattern": "^[-._a-zA-Z0-9]+$",
+              "description": "Key in that ConfigMap that holds the certificate."
+            }
+          }
         },
         "create": {
           "type": "object",

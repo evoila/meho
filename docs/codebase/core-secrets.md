@@ -123,7 +123,10 @@ a login role of its own. There are two ways, set under
 - *Named in values.* Your database team makes the database and the role.
   Set `host`, and `passwordSecret.name` (and `key`, default `password`) for
   the role's password; `name` and `user` default to `keycloak`. The secrets
-  Job checks that the Secret holds the key, and does not make it.
+  Job checks that the Secret holds the key, and does not make it. The
+  `key` is only for your own Secret: a made Secret (`passwordSecret.name`
+  empty or `<release>-core-postgres-keycloak`) has only the key
+  `password`, and the render stops when another key is named for it.
 - *Made by the chart.* Set `create.enabled: true` and
   `create.adminSecret.name` (a Secret with the keys `username` and
   `password` of a login that may create a role and a database). Leave
@@ -135,10 +138,20 @@ a login role of its own. There are two ways, set under
   It is safe to run twice. The admin login is read only by this Job.
 
 `sslMode` sets the TLS mode for Keycloak (`KC_DB_URL_PROPERTIES`) and for the
-Job (`PGSSLMODE`). `meho.coreKeycloakChecks` stops the render with a plain
+Job (`PGSSLMODE`). `verify-ca` and `verify-full` check the server's
+certificate, so they need `caBundle.configMapName`: a ConfigMap with the CA
+certificate (PEM). Both pods mount it read-only (Keycloak at
+`/opt/keycloak/conf/database-ca/<key>`, the Job at
+`/etc/meho/database-ca/<key>`). Keycloak gets the path as `sslrootcert` in
+`KC_DB_URL_PROPERTIES`, because the JDBC driver's default TLS factory reads
+a PEM file and does not use the Java truststore; the Job gets it as
+`PGSSLROOTCERT`. `meho.coreKeycloakChecks` stops the render with a plain
 sentence when the host is empty, when neither a password Secret nor
-`create.enabled` is set, when `create.enabled` has no admin Secret, and when
-any of these keys is set while `corePostgres.enabled` is on. The Keycloak
+`create.enabled` is set, when `create.enabled` has no admin Secret, when a
+made password Secret is read under another key than `password`, when a
+verified TLS mode has no CA ConfigMap (or a CA ConfigMap has no verified
+TLS mode), and when any of these keys is set while `corePostgres.enabled`
+is on. The Keycloak
 pod has no egress rule and the Job pod carries no backplane label, so the
 backplane's `postgresCIDR` rule does not apply to them. A cluster-wide
 default-deny egress policy outside the chart must allow both to reach the

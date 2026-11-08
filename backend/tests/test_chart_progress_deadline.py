@@ -91,6 +91,14 @@ def test_operator_can_set_the_deadline() -> None:
     assert spec["progressDeadlineSeconds"] == 2400
 
 
+def test_upgrade_without_the_key_keeps_the_default() -> None:
+    # helm upgrade --reuse-values from a release older than this key.
+    result = _helm_template("--set", "progressDeadlineSeconds=null")
+    assert result.returncode == 0, result.stderr
+    spec = _meho_deployment(result.stdout)["spec"]
+    assert spec["progressDeadlineSeconds"] == 1200
+
+
 def test_a_deadline_of_zero_is_refused() -> None:
     result = _helm_template("--set", "progressDeadlineSeconds=0")
     assert result.returncode != 0

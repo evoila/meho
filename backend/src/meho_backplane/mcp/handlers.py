@@ -98,6 +98,7 @@ from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.models import AuditEventClass
 from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.human_only import human_only_remediation
+from meho_backplane.mcp.profiles import profile_admits
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     ToolDefinition,
@@ -508,6 +509,23 @@ async def handle_tools_call(
             raise McpInvalidParamsError(
                 f"forbidden: {name!r} is on the operator surface and requires "
                 "an elevated (mcp:admin) MCP session",
+            )
+
+        # Tool profile (#4172): a session that named a profile lists only
+        # that profile's tools, and a call to another tool is refused, so
+        # the smaller list is the real list.
+        if not profile_admits(operator.mcp_tool_profile, name):
+            _log.warning(
+                "mcp_tool_call_profile_forbidden",
+                tool=name,
+                profile=operator.mcp_tool_profile,
+            )
+            status_code = 403
+            raise McpInvalidParamsError(
+                f"forbidden: {name!r} is not in the {operator.mcp_tool_profile!r} "
+                "tool profile. Use a tool from your tool list, or connect "
+                "without the profile to get the full list.",
+                data={"reason": "not_in_profile", "profile": operator.mcp_tool_profile},
             )
 
         # Add-on family gate (Initiative #2900, Task #3029): a tool bound to a

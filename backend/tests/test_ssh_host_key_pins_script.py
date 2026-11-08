@@ -294,8 +294,11 @@ def test_missing_token_is_a_usage_error(fake: _Fake) -> None:
 
 
 def _ssh_subclasses(cls: type[SshConnector]) -> Iterator[type[SshConnector]]:
+    # Only built-in connectors count: other test modules define their own
+    # SshConnector subclasses, and they stay loaded in the same pytest worker.
     for sub in cls.__subclasses__():
-        yield sub
+        if sub.__module__.startswith(connectors_pkg.__name__ + "."):
+            yield sub
         yield from _ssh_subclasses(sub)
 
 

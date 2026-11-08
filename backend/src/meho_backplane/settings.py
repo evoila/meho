@@ -702,6 +702,13 @@ class Settings(BaseModel):
         ``REQUEST_USAGE_RETENTION_DAYS``: without usage collection, routine
         activity would leave no record at all, so the pod refuses to start.
         Env var ``AUDIT_WRAPPER_ROWS_RETIRED``.
+    operation_search_store_query_text:
+        Also store the query text of each ``search_operations`` call in its
+        search record (#4750). Default ``False``: the record keeps only a
+        SHA-256 hash of the query, because the text can show what someone
+        was working on. The records exist only when
+        ``REQUEST_USAGE_RETENTION_DAYS`` is set, and the same daily job
+        deletes them. Env var ``OPERATION_SEARCH_STORE_QUERY_TEXT``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1729,6 +1736,8 @@ class Settings(BaseModel):
     # #3757: off by default. Must stay declared after
     # ``request_usage_retention_days``: its validator reads that value.
     audit_wrapper_rows_retired: bool = False
+    # #4750: off by default; the search record keeps only the query hash.
+    operation_search_store_query_text: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -2953,6 +2962,9 @@ def get_settings() -> Settings:
         request_usage_retention_days=request_usage_retention_days,
         audit_wrapper_rows_retired=parse_bool_env(
             os.environ.get("AUDIT_WRAPPER_ROWS_RETIRED", "false"),
+        ),
+        operation_search_store_query_text=parse_bool_env(
+            os.environ.get("OPERATION_SEARCH_STORE_QUERY_TEXT", "false"),
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),

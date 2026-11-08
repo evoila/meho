@@ -730,16 +730,52 @@ async def test_a_recovery_option_set_with_other_options_keeps_them(realm_file: P
     assert kc.totp_action["config"] == {"max_auth_age": "300", "add-recovery-codes": "true"}
 
 
-async def test_without_the_right_to_change_login_settings_recovery_codes_are_skipped(
+async def test_an_older_install_says_how_to_turn_recovery_codes_on(
     realm_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    kc = _fresh(flow_rights=False)
+    """An upgrade: the first-start account is gone, ``meho-admin`` lacks ``manage-realm``."""
+    kc = _fresh(bootstrap=False, flow_rights=False)
+    plan = _plan(realm_file)
+
+    await finish_realm(plan, _ENV, kc, FakeStore())
+
+    assert kc.totp_action["config"] == {}
+    assert _recovery_requirement(kc) == "DISABLED"
+    assert (
+        "recovery codes: not checked (no right to read login settings); see "
+        "docs-site/install/keycloak-realm.md, 'Recovery codes on an older install'"
+    ) in capfd.readouterr().out
+
+    # The page's first way: give meho-admin manage-realm once, run the upgrade again.
+    kc.flow_rights = True
+    await finish_realm(plan, _ENV, kc, FakeStore())
+
+    assert kc.totp_action["config"] == {"add-recovery-codes": "true"}
+    assert _recovery_requirement(kc) == "ALTERNATIVE"
+    assert "recovery codes: set" in capfd.readouterr().out
+
+
+async def test_without_the_right_to_change_login_settings_recovery_codes_are_skipped(
+    realm_file: Path, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An account that may read the login settings but not change them."""
+    kc = _fresh()
+    call = kc.call
+
+    async def no_writes(method: str, path: str, **kwargs: Any) -> Reply:
+        if method == "PUT" and "/authentication/" in path:
+            return Reply(403, {"error": "HTTP 403 Forbidden"})
+        return await call(method, path, **kwargs)
+
+    monkeypatch.setattr(kc, "call", no_writes)
 
     await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
 
     assert kc.totp_action["config"] == {}
     assert _recovery_requirement(kc) == "DISABLED"
-    assert "recovery codes: not set (no right to change login settings)" in capfd.readouterr().out
+    assert "recovery codes: not set (no right to change login settings); see " in (
+        capfd.readouterr().out
+    )
 
 
 async def test_a_browser_flow_without_the_recovery_step_is_reported(

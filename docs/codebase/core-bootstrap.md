@@ -76,13 +76,20 @@ so every run sets two realm settings through the Admin API
 (`core/keycloak_recovery.py`): the "Configure OTP" required action gets the
 option "Add recovery codes" (config key `add-recovery-codes`), and the step
 "Recovery Authentication Code Form" of the `browser` flow goes from Disabled
-to Alternative. Both need `manage-realm`: the first-start account has it;
-`meho-admin` has it only with the company login on. Without it the stage
-prints one line ("recovery codes: not set") and goes on. A run that finds
+to Alternative. Reading and changing both need `manage-realm`: the
+first-start account has it; `meho-admin` has it only with the company login
+on. So on an upgrade of an older install the stage cannot read them: it
+prints one line ("recovery codes: not checked ...") that names the page
+docs-site/install/keycloak-realm.md, "Recovery codes on an older install",
+and goes on. That page has two ways: give `meho-admin` `manage-realm` once
+and run the upgrade again, or set both by hand as the console admin. The
+stage does not fail here, so an upgrade still finishes. A run that finds
 both set changes nothing. An account that exists already keeps its required
 actions, so the code app is asked of new installs only. A test that logs in
-as one of these accounts without a browser must send the code too: keep the
-secret of the code app like a password and make the code from it.
+as one of these accounts without a browser must send the code too (the
+password grant takes it as `totp`). The real-Keycloak test sets up a code
+app for each account with a secret it makes up, makes the code from it,
+and checks that a login without the code or with a wrong one fails.
 
 The Secret `<release>-core-first-login` holds `admin_username`,
 `admin_password`, `approver_username` and `approver_password`. The install

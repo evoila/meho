@@ -566,6 +566,50 @@ console admin and points here. Make one once by hand
 
 Then log in as in [The console admin](#the-console-admin).
 
+### Recovery codes on an older install
+
+On a new install, the first admin and the second person set up an
+authenticator app at their first login, and Keycloak shows them twelve
+recovery codes once. Each recovery code works one time, instead of the code
+from the app. Two realm settings turn the recovery codes on, and the
+bootstrap Job sets them on every run.
+
+On an install made before this, the Job cannot set them. Changing login
+settings needs the realm-management role `manage-realm`. The first-start
+account had it, but the first run removed that account. `meho-admin` has
+it only when the company login is on. The Job does not fail. Its log
+says `recovery codes: not checked` and points here. Turn them on once, in
+one of two ways.
+
+**Way 1: let the Job do it.** Give `meho-admin` the role, then run the
+upgrade again:
+
+1. Log in to the admin console as the console admin (see
+   [The console admin](#the-console-admin)) and pick realm `meho`.
+2. **Clients → meho-admin → Service account roles → Assign role →
+   Filter by clients**, search for `realm-management`, select
+   `manage-realm`, **Assign**.
+3. Run `helm upgrade` again. The Job's log says `recovery codes: set`.
+
+With this role, the backplane, which uses `meho-admin`, can also change
+the login settings of realm `meho`. It could already change people and
+groups. If you do not want that, use way 2.
+
+**Way 2: by hand.** As the console admin, in realm `meho`:
+
+1. **Authentication → Required actions.** Open the settings of
+   **Configure OTP** and turn on **Add recovery codes**. **Save**.
+2. **Authentication → Flows → browser.** Set **Recovery Authentication
+   Code Form** to **Alternative**.
+
+The Job's log keeps saying `recovery codes: not checked`. That is expected:
+it cannot read the settings.
+
+**People who exist already.** The Job does not change the required actions
+of people who exist already. To make a person set up an authenticator app
+at the next login, open **Users →** the person **→ Details → Required user
+actions**, add **Configure OTP**, and **Save**.
+
 ## The MCP client (`meho-mcp`)
 
 Browser-capable MCP clients authenticate with authorization-code +

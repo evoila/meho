@@ -13,8 +13,11 @@ required action ``CONFIGURE_TOTP``. Two realm settings add recovery codes
 
 Keycloak reads the realm file at its first start only, so the stage sets both
 through the Admin REST API on every run. A run that finds both set changes
-nothing. Changing them needs ``manage-realm``. An account without it gets one
-line and the stage goes on.
+nothing. Reading and changing them needs ``manage-realm``. ``meho-admin`` has
+it only when the company login is on, and the first-start account is gone
+after the first run. So on an install made before this change, the stage
+says in one line that recovery codes are not checked, names the page that
+shows how to turn them on once, and goes on.
 """
 
 from __future__ import annotations
@@ -33,6 +36,8 @@ _TOTP_ACTION = "CONFIGURE_TOTP"
 ADD_RECOVERY_CODES = "add-recovery-codes"
 #: Provider of the step "Recovery Authentication Code Form".
 RECOVERY_STEP = "auth-recovery-authn-code-form"
+#: Where an operator reads how to turn recovery codes on by hand.
+HOW_TO = "docs-site/install/keycloak-realm.md, 'Recovery codes on an older install'"
 
 
 def _say(line: str) -> None:
@@ -40,11 +45,14 @@ def _say(line: str) -> None:
 
 
 async def _ensure_option(admin: Admin) -> str:
-    """Turn on "Add recovery codes" of "Configure OTP": ``kept``, ``set`` or ``no right``."""
+    """Turn on "Add recovery codes" of "Configure OTP".
+
+    Returns ``kept``, ``set``, ``no read`` or ``no right``.
+    """
     url = f"{_BASE}/required-actions/{_TOTP_ACTION}"
     reply = await admin.call("GET", url)
     if reply.status == 403:
-        return "no right"
+        return "no read"
     action: dict[str, Any] = dict(
         expect(reply, 200, what=f"cannot read required action {_TOTP_ACTION}").data
     )
@@ -60,11 +68,14 @@ async def _ensure_option(admin: Admin) -> str:
 
 
 async def _ensure_step(admin: Admin) -> str:
-    """Set the recovery step to Alternative: ``kept``, ``set``, ``missing`` or ``no right``."""
+    """Set the recovery step to Alternative.
+
+    Returns ``kept``, ``set``, ``missing``, ``no read`` or ``no right``.
+    """
     url = f"{_BASE}/flows/{quote(_BROWSER_FLOW, safe='')}/executions"
     reply = await admin.call("GET", url)
     if reply.status == 403:
-        return "no right"
+        return "no read"
     steps = expect(reply, 200, what=f"cannot list the steps of login flow {_BROWSER_FLOW}").data
     step = next((s for s in steps if s.get("providerId") == RECOVERY_STEP), None)
     if step is None:
@@ -82,8 +93,11 @@ async def ensure_recovery_codes(admin: Admin) -> None:
     """Set the two realm settings for recovery codes. Safe to run again."""
     option = await _ensure_option(admin)
     step = await _ensure_step(admin)
+    if "no read" in (option, step):
+        _say(f"recovery codes: not checked (no right to read login settings); see {HOW_TO}")
+        return
     if "no right" in (option, step):
-        _say("recovery codes: not set (no right to change login settings)")
+        _say(f"recovery codes: not set (no right to change login settings); see {HOW_TO}")
         return
     if step == "missing":
         _say("recovery codes: not set (the browser flow has no recovery code step)")

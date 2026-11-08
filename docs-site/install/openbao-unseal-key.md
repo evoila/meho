@@ -45,15 +45,22 @@ OpenBao after every restart, and MEHO waits until then.
 
 ## Save the key now
 
-Right after the install, copy the key to your key store (for example your
-password manager or a safe):
+Right after the install, copy the key to the clipboard, then paste it into
+your key store (for example your password manager or a safe). Use the
+last pipe for your desktop:
 
 ```bash
+# macOS
 kubectl -n <namespace> get secret <release>-core-vault-unseal \
-  -o jsonpath='{.data.key}' | base64 -d
+  -o jsonpath='{.data.key}' | base64 -d | pbcopy
+# Linux with X11: ... | base64 -d | xclip -selection clipboard
+# Linux with Wayland: ... | base64 -d | wl-copy
 ```
 
-The install notes print this command. The chart never shows the key itself,
+Do not run the command without the last pipe, because then the key shows
+on screen. Clear the clipboard after you save the key.
+
+The install notes show this command. The chart never shows the key itself,
 and no page in MEHO shows it. There is no root token after the install.
 
 ## Switch the mode

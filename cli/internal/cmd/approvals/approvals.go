@@ -97,7 +97,7 @@ func routeRequestError(
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approvals",
-		Short: "Manage approval requests (list / show / result / approve / reject / withdraw)",
+		Short: "Manage approval requests (list / show / result / approve / reject / withdraw / mark-checked)",
 		Long: "Manage pending approval requests wired by G11.2-T5. An " +
 			"approval request is created when the policy gate issues a " +
 			"needs-approval verdict on a connector operation. Use list " +
@@ -107,7 +107,9 @@ func NewRootCmd() *cobra.Command {
 			"read and write verbs require the operator role. The " +
 			"sender of a pending request can take it back with " +
 			"withdraw, and read the output of its approved run with result; " +
-			"both need no role, only that you sent the request. Tenant " +
+			"both need no role, only that you sent the request. When MEHO " +
+			"does not know if an approved change happened, list --outcome-unknown " +
+			"shows it, and mark-checked records what you found on the target. Tenant " +
 			"scoping is enforced server-side via the JWT.",
 		SilenceUsage: true,
 	}
@@ -117,6 +119,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newApproveCmd())
 	cmd.AddCommand(newRejectCmd())
 	cmd.AddCommand(newWithdrawCmd())
+	cmd.AddCommand(newMarkCheckedCmd())
 	return cmd
 }
 

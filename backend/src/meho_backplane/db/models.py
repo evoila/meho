@@ -938,7 +938,7 @@ class Tenant(Base):
     # ``search_knowledge`` and ``meho kb search`` also search it, and
     # ``add_to_knowledge`` says the lesson goes there as a candidate page
     # (:mod:`meho_backplane.kb.wiki_search`). ``NULL`` (default): lessons
-    # live in MEHO only, as before. Nullable, so migration ``0146`` needs
+    # live in MEHO only, as before. Nullable, so migration ``0147`` needs
     # no backfill.
     knowledge_wiki_collection: Mapped[str | None] = mapped_column(
         Text,
@@ -1165,6 +1165,10 @@ class KbRevision(Base):
     * ``embedding_model`` / ``chunker_version`` -- which embedding
       model and chunking rule indexed this body. ``None`` on backfill
       rows, because the migration cannot know them.
+    * ``entry_metadata`` -- the entry's metadata (the header) as of this
+      revision. A change to the body or to the metadata adds a
+      revision, so one revision id names one exact state of the entry.
+      ``None`` on rows stored before this column existed.
     * ``created_at`` -- when the revision was stored.
     """
 
@@ -1192,6 +1196,10 @@ class KbRevision(Base):
     origin: Mapped[str] = mapped_column(Text, nullable=False)
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunker_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entry_metadata: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

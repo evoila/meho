@@ -304,7 +304,12 @@ def test_product_list_matches_ssh_connectors() -> None:
     for mod in pkgutil.walk_packages(connectors_pkg.__path__, connectors_pkg.__name__ + "."):
         if mod.name.endswith(".connector"):
             importlib.import_module(mod.name)
-    products = {sub.product for sub in _ssh_subclasses(SshConnector)}
+    # Other test files define their own SshConnector subclasses; count only the built-in ones.
+    products = {
+        sub.product
+        for sub in _ssh_subclasses(SshConnector)
+        if sub.__module__.startswith(connectors_pkg.__name__ + ".")
+    }
 
     match = re.search(r"^SSH_PRODUCTS=\(([^)]*)\)$", _SCRIPT.read_text(), re.MULTILINE)
     assert match is not None

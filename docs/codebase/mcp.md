@@ -734,7 +734,7 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   embedding) adds it to the text as well. Setting it to `null` brings
   the original text back. The keyword index
   `endpoint_descriptor_bm25_idx` is built on the same text (migration
-  `0145`). Code: `agent_description` and `BM25_DOCUMENT_SQL` in
+  `0146`). Code: `agent_description` and `BM25_DOCUMENT_SQL` in
   `operations/_search.py`.
 
 The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus

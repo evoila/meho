@@ -104,7 +104,7 @@ _ENABLED_FOR_TENANT_SQL = """
 
 #: The text the keyword (BM25) half searches: the summary, then the admin's
 #: ``custom_description`` in place of ``description`` when it is set and not
-#: empty. ``endpoint_descriptor_bm25_idx`` (migration ``0145``) is built on
+#: empty. ``endpoint_descriptor_bm25_idx`` (migration ``0146``) is built on
 #: exactly this expression, so PostgreSQL can use the index. Change both
 #: together, with a migration; ``_assert_scope_inlined`` checks the queries.
 BM25_DOCUMENT_SQL = (

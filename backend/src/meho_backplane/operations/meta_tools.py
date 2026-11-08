@@ -57,7 +57,7 @@ are intentionally parallel — same RRF fusion math, same per-signal
 candidate-pull limit, same embedding service — but the table schema is
 different so the SQL diverges. Migration ``0005`` provisioned the
 BM25 GIN expression index (``endpoint_descriptor_bm25_idx``) over
-the summary and description (since migration ``0145`` the admin's
+the summary and description (since migration ``0146`` the admin's
 ``custom_description`` takes the place of ``description`` when set) and the
 IVFFlat cosine index (``endpoint_descriptor_embedding_idx``) over
 ``embedding vector_cosine_ops``. Both are PG-only; SQLite tests

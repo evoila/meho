@@ -13,7 +13,7 @@ This module checks what only PostgreSQL can show:
 * The keyword expression (``BM25_DOCUMENT_SQL``) is the one
   ``endpoint_descriptor_bm25_idx`` is built on, so PostgreSQL can use the
   index.
-* Migration ``0145`` runs backward to ``0144`` (the index of ``0005``) and
+* Migration ``0146`` runs backward to ``0145`` (the index of ``0005``) and
   forward again.
 """
 
@@ -182,19 +182,19 @@ def _index_definition(url: str) -> str:
     return asyncio.run(_read())
 
 
-def test_migration_0145_runs_backward_and_forward(integration_env: None, async_pg_url: str) -> None:
+def test_migration_0146_runs_backward_and_forward(integration_env: None, async_pg_url: str) -> None:
     reset_engine_for_testing()
     cfg = alembic_config()
     cfg.set_main_option("sqlalchemy.url", async_pg_url)
     try:
         assert "custom_description" in _index_definition(async_pg_url)
 
-        command.downgrade(cfg, "0144")
+        command.downgrade(cfg, "0145")
         old = _index_definition(async_pg_url)
         assert "custom_description" not in old
         assert "description" in old
 
-        command.upgrade(cfg, "0145")
+        command.upgrade(cfg, "0146")
         assert "custom_description" in _index_definition(async_pg_url)
     finally:
         command.upgrade(cfg, "head")

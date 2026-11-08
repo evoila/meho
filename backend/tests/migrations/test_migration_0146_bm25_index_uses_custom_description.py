@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0145_bm25_index_uses_custom_description`` (#4753).
+"""Tests for Alembic migration ``0146_bm25_index_uses_custom_description`` (#4753).
 
 The migration builds ``endpoint_descriptor_bm25_idx`` again, on the text the
 keyword half of operation search reads. The index is PostgreSQL only, so on
@@ -34,8 +34,8 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.operations._search import BM25_DOCUMENT_SQL
 from meho_backplane.settings import get_settings
 
-_REVISION = "0145"
-_DOWN_REVISION = "0144"
+_REVISION = "0146"
+_DOWN_REVISION = "0145"
 _VERSIONS = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
 
@@ -54,12 +54,12 @@ def _squash(sql: str) -> str:
 
 
 def test_new_expression_is_the_search_expression() -> None:
-    migration = _load("0145_bm25_index_uses_custom_description.py")
+    migration = _load("0146_bm25_index_uses_custom_description.py")
     assert _squash(migration.NEW_DOCUMENT_SQL) == _squash(BM25_DOCUMENT_SQL)
 
 
 def test_old_expression_is_the_one_of_migration_0005() -> None:
-    migration = _load("0145_bm25_index_uses_custom_description.py")
+    migration = _load("0146_bm25_index_uses_custom_description.py")
     source = (_VERSIONS / "0005_create_endpoint_descriptor.py").read_text()
     # Migration 0005 writes its expression across adjacent string literals.
     joined = _squash(source.replace('"\n            "', ""))
@@ -69,7 +69,7 @@ def test_old_expression_is_the_one_of_migration_0005() -> None:
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0145.db"
+    db_path = tmp_path / "migration_0146.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

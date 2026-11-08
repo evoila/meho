@@ -2313,9 +2313,9 @@ jobs:
     # The last release is the newest GitHub release. The job needs it
     # to have a published chart and image, as `rollback-drill` does.
     #
-    # Not in `needs:` of `helm-test-gate`: this job is a separate check. Add
-    # it to the gate, or to the required checks, when the maintainers want it
-    # to block the merge.
+    # `helm-test-gate` needs this job, so a failed upgrade blocks the merge.
+    # The job runs only on same-repo pull requests; the gate does not ask
+    # for it on a run that skips it on purpose (for example the merge queue).
     name: Upgrade from the last release (Helm 4 server-side apply)
     permissions:
       contents: read
@@ -2351,9 +2351,9 @@ jobs:
           version: v4.3.1
 
       - name: Create kind cluster
-        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
+        uses: ./.github/actions/setup-kind
         with:
-          cluster_name: meho-helm-test
+          cluster-name: meho-helm-test
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
@@ -2389,25 +2389,32 @@ jobs:
           cache-from: type=gha
 
       - name: Load images into kind
-        # As in `helm-test-byo`, plus the prior release's image, and the
-        # PostgreSQL and Valkey images of both charts (the prior chart may
-        # pin other ones). Each Docker Hub image is pulled by its digest and
-        # loaded by its tag.
+        # As in `helm-test-byo`, plus the last release's image and its Valkey
+        # image. Each Docker Hub image is pulled by its digest and loaded by
+        # a tag, and the values file clears the digests. The two charts can
+        # pin different images under one tag, and then one image would
+        # replace the other. So the last release's Valkey gets its own tag,
+        # `<tag>-prior`. PostgreSQL runs outside the release, from the chart
+        # of the pull request, so only that chart's image is needed.
         run: |
           set -euo pipefail
           helm show values oci://ghcr.io/evoila/meho-chart --version "${PRIOR#v}" > prior-values.yaml
           images=(ghcr.io/evoila/meho:test "ghcr.io/evoila/meho:${PRIOR}")
           docker pull --platform linux/amd64 "ghcr.io/evoila/meho:${PRIOR}"
-          for values in deploy/charts/meho/values.yaml prior-values.yaml; do
-            for part in corePostgres broadcast; do
-              repo=$(yq ".${part}.image.repository" "$values")
-              tag=$(yq ".${part}.image.tag" "$values")
-              digest=$(yq ".${part}.image.digest" "$values")
-              docker pull --platform linux/amd64 "${repo}@${digest}"
-              docker tag "${repo}@${digest}" "${repo}:${tag}"
-              images+=("${repo}:${tag}")
-            done
-          done
+          # Arguments: values file, chart key, suffix of the local tag.
+          add_image() {
+            local repo tag digest
+            repo=$(yq ".${2}.image.repository" "$1")
+            tag=$(yq ".${2}.image.tag" "$1")$3
+            digest=$(yq ".${2}.image.digest" "$1")
+            docker pull --platform linux/amd64 "${repo}@${digest}"
+            docker tag "${repo}@${digest}" "${repo}:${tag}"
+            images+=("${repo}:${tag}")
+          }
+          add_image deploy/charts/meho/values.yaml corePostgres ""
+          add_image deploy/charts/meho/values.yaml broadcast ""
+          add_image prior-values.yaml broadcast -prior
+          echo "PRIOR_VALKEY_TAG=$(yq '.broadcast.image.tag' prior-values.yaml)-prior" >> "$GITHUB_ENV"
           for img in $(printf '%s\n' "${images[@]}" | sort -u); do
             docker save "$img" | docker exec --privileged -i meho-helm-test-control-plane \
               ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
@@ -2522,6 +2529,7 @@ jobs:
             --kube-as-user meho-installer \
             --values "$VALUES" \
             --set image.tag="${PRIOR}" \
+            --set broadcast.image.tag="${PRIOR_VALKEY_TAG}" \
             --wait \
             --wait-for-jobs \
             --timeout 10m
@@ -2591,13 +2599,14 @@ jobs:
     # masquerade as a passing gate. On a non-chart PR the gate passes without
     # running kind; on a chart PR it requires `changes` + `validate` + both kind
     # runs (`helm-test`, built-in PostgreSQL, and `helm-test-byo`,
-    # bring-your-own PostgreSQL, #5412) to all have succeeded.
+    # bring-your-own PostgreSQL, #5412) to all have succeeded. A same-repo
+    # chart PR also needs `upgrade-from-release` (#5963) to have succeeded.
     # Refs #349; GitHub "Troubleshooting required status checks" + actions/runner#2566.
     name: helm install + helm test (pgvector preflight)
     # A started-by-hand run is the rollback drill only, and `changes` skips
     # there. The gate skips too, so it does not fail on the skipped `changes`.
     if: always() && github.event_name != 'workflow_dispatch'
-    needs: [changes, validate, helm-test, helm-test-byo]
+    needs: [changes, validate, helm-test, helm-test-byo, upgrade-from-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -2623,7 +2632,13 @@ jobs:
               echo "::error title=Chart gate failed::helm-test-byo (kind install with bring-your-own PostgreSQL) did not pass (result=${{ needs.helm-test-byo.result }})."
               exit 1
             fi
-            echo "Chart change verified: validate, helm-test and helm-test-byo all passed."
+            # Only a same-repo pull request runs this job. Other events skip it on purpose.
+            if [[ "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}" == "true" ]] \
+              && [[ "${{ needs.upgrade-from-release.result }}" != "success" ]]; then
+              echo "::error title=Chart gate failed::upgrade-from-release (upgrade from the last release with Helm 4) did not pass (result=${{ needs.upgrade-from-release.result }})."
+              exit 1
+            fi
+            echo "Chart change verified: every chart job this event runs has passed."
           else
             echo "No chart-relevant changes — gate passes without running kind."
           fi

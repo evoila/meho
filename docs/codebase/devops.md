@@ -914,8 +914,11 @@ with a plain `helm upgrade`, and again with `--server-side=auto
 it. Each upgrade must finish, the Deployment must run the new image and
 the pod must be Ready. The second upgrade starts from the already
 upgraded release, so it proves the flags work, not a second jump from the
-old chart. The job is not in `needs:` of `helm-test-gate`, so it does not
-block a merge until someone makes it a required check.
+old chart. `helm-test-gate` needs this job, so a failed upgrade blocks
+the merge. The gate asks for it only on a same-repo pull request, because
+other events skip it on purpose. Both charts can pin different Valkey
+images under one tag, so the job loads the last release's Valkey under
+its own tag, `<tag>-prior`.
 
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 

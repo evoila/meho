@@ -50,6 +50,9 @@ from __future__ import annotations
 import structlog
 from fastapi import Depends, Header, HTTPException, status
 
+from meho_backplane.auth.conventions_drift_login import (
+    SCOPE_VIOLATION as CONVENTIONS_DRIFT_SCOPE_VIOLATION,
+)
 from meho_backplane.auth.current_tenant import TENANT_HEADER, bind_tenant_role_source
 from meho_backplane.auth.jwt import header_value, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, PrincipalKind
@@ -248,6 +251,12 @@ async def verify_mcp_jwt_and_bind(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="kb_import_only_scope_violation",
+        )
+    if operator.conventions_drift_only:
+        # A login that may only run the conventions drift check has no MCP surface.
+        _log.warning(CONVENTIONS_DRIFT_SCOPE_VIOLATION, operator_sub=operator.sub, surface="mcp")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=CONVENTIONS_DRIFT_SCOPE_VIOLATION
         )
     if not operator.tenant_chosen:
         # #5239: a session with no current tenant binds nothing, as the

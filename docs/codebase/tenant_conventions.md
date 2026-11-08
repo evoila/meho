@@ -494,6 +494,115 @@ because the title is part of the rendered cost.
 are exempt from the 422 -- a `workflow` convention of arbitrary
 size is accepted.
 
+## Drift check against the team rules
+
+The team rules are written once, in the team wiki's methods pages. MEHO
+never reads the wiki and holds no Git credentials. A person loads the rules
+into the tenant's `operational` conventions with the settings file
+([settings.md](settings.md)). The drift check shows when MEHO no longer
+holds the rules as they are written: a hand edit in MEHO, or a rule that
+nobody has imported yet.
+
+**Route:** `POST /api/v1/settings/conventions-drift`
+(`api/v1/instance_settings.py::conventions_drift`). The work is in
+`instance_settings/conventions_drift.py::check_conventions_drift`.
+
+**Body:** a settings file (`application/yaml`; JSON works too) with one
+tenant block. The block holds only `conventions`; its `id` may be left out
+and must otherwise be the caller's own tenant (403 for another). Each
+convention must have `kind: operational`. This is the same file a person
+imports, so the CI job renders one file for both.
+
+**What it compares:** the file with the tenant's conventions of kind
+`operational` (the ones in the session start text). Conventions of the
+other kinds are not compared. It uses the settings import's own steps:
+`parse_settings_file` (every check of the file, also the secret check),
+`_plan_conventions` (what an import would write) and `diff_specs` (the
+preview's diff). So the answer matches what
+`POST /api/v1/settings/import?preview=true` shows for the same file.
+
+**Answer** (`ConventionsDriftResponse`, always 200):
+
+```json
+{
+  "ok": true,
+  "in_sync": false,
+  "mistakes": [],
+  "added": [{"slug": "read-first", "value": {"slug": "read-first", "title": "...", "body": "...", "kind": "operational", "priority": 1}}],
+  "changed": [{"slug": "change-window", "before": {"body": "..."}, "after": {"body": "..."}}],
+  "only_in_meho": [{"slug": "old-rule"}]
+}
+```
+
+- `added`: a rule in the file that MEHO does not have.
+- `changed`: a rule an import would change. Only the fields that differ,
+  before and after. A field the file leaves out is not compared.
+- `only_in_meho`: an operational convention that the file does not have.
+- `mistakes`: every problem with the file, one sentence each, as in the
+  preview. Then `ok` is `false` and the three lists are empty. A stored
+  convention text that looks like a secret also stops the check, because
+  `changed` shows MEHO's text.
+- `in_sync` is `true` only when `mistakes` and all three lists are empty.
+
+**It saves nothing.** No convention row, no history row and no settings
+revision. One `audit_log` row with op id `settings.conventions_drift`,
+class `read`, `in_sync` and the three counts; never a convention text.
+
+### The drift check login
+
+The route admits a `tenant_admin` or a `platform_admin` (for their own
+tenant), or a login whose token carries the claim
+`conventions_drift_only: true` (`Operator.conventions_drift_only`,
+`auth/jwt.py::_extract_conventions_drift_only`). It is the same kind of
+login as the knowledge import login ([kb.md](kb.md), "The import login").
+Such a login can do nothing else:
+
+- every other REST route, and every method but `POST` on the drift check
+  path, answers `403 conventions_drift_only_scope_violation`
+  (`auth/conventions_drift_login.py::reject_conventions_drift_only_elsewhere`,
+  called from `middleware.py::verify_jwt_and_bind`, keyed on
+  `CONVENTIONS_DRIFT_ROUTE`), whatever role the token names. This also
+  covers the settings preview and import, which stay for a person only;
+- every MCP call answers the same `403` (`mcp/auth.py::verify_mcp_jwt_and_bind`).
+
+The claim takes rights away, so a value MEHO cannot read (a number, a list,
+`"yes"`) also limits the login. Only no claim, `false` or `"false"` leaves
+a login unlimited.
+
+Set the login up in Keycloak as a confidential client with only
+**Service accounts** on, and these mappers:
+
+| Mapper | Claim | Value |
+|---|---|---|
+| Audience | `aud` | the backplane audience (`KEYCLOAK_AUDIENCE`) |
+| Hardcoded claim | `tenant_id` | the tenant whose conventions are checked |
+| Hardcoded claim | `tenant_role` | `read_only` |
+| Hardcoded claim | `principal_kind` | `service` |
+| Hardcoded claim (JSON type boolean) | `conventions_drift_only` | `true` |
+
+The client secret lives in the team wiki repo's CI secrets, never in MEHO.
+
+### The call from the CI job
+
+The team wiki repo's CI job runs after every merge. It renders the rules
+into a settings file with only `conventions`, gets a token with the client
+credentials grant, and sends the file. It fails when anything differs:
+
+```bash
+TOKEN=$(curl -s -d grant_type=client_credentials \
+  -d client_id="$MEHO_DRIFT_CLIENT_ID" -d client_secret="$MEHO_DRIFT_CLIENT_SECRET" \
+  "$KEYCLOAK_ISSUER_URL/protocol/openid-connect/token" | jq -r .access_token)
+
+curl -sf -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/yaml' \
+  --data-binary @team-rules-settings.yaml \
+  "$MEHO_URL/api/v1/settings/conventions-drift" > drift.json
+jq . drift.json
+jq -e '.in_sync' drift.json > /dev/null
+```
+
+The job renders the toolkit's CLAUDE.md sections from the same source.
+That part lives in the team wiki repo, not here.
+
 ## Domain provenance (#3747)
 
 Every write route (POST / PATCH / DELETE) writes, in one

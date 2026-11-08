@@ -1862,7 +1862,8 @@ class EndpointDescriptor(Base):
       the ``search_operations`` meta-tool.
     * ``endpoint_descriptor_bm25_idx`` (PG only) — GIN over
       ``to_tsvector('english', coalesce(summary, '') || ' ' ||
-      coalesce(description, ''))``. Powers the BM25 half of
+      coalesce(nullif(custom_description, ''), description, ''))``
+      (migration ``0145``; before it, ``description`` only). Powers the BM25 half of
       ``search_operations``'s hybrid retrieval. Declared in
       migration ``0005`` via raw SQL because Alembic has no clean
       API for expression-based GIN; intentionally **not** in

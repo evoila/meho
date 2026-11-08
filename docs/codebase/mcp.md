@@ -724,6 +724,18 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   added only when the caller sets `include_scores` **and** is
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
+- **The admin's description wins (#4753).** An admin can replace an
+  operation's text with `meho_connector_edit_op` (`custom_description`).
+  When it is set and not empty, the agent reads it in place of the
+  original `description`: in each ranked hit, in the exact-op contract,
+  and in the keyword (BM25) half of search. So a query that matches
+  only the admin's words is a keyword match and gets the `matched`
+  label, and the replaced words no longer match. The meaning half (the
+  embedding) adds it to the text as well. Setting it to `null` brings
+  the original text back. The keyword index
+  `endpoint_descriptor_bm25_idx` is built on the same text (migration
+  `0145`). Code: `agent_description` and `BM25_DOCUMENT_SQL` in
+  `operations/_search.py`.
 
 The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
 the `outcome` fields described in the next section) and the exact-op

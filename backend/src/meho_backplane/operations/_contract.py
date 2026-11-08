@@ -48,6 +48,7 @@ from meho_backplane.operations._lookup import (
     installed_owner_clause,
     visible_scope_clause,
 )
+from meho_backplane.operations._search import agent_description
 from meho_backplane.operations.dispatcher import descriptor_requires_target
 from meho_backplane.operations.op_policy import apply_effective_policy
 from meho_backplane.untrusted_text import VENDOR_TEXT_RULE
@@ -108,7 +109,11 @@ class UnknownOperationError(ValueError):
 
 
 class OperationContract(BaseModel):
-    """Everything a caller needs to form one valid ``call_operation``."""
+    """Everything a caller needs to form one valid ``call_operation``.
+
+    ``description`` is the admin's ``custom_description`` when one is set,
+    else the original text (:func:`~meho_backplane.operations._search.agent_description`).
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -300,7 +305,7 @@ async def build_operation_contract(
         connector_id=connector_id,
         op_id=descriptor.op_id,
         summary=descriptor.summary,
-        description=descriptor.description,
+        description=agent_description(descriptor),
         group_key=group_key,
         safety_level=descriptor.safety_level,
         requires_approval=descriptor.requires_approval,

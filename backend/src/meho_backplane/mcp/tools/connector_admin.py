@@ -757,7 +757,10 @@ register_mcp_tool(
         description=(
             "Edit one operation's per-op overrides (tenant_admin only). "
             "Editable fields: custom_description (operator-authored "
-            "agent-facing description), safety_level (safe / caution / "
+            "agent-facing description: agents see it in place of the "
+            "original description in search_operations hits, in the "
+            "exact-op contract and in keyword search; null brings the "
+            "original back), safety_level (safe / caution / "
             "dangerous / destructive), requires_approval (gate the "
             "operation behind out-of-band approval), is_enabled (per-op "
             "enable/disable that survives connector-level enable/disable "

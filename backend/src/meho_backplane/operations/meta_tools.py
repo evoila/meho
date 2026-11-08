@@ -57,7 +57,8 @@ are intentionally parallel — same RRF fusion math, same per-signal
 candidate-pull limit, same embedding service — but the table schema is
 different so the SQL diverges. Migration ``0005`` provisioned the
 BM25 GIN expression index (``endpoint_descriptor_bm25_idx``) over
-``coalesce(summary, '') || ' ' || coalesce(description, '')`` and the
+the summary and description (since migration ``0145`` the admin's
+``custom_description`` takes the place of ``description`` when set) and the
 IVFFlat cosine index (``endpoint_descriptor_embedding_idx``) over
 ``embedding vector_cosine_ops``. Both are PG-only; SQLite tests
 fall back to in-process ranking by re-running the candidate
@@ -380,6 +381,9 @@ class OperationSearchHit(BaseModel):
     words (BM25), on meaning (cosine), or both. They are not on the wire
     by default (#3668): :func:`search_operations` drops them unless a
     ``tenant_admin`` caller asks for them with ``include_scores``.
+
+    ``description`` is the admin's ``custom_description`` when one is set,
+    else the original text (:func:`~meho_backplane.operations._search.agent_description`).
     """
 
     model_config = ConfigDict(frozen=True)

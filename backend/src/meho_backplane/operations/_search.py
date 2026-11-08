@@ -13,8 +13,19 @@ the ``documents`` table -- pull the top
 each per-signal candidate query, fuse the two ranked lists via
 RRF (``1 / (RRF_K + rank)``), and return the top ``limit``. The
 divergence is the source table (``endpoint_descriptor``) and the
-SQL (the expression-FTS index built on ``coalesce(summary, '') || ' '
-|| coalesce(description, '')`` instead of the documents ``body`` column).
+SQL (the expression-FTS index built on :data:`BM25_DOCUMENT_SQL` instead
+of the documents ``body`` column).
+
+The text the agent reads
+========================
+
+An admin can replace an operation's ``description`` with
+``custom_description`` (``meho_connector_edit_op``). When it is set (and
+not empty), it takes the place of ``description`` everywhere the agent
+looks: the keyword half of search, the ``description`` of each hit, and
+the exact-op contract. The meaning half (the embedding) already includes
+it (:func:`~meho_backplane.operations.embed.build_embedding_text`).
+Clearing it brings the original ``description`` back.
 
 Dialect-aware
 =============
@@ -52,6 +63,8 @@ if TYPE_CHECKING:
     from meho_backplane.operations.meta_tools import OperationSearchHit
 
 __all__ = [
+    "BM25_DOCUMENT_SQL",
+    "agent_description",
     "hybrid_search",
     "resolve_group_id",
 ]
@@ -89,6 +102,16 @@ _ENABLED_FOR_TENANT_SQL = """
                  AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
                ELSE is_enabled END)"""
 
+#: The text the keyword (BM25) half searches: the summary, then the admin's
+#: ``custom_description`` in place of ``description`` when it is set and not
+#: empty. ``endpoint_descriptor_bm25_idx`` (migration ``0145``) is built on
+#: exactly this expression, so PostgreSQL can use the index. Change both
+#: together, with a migration; ``_assert_scope_inlined`` checks the queries.
+BM25_DOCUMENT_SQL = (
+    "to_tsvector('english', coalesce(summary, '') || ' ' "
+    "|| coalesce(nullif(custom_description, ''), description, ''))"
+)
+
 # The two candidate queries spell the visible-scope, enabled and installed
 # predicates out in full, so each ``text()`` argument is a plain string literal (the
 # ``avoid-sqlalchemy-text`` rule rejects f-strings). ``_VISIBLE_SCOPE_SQL``,
@@ -97,7 +120,8 @@ _ENABLED_FOR_TENANT_SQL = """
 _BM25_CANDIDATES_SQL = text(
     """
         SELECT id, ts_rank_cd(
-            to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, '')),
+            to_tsvector('english', coalesce(summary, '') || ' '
+                || coalesce(nullif(custom_description, ''), description, '')),
             plainto_tsquery('english', :query)
         ) AS score
         FROM endpoint_descriptor
@@ -123,7 +147,8 @@ _BM25_CANDIDATES_SQL = text(
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
-          AND to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, ''))
+          AND to_tsvector('english', coalesce(summary, '') || ' '
+                || coalesce(nullif(custom_description, ''), description, ''))
               @@ plainto_tsquery('english', :query)
         ORDER BY score DESC
         LIMIT :limit
@@ -166,6 +191,9 @@ _COSINE_CANDIDATES_SQL = text(
 def _assert_scope_inlined() -> None:
     """Fail at import if a candidate query no longer holds the scope predicates.
 
+    The BM25 query must also hold :data:`BM25_DOCUMENT_SQL` twice (the score
+    and the ``@@`` filter), so its text matches the index expression.
+
     Whitespace is normalised, then each query must contain
     :data:`_VISIBLE_SCOPE_SQL`, :data:`_ENABLED_FOR_TENANT_SQL` and
     :data:`_INSTALLED_OWNER_SQL` word for word. An edit to one copy that is
@@ -187,9 +215,24 @@ def _assert_scope_inlined() -> None:
                     f"{name} no longer contains {canonical_name} word for word; "
                     "keep the inlined predicate identical to it."
                 )
+    document = " ".join(BM25_DOCUMENT_SQL.split())
+    if " ".join(str(_BM25_CANDIDATES_SQL.text).split()).count(document) != 2:
+        raise AssertionError(
+            "_BM25_CANDIDATES_SQL must use BM25_DOCUMENT_SQL word for word, "
+            "for the score and the filter."
+        )
 
 
 _assert_scope_inlined()
+
+
+def agent_description(descriptor: EndpointDescriptor) -> str | None:
+    """Return the description the agent reads for *descriptor*.
+
+    The admin's ``custom_description`` when it is set and not empty, else
+    the original ``description``. Same rule as :data:`BM25_DOCUMENT_SQL`.
+    """
+    return descriptor.custom_description or descriptor.description
 
 
 async def resolve_group_id(
@@ -295,9 +338,8 @@ async def _hybrid_search_pg(
 ) -> list[OperationSearchHit]:
     """PostgreSQL path -- FTS GIN + pgvector IVFFlat + RRF fusion.
 
-    The BM25 candidate query matches against the same
-    ``coalesce(summary, '') || ' ' || coalesce(description, '')``
-    expression the ``endpoint_descriptor_bm25_idx`` is built on.
+    The BM25 candidate query matches against :data:`BM25_DOCUMENT_SQL`,
+    the expression ``endpoint_descriptor_bm25_idx`` is built on.
     """
     installed = sorted(installed_connector_package_names())
     query_embedding = await get_embedding_service().encode_one(query)
@@ -392,7 +434,7 @@ async def _hybrid_search_fallback(
     bm25_rows: list[_FallbackRow] = []
     cosine_rows: list[_FallbackRow] = []
     for row in rows:
-        text_blob = ((row.summary or "") + " " + (row.description or "")).lower()
+        text_blob = ((row.summary or "") + " " + (agent_description(row) or "")).lower()
         terms = [t for t in query_lower.split() if t]
         # Substring score: count of query terms present in the text blob.
         # Zero-score rows are dropped from the BM25 candidate list (mirrors
@@ -528,7 +570,7 @@ async def _hydrate_hits(
             OperationSearchHit(
                 op_id=descriptor.op_id,
                 summary=descriptor.summary,
-                description=descriptor.description,
+                description=agent_description(descriptor),
                 group_key=group_key,
                 safety_level=policy.safety_level,
                 requires_approval=policy.requires_approval,

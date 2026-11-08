@@ -317,7 +317,7 @@ class SecretRefScopeError(SecretRefReadError):
         )
 
 
-class TargetSecretNotFoundError(VaultCredentialsReadError):
+class TargetSecretNotFoundError(Exception):
     """Vault has no secret at the target's own ``secret_ref``.
 
     Raised by the shared loader when the KV-v2 read of ``target.secret_ref``
@@ -325,6 +325,14 @@ class TargetSecretNotFoundError(VaultCredentialsReadError):
     the ``target_secret_not_found`` result, which names the target and the
     ref and says how to fix it. The message never carries the Vault URL or
     the hvac text.
+
+    It is a plain :class:`Exception`, not a :class:`CredentialsReadError`.
+    Connector code catches ``CredentialsReadError`` around a credential
+    read and folds it into a softer answer, for example a ``fingerprint``
+    that returns ``reachable=False`` and an ``about`` op that then raises a
+    generic connector error. This error passes those handlers the same way
+    hvac ``InvalidPath`` does, so the dispatcher always sees it and the
+    caller always gets the ``target_secret_not_found`` answer.
     """
 
     def __init__(self, *, target_name: str, secret_ref: str) -> None:

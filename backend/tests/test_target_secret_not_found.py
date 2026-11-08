@@ -11,6 +11,11 @@
 * The dispatcher answers ``target_secret_not_found``: target, ref, whether
   MEHO built the ref from the target name, and how to fix it. The audit
   row gets the same error code.
+* The error passes the connector handlers for ``CredentialsReadError``.
+  The SSH connectors fold a failed credential read into
+  ``reachable=False``, and their ``about`` ops then raise a generic
+  connector error. ``linux.about`` with the real connector answers
+  ``target_secret_not_found`` all the same.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_param_secret_data,
 )
 from meho_backplane.connectors.adapters import HttpConnector
+from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.connectors.vault.tenant_paths import is_derived_secret_ref
@@ -89,15 +95,22 @@ def _invalid_path(ref: str) -> hvac.exceptions.InvalidPath:
 
 
 class _Target:
-    def __init__(self, *, name: str, secret_ref: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        name: str,
+        secret_ref: str | None,
+        product: str = "msf",
+        version: str = "1",
+    ) -> None:
         self.id: UUID = uuid.uuid4()
         self.tenant_id = _TENANT
         self.name = name
         self.host = "linux-01.example.test"
         self.port = 443
-        self.product = "msf"
-        self.fingerprint = None
-        self.version = "1"
+        self.product = product
+        self.fingerprint: dict[str, Any] | None = None
+        self.version = version
         self.preferred_impl_id: str | None = None
         self.auth_model = "shared_service_account"
         self.secret_ref = secret_ref
@@ -360,4 +373,68 @@ async def test_dispatch_answers_target_secret_not_found(
         rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
+    assert rows[0].payload["error"]["error_code"] == "target_secret_not_found"
+
+
+# ---------------------------------------------------------------------------
+# The real Linux connector: about -> fingerprint -> credential read
+# ---------------------------------------------------------------------------
+
+
+async def test_linux_about_raises_the_missing_secret_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fingerprint`` folds a failed credential read into ``reachable=False``.
+
+    The missing-secret error is not a credential read error, so it passes
+    that handler and ``about`` raises it, not ``ConnectorUnreachableError``.
+    """
+    ref = f"tenants/{_TENANT}/linux-01"
+    install_fake_client(monkeypatch, read_exc=_invalid_path(ref))
+    target = _Target(name="linux-01", secret_ref=ref, product="linux", version="1.x")
+
+    with pytest.raises(TargetSecretNotFoundError) as exc:
+        await LinuxSshConnector().about(target, {}, _operator())  # type: ignore[arg-type]
+
+    assert exc.value.target_name == "linux-01"
+    assert exc.value.secret_ref == ref
+
+
+async def test_linux_about_dispatch_answers_target_secret_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = f"tenants/{_TENANT}/linux-01"
+    install_fake_client(monkeypatch, read_exc=_invalid_path(ref))
+    register_connector_v2(
+        product="linux", version="1.x", impl_id="linux-ssh", cls=LinuxSshConnector
+    )
+    await LinuxSshConnector.register_operations()
+    target = _Target(name="linux-01", secret_ref=ref, product="linux", version="1.x")
+    target.fingerprint = {"version": "1.x"}
+
+    result = await dispatch(
+        operator=_operator(),
+        connector_id="linux-ssh-1.x",
+        op_id="linux.about",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("target_secret_not_found:")
+    assert "unreachable" not in result.error
+    assert "https://" not in result.error
+    assert result.extras["error_code"] == "target_secret_not_found"
+    assert result.extras["target"] == "linux-01"
+    assert result.extras["secret_ref"] == ref
+    assert result.extras["secret_ref_derived"] is True
+
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "linux.about")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
     assert rows[0].payload["error"]["error_code"] == "target_secret_not_found"

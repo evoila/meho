@@ -165,9 +165,13 @@ dispatcher's `connector_error` branch.
    (`VaultUnreachableError` / `VaultRoleDeniedError`) propagate verbatim.
    The per-request Vault token is revoked on context exit.
    When Vault has no secret at the path (hvac `InvalidPath`), the shared
-   loader raises `TargetSecretNotFoundError` (a `VaultCredentialsReadError`).
-   It carries `target_name` and `secret_ref`, and its message has no
-   Vault URL and no hvac text. The dispatcher answers it with
+   loader raises `TargetSecretNotFoundError`. It carries `target_name`
+   and `secret_ref`, and its message has no Vault URL and no hvac text.
+   It is a plain `Exception`, not a `CredentialsReadError`: connector
+   code that catches `CredentialsReadError` around a credential read (for
+   example a `fingerprint` that answers `reachable=False`) lets it pass,
+   so it reaches the dispatcher from every operation, also from the
+   `about` ops of the SSH connectors. The dispatcher answers it with
    `target_secret_not_found` (see `error-message-shape.md`). A ref taken
    from an op param is never reported as the target's ref. Each place
    that reads a param ref turns the not-found error into a param error:

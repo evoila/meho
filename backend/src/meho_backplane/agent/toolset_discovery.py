@@ -222,7 +222,9 @@ _CONNECTOR_LIST_DESCRIPTION = (
     "row has the `connector_id`, `product`, `version`, its review `status`, "
     "`dispatchable` (true when you can call its operations), and `scope`. "
     'Pass `product` to list one product only, and `detail: "full"` for '
-    "counts such as `enabled_operation_count`. A long list comes back as a "
+    "counts such as `enabled_operation_count`. Pass `target` (a target name) "
+    "to see only the connectors that fit that target, with a `target_fit` "
+    "summary; it does not choose one. A long list comes back as a "
     "`handle`; read its rows with `result_query`. Optional `status` filter: "
     "`enabled`, `staged`, `disabled`, or `all` (default). Read-only."
 )

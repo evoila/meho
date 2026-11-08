@@ -649,6 +649,41 @@ built-in op hidden by the tenant's own connector row is not named
 either. The extra lookups run only on this error path
 (`operations/_op_miss.py`). Tests: `tests/test_operations_op_miss.py`.
 
+### Connectors that fit one target (#3677)
+
+`meho_connector_list` takes an optional `target` (a target name or
+alias, not its id). With it, the list keeps only the connectors that fit
+that target, and the answer has a `target_fit` summary: `target`,
+`product`, `version` (probed, else set by an operator, else `null`),
+`preferred_impl_id`, `result` and a plain-text `hint`.
+
+- **Same answer as a call.** The result comes from the resolver that
+  runs when `call_operation` gets this target (`resolve_connector` in
+  `connectors/resolver.py`, the function `resolve_connector_or_label`
+  wraps). No version match is written in the MCP layer.
+- **Four results**, all outcomes the resolver already has:
+  - `compatible`: the resolver finds a connector. The rows are every
+    listed connector that fits (`connector_serves_target`).
+  - `fingerprint_unknown`: the target has no version yet. The rows are
+    the connectors of its product; they may fit. The hint says to probe
+    the target or set its version.
+  - `no_connector`: no connector fits. No rows.
+  - `ambiguous`: two or more connectors are still tied after the
+    tie-break. The rows are the tied connectors; the hint says to set
+    `preferred_impl_id` on the target.
+- **It chooses nothing.** The answer names no chosen connector, and a
+  `preferred_impl_id` does not hide the other rows. `call_operation`
+  still picks the connector by target each time it runs.
+- **Reads only.** The target is read in the caller's tenant. An unknown
+  name is `-32602` with `error_code: no_target` (or `ambiguous_target`)
+  and the near-miss names. Nothing is probed and the target row is not
+  written.
+- `status`, `product` and `detail` still apply. A long list still comes
+  back as a handle; `target_fit` stays next to it.
+
+Code: `connectors_for_target` in `mcp/tools/connector_admin.py`. Tests:
+`tests/test_mcp_tools_connector_admin.py` (`target_fit`).
+
 ### Close ids for an unknown connector (#4136)
 
 Every unknown-connector error names up to 5 close connector ids, so a
@@ -990,7 +1025,7 @@ add-on-family gate.
 | `meho_broadcast_announce` | operator | — | CLI: `meho broadcast announce <activity>` publishes through the shared durable publisher. |
 | `meho_broadcast_recent` | operator | — | CLI: `meho broadcast recent` reads stored agent announcements through the shared archive reader (operation, approval and check events are on the SSE feed and in `query_audit`). |
 | `meho_broadcast_watch` | operator | — | CLI: `meho broadcast watch` tails the authenticated `/api/v1/feed` SSE route. |
-| `meho_connector_list` | operator | — | List connectors visible to the tenant (plus built-in / global). |
+| `meho_connector_list` | operator | — | List connectors visible to the tenant (plus built-in / global); `target` keeps only the ones that fit one target. |
 | `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |
 | `meho_runbook_list_runs` | operator | — | List runbook runs (operators see only their own). |
 | `meho_runbook_list_templates` | operator | — | List runbook templates in the tenant. |

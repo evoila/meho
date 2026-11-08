@@ -41,12 +41,19 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors import (
+    Connector,
+    FingerprintResult,
+    OperationResult,
+    ProbeResult,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
@@ -1937,3 +1944,300 @@ async def test_connector_handler_maps_legacy_tenant_copy_to_invalid_params(
     assert data["connector_id"] == "vrli-rest-9.0"
     assert data["legacy_product"] == "vcf-logs"
     assert data["product"] == "vrli"
+
+
+# ---------------------------------------------------------------------------
+# meho_connector_list ``target``: which connectors fit one target
+# ---------------------------------------------------------------------------
+
+
+class _FitConnector(Connector):
+    """A registry entry for the fit tests; nothing is ever called on it."""
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+        raise NotImplementedError
+
+
+class _Vmware9(_FitConnector):
+    product = "vmware"
+    supported_version_range = ">=9.0,<10.0"
+
+
+class _Vmware8(_FitConnector):
+    product = "vmware"
+    supported_version_range = ">=8.0,<9.0"
+
+
+class _NsxA(_FitConnector):
+    product = "nsx"
+    supported_version_range = ">=4.0,<5.0"
+
+
+class _NsxB(_FitConnector):
+    product = "nsx"
+    supported_version_range = ">=4.0,<5.0"
+
+
+_FIT_REGISTRY: dict[tuple[str, str, str], type[Connector]] = {
+    ("vmware", "9.0", "vmware-rest"): _Vmware9,
+    ("vmware", "8.0", "vmware-rest"): _Vmware8,
+    ("nsx", "4.x", "nsx-a"): _NsxA,
+    ("nsx", "4.x", "nsx-b"): _NsxB,
+}
+
+
+def _fit_row(product: str, version: str, impl_id: str) -> ConnectorListItem:
+    return ConnectorListItem(
+        connector_id=f"{impl_id}-{version}",
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        tenant_id=None,
+        group_count=1,
+        staged_group_count=0,
+        enabled_group_count=1,
+        disabled_group_count=0,
+        operation_count=3,
+        enabled_operation_count=3,
+    )
+
+
+_FIT_ROWS = [_fit_row(*key) for key in _FIT_REGISTRY] + [_fit_row("harbor", "2.x", "harbor-rest")]
+
+
+def _fit_target(
+    name: str,
+    product: str,
+    *,
+    probed: str | None = None,
+    asserted: str | None = None,
+    preferred_impl_id: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        product=product,
+        fingerprint={"version": probed} if probed else None,
+        version=asserted,
+        preferred_impl_id=preferred_impl_id,
+    )
+
+
+_FIT_TARGETS = {
+    "vc-new": _fit_target("vc-new", "vmware", probed="9.0.2"),
+    "vc-fresh": _fit_target("vc-fresh", "vmware"),
+    "fw-one": _fit_target("fw-one", "firewall", asserted="7.2"),
+    "nsx-one": _fit_target("nsx-one", "nsx", probed="4.1.2"),
+    "nsx-pinned": _fit_target("nsx-pinned", "nsx", probed="4.1.2", preferred_impl_id="nsx-b"),
+}
+
+
+@pytest.fixture
+def fit_world(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the resolver at the fit registry, and the list at the fit rows."""
+    import meho_backplane.connectors.resolver as resolver_mod
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    async def _rows(**_kwargs: Any) -> list[ConnectorListItem]:
+        return list(_FIT_ROWS)
+
+    async def _load(_operator: Operator, name: str) -> Any:
+        return _FIT_TARGETS[name]
+
+    monkeypatch.setattr(resolver_mod, "all_connectors_v2", lambda: dict(_FIT_REGISTRY))
+    monkeypatch.setattr(ca_mod, "list_ingested_connectors", _rows)
+    monkeypatch.setattr(ca_mod, "_load_target", _load)
+
+
+def test_connector_list_schema_target_is_optional() -> None:
+    """``target`` is a new optional property; the schema stays strict."""
+    from meho_backplane.mcp.registry import get_tool
+
+    entry = get_tool("meho_connector_list")
+    assert entry is not None
+    definition, _handler = entry
+    schema = definition.inputSchema
+    assert schema["properties"]["target"]["type"] == "string"
+    assert schema["required"] == []
+    assert schema["additionalProperties"] is False
+
+
+async def test_connector_list_without_target_has_no_target_fit(fit_world: None) -> None:
+    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+
+    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {})
+
+    assert set(result) == {"connectors"}
+    assert len(result["connectors"]) == len(_FIT_ROWS)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_result", "expected_ids"),
+    [
+        ("vc-new", "compatible", ["vmware-rest-9.0"]),
+        ("vc-fresh", "fingerprint_unknown", ["vmware-rest-9.0", "vmware-rest-8.0"]),
+        ("fw-one", "no_connector", []),
+        ("nsx-one", "ambiguous", ["nsx-a-4.x", "nsx-b-4.x"]),
+    ],
+)
+async def test_connector_list_target_fit_buckets(
+    fit_world: None,
+    target: str,
+    expected_result: str,
+    expected_ids: list[str],
+) -> None:
+    """One target per resolver outcome; the rows are the candidates."""
+    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+
+    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {"target": target})
+
+    assert result["target_fit"]["result"] == expected_result
+    assert result["target_fit"]["target"] == target
+    assert [row["connector_id"] for row in result["connectors"]] == expected_ids
+
+
+async def test_connector_list_target_fit_versions(fit_world: None) -> None:
+    """The summary shows the version MEHO uses, probed before asserted."""
+    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+
+    op = build_operator(TenantRole.OPERATOR)
+    probed = await list_connector_rows(op, {"target": "vc-new"})
+    asserted = await list_connector_rows(op, {"target": "fw-one"})
+    unknown = await list_connector_rows(op, {"target": "vc-fresh"})
+
+    assert probed["target_fit"]["version"] == "9.0.2"
+    assert asserted["target_fit"]["version"] == "7.2"
+    assert unknown["target_fit"]["version"] is None
+    assert "Probe the target" in unknown["target_fit"]["hint"]
+
+
+async def test_connector_list_target_fit_selects_nothing(fit_world: None) -> None:
+    """The answer lists candidates and never names a chosen connector."""
+    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+
+    op = build_operator(TenantRole.OPERATOR)
+    tied = await list_connector_rows(op, {"target": "nsx-one"})
+    pinned = await list_connector_rows(op, {"target": "nsx-pinned"})
+
+    for result in (tied, pinned):
+        assert set(result["target_fit"]) == {
+            "target",
+            "product",
+            "version",
+            "preferred_impl_id",
+            "result",
+            "hint",
+        }
+    assert tied["target_fit"]["preferred_impl_id"] is None
+    assert "preferred_impl_id" in tied["target_fit"]["hint"]
+    # The pin breaks the tie for a call, but the list still shows both.
+    assert pinned["target_fit"]["result"] == "compatible"
+    assert pinned["target_fit"]["preferred_impl_id"] == "nsx-b"
+    assert [row["connector_id"] for row in pinned["connectors"]] == ["nsx-a-4.x", "nsx-b-4.x"]
+
+
+async def test_connector_list_target_with_filters(fit_world: None) -> None:
+    """``product`` and ``detail`` still apply to the rows that fit."""
+    from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+
+    result = await list_connector_rows(
+        build_operator(TenantRole.OPERATOR),
+        {"target": "vc-fresh", "product": "harbor", "detail": "full"},
+    )
+
+    assert result["connectors"] == []
+    assert result["target_fit"]["result"] == "fingerprint_unknown"
+
+
+async def test_connector_list_unknown_target_is_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A target name that is not in the tenant is -32602 ``no_target``."""
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+    from meho_backplane.targets.resolver import TargetNotFoundError
+
+    seen: dict[str, Any] = {}
+
+    async def _rows(**_kwargs: Any) -> list[ConnectorListItem]:
+        return list(_FIT_ROWS)
+
+    async def _missing(_session: Any, tenant_id: uuid.UUID, query: str) -> Any:
+        seen["tenant_id"] = tenant_id
+        raise TargetNotFoundError(query, [])
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(ca_mod, "list_ingested_connectors", _rows)
+    monkeypatch.setattr(ca_mod, "resolve_target", _missing)
+    monkeypatch.setattr(ca_mod, "get_sessionmaker", lambda: _Session)
+    op = build_operator(TenantRole.OPERATOR)
+
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await ca_mod.list_connector_rows(op, {"target": "no-such-target"})
+
+    assert seen["tenant_id"] == op.tenant_id
+    assert caught.value.data is not None
+    assert caught.value.data["error_code"] == "no_target"
+    assert caught.value.data["query"] == "no-such-target"
+
+
+async def test_reduced_connector_list_keeps_target_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A list long enough for a handle still carries ``target_fit``."""
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    reduced_inputs: list[dict[str, Any]] = []
+
+    class _Handle:
+        def model_dump(self, mode: str) -> dict[str, Any]:
+            return {"id": "h1"}
+
+    class _Reducer:
+        async def reduce(self, rows: dict[str, Any], *_args: Any) -> tuple[dict[str, Any], Any]:
+            reduced_inputs.append(rows)
+            return {"summary": "many rows"}, _Handle()
+
+    monkeypatch.setattr(ca_mod, "_CONNECTOR_LIST_REDUCER", _Reducer())
+    fit = {"result": "compatible"}
+
+    result = await ca_mod.reduce_connector_list(
+        build_operator(TenantRole.OPERATOR), {"connectors": [], "target_fit": fit}
+    )
+
+    assert reduced_inputs == [{"connectors": []}]
+    assert result == {"summary": "many rows", "target_fit": fit, "handle": {"id": "h1"}}
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_call_meho_connector_list_with_target_over_the_wire(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fit_world: None,
+) -> None:
+    """``tools/call`` accepts ``target`` and returns ``target_fit``."""
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "meho_connector_list", "arguments": {"target": "vc-new"}},
+        },
+    )
+    assert response.status_code == 200
+    payload = _unwrap_text_content(response.json())
+    assert payload["target_fit"]["result"] == "compatible"
+    assert [row["connector_id"] for row in payload["connectors"]] == ["vmware-rest-9.0"]

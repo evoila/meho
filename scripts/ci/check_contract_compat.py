@@ -187,6 +187,65 @@ def _shared_types(first: frozenset[str], second: frozenset[str]) -> frozenset[st
     return _with_integer(first) & _with_integer(second)
 
 
+def _json_type(value: Any) -> str:
+    """Return the JSON type name of an ``enum`` value."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    return "array" if isinstance(value, list) else "object"
+
+
+def _enum_texts(branch: Any) -> set[str] | None:
+    """Return the ``enum`` values of *branch* as JSON texts, or None without an ``enum``."""
+    if not isinstance(branch, dict) or not isinstance(branch.get("enum"), list):
+        return None
+    return {json.dumps(value, sort_keys=True) for value in branch["enum"]}
+
+
+def _accepted_by_both(first: Any, second: Any) -> frozenset[str]:
+    """Return what a value can be to match both branches.
+
+    An item is a JSON type name (every value of that type matches both) or
+    the JSON text of an ``enum`` value, prefixed with ``=``. A branch with
+    an ``enum`` accepts only those values, so two such branches share only
+    the values both list, and an ``enum`` branch shares with a plain branch
+    only the values of a type that the plain branch accepts.
+    """
+    shared = _shared_types(_branch_types(first), _branch_types(second))
+    enums = [texts for texts in (_enum_texts(first), _enum_texts(second)) if texts is not None]
+    if not enums:
+        return shared
+    values = set.intersection(*enums)
+    return frozenset(f"={text}" for text in values if _json_type(json.loads(text)) in shared)
+
+
+def _newly_accepted(before: frozenset[str], now: frozenset[str]) -> frozenset[str]:
+    """Return the items of *now* that *before* did not cover.
+
+    A type covers itself and every ``enum`` value of that type.
+    """
+    return frozenset(
+        item
+        for item in now
+        if item not in before
+        and not (item.startswith("=") and _json_type(json.loads(item[1:])) in before)
+    )
+
+
+def _accepted_text(items: frozenset[str]) -> str:
+    types = frozenset(item for item in items if not item.startswith("="))
+    if types:
+        return _type_text(types)
+    return "the values [" + ", ".join(sorted(item[1:] for item in items)) + "]"
+
+
 def _pair_branches(old: list[Any], new: list[Any], is_input: bool) -> list[tuple[int, int]]:
     """Pair each old branch with one new branch, whatever their positions.
 
@@ -219,29 +278,27 @@ def _pair_branches(old: list[Any], new: list[Any], is_input: bool) -> list[tuple
 def _one_of_overlaps(
     where: str, old: list[Any], new: list[Any], pairs: list[tuple[int, int]]
 ) -> list[str]:
-    """Report two input ``oneOf`` branches that newly accept the same type.
+    """Report two input ``oneOf`` branches that newly accept the same values.
 
     A value must match exactly one ``oneOf`` branch. When a new branch, or a
-    widened branch, accepts a type that another branch accepts too, a value
-    of that type matched before and is rejected now.
+    widened branch, accepts a value that another branch accepts too, that
+    value matched before and is rejected now. Only what the two branches
+    did not both accept before counts: an old overlap is not a new break.
     """
     partner = {j: i for i, j in pairs}
     found: list[str] = []
     for j in range(len(new)):
         for k in range(j + 1, len(new)):
-            shared = _shared_types(_branch_types(new[j]), _branch_types(new[k]))
-            if not shared:
-                continue
-            if (
-                j in partner
-                and k in partner
-                and _shared_types(_branch_types(old[partner[j]]), _branch_types(old[partner[k]]))
-            ):
-                continue
-            found.append(
-                f"{where}: oneOf branches {j} and {k} both accept {_type_text(shared)} now "
-                "(a value that fits two branches fails oneOf)"
-            )
+            now = _accepted_by_both(new[j], new[k])
+            before: frozenset[str] = frozenset()
+            if j in partner and k in partner:
+                before = _accepted_by_both(old[partner[j]], old[partner[k]])
+            newly = _newly_accepted(before, now)
+            if newly:
+                found.append(
+                    f"{where}: oneOf branches {j} and {k} both accept {_accepted_text(newly)} now "
+                    "(a value that fits two branches fails oneOf)"
+                )
     return found
 
 

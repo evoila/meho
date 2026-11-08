@@ -58,11 +58,16 @@ schema. A branch removed from an input, or a new branch in an output, is
 breaking.
 
 `oneOf` in an input gets one more rule. A value must match exactly one
-`oneOf` branch. So when a new or widened branch accepts a type that another
-branch accepts too (an integer is also a number, and a branch without
-`type` accepts every type), a value of that type matched before and is
-rejected now. That is breaking. `anyOf` has no such rule: more branches
-only accept more.
+`oneOf` branch. So when a new or widened branch accepts a value that another
+branch accepts too, that value matched before and is rejected now. That is
+breaking. The check compares what two branches both accept before and after
+the change, and reports only what is new: two branches that both took `null`
+before may keep doing so, but may not both start to take strings. A branch
+with an `enum` accepts only the values it lists, so two `enum` branches
+overlap only on a value both list, and an `enum` branch overlaps a plain
+branch only when one of its values has a type the plain branch accepts. An
+integer is also a number, and a branch without `type` accepts every type.
+`anyOf` has no such rule: more branches only accept more.
 
 A new tool, a new optional argument, a new output field and a new enum
 value in an input are not breaking.

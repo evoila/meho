@@ -342,6 +342,72 @@ def test_input_one_of_branches_that_overlapped_before_are_not_reported() -> None
     assert compat.mcp_breaking(_snap(base), _snap(head)) == []
 
 
+def _one_of_changed(old: list[Any], new: list[Any]) -> list[str]:
+    """Return the breaking changes of the ``target`` input ``oneOf`` going from *old* to *new*."""
+    base = _branched()
+    base["inputSchema"]["properties"]["target"]["oneOf"] = old
+    head = copy.deepcopy(base)
+    head["inputSchema"]["properties"]["target"]["oneOf"] = new
+    return compat.mcp_breaking(_snap(base), _snap(head))
+
+
+def test_an_old_overlap_does_not_hide_a_new_one() -> None:
+    """Both branches took ``null`` before; now both take a string too."""
+    found = _one_of_changed(
+        [{"type": ["string", "null"]}, {"type": ["integer", "null"]}],
+        [{"type": ["string", "null"]}, {"type": ["integer", "null", "string"]}],
+    )
+    assert found == [
+        "MCP tool search input.target: oneOf branches 0 and 1 both accept ['string'] now "
+        "(a value that fits two branches fails oneOf)"
+    ]
+
+
+_A, _B, _C = ({"type": "string", "enum": [v]} for v in ("a", "b", "c"))
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # A new enum branch with its own values cannot overlap the others.
+        ([_A, _B], [_A, _B, _C]),
+        # Enum values of another type than the plain branch do not overlap it.
+        ([{"type": "string"}], [{"type": "string"}, {"enum": [1, None]}]),
+        # Both branches took every string before; a value they both list is not new.
+        ([{"type": "string"}, {}], [_A, {"enum": ["a", 2]}]),
+    ],
+)
+def test_one_of_enum_branches_that_cannot_overlap_are_not_breaking(
+    old: list[Any], new: list[Any]
+) -> None:
+    assert _one_of_changed(old, new) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "accepted"),
+    [
+        # A new enum branch lists a value another enum branch lists.
+        ([_A, _B], [_A, _B, {"type": "string", "enum": ["b", "c"]}], 'the values ["b"]'),
+        # A new enum branch holds a string, and a plain branch takes every string.
+        (
+            [{"type": "string"}, {"type": "integer"}],
+            [{"type": "string"}, {"type": "integer"}, _C],
+            'the values ["c"]',
+        ),
+        # An enum branch loses its enum and takes every string now, also the other branch's "a".
+        ([_A, _B], [_A, {"type": "string"}], 'the values ["a"]'),
+        # True is a boolean, not the integer 1.
+        ([{"enum": [1]}, {"enum": [True]}], [{"enum": [1]}, {"enum": [True, 1]}], "the values [1]"),
+    ],
+)
+def test_one_of_enum_branches_that_start_to_overlap_are_breaking(
+    old: list[Any], new: list[Any], accepted: str
+) -> None:
+    found = _one_of_changed(old, new)
+    assert len(found) == 1
+    assert f"both accept {accepted} now" in found[0]
+
+
 def _reverse_branches(t: dict[str, Any]) -> None:
     t["outputSchema"]["oneOf"].reverse()
     t["inputSchema"]["properties"]["query"]["anyOf"].reverse()

@@ -34,6 +34,7 @@ from sqlalchemy import select
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
 
 
@@ -244,3 +245,24 @@ def test_the_release_commands_write_both_files(tmp_path: Path) -> None:
     assert changes["previous_release"] == "v9.9.8"
     assert [c["op_id"] for c in changes["changed"]] == [first["op_id"]]
     assert changes["changed"][0]["changes"][0]["field"] == "safety_level"
+
+
+@pytest.mark.usefixtures("real_descriptor_embeddings")
+def test_export_never_uses_the_embedding_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The export runs without the test-wide embedding stub and never embeds.
+
+    A release runner cannot download the model. So every registrar, also
+    one that does not pass the embedding service on, must get the stand-in.
+    """
+    monkeypatch.delenv("MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS", raising=False)
+    get_settings.cache_clear()
+
+    async def no_model(self: EmbeddingService, texts: list[str]) -> list[list[float]]:
+        raise AssertionError("the export used the embedding model")
+
+    monkeypatch.setattr(EmbeddingService, "encode", no_model)
+    catalog_path = tmp_path / "operation-catalog.json"
+    assert main(["export", "--release", "v9.9.9", "--out", str(catalog_path)]) == 0
+    assert len(json.loads(catalog_path.read_text(encoding="utf-8"))["operations"]) > 100

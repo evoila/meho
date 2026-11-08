@@ -43,6 +43,7 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Final, cast
+from unittest.mock import patch
 
 #: Raise this when a field changes its meaning or is removed. Adding a
 #: field does not raise it.
@@ -126,8 +127,12 @@ async def collect_operations() -> list[dict[str, Any]]:
     from meho_backplane.operations.typed_register import run_typed_op_registrars
     from meho_backplane.retrieval.embedding import EmbeddingService
 
+    no_embeddings = cast(EmbeddingService, _NoEmbeddings())
     _eager_import_connectors()
-    await run_typed_op_registrars(embedding_service=cast(EmbeddingService, _NoEmbeddings()))
+    # Some registrars do not pass the service on; their rows then embed with
+    # the default service, which would download the model. Swap it too.
+    with patch("meho_backplane.operations.embed.get_embedding_service", return_value=no_embeddings):
+        await run_typed_op_registrars(embedding_service=no_embeddings)
     async with get_sessionmaker()() as session:
         rows = (
             await session.execute(

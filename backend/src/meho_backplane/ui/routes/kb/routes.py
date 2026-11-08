@@ -343,7 +343,11 @@ _SIMILAR_EDITOR_MESSAGE: Final[str] = (
 def _similar_upload_row(
     filename: str, slug: str, similar: list[KbSimilarEntry]
 ) -> dict[str, object]:
-    """Return the upload result row of a file that similar entries stopped."""
+    """Return the upload result row of a file that similar entries stopped.
+
+    ``similar`` carries the entries, so the result shows each one in
+    full (``_similar_entries.html``) and the operator can choose.
+    """
     return {
         "filename": filename,
         "slug": slug,
@@ -354,6 +358,7 @@ def _similar_upload_row(
             + '. Nothing was saved. Tick "Create anyway" to upload it.'
         ),
         "entry": None,
+        "similar": similar,
     }
 
 
@@ -835,7 +840,8 @@ def build_kb_router() -> APIRouter:
         Each entry in the returned list is a dict with:
         ``filename``, ``slug``, ``status`` (``"success"`` / ``"error"``),
         ``message`` (human-readable detail), and optionally ``entry``
-        (:class:`~meho_backplane.kb.KbEntry`) on success for the OOB swap.
+        (:class:`~meho_backplane.kb.KbEntry`) on success for the OOB swap,
+        or ``similar`` (the entries that stopped the file).
 
         Errors are caught per-file; the list length always equals
         ``len(files)`` so the template can render every row.

@@ -861,12 +861,16 @@ def _fake_embedding_service() -> AsyncMock:
     return svc
 
 
-def test_upload_with_similar_entries_saves_nothing_and_names_them() -> None:
-    """An upload of a new slug next to a similar entry is not saved; the row names the entry."""
+_OLD_REVISION = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
+_SHARED_REVISION = uuid.UUID("00000000-0000-4000-8000-0000000000bb")
+
+
+def _similar_check(slug: str) -> object:
+    """A check with one entry the operator may change and one shared entry it may not."""
     from meho_backplane.kb.similar import KbSimilarCheck, KbSimilarEntry
 
-    check = KbSimilarCheck(
-        slug="my-entry",
+    return KbSimilarCheck(
+        slug=slug,
         reason="similar_entries",
         would_write=False,
         slug_exists=False,
@@ -874,20 +878,58 @@ def test_upload_with_similar_entries_saves_nothing_and_names_them() -> None:
             KbSimilarEntry(
                 slug="old-entry",
                 entry_id=uuid.uuid4(),
-                revision_id=uuid.uuid4(),
-                summary=None,
+                revision_id=_OLD_REVISION,
+                summary="The old summary",
+                product="vcenter",
+                version="8.0",
+                status="candidate",
+                snippet="old text of the entry",
+                score=0.93,
+                match="same_product_version",
+                may_change=True,
+            ),
+            KbSimilarEntry(
+                slug="shared-entry",
+                entry_id=uuid.uuid4(),
+                revision_id=_SHARED_REVISION,
+                summary="The shared summary",
                 product=None,
                 version=None,
                 status=None,
-                snippet="old text",
-                score=0.93,
+                snippet="shared text",
+                score=0.88,
                 match="close_meaning",
-                may_change=True,
-            )
+                may_change=False,
+            ),
         ],
         min_score=0.85,
         next_step="n",
     )
+
+
+def _assert_similar_entries_shown(html: str) -> None:
+    """The result shows every field of each entry, and whether it can be changed."""
+    assert "/ui/kb/old-entry" in html
+    assert "The old summary" in html
+    assert "vcenter" in html
+    assert "8.0" in html
+    assert "candidate" in html
+    assert str(_OLD_REVISION) in html
+    assert "old text of the entry" in html
+    assert "0.93" in html
+    assert "same product and version" in html
+    assert "You can update this entry" in html
+    assert "/ui/kb/shared-entry" in html
+    assert "The shared summary" in html
+    assert str(_SHARED_REVISION) in html
+    assert "shared text" in html
+    assert "0.88" in html
+    assert "you cannot change it" in html
+
+
+def test_upload_with_similar_entries_saves_nothing_and_shows_them() -> None:
+    """An upload next to similar entries is not saved; the result shows them in full."""
+    check = _similar_check("my-entry")
     _seed_tenant(_TENANT_A, "tenant-a")
     with respx.mock(assert_all_called=False) as mock_router:
         mock_discovery_and_jwks(mock_router, _JWKS)
@@ -929,9 +971,43 @@ def test_upload_with_similar_entries_saves_nothing_and_names_them() -> None:
 
     assert refused.status_code == 200, refused.text
     assert "alert-error" in refused.text
-    assert "old-entry" in refused.text
     assert "Create anyway" in refused.text
+    _assert_similar_entries_shown(refused.text)
     fake_create.assert_not_awaited()
     assert accepted.status_code == 200, accepted.text
     assert "alert-success" in accepted.text
     assert fake_check.await_args.kwargs["create_anyway"] is True
+
+
+def test_bulk_upload_with_similar_entries_shows_them_per_file() -> None:
+    """A bulk upload shows the similar entries of a refused file next to that file."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_discovery_and_jwks(mock_router, _JWKS)
+        token = _mint_admin_token(_TENANT_A)
+        session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        csrf = mint_csrf_token(str(session_id))
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=_similar_check("my-entry"),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
+                new_callable=AsyncMock,
+            ) as fake_create,
+        ):
+            response = _upload_bulk(
+                client,
+                files=[("my-entry.md", _SMALL_MD), ("notes.txt", b"plain")],
+                csrf=csrf,
+            )
+
+    assert response.status_code == 200, response.text
+    assert "2 failed" in response.text
+    assert "Only .md files are accepted" in response.text
+    _assert_similar_entries_shown(response.text)
+    fake_create.assert_not_awaited()

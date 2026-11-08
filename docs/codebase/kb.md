@@ -745,7 +745,9 @@ The job changes only metadata, through `kb/revisions.py::update_head_metadata`
 (head and passages, under the row lock). A change of the metadata adds
 a new revision with the same body, as for any write that changes the
 metadata, so a write that names the revision read before it is refused
-as stale. It deletes no entry. It deletes recorded
+as stale. The refusal names the job as the writer
+(`last_updated_by_sub = system:knowledge-upkeep`); the creator of the
+entry stays. It deletes no entry. It deletes recorded
 retrievals older than 180 days.
 
 **The report.** One `INTERNAL` audit row per tenant, with

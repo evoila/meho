@@ -85,6 +85,7 @@ from meho_backplane.kb.schemas import (
     KB_PASSAGE_SOURCE,
     KB_SOURCE,
     META_KB_PASSAGE,
+    META_LAST_UPDATED_BY_SUB,
     META_PROVENANCE,
     KbEntryRevision,
 )
@@ -454,17 +455,22 @@ async def update_head_metadata(
     session: AsyncSession,
     doc: Document,
     metadata: dict[str, Any],
+    actor_sub: str,
 ) -> None:
     """Replace the metadata of the head *doc* and of its passages; the body stays.
 
     For a change of the metadata alone, such as a new ``status``. When
-    the metadata differs, a new revision is added with the same body,
-    as for any write that changes the metadata. So a write that names
-    the revision read before this change is refused as stale. The
+    the metadata differs, *actor_sub* is recorded as the writer
+    (``last_updated_by_sub``; the creator stays as it is) and a new
+    revision is added with the same body, as for any write that changes
+    the metadata. So a write that names the revision read before this
+    change is refused as stale, and the refusal names *actor_sub*. The
     caller holds the head row (``SELECT ... FOR UPDATE`` on PostgreSQL)
     and commits.
     """
     changed = metadata_changed_keys(doc.doc_metadata or {}, metadata)
+    if changed:
+        metadata = {**metadata, META_LAST_UPDATED_BY_SUB: actor_sub}
     doc.doc_metadata = metadata
     doc.updated_at = datetime.now(UTC)
     await _refresh_passage_metadata(session, doc.tenant_id, doc.id, metadata)

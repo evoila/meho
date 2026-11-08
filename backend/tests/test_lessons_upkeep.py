@@ -133,7 +133,7 @@ async def test_expired_entries_are_retired_and_others_stay() -> None:
 async def test_a_retired_entry_has_a_new_revision_and_an_older_write_is_stale() -> None:
     past = (NOW - timedelta(days=1)).isoformat()
     before, _ = await KbService().create_entry(
-        TENANT, "old", "old", {"status": "candidate", "expires_at": past}
+        TENANT, "old", "old", {"status": "candidate", "expires_at": past}, actor_sub="user-a"
     )
 
     await run_upkeep(now=NOW)
@@ -144,10 +144,13 @@ async def test_a_retired_entry_has_a_new_revision_and_an_older_write_is_stale() 
     revision = await KbService().get_revision(TENANT, after.id, after.revision_id)
     assert revision is not None
     assert revision.body == "old"
-    with pytest.raises(KbStaleRevisionError):
+    with pytest.raises(KbStaleRevisionError) as refused:
         await KbService().create_entry(
             TENANT, "old", "old", {"status": "candidate"}, expected_revision=before.revision_id
         )
+    assert refused.value.detail.changed_by == SYSTEM_OPERATOR_SUB
+    assert after.metadata["last_updated_by_sub"] == SYSTEM_OPERATOR_SUB
+    assert after.metadata["created_by_sub"] == "user-a"
 
 
 @pytest.mark.asyncio

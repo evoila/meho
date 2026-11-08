@@ -374,11 +374,17 @@ class KbEntrySearchHit(BaseModel):
 
     ``snippet`` is the first ~200 characters of the best passage (or of
     the body, for an entry without passages).
+
+    ``tenant_id`` is the tenant that owns the entry, and ``shared`` says
+    whether the entry is in the shared knowledge scope of the instance
+    (#5726). A hit from another tenant is always a shared one.
     """
 
     model_config = ConfigDict(frozen=True)
 
     slug: str
+    tenant_id: uuid.UUID | None = None
+    shared: bool = False
     snippet: str
     metadata: dict[str, object]
     fused_score: float

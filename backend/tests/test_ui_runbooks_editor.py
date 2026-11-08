@@ -101,7 +101,7 @@ from tests._oidc_jwt_helpers import (
 from tests._oidc_jwt_helpers import (
     public_jwks as _public_jwks,
 )
-from tests.test_ui_broadcast_filters import (
+from tests._xss_helpers import (
     _XSS_OP_ID,
     _assert_no_xss_breakout,
 )
@@ -855,7 +855,7 @@ def test_editor_preview_operator_forbidden() -> None:
 # the edit page, reflected XSS on the create / 422 re-render path).
 #
 # Both tests reuse the parser-grounded harness from
-# :mod:`backend.tests.test_ui_broadcast_filters` (``_XSS_OP_ID`` +
+# :mod:`backend.tests._xss_helpers` (``_XSS_OP_ID`` +
 # ``_assert_no_xss_breakout``): they feed the rendered HTML through a stdlib
 # ``HTMLParser`` and assert no ``onfocus`` / ``autofocus`` / ``onerror``
 # leaks as a parsed attribute and that the marker stays inside an ``x-data``

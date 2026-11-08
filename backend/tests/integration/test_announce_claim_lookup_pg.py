@@ -72,6 +72,10 @@ def _row(principal_sub: str, *, minutes_ago: float) -> dict[str, Any]:
         "planned_op_class": "write",
         "ttl_minutes": 60,
         "created_at": datetime.now(UTC) - timedelta(minutes=minutes_ago),
+        # Only trusted claims count (#3762): each row is the start of a claim.
+        "claim_id": uuid.uuid4(),
+        "owner_sub": f"agent:{principal_sub}",
+        "admission": "agent_principal",
     }
 
 

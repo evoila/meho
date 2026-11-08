@@ -56,12 +56,16 @@ from meho_backplane.operations.ingest._internals import (
     OP_EDIT_OP,
     OP_LLM_GROUPING,
 )
-from meho_backplane.operations.ingest.catalog import ConnectorSpecCatalog, ConnectorSpecEntry
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
+from .fixtures.catalog import (
+    FIXTURE_PROFILE_RESOURCE,
+    FIXTURE_SPEC_RESOURCE,
+    catalog_with_fixture_files,
+)
 
 _WORK_REF = "gh:evoila/meho#3804"
 _WITH_REF = {"Meho-Work-Ref": _WORK_REF}
@@ -211,7 +215,7 @@ async def _register_agent_principal(tenant_id: uuid.UUID, client_id: str) -> Non
 
 
 class _StubLlmClient:
-    """Deterministic grouping answers for the one-op ``_fixture_minimal.yaml`` spec."""
+    """Deterministic grouping answers for the one-op test spec (``GET /things``)."""
 
     async def generate_json(
         self,
@@ -229,25 +233,23 @@ class _StubLlmClient:
 
 
 def _install_shipped_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the ingest route at a one-entry catalog backed by the packaged minimal spec.
+    """Point the ingest route at a one-entry catalog backed by the test catalog's spec.
 
     Same shape as ``tests.test_api_v1_connectors_ingest._patch_catalog``:
     the route resolves ``load_catalog`` through its own module attribute,
     and the cached loader is cleared so an earlier test cannot leave the
     on-disk catalog behind.
     """
-    fake = ConnectorSpecCatalog(
-        entries=(
-            ConnectorSpecEntry(
-                product="shippedt1",
-                version="1.0",
-                impl_id="shippedt1-rest",
-                requires_connector_class="ProfiledRestConnector_shippedt1",
-                upstream=None,
-                spec_resource="_fixture_minimal.yaml",
-                profile_resource="_fixture_minimal.yaml",
-            ),
-        )
+    fake = catalog_with_fixture_files(
+        {
+            "product": "shippedt1",
+            "version": "1.0",
+            "impl_id": "shippedt1-rest",
+            "requires_connector_class": "ProfiledRestConnector_shippedt1",
+            "upstream": None,
+            "spec_resource": FIXTURE_SPEC_RESOURCE,
+            "profile_resource": FIXTURE_PROFILE_RESOURCE,
+        }
     )
     _catalog_mod.load_catalog.cache_clear()
     monkeypatch.setattr(_ingest_route, "load_catalog", lambda: fake)

@@ -605,7 +605,8 @@ def _shipped_profile_triples() -> set[tuple[str, str, str]]:
     (:func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`).
     The triple is derived the way that stamp derives it: from the row's
     ``<impl_id>-<version>`` id, so a catalog product that does not round
-    trip (``_fixture`` -> ``fixture``) still matches the registry entry.
+    trip (for example one with a leading ``_``) still matches the registry
+    entry.
     """
     # Local import: the ingest package imports this module at load time.
     from meho_backplane.operations.ingest.catalog import load_catalog

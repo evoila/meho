@@ -16,8 +16,8 @@ import (
 // approveRightsHelp is the part of `meho approvals approve --help` that
 // explains who may approve (#3329). The server decides; the CLI only
 // shows its answer.
-const approveRightsHelp = "Who may approve: a MEHO-SA-Operator may approve their " +
-	"own change. Then approve prints a self-approval line, and the audit " +
+const approveRightsHelp = "Who may approve: a MEHO-SA-Operator or a MEHO-Admin may " +
+	"approve their own change. Then approve prints a self-approval line, and the audit " +
 	"log records the self-approval. Another person's dangerous or " +
 	"destructive change needs a MEHO-SA-Operator or a MEHO-Admin. MEHO " +
 	"refuses an approval you may not make (403); approve then prints " +
@@ -54,7 +54,7 @@ func selfApprovalLine(resp *api.DecideResponseBody) string {
 	}
 	switch *resp.ApprovalRule {
 	case ruleSAOperatorSelf:
-		return "self-approved as a MEHO-SA-Operator: this is your own change, recorded in the audit log"
+		return "self-approved as a MEHO-SA-Operator or MEHO-Admin: this is your own change, recorded in the audit log"
 	case ruleBreakGlassSelf:
 		return "self-approved because APPROVAL_ALLOW_SELF_APPROVAL is on: this is your own change, recorded in the audit log"
 	default:

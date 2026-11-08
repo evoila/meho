@@ -42,8 +42,9 @@ What is true after the Job ran:
   (`RoleGroup.SA_OPERATORS` in `auth/operator.py`). A change that waits
   for a second person can be approved by any operator other than the
   person who asked, or by a member of `MEHO-Approvers`. So the second
-  person can approve the first admin's changes. The first admin cannot
-  approve their own request.
+  person can approve the first admin's changes. The first admin may also
+  approve their own changes: members of `MEHO-Admins` may, like members
+  of `MEHO-SA-Operators` (`Operator.may_self_approve`).
 - The console admin can log in to the admin console at
   `https://<host>/auth/admin/master/console/#/meho` (with
   `coreKeycloak.ingress.exposeAdmin: true`), pick realm `meho` and manage

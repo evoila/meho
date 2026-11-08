@@ -771,7 +771,7 @@ model, or resume endpoint):
    raises `SelfApprovalForbiddenError` (→ HTTP 403 `self_approval_forbidden`
    on REST; the console shows the plain text) when `operator.sub ==
    request.principal_sub` and none of the self-approval rules below
-   allows it. The person is not a MEHO-SA-Operator, the change did not
+   allows it. The person is not a MEHO-SA-Operator or a MEHO-Admin, the change did not
    wait only because it came with a token, and the audited **emergency
    break-glass** switch `APPROVAL_ALLOW_SELF_APPROVAL=true`
    (`Settings.approval_allow_self_approval`, default `False` =
@@ -791,8 +791,8 @@ model, or resume endpoint):
    **Who may approve, by group (#3328).** `_check_approver_group`
    (`approval_queue.py`) decides, after the role check. The rules come
    from [the decision record](../decisions/approval-groups-and-self-approval.md):
-   - A MEHO-SA-Operator (`Operator.may_self_approve`) may approve their
-     own change at every risk level. Everyone else gets
+   - A MEHO-SA-Operator or a MEHO-Admin (`Operator.may_self_approve`)
+     may approve their own change at every risk level. Everyone else gets
      `SelfApprovalForbiddenError` for their own change, unless break-glass
      covers it (`safe` and `caution` only).
    - Another person's `dangerous` or `destructive` change may be approved
@@ -873,8 +873,8 @@ request field, header or command-line flag can set it.
 | Group | Their own change | Another person's `safe` or `caution` change (also one marked `requires_approval`) | Another person's `dangerous` or `destructive` change |
 |---|---|---|---|
 | MEHO-SA-Operators | yes, at every risk level, on purpose | yes | yes |
-| MEHO-Admins | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | yes |
-| MEHO-Operators | the same as MEHO-Admins | yes | no |
+| MEHO-Admins | yes, at every risk level, on purpose | yes | yes |
+| MEHO-Operators | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | no |
 | MEHO-Approvers | (they cannot run changes) | yes | no |
 | MEHO-Readers | (they cannot run changes) | no | no |
 
@@ -930,7 +930,7 @@ interface only show it.
   approved (`not_pending`), the group rule of #3328 (`own_change`,
   `wrong_group`), and the role floor of the operation (`role_too_low`).
   Otherwise the answer is `ok`. For an own change that a
-  MEHO-SA-Operator (or break-glass) may approve, the answer is yes with
+  MEHO-SA-Operator, a MEHO-Admin (or break-glass) may approve, the answer is yes with
   `own_change`. So is a web click on an own `caution` change that
   waited only because it came with a token (#3980): the web interface
   says yes, the command line and REST say no. It does not check what can change before the click: the
@@ -1153,10 +1153,13 @@ approve it is the operator. Since #3328 the main answer is the
    [The approval groups and how a person approves](#the-approval-groups-and-how-a-person-approves-3325)).
 
 This works at every risk level, also for `dangerous` and `destructive`
-changes. A MEHO-Admin is not a MEHO-SA-Operator: a person is in exactly
-one role group per tenant, so a single admin cannot approve their own
-`dangerous` or `destructive` change. Give the single operator the
-MEHO-SA-Operators group for their daily changes.
+changes. A MEHO-Admin is not a MEHO-SA-Operator (a person is in exactly
+one role group per tenant), but `Operator.may_self_approve` is also true
+for the `tenant_admin` role. So a single admin may approve their own
+change in the same way, and the row records the same rule
+`sa_operator_self_approval`. A site that wants a second person for an
+admin's risky changes keeps the admins out of risky work and gives the
+people who run changes the MEHO-Operators group.
 
 The break-glass switch `APPROVAL_ALLOW_SELF_APPROVAL` is still an
 **emergency** escape, not the everyday answer. Flipping it posture-wide
@@ -1217,7 +1220,7 @@ and it is the difference between the two agent-run entry points in
 
 | Identity shape | How it parks | `principal_sub` | `principal_act` | Approve by the human op |
 |---|---|---|---|---|
-| Direct human op | human dispatches a write that waits, as `USER` | the human's `sub` | `NULL` | **Clears only for a MEHO-SA-Operator** (or a token `caution` change approved with a web click, or break-glass for `safe` / `caution`); else blocked — `requester == approver` |
+| Direct human op | human dispatches a write that waits, as `USER` | the human's `sub` | `NULL` | **Clears only for a MEHO-SA-Operator or a MEHO-Admin** (or a token `caution` change approved with a web click, or break-glass for `safe` / `caution`); else blocked — `requester == approver` |
 | Human-initiated delegated agent run (`run`) | human launches an agent; agent binds as RFC 8693 *actor* | the human's `sub` | the agent's `sub` | Same as a direct human op — RFC 8693 subject is the human; `requester == approver` |
 | Autonomous / scheduled agent run (`run_scheduled`) | agent authenticates as itself; **no** delegation bound | the agent's `sub` | `NULL` | **Clears** under the group rules for another person's change — distinct `sub`, no break-glass, full audit lineage |
 
@@ -1247,7 +1250,7 @@ and it is the difference between the two agent-run entry points in
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `approve` returns `self_approval_forbidden` and you are the tenant's only operator | The write was parked under **your own** `sub` — a direct human op, or a human-initiated delegated agent run (where RFC 8693 keeps you the subject) — and you are not in MEHO-SA-Operators. | Put yourself in **MEHO-SA-Operators** (the change applies at your next login), then approve with a click in the web interface. Or re-park the write under an **agent-requester** (the four-step recipe above). Reserve `APPROVAL_ALLOW_SELF_APPROVAL` for genuine emergencies; it re-opens the #1401 single-account hole posture-wide for `safe` and `caution`. |
+| `approve` returns `self_approval_forbidden` and you are the tenant's only operator | The write was parked under **your own** `sub` — a direct human op, or a human-initiated delegated agent run (where RFC 8693 keeps you the subject) — and you are not in MEHO-SA-Operators or MEHO-Admins. | Put yourself in **MEHO-SA-Operators** (the change applies at your next login), then approve with a click in the web interface. Or re-park the write under an **agent-requester** (the four-step recipe above). Reserve `APPROVAL_ALLOW_SELF_APPROVAL` for genuine emergencies; it re-opens the single-account hole posture-wide for `safe` and `caution`. |
 
 ### Operator-facing discoverability of this story (#2669)
 
@@ -2456,13 +2459,13 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
   secret-version soft-delete) while still being the four-eyes-critical
   action the requirement protects, so #3290 widened the refusal to cover
   it; `caution` / `safe` still honour break-glass. Since #3328 the
-  group rules decide the rest: a MEHO-SA-Operator may approve their own
+  group rules decide the rest: a MEHO-SA-Operator or a MEHO-Admin may approve their own
   `dangerous` or `destructive` change (`approval_rule`
   `sa_operator_self_approval`), and another person's change at these
   levels needs a MEHO-SA-Operator or a tenant admin (see
   [Who may approve, by group](#the-approval-groups-and-how-a-person-approves-3325)).
-  A single-operator tenant puts its operator in MEHO-SA-Operators, or
-  uses the agent-requester pattern.
+  A single-operator tenant puts its operator in MEHO-SA-Operators or
+  MEHO-Admins, or uses the agent-requester pattern.
 - **Registration fail-fast.** `_register_in_session` (`operations/typed_register.py`)
   now rejects a `destructive` descriptor declared `requires_approval=False`
   at registration time — an inconsistent row can't exist. Belt-and-suspenders
@@ -2471,7 +2474,7 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
 Conformance for the op — an agent's request waits for a person like any
 other destructive request (agent verdict `NEEDS_APPROVAL`, #3980), no standing
 grant (`ServicePrincipalGrant` refuses), no break-glass self-approval
-(only a MEHO-SA-Operator may approve their own), no satellite mint
+(only a MEHO-SA-Operator or a MEHO-Admin may approve their own), no satellite mint
 (`MintRefusalCode.OP_NOT_SAFE`), dispatch
 refused without a matching hash, park refused without a blast-radius block,
 and the full preview→park→human-approve→audited-resume flow — is pinned in
@@ -3841,7 +3844,7 @@ and `/preview`. Paths are under `backend/src/meho_backplane/`.
    lives on the row's `proposed_effect`. The add-on gets
    `status="awaiting_approval"` and `extras.approval_request_id`. It should
    store that id.
-4. **A human approves.** A MEHO-SA-Operator may approve their own delete.
+4. **A human approves.** A MEHO-SA-Operator or a MEHO-Admin may approve their own delete.
    Everyone else needs a MEHO-SA-Operator or a tenant admin to approve it,
    and break-glass never covers this tier
    (`operations/approval_queue.py` `_check_self_approval`,
@@ -3934,7 +3937,7 @@ by a service principal. The instance holds only disposable test systems,
 so nothing waits for a person there. Everything else in this document
 stays as it is: people and agents keep their rules, a run approval never
 covers a delete, satellites get no delete, and self-approval follows the
-group rules (only a MEHO-SA-Operator approves their own delete).
+group rules (only a MEHO-SA-Operator or a MEHO-Admin approves their own delete).
 
 - The mode is one instance-wide switch, set at install time and fixed for
   the life of the database (`meho_backplane/sandbox_mode.py`). Every other

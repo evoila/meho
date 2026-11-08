@@ -84,6 +84,8 @@ RESULT_STATE_PILL: Final[dict[str, tuple[str, str]]] = {
     "running": ("running", "badge-info"),
     # The background run ended, but no result was stored (#5110).
     "ended_no_result": ("no result: check it", "badge-warning"),
+    # Another caller runs it, and it started too long ago with no result (#5110).
+    "started_no_result": ("no result", "badge-warning"),
 }
 
 

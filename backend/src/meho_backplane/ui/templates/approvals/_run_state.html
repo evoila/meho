@@ -10,9 +10,9 @@
   seconds and is swapped in place (``outerHTML``); a final state drops the
   ``hx-*`` attributes, so the asking stops.
 
-  ``data-meho-watch-run`` marks a background run that is still going, so
-  ``run-notices.js`` shows the "the run has ended" notice later, on any
-  page. ``data-meho-run-seen`` marks a final state shown in an open dialog,
+  ``data-meho-watch-run`` marks a background run whose state is not final
+  yet (also when another caller runs the operation), so ``run-notices.js``
+  shows the "the run has ended" notice later, on any page. ``data-meho-run-seen`` marks a final state shown in an open dialog,
   so the notice for that run is not shown again.
 
   Context:
@@ -34,7 +34,7 @@
   hx-target="this"
   hx-swap="outerHTML"
   {% endif %}
-  {% if run and run.run_id and run.result_state == "running" %}data-meho-watch-run="{{ run.run_id }}"{% endif %}
+  {% if run and run.run_id and run.polling %}data-meho-watch-run="{{ run.run_id }}"{% endif %}
   {% if run and run.run_id and not run.polling %}data-meho-run-seen="{{ run.run_id }}"{% endif %}
 >
   {% if run and run.result_state == "failed" %}
@@ -137,6 +137,19 @@
       Another caller runs
       <span class="font-mono">{{ request.op_id }}</span>. The result shows on
       this request in the approvals history when the run ends.
+    </p>
+  {% elif run and run.result_state == "started_no_result" %}
+    {#- Another caller runs it, and the run started long ago with no
+        result (#5110): the page stops asking. Say so, never "still
+        going" forever. -#}
+    <span class="grid size-12 place-items-center rounded-full bg-warning/15 text-warning">
+      {{ icon("ban", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Approved, but MEHO has no result</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-started-no-result">
+      The run of <span class="font-mono">{{ request.op_id }}</span> started
+      long ago and stored no result. MEHO does not know if the change
+      happened. Do not run it again. Check the target first.
     </p>
   {% elif run and run.result_state == "not_started" %}
     <span class="grid size-12 place-items-center rounded-full bg-info/15 text-info">

@@ -37,6 +37,7 @@ from meho_backplane.db.models import (
     OperationRunOrigin,
     OperationRunStatus,
 )
+from meho_backplane.operations._errors import result_already_resumed
 from meho_backplane.operations.approval_queue import (
     approval_result_state,
     claim_resume,
@@ -87,6 +88,17 @@ class _SlowOperation:
             await asyncio.sleep(0.02)
         await persist_resume_result(self.request_id, self.envelope, parked_op_id=_OP_ID)
         return self.envelope
+
+
+class _OtherCallerRuns:
+    """The approved operation, when another caller (the requester) won the run claim."""
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+
+    async def __call__(self, **_: object) -> Any:
+        assert await claim_resume(self.request_id)
+        return result_already_resumed(_OP_ID, self.request_id, 0.0)
 
 
 def _client() -> tuple[TestClient, str]:
@@ -353,7 +365,23 @@ def test_a_run_that_was_never_started_by_this_server_stops_asking_at_the_outcome
     assert "hx-trigger" in fresh_row
     assert 'data-result-state="started"' in fresh_row
     assert "hx-trigger" not in old_row
+    assert 'data-result-state="started_no_result"' in old_row
     assert "no result: check it" in old_row
+
+
+def test_an_old_started_request_shows_that_it_has_no_result() -> None:
+    """The card of an old started request says "no result" and to check the target."""
+    client, _ = _client()
+    rid = _approved(resumed_minutes_ago=60)
+
+    with respx.mock(assert_all_called=False), client:
+        card = client.get(f"/ui/approvals/{rid}/run").text
+
+    assert "hx-trigger" not in card
+    assert 'data-result-state="started_no_result"' in card
+    assert "Approved, but MEHO has no result" in card
+    assert "Check the target first." in card
+    assert "still going" not in card
 
 
 def test_a_checked_old_started_request_does_not_ask_again() -> None:
@@ -378,6 +406,47 @@ def test_a_checked_old_started_request_does_not_ask_again() -> None:
 
     assert "hx-trigger" not in card
     assert "hx-trigger" not in row
+    assert 'data-result-state="started_no_result"' in card
+    assert "still going" not in card
+
+
+def test_a_retry_after_a_failed_background_run_does_not_show_the_old_failure() -> None:
+    """A re-run makes no background run: the old run's failure is left out until the re-run ends."""
+    client, _ = _client()
+    rid = _approved(resumed_minutes_ago=10)
+    old_run = _seed_run(
+        approval_request_id=rid, status=OperationRunStatus.SUCCEEDED, result=_FAILED
+    )
+
+    async def _rerun_started() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            run = await session.get(OperationRun, old_run)
+            row = await session.get(ApprovalRequest, rid)
+            assert run is not None and row is not None
+            run.created_at = datetime.now(UTC) - timedelta(minutes=10)
+            row.resume_result = None
+            row.rerun_started_at = datetime.now(UTC)
+
+    asyncio.run(_rerun_started())
+
+    with respx.mock(assert_all_called=False), client:
+        card = client.get(f"/ui/approvals/{rid}/run").text
+        row = client.get(f"/ui/approvals/{rid}/row").text
+        notices = _notices(client, old_run)
+        _in_loop(client, lambda: persist_resume_result(rid, _OK, parked_op_id=_OP_ID))
+        card_after = client.get(f"/ui/approvals/{rid}/run").text
+        row_after = client.get(f"/ui/approvals/{rid}/row").text
+
+    assert 'data-result-state="started"' in card
+    assert "hx-trigger" in card
+    assert "run failed" not in card
+    assert 'data-result-state="started"' in row
+    assert "hx-trigger" in row
+    assert "run failed" not in row
+    assert "data-run-ended" not in notices
+    assert "Request approved" in card_after
+    assert "hx-trigger" not in card_after
+    assert 'data-result-state="executed"' in row_after
 
 
 def test_run_state_routes_are_tenant_scoped() -> None:
@@ -435,6 +504,35 @@ def test_notice_shows_when_the_run_has_ended() -> None:
     assert f'hx-get="/ui/approvals/{rid}"' in ended
     assert "data-run-notice-close" in ended
     assert "onclick" not in ended
+
+
+def test_notice_when_another_caller_runs_the_operation() -> None:
+    """The background run lost the run claim: the card watches it; the notice follows the result."""
+    client, csrf = _client()
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with (
+        respx.mock(assert_all_called=False),
+        patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+        patch(_RESUME_DISPATCH, _OtherCallerRuns(rid)),
+        client,
+    ):
+        card, _ = _approve(client, csrf, rid)
+        run_id = _runs_of(client, rid)[0].id
+        card = _ask_until(
+            client, f"/ui/approvals/{rid}/run", lambda body: 'data-result-state="started"' in body
+        )
+        # The person moved to another page: only the notice route is asked.
+        while_running = _notices(client, run_id)
+        _in_loop(client, lambda: persist_resume_result(rid, _OK, parked_op_id=_OP_ID))
+        ended = _notices(client, run_id)
+
+    assert 'data-result-state="started"' in card
+    assert f'data-meho-watch-run="{run_id}"' in card
+    assert "data-run-ended" not in while_running
+    assert f'data-run-ended="{run_id}"' in ended
+    assert "The run has ended: ran OK" in ended
 
 
 def test_notice_of_a_failed_and_of_a_lost_run() -> None:

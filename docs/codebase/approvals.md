@@ -3020,8 +3020,10 @@ then reads the request once and prints its state, the `Run:` line
 (`started` while it runs) and "Approved. The operation is running. Check
 it with `meho approvals show <id>`." With `--wait` it reads
 `GET /api/v1/approvals/{id}` every 3 seconds until `result_state` is
-`executed`, `failed` or `uncertain`, or the request is on the "outcome
-unknown" list, and then prints the run lines as before. Each read is a
+`executed`, `failed` or `uncertain`, and then prints the run lines as
+before. The "outcome unknown" list ends the wait only when the CLI cannot
+check the run: while the run still goes on, a run longer than that age
+limit is still waited for. Each read is a
 short call, so a proxy time limit cannot cut the wait; up to 5 failed
 reads in a row are tried again. When the person may read runs (operator
 role), each read also checks the run (`GET /api/v1/operations/runs/{id}`):
@@ -3112,10 +3114,16 @@ stored request and its latest background run (`operation_run` rows with
   the reaper turned into `uncertain`, a cancel) is `ended_no_result` ("no
   result: check it"). So nothing shows "running" forever.
 - When another caller (usually the waiting requester) runs the operation,
-  the request is `started` until its result is stored. The asking stops
-  once the run is older than the "outcome unknown" time
-  (`approval_outcome_unknown_after_minutes`). Only the age counts, so a
-  request that someone marked as checked does not start asking again.
+  the request is `started` until its result is stored. Once the run is
+  older than the "outcome unknown" time
+  (`approval_outcome_unknown_after_minutes`), the asking stops and the
+  state is `started_no_result` ("Approved, but MEHO has no result", with
+  the advice to check the target). Only the age counts, so a request that
+  someone marked as checked does not start asking again.
+- A re-run (#5417) clears the stored result but makes no background run.
+  So a background run made before `rerun_started_at` belongs to an earlier
+  attempt and is left out: the re-run shows `started`, not the old
+  attempt's result.
 
 The card part (`_run_state.html`) and each list row (`_history_row.html`)
 carry `hx-get` + `hx-trigger="every 3s"` + `hx-swap="outerHTML"` while
@@ -3123,8 +3131,9 @@ carry `hx-get` + `hx-trigger="every 3s"` + `hx-swap="outerHTML"` while
 connector import job card.
 
 **The "the run has ended" notice (#5110).** Not tied to approvals, so the
-operations page can use it too. A page marks a background run that is
-still going with `data-meho-watch-run="<run id>"`.
+operations page can use it too. A page marks a background run whose state
+is not final yet (`polling`) with `data-meho-watch-run="<run id>"`, also
+when another caller runs the operation.
 `static/src/app/run-notices.js` keeps those ids for the browser tab
 (sessionStorage, so they survive a move to another page) and, on the
 5-second `meho:approval-badge-poll` timer of `approvals-bell.js` (only

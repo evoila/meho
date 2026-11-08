@@ -56,7 +56,7 @@ _ALERT_CLASS: Final[dict[str, str]] = {
     "failed": "alert-error",
     "uncertain": "alert-warning",
     "ended_no_result": "alert-warning",
-    "started": "alert-warning",
+    "started_no_result": "alert-warning",
     "cancelled": "alert-info",
 }
 

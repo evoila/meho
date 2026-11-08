@@ -19,7 +19,9 @@ seconds:
 Both read the stored request and its latest background run
 (:func:`live_run`), so they work on every MEHO server process. Both stop
 asking at a final state, also when the run ended without a stored result
-(for example after a server restart).
+(for example after a server restart), and when a run that another caller
+runs is old enough for the "outcome unknown" list. A background run from
+before the latest re-run says nothing about the re-run, so it is left out.
 """
 
 from __future__ import annotations
@@ -108,8 +110,10 @@ def live_run(row: ApprovalRequest, run: OperationRun | None) -> dict[str, Any] |
     without one (a crash, a server restart, a cancel) is
     ``ended_no_result``. When another caller (usually the waiting
     requester) runs the operation, the request is ``started`` until its
-    result is stored, and asking stops once the run is old enough for the
-    "outcome unknown" list (also after someone marked it as checked).
+    result is stored. Once the run is old enough for the "outcome unknown"
+    list (also after someone marked it as checked), asking stops and the
+    state is ``started_no_result``: check the target. A background run
+    from before the latest re-run is left out.
     """
     state = approval_result_state(row)
     if state is None:
@@ -118,12 +122,31 @@ def live_run(row: ApprovalRequest, run: OperationRun | None) -> dict[str, Any] |
         live = _state(state.value, run, polling=False)
         live["outcome"] = project_outcome(resume_outcome(row))
         return live
+    run = _run_of_latest_attempt(row, run)
     from_run = _from_own_run(row, run) if run is not None else None
     if from_run is not None:
         return from_run
     if state == ApprovalResultState.STARTED:
-        return _state("started", run, polling=_run_is_young(row))
+        if _run_is_young(row):
+            return _state("started", run, polling=True)
+        return _state("started_no_result", run, polling=False)
     return _state(state.value, run, polling=False)
+
+
+def _run_of_latest_attempt(row: ApprovalRequest, run: OperationRun | None) -> OperationRun | None:
+    """*run*, or ``None`` when it was made before the latest re-run of *row*.
+
+    A re-run clears the stored result but makes no background run, so the
+    latest background run can be the one of an earlier attempt.
+    """
+    if run is None or row.rerun_started_at is None:
+        return run
+    return run if _as_utc(run.created_at) >= _as_utc(row.rerun_started_at) else None
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Treat a naive datetime (the SQLite test driver) as UTC."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _run_is_young(row: ApprovalRequest) -> bool:

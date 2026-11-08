@@ -913,23 +913,37 @@ def _extract_tenants(
 _GROUPS_CLAIM_NAME: str = "groups"
 
 
-def _role_groups_in_token(claims: Any, settings: Settings) -> list[str]:
-    """Return the configured role groups the token's ``groups`` claim names.
+def _group_key(name: str) -> str:
+    """Return the form of a group name that MEHO compares.
 
     The group-membership mapper can send plain names or full paths
-    (``/MEHO-Operators``), so a leading ``/`` is dropped on both sides
-    before comparing. Each group is listed once, in the order
-    :attr:`Settings.jwt_role_groups` lists them, so the 401 message and
-    the log event are stable.
+    (``/MEHO-Operators``), so a leading ``/`` is dropped. Upper and lower
+    case do not count: ``meho-operators`` is the same group as
+    ``MEHO-Operators``.
+    """
+    return name.lstrip("/").casefold()
+
+
+def _role_groups_in_token(claims: Any, settings: Settings) -> list[str]:
+    """Return the role groups the token's ``groups`` claim names.
+
+    A token group is a role group when :func:`_group_key` gives the same
+    key as a name in :attr:`Settings.jwt_role_groups`. Each group is
+    listed once, in the order of that setting, with the name as the
+    token spells it, so the 401 message and the log event are stable and
+    show the names the admin sees in Keycloak.
     """
     raw = claims.get(_GROUPS_CLAIM_NAME)
     if not isinstance(raw, list):
         return []
-    names = {item.lstrip("/") for item in raw if isinstance(item, str)}
+    names: dict[str, str] = {}
+    for item in raw:
+        if isinstance(item, str):
+            names.setdefault(_group_key(item), item.lstrip("/"))
     found: list[str] = []
     for group in settings.jwt_role_groups:
-        name = group.lstrip("/")
-        if name in names and name not in found:
+        name = names.pop(_group_key(group), None)
+        if name is not None:
             found.append(name)
     return found
 
@@ -1524,8 +1538,8 @@ def _extract_self_approver(
     * The token has no ``meho_tenants`` claim (a site with one tenant
       and the older mappers): the flag is on when the ``groups`` claim
       names the group ``JWT_SELF_APPROVER_GROUP`` (default
-      ``MEHO-SA-Operators``). A leading ``/`` is ignored on both sides,
-      the same as in the one-group check. A ``groups`` claim that is not
+      ``MEHO-SA-Operators``). A leading ``/`` and upper or lower case do
+      not count, the same as in the one-group check. A ``groups`` claim that is not
       a list, or has an entry that is not a string, gives ``False`` and
       logs ``malformed_groups_claim``.
 
@@ -1550,8 +1564,8 @@ def _extract_self_approver(
             "malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="entry_not_a_string"
         )
         return False
-    names = {item.lstrip("/") for item in raw}
-    return settings.jwt_self_approver_group.lstrip("/") in names
+    names = {_group_key(item) for item in raw}
+    return _group_key(settings.jwt_self_approver_group) in names
 
 
 def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:

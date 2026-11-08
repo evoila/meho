@@ -97,7 +97,9 @@ def test_token_without_groups_or_tenants_gives_no_flag() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("group", ["MEHO-SA-Operators", "/MEHO-SA-Operators"])
+@pytest.mark.parametrize(
+    "group", ["MEHO-SA-Operators", "/MEHO-SA-Operators", "meho-sa-operators", "/Meho-SA-operators"]
+)
 def test_sa_operators_group_sets_the_flag(group: str) -> None:
     operator = _operator(_claims(groups=[group]))
     assert operator.self_approver is True
@@ -112,7 +114,6 @@ def test_sa_operators_group_sets_the_flag(group: str) -> None:
         pytest.param(["MEHO-Operators"], id="operators"),
         pytest.param(["MEHO-Admins"], id="admins"),
         pytest.param(["MEHO-Approvers"], id="approvers"),
-        pytest.param(["meho-sa-operators"], id="wrong-case"),
         pytest.param(["MEHO-SA-Operators-old"], id="longer-name"),
         pytest.param(["MEHO-lab-a-SA-Operators"], id="other-tenant-group"),
         pytest.param([42, None], id="not-strings"),
@@ -155,7 +156,22 @@ def test_custom_group_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JWT_SELF_APPROVER_GROUP", "Ops-Self-Approve")
     get_settings.cache_clear()
     assert _operator(_claims(groups=["Ops-Self-Approve"])).self_approver is True
+    assert _operator(_claims(groups=["ops-self-approve"])).self_approver is True
     assert _operator(_claims(groups=["MEHO-SA-Operators"])).self_approver is False
+
+
+def test_one_role_group_in_lower_case_keeps_the_token_role() -> None:
+    """A person in one lower-case role group gets the role of ``tenant_role``."""
+    operator = _operator(_claims(groups=["meho-admins"], tenant_role="tenant_admin"))
+    assert operator.tenant_role is TenantRole.TENANT_ADMIN
+    assert operator.self_approver is False
+
+
+def test_two_role_groups_in_lower_case_refuse_the_login() -> None:
+    with pytest.raises(HTTPException) as exc:
+        _operator(_claims(groups=["meho-admins", "meho-operators"]))
+    assert exc.value.status_code == 401
+    assert str(exc.value.detail).startswith("multiple_role_groups")
 
 
 def test_blank_group_name_keeps_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,6 +255,28 @@ def test_good_entry_next_to_a_bad_entry_gives_no_flag(raw: Any) -> None:
     assert operator.tenants_claim_malformed is True
     assert [e["event"] for e in logs] == ["malformed_tenant_entry"]
     assert [t.tenant_id for t in operator.tenants] == [_TENANT_A]
+
+
+def test_list_entry_decides_whatever_the_group_is_called() -> None:
+    """The flag comes from the group's ``meho_tenant`` value, not from its name."""
+    operator = _operator(
+        _claims(groups=["sa-ops-team"], meho_tenants=[f"{_TENANT_A}:lab-a:SA-Operators"])
+    )
+    assert operator.self_approver is True
+    assert operator.tenant_role is TenantRole.OPERATOR
+
+
+def test_two_list_entries_refuse_the_login_whatever_the_groups_are_called() -> None:
+    """Two role groups of one tenant are refused by their ``meho_tenant`` values."""
+    with pytest.raises(HTTPException) as exc:
+        _operator(
+            _claims(
+                groups=["meho-admins", "meho-operators"],
+                meho_tenants=[f"{_TENANT_A}:lab-a:Admins", f"{_TENANT_A}:lab-a:Operators"],
+            )
+        )
+    assert exc.value.status_code == 401
+    assert str(exc.value.detail).startswith("multiple_role_groups")
 
 
 def test_two_entries_for_the_current_tenant_refuse_the_login() -> None:

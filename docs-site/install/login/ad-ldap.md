@@ -141,6 +141,9 @@ groups out of Keycloak.
     and with way B that claim holds your names (for example
     `SG-MEHO-Ops`), not the MEHO names. Set the backplane setting
     `JWT_ROLE_GROUPS` to the five MEHO names **and** your five names.
+    Upper and lower case do not count. Also set
+    `JWT_SELF_APPROVER_GROUP` to your SA-Operators group, so its
+    members may approve their own changes.
     Without it, a person in two of your groups gets one of the two
     roles, and you cannot tell which.
 

@@ -3,8 +3,8 @@
 
 """Add a keyword index on the admin's operation description (#4753).
 
-Revision ID: 0146
-Revises: 0145
+Revision ID: 0147
+Revises: 0146
 Create Date: 2026-11-08
 
 Why
@@ -44,8 +44,8 @@ from collections.abc import Sequence
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0146"
-down_revision: str | None = "0145"
+revision: str = "0147"
+down_revision: str | None = "0146"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -65,7 +65,7 @@ INDEX = "endpoint_descriptor_bm25_custom_idx"
 
 #: Frozen copy of the index expression. It must match
 #: ``BM25_CUSTOM_DOCUMENT_SQL`` in ``operations/_search.py``;
-#: ``tests/migrations/test_migration_0146_bm25_custom_description_index.py``
+#: ``tests/migrations/test_migration_0147_bm25_custom_description_index.py``
 #: checks that.
 CUSTOM_DOCUMENT_SQL = (
     "to_tsvector('english', coalesce(summary, '') || ' ' "

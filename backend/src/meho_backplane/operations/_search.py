@@ -35,7 +35,7 @@ brings the original ``description`` back.
 Each state has its own keyword expression and its own index:
 :data:`BM25_ORIGINAL_DOCUMENT_SQL` with ``endpoint_descriptor_bm25_idx``
 (migration ``0005``) and :data:`BM25_CUSTOM_DOCUMENT_SQL` with
-``endpoint_descriptor_bm25_custom_idx`` (migration ``0146``). PostgreSQL
+``endpoint_descriptor_bm25_custom_idx`` (migration ``0147``). PostgreSQL
 uses an expression index only for a query with the same expression, so the
 switch picks the candidate query, and both states keep their index.
 
@@ -127,7 +127,7 @@ BM25_ORIGINAL_DOCUMENT_SQL = (
 #: The text the keyword (BM25) half searches while the switch is on: the
 #: summary, then the admin's ``custom_description`` in place of
 #: ``description`` when it is set and not empty.
-#: ``endpoint_descriptor_bm25_custom_idx`` (migration ``0146``) is built on
+#: ``endpoint_descriptor_bm25_custom_idx`` (migration ``0147``) is built on
 #: exactly this expression. Change an expression and its index together,
 #: with a migration; ``_assert_scope_inlined`` checks the queries.
 BM25_CUSTOM_DOCUMENT_SQL = (

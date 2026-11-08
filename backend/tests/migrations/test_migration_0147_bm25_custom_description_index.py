@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0146_bm25_custom_description_index`` (#4753).
+"""Tests for Alembic migration ``0147_bm25_custom_description_index`` (#4753).
 
 The migration adds ``endpoint_descriptor_bm25_custom_idx``, the keyword
 index of the ``AGENT_READS_CUSTOM_DESCRIPTION`` switch's on state, and
@@ -39,8 +39,8 @@ from meho_backplane.operations._search import (
 )
 from meho_backplane.settings import get_settings
 
-_REVISION = "0146"
-_DOWN_REVISION = "0145"
+_REVISION = "0147"
+_DOWN_REVISION = "0146"
 _VERSIONS = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
 
@@ -59,7 +59,7 @@ def _squash(sql: str) -> str:
 
 
 def test_index_expression_is_the_on_state_search_expression() -> None:
-    migration = _load("0146_bm25_custom_description_index.py")
+    migration = _load("0147_bm25_custom_description_index.py")
     assert _squash(migration.CUSTOM_DOCUMENT_SQL) == _squash(BM25_CUSTOM_DOCUMENT_SQL)
     assert migration.INDEX == "endpoint_descriptor_bm25_custom_idx"
 
@@ -74,7 +74,7 @@ def test_off_state_expression_is_the_one_of_migration_0005() -> None:
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0146.db"
+    db_path = tmp_path / "migration_0147.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

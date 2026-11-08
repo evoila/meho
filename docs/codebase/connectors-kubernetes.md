@@ -1196,6 +1196,42 @@ How it behaves:
   answers hold no values text either
   (`test_trace_capture_records_no_values_text_and_no_secret_data`).
 
+### A node's disk and images -- `k8s.node.disk` / `k8s.node.images` (`ops_node_disk.py`)
+
+Two read-only ops (group `inventory`, risk level `safe`). They answer
+"has the node recovered, and is the big image still there?". Both take an
+optional `node`. Without it they read every node, at most 50, and set
+`incomplete` when more exist. A named node that does not exist gives an
+empty `rows` and `node_state: "not present"`.
+
+- `k8s.node.disk`: per node, the capacity, used, available bytes and the
+  used percent of the node file system, the image store (`image_fs`) and, on
+  newer kubelets, the container store (`container_fs`). The sizes come from
+  the kubelet summary, read through the API server
+  (`/api/v1/nodes/<node>/proxy/stats/summary`, needs the `nodes/proxy`
+  right). The conditions `DiskPressure`, `MemoryPressure` and `PIDPressure`
+  (status, reason, last change time) come from the node status. When the
+  summary cannot be read, `summary.state` is `unknown` with a short error
+  and the sizes are `null`. The conditions still show.
+- `k8s.node.images`: per node, the images of the node status (`names`,
+  `size_bytes`), biggest first, each with `used_by_running_pod`. The flag
+  comes from the pods that run on the node (field selector
+  `spec.nodeName`). A pod counts unless it is `Succeeded` or `Failed`. An
+  image matches by name or by digest, also for init containers and debug
+  (ephemeral) containers. `nodes[]` holds the totals: image count, total
+  bytes, unused count and bytes. When the pods cannot be read, the flag and
+  the unused totals are `null`, never `false`, and `nodes[].pods.state` says
+  why. A byte total is `null` when one of its images has no size, so it
+  never shows less disk use than there is.
+- The kubelet lists at most 50 images in the node status by default. A node
+  with 50 or more rows carries `list_may_be_cut: true`.
+- A 401 is raised, so the dispatcher can renew the login. Long answers
+  become a result handle like every list read.
+
+Example question: "is the big image still on the node?" -- call
+`k8s.node.images` with the node name, read the first row (the biggest), and
+call `k8s.node.disk` for the free space.
+
 ### Read-side Secret redaction (#3501, `redaction.py`)
 
 Response redaction is otherwise pattern-based (the Tier-1 named-pattern

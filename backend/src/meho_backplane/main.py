@@ -126,6 +126,9 @@ from meho_backplane.api.v1.runner_principals import (
 )
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
+from meho_backplane.api.v1.sensor_acknowledgements import (
+    router as api_v1_sensor_acknowledgements_router,
+)
 from meho_backplane.api.v1.sensors import router as api_v1_sensors_router
 from meho_backplane.api.v1.service_grants import router as api_v1_service_grants_router
 from meho_backplane.api.v1.service_read_scopes import (
@@ -167,6 +170,7 @@ from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
+from meho_backplane.first_start import router as first_start_router
 from meho_backplane.flight_recorder.reaper import (
     start_flight_recorder_reaper,
     stop_flight_recorder_reaper,
@@ -1018,6 +1022,7 @@ app.add_middleware(RequestBodyLimitMiddleware)
 app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
 
 app.include_router(health_router)
+app.include_router(first_start_router)
 app.include_router(version_router)
 app.include_router(api_v1_auth_config_router)
 app.include_router(api_v1_health_router)
@@ -1341,6 +1346,9 @@ app.include_router(api_v1_scheduler_router)
 # JWT; platform_admin may pass tenant_filter / a body tenant_id to act
 # cross-tenant. Every mutation writes an audit row under op_class=write.
 app.include_router(api_v1_sensors_router)
+# #4128 -- POST /sensors/{id}/acknowledgement: a person acknowledges a
+# Sensor finding until an end time, with a reason. Operator role, people only.
+app.include_router(api_v1_sensor_acknowledgements_router)
 # I2416-T2506 -- Dashboard admin surface (five-state worst-of rollup). POST
 # /checks/dashboards (create, tenant_admin; 422 sensor_not_found on a foreign
 # member id), GET /checks/dashboards (list, operator-level; each row carries

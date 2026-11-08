@@ -398,6 +398,13 @@ const (
 	FilterPredicateOpLessThanEqual    FilterPredicateOp = "<="
 )
 
+// Defines values for FirstStartLineStatus.
+const (
+	FirstStartLineStatusFail    FirstStartLineStatus = "fail"
+	FirstStartLineStatusOk      FirstStartLineStatus = "ok"
+	FirstStartLineStatusSkipped FirstStartLineStatus = "skipped"
+)
+
 // Defines values for GatewayResultBodyOutcome.
 const (
 	GatewayResultBodyOutcomeFailed    GatewayResultBodyOutcome = "failed"
@@ -634,6 +641,35 @@ const (
 	SelectSpecAggregateMax   SelectSpecAggregate = "max"
 	SelectSpecAggregateMin   SelectSpecAggregate = "min"
 	SelectSpecAggregateSum   SelectSpecAggregate = "sum"
+)
+
+// Defines values for SensorAcknowledgementCreateReason.
+const (
+	SensorAcknowledgementCreateReasonAcceptedRisk SensorAcknowledgementCreateReason = "accepted_risk"
+	SensorAcknowledgementCreateReasonFalseAlarm   SensorAcknowledgementCreateReason = "false_alarm"
+	SensorAcknowledgementCreateReasonFixPlanned   SensorAcknowledgementCreateReason = "fix_planned"
+)
+
+// Defines values for SensorAcknowledgementReadAckedState.
+const (
+	SensorAcknowledgementReadAckedStateCritical SensorAcknowledgementReadAckedState = "critical"
+	SensorAcknowledgementReadAckedStateDegraded SensorAcknowledgementReadAckedState = "degraded"
+	SensorAcknowledgementReadAckedStateOk       SensorAcknowledgementReadAckedState = "ok"
+	SensorAcknowledgementReadAckedStateSkip     SensorAcknowledgementReadAckedState = "skip"
+	SensorAcknowledgementReadAckedStateUnknown  SensorAcknowledgementReadAckedState = "unknown"
+)
+
+// Defines values for SensorAcknowledgementReadEndReason.
+const (
+	SensorAcknowledgementReadEndReasonExpired    SensorAcknowledgementReadEndReason = "expired"
+	SensorAcknowledgementReadEndReasonStateWorse SensorAcknowledgementReadEndReason = "state_worse"
+)
+
+// Defines values for SensorAcknowledgementReadReason.
+const (
+	SensorAcknowledgementReadReasonAcceptedRisk SensorAcknowledgementReadReason = "accepted_risk"
+	SensorAcknowledgementReadReasonFalseAlarm   SensorAcknowledgementReadReason = "false_alarm"
+	SensorAcknowledgementReadReasonFixPlanned   SensorAcknowledgementReadReason = "fix_planned"
 )
 
 // Defines values for SensorCadenceKind.
@@ -4999,6 +5035,8 @@ type DashboardListResponse struct {
 // the hysteresis clock (“state_since“), and the last observed value /
 // evidence.
 type DashboardMemberView struct {
+	// Acknowledgement One acknowledgement as REST, the CLI and the Dashboard detail show it.
+	Acknowledgement *SensorAcknowledgementRead        `json:"acknowledgement,omitempty"`
 	ConnectorId     string                            `json:"connector_id"`
 	EffectiveState  DashboardMemberViewEffectiveState `json:"effective_state"`
 	ForSeconds      int                               `json:"for_seconds"`
@@ -5231,6 +5269,11 @@ type DeprecateTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
 	Version int    `json:"version"`
+}
+
+// DestinationProof The answer of “GET /first-start/destination“: the proof for the nonce.
+type DestinationProof struct {
+	Proof string `json:"proof"`
 }
 
 // DiscardTemplateResponse Response for “meho_runbook_discard_template“ -- the discarded draft's coordinates.
@@ -6139,6 +6182,22 @@ type FingerprintResult struct {
 	Reachable   bool                    `json:"reachable"`
 	Vendor      string                  `json:"vendor"`
 	Version     *string                 `json:"version"`
+}
+
+// FirstStartLine One line of the first-start list.
+type FirstStartLine struct {
+	Message string               `json:"message"`
+	Name    string               `json:"name"`
+	Status  FirstStartLineStatus `json:"status"`
+}
+
+// FirstStartLineStatus defines model for FirstStartLine.Status.
+type FirstStartLineStatus string
+
+// FirstStartResponse The whole list. “ok“ is true when no line is “fail“.
+type FirstStartResponse struct {
+	Checks []FirstStartLine `json:"checks"`
+	Ok     bool             `json:"ok"`
 }
 
 // ForkInfo Surfaced by “meho_runbook_edit_template“ when editing a published template forks.
@@ -9678,6 +9737,42 @@ type SelectSpec struct {
 // SelectSpecAggregate defines model for SelectSpec.Aggregate.
 type SelectSpecAggregate string
 
+// SensorAcknowledgementCreate Body of “POST /api/v1/sensors/{id}/acknowledgement“.
+//
+// “expires_at“ is required and must carry a time zone: an acknowledgement
+// without an end time is refused with 422.
+type SensorAcknowledgementCreate struct {
+	ExpiresAt time.Time                         `json:"expires_at"`
+	Note      string                            `json:"note"`
+	Reason    SensorAcknowledgementCreateReason `json:"reason"`
+}
+
+// SensorAcknowledgementCreateReason defines model for SensorAcknowledgementCreate.Reason.
+type SensorAcknowledgementCreateReason string
+
+// SensorAcknowledgementRead One acknowledgement as REST, the CLI and the Dashboard detail show it.
+type SensorAcknowledgementRead struct {
+	AckedState   SensorAcknowledgementReadAckedState `json:"acked_state"`
+	CreatedAt    time.Time                           `json:"created_at"`
+	CreatedBySub string                              `json:"created_by_sub"`
+	EndReason    *SensorAcknowledgementReadEndReason `json:"end_reason"`
+	EndedAt      *time.Time                          `json:"ended_at"`
+	ExpiresAt    time.Time                           `json:"expires_at"`
+	Id           openapi_types.UUID                  `json:"id"`
+	Note         string                              `json:"note"`
+	Reason       SensorAcknowledgementReadReason     `json:"reason"`
+	SensorId     openapi_types.UUID                  `json:"sensor_id"`
+}
+
+// SensorAcknowledgementReadAckedState defines model for SensorAcknowledgementRead.AckedState.
+type SensorAcknowledgementReadAckedState string
+
+// SensorAcknowledgementReadEndReason defines model for SensorAcknowledgementRead.EndReason.
+type SensorAcknowledgementReadEndReason string
+
+// SensorAcknowledgementReadReason defines model for SensorAcknowledgementRead.Reason.
+type SensorAcknowledgementReadReason string
+
 // SensorCadenceKind Closed enum of the two cadence shapes a :class:`Sensor` may carry.
 //
 // Initiative #2416 (parent goal #221), Task #2503. One “sensor“ row
@@ -12729,6 +12824,11 @@ type EditSensorApiV1SensorsSensorIdPatchParams struct {
 	Authorization *string             `json:"authorization,omitempty"`
 }
 
+// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams defines parameters for AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost.
+type AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListSensorResultsApiV1SensorsSensorIdResultsGetParams defines parameters for ListSensorResultsApiV1SensorsSensorIdResultsGet.
 type ListSensorResultsApiV1SensorsSensorIdResultsGetParams struct {
 	From          *time.Time                                                  `form:"from,omitempty" json:"from,omitempty"`
@@ -13013,6 +13113,12 @@ type TimelineRouteApiV1TopologyTimelineGetParams struct {
 	Limit         *int       `form:"limit,omitempty" json:"limit,omitempty"`
 	Cursor        *string    `form:"cursor,omitempty" json:"cursor,omitempty"`
 	Authorization *string    `json:"authorization,omitempty"`
+}
+
+// FirstStartDestinationFirstStartDestinationGetParams defines parameters for FirstStartDestinationFirstStartDestinationGet.
+type FirstStartDestinationFirstStartDestinationGetParams struct {
+	// Nonce 32 hex characters
+	Nonce string `form:"nonce" json:"nonce"`
 }
 
 // McpDispatchMcpPostParams defines parameters for McpDispatchMcpPost.
@@ -13592,6 +13698,9 @@ type CreateSensorApiV1SensorsPostJSONRequestBody = SensorCreate
 
 // EditSensorApiV1SensorsSensorIdPatchJSONRequestBody defines body for EditSensorApiV1SensorsSensorIdPatch for application/json ContentType.
 type EditSensorApiV1SensorsSensorIdPatchJSONRequestBody = SensorUpdate
+
+// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody defines body for AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost for application/json ContentType.
+type AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody = SensorAcknowledgementCreate
 
 // CreateGrantApiV1ServicePrincipalsGrantsPostJSONRequestBody defines body for CreateGrantApiV1ServicePrincipalsGrantsPost for application/json ContentType.
 type CreateGrantApiV1ServicePrincipalsGrantsPostJSONRequestBody = ServiceGrantCreate
@@ -16364,6 +16473,11 @@ type ClientInterface interface {
 
 	EditSensorApiV1SensorsSensorIdPatch(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, body EditSensorApiV1SensorsSensorIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBody request with any body
+	AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBody(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListSensorResultsApiV1SensorsSensorIdResultsGet request
 	ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -16508,6 +16622,12 @@ type ClientInterface interface {
 
 	// TimelineRouteApiV1TopologyTimelineGet request
 	TimelineRouteApiV1TopologyTimelineGet(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FirstStartFirstStartGet request
+	FirstStartFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FirstStartDestinationFirstStartDestinationGet request
+	FirstStartDestinationFirstStartDestinationGet(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// HealthzHealthzGet request
 	HealthzHealthzGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -17026,6 +17146,9 @@ type ClientInterface interface {
 	EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiFirstStartUiFirstStartGet request
+	UiFirstStartUiFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// IndexUiGrantsGet request
 	IndexUiGrantsGet(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20096,6 +20219,30 @@ func (c *Client) EditSensorApiV1SensorsSensorIdPatch(ctx context.Context, sensor
 	return c.Client.Do(req)
 }
 
+func (c *Client) AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBody(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequestWithBody(c.Server, sensorId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequest(c.Server, sensorId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(c.Server, sensorId, params)
 	if err != nil {
@@ -20710,6 +20857,30 @@ func (c *Client) RefreshApiV1TopologyRefreshTargetNamePost(ctx context.Context, 
 
 func (c *Client) TimelineRouteApiV1TopologyTimelineGet(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewTimelineRouteApiV1TopologyTimelineGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FirstStartFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartFirstStartGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FirstStartDestinationFirstStartDestinationGet(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartDestinationFirstStartDestinationGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -23086,6 +23257,18 @@ func (c *Client) EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slu
 
 func (c *Client) EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEditUiEventSourcesSlugEditPostRequestWithFormdataBody(c.Server, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiFirstStartUiFirstStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiFirstStartUiFirstStartGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -35461,6 +35644,68 @@ func NewEditSensorApiV1SensorsSensorIdPatchRequestWithBody(server string, sensor
 	return req, nil
 }
 
+// NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequest calls the generic AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost builder with application/json body
+func NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequest(server string, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequestWithBody(server, sensorId, params, "application/json", bodyReader)
+}
+
+// NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequestWithBody generates requests for AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost with any type of body
+func NewAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostRequestWithBody(server string, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sensor_id", runtime.ParamLocationPath, sensorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors/%s/acknowledgement", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest generates requests for ListSensorResultsApiV1SensorsSensorIdResultsGet
 func NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(server string, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams) (*http.Request, error) {
 	var err error
@@ -38521,6 +38766,78 @@ func NewTimelineRouteApiV1TopologyTimelineGetRequest(server string, params *Time
 			req.Header.Set("authorization", headerParam0)
 		}
 
+	}
+
+	return req, nil
+}
+
+// NewFirstStartFirstStartGetRequest generates requests for FirstStartFirstStartGet
+func NewFirstStartFirstStartGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/first-start")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewFirstStartDestinationFirstStartDestinationGetRequest generates requests for FirstStartDestinationFirstStartDestinationGet
+func NewFirstStartDestinationFirstStartDestinationGetRequest(server string, params *FirstStartDestinationFirstStartDestinationGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/first-start/destination")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "nonce", runtime.ParamLocationQuery, params.Nonce); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
 	}
 
 	return req, nil
@@ -44568,6 +44885,33 @@ func NewEditUiEventSourcesSlugEditPostRequestWithBody(server string, slug string
 	return req, nil
 }
 
+// NewUiFirstStartUiFirstStartGetRequest generates requests for UiFirstStartUiFirstStartGet
+func NewUiFirstStartUiFirstStartGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/first-start")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewIndexUiGrantsGetRequest generates requests for IndexUiGrantsGet
 func NewIndexUiGrantsGetRequest(server string, params *IndexUiGrantsGetParams) (*http.Request, error) {
 	var err error
@@ -50350,6 +50694,11 @@ type ClientWithResponsesInterface interface {
 
 	EditSensorApiV1SensorsSensorIdPatchWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *EditSensorApiV1SensorsSensorIdPatchParams, body EditSensorApiV1SensorsSensorIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditSensorApiV1SensorsSensorIdPatchResponse, error)
 
+	// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBodyWithResponse request with any body
+	AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBodyWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error)
+
+	AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error)
+
 	// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request
 	ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error)
 
@@ -50494,6 +50843,12 @@ type ClientWithResponsesInterface interface {
 
 	// TimelineRouteApiV1TopologyTimelineGetWithResponse request
 	TimelineRouteApiV1TopologyTimelineGetWithResponse(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*TimelineRouteApiV1TopologyTimelineGetResponse, error)
+
+	// FirstStartFirstStartGetWithResponse request
+	FirstStartFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*FirstStartFirstStartGetResponse, error)
+
+	// FirstStartDestinationFirstStartDestinationGetWithResponse request
+	FirstStartDestinationFirstStartDestinationGetWithResponse(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*FirstStartDestinationFirstStartDestinationGetResponse, error)
 
 	// HealthzHealthzGetWithResponse request
 	HealthzHealthzGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthzHealthzGetResponse, error)
@@ -51012,6 +51367,9 @@ type ClientWithResponsesInterface interface {
 	EditUiEventSourcesSlugEditPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
 
 	EditUiEventSourcesSlugEditPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
+
+	// UiFirstStartUiFirstStartGetWithResponse request
+	UiFirstStartUiFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiFirstStartUiFirstStartGetResponse, error)
 
 	// IndexUiGrantsGetWithResponse request
 	IndexUiGrantsGetWithResponse(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*IndexUiGrantsGetResponse, error)
@@ -55040,6 +55398,29 @@ func (r EditSensorApiV1SensorsSensorIdPatchResponse) StatusCode() int {
 	return 0
 }
 
+type AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *SensorAcknowledgementRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListSensorResultsApiV1SensorsSensorIdResultsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -56061,6 +56442,51 @@ func (r TimelineRouteApiV1TopologyTimelineGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r TimelineRouteApiV1TopologyTimelineGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FirstStartFirstStartGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *FirstStartResponse
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartFirstStartGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartFirstStartGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FirstStartDestinationFirstStartDestinationGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DestinationProof
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartDestinationFirstStartDestinationGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartDestinationFirstStartDestinationGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -58739,6 +59165,27 @@ func (r EditUiEventSourcesSlugEditPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EditUiEventSourcesSlugEditPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiFirstStartUiFirstStartGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiFirstStartUiFirstStartGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiFirstStartUiFirstStartGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -62942,6 +63389,23 @@ func (c *ClientWithResponses) EditSensorApiV1SensorsSensorIdPatchWithResponse(ct
 	return ParseEditSensorApiV1SensorsSensorIdPatchResponse(rsp)
 }
 
+// AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBodyWithResponse request with arbitrary body returning *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse
+func (c *ClientWithResponses) AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBodyWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error) {
+	rsp, err := c.AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithBody(ctx, sensorId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostParams, body AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error) {
+	rsp, err := c.AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost(ctx, sensorId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse(rsp)
+}
+
 // ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request returning *ListSensorResultsApiV1SensorsSensorIdResultsGetResponse
 func (c *ClientWithResponses) ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error) {
 	rsp, err := c.ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx, sensorId, params, reqEditors...)
@@ -63397,6 +63861,24 @@ func (c *ClientWithResponses) TimelineRouteApiV1TopologyTimelineGetWithResponse(
 		return nil, err
 	}
 	return ParseTimelineRouteApiV1TopologyTimelineGetResponse(rsp)
+}
+
+// FirstStartFirstStartGetWithResponse request returning *FirstStartFirstStartGetResponse
+func (c *ClientWithResponses) FirstStartFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*FirstStartFirstStartGetResponse, error) {
+	rsp, err := c.FirstStartFirstStartGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartFirstStartGetResponse(rsp)
+}
+
+// FirstStartDestinationFirstStartDestinationGetWithResponse request returning *FirstStartDestinationFirstStartDestinationGetResponse
+func (c *ClientWithResponses) FirstStartDestinationFirstStartDestinationGetWithResponse(ctx context.Context, params *FirstStartDestinationFirstStartDestinationGetParams, reqEditors ...RequestEditorFn) (*FirstStartDestinationFirstStartDestinationGetResponse, error) {
+	rsp, err := c.FirstStartDestinationFirstStartDestinationGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartDestinationFirstStartDestinationGetResponse(rsp)
 }
 
 // HealthzHealthzGetWithResponse request returning *HealthzHealthzGetResponse
@@ -65103,6 +65585,15 @@ func (c *ClientWithResponses) EditUiEventSourcesSlugEditPostWithFormdataBodyWith
 		return nil, err
 	}
 	return ParseEditUiEventSourcesSlugEditPostResponse(rsp)
+}
+
+// UiFirstStartUiFirstStartGetWithResponse request returning *UiFirstStartUiFirstStartGetResponse
+func (c *ClientWithResponses) UiFirstStartUiFirstStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiFirstStartUiFirstStartGetResponse, error) {
+	rsp, err := c.UiFirstStartUiFirstStartGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiFirstStartUiFirstStartGetResponse(rsp)
 }
 
 // IndexUiGrantsGetWithResponse request returning *IndexUiGrantsGetResponse
@@ -71504,6 +71995,39 @@ func ParseEditSensorApiV1SensorsSensorIdPatchResponse(rsp *http.Response) (*Edit
 	return response, nil
 }
 
+// ParseAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse parses an HTTP response from a AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostWithResponse call
+func ParseAcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse(rsp *http.Response) (*AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest SensorAcknowledgementRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse parses an HTTP response from a ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse call
 func ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp *http.Response) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -72928,6 +73452,65 @@ func ParseTimelineRouteApiV1TopologyTimelineGetResponse(rsp *http.Response) (*Ti
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest TopologyTimelineResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFirstStartFirstStartGetResponse parses an HTTP response from a FirstStartFirstStartGetWithResponse call
+func ParseFirstStartFirstStartGetResponse(rsp *http.Response) (*FirstStartFirstStartGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartFirstStartGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FirstStartResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFirstStartDestinationFirstStartDestinationGetResponse parses an HTTP response from a FirstStartDestinationFirstStartDestinationGetWithResponse call
+func ParseFirstStartDestinationFirstStartDestinationGetResponse(rsp *http.Response) (*FirstStartDestinationFirstStartDestinationGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartDestinationFirstStartDestinationGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DestinationProof
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -76037,6 +76620,22 @@ func ParseEditUiEventSourcesSlugEditPostResponse(rsp *http.Response) (*EditUiEve
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiFirstStartUiFirstStartGetResponse parses an HTTP response from a UiFirstStartUiFirstStartGetWithResponse call
+func ParseUiFirstStartUiFirstStartGetResponse(rsp *http.Response) (*UiFirstStartUiFirstStartGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiFirstStartUiFirstStartGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

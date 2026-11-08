@@ -71,6 +71,7 @@ _SUB = "op-floor-check"
 #: ``(console method, console path, REST method, REST path)``. The REST twin
 #: serves the same data and needs the ``operator`` role.
 _OPERATOR_FLOOR_PAGES: tuple[tuple[str, str, str, str], ...] = (
+    ("GET", "/ui/first-start", "POST", "/api/v1/targets/{name}/probe"),
     ("GET", "/ui/event-sources", "GET", "/api/v1/event-sources"),
     ("GET", "/ui/conventions", "GET", "/api/v1/conventions"),
     ("GET", "/ui/conventions/{slug}", "GET", "/api/v1/conventions/{slug}"),

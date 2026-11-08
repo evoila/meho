@@ -52,6 +52,74 @@
         }
       }
     },
+    "/first-start": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "First Start",
+        "description": "The first-start list. No login: it shows the verdict lines only.",
+        "operationId": "first_start_first_start_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FirstStartResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/first-start/destination": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "First Start Destination",
+        "description": "The proof that this address serves this MEHO. Used by the DNS check only.",
+        "operationId": "first_start_destination_first_start_destination_get",
+        "parameters": [
+          {
+            "name": "nonce",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$",
+              "description": "32 hex characters",
+              "title": "Nonce"
+            },
+            "description": "32 hex characters"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationProof"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/version": {
       "get": {
         "tags": [
@@ -10584,6 +10652,70 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SensorResultListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sensors/{sensor_id}/acknowledgement": {
+      "post": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Acknowledge Sensor Finding",
+        "description": "Acknowledge one Sensor finding of the caller's tenant: until when and why.",
+        "operationId": "acknowledge_sensor_finding_api_v1_sensors__sensor_id__acknowledgement_post",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SensorAcknowledgementCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorAcknowledgementRead"
                 }
               }
             }
@@ -23743,6 +23875,28 @@
         }
       }
     },
+    "/ui/first-start": {
+      "get": {
+        "tags": [
+          "ui-first-start"
+        ],
+        "summary": "Ui First Start",
+        "description": "``GET /ui/first-start``.",
+        "operationId": "ui_first_start_ui_first_start_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/vault/list": {
       "get": {
         "tags": [
@@ -30629,6 +30783,10 @@
             "format": "date-time",
             "nullable": true,
             "title": "Next Fire At"
+          },
+          "acknowledgement": {
+            "$ref": "#/components/schemas/SensorAcknowledgementRead",
+            "nullable": true
           }
         },
         "type": "object",
@@ -31018,6 +31176,20 @@
         ],
         "title": "DeprecateTemplateResponse",
         "description": "Response for ``meho_runbook_deprecate_template`` -- the now-deprecated coordinates."
+      },
+      "DestinationProof": {
+        "properties": {
+          "proof": {
+            "type": "string",
+            "title": "Proof"
+          }
+        },
+        "type": "object",
+        "required": [
+          "proof"
+        ],
+        "title": "DestinationProof",
+        "description": "The answer of ``GET /first-start/destination``: the proof for the nonce."
       },
       "DiscardTemplateResponse": {
         "properties": {
@@ -32435,6 +32607,57 @@
         ],
         "title": "FingerprintResult",
         "description": "Connector fingerprint per consumer-needs L95."
+      },
+      "FirstStartLine": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "status",
+          "message"
+        ],
+        "title": "FirstStartLine",
+        "description": "One line of the first-start list."
+      },
+      "FirstStartResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/FirstStartLine"
+            },
+            "type": "array",
+            "title": "Checks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "checks"
+        ],
+        "title": "FirstStartResponse",
+        "description": "The whole list. ``ok`` is true when no line is ``fail``."
       },
       "ForkInfo": {
         "properties": {
@@ -37863,6 +38086,119 @@
         ],
         "title": "SelectSpec",
         "description": "The select stage: a dotted path and at most one bounded aggregate.\n\nWith no aggregate the path must resolve to a scalar; with an aggregate it\nmust resolve to a list (either a ``[*]`` projection or a directly selected\narray). The path is compiled at model-parse time so an invalid grammar is\na 422, not an evaluation-time surprise."
+      },
+      "SensorAcknowledgementCreate": {
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "accepted_risk",
+              "fix_planned",
+              "false_alarm"
+            ],
+            "title": "Reason"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expires_at",
+          "reason",
+          "note"
+        ],
+        "title": "SensorAcknowledgementCreate",
+        "description": "Body of ``POST /api/v1/sensors/{id}/acknowledgement``.\n\n``expires_at`` is required and must carry a time zone: an acknowledgement\nwithout an end time is refused with 422."
+      },
+      "SensorAcknowledgementRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "sensor_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Sensor Id"
+          },
+          "acked_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "Acked State"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "accepted_risk",
+              "fix_planned",
+              "false_alarm"
+            ],
+            "title": "Reason"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ended At"
+          },
+          "end_reason": {
+            "type": "string",
+            "enum": [
+              "expired",
+              "state_worse"
+            ],
+            "nullable": true,
+            "title": "End Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "sensor_id",
+          "acked_state",
+          "reason",
+          "note",
+          "created_by_sub",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "SensorAcknowledgementRead",
+        "description": "One acknowledgement as REST, the CLI and the Dashboard detail show it."
       },
       "SensorCadenceKind": {
         "type": "string",

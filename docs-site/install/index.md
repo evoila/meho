@@ -18,12 +18,10 @@ open-source fork of Vault). This is the default since v0.45.0. The
 chart connects MEHO to these parts by itself, and MEHO manages them.
 This is the normal way to run MEHO.
 
-!!! tip "Just exploring?"
+!!! tip "Not sure this is the right way for you?"
 
-    If you only want to see the backplane come up on your workstation —
-    without a real Keycloak, Vault, or login — take the
-    [local kind quickstart](kind-quickstart.md) instead. It is faster,
-    and it is honest about what it fakes.
+    [Ways to install MEHO](ways-to-install.md) lists every way to
+    install MEHO and helps you pick one.
 
 ## Part A — Standard install
 

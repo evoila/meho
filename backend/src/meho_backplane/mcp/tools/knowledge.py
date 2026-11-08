@@ -219,7 +219,7 @@ async def _search_knowledge_handler(
         operator,
         query,
         limit=limit,
-        stored=[(hit.tenant_id, hit.metadata) for hit in hits],
+        stored=[(hit.tenant_id, hit.slug, hit.metadata) for hit in hits],
         filtered=bool(filters) or time_window is not None or scope == "shared",
     )
     payloads = [_hit_payload(hit) for hit in hits]

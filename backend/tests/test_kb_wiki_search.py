@@ -14,7 +14,9 @@ collection where the tenant keeps its lessons. These tests cover:
 * without the docs add-on, without the entitlement, with an unknown or
   not-ready collection, with the index down, or with filters, the store's
   hits still come back and ``wiki`` says why the wiki was not searched;
-* a wiki page that the store holds as an imported copy is shown once;
+* a wiki page that the store holds as an imported copy is shown once, and
+  only when the stored copy holds the wiki hit's text (a page at the same
+  path in another repository stays);
 * ``add_to_knowledge`` stores the lesson as a direct write and its answer
   names the collection and says whether the lesson goes to the wiki;
 * the setting is per tenant;
@@ -46,6 +48,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Tenant
 from meho_backplane.instance_settings.schema import parse_settings_file
+from meho_backplane.kb.page_import import KbImportPage, KbImportRequest, import_pages
 from meho_backplane.kb.provenance import stamp_provenance
 from meho_backplane.kb.service import KbService
 from meho_backplane.main import app
@@ -147,6 +150,23 @@ def _corpus(*chunks: CorpusChunk) -> AsyncMock:
     return AsyncMock(return_value=CorpusSearchResponse(chunks=list(chunks)))
 
 
+async def _seed_import(
+    path: str = _PAGE_PATH,
+    body: str = "# Snapshot limits\n\nKeep at most 32 snapshots\nper VM.",
+    tenant_id: uuid.UUID = OPERATOR_TENANT_ID,
+) -> str:
+    """Import one confirmed page into the store, as the wiki's CI job does; return its slug."""
+    header = "type: lesson\napplies_to: product-and-version\nstatus: confirmed\n"
+    page = KbImportPage(path=path, content=f"---\n{header}---\n{body}\n")
+    result = await import_pages(
+        KbImportRequest(pages=[page]), tenant_id=tenant_id, actor_sub="kb-import"
+    )
+    (written,) = result.pages
+    assert written.action == "create", written
+    assert written.slug is not None
+    return written.slug
+
+
 async def _search(
     operator: Operator,
     *,
@@ -238,6 +258,7 @@ async def test_wiki_hits_come_next_to_the_store_hits() -> None:
 async def test_an_imported_copy_of_a_wiki_page_is_shown_once() -> None:
     await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
     await seed_doc_collection(collection_key=_WIKI)
+    assert await _seed_import() == "snapshot-limits"
     imported = stamp_provenance(
         {"status": "confirmed"},
         source_kind="import",
@@ -268,13 +289,14 @@ async def test_a_page_only_named_alike_is_not_a_copy() -> None:
     """``limits.md`` is not ``snapshot-limits.md``: only a whole path matches."""
     await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
     await seed_doc_collection(collection_key=_WIKI)
+    slug = await _seed_import("limits.md")
     imported = stamp_provenance(
         {},
         source_kind="import",
         relative_path="limits.md",
         ingested_at=datetime(2026, 11, 8, tzinfo=UTC),
     )
-    response, _ = await _search(_operator(), store=[_store_hit(metadata=imported)])
+    response, _ = await _search(_operator(), store=[_store_hit(slug=slug, metadata=imported)])
     assert response["wiki"]["duplicate_count"] == 0
     assert response["wiki"]["hit_count"] == 1
 
@@ -297,7 +319,9 @@ async def test_the_same_file_name_in_another_folder_is_not_a_copy(imported_path:
     """Only the whole page path matches, not the end of it."""
     await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
     await seed_doc_collection(collection_key=_WIKI)
-    response, _ = await _search(_operator(), store=[_store_hit(metadata=_imported(imported_path))])
+    slug = await _seed_import(imported_path)
+    hit = _store_hit(slug=slug, metadata=_imported(imported_path))
+    response, _ = await _search(_operator(), store=[hit])
     assert response["wiki"]["duplicate_count"] == 0
     assert response["wiki"]["hit_count"] == 1
 
@@ -307,7 +331,8 @@ async def test_a_shared_import_of_another_tenant_is_not_a_copy() -> None:
     """Another tenant's import comes from that tenant's wiki, even with the same path."""
     await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
     await seed_doc_collection(collection_key=_WIKI)
-    shared = _store_hit(tenant_id=_TENANT_B, metadata=_imported(_PAGE_PATH))
+    slug = await _seed_import()
+    shared = _store_hit(tenant_id=_TENANT_B, slug=slug, metadata=_imported(_PAGE_PATH))
     response, _ = await _search(_operator(), store=[shared])
     assert response["wiki"]["duplicate_count"] == 0
     assert response["wiki"]["hit_count"] == 1
@@ -323,13 +348,43 @@ async def test_a_hit_without_a_page_link_matches_only_by_its_whole_document_id()
     other = _WIKI_CHUNK.model_copy(
         update={"chunk_id": "other", "source_url": None, "document_id": f"x/{_PAGE_PATH}"}
     )
+    slug = await _seed_import()
     response, _ = await _search(
         _operator(),
-        store=[_store_hit(metadata=_imported(_PAGE_PATH))],
+        store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))],
         corpus=_corpus(same, other),
     )
     assert [hit.get("chunk_id") for hit in response["hits"][1:]] == ["other"]
     assert response["wiki"]["duplicate_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_same_path_from_another_repository_is_not_a_copy() -> None:
+    """A page with this path imported from another repository has other text: it stays."""
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    slug = await _seed_import(body="Notes from another repository about snapshots.")
+    response, _ = await _search(
+        _operator(), store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))]
+    )
+    assert [hit.get("slug") or hit["chunk_id"] for hit in response["hits"]] == [
+        "snapshot-limits",
+        _WIKI_CHUNK.chunk_id,
+    ]
+    assert response["wiki"]["duplicate_count"] == 0
+    assert response["wiki"]["hit_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_import_whose_stored_text_is_missing_is_not_a_copy() -> None:
+    """The store hit says it is an import, but no stored text proves it: the wiki hit stays."""
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    response, _ = await _search(
+        _operator(), store=[_store_hit(slug="snapshot-limits", metadata=_imported(_PAGE_PATH))]
+    )
+    assert response["wiki"]["duplicate_count"] == 0
+    assert response["wiki"]["hit_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -563,6 +618,32 @@ async def test_kb_search_over_rest_gives_the_same_wiki_result() -> None:
     assert (wiki["collection"], wiki["searched"], wiki["duplicate_count"]) == (_WIKI, True, 0)
     assert wiki["hits"][0]["collection"] == _WIKI
     assert wiki["hits"][0]["source_url"].endswith(f"/blob/abc123/{_PAGE_PATH}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_body", "duplicates"),
+    [
+        ("# Snapshot limits\n\nKeep at most 32 snapshots\nper VM.", 1),
+        ("Notes from another repository about snapshots.", 0),
+    ],
+)
+async def test_kb_search_over_rest_leaves_out_only_proven_copies(
+    stored_body: str, duplicates: int
+) -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    slug = await _seed_import(body=stored_body)
+    client = _retrieve_client(_operator())
+    store = [_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))]
+    with (
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=store)),
+        patch(_CORPUS_SEAM, new=_corpus(_WIKI_CHUNK)),
+    ):
+        response = client.post("/api/v1/retrieve", json={"query": "snapshot", "source": "kb"})
+    wiki = response.json()["wiki"]
+    assert wiki["duplicate_count"] == duplicates
+    assert len(wiki["hits"]) == 1 - duplicates
 
 
 @pytest.mark.asyncio

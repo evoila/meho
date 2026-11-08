@@ -33,12 +33,21 @@ wiki as a page for review, or why not yet.
 A wiki page that the store also holds as an imported copy is shown once:
 as the store hit, which has the slug for a full read and is what the recall
 before an operation uses. The import refreshes the copy after every merge in
-the wiki. A store hit is such a copy only when the caller's own tenant owns
-it (a shared hit of another tenant comes from that tenant's wiki), its
-provenance says ``source_kind="import"``, and its page path is the whole
-path of the wiki page: the path after ``blob/<commit>/`` in the hit's
-source link, or the hit's ``document_id``. A page with only the same file
-name in another folder is a different page and stays in the answer.
+the wiki. The import does not record which repository a page came from, so
+a wiki hit is left out only when all of these hold:
+
+* the caller's own tenant owns the store hit (a shared hit of another
+  tenant comes from that tenant's wiki);
+* its provenance says ``source_kind="import"``;
+* its page path is the whole path of the wiki page: the path after
+  ``blob/<commit>/`` in the hit's source link, or the hit's
+  ``document_id`` (a page with only the same file name in another folder
+  is a different page);
+* the stored entry's text holds the wiki hit's text (spaces and line
+  breaks aside). A page at the same path in another repository has other
+  text, so it stays in the answer.
+
+When any of these cannot be shown, the wiki hit stays.
 """
 
 from __future__ import annotations
@@ -54,7 +63,7 @@ from sqlalchemy import select
 
 from meho_backplane.auth.corpus import CorpusUnavailable
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Tenant
+from meho_backplane.db.models import Document, Tenant
 from meho_backplane.docs_search import (
     CollectionDisabledError,
     CollectionForbiddenError,
@@ -68,6 +77,7 @@ from meho_backplane.docs_search import (
 )
 from meho_backplane.kb.page_export import KbExportPage, KbExportRemoval, KbExportSkip, plan_entry
 from meho_backplane.kb.provenance import read_provenance
+from meho_backplane.kb.schemas import KB_SOURCE
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -133,14 +143,14 @@ async def search_wiki(
     query: str,
     *,
     limit: int,
-    stored: Iterable[tuple[uuid.UUID | None, Mapping[str, object]]],
+    stored: Iterable[tuple[uuid.UUID | None, str, Mapping[str, object]]],
     filtered: bool,
 ) -> KbWikiSearch | None:
     """Search the caller's wiki collection; ``None`` when the tenant has none.
 
-    *stored* holds the owning tenant and the metadata of each store hit in
-    the same answer, used to leave out wiki pages the store holds as
-    imported copies.
+    *stored* holds the owning tenant, the slug and the metadata of each
+    store hit in the same answer, used to leave out wiki pages the store
+    holds as imported copies.
     *filtered* is true when the search uses filters, a time window or the
     shared scope: the wiki cannot apply them, so it is not searched.
     """
@@ -167,9 +177,9 @@ async def search_wiki(
     except CorpusUnavailable as exc:
         _log.warning("kb_wiki_search_unavailable", collection_key=key, error=str(exc))
         return _not_searched(key, "index_unavailable")
-    imported = _imported_paths(operator.tenant_id, stored)
     hits = [chunk.model_copy(update={"collection": key}) for chunk in result.chunks]
-    kept = [chunk for chunk in hits if not _is_imported_copy(chunk, imported)]
+    copies = await _imported_copies(operator.tenant_id, stored, hits)
+    kept = [chunk for chunk in hits if chunk.chunk_id not in copies]
     structlog.contextvars.bind_contextvars(
         audit_wiki_status=_SEARCHED, audit_wiki_hit_count=len(kept)
     )
@@ -233,35 +243,73 @@ def _message(key: str, reason: WikiSkipReason) -> str:
     return f"The team wiki (docs collection `{key}`) was not searched: {why}."
 
 
-def _imported_paths(
-    tenant_id: uuid.UUID, stored: Iterable[tuple[uuid.UUID | None, Mapping[str, object]]]
+async def _imported_copies(
+    tenant_id: uuid.UUID,
+    stored: Iterable[tuple[uuid.UUID | None, str, Mapping[str, object]]],
+    hits: list[DocsChunk],
 ) -> set[str]:
-    """Return the wiki page paths of the caller's own imported copies among the store's hits."""
-    paths: set[str] = set()
-    for owner, metadata in stored:
+    """Return the chunk ids of the wiki *hits* that are proven imported copies.
+
+    See the module docstring for the rules. The stored text is read only
+    for the caller's own imported entries whose page path a hit has.
+    """
+    slugs_by_path = _imported_slugs(tenant_id, stored)
+    matched = {chunk.chunk_id: _matching_slugs(chunk, slugs_by_path) for chunk in hits}
+    wanted = set().union(*matched.values())
+    if not wanted:
+        return set()
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(
+            select(Document.source_id, Document.body).where(
+                Document.tenant_id == tenant_id,
+                Document.source == KB_SOURCE,
+                Document.source_id.in_(wanted),
+            )
+        )
+        bodies = {slug: _plain(body) for slug, body in rows.tuples()}
+    copies: set[str] = set()
+    for chunk in hits:
+        text = _plain(chunk.content)
+        if text and any(text in bodies.get(slug, "") for slug in matched[chunk.chunk_id]):
+            copies.add(chunk.chunk_id)
+    return copies
+
+
+def _imported_slugs(
+    tenant_id: uuid.UUID,
+    stored: Iterable[tuple[uuid.UUID | None, str, Mapping[str, object]]],
+) -> dict[str, set[str]]:
+    """Map each wiki page path to the slugs of the caller's own imported copies of it."""
+    slugs: dict[str, set[str]] = {}
+    for owner, slug, metadata in stored:
         if owner != tenant_id:
             continue
         provenance = read_provenance(dict(metadata))
         if provenance.source_kind == "import" and provenance.relative_path:
-            paths.add(provenance.relative_path.strip("/"))
-    return paths
+            slugs.setdefault(provenance.relative_path.strip("/"), set()).add(slug)
+    return slugs
 
 
-def _is_imported_copy(chunk: DocsChunk, imported: set[str]) -> bool:
-    """Say whether the page of *chunk* is one of the *imported* page paths.
+def _matching_slugs(chunk: DocsChunk, slugs_by_path: Mapping[str, set[str]]) -> set[str]:
+    """Return the slugs of the imported copies whose page path is the page of *chunk*.
 
     The page path is the ``document_id``, or the path after
     ``blob/<commit>/`` in the source link (``source_url`` or
     ``upstream_url``, for example ``.../-/blob/<commit>/products/x/page.md``).
     Only a path equal to an imported path matches.
     """
-    if not imported:
-        return False
+    if not slugs_by_path:
+        return set()
     candidates = {(chunk.document_id or "").strip("/")}
     for link in (chunk.source_url, chunk.upstream_url):
         if link:
             candidates.add(_page_path_of(link))
-    return not candidates.isdisjoint(imported)
+    return set().union(*(slugs_by_path.get(path, set()) for path in candidates))
+
+
+def _plain(text: str) -> str:
+    """Return *text* with each run of spaces and line breaks made one space."""
+    return " ".join(text.split())
 
 
 def _page_path_of(link: str) -> str:

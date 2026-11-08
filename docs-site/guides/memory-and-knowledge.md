@@ -197,7 +197,8 @@ What changes for the tenant:
   search used filters, a time window or scope `shared`, which the wiki
   cannot apply. The knowledge hits still come back.
 - When MEHO holds an imported copy of a wiki page, the page is shown once,
-  as the knowledge hit.
+  as the knowledge hit. This happens only when the copy has the same path
+  and holds the same text as the wiki hit.
 - `add_to_knowledge` still stores the lesson in MEHO. Its answer has a
   `wiki` part: the collection, and whether the lesson also goes to the
   wiki. A lesson with `applies_to: product-and-version`, a full lesson

@@ -6,6 +6,7 @@
 # Locked tag scheme (Goal #11 — artefact-distribution principle):
 #   PR (branch -> main)   : build only, do NOT push (verifies Dockerfile + deps),
 #                           plus a trivy scan of backend/uv.lock (see below).
+#                           Both jobs run on GitHub-hosted runners.
 #   push to main          : publish :<git-sha> (immutable) + :main (moving target).
 #   push tag v*           : publish :v<x.y.z> (alongside :<sha> + :main from main push).
 #
@@ -149,8 +150,14 @@ jobs:
     #   - fork PRs -> head.repo.full_name != github.repository -> skip entirely.
     # The OR short-circuits on push events, so the missing pull_request context
     # on push is irrelevant. Job-level (not step-level) so no step ever starts.
+    # The guard stays now that pull requests build on a hosted runner (below):
+    # #4626 keeps every fork guard as it is.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    # Pull requests build on a GitHub-hosted runner (#4626, step 3). A pull
+    # request build never logs in, pushes or signs, so it needs nothing from
+    # our network, and it no longer waits for a free slot on our own pool.
+    # Pushes to main and v* tags publish and sign, so they stay on our pool.
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 45  # arm64 emulation under QEMU is 3-5x slower than native
     steps:
       - name: Checkout
@@ -241,6 +248,13 @@ jobs:
           # carbon-copy preserves them under every release alias.
           provenance: true
           sbom: true
+
+      - name: Show free disk space
+        # A hosted runner has less disk than our own machines. This line in
+        # the log shows how close a two-platform pull request build comes to
+        # the limit (#4626, step 3).
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        run: df -h /
 
       - name: Echo and guard the quarantine digest
         # Surfaces the immutable manifest-list digest in workflow logs and

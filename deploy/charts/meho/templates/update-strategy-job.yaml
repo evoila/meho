@@ -11,7 +11,7 @@ Rendered only when the chart asks for Recreate and the live Deployment still
 has a `rollingUpdate` block. `lookup` is empty in `helm template` and in a
 client dry run, so those never render it. Same default as deployment.yaml.
 The account, the rights and the Job are removed once the Job succeeds.
-Details: docs/codebase/shutdown-drain.md.
+Details: docs/codebase/devops.md.
 */}}
 {{- $strategy := .Values.updateStrategy | default (dict "type" "Recreate") }}
 {{- if eq (toString $strategy.type) "Recreate" }}
@@ -135,6 +135,10 @@ spec:
       {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- end }}

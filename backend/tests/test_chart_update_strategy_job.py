@@ -174,3 +174,44 @@ def test_reuse_values_from_an_older_release_still_renders_the_job(tmp_path: Path
     chart = _chart_with_live(tmp_path, _LIVE_ROLLING)
 
     assert "Job" in _ours(_render(chart, "--set", "updateStrategy=null"))
+
+
+def test_job_follows_the_pod_placement_values(tmp_path: Path) -> None:
+    # Same placement as the migration Job and the secrets Job.
+    chart = _chart_with_live(tmp_path, _LIVE_ROLLING)
+    docs = _render(
+        chart,
+        "--set",
+        "nodeSelector.pool=ops",
+        "--set",
+        "tolerations[0].key=dedicated",
+        "--set",
+        "tolerations[0].operator=Exists",
+        "--set",
+        "affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution"
+        ".nodeSelectorTerms[0].matchExpressions[0].key=zone",
+        "--set",
+        "affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution"
+        ".nodeSelectorTerms[0].matchExpressions[0].operator=Exists",
+    )
+    pod = _ours(docs)["Job"]["spec"]["template"]["spec"]
+
+    assert pod["nodeSelector"] == {"pool": "ops"}
+    assert pod["tolerations"] == [{"key": "dedicated", "operator": "Exists"}]
+    assert pod["affinity"] == {
+        "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [{"matchExpressions": [{"key": "zone", "operator": "Exists"}]}]
+            }
+        }
+    }
+
+
+def test_plain_job_has_no_placement(tmp_path: Path) -> None:
+    pod = _ours(_render(_chart_with_live(tmp_path, _LIVE_ROLLING)))["Job"]["spec"]["template"][
+        "spec"
+    ]
+
+    assert "nodeSelector" not in pod
+    assert "tolerations" not in pod
+    assert "affinity" not in pod

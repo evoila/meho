@@ -600,7 +600,10 @@ zone. Only reads run; no sudo.
 
 - **Zones.** Type `master` / `primary` / `slave` / `secondary` with a
   `file`, not reverse (`in-addr.arpa`, `ip6.arpa`). Each view is read
-  on its own; the view is on each record.
+  on its own; the view is on each record. A relative `file` path is
+  read under the `directory` of the `options` block, where BIND
+  resolves it (`cat` over SSH runs from the login directory). Without
+  a `directory` option the path is read as it is.
 - **Skipped, not failed.** A zone file the SSH user may not read
   (`Permission denied`) is skipped with reason `not_allowed`; a missing
   file with `file_missing`; a file that is not a text zone file (for

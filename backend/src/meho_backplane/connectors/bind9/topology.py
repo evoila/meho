@@ -13,6 +13,10 @@ limit shortens a zone.
   ``slave`` / ``secondary`` with a ``file``, and not a reverse zone
   (``in-addr.arpa`` / ``ip6.arpa``, which holds no A, AAAA or CNAME
   records a system is named by).
+* A relative zone-file path is read under the ``directory`` of the
+  ``options`` block, because that is where BIND resolves it. SSH runs
+  ``cat`` from the login directory, so the bare path would miss the file.
+  Without a ``directory`` option the path is read as it is.
 * A zone file the SSH user may not read (``Permission denied``) is
   skipped and named on the target node with reason ``not_allowed``. A
   missing file is skipped with ``file_missing``, and a file that is not
@@ -28,6 +32,8 @@ The snapshot itself is built by
 
 from __future__ import annotations
 
+import posixpath
+import re
 from typing import TYPE_CHECKING, Any
 
 import dns.exception
@@ -44,11 +50,19 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.bind9.connector import Bind9Connector
 
-__all__ = ["Bind9TopologyReadError", "discover_bind9_topology", "zones_to_read"]
+__all__ = [
+    "Bind9TopologyReadError",
+    "discover_bind9_topology",
+    "parse_named_checkconf_directory",
+    "zone_file_path",
+    "zones_to_read",
+]
 
 _SOURCE = "bind9"
 _DATA_ZONE_TYPES = frozenset({"master", "primary", "slave", "secondary"})
 _REVERSE_SUFFIXES = (".in-addr.arpa", ".ip6.arpa")
+_OPTIONS_HEADER_RE = re.compile(r"^\s*options\s*\{\s*$")
+_DIRECTORY_RE = re.compile(r'^\s*directory\s+"([^"]+)"\s*;\s*$')
 
 
 class Bind9TopologyReadError(RuntimeError):
@@ -70,6 +84,37 @@ def zones_to_read(zone_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def parse_named_checkconf_directory(output: str) -> str | None:
+    """Return the ``directory`` of the ``options`` block, or ``None`` without one.
+
+    *output* is the stdout of ``named-checkconf -p``. Only the ``options``
+    block is searched: a ``directory`` line elsewhere (for example inside a
+    ``view``) is not where BIND resolves zone-file paths.
+    """
+    depth = 0
+    in_options = False
+    for line in output.splitlines():
+        if not in_options:
+            if _OPTIONS_HEADER_RE.match(line):
+                in_options = True
+                depth = 1
+            continue
+        match = _DIRECTORY_RE.match(line)
+        if match:
+            return match.group(1)
+        depth += line.count("{") - line.count("}")
+        if depth <= 0:
+            return None
+    return None
+
+
+def zone_file_path(path: str, directory: str | None) -> str:
+    """Return the path ``cat`` reads: a relative *path* is under *directory*."""
+    if directory is None or posixpath.isabs(path):
+        return path
+    return posixpath.join(directory, path)
+
+
 def _skip_reason(stderr: str) -> str | None:
     """Map a failed ``cat`` to a skip reason, or ``None`` when it must fail."""
     text = stderr.lower()
@@ -85,11 +130,12 @@ async def _read_zone(
     target: Any,
     zone: dict[str, Any],
     operator: Operator,
+    directory: str | None,
 ) -> list[DnsRecord] | DnsZoneSkip:
     """Read one zone file; return its records, or why it was skipped."""
     zone_name = str(zone["name"])
     view = zone.get("view")
-    path = str(zone["file"])
+    path = zone_file_path(str(zone["file"]), directory)
     quoted_path = "'" + path.replace("'", "'\\''") + "'"
     try:
         proc = await connector._run_command(target, f"cat {quoted_path}", operator=operator)
@@ -135,11 +181,12 @@ async def discover_bind9_topology(
             f"named-checkconf -p failed with exit status {exit_status!r}; the zone list is unknown"
         )
     output = checkconf.stdout if isinstance(checkconf.stdout, str) else ""
+    directory = parse_named_checkconf_directory(output)
     records: list[DnsRecord] = []
     zones_read: list[tuple[str, str | None]] = []
     skipped: list[DnsZoneSkip] = []
     for zone in zones_to_read(parse_named_checkconf_zones(output)):
-        result = await _read_zone(connector, target, zone, operator)
+        result = await _read_zone(connector, target, zone, operator, directory)
         if isinstance(result, DnsZoneSkip):
             skipped.append(result)
             continue

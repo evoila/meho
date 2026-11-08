@@ -32,7 +32,11 @@ from meho_backplane.connectors._shared.dns_topology import (
 )
 from meho_backplane.connectors._shared.pwsh import PwshRunError
 from meho_backplane.connectors.bind9 import Bind9Connector
-from meho_backplane.connectors.bind9.topology import Bind9TopologyReadError, zones_to_read
+from meho_backplane.connectors.bind9.topology import (
+    Bind9TopologyReadError,
+    parse_named_checkconf_directory,
+    zones_to_read,
+)
 from meho_backplane.connectors.schemas import TopologyHints
 from meho_backplane.connectors.windows_dns.connector import WindowsDnsConnector
 from meho_backplane.connectors.windows_dns.topology import (
@@ -255,6 +259,76 @@ async def test_bind9_discover_reads_zones_and_skips_not_allowed() -> None:
     # Only reads: named-checkconf and cat, never a write or sudo.
     commands = [c.args[1] for c in run.await_args_list]
     assert all(c.startswith(("named-checkconf -p", "cat ")) for c in commands)
+
+
+async def test_bind9_relative_zone_file_is_read_under_the_configured_directory() -> None:
+    connector = Bind9Connector()
+    checkconf = (
+        'options {\n\tdirectory "/var/cache/bind";\n\tlisten-on {\n\t\t"any";\n\t};\n};\n'
+        'zone "example.com" {\n\ttype master;\n\tfile "db.example.com";\n};\n'
+        'zone "other.example.com" {\n\ttype master;\n\tfile "/etc/bind/db.other";\n};\n'
+    )
+    run = _bind9_runner(
+        {
+            "named-checkconf -p": _proc(checkconf),
+            "cat '/var/cache/bind/db.example.com'": _proc(_ZONEFILE),
+            "cat '/etc/bind/db.other'": _proc(""),
+        }
+    )
+    with patch.object(connector, "_run_command", run):
+        hints = await connector.discover_topology(_TARGET, operator=_operator())
+
+    assert _names(hints, "dns-record") == [
+        "ns1.example.com",
+        "web01.example.com",
+        "www.example.com",
+    ]
+    target = _node(hints, "target", "dns-test")
+    assert target.properties["zones_read"] == [
+        {"zone": "example.com"},
+        {"zone": "other.example.com"},
+    ]
+    assert target.properties["zones_skipped"] == []
+    commands = [c.args[1] for c in run.await_args_list]
+    assert commands == [
+        "named-checkconf -p",
+        "cat '/var/cache/bind/db.example.com'",
+        "cat '/etc/bind/db.other'",
+    ]
+
+
+def test_bind9_directory_is_read_from_the_options_block_only() -> None:
+    assert parse_named_checkconf_directory(_CHECKCONF) is None
+    assert (
+        parse_named_checkconf_directory(
+            'options {\n\tdirectory "/var/cache/bind";\n};\n'
+            'view "internal" {\n\tdirectory "/elsewhere";\n};\n'
+        )
+        == "/var/cache/bind"
+    )
+    # A ``directory`` line outside the options block is not BIND's working directory.
+    assert (
+        parse_named_checkconf_directory(
+            'options {\n\tlisten-on {\n\t\t"any";\n\t};\n};\n'
+            'view "internal" {\n\tdirectory "/elsewhere";\n};\n'
+        )
+        is None
+    )
+
+
+async def test_bind9_relative_zone_file_without_a_directory_is_read_as_is() -> None:
+    connector = Bind9Connector()
+    checkconf = 'zone "example.com" {\n\ttype master;\n\tfile "db.example.com";\n};\n'
+    run = _bind9_runner(
+        {
+            "named-checkconf -p": _proc(checkconf),
+            "cat 'db.example.com'": _proc("", "cat: db.example.com: No such file or directory", 1),
+        }
+    )
+    with patch.object(connector, "_run_command", run):
+        hints = await connector.discover_topology(_TARGET, operator=_operator())
+    target = _node(hints, "target", "dns-test")
+    assert target.properties["zones_skipped"] == [{"zone": "example.com", "reason": "file_missing"}]
 
 
 async def test_bind9_missing_and_binary_zone_files_are_skipped() -> None:

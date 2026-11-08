@@ -4,8 +4,10 @@
 """The approver of ``linux.script.run`` reads the script.
 
 * The preview carries the script text, its size and its SHA-256.
-* Values that look like secrets are hidden in the text; then the preview
-  says so and leaves out the SHA-256.
+* Values that look like secrets are hidden in the text, also the shell
+  shapes (``PGPASSWORD=...``, ``sshpass -p ...``, ``curl -u user:...``,
+  ``mysql -p...``); then the preview says so and leaves out the SHA-256.
+  Common short flags (``mkdir -p``, ``ssh -p 22``) stay as they are.
 * A long script is cut and marked; the SHA-256 is of the full script.
 * The optional ``script_ref`` and ``expected_sha256`` give "matches" or
   "does not match"; the handler refuses a script that does not match.
@@ -104,6 +106,51 @@ def test_values_that_look_like_secrets_are_hidden_and_no_hash_is_shown(line: str
     # The rest of the script stays readable.
     assert "uname -a" in fields["script"]
     assert fields["script_bytes"] == len(script.encode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # A secret word inside a longer NAME=value.
+        f"export PGPASSWORD={_FAKE_VALUE}",
+        f"export AWS_SECRET_ACCESS_KEY={_FAKE_VALUE}",
+        f"PGPASSWORD={_FAKE_VALUE}; psql -h db -c 'select 1'",
+        # The value after a secret flag.
+        f"mytool --password {_FAKE_VALUE} run",
+        f"sshpass -p {_FAKE_VALUE} ssh deploy@host uptime",
+        f"sshpass -p{_FAKE_VALUE} ssh deploy@host uptime",
+        # The password in user:password after -u.
+        f"curl -u admin:{_FAKE_VALUE} https://example.invalid/api",  # gitleaks:allow
+        # The password glued to -p of mysql and mysqldump.
+        f"mysql -u app -p{_FAKE_VALUE} -e 'select 1'",
+        f"mysql -u app -p'{_FAKE_VALUE} two' appdb",
+        f"/usr/bin/mysqldump \\\n  -p{_FAKE_VALUE} appdb > dump.sql",
+    ],
+)
+def test_shell_command_secrets_are_hidden_and_no_hash_is_shown(line: str) -> None:
+    script = f"#!/bin/bash\n{line}\nuname -a\n"
+    fields = script_preview_fields({"script": script})
+    assert _FAKE_VALUE not in repr(fields)
+    assert fields["script_values_hidden"] is True
+    assert "script_sha256" not in fields
+    assert "uname -a" in fields["script"]
+
+
+def test_common_short_flags_keep_the_script_as_it_is() -> None:
+    script = (
+        "#!/bin/bash\n"
+        "mkdir -p /tmp/work\n"
+        "cp -p a.conf /tmp/work/\n"
+        "ssh -p 22 deploy@host uptime\n"
+        "find /tmp/work -print\n"
+        'for f in /tmp/work/*; do\n  echo "$f"\ndone\n'
+        "mysql -u app -p\n"
+        "mkdir -p /tmp/other\n"
+    )
+    fields = script_preview_fields({"script": script})
+    assert fields["script"] == script
+    assert "script_values_hidden" not in fields
+    assert fields["script_sha256"] == _sha(script)
 
 
 def test_a_hidden_value_does_not_hide_the_hash_check() -> None:

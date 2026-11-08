@@ -6,11 +6,18 @@
 For ``linux.script.run`` the script body is the change that waits for
 approval, so the park-time preview shows it. The fields are:
 
-* ``script`` -- the script text. Values that look like secrets (a
-  ``DB_PASSWORD=...`` pair, a bearer token, a JWT, a private key block, the
-  password in a URL, a quoted ``"password": "..."`` pair) are replaced by a
-  marker, with the same packaged default redaction policy that MEHO uses for
-  error text. The text is cut at :data:`SCRIPT_SHOWN_MAX_BYTES`.
+* ``script`` -- the script text. Values that look like secrets are replaced
+  by a marker in two passes. First the shell-aware pass of
+  :func:`~meho_backplane.redaction.command_line.hide_shell_script`, the
+  same one the ``k8s.job.create`` preview uses for a command line: the value
+  of a ``NAME=VALUE`` whose name holds a secret word (``PGPASSWORD=...``,
+  ``export AWS_SECRET_ACCESS_KEY=...``), the value after a secret flag
+  (``--password x``, ``sshpass -p x``), the password in ``curl -u
+  user:password`` and in ``mysql -pVALUE``, the password in a URL, tokens
+  with a known vendor prefix. Then the packaged default redaction policy
+  that MEHO uses for error text (a bearer token, a JWT, a private key
+  block, a quoted ``"password": "..."`` pair). The text is cut at
+  :data:`SCRIPT_SHOWN_MAX_BYTES`.
 * ``script_bytes`` -- the size of the full script in UTF-8 bytes.
 * ``script_sha256`` -- the SHA-256 of the full script as it will run, so the
   approver can compare it with a reviewed copy. Left out when values were
@@ -34,6 +41,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Final
 
+from meho_backplane.redaction.command_line import hide_shell_script
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
@@ -78,12 +86,12 @@ def script_matches_expected(script: str, expected: Any) -> bool | None:
 
 def _hide_secret_values(script: str) -> tuple[str, bool]:
     """*script* with the values that look like secrets replaced, and whether any was."""
-    scrubbed = scrub_secret_fields_in_text(script)
+    scrubbed = scrub_secret_fields_in_text(hide_shell_script(script))
     result = redact(scrubbed, get_default_policy())
     shown = result.redacted
     if not isinstance(shown, str):  # pragma: no cover -- str in, str out
         raise TypeError("redaction returned a non-string for a string")
-    return shown, scrubbed != script or bool(result.manifest)
+    return shown, shown != script or bool(result.manifest)
 
 
 def _cut(text: str, max_bytes: int) -> tuple[str, bool]:

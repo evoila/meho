@@ -392,7 +392,7 @@ the approver reads it. `linux/script_preview.py` builds these preview fields:
 
 | Field | What it holds |
 |---|---|
-| `script` | The script text. Values that look like secrets (`DB_PASSWORD=...`, a bearer token, a JWT, a private key block, the password in a URL, a quoted `"password": "..."` pair) are replaced by a marker, with the packaged default redaction policy (`docs/codebase/redaction.md`). Cut at 64 KiB. |
+| `script` | The script text. Values that look like secrets are replaced by a marker, in two passes. First the shell-aware command-line hider that the `k8s.job.create` preview uses (`redaction/command_line.py`, `hide_shell_script`): the value of a `NAME=VALUE` whose name holds a secret word (`PGPASSWORD=...`, `export AWS_SECRET_ACCESS_KEY=...`), the value after a secret flag (`--password x`), the password in `curl -u user:password` and in a URL, tokens with a known vendor prefix. In a script, `-p` is a secret flag only for `sshpass`, `mysql*` and `mariadb*`, also with the value glued (`mysql -pVALUE`), so `mkdir -p` and `ssh -p 22` stay as they are; a new line ends a command. Then the packaged default redaction policy (`docs/codebase/redaction.md`): a bearer token, a JWT, a private key block, a quoted `"password": "..."` pair. Any change counts as hidden. Cut at 64 KiB. |
 | `script_bytes` | The size of the full script in UTF-8 bytes. |
 | `script_sha256` | The SHA-256 of the full script as it runs, to compare with a reviewed copy. Left out when values were hidden: with the rest of the text in view, the hash would let a reader test guesses of the hidden value. |
 | `script_values_hidden`, `script_truncated` | `true` when the shown text differs from the script that runs. |

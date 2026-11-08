@@ -122,7 +122,9 @@ async def test_a_confirmed_entry_gets_no_expiry(stub_embedding: AsyncMock) -> No
 async def test_a_rewrite_of_a_candidate_keeps_its_dates(stub_embedding: AsyncMock) -> None:
     service = KbService()
     first, _ = await service.create_entry(OWNER, "cand", "v1", {"status": "candidate"})
-    second, _ = await service.create_entry(OWNER, "cand", "v2", {"status": "candidate"})
+    second, _ = await service.create_entry(
+        OWNER, "cand", "v2", {"status": "candidate"}, expected_revision=first.revision_id
+    )
     assert second.metadata["learned_at"] == first.metadata["learned_at"]
     assert second.metadata["expires_at"] == first.metadata["expires_at"]
 
@@ -215,8 +217,14 @@ async def test_shared_must_be_a_boolean(stub_embedding: AsyncMock) -> None:
 @pytest.mark.asyncio
 async def test_unsharing_hides_the_note_again(stub_embedding: AsyncMock) -> None:
     service = KbService()
-    await service.create_entry(OWNER, "lab-note", "generic note", {"shared": True})
-    await service.create_entry(OWNER, "lab-note", "generic note", {"shared": False})
+    shared, _ = await service.create_entry(OWNER, "lab-note", "generic note", {"shared": True})
+    await service.create_entry(
+        OWNER,
+        "lab-note",
+        "generic note",
+        {"shared": False},
+        expected_revision=shared.revision_id,
+    )
     assert await service.get_entry(OTHER, "lab-note") is None
 
 

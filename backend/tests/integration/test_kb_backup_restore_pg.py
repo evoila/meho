@@ -139,7 +139,9 @@ async def test_restored_database_keeps_entry_history_and_search(
         await session.commit()
     with patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake):
         first_entry, _ = await service.create_entry(TENANT_ID, SLUG, FIRST_BODY)
-        second_entry, _ = await service.create_entry(TENANT_ID, SLUG, SECOND_BODY)
+        second_entry, _ = await service.create_entry(
+            TENANT_ID, SLUG, SECOND_BODY, expected_revision=first_entry.revision_id
+        )
     assert first_entry.id == second_entry.id
     assert first_entry.revision_id != second_entry.revision_id
     passages_before = await _scalar(

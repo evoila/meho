@@ -252,6 +252,13 @@ async def verify_mcp_jwt_and_bind(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="kb_import_only_scope_violation",
         )
+    if operator.kb_export_only:
+        # #5730: a login that may only export knowledge has no MCP surface.
+        _log.warning("kb_export_only_scope_violation", operator_sub=operator.sub, surface="mcp")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="kb_export_only_scope_violation",
+        )
     if operator.conventions_drift_only:
         # A login that may only run the conventions drift check has no MCP surface.
         _log.warning(CONVENTIONS_DRIFT_SCOPE_VIOLATION, operator_sub=operator.sub, surface="mcp")

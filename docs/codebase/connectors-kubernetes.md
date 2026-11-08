@@ -462,6 +462,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
 | `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). Optional `labels` / `annotations` maps go on the Secret's metadata. |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
+| `k8s.cronjob.list`     | safe      | `BatchV1Api.list_namespaced_cron_job` (or `list_cron_job_for_all_namespaces`): name, namespace, schedule, suspended, last schedule time (`ops_cronjob_list.py`). |
 | `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
 | `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
 | `k8s.secret.delete`    | **destructive** | `CoreV1Api.delete_namespaced_secret`. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_secret_write.py`. |
@@ -854,7 +855,7 @@ match. `ops_secret_compare.py` answers that without showing the value.
 
 Every namespaced list op on this connector
 (`k8s.pod.list`, `k8s.deployment.list`, `k8s.workload.list`,
-`k8s.job.list`, `k8s.event.list`, `k8s.service.list`,
+`k8s.job.list`, `k8s.cronjob.list`, `k8s.event.list`, `k8s.service.list`,
 `k8s.ingress.list`, `k8s.configmap.list`, `k8s.secret.list`) shares
 the same input-parameter shape via the building blocks in
 [`ops_listparams.py`](../../backend/src/meho_backplane/connectors/kubernetes/ops_listparams.py):
@@ -1027,8 +1028,10 @@ in the `workload` group over `BatchV1Api`.
   the counts stay inline if the JSONFlux reducer ever spills the pod
   list to a handle.
 
-Not covered: CronJob reads, and `k8s.ls /<namespace>` does not count
-Jobs yet (`K8S_NAMESPACED_KIND_LISTERS` is unchanged).
+`k8s.cronjob.list` (`ops_cronjob_list.py`) lists CronJobs with the
+same selectors and paging as `k8s.job.list`. A row has `name`,
+`namespace`, `schedule`, `suspended` and `last_schedule_time`. Not
+covered: `k8s.ls /<namespace>` does not count Jobs or CronJobs yet (`K8S_NAMESPACED_KIND_LISTERS` is unchanged).
 
 ### ConfigMap privacy split
 
@@ -1129,6 +1132,70 @@ map (`_PLURAL_TO_SINGULAR_KIND`, pre-wired) forwards
 `k8s.ls /<ns>/persistentvolumeclaims` to the new op instead of the
 `unknown_op` envelope.
 
+### What a MEHO install runs -- `k8s.meho.release.info` (`ops_meho_release.py`)
+
+The op shows what a MEHO install on a Kubernetes target runs today. It
+changes nothing. It is the first step of a governed MEHO update: the update
+must know what runs before it changes anything, and what to go back to.
+Group `cluster`. Risk level `caution`, and it waits for approval: `host`
+is an address the caller gives, so it carries `x-meho-caller-address: true`
+and MEHO applies the floor for such an address
+(`operations/caller_address.py`). The op still only reads.
+
+| Parameter   | Meaning |
+| ----------- | ------- |
+| `namespace` | Required. The namespace of the install. |
+| `release`   | Optional, default `meho`. The Helm release name: the value of the `app.kubernetes.io/instance` label the chart puts on every object, and the name of the `HelmChart` object. |
+| `host`      | Optional. A host name or IP address, with an optional `:port`, of this MEHO install. MEHO calls `https://<host>/version` and `/ready` through the address-pinning transport, so the same address check as for a target applies. |
+
+The result has one part for each source. Each part has a `state`:
+`present`, `not present` or `unknown`.
+
+| Part            | Source | Content |
+| --------------- | ------ | ------- |
+| `deployment`    | `AppsV1Api.list_namespaced_deployment` with `app.kubernetes.io/instance=<release>`; the one with a container named `backplane` | name, image, tag, digest, replicas. With a tag-only image the digest is the `imageID` of the `backplane` container of the running pods. |
+| `helm_chart`    | `HelmChart` object `helm.cattle.io/v1` (RKE2 installs) named `<release>`: in the install namespace, else the cluster's chart whose `spec.targetNamespace` is the install namespace | `chart_namespace`, chart, chart version, `values_hash` (sha256 of `valuesContent` and `set`). |
+| `helm_releases` | `CoreV1Api.list_namespaced_secret`, labels `owner=helm,name=<release>` | revision, status, Secret name, `modified_at`; `incomplete` is true when the page cap (10 pages of 200) was reached. |
+| `meho`          | only with `host` | `version`: the `/version` fields; `ready`: `ready`, `status`, `http_status`, `db_ahead`, and name and `ok` of each check. |
+
+How it behaves:
+
+- The Deployment is never read by name. The chart names it after the
+  release (`meho.fullname` in `deploy/charts/meho/templates/_helpers.tpl`:
+  `meho` for release `meho`, `demo-meho` for release `demo`, or
+  `fullnameOverride`). The op lists the Deployments with the release's
+  instance label and takes the one with a `backplane` container; the
+  subcharts (Keycloak, PostgreSQL, ...) carry the same label but not that
+  container. No match is `not present`. Two or more matches are `unknown`
+  with the `candidates` names.
+- The digest from the pods uses only the `backplane` container, never a
+  sidecar, and only pods that run the same image as the Deployment (a pod
+  of the previous rollout runs another tag and is skipped). When the pods
+  run two builds of the same tag, `digest` stays null and `pod_digests`
+  lists both. When the pods cannot be read, `digest` is null and
+  `digest_error` says why.
+- The `HelmChart` is looked up in the install namespace first. RKE2 can
+  keep it in `kube-system` and install into another namespace through
+  `spec.targetNamespace`; then the op lists the cluster's HelmCharts and
+  takes the one named `<release>` that targets the install namespace.
+  A list the target does not allow is `unknown`, not `not present`.
+- A 404 is `not present`. Any other failed read (no right, server error,
+  timeout, host not reachable or refused by the address check) is
+  `unknown` with a short `error`, never `not present`. A 401 is raised, so
+  the dispatcher can renew the login.
+- `db_ahead` is true when `/ready` reports `db_ahead=true`: the database
+  has a revision the running image does not know. The older image still
+  starts and stays ready, so going back to the previous chart needs no
+  database restore (`db/migrate.py`, `db/migrations.py`).
+- Secrets: only the names and labels of the Helm release Secrets are read.
+  Their `data` is never copied. The values text of the `HelmChart` is never
+  returned, only the hash. A userinfo part in the chart URL is removed.
+  The flight recorder masks Secret data, `HelmChart` values and `HelmChart`
+  annotations (the last-applied annotation repeats the values) before it
+  stores a trace (`redaction.py`, `_wire_span.py`), so the recorded API
+  answers hold no values text either
+  (`test_trace_capture_records_no_values_text_and_no_secret_data`).
+
 ### Read-side Secret redaction (#3501, `redaction.py`)
 
 Response redaction is otherwise pattern-based (the Tier-1 named-pattern
@@ -1145,13 +1212,28 @@ carrying a `sha256:` digest — key names kept — regardless of whether the
 value matches a pattern. It is the k8s sibling of the keycloak / rabbitmq
 per-connector redactors (see [`redaction.md`](redaction.md)).
 
+The same walk masks the Helm values of a `kind: HelmChart` object (the
+k3s / RKE2 `helm.cattle.io/v1` resource) and of the kind-less items of a
+`HelmChartList`: `spec.valuesContent` becomes one placeholder, and every
+value of `spec.set` becomes one (keys kept). Chart values often hold
+passwords. A chart made with `kubectl apply` also carries its whole
+manifest, values included, in the last-applied annotation, so every
+annotation value of a `HelmChart` becomes a placeholder too (keys kept),
+as on a Secret. `k8s.meho.release.info` reads such objects, and the flight
+recorder (next paragraph) records the answer only in this masked form.
+
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
-`k8s.cr.info` share, so a dynamic read pointed at core Secrets
-(`group=""` / `version="v1"` / `plural="secrets"`) is scrubbed before
-JSONFlux / audit / broadcast. For a list read, each item first gets
-`kind: Secret` from its `SecretList` (see "Built-in kinds" above),
-because the API server leaves `kind` off list items. The dedicated way
+`k8s.cr.info` share. It runs on every `kind: Secret` and every
+`kind: HelmChart` object, so a dynamic read pointed at core Secrets
+(`group=""` / `version="v1"` / `plural="secrets"`) or at the charts
+(`group="helm.cattle.io"` / `version="v1"` / `plural="helmcharts"`) is
+scrubbed before JSONFlux / audit / broadcast: a chart row's spec excerpt
+and annotations carry placeholders, never the values text. For a list
+read, each item first gets its `kind` from the list envelope
+(`Secret` from a `SecretList`, `HelmChart` from a `HelmChartList`; see
+"Built-in kinds" above), because the API server leaves `kind` off list
+items. The dedicated way
 to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
 section), which also run this redactor as a second net.
 
@@ -1314,7 +1396,9 @@ a "200 but nothing happened" apply can be explained from the trace.
   key names stay. This covers a `k8s.apply` of a Secret
   manifest, a `k8s.cr.info` read of one, and the items of a
   `SecretList` (which carry no `kind` of their own). The normal body
-  redaction then runs over the masked body.
+  redaction then runs over the masked body. The same walk masks the
+  values of a `kind: HelmChart` object and of the items of a
+  `HelmChartList` (`spec.valuesContent`, every `spec.set` value).
 - Non-2xx (`ApiException`) and transport errors are recorded
   (`status` = HTTP code or `error:<ExceptionClass>`) and re-raised
   unchanged. With `_preload_content=False` the wrapper reads the body
@@ -1423,9 +1507,16 @@ The `k8s.ls` handler is a thin path parser:
   pays one round-trip per probed kind, not one per row.
 - `/<namespace>/<kind>` -- forwards through
   `KubernetesConnector.execute()` to `k8s.<kind>.list`. The shim is the
-  same dispatcher path direct callers use; an unknown kind comes back
-  as the structured `unknown_op` envelope and the forwarder surfaces it
-  verbatim under `result`.
+  same dispatcher path direct callers use. The forwarder passes the
+  caller's operator (`execute(..., operator=operator)`), so the sub-op
+  reads the target's credentials under the caller's identity; a system
+  operator could not (the client cache refuses it and Vault rejects its
+  placeholder token). `statefulsets` and
+  `daemonsets` go to `k8s.workload.list` with the matching `kind`. A
+  kind with no list op, and any sub-op that does not return `ok`, make
+  `k8s.ls` raise, so the top-level answer is an error and not `ok` with
+  an error inside. The `unknown_op` message names the kinds `k8s.ls` can
+  list (`_LS_LISTABLE_KINDS`; a test checks each one has an op).
 
 ## Dependencies
 

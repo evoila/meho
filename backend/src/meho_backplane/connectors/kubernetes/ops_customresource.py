@@ -34,7 +34,9 @@ is ``true`` and the excerpt is a preview (not parseable JSON). The
 truncation rule is documented in each op's ``llm_instructions``.
 ``.status`` gets the same capped excerpt, and annotations are kept with
 capped values minus the last-applied copy of the manifest (#3878); on a
-``Secret`` every annotation value is the redacted placeholder. The
+``Secret`` and on a ``HelmChart`` every annotation value is the redacted
+placeholder, and a ``HelmChart``'s Helm values (``spec.valuesContent``,
+every ``spec.set`` value) are placeholders in the spec excerpt. The
 verbose ``metadata.managedFields`` block (server-side-apply carries huge
 ones) is dropped from the projection entirely.
 
@@ -64,6 +66,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 from meho_backplane.connectors.kubernetes.redaction import (
+    HELM_CHART_KIND,
     LAST_APPLIED_ANNOTATION,
     SECRET_KIND,
     redact_kubernetes_payload,
@@ -216,15 +219,25 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     the **redacted** ``data`` / ``string_data`` key inventory -- so the
     read answers "which keys does this Secret carry?" with a per-value
     digest, never the bytes. The same walk replaces every annotation
-    value of a Secret with the placeholder (keys kept). A non-Secret CR
-    gets neither field and is otherwise untouched by the walk.
+    value of a Secret with the placeholder (keys kept).
+
+    A ``kind: HelmChart`` object (k3s / RKE2 ``helm.cattle.io/v1``) goes
+    through the same walk: its ``spec.valuesContent`` and every
+    ``spec.set`` value are placeholders in the spec excerpt (``set`` keys
+    kept), and its annotation values are placeholders too, because Helm
+    values and the last-applied copy of the chart often hold passwords.
+    A list item gets its ``kind`` from the list envelope before it
+    reaches this function (``list_items``), so a ``HelmChartList`` item
+    is masked as well. Any other CR gets no ``data`` field and is
+    otherwise untouched by the walk.
     ``k8s.secret.list`` / ``k8s.secret.info`` are the dedicated way to
     look at a core Secret's key names.
     """
-    is_secret = obj.get("kind") == SECRET_KIND
-    if is_secret:
-        # Only a Secret object carries values to scrub; redacting a copy
-        # (never the caller's dict) keeps the walk off every other CR.
+    kind = obj.get("kind")
+    is_secret = kind == SECRET_KIND
+    if is_secret or kind == HELM_CHART_KIND:
+        # Only a Secret or a HelmChart carries values to scrub; redacting
+        # a copy (never the caller's dict) keeps the walk off every other CR.
         obj = redact_kubernetes_payload(obj)
     metadata = obj.get("metadata") or {}
     excerpt, truncated = _bounded_json_excerpt(obj.get("spec"))

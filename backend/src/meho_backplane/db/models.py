@@ -1189,6 +1189,57 @@ class KbRevision(Base):
     )
 
 
+class MemoryRevision(Base):
+    """One retained version of a memory entry (body and metadata).
+
+    The :class:`Document` row with ``source="memory"`` stays the latest
+    head. Each time a memory write changes the body or the metadata, the
+    service adds one row here. A row is never updated. Rows go with the
+    entry: ``ON DELETE CASCADE``, and the memory delete paths remove them
+    explicitly (SQLite does not enforce the foreign key).
+
+    ``revision_number`` counts 1, 2, 3, ... per entry and is unique per
+    entry. ``written_by_sub`` is the OIDC ``sub`` of the writer, or
+    ``None`` when the write had no principal.
+    """
+
+    __tablename__ = "memory_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    doc_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
+    written_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "memory_revision_entry_number_idx",
+            "entry_id",
+            "revision_number",
+            unique=True,
+        ),
+    )
+
+
 class Target(Base):
     """A registered endpoint that MEHO agents may connect to.
 
@@ -6688,6 +6739,15 @@ class ApprovalRequestStatus(StrEnum):
 #: literal. The drift guard asserts equality so the two never diverge.
 _APPROVAL_REQUEST_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalRequestStatus)
 
+#: What an operator found when they checked the target of an approved run
+#: whose outcome MEHO does not know (#5026). Kept equal to
+#: ``OutcomeCheckVerdict`` in ``operations/approval_outcome_check.py``.
+_APPROVAL_OUTCOME_CHECK_VERDICTS: tuple[str, ...] = ("happened", "did_not_happen")
+
+#: Why a checked request was on the "outcome unknown" list (#5026). Kept
+#: equal to ``OutcomeUnknownReason`` in ``operations/approval_outcome_check.py``.
+_APPROVAL_OUTCOME_CHECK_REASONS: tuple[str, ...] = ("uncertain", "started_no_result")
+
 
 class ApprovalRequest(Base):
     """One pending (or decided) approval request for a ``requires_approval`` op.
@@ -7130,6 +7190,15 @@ class ApprovalRequest(Base):
     rerun_count: Mapped[int] = mapped_column(
         sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
     )
+    # When the latest re-run started (#5026). NULL until the first re-run.
+    # Until then, the latest run is the first run, which started at
+    # ``resumed_at``. The re-run claim sets it
+    # in the same UPDATE that adds one to ``rerun_count``. The "outcome
+    # unknown" list counts its minutes from the start of the latest run.
+    # Added by migration ``0142``.
+    rerun_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     # The target's connection settings when the request was made. See the
     # class docstring. Added by migration ``0130``.
     target_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
@@ -7138,6 +7207,23 @@ class ApprovalRequest(Base):
     reveal_secret: Mapped[bool] = mapped_column(
         sa.Boolean(), nullable=False, default=False, server_default=sa.false()
     )
+    # An operator checked the target of an approved run whose outcome MEHO
+    # does not know, and wrote down what they found (#5026): the verdict
+    # (``happened`` / ``did_not_happen``), a note, who and when. NULL until
+    # someone marks the request as checked. ``outcome_check_reason`` is why
+    # the request was on the list at that time (``uncertain`` /
+    # ``started_no_result``). A check covers only that reason and the run that
+    # was the latest at that time, so a later re-run or a later ``uncertain``
+    # result puts the request back on the list. The stored result is never
+    # changed, and nothing runs. Added by migration ``0142``.
+    outcome_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    outcome_checked_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_checked_by_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_verdict: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_note: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         Index(
@@ -7180,6 +7266,14 @@ class ApprovalRequest(Base):
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),
             name="ck_approval_request_status",
+        ),
+        sa.CheckConstraint(
+            _ck_in("outcome_check_verdict", _APPROVAL_OUTCOME_CHECK_VERDICTS),
+            name="ck_approval_request_outcome_check_verdict",
+        ),
+        sa.CheckConstraint(
+            _ck_in("outcome_check_reason", _APPROVAL_OUTCOME_CHECK_REASONS),
+            name="ck_approval_request_outcome_check_reason",
         ),
     )
 

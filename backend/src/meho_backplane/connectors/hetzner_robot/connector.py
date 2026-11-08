@@ -92,6 +92,7 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.hetzner_robot._topology import discover_robot_topology
 from meho_backplane.connectors.hetzner_robot.session import (
     HetznerRobotCredentialsLoader,
     HetznerRobotTargetLike,
@@ -102,6 +103,7 @@ from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
+    TopologyHints,
 )
 
 __all__ = ["HetznerRobotConnector", "robot_form_fields"]
@@ -294,6 +296,7 @@ class HetznerRobotConnector(HttpConnector):
         self,
         target: HetznerRobotTargetLike,
         path: str,
+        operator: Operator | None = None,
     ) -> Any:
         """Perform a GET against the Robot Webservice, raising auth_failed on 401.
 
@@ -302,9 +305,13 @@ class HetznerRobotConnector(HttpConnector):
         ``HTTPStatusError`` propagates.  The base ``_retryable`` predicate
         already excludes 4xx, so tenacity does not retry — this method adds
         the human-readable failure on top.
+
+        ``operator`` is the caller whose login reads the target's secret.
+        Without one, the system operator is used (fingerprint and probe).
         """
         client = await self._http_client(target)
-        headers = await self.auth_headers(target, synthesise_system_operator())
+        eff_operator = operator if operator is not None else synthesise_system_operator()
+        headers = await self.auth_headers(target, eff_operator)
         resp = await client.request("GET", path, headers=headers)
         if resp.status_code == 401:
             raise RuntimeError(
@@ -479,6 +486,29 @@ class HetznerRobotConnector(HttpConnector):
                 probed_at=probed_at,
             )
         return ProbeResult(ok=True, probed_at=probed_at)
+
+    async def discover_topology(
+        self,
+        target: HetznerRobotTargetLike,
+        *,
+        operator: Operator | None = None,
+    ) -> TopologyHints:
+        """Return the account's servers, subnets and vSwitches for the topology map.
+
+        Only GET calls: ``GET /server``, ``GET /subnet``, ``GET /vswitch`` and
+        ``GET /vswitch/{id}`` for each vSwitch (the list does not name the
+        member servers). The refresh service passes the acting ``operator``,
+        whose login reads the target's secret. Without one, the system
+        operator is used. A failed read raises, so the refresh rolls back
+        and the map keeps its last good state. See
+        :mod:`~meho_backplane.connectors.hetzner_robot._topology`.
+        """
+        eff_operator = operator if operator is not None else synthesise_system_operator()
+
+        async def get_json(path: str) -> Any:
+            return await self._get_robot_json(target, path, eff_operator)
+
+        return await discover_robot_topology(target.name, get_json)
 
     async def execute(
         self,

@@ -60,7 +60,7 @@ _BASE_OVERRIDES = [
 ]
 
 # The Keycloak subchart (#4040) needs its host name and first tenant id
-# whenever coreKeycloak is on, and the schema needs corePostgres with it.
+# whenever coreKeycloak is on.
 # The chart then derives the issuer, so the hand-set one is cleared (#4591).
 _CORE_ON = [
     "--set",

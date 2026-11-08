@@ -460,7 +460,7 @@ async def test_record_sensor_result_projection_and_state_since() -> None:
             evaluated_at=t0,
         )
         await session.commit()
-        assert changed is True
+        assert changed.changed is True
 
     async with sessionmaker() as session:
         row = await session.get(Sensor, entry.id)
@@ -483,7 +483,7 @@ async def test_record_sensor_result_projection_and_state_since() -> None:
             evaluated_at=t1,
         )
         await session.commit()
-        assert changed is False
+        assert changed.changed is False
 
     async with sessionmaker() as session:
         row = await session.get(Sensor, entry.id)
@@ -502,7 +502,7 @@ async def test_record_sensor_result_projection_and_state_since() -> None:
             evaluated_at=t2,
         )
         await session.commit()
-        assert changed is True
+        assert changed.changed is True
 
     async with sessionmaker() as session:
         row = await session.get(Sensor, entry.id)
@@ -538,7 +538,7 @@ async def test_record_sensor_result_ignores_stale_evaluated_at() -> None:
             evaluated_at=t_new,
         )
         await session.commit()
-        assert changed is True
+        assert changed.changed is True
 
     # A stale (older) result must not overwrite the newer projection.
     async with sessionmaker() as session:
@@ -551,7 +551,7 @@ async def test_record_sensor_result_ignores_stale_evaluated_at() -> None:
             evaluated_at=t_old,
         )
         await session.commit()
-        assert changed is False
+        assert changed.changed is False
 
     # A duplicate (equal timestamp) is likewise a no-op.
     async with sessionmaker() as session:
@@ -564,7 +564,7 @@ async def test_record_sensor_result_ignores_stale_evaluated_at() -> None:
             evaluated_at=t_new,
         )
         await session.commit()
-        assert changed is False
+        assert changed.changed is False
 
     async with sessionmaker() as session:
         row = await session.get(Sensor, entry.id)

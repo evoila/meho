@@ -104,7 +104,7 @@ suppressed (``checks_notify_suppressed``). The window is
 suppression entirely and short-circuits before any Valkey call, restoring
 the pre-#2732 one-mail-per-edge behaviour.
 
-Three deliberate asymmetries keep the window from ever costing a page:
+Four deliberate asymmetries keep the window from ever costing a page:
 
 * **Escalation is never suppressed.** A different state is a different
   key, so ``degraded -> critical`` mails immediately after a recent
@@ -115,6 +115,12 @@ Three deliberate asymmetries keep the window from ever costing a page:
   -- even when the recovery edge itself sits below the floor -- so the
   incident *after* an all-clear is a new incident and its first crossing
   mails, never inherits a half-spent window.
+* **An acknowledgement ending is never suppressed** (#4128). The warning
+  that was acknowledged claimed the member's window before the
+  acknowledgement; the "acknowledgement ended" notice still claims that
+  window when it is free, but it mails whether or not the claim wins. A
+  person set the end time, and the runner sends this notice once per
+  ended acknowledgement, so there is no flap for the window to bound.
 * **Fail-open.** A Valkey error on claim or clear warn-logs
   (``checks_notify_suppression_failed``) and the notification is sent --
   a missed alert is worse than a duplicate.
@@ -168,11 +174,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Final, cast
 
 import structlog
 
 from meho_backplane.broadcast.client import get_broadcast_client
+from meho_backplane.checks.acknowledgement import all_acknowledged
 from meho_backplane.checks.mail_result import record_mail_result
 from meho_backplane.connectors.mail.allowlist import (
     RecipientNotAllowedError,
@@ -288,12 +296,19 @@ class MemberChange:
     the floor and the flap window are judged on when this rides along on a
     :class:`DashboardNotice`. :attr:`sensor_id` keys the member's own flap
     window.
+
+    With :attr:`acknowledgement_ended` set (#4128) the member did not get
+    worse: its acknowledgement expired while it still fails, so the
+    warning comes back. Both states are then the member's counted state,
+    and the mail says that the acknowledgement ended instead of "new
+    problem".
     """
 
     sensor_id: uuid.UUID
     name: str
     previous_state: str
     current_state: str
+    acknowledgement_ended: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +361,11 @@ def _edge(notice: DashboardNotice) -> tuple[str, str]:
     return notice.previous_state, notice.current_state
 
 
+def _acknowledgement_ended(notice: DashboardNotice) -> bool:
+    """True for an "acknowledgement ended" notice (#4128)."""
+    return notice.member_change is not None and notice.member_change.acknowledgement_ended
+
+
 def _log_fields(notice: DashboardNotice) -> dict[str, object]:
     """The structured fields every outcome log for *notice* carries."""
     previous, current = _edge(notice)
@@ -357,6 +377,8 @@ def _log_fields(notice: DashboardNotice) -> dict[str, object]:
     if notice.member_change is not None:
         fields["member_name"] = notice.member_change.name
         fields["member_sensor_id"] = str(notice.member_change.sensor_id)
+        if notice.member_change.acknowledgement_ended:
+            fields["acknowledgement_ended"] = True
     return fields
 
 
@@ -429,6 +451,28 @@ def _suppression_key(
     return f"meho:checks:notify:{tenant_id}:{dashboard_id}:{state}"
 
 
+async def _acknowledged(notice: DashboardNotice) -> bool:
+    """True when every Sensor this warning is about is acknowledged (#4128).
+
+    A "new problem" notice is about its one member; a Dashboard notice is
+    about its non-green members. A notice with no member is never treated
+    as acknowledged. Fail-open: when the read fails, the mail is sent.
+    """
+    if notice.member_change is not None:
+        sensor_ids = [notice.member_change.sensor_id]
+    else:
+        sensor_ids = [m.sensor_id for m in notice.members]
+    try:
+        return await all_acknowledged(sensor_ids, datetime.now(UTC))
+    except Exception:
+        _log().warning(
+            "checks_notify_acknowledgement_read_failed",
+            dashboard_id=str(notice.dashboard_id),
+            exc_info=True,
+        )
+        return False
+
+
 async def _claim_suppression(notice: DashboardNotice, window_seconds: int) -> bool:
     """Claim this edge's suppression window; ``True`` iff the mail should send.
 
@@ -443,6 +487,11 @@ async def _claim_suppression(notice: DashboardNotice, window_seconds: int) -> bo
 
     Fail-open: any Valkey error warn-logs ``checks_notify_suppression_failed``
     and returns ``True`` -- a missed alert is worse than a duplicate.
+
+    An "acknowledgement ended" notice (#4128) calls this for the member's
+    key too, so a flap at that state inside the window stays bounded, but
+    its caller sends whatever the answer: the acknowledged warning claimed
+    the same key before the acknowledgement, and the mail must return.
     """
     _, current = _edge(notice)
     change = notice.member_change
@@ -562,7 +611,8 @@ def _subject(notice: DashboardNotice) -> str:
     anything is still broken. A "new problem" notice (#5068) names the
     member and its edge, and says the Dashboard is still in its state --
     the Sensor name is operator-authored text, so it is folded like the
-    Dashboard name.
+    Dashboard name. An "acknowledgement ended" notice (#4128) names the
+    member and the state it is still in.
     """
     name = _single_line(notice.name)
     change = notice.member_change
@@ -573,6 +623,11 @@ def _subject(notice: DashboardNotice) -> str:
             if notice.previous_state == notice.current_state
             else f"{notice.previous_state} -> {notice.current_state}"
         )
+        if change.acknowledgement_ended:
+            return (
+                f"[MEHO] {name}: acknowledgement ended, {member} "
+                f"still {change.current_state} (dashboard {dashboard})"
+            )
         return (
             f"[MEHO] {name}: new problem {member} "
             f"{change.previous_state} -> {change.current_state} "
@@ -604,7 +659,9 @@ def _body(notice: DashboardNotice) -> str:
     A "new problem" notice (#5068) states the Dashboard state and the
     member's edge up front, then lists that member first and marks it
     ``(new)`` so the recipient finds it without reading every block -- and
-    so the member-line limit can never drop it.
+    so the member-line limit can never drop it. An "acknowledgement ended"
+    notice (#4128) does the same with the member that is still failing,
+    marked ``(acknowledgement ended)``.
     """
     change = notice.member_change
     lines = [f"Dashboard: {notice.name}"]
@@ -613,9 +670,15 @@ def _body(notice: DashboardNotice) -> str:
             lines.append(f"State: {notice.current_state} (unchanged)")
         else:
             lines.append(f"State: {notice.previous_state} -> {notice.current_state}")
-        lines.append(
-            f"New problem: {_clip(change.name)} {change.previous_state} -> {change.current_state}"
-        )
+        if change.acknowledgement_ended:
+            lines.append(
+                f"Acknowledgement ended: {_clip(change.name)} is still {change.current_state}"
+            )
+        else:
+            lines.append(
+                f"New problem: {_clip(change.name)} "
+                f"{change.previous_state} -> {change.current_state}"
+            )
     else:
         lines.append(f"State: {notice.previous_state} -> {notice.current_state}")
     lines.append("")
@@ -628,7 +691,9 @@ def _body(notice: DashboardNotice) -> str:
     lines.append(f"Non-green members ({len(members)}):")
     lines.append("")
     for member in shown:
-        marker = " (new)" if change is not None and member.sensor_id == change.sensor_id else ""
+        marker = ""
+        if change is not None and member.sensor_id == change.sensor_id:
+            marker = " (acknowledgement ended)" if change.acknowledgement_ended else " (new)"
         lines.append(f"- {_clip(member.name)} [{member.effective_state}]{marker}")
         lines.append(f"    last value: {_clip(member.last_value)}")
         lines.append(f"    evidence:   {_clip(member.last_evidence)}")
@@ -733,9 +798,17 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
       (the state every pre-#2719 row backfills to);
     * the edge does not reach ``notify_min_state`` (see
       :func:`_crosses_threshold`);
+    * it is a warning (not an all-clear) and every Sensor it is about is
+      acknowledged (#4128, see :func:`_acknowledged`); when the
+      acknowledgement's time is up and the Sensor still fails, the
+      transition detector sends an "acknowledgement ended" notice
+      (:class:`MemberChange` with ``acknowledgement_ended``), which runs
+      these gates like a "new problem" notice;
     * a same-state notification already claimed this edge's flap window
       (#2732, see :func:`_claim_suppression`; skipped entirely when the
-      window is ``0`` or the crossing is into a rank-0 state);
+      window is ``0`` or the crossing is into a rank-0 state, and never
+      holding back an "acknowledgement ended" notice, whose window the
+      acknowledged warning itself claimed);
     * every configured recipient is refused by the allowlist, so there is
       nothing to send (``checks_notify_no_allowed_recipients``).
 
@@ -784,9 +857,13 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
             **_log_fields(notice),
         )
         return
+    if suppressible and await _acknowledged(notice):
+        _log().info("checks_notify_skipped_acknowledged", **_log_fields(notice))
+        return
     if window_minutes > 0 and suppressible:
         window_seconds = window_minutes * 60
-        if not await _claim_suppression(notice, window_seconds):
+        claimed = await _claim_suppression(notice, window_seconds)
+        if not claimed and not _acknowledgement_ended(notice):
             _log().info(
                 "checks_notify_suppressed",
                 window_minutes=window_minutes,

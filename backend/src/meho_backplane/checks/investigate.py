@@ -402,6 +402,7 @@ async def investigate_on_transition(
     sensor_id: uuid.UUID,
     tenant_id: uuid.UUID,
     now: datetime | None = None,
+    acknowledgement_expired: bool = False,
 ) -> None:
     """Detect Dashboard green->non-green transitions off one Sensor persist.
 
@@ -416,9 +417,19 @@ async def investigate_on_transition(
         tenant_id: The Sensor's tenant (every read/write here is scoped to it).
         now: Injection point for the rollup's hysteresis clock; defaults to the
             current instant (the read-path default #2506 uses).
+        acknowledgement_expired: The persist that was just written ended the
+            Sensor's acknowledgement because its time was up (#4128). When
+            the Sensor still fails, each of its Dashboards gets an
+            "acknowledgement ended" notice: no memo moved, so nothing else
+            would put the warning mail back.
     """
     try:
-        await _process_transition(sensor_id=sensor_id, tenant_id=tenant_id, now=now)
+        await _process_transition(
+            sensor_id=sensor_id,
+            tenant_id=tenant_id,
+            now=now,
+            acknowledgement_expired=acknowledgement_expired,
+        )
     except Exception:
         # Contract: never propagate to the runner's persist path.
         _log().warning(
@@ -434,6 +445,7 @@ async def _process_transition(
     sensor_id: uuid.UUID,
     tenant_id: uuid.UUID,
     now: datetime | None,
+    acknowledgement_expired: bool = False,
 ) -> None:
     """Recompute affected Dashboards, maintain the memo, route the claim.
 
@@ -455,7 +467,10 @@ async def _process_transition(
 
     A member Sensor that got worse while the Dashboard's state stayed the
     same (#5068) is handed to the notifier only, as a "new problem" notice;
-    the investigator keeps its Dashboard-edge gate.
+    the investigator keeps its Dashboard-edge gate. A member whose
+    acknowledgement expired with this persist while it still fails (#4128)
+    is handed to the notifier the same way, as an "acknowledgement ended"
+    notice (:func:`_acknowledgement_ended`).
     """
     now = now or datetime.now(UTC)
     sessionmaker = get_sessionmaker()
@@ -469,7 +484,11 @@ async def _process_transition(
     member_notices: list[DashboardNotice] = []
     for dashboard_id in dashboard_ids:
         claims = await _claim_dashboard_transition(
-            sessionmaker, tenant_id=tenant_id, dashboard_id=dashboard_id, now=now
+            sessionmaker,
+            tenant_id=tenant_id,
+            dashboard_id=dashboard_id,
+            now=now,
+            returned_sensor_id=sensor_id if acknowledgement_expired else None,
         )
         if claims.transition is not None:
             pending.append(claims.transition)
@@ -498,6 +517,7 @@ async def _claim_dashboard_transition(
     tenant_id: uuid.UUID,
     dashboard_id: uuid.UUID,
     now: datetime,
+    returned_sensor_id: uuid.UUID | None = None,
 ) -> _DashboardClaims:
     """Atomically claim one Dashboard's rollup transition and its member changes.
 
@@ -522,6 +542,9 @@ async def _claim_dashboard_transition(
     member that got worse while the overall state stayed the same yields a
     "new problem" notice; when the overall state moved, the Dashboard mail
     covers every member and the member memos are only brought up to date.
+    *returned_sensor_id* names the member whose acknowledgement expired with
+    this persist (#4128); while it still fails it yields an "acknowledgement
+    ended" change, routed like a member change.
 
     The snapshots are detached while the ORM rows are live (before commit)
     because the backgrounded investigation opens its own sessions and the
@@ -564,6 +587,10 @@ async def _claim_dashboard_transition(
             # would silence that member for good: its change belongs to a
             # Dashboard mail this caller does not own.
             changes = await _claim_member_changes(session, evaluations)
+            if returned_sensor_id is not None:
+                returned = _acknowledgement_ended(evaluations, returned_sensor_id, changes)
+                if returned is not None:
+                    changes.append(returned)
         transition: _ClaimedTransition | None = None
         member_notices: list[DashboardNotice] = []
         if claimed:
@@ -632,6 +659,35 @@ async def _claim_member_changes(
             )
         )
     return changes
+
+
+def _acknowledgement_ended(
+    evaluations: list[_MemberRow],
+    sensor_id: uuid.UUID,
+    changes: list[MemberChange],
+) -> MemberChange | None:
+    """The "acknowledgement ended" change for *sensor_id*, if its warning must return.
+
+    The Sensor's acknowledgement expired with the result that was just
+    recorded (#4128). Its memos did not move, so no other change would mail.
+    The change carries the member's counted state on both sides. ``None``
+    when the member is green as the Dashboard counts it (nothing to warn
+    about), or when this result also made it worse: its own change in
+    *changes* mails already.
+    """
+    if any(change.sensor_id == sensor_id for change in changes):
+        return None
+    for _link, sensor, evaluation in evaluations:
+        if sensor.id != sensor_id or evaluation.effective_state in ("ok", "skip"):
+            continue
+        return MemberChange(
+            sensor_id=sensor.id,
+            name=sensor.name,
+            previous_state=evaluation.effective_state,
+            current_state=evaluation.effective_state,
+            acknowledgement_ended=True,
+        )
+    return None
 
 
 def _dashboard_transition_lock_key(tenant_id: uuid.UUID, dashboard_id: uuid.UUID) -> int:

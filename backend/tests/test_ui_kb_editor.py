@@ -761,3 +761,140 @@ def test_editor_save_error_rerenders_modal_with_editor_anchor_and_csrf() -> None
     assert new_csrf_cookie in html, (
         "Fresh CSRF token must appear inside the re-rendered modal fragment"
     )
+
+
+_OLD_REVISION = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
+_SHARED_REVISION = uuid.UUID("00000000-0000-4000-8000-0000000000bb")
+
+
+def _similar_check() -> object:
+    """A check with one entry the operator may change and one shared entry it may not."""
+    from meho_backplane.kb.similar import KbSimilarCheck, KbSimilarEntry
+
+    return KbSimilarCheck(
+        slug="new-entry-slug",
+        reason="similar_entries",
+        would_write=False,
+        slug_exists=False,
+        similar=[
+            KbSimilarEntry(
+                slug="old-entry",
+                entry_id=uuid.uuid4(),
+                revision_id=_OLD_REVISION,
+                summary="The old summary",
+                product="vcenter",
+                version="8.0",
+                status="candidate",
+                snippet="old text of the entry",
+                score=0.93,
+                match="same_product_version",
+                may_change=True,
+            ),
+            KbSimilarEntry(
+                slug="shared-entry",
+                entry_id=uuid.uuid4(),
+                revision_id=_SHARED_REVISION,
+                summary="The shared summary",
+                product=None,
+                version=None,
+                status=None,
+                snippet="shared text",
+                score=0.88,
+                match="close_meaning",
+                may_change=False,
+            ),
+        ],
+        min_score=0.85,
+        next_step="n",
+    )
+
+
+def test_editor_save_with_similar_entries_saves_nothing_and_shows_them() -> None:
+    """A new slug next to similar entries is not saved; the modal shows them in full."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    fake_create = AsyncMock()
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
+                new_callable=AsyncMock,
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=_similar_check(),
+            ) as fake_check,
+            patch("meho_backplane.ui.routes.kb.routes.KbService.create_entry", fake_create),
+        ):
+            response = client.post(
+                "/ui/kb/new",
+                data={"slug": "new-entry-slug", "body": "# Hello", "tags": ""},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    html = response.text
+    assert "Similar entries exist" in html
+    assert 'name="create_anyway"' in html
+    # Every field of each entry, and whether the operator may change it.
+    assert "/ui/kb/old-entry" in html
+    assert "The old summary" in html
+    assert "vcenter" in html
+    assert "8.0" in html
+    assert "candidate" in html
+    assert str(_OLD_REVISION) in html
+    assert "old text of the entry" in html
+    assert "0.93" in html
+    assert "same product and version" in html
+    assert "You can update this entry" in html
+    assert "/ui/kb/shared-entry" in html
+    assert "The shared summary" in html
+    assert str(_SHARED_REVISION) in html
+    assert "shared text" in html
+    assert "0.88" in html
+    assert "you cannot change it" in html
+    fake_create.assert_not_awaited()
+    assert fake_check.await_args.kwargs["create_anyway"] is False
+
+
+def test_editor_save_create_anyway_is_passed_on() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    fake_entry = MagicMock(spec=KbEntry)
+    fake_entry.slug = "new-entry-slug"
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
+                new_callable=AsyncMock,
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as fake_check,
+            patch(
+                "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
+                new_callable=AsyncMock,
+                return_value=(fake_entry, True),
+            ),
+        ):
+            response = client.post(
+                "/ui/kb/new",
+                data={"slug": "new-entry-slug", "body": "# Hello", "create_anyway": "true"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 204, response.text
+    assert fake_check.await_args.kwargs["create_anyway"] is True

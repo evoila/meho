@@ -757,8 +757,9 @@ register_mcp_tool(
         description=(
             "Edit one operation's per-op overrides (tenant_admin only). "
             "Editable fields: custom_description (operator-authored "
-            "agent-facing description: agents see it in place of the "
-            "original description in search_operations hits, in the "
+            "agent-facing description: while the backplane switch "
+            "AGENT_READS_CUSTOM_DESCRIPTION is on, agents see it in place "
+            "of the original description in search_operations hits, in the "
             "exact-op contract and in keyword search; null brings the "
             "original back), safety_level (safe / caution / "
             "dangerous / destructive), requires_approval (gate the "

@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0146_bm25_index_uses_custom_description`` (#4753).
+"""Tests for Alembic migration ``0146_bm25_custom_description_index`` (#4753).
 
-The migration builds ``endpoint_descriptor_bm25_idx`` again, on the text the
-keyword half of operation search reads. The index is PostgreSQL only, so on
-SQLite both steps change nothing. These tests check that:
+The migration adds ``endpoint_descriptor_bm25_custom_idx``, the keyword
+index of the ``AGENT_READS_CUSTOM_DESCRIPTION`` switch's on state, and
+leaves the index of migration ``0005`` alone. The index is PostgreSQL
+only, so on SQLite both steps change nothing. These tests check that:
 
-* the migration's frozen index expression is the one the search query uses
-  (``BM25_DOCUMENT_SQL``), so PostgreSQL can use the index;
-* its old expression is the one migration ``0005`` built;
+* the migration's frozen index expression is the one the on-state search
+  query uses (``BM25_CUSTOM_DOCUMENT_SQL``), so PostgreSQL can use the index;
+* the off-state expression (``BM25_ORIGINAL_DOCUMENT_SQL``) is the one
+  migration ``0005`` built its index on, so the default keeps its index;
 * ``upgrade`` and ``downgrade`` run on SQLite and leave the indexes alone.
 
-The PostgreSQL steps and the query plan are checked in
+The PostgreSQL steps and the query plans are checked in
 ``tests/integration/test_bm25_custom_description_pg.py``.
 """
 
@@ -31,7 +33,10 @@ from sqlalchemy import inspect
 
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
-from meho_backplane.operations._search import BM25_DOCUMENT_SQL
+from meho_backplane.operations._search import (
+    BM25_CUSTOM_DOCUMENT_SQL,
+    BM25_ORIGINAL_DOCUMENT_SQL,
+)
 from meho_backplane.settings import get_settings
 
 _REVISION = "0146"
@@ -53,17 +58,17 @@ def _squash(sql: str) -> str:
     return " ".join(sql.split())
 
 
-def test_new_expression_is_the_search_expression() -> None:
-    migration = _load("0146_bm25_index_uses_custom_description.py")
-    assert _squash(migration.NEW_DOCUMENT_SQL) == _squash(BM25_DOCUMENT_SQL)
+def test_index_expression_is_the_on_state_search_expression() -> None:
+    migration = _load("0146_bm25_custom_description_index.py")
+    assert _squash(migration.CUSTOM_DOCUMENT_SQL) == _squash(BM25_CUSTOM_DOCUMENT_SQL)
+    assert migration.INDEX == "endpoint_descriptor_bm25_custom_idx"
 
 
-def test_old_expression_is_the_one_of_migration_0005() -> None:
-    migration = _load("0146_bm25_index_uses_custom_description.py")
+def test_off_state_expression_is_the_one_of_migration_0005() -> None:
     source = (_VERSIONS / "0005_create_endpoint_descriptor.py").read_text()
     # Migration 0005 writes its expression across adjacent string literals.
     joined = _squash(source.replace('"\n            "', ""))
-    assert _squash(migration.OLD_DOCUMENT_SQL) in joined
+    assert _squash(BM25_ORIGINAL_DOCUMENT_SQL) in joined
 
 
 @pytest.fixture

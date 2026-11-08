@@ -13,19 +13,31 @@ the ``documents`` table -- pull the top
 each per-signal candidate query, fuse the two ranked lists via
 RRF (``1 / (RRF_K + rank)``), and return the top ``limit``. The
 divergence is the source table (``endpoint_descriptor``) and the
-SQL (the expression-FTS index built on :data:`BM25_DOCUMENT_SQL` instead
-of the documents ``body`` column).
+SQL (the expression-FTS index built on :data:`BM25_ORIGINAL_DOCUMENT_SQL`
+instead of the documents ``body`` column).
 
 The text the agent reads
 ========================
 
 An admin can replace an operation's ``description`` with
-``custom_description`` (``meho_connector_edit_op``). When it is set (and
-not empty), it takes the place of ``description`` everywhere the agent
-looks: the keyword half of search, the ``description`` of each hit, and
-the exact-op contract. The meaning half (the embedding) already includes
-it (:func:`~meho_backplane.operations.embed.build_embedding_text`).
-Clearing it brings the original ``description`` back.
+``custom_description`` (``meho_connector_edit_op``). The switch
+``AGENT_READS_CUSTOM_DESCRIPTION`` (off by default,
+:attr:`~meho_backplane.settings.Settings.agent_reads_custom_description`)
+decides whether the agent reads it. Off: the agent reads the original
+``description`` everywhere, as before the switch existed. On: when the
+admin's text is set (and not empty), it takes the place of ``description``
+everywhere the agent looks: the keyword half of search, the ``description``
+of each hit, and the exact-op contract. The meaning half (the embedding)
+includes it in both states
+(:func:`~meho_backplane.operations.embed.build_embedding_text`). Clearing it
+brings the original ``description`` back.
+
+Each state has its own keyword expression and its own index:
+:data:`BM25_ORIGINAL_DOCUMENT_SQL` with ``endpoint_descriptor_bm25_idx``
+(migration ``0005``) and :data:`BM25_CUSTOM_DOCUMENT_SQL` with
+``endpoint_descriptor_bm25_custom_idx`` (migration ``0146``). PostgreSQL
+uses an expression index only for a query with the same expression, so the
+switch picks the candidate query, and both states keep their index.
 
 Dialect-aware
 =============
@@ -44,7 +56,7 @@ import uuid
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select, text
+from sqlalchemy import TextClause, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connector_packages import installed_connector_package_names
@@ -58,13 +70,16 @@ from meho_backplane.operations._lookup import (
 from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RRF_K
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.operations.meta_tools import OperationSearchHit
 
 __all__ = [
-    "BM25_DOCUMENT_SQL",
+    "BM25_CUSTOM_DOCUMENT_SQL",
+    "BM25_ORIGINAL_DOCUMENT_SQL",
     "agent_description",
+    "agent_reads_custom_description",
     "hybrid_search",
     "resolve_group_id",
 ]
@@ -102,22 +117,68 @@ _ENABLED_FOR_TENANT_SQL = """
                  AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
                ELSE is_enabled END)"""
 
-#: The text the keyword (BM25) half searches: the summary, then the admin's
-#: ``custom_description`` in place of ``description`` when it is set and not
-#: empty. ``endpoint_descriptor_bm25_idx`` (migration ``0146``) is built on
-#: exactly this expression, so PostgreSQL can use the index. Change both
-#: together, with a migration; ``_assert_scope_inlined`` checks the queries.
-BM25_DOCUMENT_SQL = (
+#: The text the keyword (BM25) half searches while the switch is off: the
+#: summary and the original ``description``. ``endpoint_descriptor_bm25_idx``
+#: (migration ``0005``) is built on exactly this expression.
+BM25_ORIGINAL_DOCUMENT_SQL = (
+    "to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, ''))"
+)
+
+#: The text the keyword (BM25) half searches while the switch is on: the
+#: summary, then the admin's ``custom_description`` in place of
+#: ``description`` when it is set and not empty.
+#: ``endpoint_descriptor_bm25_custom_idx`` (migration ``0146``) is built on
+#: exactly this expression. Change an expression and its index together,
+#: with a migration; ``_assert_scope_inlined`` checks the queries.
+BM25_CUSTOM_DOCUMENT_SQL = (
     "to_tsvector('english', coalesce(summary, '') || ' ' "
     "|| coalesce(nullif(custom_description, ''), description, ''))"
 )
 
-# The two candidate queries spell the visible-scope, enabled and installed
+# The candidate queries spell the visible-scope, enabled and installed
 # predicates out in full, so each ``text()`` argument is a plain string literal (the
 # ``avoid-sqlalchemy-text`` rule rejects f-strings). ``_VISIBLE_SCOPE_SQL``,
 # ``_ENABLED_FOR_TENANT_SQL`` and ``_INSTALLED_OWNER_SQL`` stay the canonical
-# copies; ``_assert_scope_inlined`` below fails at import if either query drifts.
+# copies; ``_assert_scope_inlined`` below fails at import if a query drifts.
+# The two BM25 queries differ only in the keyword expression; the switch
+# ``AGENT_READS_CUSTOM_DESCRIPTION`` picks one (``_bm25_candidates_sql``).
 _BM25_CANDIDATES_SQL = text(
+    """
+        SELECT id, ts_rank_cd(
+            to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, '')),
+            plainto_tsquery('english', :query)
+        ) AS score
+        FROM endpoint_descriptor
+        WHERE
+          (tenant_id = :tenant_id
+           OR (tenant_id IS NULL AND NOT EXISTS (
+               SELECT 1 FROM endpoint_descriptor owned
+               WHERE owned.tenant_id = :tenant_id
+                 AND owned.product = :product
+                 AND owned.version = :version
+                 AND owned.impl_id = :impl_id)))
+          AND product = :product
+          AND version = :version
+          AND impl_id = :impl_id
+          AND (CASE WHEN tenant_id IS NULL THEN COALESCE((
+               SELECT setting.enabled FROM tenant_operation_setting setting
+               WHERE setting.tenant_id = :tenant_id
+                 AND setting.product = :product
+                 AND setting.version = :version
+                 AND setting.impl_id = :impl_id
+                 AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
+               ELSE is_enabled END)
+          AND (owner_package IS NULL
+               OR owner_package = ANY(CAST(:installed_packages AS text[])))
+          AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
+          AND to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, ''))
+              @@ plainto_tsquery('english', :query)
+        ORDER BY score DESC
+        LIMIT :limit
+        """
+)
+
+_BM25_CUSTOM_CANDIDATES_SQL = text(
     """
         SELECT id, ts_rank_cd(
             to_tsvector('english', coalesce(summary, '') || ' '
@@ -191,8 +252,8 @@ _COSINE_CANDIDATES_SQL = text(
 def _assert_scope_inlined() -> None:
     """Fail at import if a candidate query no longer holds the scope predicates.
 
-    The BM25 query must also hold :data:`BM25_DOCUMENT_SQL` twice (the score
-    and the ``@@`` filter), so its text matches the index expression.
+    Each BM25 query must also hold its keyword expression twice (the score
+    and the ``@@`` filter), so its text matches its index expression.
 
     Whitespace is normalised, then each query must contain
     :data:`_VISIBLE_SCOPE_SQL`, :data:`_ENABLED_FOR_TENANT_SQL` and
@@ -208,6 +269,7 @@ def _assert_scope_inlined() -> None:
         predicate = " ".join(canonical.split())
         for name, statement in (
             ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
+            ("_BM25_CUSTOM_CANDIDATES_SQL", _BM25_CUSTOM_CANDIDATES_SQL),
             ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
         ):
             if predicate not in " ".join(str(statement.text).split()):
@@ -215,24 +277,43 @@ def _assert_scope_inlined() -> None:
                     f"{name} no longer contains {canonical_name} word for word; "
                     "keep the inlined predicate identical to it."
                 )
-    document = " ".join(BM25_DOCUMENT_SQL.split())
-    if " ".join(str(_BM25_CANDIDATES_SQL.text).split()).count(document) != 2:
-        raise AssertionError(
-            "_BM25_CANDIDATES_SQL must use BM25_DOCUMENT_SQL word for word, "
-            "for the score and the filter."
-        )
+    for statement, document in (
+        (_BM25_CANDIDATES_SQL, BM25_ORIGINAL_DOCUMENT_SQL),
+        (_BM25_CUSTOM_CANDIDATES_SQL, BM25_CUSTOM_DOCUMENT_SQL),
+    ):
+        squashed = " ".join(document.split())
+        if " ".join(str(statement.text).split()).count(squashed) != 2:
+            raise AssertionError(
+                "a BM25 candidate query must use its keyword expression word for word, "
+                f"for the score and the filter; not found twice: {document}"
+            )
 
 
 _assert_scope_inlined()
 
 
+def agent_reads_custom_description() -> bool:
+    """Return the state of the ``AGENT_READS_CUSTOM_DESCRIPTION`` switch."""
+    return get_settings().agent_reads_custom_description
+
+
 def agent_description(descriptor: EndpointDescriptor) -> str | None:
     """Return the description the agent reads for *descriptor*.
 
-    The admin's ``custom_description`` when it is set and not empty, else
-    the original ``description``. Same rule as :data:`BM25_DOCUMENT_SQL`.
+    With the switch off (the default), the original ``description``. With
+    it on, the admin's ``custom_description`` when it is set and not empty,
+    else the original. Same rule as :data:`BM25_CUSTOM_DOCUMENT_SQL`.
     """
-    return descriptor.custom_description or descriptor.description
+    if agent_reads_custom_description():
+        return descriptor.custom_description or descriptor.description
+    return descriptor.description
+
+
+def _bm25_candidates_sql() -> TextClause:
+    """Return the keyword candidate query of the current switch state."""
+    if agent_reads_custom_description():
+        return _BM25_CUSTOM_CANDIDATES_SQL
+    return _BM25_CANDIDATES_SQL
 
 
 async def resolve_group_id(
@@ -338,15 +419,16 @@ async def _hybrid_search_pg(
 ) -> list[OperationSearchHit]:
     """PostgreSQL path -- FTS GIN + pgvector IVFFlat + RRF fusion.
 
-    The BM25 candidate query matches against :data:`BM25_DOCUMENT_SQL`,
-    the expression ``endpoint_descriptor_bm25_idx`` is built on.
+    The BM25 candidate query matches against the keyword expression of the
+    current switch state (:func:`_bm25_candidates_sql`), the expression its
+    index is built on.
     """
     installed = sorted(installed_connector_package_names())
     query_embedding = await get_embedding_service().encode_one(query)
     embedding_literal = "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
 
     bm25_result = await session.execute(
-        _BM25_CANDIDATES_SQL,
+        _bm25_candidates_sql(),
         {
             "query": query,
             "tenant_id": str(tenant_id),

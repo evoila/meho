@@ -1902,9 +1902,12 @@ class EndpointDescriptor(Base):
       the ``search_operations`` meta-tool.
     * ``endpoint_descriptor_bm25_idx`` (PG only) — GIN over
       ``to_tsvector('english', coalesce(summary, '') || ' ' ||
-      coalesce(nullif(custom_description, ''), description, ''))``
-      (migration ``0146``; before it, ``description`` only). Powers the BM25 half of
-      ``search_operations``'s hybrid retrieval. Declared in
+      coalesce(description, ''))``. Powers the BM25 half of
+      ``search_operations``'s hybrid retrieval. Its twin
+      ``endpoint_descriptor_bm25_custom_idx`` (migration ``0146``) is
+      GIN over the same text with ``nullif(custom_description, '')``
+      in place of ``description``; the keyword query uses it while the
+      ``AGENT_READS_CUSTOM_DESCRIPTION`` switch is on. Declared in
       migration ``0005`` via raw SQL because Alembic has no clean
       API for expression-based GIN; intentionally **not** in
       :attr:`__table_args__` because declaring it would force

@@ -4,14 +4,19 @@
 """An admin's ``custom_description`` is the text the agent reads (#4753).
 
 An admin can fix a weak or misleading operation description with
-``meho_connector_edit_op`` (``custom_description``). These tests check that
-the agent then sees the admin's text, not the original one:
+``meho_connector_edit_op`` (``custom_description``). The switch
+``AGENT_READS_CUSTOM_DESCRIPTION`` (off by default) decides whether the
+agent reads it. With the switch on, these tests check that the agent sees
+the admin's text, not the original one:
 
 * in each ``search_operations`` hit and in the exact-op contract;
 * in the keyword half of search, so a query that matches only the admin's
   words finds the operation with a keyword score and the ``matched`` label;
 * after the admin clears it (``null``), the original text is back, in the
   hit, the contract and the keyword half.
+
+With the switch off (or unset), a saved override changes nothing: the
+agent reads the original text in all three places.
 
 The edit goes through :meth:`ReviewService.edit_op`, the same service the
 MCP tool and the REST route use. Unit tests run on SQLite, so the keyword
@@ -34,6 +39,7 @@ from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._search import agent_reads_custom_description
 from meho_backplane.operations.ingest import ReviewService
 from meho_backplane.operations.meta_tools import search_operations
 from meho_backplane.settings import get_settings
@@ -51,12 +57,20 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.delenv("AGENT_READS_CUSTOM_DESCRIPTION", raising=False)
     get_settings.cache_clear()
     reset_dispatcher_caches()
     clear_registry()
     yield
     reset_dispatcher_caches()
     clear_registry()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def switch_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn ``AGENT_READS_CUSTOM_DESCRIPTION`` on for one test."""
+    monkeypatch.setenv("AGENT_READS_CUSTOM_DESCRIPTION", "true")
     get_settings.cache_clear()
 
 
@@ -147,7 +161,7 @@ def _hit(result: dict[str, Any], op_id: str = _OP) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_custom_description_is_the_description_in_hit_and_contract() -> None:
+async def test_custom_description_is_the_description_in_hit_and_contract(switch_on: None) -> None:
     await _seed()
     await _edit(_CUSTOM)
 
@@ -162,7 +176,7 @@ async def test_custom_description_is_the_description_in_hit_and_contract() -> No
 
 
 @pytest.mark.asyncio
-async def test_query_matching_only_custom_words_is_a_keyword_match() -> None:
+async def test_query_matching_only_custom_words_is_a_keyword_match(switch_on: None) -> None:
     await _seed()
     await _edit(_CUSTOM)
 
@@ -175,7 +189,7 @@ async def test_query_matching_only_custom_words_is_a_keyword_match() -> None:
 
 
 @pytest.mark.asyncio
-async def test_clearing_custom_description_brings_back_the_original() -> None:
+async def test_clearing_custom_description_brings_back_the_original(switch_on: None) -> None:
     await _seed()
     await _edit(_CUSTOM)
     await _edit(None)
@@ -188,7 +202,7 @@ async def test_clearing_custom_description_brings_back_the_original() -> None:
 
 
 @pytest.mark.asyncio
-async def test_empty_custom_description_falls_back_to_the_original() -> None:
+async def test_empty_custom_description_falls_back_to_the_original(switch_on: None) -> None:
     """An empty string is no override, the same as the SQL ``nullif`` rule."""
     await _seed()
     async with get_sessionmaker()() as session:
@@ -203,3 +217,21 @@ async def test_empty_custom_description_falls_back_to_the_original() -> None:
     assert result["outcome"] == "matched"
     assert _hit(result)["description"] == _ORIGINAL
     assert (await _contract())["description"] == _ORIGINAL
+
+
+def test_switch_is_off_when_the_env_var_is_unset() -> None:
+    assert agent_reads_custom_description() is False
+
+
+@pytest.mark.asyncio
+async def test_switch_off_agent_reads_the_original_text() -> None:
+    """A saved override changes nothing while the switch is off (the default)."""
+    await _seed()
+    await _edit(_CUSTOM)
+
+    result = await _search("gadget records")
+    assert result["outcome"] == "matched"
+    assert _hit(result)["description"] == _ORIGINAL
+    assert (await _contract())["description"] == _ORIGINAL
+    # The admin's words are not keyword matches while the switch is off.
+    assert (await _search("widget serial"))["outcome"] == "no_match"

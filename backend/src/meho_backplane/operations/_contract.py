@@ -111,8 +111,9 @@ class UnknownOperationError(ValueError):
 class OperationContract(BaseModel):
     """Everything a caller needs to form one valid ``call_operation``.
 
-    ``description`` is the admin's ``custom_description`` when one is set,
-    else the original text (:func:`~meho_backplane.operations._search.agent_description`).
+    ``description`` is the original text, or the admin's
+    ``custom_description`` while the ``AGENT_READS_CUSTOM_DESCRIPTION``
+    switch is on (:func:`~meho_backplane.operations._search.agent_description`).
     """
 
     model_config = ConfigDict(frozen=True)

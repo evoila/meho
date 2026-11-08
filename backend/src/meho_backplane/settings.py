@@ -2324,6 +2324,15 @@ class Settings(BaseModel):
     #: (:func:`~meho_backplane.docs_search.call_log.log_query_text`). Set via
     #: ``DOCS_DEBUG_LOG_QUERY_TEXT``.
     docs_debug_log_query_text: bool = False
+    #: Whether the agent reads an admin's ``custom_description`` (#4753).
+    #: ``False`` (default): ``search_operations`` hits, the exact-op contract
+    #: and the keyword half of search use the original ``description``, as
+    #: before. ``True``: when an admin set a non-empty ``custom_description``
+    #: with ``meho_connector_edit_op``, it takes the place of ``description``
+    #: in all three. The keyword half then uses the index of migration
+    #: ``0146`` (``endpoint_descriptor_bm25_custom_idx``). Set via
+    #: ``AGENT_READS_CUSTOM_DESCRIPTION``.
+    agent_reads_custom_description: bool = False
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3281,6 +3290,9 @@ def get_settings() -> Settings:
         ),
         docs_debug_log_query_text=parse_bool_env(
             os.environ.get("DOCS_DEBUG_LOG_QUERY_TEXT"),
+        ),
+        agent_reads_custom_description=parse_bool_env(
+            os.environ.get("AGENT_READS_CUSTOM_DESCRIPTION"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

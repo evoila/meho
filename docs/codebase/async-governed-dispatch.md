@@ -200,10 +200,16 @@ does not need this: its outcome is stored on the run row.
 
 ## Known issues / notes
 
-- **No CLI verbs yet.** The generated Go client (`cli/api/openapi.json` /
-  `client.gen.go`) carries the new paths after `make snapshot-openapi &&
-  make generate`, but no `meho operation runs …` CLI command is wired.
-  Adding operator CLI verbs is a follow-up.
+- **CLI verbs.** `meho operation call --async` sends `async: true`, accepts
+  the HTTP 202 answer and prints the run id and the command to check it.
+  `meho operation run-status <run id>` reads the run with
+  `GET /operations/runs/{handle}`. It prints the state while the run waits
+  or runs, the stored result when the run ended (the same render as
+  `meho operation call`), and the reason for a `failed`, `cancelled` or
+  `uncertain` run. The run state `succeeded` only says a result was stored:
+  the stored `status` decides the output and the exit code. `--wait` checks
+  again and again, each time with `wait_seconds=20`, until the run ends.
+  Listing and cancelling runs have no CLI verb yet.
 - **Pending rows are not reaped.** The reaper only reclaims `running` rows
   (a `pending` row has no lease window that matters). The task transitions
   `pending → running` within milliseconds of the row insert, so the window

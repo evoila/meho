@@ -58,6 +58,7 @@ __all__ = [
     "META_KB_PASSAGE",
     "META_LAST_UPDATED_BY_SUB",
     "META_PROVENANCE",
+    "META_SHARED",
     "SLUG_PATTERN",
     "InvalidKbSlugError",
     "KbEntry",
@@ -70,6 +71,8 @@ __all__ = [
     "KbPassageLocator",
     "KbProvenance",
     "KbReservedMetadataError",
+    "KbSharedNotAllowedError",
+    "KbSharedSlugError",
     "validate_slug",
 ]
 
@@ -107,6 +110,11 @@ META_LAST_UPDATED_BY_SUB: Final[str] = "last_updated_by_sub"
 #: write). Rows written before this key existed have no value here; the
 #: read side reports them as ``state="legacy"`` instead of guessing.
 META_PROVENANCE: Final[str] = "provenance"
+
+#: Metadata key that marks an entry as shared: every tenant on the
+#: instance can read it. Only a tenant listed in ``KB_SHARED_TENANT_IDS``
+#: may set it (see :mod:`meho_backplane.kb.shared`).
+META_SHARED: Final[str] = "shared"
 
 #: The ``documents.kind`` value every kb entry carries. Distinct from
 #: future kb-adjacent rows (kb-index, kb-collection) that would each
@@ -159,7 +167,8 @@ class KbEntryNotOwnedError(PermissionError):
     def __init__(self, slug: str, created_by_sub: str | None) -> None:
         super().__init__(
             f"the knowledge entry {slug!r} was created by another principal; "
-            "only a tenant admin can change it"
+            "only its owner, a reviewer or a tenant admin can change it. "
+            "To propose a change, save it under a new slug, or ask a reviewer or tenant admin"
         )
         self.slug = slug
         self.created_by_sub = created_by_sub
@@ -167,8 +176,9 @@ class KbEntryNotOwnedError(PermissionError):
 
 #: Metadata keys that mark an entry as curated content. Only a tenant
 #: admin may set them: ``source_kind`` is the key the search filter
-#: example ``{"source_kind": "evoila-distilled"}`` scopes to.
-CURATION_METADATA_KEYS: Final[frozenset[str]] = frozenset({"source_kind"})
+#: example ``{"source_kind": "evoila-distilled"}`` scopes to, and
+#: ``shared`` makes an entry readable from every tenant.
+CURATION_METADATA_KEYS: Final[frozenset[str]] = frozenset({"source_kind", "shared"})
 
 
 class KbReservedMetadataError(PermissionError):
@@ -178,6 +188,28 @@ class KbReservedMetadataError(PermissionError):
         self.keys = keys
         names = ", ".join(sorted(keys))
         super().__init__(f"the metadata key(s) {names} are reserved for a tenant admin")
+
+
+class KbSharedNotAllowedError(PermissionError):
+    """A tenant that may not share tried to mark an entry as shared."""
+
+    def __init__(self, tenant_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        super().__init__(
+            "this tenant may not share knowledge entries. "
+            "An admin lists the tenant in KB_SHARED_TENANT_IDS to allow it"
+        )
+
+
+class KbSharedSlugError(PermissionError):
+    """A write used the slug of a shared entry that another tenant owns."""
+
+    def __init__(self, slug: str) -> None:
+        self.slug = slug
+        super().__init__(
+            f"the slug {slug!r} is a shared knowledge entry of another tenant, "
+            "and only its owner tenant can change it. Use a different slug"
+        )
 
 
 def validate_slug(slug: str) -> str:

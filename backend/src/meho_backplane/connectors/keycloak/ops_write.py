@@ -122,6 +122,13 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
+from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
+    SMTP_PASSWORD_PREFIX,
+    SMTP_PASSWORD_REF_PARAM,
+    has_inline_smtp_password,
+    inline_smtp_password_reason,
+    with_smtp_password,
+)
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
 if TYPE_CHECKING:
@@ -201,9 +208,18 @@ class _PasswordSecretTarget:
 
 
 async def _read_password_from_vault(
-    operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    operator: Operator,
+    target: KeycloakTargetLike,
+    params: dict[str, Any],
+    *,
+    prefix: str = "password",
 ) -> str:
     """Read a user password via the credential-backend seam (#2229).
+
+    *prefix* names the three params: ``<prefix>_secret_ref`` /
+    ``<prefix>_secret_mount`` / ``<prefix>_secret_key``. The user ops use
+    the default ``password``; ``keycloak.realm.update`` reads the realm's
+    SMTP password with ``smtp_password``.
 
     The password is **never** an inline param — only its secret *ref* is.
     ``password_secret_ref`` is resolved through
@@ -225,16 +241,17 @@ async def _read_password_from_vault(
     :exc:`~meho_backplane.connectors._shared.vault_creds.SecretRefReadError`
     when Vault refuses or cannot serve the read (#3864).
     """
-    secret_ref = str(params["password_secret_ref"]).strip()
-    mount = str(params.get("password_secret_mount") or _DEFAULT_PASSWORD_MOUNT).strip()
-    key = str(params.get("password_secret_key") or _DEFAULT_PASSWORD_KEY).strip()
+    ref_param = f"{prefix}_secret_ref"
+    secret_ref = str(params[ref_param]).strip()
+    mount = str(params.get(f"{prefix}_secret_mount") or _DEFAULT_PASSWORD_MOUNT).strip()
+    key = str(params.get(f"{prefix}_secret_key") or _DEFAULT_PASSWORD_KEY).strip()
 
     # #3864: a denied or missing password ref raises SecretRefReadError, so
     # the write fails with a clear error about this ref, not the target's.
     secret_data = await load_param_secret_data(
         _PasswordSecretTarget(name=target.name, host=target.host, secret_ref=secret_ref),
         operator,
-        param="password_secret_ref",
+        param=ref_param,
         mount=mount,
     )
     value = secret_data.get(key) if isinstance(secret_data, dict) else None
@@ -245,10 +262,10 @@ async def _read_password_from_vault(
     if not stripped:
         raise KeycloakPasswordSecretError(
             f"keycloak_password_secret: credential secret at "
-            f"password_secret_ref={secret_ref!r} (mount={mount!r}) carries no "
+            f"{ref_param}={secret_ref!r} (mount={mount!r}) carries no "
             f"usable string value under key {key!r}. Store the password under "
-            f"that key (or set password_secret_key, or select it with a "
-            f"'#field' fragment on a schemed ref) so the user write can source "
+            f"that key (or set {prefix}_secret_key, or select it with a "
+            f"'#field' fragment on a schemed ref) so the write can source "
             f"it without the password ever appearing in op params."
         )
     return stripped
@@ -313,10 +330,24 @@ async def keycloak_realm_update(
     value-free confirmation plus the read-back check. Both realm names are
     percent-encoded as one path segment, so a ``/``, a dot or a ``%`` in a
     name stays part of that name.
+
+    The realm's SMTP password comes only from ``smtp_password_secret_ref``
+    (see :mod:`.ops_write_realm_smtp`): it is read here and set as
+    ``smtpServer.password`` in the body sent to Keycloak. A ``password``
+    inside ``representation.smtpServer`` is refused before anything is sent.
     """
+    if has_inline_smtp_password(params):
+        raise ValueError(f"keycloak.realm.update: {inline_smtp_password_reason()}")
     realms = resolve_realm_config(target)
     realm_name = str(params.get("realm") or realms.managed_realm).strip()
     representation = dict(params["representation"])
+    if params.get(SMTP_PASSWORD_REF_PARAM):
+        password = await _read_password_from_vault(
+            operator, target, params, prefix=SMTP_PASSWORD_PREFIX
+        )
+        representation["smtpServer"] = with_smtp_password(
+            representation.get("smtpServer"), password
+        )
     new_name = _opt_str(representation.get("realm")) or realm_name
     check = await read_merge_write(
         self,

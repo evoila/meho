@@ -15,6 +15,10 @@
   ``call_operation`` passes ``preview_hash`` and ``idempotency_key`` on.
 * The bad cases: an unknown ``op_id``, a search with neither ``query`` nor
   ``op_id``, and a left-out field sent anyway.
+* With the switch off, the hand-written tools check their arguments against
+  their own schema: a field the schema does not name (``preview_hash``,
+  ``idempotency_key``, ``work_ref``) goes back as a retry and does not reach
+  the dispatcher.
 """
 
 from __future__ import annotations
@@ -276,3 +280,66 @@ async def test_unknown_op_is_a_failed_tool_result(monkeypatch: pytest.MonkeyPatc
             _operator(), {"connector_id": "vault-1.x", "op_id": "vault.nope"}
         )
     assert "free-text `query`" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"preview_hash": "<preview-hash>"},
+        {"idempotency_key": "<retry-key>"},
+        {"work_ref": "gh:x#1"},
+    ],
+)
+async def test_switch_off_call_operation_checks_its_own_schema(
+    monkeypatch: pytest.MonkeyPatch, extra: dict[str, Any]
+) -> None:
+    assert get_settings().agent_operation_tools_from_mcp is False
+    dispatch_mock = AsyncMock()
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    tools = {
+        t.name: t for t in resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
+    }
+
+    with pytest.raises(ModelRetry, match="invalid arguments"):
+        await tools["call_operation"].function(
+            _ctx(_operator()),
+            connector_id="vault-1.x",
+            op_id="vault.kv.destroy",
+            params={"path": "secret/app"},
+            **extra,
+        )
+    dispatch_mock.assert_not_awaited()
+
+
+async def test_switch_off_call_operation_passes_its_own_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatch_mock = AsyncMock(
+        return_value=OperationResult(status="ok", op_id="vault.kv.read", duration_ms=1.0)
+    )
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    tools = {
+        t.name: t for t in resolve_agent_tools({"meta_tools": ["call_operation"]}, _operator())
+    }
+
+    result = await tools["call_operation"].function(
+        _ctx(_operator()),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=None,
+        params={"path": "secret/app"},
+    )
+
+    assert result["status"] == "ok"
+    kwargs = dispatch_mock.await_args.kwargs
+    assert kwargs["params"] == {"path": "secret/app"}
+    assert kwargs["preview_hash"] is None
+    assert kwargs["idempotency_key"] is None
+
+
+async def test_switch_off_search_checks_its_own_schema() -> None:
+    # The check runs before the handler, so the handler is never reached.
+    spec = next(s for s in toolset_mod._OPERATIONS_META_TOOLS if s.name == "search_operations")
+
+    with pytest.raises(ModelRetry, match="invalid arguments"):
+        await spec.handler(_operator(), {"connector_id": "vault-1.x", "op_id": "vault.kv.read"})

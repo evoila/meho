@@ -31,7 +31,9 @@ does not check the arguments against the schema:
   tool result with ``reason: unknown_op``, so the run goes on.
 
 The toolset uses these tools only when the setting
-``agent_operation_tools_from_mcp`` is on (off by default).
+``agent_operation_tools_from_mcp`` is on (off by default). With the setting
+off, the hand-written copies run :func:`check_arguments` against their own
+schema.
 """
 
 from __future__ import annotations
@@ -52,7 +54,12 @@ from meho_backplane.mcp.tools import operations as _operations_mcp_tools  # noqa
 from meho_backplane.operations import meta_tools as _meta_tools
 from meho_backplane.operations.meta_tools import UnknownOperationError
 
-__all__ = ["LEFT_OUT_FIELDS", "OPERATION_TOOL_NAMES", "build_operation_meta_tools"]
+__all__ = [
+    "LEFT_OUT_FIELDS",
+    "OPERATION_TOOL_NAMES",
+    "build_operation_meta_tools",
+    "check_arguments",
+]
 
 
 _LIST_OPERATION_GROUPS = "list_operation_groups"
@@ -123,7 +130,9 @@ def _without_fields(schema: dict[str, Any], fields: tuple[str, ...]) -> dict[str
     return reduced
 
 
-def _checked(name: str, schema: dict[str, Any], handler: _MetaToolHandler) -> _MetaToolHandler:
+def check_arguments(
+    name: str, schema: dict[str, Any], handler: _MetaToolHandler
+) -> _MetaToolHandler:
     """Check the arguments against *schema*, then run *handler*.
 
     The check uses the same validator and format checker as MCP
@@ -167,7 +176,9 @@ def _build(name: str) -> MetaToolSpec:
     left_out = LEFT_OUT_FIELDS[name]
     return MetaToolSpec(
         name=name,
-        handler=_checked(name, _without_fields(definition.inputSchema, left_out), _call(name)),
+        handler=check_arguments(
+            name, _without_fields(definition.inputSchema, left_out), _call(name)
+        ),
         description=_description(definition),
         parameter_schema=_without_fields(definition.to_wire()["inputSchema"], left_out),
         required_role=definition.required_role,

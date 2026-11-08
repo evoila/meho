@@ -558,12 +558,24 @@ Two checks run before each handler:
 - An unknown `op_id` in exact-op mode goes back to the model as a failed tool
   result with `reason: unknown_op` and the next step. The run goes on.
 
+With the setting off, the hand-written tools run the same schema check,
+against their own schema (`_with_argument_check` in `agent/toolset.py`).
+Each of these schemas has `additionalProperties: false`. So a field the
+schema does not name goes back to the model as a retry and never reaches
+the handler. For `call_operation` that covers `preview_hash`,
+`idempotency_key` and `work_ref`.
+
 Destructive operations: with the setting on, a hosted run can call a
 `destructive` operation the same way an MCP client can. It must first call
 `preview_operation` with the same arguments and pass the `preview_hash`.
 Then the call waits until a person approves it. With the setting off, the
-hosted `call_operation` has no `preview_hash` field, so MEHO refuses every
-destructive call from a hosted run.
+schema check above refuses a `preview_hash` on `call_operation`, so a
+hosted run cannot pass one. The dispatcher refuses a destructive call
+without a `preview_hash`, so with the setting off MEHO refuses every
+destructive call from a hosted run. Tests in
+`tests/test_agent_toolset_operations.py` check that, with the setting off,
+`preview_hash`, `idempotency_key` and `work_ref` do not reach the
+dispatcher.
 
 A test (`tests/test_agent_toolset_operations.py`) checks that each hosted
 schema is the MCP wire schema minus the fields above.

@@ -152,7 +152,7 @@ from meho_backplane.agent.toolset_discovery import (
     build_write_meta_tools,
     keep_allowed_connectors,
 )
-from meho_backplane.agent.toolset_operations import build_operation_meta_tools
+from meho_backplane.agent.toolset_operations import build_operation_meta_tools, check_arguments
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import capability_satisfied, role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
@@ -192,6 +192,27 @@ _CONNECTOR_ID_ARG = "connector_id"
 _CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset({"call_operation", "preview_operation"})
 
 
+def _with_argument_check(*specs: MetaToolSpec) -> tuple[MetaToolSpec, ...]:
+    """Return *specs* with each handler behind a check of its own schema.
+
+    ``pydantic_ai.Tool.from_schema`` does not check the arguments against the
+    schema, so :func:`check_arguments` does it before the handler runs. A
+    bad argument, or a field the schema does not name, goes back to the model
+    as a retry (#4754).
+    """
+    return tuple(
+        MetaToolSpec(
+            name=spec.name,
+            handler=check_arguments(spec.name, spec.parameter_schema, spec.handler),
+            description=spec.description,
+            parameter_schema=spec.parameter_schema,
+            required_role=spec.required_role,
+            required_capability=spec.required_capability,
+        )
+        for spec in specs
+    )
+
+
 #: The connector-execution meta-tools. These three form the agent's working
 #: surface over the G0.6 substrate (CLAUDE.md "the load-bearing pattern":
 #: pick connector → list operation groups → search operations → call). These
@@ -201,7 +222,13 @@ _CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset({"call_operation", "preview_
 #: :func:`_active_catalog` uses :data:`_MCP_OPERATIONS_META_TOOLS` in their
 #: place (#4754). The full :data:`_META_TOOL_CATALOG` appends the discovery,
 #: broadcast and context tools.
-_OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
+#:
+#: Each handler first checks the arguments against the tool's own
+#: ``parameter_schema`` (:func:`_with_argument_check`), the same check the
+#: tools built from the MCP tools run. Each schema has
+#: ``additionalProperties: false``, so a field it does not name goes back to
+#: the model as a retry and never reaches the handler.
+_OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = _with_argument_check(
     MetaToolSpec(
         name="list_operation_groups",
         handler=list_operation_groups,

@@ -82,7 +82,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditEventClass, Document
+from meho_backplane.db.models import AuditEventClass, Document, MemoryRevision
 from meho_backplane.memory._internal import MEMORY_SOURCE
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
@@ -181,6 +181,9 @@ async def _run_one_tick() -> None:
             ids_to_delete.append(doc_id)
             per_tenant[tenant_id].append(kind)
 
+        await session.execute(
+            delete(MemoryRevision).where(MemoryRevision.entry_id.in_(ids_to_delete))
+        )
         await session.execute(delete(Document).where(Document.id.in_(ids_to_delete)))
         await session.commit()
 

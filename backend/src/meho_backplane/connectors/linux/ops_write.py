@@ -26,7 +26,9 @@ Tier table:
   ``umask 077`` temp path and execute it (optionally under sudo), capturing
   stdout / stderr / exit. Its ``arguments`` / ``env`` may carry secrets, so it
   is pinned ``credential_write`` and previews only at park time via its
-  bespoke builder (never the body / argument values / env values). A credential
+  bespoke builder: the approver reads the script body and its SHA-256
+  (:mod:`~meho_backplane.connectors.linux.script_preview`), never the argument
+  values or env values. A credential
   the script needs is instead passed by reference via ``secret_env``
   (``ENV_NAME -> "<vault-path>#<field>"``), resolved from Vault server-side at
   execution time (the same ``_resolve_secret`` seam the sudo password uses) and
@@ -81,6 +83,10 @@ from meho_backplane.connectors.linux.ops_host import (
     UNIT_NAME_PATTERN,
     validate_sysctl_key,
     validate_unit_name,
+)
+from meho_backplane.connectors.linux.script_preview import (
+    script_matches_expected,
+    script_preview_fields,
 )
 
 if TYPE_CHECKING:
@@ -732,6 +738,8 @@ async def linux_script_run(
     script = params["script"]
     if not isinstance(script, str):
         raise LinuxWriteSafetyError("script must be a string")
+    if script_matches_expected(script, params.get("expected_sha256")) is False:
+        raise LinuxWriteSafetyError("the script does not match expected_sha256")
     interpreter = _validate_abspath(
         params.get("interpreter") or _DEFAULT_INTERPRETER, "interpreter"
     )
@@ -979,17 +987,19 @@ async def _linux_file_write_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
 
 async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview builder for ``linux.script.run`` -- program identity, never values.
+    """Preview builder for ``linux.script.run`` -- the script, never the values.
 
     ``linux.script.run`` classifies ``credential_write`` (its ``arguments`` /
     ``env`` may carry secrets), so ``preview_operation`` returns
-    ``preview_unavailable`` for it; this bespoke builder runs *at park time* and
-    echoes only the *shape*: the target, the interpreter, the script byte size,
-    the argument byte size, the env-var NAMES, the ``secret_env`` reference
-    mapping (non-secret ``ENV -> path#field`` Vault pointers), the working
-    directory, the sudo intent, and the timeout -- never the script body, the
-    argument values, or the env values (mirrors the guest program-run
-    precedent). Declines (``None``) on malformed params.
+    ``preview_unavailable`` for it; this bespoke builder runs *at park time*.
+    The script body is the change the approver decides on, so the preview
+    shows it with its SHA-256 and the optional check against a reviewed copy
+    (:func:`~meho_backplane.connectors.linux.script_preview.script_preview_fields`).
+    Next to it: the target, the interpreter, the argument byte size, the
+    env-var NAMES, the ``secret_env`` reference mapping (non-secret
+    ``ENV -> path#field`` Vault pointers), the working directory, the sudo
+    intent, and the timeout -- never the argument values or the env values.
+    Declines (``None``) on malformed params.
     """
     script = ctx.params.get("script")
     if not isinstance(script, str):
@@ -998,7 +1008,7 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     preview: dict[str, Any] = {
         "target": _target_label(ctx.target),
         "interpreter": interpreter,
-        "script_bytes": len(script.encode("utf-8")),
+        **script_preview_fields(ctx.params),
         "use_sudo": bool(ctx.params.get("use_sudo", False)),
     }
     arguments = ctx.params.get("arguments")
@@ -1227,7 +1237,27 @@ _SCRIPT_RUN_OP = LinuxOp(
             },
             "script": {
                 "type": "string",
-                "description": "The script body to run. Do NOT embed bare secrets.",
+                "description": (
+                    "The script body to run. The approver reads it and its "
+                    "SHA-256. Do NOT embed bare secrets."
+                ),
+            },
+            "script_ref": {
+                "type": "string",
+                "maxLength": 512,
+                "description": (
+                    "Optional. Where the reviewed copy of the script lives (a "
+                    "commit, a pull request, a file path). Shown to the approver."
+                ),
+            },
+            "expected_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{64}$",
+                "description": (
+                    "Optional SHA-256 (hex) of the reviewed script. The approver "
+                    "sees whether the script matches it; a script that does not "
+                    "match is refused when it would run."
+                ),
             },
             "arguments": {
                 "type": "string",
@@ -1315,7 +1345,9 @@ _SCRIPT_RUN_OP = LinuxOp(
             "Vault server-side at run time and never persisted. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {
-            "script": "The script body; no bare secrets.",
+            "script": "The script body; no bare secrets. The approver reads it.",
+            "script_ref": "Optional; where the reviewed copy is (commit, PR, path).",
+            "expected_sha256": "Optional; SHA-256 hex of the reviewed script.",
             "interpreter": "Absolute path; defaults to /bin/bash.",
             "arguments": "Optional command line; word-split.",
             "env": "Optional; no bare secrets in values.",

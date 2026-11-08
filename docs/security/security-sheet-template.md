@@ -67,20 +67,31 @@ release, approved once per release):**
 
 {{ cis_exceptions }}
 
-## 3. Vulnerability scan of the MEHO image
+## 3. Vulnerability scan of the release images
 
-The release job scanned the MEHO image with Trivy, by digest:
+The release job scanned every image of this release with Trivy, each by
+its digest: the MEHO image and the images the install brings with it,
+for example the database and the login server. These are the images of
+the download for a Linux server without internet, read from the chart
+and the storage helper of this release. The MEHO image is:
 
 `ghcr.io/evoila/meho@{{ image_digest }}`
 
-It scanned the image for linux/amd64. It counts the known security bugs
-(CVEs) of the OS packages and the Python packages in the image.
+It scanned each image for linux/amd64. It counts the known security bugs
+(CVEs) of the OS packages and the language packages in the images.
+
+All images together:
 
 {{ vuln_counts }}
 
-Before the image job publishes an image, the same scan must find no
+Each image:
+
+{{ vuln_images }}
+
+Before the image job publishes the MEHO image, the same scan must find no
 CRITICAL or HIGH finding that has a fix. Otherwise the image is not
-published.
+published. The other images are made by their own projects; the release
+pins each one by its digest.
 
 **CRITICAL and HIGH findings:**
 
@@ -90,7 +101,7 @@ published.
 
 {{ vuln_exceptions }}
 
-The full scan report: `{{ vuln_report_file }}`.
+The full scan report of every image (one JSON list): `{{ vuln_report_file }}`.
 
 ## 4. What is inside (SBOM)
 

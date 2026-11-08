@@ -4,7 +4,7 @@
 # Makes the security sheet of a release and attaches it to the GitHub
 # Release (#4639). The sheet is one short Markdown file for the customer's
 # security team: the open ports, the CIS results, the vulnerability scan of
-# the MEHO image, the SBOM and how to check each signature. See
+# every image of the release, the SBOM and how to check each signature. See
 # docs/codebase/release-security-sheet.md.
 #
 # Two ways to run it:
@@ -19,8 +19,10 @@
 #      signed checksum files of the release, with the same commands the
 #      sheet gives the reader. A failed check stops the job: no sheet;
 #   2. reads the SBOM from the image's signed attestation;
-#   3. scans the image by digest with Trivy (all severities, the same
-#      exception file as the image job, never fails on a finding);
+#   3. lists every image of the release (the images of the form-2
+#      download: the chart's and the storage helper's) and scans each one
+#      by digest with Trivy (all severities, the same exception file as the
+#      image job, never fails on a finding);
 #   4. reads the firewall's port list from the tag's install script, and
 #      the appliance's CIS exception list from the tag;
 #   5. writes the sheet with scripts/release/security_sheet.py and attaches
@@ -171,19 +173,69 @@ jobs:
           head -n 1 "${RUNNER_TEMP}/attestations.jsonl" \
             | jq -e '.payload | @base64d | fromjson | .predicate' > "${DATA}/sbom.spdx.json"
 
-      - name: Scan the image (Trivy, all severities)
-        # Same action commit and exception file as the image job. It does not
-        # fail on a finding: the sheet reports the findings. The image job's
-        # gate already refused any fixable CRITICAL or HIGH finding before it
-        # published the image.
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+      - name: List the images of the release
+        # The same list as the form-2 download of the tag: the images of the
+        # signed chart, rendered as the install renders it, and the images of
+        # the storage helper, each locked to a digest. The functions come from
+        # deploy/linux-server/packaging/ of the tag, so the list is the one the
+        # download build of that tag made.
+        env:
+          CHART_DIGEST: ${{ steps.digests.outputs.chart }}
+        run: |
+          set -euo pipefail
+          PACKAGING_DIR=release/deploy/linux-server/packaging
+          # shellcheck source=/dev/null
+          source "${PACKAGING_DIR}/common.sh"
+          # shellcheck source=/dev/null
+          source "${PACKAGING_DIR}/images.sh"
+          # shellcheck source=/dev/null
+          source "${PACKAGING_DIR}/parts.sh"
+          work="${RUNNER_TEMP}/images"
+          mkdir -p "${work}/chart"
+          curl -fsSL -o "${work}/helm.tar.gz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${work}/helm.tar.gz" | sha256sum -c -
+          tar -xzf "${work}/helm.tar.gz" -C "${work}" linux-amd64/helm
+          helm="${work}/linux-amd64/helm"
+          output=$("${helm}" pull "oci://${MEHO_CHART_REPOSITORY}" --version "${TAG#v}" -d "${work}/chart" 2>&1)
+          pulled=$(awk '/^Digest:/ { print $2; exit }' <<<"${output}")
+          if [[ "${pulled}" != "${CHART_DIGEST}" ]]; then
+            echo "::error::helm pulled the chart with the digest '${pulled}', but cosign checked ${CHART_DIGEST}."
+            exit 1
+          fi
+          chart=$(find "${work}/chart" -maxdepth 1 -name '*.tgz' -print -quit)
+          {
+            chart_image_refs "${helm}" "${chart}" release/deploy/linux-server/values-single-node.yaml "${TAG}"
+            images_in_manifests < release/deploy/linux-server/storage/local-path-storage.yaml
+          } | LC_ALL=C sort -u > "${work}/refs.txt"
+          lock_images "${work}/refs.txt" "${DATA}/images.txt"
+          cat "${DATA}/images.txt"
+
+      - name: Install Trivy
+        # The setup action and the Trivy version that trivy-action v0.36.0
+        # uses, the action of the image job.
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514  # v0.2.6
         with:
-          image-ref: ghcr.io/evoila/meho@${{ steps.digests.outputs.image }}
-          scanners: vuln
-          format: json
-          output: data/trivy.json
-          trivyignores: release/.trivyignore
-          exit-code: '0'
+          version: v0.70.0
+
+      - name: Scan every image of the release (Trivy, all severities)
+        # The same exception file as the image job. It does not fail on a
+        # finding: the sheet reports the findings. The image job's gate
+        # already refused any fixable CRITICAL or HIGH finding in the MEHO
+        # image before it published it.
+        run: |
+          set -euo pipefail
+          mkdir -p "${DATA}/trivy"
+          # Once per image and digest: two tags of one image are one scan.
+          while read -r name digest; do
+            echo "${name%:*}@${digest}"
+          done < "${DATA}/images.txt" | LC_ALL=C sort -u > "${RUNNER_TEMP}/scan-refs.txt"
+          number=0
+          while read -r ref; do
+            number=$((number + 1))
+            trivy image --scanners vuln --format json --platform linux/amd64 \
+              --ignorefile release/.trivyignore --exit-code 0 \
+              --output "${DATA}/trivy/image-${number}.json" "${ref}"
+          done < "${RUNNER_TEMP}/scan-refs.txt"
 
       - name: Collect the facts and the port list of the tag
         env:
@@ -221,7 +273,7 @@ jobs:
           fi
           python3 tool/scripts/release/security_sheet.py \
             --data "${DATA}" "${previous[@]}" --out "${RUNNER_TEMP}/assets/${sheet}"
-          cp "${DATA}/trivy.json" "${RUNNER_TEMP}/assets/meho-vulnerability-scan-${TAG}.json"
+          jq -s '.' "${DATA}"/trivy/*.json > "${RUNNER_TEMP}/assets/meho-vulnerability-scan-${TAG}.json"
           cp "${DATA}/sbom.spdx.json" "${RUNNER_TEMP}/assets/meho-sbom-${TAG}.spdx.json"
           cat "${RUNNER_TEMP}/assets/meho-security-sheet-${TAG}.md" >> "${GITHUB_STEP_SUMMARY}"
 

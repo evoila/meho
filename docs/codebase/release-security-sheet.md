@@ -7,13 +7,13 @@ team: `meho-security-sheet-<tag>.md` on the GitHub Release (#4639, ADR
 1. the open ports, and who may talk to them;
 2. the CIS results: RKE2's CIS profile and the appliance's CIS Ubuntu
    Level 1 scan;
-3. the vulnerability scan of the MEHO image;
+3. the vulnerability scan of every image of the release;
 4. the SBOM (the list of every package in the image);
 5. how to check the signature of each download.
 
 Two more files go next to it on the release: the SBOM
-(`meho-sbom-<tag>.spdx.json`) and the full scan report
-(`meho-vulnerability-scan-<tag>.json`).
+(`meho-sbom-<tag>.spdx.json`) and the full scan reports of every image,
+as one JSON list (`meho-vulnerability-scan-<tag>.json`).
 
 ## Key files
 
@@ -43,14 +43,25 @@ when the sheet job starts. The job:
 3. reads the SBOM from the image's signed SPDX attestation
    (`cosign verify-attestation --type spdxjson`), which `image.yml` made
    with syft;
-4. scans the image by digest with Trivy: every severity, the scan
+4. lists every image of the release in `images.txt`, the same list as
+   the form-2 download of the tag: it pulls the signed chart (and checks
+   that its digest is the one cosign checked), renders it with
+   `chart_image_refs`, adds the images of the storage helper's manifest
+   and locks each image to a digest with `lock_images`. These functions
+   come from `deploy/linux-server/packaging/` of the tag, with the Helm
+   version pinned there. So the list holds the MEHO image, PostgreSQL,
+   Keycloak, OpenBao, Valkey and the storage helper's images;
+5. scans each image once, by digest, with Trivy: every severity, the scan
    exception file `.trivyignore` of the tag, and it never fails on a
-   finding. The image job's own scan already refused every CRITICAL or
+   finding. Two tags of one image (the download also names a digest-pinned
+   image `digest-<hex>`) are one scan. The sheet shows the totals, one row
+   per image, and every CRITICAL and HIGH finding with its image. The
+   MEHO image job's own scan already refused every CRITICAL or
    HIGH finding that has a fix;
-5. writes `facts.json`, the port list (`firewall_port_list` of
+6. writes `facts.json`, the port list (`firewall_port_list` of
    `deploy/linux-server/lib/firewall.sh` at the tag), and copies
    `.trivyignore` and `deploy/appliance/cis/exceptions.md` of the tag;
-6. runs `security_sheet.py`, keeps the data folder as the workflow
+7. runs `security_sheet.py`, keeps the data folder as the workflow
    artifact `security-sheet-data` (90 days), and attaches the sheet, the
    SBOM and the scan report with `gh release upload --clobber`.
 
@@ -92,7 +103,10 @@ script: the release manager removes them before the run.
 ### Fail closed
 
 The script stops with exit code 2, and writes no sheet, when a data file
-is missing or has the wrong shape: a Trivy report without scanned targets,
+is missing or has the wrong shape: an image of `images.txt` without its
+Trivy report (the script matches each report by its `ArtifactName`), a
+report for an image that is not in the list, `images.txt` without the
+MEHO image of the tag, a Trivy report without scanned targets,
 an SBOM without packages, an empty port list, a scan result list without
 rules, a tag or digest of the wrong form. So a sheet never says "no
 findings" for data it could not read. The template and the script must
@@ -103,20 +117,24 @@ agree: a place without a value, or a value without a place, stops it too.
 - cosign v3 (`sigstore/cosign-installer` v4.1.2, as in the other release
   workflows). The SBOM is `.payload | @base64d | fromjson | .predicate` of
   the attestation line; checked against the v0.45.0 image.
-- Trivy through `aquasecurity/trivy-action` v0.36.0, the same commit as
-  `image.yml`. The JSON report has `SchemaVersion` 2 and leaves out
+- Trivy v0.70.0, installed with `aquasecurity/setup-trivy` v0.2.6: the
+  version and the setup action that `aquasecurity/trivy-action` v0.36.0
+  of `image.yml` uses. The JSON report has `SchemaVersion` 2, leaves out
   `Vulnerabilities` for a target without findings (Trivy
-  `pkg/types/report.go`).
+  `pkg/types/report.go`), and its `ArtifactName` is the reference that was
+  scanned (`pkg/fanal/image/remote.go`).
+- Helm, pinned by version and sha256 in
+  `deploy/linux-server/packaging/common.sh` of the tag, to pull and render
+  the chart.
 - regctl v0.11.6, the same pin as `linux-download.yml`.
 - `gh` on the GitHub-hosted runner, for `gh release download` and
   `gh release upload --clobber`.
 
 ## Known issues
 
-- Only the MEHO image is scanned. The chart's other images (Postgres,
-  Keycloak, OpenBao, Valkey, and the storage helper's) are not in the
-  sheet.
-- Trivy scans the linux/amd64 image of the multi-arch image.
+- Trivy scans the linux/amd64 image of each multi-arch image.
+- The SBOM covers only the MEHO image. The other images are listed with
+  their digests and scanned, but the sheet has no SBOM of them.
 
 ## References
 

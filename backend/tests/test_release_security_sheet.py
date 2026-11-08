@@ -39,6 +39,12 @@ _FACTS = {
     "made_on": "2026-11-07",
 }
 
+_MEHO_REF = "ghcr.io/evoila/meho@" + _IMAGE_DIGEST
+_PG_NAME = "docker.io/library/postgres:17.6"
+_PG_DIGEST = "sha256:" + "c" * 64
+_PG_REF = "docker.io/library/postgres@" + _PG_DIGEST
+_IMAGES = f"ghcr.io/evoila/meho:v1.0.0 {_IMAGE_DIGEST}\n{_PG_NAME} {_PG_DIGEST}\n"
+
 _PORTS = "80/tcp open\n443/tcp open\n22/tcp admin-network\n6443/tcp closed\n8472/udp closed\n"
 
 
@@ -54,17 +60,21 @@ def _vuln(vid: str, severity: str, fixed: str | None = None) -> dict[str, Any]:
     return item
 
 
-def _trivy(*vulns: dict[str, Any]) -> dict[str, Any]:
+def _trivy(*vulns: dict[str, Any], ref: str = _MEHO_REF) -> dict[str, Any]:
     results: list[dict[str, Any]] = [
-        {"Target": "ghcr.io/evoila/meho (debian 12.12)", "Class": "os-pkgs", "Type": "debian"},
+        {"Target": f"{ref} (debian 12.12)", "Class": "os-pkgs", "Type": "debian"},
         {"Target": "Python", "Class": "lang-pkgs", "Type": "python-pkg"},
     ]
     if vulns:
         results[0]["Vulnerabilities"] = list(vulns)
+    return {"SchemaVersion": 2, "ArtifactName": ref, "Results": results}
+
+
+def _scans(meho: Any = None, pg: Any = None) -> dict[str, Any]:
+    """The trivy/ folder: one report for each image of _IMAGES."""
     return {
-        "SchemaVersion": 2,
-        "ArtifactName": "ghcr.io/evoila/meho@" + _IMAGE_DIGEST,
-        "Results": results,
+        "image-1.json": _trivy() if meho is None else meho,
+        "image-2.json": _trivy(ref=_PG_REF) if pg is None else pg,
     }
 
 
@@ -91,7 +101,8 @@ def _data(tmp_path: Path, **override: Any) -> Path:
     data.mkdir()
     files: dict[str, Any] = {
         "facts.json": _FACTS,
-        "trivy.json": _trivy(),
+        "images.txt": _IMAGES,
+        "trivy": _scans(),
         "sbom.spdx.json": _SBOM,
         "ports.txt": _PORTS,
         "trivyignore": _TRIVYIGNORE,
@@ -99,7 +110,8 @@ def _data(tmp_path: Path, **override: Any) -> Path:
     }
     names = {
         "facts_json": "facts.json",
-        "trivy_json": "trivy.json",
+        "images_txt": "images.txt",
+        "trivy": "trivy",
         "sbom_spdx_json": "sbom.spdx.json",
         "ports_txt": "ports.txt",
         "trivyignore": "trivyignore",
@@ -108,6 +120,12 @@ def _data(tmp_path: Path, **override: Any) -> Path:
     files.update({names[key]: value for key, value in override.items()})
     for name, value in files.items():
         if value is None:
+            continue
+        if name == "trivy":
+            (data / name).mkdir()
+            for report, content in value.items():
+                text = content if isinstance(content, str) else json.dumps(content)
+                (data / name / report).write_text(text, encoding="utf-8")
             continue
         text = value if isinstance(value, str) else json.dumps(value)
         (data / name).write_text(text, encoding="utf-8")
@@ -126,13 +144,14 @@ def _run(data: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str], str
 
 
 def test_writes_every_measured_part(tmp_path: Path) -> None:
-    trivy = _trivy(
+    meho = _trivy(
         _vuln("CVE-2026-0001", "HIGH"),
         _vuln("CVE-2026-0002", "MEDIUM", fixed="1.1"),
         _vuln("CVE-2026-0003", "CRITICAL"),
         _vuln("CVE-2026-0004", "LOW"),
     )
-    proc, sheet = _run(_data(tmp_path, trivy_json=trivy))
+    pg = _trivy(_vuln("CVE-2026-0005", "HIGH", fixed="2.0"), ref=_PG_REF)
+    proc, sheet = _run(_data(tmp_path, trivy=_scans(meho, pg)))
     assert proc.returncode == 0, proc.stderr
     assert sheet is not None
     assert "{{" not in sheet
@@ -142,11 +161,18 @@ def test_writes_every_measured_part(tmp_path: Path) -> None:
     assert "image.yml@refs/tags/v1.0.0" in sheet
     assert "| 22/tcp | admin-network |" in sheet
     assert "| 8472/udp | closed |" in sheet
+    # The totals count the findings of both images.
     assert "| CRITICAL | 0 | 1 |" in sheet
-    assert "| HIGH | 0 | 1 |" in sheet
+    assert "| HIGH | 1 | 1 |" in sheet
     assert "| MEDIUM | 1 | 0 |" in sheet
+    # One row per image, with its digest.
+    assert f"| `ghcr.io/evoila/meho:v1.0.0` | `{_IMAGE_DIGEST}` | 1 | 1 | 1 | 1 | 0 |" in sheet
+    assert f"| `{_PG_NAME}` | `{_PG_DIGEST}` | 0 | 1 | 0 | 0 | 0 |" in sheet
     # CRITICAL first, then HIGH; MEDIUM and LOW are only counted.
     assert sheet.index("CVE-2026-0003") < sheet.index("CVE-2026-0001")
+    assert sheet.index("CVE-2026-0001") < sheet.index("CVE-2026-0005")
+    assert f"| CVE-2026-0005 | HIGH | {_PG_NAME} | libexample | 1.0 | 2.0 |" in sheet
+    assert "| CVE-2026-0001 | HIGH | ghcr.io/evoila/meho:v1.0.0 |" in sheet
     assert "CVE-2026-0002" not in sheet
     assert "- Packages listed: 3" in sheet
     assert "- Made by: syft-1.54.0" in sheet
@@ -156,6 +182,35 @@ def test_writes_every_measured_part(tmp_path: Path) -> None:
     assert "blob/v1.0.0/deploy/appliance/cis/not-applicable.md" in sheet
     # No lab folder: the three lab parts say so, they are not left empty.
     assert sheet.count("Not measured for this release yet.") == 3
+
+
+def test_one_image_under_two_names_is_one_scan(tmp_path: Path) -> None:
+    """The download names a digest-pinned image twice: by its tag and by digest-<hex>."""
+    busybox = "sha256:" + "d" * 64
+    pgvector = "sha256:" + "e" * 64
+    images = (
+        _IMAGES
+        + f"docker.io/library/busybox:1.37 {busybox}\n"
+        + f"docker.io/library/busybox:digest-{busybox[7:]} {busybox}\n"
+        + f"docker.io/pgvector/pgvector:digest-{pgvector[7:]} {pgvector}\n"
+    )
+    scans = {
+        **_scans(),
+        "image-3.json": _trivy(
+            _vuln("CVE-2026-0007", "HIGH"), ref="docker.io/library/busybox@" + busybox
+        ),
+        "image-4.json": _trivy(ref="docker.io/pgvector/pgvector@" + pgvector),
+    }
+    proc, sheet = _run(_data(tmp_path, images_txt=images, trivy=scans))
+    assert proc.returncode == 0, proc.stderr
+    assert sheet is not None
+    # One row, and its finding counted once.
+    assert f"| `docker.io/library/busybox:1.37` | `{busybox}` | 0 | 1 | 0 | 0 | 0 |" in sheet
+    assert sheet.count(busybox) == 1
+    assert "| HIGH | 0 | 1 |" in sheet
+    # A digest-only name shows the image without the digest-<hex> tag.
+    assert f"| `docker.io/pgvector/pgvector` | `{pgvector}` |" in sheet
+    assert "digest-" not in sheet
 
 
 def test_clean_scan_says_none(tmp_path: Path) -> None:
@@ -369,27 +424,59 @@ def test_missing_lab_folder_fails(tmp_path: Path) -> None:
         ({"facts_json": {**_FACTS, "commit": ""}}, "no value for 'commit'"),
         ({"facts_json": {**_FACTS, "tag": "1.0.0"}}, "is not like v1.0.0"),
         ({"facts_json": {**_FACTS, "image_digest": "sha256:short"}}, "not a sha256 digest"),
-        ({"trivy_json": None}, "cannot read"),
-        ({"trivy_json": {"SchemaVersion": 2}}, "no scanned target"),
-        ({"trivy_json": {"SchemaVersion": 2, "Results": []}}, "no scanned target"),
-        ({"trivy_json": {"Results": [{"Target": "x"}]}}, "SchemaVersion 2"),
+        ({"trivy": None}, "not a folder"),
+        ({"trivy": {}}, "no report for"),
+        ({"trivy": {"image-1.json": _trivy()}}, f"no report for: {_PG_REF}"),
+        ({"trivy": _scans(pg="{not json")}, "not valid JSON"),
+        ({"trivy": _scans(pg=_trivy())}, f"two reports in trivy/ scanned {_MEHO_REF}"),
+        (
+            {"trivy": {**_scans(), "x.json": _trivy(ref="docker.io/library/redis@" + _PG_DIGEST)}},
+            "not in images.txt",
+        ),
+        ({"trivy": _scans(pg={"SchemaVersion": 2, "Results": []})}, "names no scanned image"),
+        (
+            {"trivy": _scans(pg={"SchemaVersion": 2, "ArtifactName": _PG_REF})},
+            "trivy/image-2.json has no scanned target",
+        ),
+        (
+            {"trivy": _scans(pg={"SchemaVersion": 2, "ArtifactName": _PG_REF, "Results": []})},
+            "no scanned target",
+        ),
+        (
+            {"trivy": _scans(pg={"ArtifactName": _PG_REF, "Results": [{"Target": "x"}]})},
+            "SchemaVersion 2",
+        ),
         (
             {
-                "trivy_json": {
-                    "SchemaVersion": 2,
-                    "Results": [{"Target": "x", "Vulnerabilities": {}}],
-                }
+                "trivy": _scans(
+                    pg={
+                        "SchemaVersion": 2,
+                        "ArtifactName": _PG_REF,
+                        "Results": [{"Target": "x", "Vulnerabilities": {}}],
+                    }
+                )
             },
             "not a list",
         ),
         (
             {
-                "trivy_json": {
-                    "SchemaVersion": 2,
-                    "Results": [{"Target": "x", "Vulnerabilities": [{}]}],
-                }
+                "trivy": _scans(
+                    pg={
+                        "SchemaVersion": 2,
+                        "ArtifactName": _PG_REF,
+                        "Results": [{"Target": "x", "Vulnerabilities": [{}]}],
+                    }
+                )
             },
             "without a VulnerabilityID",
+        ),
+        ({"images_txt": None}, "cannot read"),
+        ({"images_txt": "\n"}, "lists no image"),
+        ({"images_txt": f"ghcr.io/evoila/meho {_IMAGE_DIGEST}\n"}, "line 1"),
+        ({"images_txt": "ghcr.io/evoila/meho:v1.0.0 sha256:short\n"}, "line 1"),
+        (
+            {"images_txt": f"{_PG_NAME} {_PG_DIGEST}\n", "trivy": {"p.json": _trivy(ref=_PG_REF)}},
+            "does not hold the MEHO image",
         ),
         ({"sbom_spdx_json": {"packages": [{}]}}, "no 'spdxVersion'"),
         ({"sbom_spdx_json": {"spdxVersion": "SPDX-2.3", "packages": []}}, "lists no package"),

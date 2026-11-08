@@ -41,11 +41,12 @@ it, and attaches it to the same Release
 ([`docs/codebase/linux-server-download.md`](codebase/linux-server-download.md)).
 
 Last, `cli-release.yml` calls `security-sheet.yml`. It checks the
-signature of the image, the chart and each checksum file, scans the image,
+signature of the image, the chart and each checksum file, scans every
+image of the release (the MEHO image and the images the install brings),
 and attaches three files to the Release: the security sheet
 `meho-security-sheet-vX.Y.Z.md` (one short file for the customer's
 security team), the SBOM `meho-sbom-vX.Y.Z.spdx.json` and the full scan
-report `meho-vulnerability-scan-vX.Y.Z.json`
+reports `meho-vulnerability-scan-vX.Y.Z.json`
 ([`docs/codebase/release-security-sheet.md`](codebase/release-security-sheet.md)).
 
 ## Supply-chain and CI baseline

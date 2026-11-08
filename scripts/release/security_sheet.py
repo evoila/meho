@@ -14,7 +14,13 @@ The data folder (``--data``) holds:
 
 * ``facts.json``: ``{"tag", "commit", "image_digest", "chart_digest",
   "made_on"}``;
-* ``trivy.json``: the Trivy JSON report of the MEHO image;
+* ``images.txt``: every image of the release, one ``<image>:<tag> <digest>``
+  line per image (the image list of the form-2 download, made with
+  ``lock_images`` of ``deploy/linux-server/packaging/images.sh``);
+* ``trivy/``: one Trivy JSON report per image of ``images.txt``, any file
+  name ending in ``.json``. Each report's ``ArtifactName`` must be
+  ``<image>@<digest>``. Two lines of ``images.txt`` with the same image and
+  digest (two tags of one image) share one report;
 * ``sbom.spdx.json``: the SBOM of the MEHO image (SPDX JSON);
 * ``ports.txt``: the output of ``firewall_port_list`` of the tag;
 * ``trivyignore``: the ``.trivyignore`` file of the tag;
@@ -73,6 +79,7 @@ SBOM_FILE = "meho-sbom-{tag}.spdx.json"
 _PLACEHOLDER = re.compile(r"\{\{ ([a-z0-9_]+) \}\}")
 _TAG = re.compile(r"^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+MEHO_IMAGE = "ghcr.io/evoila/meho"
 _IPV4 = re.compile(r"(?<!\d)(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?!\.?\d)")
 _LAB_MARK = re.compile(r"<!-- (?:end )?lab_")
 
@@ -129,25 +136,76 @@ def port_rows(text: str) -> str:
     return "\n".join(rows)
 
 
-def _vulnerabilities(report: Any) -> list[dict[str, Any]]:
+def read_images(text: str) -> list[tuple[str, str]]:
+    """The images of the release, once each: ``(<image>@<digest>, <name to show>)``.
+
+    A line is ``<image>:<tag> <digest>``. The download names an image that is
+    pinned by digest only ``<image>:digest-<hex>``; that tag is not shown.
+    """
+    tags: dict[str, list[str]] = {}
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) != 2 or ":" not in parts[0].rsplit("/", 1)[-1] or not _DIGEST.match(parts[1]):
+            raise InputError(f"images.txt line {number} is not '<image>:<tag> <digest>': {line!r}")
+        repository, tag = parts[0].rsplit(":", 1)
+        shown = tags.setdefault(f"{repository}@{parts[1]}", [])
+        if not tag.startswith("digest-"):
+            shown.append(f"{repository}:{tag}")
+    if not tags:
+        raise InputError("images.txt lists no image.")
+    return [
+        (ref, ", ".join(sorted(shown)) or ref.split("@", 1)[0])
+        for ref, shown in sorted(tags.items())
+    ]
+
+
+def _vulnerabilities(report: Any, label: str) -> list[dict[str, Any]]:
     if not isinstance(report, dict) or report.get("SchemaVersion") != 2:
-        raise InputError("trivy.json is not a Trivy JSON report (SchemaVersion 2).")
+        raise InputError(f"{label} is not a Trivy JSON report (SchemaVersion 2).")
     results = report.get("Results")
     if not isinstance(results, list) or not results:
-        raise InputError("trivy.json has no scanned target, so the scan did not read the image.")
+        raise InputError(f"{label} has no scanned target, so the scan did not read the image.")
     found: list[dict[str, Any]] = []
     for result in results:
         if not isinstance(result, dict):
-            raise InputError("trivy.json has a result that is not an object.")
+            raise InputError(f"{label} has a result that is not an object.")
         # Trivy leaves "Vulnerabilities" out when a target has none.
         items = result.get("Vulnerabilities", [])
         if not isinstance(items, list):
-            raise InputError("trivy.json has a 'Vulnerabilities' value that is not a list.")
+            raise InputError(f"{label} has a 'Vulnerabilities' value that is not a list.")
         for item in items:
             if not isinstance(item, dict) or not item.get("VulnerabilityID"):
-                raise InputError("trivy.json has a finding without a VulnerabilityID.")
+                raise InputError(f"{label} has a finding without a VulnerabilityID.")
             found.append(item)
     return found
+
+
+def read_scans(
+    folder: Path, images: list[tuple[str, str]]
+) -> list[tuple[str, str, list[dict[str, Any]]]]:
+    """The findings of each image, from its Trivy report. Every image needs one."""
+    if not folder.is_dir():
+        raise InputError(f"cannot read {folder}: it is not a folder.")
+    by_ref: dict[str, list[dict[str, Any]]] = {}
+    for path in sorted(folder.glob("*.json")):
+        label = f"trivy/{path.name}"
+        report = _read_json(path)
+        ref = report.get("ArtifactName") if isinstance(report, dict) else None
+        if not isinstance(ref, str) or not ref:
+            raise InputError(f"{label} names no scanned image (ArtifactName).")
+        if ref in by_ref:
+            raise InputError(f"two reports in trivy/ scanned {ref}.")
+        by_ref[ref] = _vulnerabilities(report, label)
+    refs = [ref for ref, _ in images]
+    missing = [ref for ref in refs if ref not in by_ref]
+    if missing:
+        raise InputError(f"trivy/ has no report for: {', '.join(missing)}.")
+    extra = sorted(set(by_ref) - set(refs))
+    if extra:
+        raise InputError(f"trivy/ has a report for an image not in images.txt: {', '.join(extra)}.")
+    return [(ref, name, by_ref[ref]) for ref, name in images]
 
 
 def _severity(item: dict[str, Any]) -> str:
@@ -155,38 +213,57 @@ def _severity(item: dict[str, Any]) -> str:
     return value if value in SEVERITIES else "UNKNOWN"
 
 
-def vuln_parts(report: Any) -> tuple[str, str]:
-    """The count table and the list of CRITICAL and HIGH findings."""
-    found = _vulnerabilities(report)
+def vuln_parts(scans: list[tuple[str, str, list[dict[str, Any]]]]) -> dict[str, str]:
+    """The count tables and the list of CRITICAL and HIGH findings of all images."""
     with_fix: Counter[str] = Counter()
     without_fix: Counter[str] = Counter()
-    for item in found:
-        (with_fix if item.get("FixedVersion") else without_fix)[_severity(item)] += 1
-    lines = [
+    per_image = [
+        "| Image | Digest | " + " | ".join(SEVERITIES) + " |",
+        "|---|---|" + "---|" * len(SEVERITIES),
+    ]
+    serious: list[tuple[str, dict[str, Any]]] = []
+    for ref, name, found in scans:
+        counts: Counter[str] = Counter()
+        for item in found:
+            severity = _severity(item)
+            counts[severity] += 1
+            (with_fix if item.get("FixedVersion") else without_fix)[severity] += 1
+            if severity in ("CRITICAL", "HIGH"):
+                serious.append((name, item))
+        numbers = " | ".join(str(counts[sev]) for sev in SEVERITIES)
+        per_image.append(f"| `{_cell(name)}` | `{ref.split('@', 1)[1]}` | {numbers} |")
+    totals = [
         "| Severity | With a fix | No fix yet |",
         "|---|---|---|",
         *(f"| {sev} | {with_fix[sev]} | {without_fix[sev]} |" for sev in SEVERITIES),
     ]
-    serious = sorted(
-        (item for item in found if _severity(item) in ("CRITICAL", "HIGH")),
-        key=lambda item: (SEVERITIES.index(_severity(item)), str(item["VulnerabilityID"])),
-    )
+    values = {"vuln_counts": "\n".join(totals), "vuln_images": "\n".join(per_image)}
     if not serious:
-        return "\n".join(lines), "None."
+        values["vuln_findings"] = "None."
+        return values
+    serious.sort(
+        key=lambda pair: (
+            SEVERITIES.index(_severity(pair[1])),
+            str(pair[1]["VulnerabilityID"]),
+            pair[0],
+        )
+    )
     rows = [
-        "| Finding | Severity | Package | Installed | Fixed in |",
-        "|---|---|---|---|---|",
+        "| Finding | Severity | Image | Package | Installed | Fixed in |",
+        "|---|---|---|---|---|---|",
     ]
-    for item in serious:
+    for name, item in serious:
         cells = (
             item["VulnerabilityID"],
             _severity(item),
+            name,
             item.get("PkgName") or "?",
             item.get("InstalledVersion") or "?",
             item.get("FixedVersion") or "no fix yet",
         )
         rows.append("| " + " | ".join(_cell(str(cell)) for cell in cells) + " |")
-    return "\n".join(lines), "\n".join(rows)
+    values["vuln_findings"] = "\n".join(rows)
+    return values
 
 
 def _cell(text: str) -> str:
@@ -335,13 +412,15 @@ def sheet(data: Path, lab: Path | None, previous: Path | None, template: str) ->
     """The security sheet for the data folder, the lab folder and the previous sheet."""
     facts = read_facts(data / "facts.json")
     tag = facts["tag"]
-    counts, findings = vuln_parts(_read_json(data / "trivy.json"))
+    images = read_images(_read_text(data / "images.txt"))
+    meho = f"{MEHO_IMAGE}@{facts['image_digest']}"
+    if meho not in (ref for ref, _ in images):
+        raise InputError(f"images.txt does not hold the MEHO image of facts.json, {meho}.")
     values = {
         **facts,
         "version": tag.removeprefix("v"),
         "port_rows": port_rows(_read_text(data / "ports.txt")),
-        "vuln_counts": counts,
-        "vuln_findings": findings,
+        **vuln_parts(read_scans(data / "trivy", images)),
         "vuln_exceptions": vuln_exceptions(_read_text(data / "trivyignore")),
         "cis_exceptions": cis_exceptions(_read_text(data / "cis-exceptions.md")),
         "vuln_report_file": VULN_REPORT_FILE.format(tag=tag),

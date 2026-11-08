@@ -183,36 +183,55 @@ def test_other_tabs_do_not_mark_waiting_rows() -> None:
     operator.assert_not_awaited()
 
 
-def test_load_more_page_is_split_the_same_way() -> None:
+def _seed_newer_others_and_one_older_waiting() -> None:
+    """25 newer requests this person cannot approve, and one older they can."""
     _seed_tenant(_TENANT_A, "tenant-a")
     for i in range(25):
         _seed_request(
             tenant_id=_TENANT_A,
-            op_id=f"first.{i:02d}",
+            op_id=f"own.{i:02d}",
+            principal_sub=_REVIEWER_SUB,
             created_at=datetime(2026, 6, 15, 12, i, tzinfo=UTC),
         )
-    # The two oldest rows land on page two; the newer one is the own one.
     _seed_request(
         tenant_id=_TENANT_A,
-        op_id="page2.other",
+        op_id="older.waiting",
         created_at=datetime(2026, 6, 15, 9, 0, tzinfo=UTC),
     )
-    _seed_request(
-        tenant_id=_TENANT_A,
-        op_id="page2.own",
-        principal_sub=_REVIEWER_SUB,
-        created_at=datetime(2026, 6, 15, 10, 0, tzinfo=UTC),
-    )
-    operator = _operator(tenant_id=_TENANT_A)
 
-    body = _get_list(
-        "/ui/approvals/list?tab=pending&order=newest&offset=25&partial=rows",
-        AsyncMock(return_value=operator),
+
+def test_waiting_request_behind_a_full_page_comes_first_on_page_one() -> None:
+    _seed_newer_others_and_one_older_waiting()
+    operator = AsyncMock(return_value=_operator(tenant_id=_TENANT_A))
+
+    page_one = _get_list("/ui/approvals/list?tab=pending&order=newest", operator)
+    page_two = _get_list(
+        "/ui/approvals/list?tab=pending&order=newest&offset=25&partial=rows", operator
     )
 
-    ops = re.findall(r'aria-label="Review approval request for ([^"]+)"', body)
-    assert ops == ["page2.other", "page2.own"]
-    assert _waiting_ops(body) == ["page2.other"]
+    ops_one = _row_ops(page_one)
+    assert ops_one[0] == "older.waiting"
+    assert _waiting_ops(page_one) == ["older.waiting"]
+    assert ops_one[1:] == [f"own.{i:02d}" for i in range(24, 0, -1)]
+    # "Load more" goes on in the same order: the one row left is the oldest own one.
+    ops_two = re.findall(r'aria-label="Review approval request for ([^"]+)"', page_two)
+    assert ops_two == ["own.00"]
+    assert _WAITING_BADGE not in page_two
+
+
+def test_over_the_sort_cap_the_tab_pages_plainly_and_still_marks() -> None:
+    _seed_newer_others_and_one_older_waiting()
+    operator = AsyncMock(return_value=_operator(tenant_id=_TENANT_A))
+
+    with patch("meho_backplane.ui.routes.approvals.routes._WAITING_SORT_CAP", 10):
+        page_one = _get_list("/ui/approvals/list?tab=pending&order=newest", operator)
+        page_two = _get_list(
+            "/ui/approvals/list?tab=pending&order=newest&offset=25&partial=rows", operator
+        )
+
+    assert _row_ops(page_one) == [f"own.{i:02d}" for i in range(24, -1, -1)]
+    assert _WAITING_BADGE not in page_one
+    assert _waiting_ops(page_two) == ["older.waiting"]
 
 
 # ---------------------------------------------------------------------------

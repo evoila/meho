@@ -221,6 +221,12 @@ _PENDING_LIMIT: Final[int] = 50
 #: small so the first paint is fast; "Load more" advances the offset.
 _HISTORY_PAGE_SIZE: Final[int] = 25
 
+#: Most pending requests the Pending tab sorts "waiting for you" first
+#: before it pages (#6000). The check runs in Python, so the sort loads
+#: every pending request of the view. Above this count the tab pages in
+#: the plain order and only marks the rows of each page.
+_WAITING_SORT_CAP: Final[int] = 500
+
 #: Maximum work_ref length accepted by the history filter. ``work_ref`` is
 #: an opaque external change-ticket string (e.g. ``"gh:evoila/meho#1"``);
 #: bounding the wire shape rejects an oversized paste at the form boundary
@@ -445,6 +451,39 @@ async def _list_history_for_session(
         )
     has_more = len(rows) > _HISTORY_PAGE_SIZE
     return rows[:_HISTORY_PAGE_SIZE], has_more
+
+
+async def _list_pending_waiting_first(
+    session: UISessionContext,
+    operator: Operator,
+    *,
+    work_ref: str | None,
+    offset: int,
+    order: ApprovalListOrder,
+) -> tuple[list[ApprovalRequest], bool, set[uuid.UUID]] | None:
+    """Page the Pending tab with the requests *operator* may approve first.
+
+    The split runs over every pending request of the view before the page
+    is cut, so a request waiting for this person is on page one even when
+    25 newer requests are not. Returns ``(rows, has_more, waiting ids)``,
+    or ``None`` when more than :data:`_WAITING_SORT_CAP` requests are
+    pending; then the caller pages in the plain order.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        rows = await list_pending(
+            db_session,
+            tenant_id=session.tenant_id,
+            status="pending",
+            work_ref=work_ref,
+            limit=_WAITING_SORT_CAP + 1,
+            order=order,
+        )
+    if len(rows) > _WAITING_SORT_CAP:
+        return None
+    ordered, waiting = waiting_for_me_first(rows, operator)
+    page = ordered[offset : offset + _HISTORY_PAGE_SIZE]
+    return page, len(ordered) > offset + _HISTORY_PAGE_SIZE, waiting
 
 
 async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) -> ApprovalRequest:
@@ -686,14 +725,27 @@ async def _build_history_context(
         resolved_order = "oldest"
     else:
         resolved_order = "newest"
-    rows, has_more = await _list_history_for_session(
-        session,
-        status_filter=_HISTORY_TABS[tab],
-        work_ref=work_ref_filter,
-        offset=offset,
-        order=resolved_order,
-        outcome_unknown=tab == _OUTCOME_UNKNOWN_TAB,
-    )
+    operator = await _operator_or_none(session) if tab == "pending" else None
+    sorted_page = None
+    if operator is not None:
+        sorted_page = await _list_pending_waiting_first(
+            session, operator, work_ref=work_ref_filter, offset=offset, order=resolved_order
+        )
+    waiting: set[uuid.UUID] = set()
+    if sorted_page is not None:
+        rows, has_more, waiting = sorted_page
+    else:
+        rows, has_more = await _list_history_for_session(
+            session,
+            status_filter=_HISTORY_TABS[tab],
+            work_ref=work_ref_filter,
+            offset=offset,
+            order=resolved_order,
+            outcome_unknown=tab == _OUTCOME_UNKNOWN_TAB,
+        )
+        if operator is not None:
+            # Too many pending requests to sort: keep the order, still mark.
+            _, waiting = waiting_for_me_first(rows, operator)
     # The "outcome unknown" rows name the target to check (#5026); the
     # other tabs show the target in the modal only.
     target_names: dict[uuid.UUID, str] = {}
@@ -702,9 +754,6 @@ async def _build_history_context(
             target_names = await resolve_target_names(
                 db_session, tenant_id=session.tenant_id, requests=rows
             )
-    waiting: set[uuid.UUID] = set()
-    if tab == "pending" and rows:
-        rows, waiting = waiting_for_me_first(rows, await _operator_or_none(session))
     return {
         "requests": [
             {

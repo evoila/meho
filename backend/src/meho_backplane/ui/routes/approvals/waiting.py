@@ -9,8 +9,8 @@ that need this person sit at the top. The check is
 :func:`~meho_backplane.operations.approval_rights.approve_right`, the same
 one the detail modal and the approve itself use. The order inside each
 group stays as the database returned it, so a change ticket's steps keep
-their oldest-first order. The split works per page: "Load more" sorts the
-next page the same way.
+their oldest-first order. The route splits every pending request before
+it cuts the page, so "Load more" goes on with the same order.
 """
 
 from __future__ import annotations

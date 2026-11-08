@@ -3265,8 +3265,12 @@ the `sm:` width (640 px) as the switch point.
   `approval_rights.approve_right`, the same one the modal and the approve
   use. `ui/routes/approvals/waiting.py` (`waiting_for_me_first`) does the
   split; it is stable, so each group keeps the order the database returned
-  (a change ticket's steps stay oldest first). The split works per page:
-  "Load more" splits the next page the same way. The other tabs do not
+  (a change ticket's steps stay oldest first). The split runs over all
+  pending requests before the page is cut
+  (`routes._list_pending_waiting_first`), so a request waiting for you is
+  on page one even behind 25 newer ones, and "Load more" goes on in the
+  same order. Above 500 pending requests (`_WAITING_SORT_CAP`) the tab
+  pages in the plain order and only marks the rows. The other tabs do not
   check the person and keep their order.
 - **The person check can fail.** The list pages are open with the session
   alone. To know who may approve, the Pending tab also checks the

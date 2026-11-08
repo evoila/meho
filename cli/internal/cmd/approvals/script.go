@@ -89,7 +89,11 @@ func printScript(w io.Writer, indent string, effect map[string]interface{}) {
 		fmt.Fprintf(w, "%s  Values that look like secrets are hidden below. MEHO shows no SHA-256 for this script.\n", indent)
 	}
 	if cut, _ := preview["script_truncated"].(bool); cut {
-		fmt.Fprintf(w, "%s  The script is longer than the text below. Compare its SHA-256 with a reviewed copy.\n", indent)
+		if sha, _ := preview["script_sha256"].(string); sha != "" {
+			fmt.Fprintf(w, "%s  The script is longer than the text below. Compare its SHA-256 with a reviewed copy.\n", indent)
+		} else {
+			fmt.Fprintf(w, "%s  The script is longer than the text below. Read the full script in a reviewed copy before you approve.\n", indent)
+		}
 	}
 	script, ok := preview["script"].(string)
 	if !ok {

@@ -63,9 +63,11 @@ def test_modal_shows_the_script_body_and_its_sha256() -> None:
     assert "app-repo@abc123:scripts/check.sh" in block
     assert ">matches<" in block
     table = body.split('aria-label="Proposed effect fields"')[1].split("</table>")[0]
-    # The script is shown once, in its block; the table keeps the other fields.
-    assert ">script<" not in table
+    # The script fields are shown once, in their block; the table keeps the other fields.
+    assert ">script" not in table
     assert "uname -a" not in table
+    assert _SHA not in table
+    assert "app-repo@abc123" not in table
     assert "argument_bytes" in table
     assert "APP_MODE" in table
 
@@ -101,6 +103,24 @@ def test_modal_says_when_values_are_hidden_or_the_text_is_cut() -> None:
     assert 'data-testid="approval-script-hidden"' in block
     assert 'data-testid="approval-script-truncated"' in block
     assert 'data-testid="approval-script-sha256"' not in block
+    # No SHA-256 is shown, so the cut note does not ask to compare one.
+    assert "Compare its SHA-256" not in block
+    assert "Read the full script in a" in block
+
+
+def test_modal_asks_to_compare_the_sha256_of_a_cut_script() -> None:
+    body = _render_modal(
+        _effect(
+            {
+                "script": _SCRIPT,
+                "script_bytes": 70_000,
+                "script_sha256": _SHA,
+                "script_truncated": True,
+            }
+        )
+    )
+    block = _block(body)
+    assert "Compare its SHA-256" in block
 
 
 def test_modal_says_why_no_script_text_is_shown() -> None:

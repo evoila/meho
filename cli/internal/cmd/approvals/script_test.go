@@ -107,6 +107,21 @@ func TestPrintScriptSaysWhenTextIsHiddenCutOrMissing(t *testing.T) {
 	if strings.Contains(out, "SHA-256:  ") {
 		t.Errorf("printScript shows a SHA-256 line with no hash:\n%s", out)
 	}
+	if strings.Contains(out, "Compare its SHA-256") || !strings.Contains(out, "Read the full script in a reviewed copy") {
+		t.Errorf("printScript asks to compare a SHA-256 it does not show:\n%s", out)
+	}
+
+	d = scriptRunView(t, map[string]interface{}{
+		"script":           "uname -a\n",
+		"script_bytes":     float64(70000),
+		"script_sha256":    strings.Repeat("a", 64),
+		"script_truncated": true,
+	})
+	buf.Reset()
+	printScript(&buf, "", d.ProposedEffect)
+	if out := buf.String(); !strings.Contains(out, "Compare its SHA-256 with a reviewed copy") {
+		t.Errorf("printScript output for a cut script with a hash:\n%s", out)
+	}
 
 	d = scriptRunView(t, map[string]interface{}{
 		"script_bytes":       float64(10),

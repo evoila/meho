@@ -49,8 +49,13 @@
     {% endif %}
     {% if fields.get("script_truncated") %}
       <p class="mt-2 text-xs font-semibold" data-testid="approval-script-truncated">
-        The script is longer than the text below. Compare its SHA-256 with a
-        reviewed copy before you approve.
+        {% if fields.get("script_sha256") %}
+          The script is longer than the text below. Compare its SHA-256 with a
+          reviewed copy before you approve.
+        {% else %}
+          The script is longer than the text below. Read the full script in a
+          reviewed copy before you approve.
+        {% endif %}
       </p>
     {% endif %}
     {% if script is string %}

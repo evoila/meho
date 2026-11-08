@@ -117,6 +117,8 @@ __all__ = [
     "KB_IGNORE_FILENAME",
     "KbFileParseError",
     "KbFileRecord",
+    "assert_header_storable",
+    "parse_front_matter",
     "walk_kb_directory",
 ]
 
@@ -420,23 +422,11 @@ def _build_record(path: Path, rel: str) -> KbFileRecord:
         # catch PermissionError and friends.
         raise type(exc)(f"could not read {rel}: {exc.strerror or type(exc).__name__}") from exc
 
-    # Passing a handler skips the library's format detection. Keep the
-    # detection: use the text-keeping YAML handler only when the file
-    # starts with a YAML header, else let the library pick (a JSON
-    # header, or no header at all).
-    handler = _HEADER_HANDLER if _HEADER_HANDLER.detect(raw.strip()) else None
-    try:
-        post = frontmatter.loads(raw, handler=handler)
-    except yaml.YAMLError as exc:
-        raise KbFileParseError(f"front-matter parse error in {rel}: {exc}") from exc
-
+    header, body = parse_front_matter(raw, rel)
     # A wrong header value raises LessonHeaderError (a ValueError), so the
     # file is counted as an error like any other bad file.
-    metadata = normalise_lesson_header(
-        post.metadata, allowed_reserved=frozenset({"slug", "provenance"})
-    )
-    _assert_header_storable(metadata, rel)
-    body = post.content
+    metadata = normalise_lesson_header(header, allowed_reserved=frozenset({"slug", "provenance"}))
+    assert_header_storable(metadata, rel)
 
     override = metadata.get("slug")
     if isinstance(override, str) and override:
@@ -453,7 +443,26 @@ def _build_record(path: Path, rel: str) -> KbFileRecord:
     )
 
 
-def _assert_header_storable(metadata: dict[str, object], rel: str) -> None:
+def parse_front_matter(raw: str, rel: str) -> tuple[dict[str, object], str]:
+    """Split *raw* into its header fields and its body text.
+
+    Dates and decimal numbers in a YAML header stay as the author's text
+    (:class:`_HeaderYamlLoader`). *rel* names the file in the error.
+    Raises :class:`KbFileParseError` when the header is not valid YAML.
+    """
+    # Passing a handler skips the library's format detection. Keep the
+    # detection: use the text-keeping YAML handler only when the file
+    # starts with a YAML header, else let the library pick (a JSON
+    # header, or no header at all).
+    handler = _HEADER_HANDLER if _HEADER_HANDLER.detect(raw.strip()) else None
+    try:
+        post = frontmatter.loads(raw, handler=handler)
+    except yaml.YAMLError as exc:
+        raise KbFileParseError(f"front-matter parse error in {rel}: {exc}") from exc
+    return dict(post.metadata), post.content
+
+
+def assert_header_storable(metadata: dict[str, object], rel: str) -> None:
     """Fail the file when a header field cannot be written to the JSON column.
 
     The dry run stops before the store step, so without this check it

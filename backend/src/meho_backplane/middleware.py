@@ -108,6 +108,7 @@ from meho_backplane.metrics import HTTP_REQUEST_DURATION_SECONDS, HTTP_REQUESTS_
 from meho_backplane.tenancy import ensure_tenant
 
 __all__ = [
+    "KB_IMPORT_PATH",
     "RUNNER_ALLOWED_PATH_PREFIXES",
     "SENSITIVE_HEADERS",
     "UNMATCHED_ROUTE_LABEL",
@@ -129,6 +130,10 @@ RUNNER_ALLOWED_PATH_PREFIXES: Final[tuple[str, ...]] = (
     "/api/v1/gateway/",
     "/api/v1/checks/",
 )
+
+#: The one REST route a ``kb_import_only`` login may reach (#5728). Every
+#: other route answers 403 ``kb_import_only_scope_violation``.
+KB_IMPORT_PATH: Final[str] = "/api/v1/kb/import"
 
 #: Lower-cased header names whose values must never appear in logs or
 #: metrics. The set is intentionally tiny — every entry is paid for in
@@ -441,6 +446,27 @@ def _reject_runner_outside_gateway(operator: Operator, request: Request) -> None
         )
 
 
+def _reject_kb_import_only_elsewhere(operator: Operator, request: Request) -> None:
+    """Refuse a ``kb_import_only`` login on every route but the import (#5728).
+
+    The login is a program in the team wiki's CI job. Its one right is
+    to import pages into its tenant. On any other path it gets HTTP 403
+    ``kb_import_only_scope_violation``, whatever role its token names.
+    A no-op for every other login.
+    """
+    if operator.kb_import_only and request.url.path != KB_IMPORT_PATH:
+        structlog.get_logger(__name__).warning(
+            "kb_import_only_scope_violation",
+            operator_sub=operator.sub,
+            path=request.url.path,
+            surface="rest",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="kb_import_only_scope_violation",
+        )
+
+
 async def verify_jwt_and_bind(
     request: Request,
     operator: Operator = Depends(verify_jwt),
@@ -527,6 +553,7 @@ async def verify_jwt_and_bind(
     # attributable in the audit trail, and before tenant seeding so a caged
     # request does no DB write. See :func:`_reject_runner_outside_gateway`.
     _reject_runner_outside_gateway(operator, request)
+    _reject_kb_import_only_elsewhere(operator, request)
     async with get_sessionmaker()() as session, session.begin():
         await ensure_tenant(operator.tenant_id, session)
     return operator

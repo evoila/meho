@@ -44,6 +44,11 @@ self-describing about authorship without an audit-log join; see
 * ``POST /api/v1/kb/ingest`` -- server-side bulk ingest. Body:
   :class:`IngestKbRequest`. Returns :class:`KbIngestionResult`. Role:
   ``tenant_admin``.
+* ``POST /api/v1/kb/import`` -- import pages sent in the request (#5728).
+  Body: :class:`~meho_backplane.kb.page_import.KbImportRequest`. Returns
+  :class:`~meho_backplane.kb.page_import.KbImportResult`. Caller: a
+  ``tenant_admin``, or a login with the ``kb_import_only`` claim (the
+  team wiki's CI job), which may reach this route and nothing else.
 
 Tenant scoping
 --------------
@@ -137,6 +142,7 @@ from meho_backplane.kb import (
     KbIngestRootError,
     KbService,
 )
+from meho_backplane.kb.page_import import KbImportRequest, KbImportResult, import_pages
 from meho_backplane.kb.schemas import (
     InvalidKbSlugError,
     KbSharedNotAllowedError,
@@ -144,6 +150,7 @@ from meho_backplane.kb.schemas import (
 )
 from meho_backplane.kb.service import KbListOrder
 from meho_backplane.lesson_header import LessonHeaderError
+from meho_backplane.middleware import verify_jwt_and_bind
 
 __all__ = ["router"]
 
@@ -166,6 +173,7 @@ _KB_OP_IDS: Final[dict[str, str]] = {
     "create": "kb.create",
     "delete": "kb.delete",
     "ingest": "kb.ingest",
+    "import": "kb.import",
 }
 
 #: Maximum length of the ``slug`` path parameter accepted by /{slug}
@@ -648,5 +656,52 @@ async def ingest_kb(
         audit_skipped_count=result.skipped_count,
         audit_error_count=result.error_count,
         audit_conflict_count=result.conflict_count,
+    )
+    return result
+
+
+def _require_importer(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
+    """Admit a ``tenant_admin`` or a ``kb_import_only`` login; 403 for anyone else."""
+    if operator.kb_import_only or operator.tenant_role is TenantRole.TENANT_ADMIN:
+        return operator
+    structlog.get_logger(__name__).warning(
+        "insufficient_role",
+        operator_sub=operator.sub,
+        actual_role=operator.tenant_role.value,
+        required_role=TenantRole.TENANT_ADMIN.value,
+    )
+    raise HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail="insufficient_role",
+    )
+
+
+@router.post("/import", response_model=KbImportResult)
+async def import_kb_pages(
+    body: KbImportRequest,
+    operator: Operator = Depends(_require_importer),
+) -> KbImportResult:
+    """Import knowledge pages sent in the request into the caller's tenant (#5728).
+
+    The team wiki's CI job calls this after each merge, with the
+    ``kb_import_only`` login. A ``tenant_admin`` may call it too. Every
+    page gets one row in the answer: ``create``, ``update``,
+    ``unchanged`` or ``skip`` with the reason. ``dry_run`` writes
+    nothing. The rules are in :mod:`meho_backplane.kb.page_import`.
+
+    Binds ``audit_op_id="kb.import"`` + ``audit_op_class="write"`` and
+    the four counters. The page texts are never in the audit payload.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_KB_OP_IDS["import"],
+        audit_op_class="write",
+        audit_dry_run=body.dry_run,
+    )
+    result = await import_pages(body, tenant_id=operator.tenant_id, actor_sub=operator.sub)
+    structlog.contextvars.bind_contextvars(
+        audit_created_count=result.created_count,
+        audit_updated_count=result.updated_count,
+        audit_unchanged_count=result.unchanged_count,
+        audit_skipped_count=result.skipped_count,
     )
     return result

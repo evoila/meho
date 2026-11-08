@@ -430,10 +430,19 @@ const (
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
+// Defines values for KbImportPageResultAction.
+const (
+	KbImportPageResultActionCreate    KbImportPageResultAction = "create"
+	KbImportPageResultActionSkip      KbImportPageResultAction = "skip"
+	KbImportPageResultActionUnchanged KbImportPageResultAction = "unchanged"
+	KbImportPageResultActionUpdate    KbImportPageResultAction = "update"
+)
+
 // Defines values for KbProvenanceSourceKind.
 const (
 	KbProvenanceSourceKindDirect    KbProvenanceSourceKind = "direct"
 	KbProvenanceSourceKindDirectory KbProvenanceSourceKind = "directory"
+	KbProvenanceSourceKindImport    KbProvenanceSourceKind = "import"
 )
 
 // Defines values for KbProvenanceState.
@@ -6753,6 +6762,49 @@ type KbEntryPreview struct {
 	UpdatedAt string                 `json:"updated_at"`
 }
 
+// KbImportPage One page the caller sends: its path in the wiki and its full text.
+type KbImportPage struct {
+	// Content The whole page: the YAML lesson header, then the text.
+	Content string `json:"content"`
+
+	// Path Path of the page in the wiki, relative, ending in .md.
+	Path string `json:"path"`
+}
+
+// KbImportPageResult What the import did, or would do in a dry run, with one page.
+type KbImportPageResult struct {
+	Action KbImportPageResultAction `json:"action"`
+	Path   string                   `json:"path"`
+
+	// Reason Why the page was skipped. Set for every skipped page.
+	Reason *string `json:"reason"`
+	Slug   *string `json:"slug"`
+}
+
+// KbImportPageResultAction defines model for KbImportPageResult.Action.
+type KbImportPageResultAction string
+
+// KbImportRequest POST body for “/api/v1/kb/import“.
+type KbImportRequest struct {
+	// DryRun Show what the import would do, and write nothing.
+	DryRun *bool `json:"dry_run,omitempty"`
+
+	// IncludeCandidates Also import pages with status: candidate. Off: they are skipped.
+	IncludeCandidates *bool          `json:"include_candidates,omitempty"`
+	Pages             []KbImportPage `json:"pages"`
+}
+
+// KbImportResult The answer of one import: one row per page, sorted by path.
+type KbImportResult struct {
+	Conflicts      []KbIngestConflict   `json:"conflicts"`
+	CreatedCount   int                  `json:"created_count"`
+	DryRun         bool                 `json:"dry_run"`
+	Pages          []KbImportPageResult `json:"pages"`
+	SkippedCount   int                  `json:"skipped_count"`
+	UnchangedCount int                  `json:"unchanged_count"`
+	UpdatedCount   int                  `json:"updated_count"`
+}
+
 // KbIngestConflict Two or more files in one directory ingest claim the same slug.
 //
 // “relative_paths“ lists every file that claims “slug“, sorted,
@@ -12025,6 +12077,11 @@ type CreateKbApiV1KbPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ImportKbPagesApiV1KbImportPostParams defines parameters for ImportKbPagesApiV1KbImportPost.
+type ImportKbPagesApiV1KbImportPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // IngestKbApiV1KbIngestPostParams defines parameters for IngestKbApiV1KbIngestPost.
 type IngestKbApiV1KbIngestPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -13119,6 +13176,9 @@ type ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody = GatewayRes
 
 // CreateKbApiV1KbPostJSONRequestBody defines body for CreateKbApiV1KbPost for application/json ContentType.
 type CreateKbApiV1KbPostJSONRequestBody = KbEntryCreate
+
+// ImportKbPagesApiV1KbImportPostJSONRequestBody defines body for ImportKbPagesApiV1KbImportPost for application/json ContentType.
+type ImportKbPagesApiV1KbImportPostJSONRequestBody = KbImportRequest
 
 // IngestKbApiV1KbIngestPostJSONRequestBody defines body for IngestKbApiV1KbIngestPost for application/json ContentType.
 type IngestKbApiV1KbIngestPostJSONRequestBody = IngestKbRequest
@@ -15744,6 +15804,11 @@ type ClientInterface interface {
 	CreateKbApiV1KbPostWithBody(ctx context.Context, params *CreateKbApiV1KbPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ImportKbPagesApiV1KbImportPostWithBody request with any body
+	ImportKbPagesApiV1KbImportPostWithBody(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ImportKbPagesApiV1KbImportPost(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// IngestKbApiV1KbIngestPostWithBody request with any body
 	IngestKbApiV1KbIngestPostWithBody(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -18670,6 +18735,30 @@ func (c *Client) CreateKbApiV1KbPostWithBody(ctx context.Context, params *Create
 
 func (c *Client) CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateKbApiV1KbPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportKbPagesApiV1KbImportPostWithBody(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportKbPagesApiV1KbImportPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportKbPagesApiV1KbImportPost(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportKbPagesApiV1KbImportPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -31008,6 +31097,61 @@ func NewCreateKbApiV1KbPostRequestWithBody(server string, params *CreateKbApiV1K
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/kb")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewImportKbPagesApiV1KbImportPostRequest calls the generic ImportKbPagesApiV1KbImportPost builder with application/json body
+func NewImportKbPagesApiV1KbImportPostRequest(server string, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewImportKbPagesApiV1KbImportPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewImportKbPagesApiV1KbImportPostRequestWithBody generates requests for ImportKbPagesApiV1KbImportPost with any type of body
+func NewImportKbPagesApiV1KbImportPostRequestWithBody(server string, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/kb/import")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -48879,6 +49023,11 @@ type ClientWithResponsesInterface interface {
 
 	CreateKbApiV1KbPostWithResponse(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateKbApiV1KbPostResponse, error)
 
+	// ImportKbPagesApiV1KbImportPostWithBodyWithResponse request with any body
+	ImportKbPagesApiV1KbImportPostWithBodyWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error)
+
+	ImportKbPagesApiV1KbImportPostWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error)
+
 	// IngestKbApiV1KbIngestPostWithBodyWithResponse request with any body
 	IngestKbApiV1KbIngestPostWithBodyWithResponse(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestKbApiV1KbIngestPostResponse, error)
 
@@ -52504,6 +52653,29 @@ func (r CreateKbApiV1KbPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateKbApiV1KbPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ImportKbPagesApiV1KbImportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *KbImportResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ImportKbPagesApiV1KbImportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ImportKbPagesApiV1KbImportPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -60713,6 +60885,23 @@ func (c *ClientWithResponses) CreateKbApiV1KbPostWithResponse(ctx context.Contex
 	return ParseCreateKbApiV1KbPostResponse(rsp)
 }
 
+// ImportKbPagesApiV1KbImportPostWithBodyWithResponse request with arbitrary body returning *ImportKbPagesApiV1KbImportPostResponse
+func (c *ClientWithResponses) ImportKbPagesApiV1KbImportPostWithBodyWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error) {
+	rsp, err := c.ImportKbPagesApiV1KbImportPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportKbPagesApiV1KbImportPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ImportKbPagesApiV1KbImportPostWithResponse(ctx context.Context, params *ImportKbPagesApiV1KbImportPostParams, body ImportKbPagesApiV1KbImportPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportKbPagesApiV1KbImportPostResponse, error) {
+	rsp, err := c.ImportKbPagesApiV1KbImportPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportKbPagesApiV1KbImportPostResponse(rsp)
+}
+
 // IngestKbApiV1KbIngestPostWithBodyWithResponse request with arbitrary body returning *IngestKbApiV1KbIngestPostResponse
 func (c *ClientWithResponses) IngestKbApiV1KbIngestPostWithBodyWithResponse(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestKbApiV1KbIngestPostResponse, error) {
 	rsp, err := c.IngestKbApiV1KbIngestPostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -68094,6 +68283,39 @@ func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostR
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseImportKbPagesApiV1KbImportPostResponse parses an HTTP response from a ImportKbPagesApiV1KbImportPostWithResponse call
+func ParseImportKbPagesApiV1KbImportPostResponse(rsp *http.Response) (*ImportKbPagesApiV1KbImportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ImportKbPagesApiV1KbImportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KbImportResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

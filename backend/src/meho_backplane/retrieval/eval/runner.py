@@ -5,7 +5,9 @@
 
 The runner is the load-bearing piece of the G4.3 retire-decision
 contract: it consumes T1's corpus loader, calls the in-process
-:func:`meho_backplane.retrieval.retriever.retrieve` helper per query,
+:func:`meho_backplane.retrieval.retriever.retrieve` helper per kb and
+memory query (and the operation search per operations query, see
+below),
 folds the per-query hits into precision@5 / MRR / coverage via the
 pure :mod:`metrics` module, and returns a typed
 :class:`~meho_backplane.retrieval.eval.result_models.EvalResult`
@@ -14,14 +16,20 @@ whose ``verdict`` field gates the CI workflow.
 Surfaces
 --------
 
-The same dispatch path drives all three retrieval surfaces — the
-per-surface differences (slug vs ``(scope, slug)`` vs
-``(connector_id, op_id)`` ground truth) are absorbed by per-surface
-``_eval_<surface>`` private dispatchers that produce a uniform
-``QueryResult`` shape. A surface whose corpus YAML hasn't shipped
-yet returns an empty ``SurfaceResult`` with ``verdict="green"`` +
-``query_count=0`` — the "no data" green is intentional: an absent
-corpus must not flip the CI gate red. The retire-checklist verb
+The kb and memory surfaces search the ``documents`` table through
+``retrieve``. The operations surface searches ``endpoint_descriptor``
+through :func:`~meho_backplane.retrieval.eval.operation_search.search_corpus_operations`,
+the ranked search of ``search_operations`` the agent uses (#4752);
+``documents`` holds no operations. The per-surface differences (slug
+vs ``(scope, slug)`` vs ``(connector_id, op_id)`` ground truth) are
+absorbed by per-surface ``_eval_<surface>`` private dispatchers that
+produce a uniform ``QueryResult`` shape. An operations question whose
+connector cannot be searched on this install is "not run": its row
+carries the reason and the surface aggregate leaves it out. A
+surface whose corpus YAML hasn't shipped yet returns an empty
+``SurfaceResult`` with ``verdict="green"`` + ``query_count=0`` —
+the "no data" green is intentional: an absent corpus must not flip
+the CI gate red. The retire-checklist verb
 (T6 #445) is responsible for asserting that an evaluable corpus
 actually shipped before trusting the green. The kb (T1 #440),
 operations (T3 #442) and memory (T4 #443) corpora are all shipped
@@ -82,6 +90,10 @@ from meho_backplane.retrieval.eval.metrics import (
     reciprocal_rank,
     verdict,
 )
+from meho_backplane.retrieval.eval.operation_search import (
+    SearchOperationsCallable,
+    search_corpus_operations,
+)
 from meho_backplane.retrieval.eval.result_models import (
     EvalResult,
     QueryResult,
@@ -97,6 +109,7 @@ __all__ = [
     "QueryResult",
     "RegressionEpsilon",
     "RetrieveCallable",
+    "SearchOperationsCallable",
     "SurfaceResult",
     "compare_baseline",
     "eval_all",
@@ -169,19 +182,6 @@ def _memory_hits_to_pairs(hits: list[RetrievalHit]) -> list[str]:
         else:
             pairs.append(hit.source_id)
     return pairs
-
-
-def _operations_hits_to_op_ids(hits: list[RetrievalHit]) -> list[str]:
-    """Map operations retrieval hits to ``op_id`` strings.
-
-    Operation surface ``RetrievalHit.source_id`` is the connector's
-    ``op_id`` (e.g. ``GET:/repos/{owner}/{repo}/issues``); the corpus's
-    ``expected_op_ids`` field carries the same shape, so this is the
-    identity mapping. Kept as a named function for surface symmetry
-    + future op_id encoding changes (e.g. when G0.7's spec ingestion
-    settles a stable shape).
-    """
-    return [hit.source_id for hit in hits]
 
 
 def _format_memory_expected(pairs: list[tuple[str, str]]) -> list[str]:
@@ -280,9 +280,14 @@ def _aggregate_surface(
     The MEHO-≥-baseline overlay (see :func:`_apply_baseline_check`)
     runs here so the verdict reflects both the absolute thresholds
     *and* the "MEHO must beat the operator's pre-MEHO workflow"
-    constraint. An empty *queries* list returns the corpus-not-yet-
-    shipped green per the module docstring.
+    constraint. Rows with a ``not_run_reason`` stay in ``queries`` but
+    are left out of the metrics, the verdict and ``query_count``. With
+    no scored row the surface returns the no-data green per the module
+    docstring.
     """
+    all_queries = queries
+    queries = [q for q in all_queries if q.not_run_reason is None]
+    not_run_count = len(all_queries) - len(queries)
     if not queries:
         return SurfaceResult(
             surface=surface,
@@ -291,7 +296,8 @@ def _aggregate_surface(
             mrr=0.0,
             coverage=0.0,
             verdict="green",
-            queries=[],
+            not_run_count=not_run_count,
+            queries=all_queries,
         )
 
     p5 = mean_metric(q.precision_at_5 for q in queries)
@@ -327,7 +333,8 @@ def _aggregate_surface(
         baseline_mrr=baseline_mrr,
         baseline_coverage=baseline_cov,
         baseline_verdict=baseline_v,
-        queries=queries,
+        not_run_count=not_run_count,
+        queries=all_queries,
     )
 
 
@@ -415,32 +422,36 @@ async def _eval_memory(
 
 async def _eval_operations(
     *,
-    retrieve_fn: RetrieveCallable,
+    search_fn: SearchOperationsCallable,
     tenant_id: uuid.UUID,
-    principal_sub: str | None,
     thresholds: Thresholds,
     k: int,
 ) -> SurfaceResult:
-    """Eval the operations surface — empty corpus until T3 #442 ships."""
+    """Eval the operations surface with the operation search (#4752).
+
+    Each question searches its own ``expected_connector_id``, the way an
+    agent calls ``search_operations(connector_id, query)``. A question
+    the search cannot run on this install becomes a "not run" row.
+    """
     rows: list[OperationCorpusQuery] = load_corpus("operations")
     queries: list[QueryResult] = []
     for row in rows:
-        # Operations corpus carries expected_op_ids per-row; the
-        # connector_id filtering is the runner's responsibility (the
-        # ``source="operations"`` filter narrows to that surface, but
-        # not to a specific connector — that's what the corpus
-        # constraint enforces).
+        expected = list(row.expected_op_ids)
+        found = await search_fn(
+            tenant_id=tenant_id,
+            connector_id=row.expected_connector_id,
+            query=row.query,
+            limit=k,
+        )
         queries.append(
-            await _eval_query(
+            QueryResult(
                 query=row.query,
-                expected=list(row.expected_op_ids),
-                retrieve_fn=retrieve_fn,
-                tenant_id=tenant_id,
-                principal_sub=principal_sub,
-                source="operations",
-                hits_to_slugs=_operations_hits_to_op_ids,
-                baseline_corpus_root=None,
-                k=k,
+                expected_hits=expected,
+                meho_hits=list(found.op_ids),
+                precision_at_5=precision_at_k(found.op_ids, expected, k=k),
+                reciprocal_rank=reciprocal_rank(found.op_ids, expected),
+                coverage_at_5=coverage_at_k(found.op_ids, expected, k=k),
+                not_run_reason=found.not_run_reason,
             )
         )
     return _aggregate_surface(
@@ -459,6 +470,7 @@ async def eval_surface(
     tenant_id: uuid.UUID,
     principal_sub: str | None = None,
     retrieve_fn: RetrieveCallable | None = None,
+    search_operations_fn: SearchOperationsCallable | None = None,
     baseline_corpus_root: Path | None = None,
     thresholds: Thresholds = GREEN_DEFAULTS,
     k: int = DEFAULT_K,
@@ -467,7 +479,10 @@ async def eval_surface(
 
     *retrieve_fn* defaults to the production
     :func:`meho_backplane.retrieval.retriever.retrieve`; tests pass a
-    stub. *baseline_corpus_root* is honoured for the kb surface only
+    stub. It serves the kb and memory surfaces. *search_operations_fn*
+    serves the operations surface and defaults to
+    :func:`~meho_backplane.retrieval.eval.operation_search.search_corpus_operations`.
+    *baseline_corpus_root* is honoured for the kb surface only
     (memory/operations baselines are deferred per module docstring) —
     pass on memory/operations and the runner silently ignores it.
 
@@ -505,9 +520,10 @@ async def eval_surface(
             k=k,
         )
     return await _eval_operations(
-        retrieve_fn=rfn,
+        search_fn=(
+            search_operations_fn if search_operations_fn is not None else search_corpus_operations
+        ),
         tenant_id=tenant_id,
-        principal_sub=principal_sub,
         thresholds=thresholds,
         k=k,
     )
@@ -518,6 +534,7 @@ async def eval_all(
     tenant_id: uuid.UUID,
     principal_sub: str | None = None,
     retrieve_fn: RetrieveCallable | None = None,
+    search_operations_fn: SearchOperationsCallable | None = None,
     baseline_corpus_root: Path | None = None,
     thresholds: Thresholds = GREEN_DEFAULTS,
     k: int = DEFAULT_K,
@@ -530,7 +547,8 @@ async def eval_all(
     memory/operations corpora).
 
     *principal_sub* is the caller's OIDC ``sub``; see
-    :func:`eval_surface`.
+    :func:`eval_surface`. *search_operations_fn* is passed through to
+    :func:`eval_surface` for the operations surface.
 
     The overall verdict is the worst of the per-surface verdicts —
     a single red surface flips the whole eval red. Empty surfaces
@@ -548,6 +566,7 @@ async def eval_all(
             tenant_id=tenant_id,
             principal_sub=principal_sub,
             retrieve_fn=retrieve_fn,
+            search_operations_fn=search_operations_fn,
             baseline_corpus_root=baseline_corpus_root,
             thresholds=thresholds,
             k=k,
@@ -557,6 +576,7 @@ async def eval_all(
             "retrieval_eval_surface_complete",
             surface=s,
             query_count=result.query_count,
+            not_run_count=result.not_run_count,
             precision_at_5=result.precision_at_5,
             mrr=result.mrr,
             coverage=result.coverage,

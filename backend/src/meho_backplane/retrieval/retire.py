@@ -77,7 +77,7 @@ References
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from typing import Final, Literal, cast
@@ -443,6 +443,7 @@ def _evaluate_eval_precision(
     *,
     precision_at_5: float | None,
     query_count: int,
+    not_run_reasons: Sequence[str] = (),
 ) -> CriterionResult:
     """Build criterion 3 (eval precision@5 >= 0.80).
 
@@ -452,8 +453,22 @@ def _evaluate_eval_precision(
     #442). An absent corpus is red here (not green) — the verdict
     contract requires *evidence* of equivalence, and an empty corpus
     provides none.
+
+    *not_run_reasons* holds one reason per corpus question the eval
+    could not run on this install (operations surface: its connector
+    cannot be searched here, #4752). When no question was scored but
+    some were not run, the corpus did ship: the criterion stays red
+    and names why the questions did not run.
     """
     if precision_at_5 is None or query_count == 0:
+        if not_run_reasons:
+            return CriterionResult(
+                name="eval_precision",
+                verdict="red",
+                observed_value=f"{len(not_run_reasons)} questions not run",
+                threshold_summary=f">= {EVAL_PRECISION_GREEN:.2f}",
+                notes=_not_run_note(not_run_reasons),
+            )
         return CriterionResult(
             name="eval_precision",
             verdict="red",
@@ -474,7 +489,18 @@ def _evaluate_eval_precision(
         verdict=band,
         observed_value=f"precision@5 = {precision_at_5:.3f}",
         threshold_summary=f">= {EVAL_PRECISION_GREEN:.2f}",
+        notes=_not_run_note(not_run_reasons) if not_run_reasons else None,
     )
+
+
+def _not_run_note(not_run_reasons: Sequence[str]) -> str:
+    """Name the distinct not-run reasons, cut to the note's 256 chars."""
+    distinct = "; ".join(dict.fromkeys(not_run_reasons))
+    note = (
+        f"{len(not_run_reasons)} eval questions not run: {distinct}. "
+        "Install and enable the connector, then run the eval again"
+    )
+    return note if len(note) <= 256 else note[:253] + "..."
 
 
 # ---------------------------------------------------------------------------
@@ -727,36 +753,28 @@ def _compose_overall(surfaces: list[SurfaceChecklist]) -> ChecklistVerdict:
     return _band_to_surface_verdict(worst_band)
 
 
+_EvalEntry = tuple[
+    float,
+    int,
+    str | None,
+    tuple[float, float, float] | None,
+    tuple[float, float, float] | None,
+    tuple[str, ...],
+]
+
+
 def _resolve_eval_lookup(
     eval_result_surfaces: Iterable[object],
-) -> dict[
-    ChecklistSurface,
-    tuple[
-        float,
-        int,
-        str | None,
-        tuple[float, float, float] | None,
-        tuple[float, float, float] | None,
-    ],
-]:
+) -> dict[ChecklistSurface, _EvalEntry]:
     """Index ``EvalResult.surfaces`` by surface label.
 
     Each value is ``(precision_at_5, query_count, baseline_kind,
-    meho_metrics, baseline_metrics)``. Returning a flat tuple instead
+    meho_metrics, baseline_metrics, not_run_reasons)``. Returning a flat tuple instead
     of the full :class:`SurfaceResult` keeps the criteria evaluators
     surface-agnostic — they take per-criterion primitives, not the
     eval runner's nested shape.
     """
-    lookup: dict[
-        ChecklistSurface,
-        tuple[
-            float,
-            int,
-            str | None,
-            tuple[float, float, float] | None,
-            tuple[float, float, float] | None,
-        ],
-    ] = {}
+    lookup: dict[ChecklistSurface, _EvalEntry] = {}
     for surface_result in eval_result_surfaces:
         # The eval runner ships a typed SurfaceResult; we accept any
         # object with the matching attribute shape so test fakes don't
@@ -780,12 +798,18 @@ def _resolve_eval_lookup(
                 getattr(surface_result, "baseline_mrr", 0.0) or 0.0,
                 getattr(surface_result, "baseline_coverage", 0.0) or 0.0,
             )
+        not_run_reasons = tuple(
+            reason
+            for query in getattr(surface_result, "queries", [])
+            if (reason := getattr(query, "not_run_reason", None)) is not None
+        )
         lookup[surface] = (
             precision,
             query_count,
             baseline_kind,
             meho_metrics,
             baseline_metrics,
+            not_run_reasons,
         )
     return lookup
 
@@ -900,10 +924,18 @@ async def compute_retire_checklist(
             baseline_kind_for_c4: str | None = None
             baseline_metrics_for_c4: tuple[float, float, float] | None = None
         else:
-            (precision, query_count, baseline_kind, meho_metrics, baseline_metrics) = eval_entry
+            (
+                precision,
+                query_count,
+                baseline_kind,
+                meho_metrics,
+                baseline_metrics,
+                not_run_reasons,
+            ) = eval_entry
             c3 = _evaluate_eval_precision(
                 precision_at_5=precision if query_count > 0 else None,
                 query_count=query_count,
+                not_run_reasons=not_run_reasons,
             )
             meho_metrics_for_c4 = meho_metrics
             baseline_kind_for_c4 = baseline_kind

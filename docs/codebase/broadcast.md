@@ -452,7 +452,14 @@ path, merged as a clobber-free union of distinct keys
 3. `reflex_advisory` — #3133, built in `broadcast/reflex.py`, a
    session-scoped coordination nudge (read-before-act /
    announce-before-mutate) deduped per `(session, heuristic)`; see
-   [`docs/codebase/reflex-advisory.md`](reflex-advisory.md). #3133 also
+   [`docs/codebase/reflex-advisory.md`](reflex-advisory.md). Who gets
+   each nudge (#5489): every agent session gets the read nudge until it
+   has read the feed (for a service login with a `work_ref`, a read in
+   its MCP session counts). Only a caller that may publish (a live
+   hosted agent run or a registered agent principal, see "Who can
+   publish" below) gets the announce nudge; a person or a service login
+   does not. The full table is in
+   [`reflex-advisory.md`](reflex-advisory.md). #3133 also
    ships the opt-in **announce gate** (`broadcast/announce_gate.py`),
    which *rejects* — rather than nudges — a caution-or-higher write-class
    op dispatched without an active claim in a tenant that opted in.

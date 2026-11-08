@@ -294,21 +294,38 @@ def test_missing_token_is_a_usage_error(fake: _Fake) -> None:
 
 
 def _ssh_subclasses(cls: type[SshConnector]) -> Iterator[type[SshConnector]]:
+    # Only built-in connectors count: other test modules define their own
+    # SshConnector subclasses, and they stay loaded in the same pytest worker.
     for sub in cls.__subclasses__():
-        yield sub
+        if sub.__module__.startswith(connectors_pkg.__name__ + "."):
+            yield sub
         yield from _ssh_subclasses(sub)
+
+
+def _built_in_ssh_products() -> set[str]:
+    """Return the products of the SSH connectors that ship in the connectors package.
+
+    It imports every connector module first, so the answer does not depend on
+    what else the test run imported. Other test files define their own
+    ``SshConnector`` subclasses; those live outside the package and are left out.
+    """
+    for mod in pkgutil.walk_packages(connectors_pkg.__path__, connectors_pkg.__name__ + "."):
+        if mod.name.endswith(".connector"):
+            importlib.import_module(mod.name)
+    prefix = connectors_pkg.__name__ + "."
+    return {
+        sub.product for sub in _ssh_subclasses(SshConnector) if sub.__module__.startswith(prefix)
+    }
 
 
 def test_product_list_matches_ssh_connectors() -> None:
     """The script's list names every built-in connector that uses SSH."""
-    for mod in pkgutil.walk_packages(connectors_pkg.__path__, connectors_pkg.__name__ + "."):
-        if mod.name.endswith(".connector"):
-            importlib.import_module(mod.name)
-    # Other test files define their own SshConnector subclasses; count only the built-in ones.
-    built_in = connectors_pkg.__name__ + "."
-    products = {
-        sub.product for sub in _ssh_subclasses(SshConnector) if sub.__module__.startswith(built_in)
-    }
+
+    class _TestOnlySsh(SshConnector):  # a test-only subclass must not count
+        product = "test-only-ssh"
+
+    products = _built_in_ssh_products()
+    assert "test-only-ssh" not in products
 
     match = re.search(r"^SSH_PRODUCTS=\(([^)]*)\)$", _SCRIPT.read_text(), re.MULTILINE)
     assert match is not None

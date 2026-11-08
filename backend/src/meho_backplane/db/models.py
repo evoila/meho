@@ -9757,6 +9757,68 @@ class RequestUsageEvent(Base):
     duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
 
+class OperationSearchRecord(Base):
+    """One ``search_operations`` call: what it was asked and what it returned.
+
+    Written by :mod:`meho_backplane.operation_picks.recorder`, only when
+    ``REQUEST_USAGE_RETENTION_DAYS`` is set. The request usage retention job
+    deletes rows older than that window. Migration ``0147`` makes the table.
+
+    * ``transport`` -- ``mcp``, ``rest`` or ``agent`` (a hosted agent run).
+    * ``mode`` -- ``ranked`` (a query) or ``exact`` (one ``op_id``).
+    * ``op_ids`` -- the returned operation ids, in rank order.
+    * ``query_hash`` -- SHA-256 of the query text; ``NULL`` in exact mode.
+    * ``query_text`` -- the query itself, only when
+      ``OPERATION_SEARCH_STORE_QUERY_TEXT`` is on. Otherwise ``NULL``.
+    """
+
+    __tablename__ = "operation_search_record"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    group_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    search_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    op_ids: Mapped[list[str]] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))
+    query_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    query_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class OperationCallRecord(Base):
+    """One ``call_operation`` call, linked to the search it followed.
+
+    Written next to :class:`OperationSearchRecord`, under the same switch
+    and retention. ``search_id`` is the newest search of the same caller,
+    session and connector within five minutes, or ``NULL`` when there was
+    none. ``rank`` is the 1-based place of ``op_id`` in that search's
+    results, or ``NULL`` when it was not there. ``outcome`` is the call's
+    status (``ok``, ``error``, ``denied``, ...) or ``unknown_op``.
+    """
+
+    __tablename__ = "operation_call_record"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    search_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class InstanceSettingsRevision(Base):
     """One applied settings-file import (``POST /api/v1/settings/import``).
 

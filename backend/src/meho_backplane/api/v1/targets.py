@@ -223,8 +223,9 @@ _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 MACHINE_TARGET_WRITE_REMEDIATION: Final[str] = (
     "target writes on REST are for people. A machine login (agent, service "
     "or runner) registers a target with call_operation(connector_id="
-    "'targets-registry-1.x', op_id='targets.register') and removes one with "
-    "op_id='targets.remove'; MEHO checks both against the approval rules. A "
+    "'targets-registry-1.x', op_id='targets.register'), changes one with "
+    "op_id='targets.update' and removes one with op_id='targets.remove'; "
+    "MEHO checks each against the approval rules. A "
     "person changes a target in the operator console or with the meho CLI."
 )
 

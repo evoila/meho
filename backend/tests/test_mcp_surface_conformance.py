@@ -39,7 +39,7 @@ The pinned snapshots are tied to the live registry by
 never drift from reality (a reclassification breaks the per-claim-shape
 pins; an unclassified addition breaks the partition guard). The
 authoritative human-readable enumeration of the same split — name +
-one-liner + surface + gating claim for all 81 tools — lives in
+one-liner + surface + gating claim for all 82 tools — lives in
 ``docs/codebase/mcp.md`` (the dual-surface inventory).
 """
 
@@ -291,6 +291,7 @@ OPERATOR_SURFACE_SORTED: tuple[str, ...] = (
     "meho_sensor_list",
     "meho_sensor_results",
     "meho_targets_register",
+    "meho_targets_update",
     "meho_topology_annotate",
     "meho_topology_bulk_import",
     "meho_topology_create_node",

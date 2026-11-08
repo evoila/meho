@@ -108,6 +108,7 @@ Connector lifecycle, principals and grants, scheduler, sensors, topology mutatio
 | `meho_sensor_list` | beta | — | List sensors for the operator's tenant. |
 | `meho_sensor_results` | beta | — | Per-tick evidence trend query for one sensor. |
 | `meho_targets_register` | ga | — | Register a new target in the operator's tenant (tenant_admin only). |
+| `meho_targets_update` | ga | — | Change fields of one target in the operator's tenant (tenant_admin only). |
 | `meho_topology_annotate` | beta | — | Assert a curated `graph_edge` that auto-discovery cannot infer (tenant_admin only). |
 | `meho_topology_bulk_import` | beta | — | Batch-assert curated `graph_edge` rows in one atomic pass (tenant_admin only). |
 | `meho_topology_create_node` | beta | — | Manually seed a `graph_node` row in the operator's tenant (tenant_admin only). |

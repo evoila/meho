@@ -134,7 +134,7 @@ async def dispatch_targets_write(
             "op_id": op_id,
             "message": (
                 f"{op_id} parked for approval (request "
-                f"{approval_request_id}): the registration executes with "
+                f"{approval_request_id}): the call runs with "
                 "these exact params once a tenant operator approves it via "
                 "/ui/approvals, `meho approvals list`, or the "
                 "meho_approvals_* MCP tools."

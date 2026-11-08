@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Writes the operation catalog of a release and attaches it, signed, to the
+# GitHub release of the tag.
+#
+# cli-release.yml calls this workflow after its `release` job, on every v*
+# tag. Two files, each with a cosign signature bundle:
+#   * operation-catalog.json: every operation of every built-in connector,
+#     with its parameter schema, a short result shape, its risk level, its
+#     approval flag and the product versions its connector supports.
+#   * operation-catalog-changes.json: what changed since the catalog of the
+#     previous release tag (added, removed, changed).
+# backend/scripts/operation_catalog.py writes both. See
+# docs/codebase/operation-catalog-file.md.
+#
+# Runner: GitHub-hosted ubuntu-latest, like linux-download.yml. It runs no
+# pull-request code (no pull_request trigger).
+#
+# Permissions: read-only by default. Only `publish`, the job that signs and
+# attaches, gets contents: write and id-token: write. It runs no repository
+# code.
+
+name: operation-catalog
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag, for example v0.36.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Write the operation catalog and its change file
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # All tags, to find the previous release tag.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        # Same pin as ci.yml. Python comes from backend/.python-version.
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          add-problem-matchers: false
+
+      - name: Sync Python environment (locked)
+        working-directory: backend
+        run: uv sync --locked
+
+      - name: Install cosign
+        # Checks the signature of the previous release's catalog. Same pin as
+        # cli-release.yml and linux-download.yml.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Write operation-catalog.json
+        working-directory: backend
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::The tag '${TAG}' is not like v0.36.0."
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/catalog"
+          uv run python -m scripts.operation_catalog export \
+            --release "${TAG}" --out "${RUNNER_TEMP}/catalog/operation-catalog.json"
+
+      - name: Get the previous release's catalog
+        # The previous v* tag before this one. A release from before this
+        # workflow has no catalog (HTTP 404): then the change file lists
+        # every operation as added. Any other download error fails the job.
+        # A catalog that is there must carry a valid signature of this
+        # workflow at that tag.
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          PREV=$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)
+          if [[ -z "${PREV}" ]]; then
+            echo "No release tag before ${TAG}."
+            exit 0
+          fi
+          DIR="${RUNNER_TEMP}/previous"
+          mkdir -p "${DIR}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${PREV}"
+          CODE=$(curl -sSL -o "${DIR}/operation-catalog.json" -w '%{http_code}' "${BASE}/operation-catalog.json")
+          if [[ "${CODE}" == "404" ]]; then
+            echo "Release ${PREV} has no operation catalog."
+            rm -f "${DIR}/operation-catalog.json"
+            exit 0
+          fi
+          if [[ "${CODE}" != "200" ]]; then
+            echo "::error::Downloading the catalog of ${PREV} failed with HTTP ${CODE}."
+            exit 1
+          fi
+          curl -fsSL -o "${DIR}/operation-catalog.json.cosign.bundle" "${BASE}/operation-catalog.json.cosign.bundle"
+          cosign verify-blob \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/operation-catalog.yml@refs/tags/${PREV}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle "${DIR}/operation-catalog.json.cosign.bundle" \
+            "${DIR}/operation-catalog.json"
+          echo "PREVIOUS_CATALOG=${DIR}/operation-catalog.json" >> "${GITHUB_ENV}"
+
+      - name: Write operation-catalog-changes.json
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          OLD=()
+          if [[ -n "${PREVIOUS_CATALOG:-}" ]]; then
+            OLD=(--old "${PREVIOUS_CATALOG}")
+          fi
+          uv run python -m scripts.operation_catalog diff \
+            --new "${RUNNER_TEMP}/catalog/operation-catalog.json" "${OLD[@]}" \
+            --out "${RUNNER_TEMP}/catalog/operation-catalog-changes.json" \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Keep the two files for the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: operation-catalog
+          path: |
+            ${{ runner.temp }}/catalog/operation-catalog.json
+            ${{ runner.temp }}/catalog/operation-catalog-changes.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Sign the operation catalog and attach it to the release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # Attach the files to the release.
+      contents: write
+      # Mint the GitHub OIDC token for cosign keyless signing.
+      id-token: write
+    steps:
+      - name: Get the two files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: operation-catalog
+          path: ${{ runner.temp }}/catalog
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Sign both files
+        # The same keyless signing as SHA256SUMS-linux in linux-download.yml.
+        # The certificate names this workflow file at the tag:
+        # https://github.com/evoila/meho/.github/workflows/operation-catalog.yml@refs/tags/<tag>
+        working-directory: ${{ runner.temp }}/catalog
+        env:
+          COSIGN_YES: "true"
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          for FILE in operation-catalog.json operation-catalog-changes.json; do
+            cosign sign-blob --yes --bundle="${FILE}.cosign.bundle" "${FILE}"
+            # Check the signature with the command docs/RELEASING.md gives.
+            cosign verify-blob \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/operation-catalog.yml@refs/tags/${TAG}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --bundle "${FILE}.cosign.bundle" \
+              "${FILE}"
+          done
+
+      - name: Attach the files to the release
+        # GoReleaser created the release in cli-release.yml's `release` job.
+        # Same pinned action as the other attach steps.
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            ${{ runner.temp }}/catalog/operation-catalog.json
+            ${{ runner.temp }}/catalog/operation-catalog.json.cosign.bundle
+            ${{ runner.temp }}/catalog/operation-catalog-changes.json
+            ${{ runner.temp }}/catalog/operation-catalog-changes.json.cosign.bundle
+          fail_on_unmatched_files: true

@@ -23,8 +23,8 @@ operator (or an agent, before recommending a destructive op) can ask
 - **`Connector.discover_topology(target) -> TopologyHints`** — the
   per-connector probe hook on the connector ABC
   (`backend/src/meho_backplane/connectors/base.py`). The base class
-  returns an empty `TopologyHints`; in this repository the
-  Kubernetes and pfSense connectors override it (see
+  returns an empty `TopologyHints`; in this repository the Kubernetes,
+  pfSense, bind9 and Windows DNS connectors override it (see
   [Curated-until-populator-covers policy](#curated-until-populator-covers-policy)). `TopologyHints` / `NodeHint` / `EdgeHint` are frozen
   Pydantic v2 models in
   `backend/src/meho_backplane/connectors/schemas.py`.

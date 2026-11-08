@@ -394,7 +394,7 @@ meho agent-principal revoke <name> [flags]
 
 ## `meho approvals`
 
-Manage approval requests (list / show / result / approve / reject / withdraw)
+Manage approval requests (list / show / result / approve / reject / withdraw / mark-checked)
 
 ```
 meho approvals
@@ -428,7 +428,21 @@ meho approvals list [flags]
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
 - `--order` — sort order: oldest or newest (default: newest; oldest when --filter-work-ref is set)
+- `--outcome-unknown` — list approved changes whose outcome MEHO does not know, for you to check
 - `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
+
+### `meho approvals mark-checked`
+
+Record what you found on the target of a run with an unknown outcome
+
+```
+meho approvals mark-checked <id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw JSON response instead of summary
+- `--note` — what you checked (required)
+- `--outcome` — what you found: happened or did-not-happen (required)
 
 ### `meho approvals reject`
 
@@ -1486,7 +1500,7 @@ meho conventions show <slug> [flags]
 
 ## `meho dashboard`
 
-Manage deterministic-check dashboards (list / show / create / edit / delete)
+Manage deterministic-check dashboards (list / show / create / edit / delete / export / import)
 
 ```
 meho dashboard
@@ -1539,6 +1553,34 @@ meho dashboard edit <dashboard_id> [flags]
 - `--notify-off` — turn transition mail off
 - `--remove-sensor` — sensor UUID to remove (repeatable)
 - `--tenant` — target tenant UUID (platform_admin cross-tenant edit)
+
+### `meho dashboard export`
+
+Write one dashboard and its sensors to a file
+
+```
+meho dashboard export <name> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit errors as structured JSON
+- `--output`, `-o` — write the file here instead of stdout
+- `--tenant` — target tenant UUID (platform_admin cross-tenant export)
+
+### `meho dashboard import`
+
+Create or update a dashboard and its sensors from a file (tenant_admin)
+
+```
+meho dashboard import <file> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--dry-run` — show what would change and write nothing
+- `--force` — import a sensor even when its connector does not fit the mapped target
+- `--json` — emit the raw import result JSON instead of the summary
+- `--map-target` — map a placeholder to a target of this site: <placeholder>=<target> (repeatable)
+- `--tenant` — target tenant UUID (platform_admin cross-tenant import)
 
 ### `meho dashboard list`
 

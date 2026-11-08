@@ -906,8 +906,8 @@ is not set.
 - `meho_status` (and `GET /api/v1/health`) then answers with
   `operator.tenant_id` and `operator.tenant_role` set to `null`,
   `operator.tenants` (each tenant's `tenant_id`, `name`, `tenant_role`,
-  `current`), `vault.detail = "tenant_not_chosen"` and the database
-  state. It runs no tenant work (no credential check, no add-on
+  `current`), `vault.detail = "tenant_not_chosen"`, the database
+  state and `server_time` (#5504). It runs no tenant work (no credential check, no add-on
   pairings, no tool comparison). With a current tenant, `meho_status`
   answers as before and also lists `operator.tenants`, with `current`
   set on the current one. Inside an agent run that a person started, no
@@ -997,7 +997,7 @@ add-on-family gate.
 | `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
-| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. Since #5504 also the server's time now in UTC (`server_time`, ISO 8601 to the second, for example `2026-10-31T14:34:28Z`), so an agent with no shell can write down a correct time. |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |

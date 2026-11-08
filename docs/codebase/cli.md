@@ -878,6 +878,7 @@ field, so a response from an older backplane prints as it always did.
 | `Logged in as …` | `operator` | `Logged in as alice@example.com (sub: …)` |
 | `Vault: …` | `vault` | `Vault: reachable, read OK (version=42)` |
 | `DB: …` | `db` | `DB: migrated, revision 0115` |
+| `Server time: …` | `server_time` | `Server time: 2026-10-31T14:34:28Z` — the server's time in UTC (#5504); also printed for a login that chose no tenant |
 | `Readiness: …` | `readiness` | `Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)` |
 | `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
 | `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |

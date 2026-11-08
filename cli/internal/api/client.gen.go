@@ -6461,6 +6461,12 @@ type HTTPValidationError struct {
 // cost of runs on the default agent model (:class:`AgentModelSpend`).
 // The “None“ default keeps older response decoders working; the
 // handler always fills it.
+//
+// “server_time“ (#5504) is the server's time now, in UTC, to the
+// second (ISO 8601 with a “Z“ suffix). An agent with no shell has no
+// other clock, so it reads this when it must write down the time. Both
+// answers fill it, also the one for a login that chose no tenant. The
+// “None“ default keeps older response decoders working.
 type HealthResponse struct {
 	// AgentModelSpend Whether the spend limits count the cost of the default agent model (#5771).
 	//
@@ -6597,6 +6603,7 @@ type HealthResponse struct {
 	// replica's claim stamp advances, so alert on the minimum across
 	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
+	ServerTime   *time.Time          `json:"server_time"`
 
 	// SurfaceSummary Which working-surface MCP tools this session should see, and which it does.
 	//

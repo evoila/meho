@@ -71,7 +71,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import (
     InvalidKbSlugError,
     KbEntryNotOwnedError,
@@ -82,7 +82,8 @@ from meho_backplane.kb.schemas import (
 )
 from meho_backplane.kb.service import KbService
 from meho_backplane.kb.similar import KbSimilarCheck, check_new_entry
-from meho_backplane.lesson_header import LessonHeaderError
+from meho_backplane.lesson_header import LessonHeaderError, may_confirm
+from meho_backplane.lessons.retrievals import record_kb_retrievals
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
@@ -188,7 +189,9 @@ async def _search_knowledge_handler(
     """
     slug = arguments.get("slug")
     if slug is not None:
-        return {"entry": await read_kb_entry(operator, slug)}
+        entry = await read_kb_entry(operator, slug)
+        await record_kb_retrievals(operator.tenant_id, [(slug, None)])
+        return {"entry": entry}
     query = arguments.get("query")
     if query is None:
         raise McpInvalidParamsError(
@@ -206,10 +209,13 @@ async def _search_knowledge_handler(
         time_window=time_window_from("search_knowledge", arguments),
         scope=arguments.get("scope") or "all",
     )
-    return _bounded_search_response(
+    response = _bounded_search_response(
         [_hit_payload(hit) for hit in hits],
         get_settings().result_complete_response_wire_max_bytes,
     )
+    delivered = hits[: len(response["hits"])]
+    await record_kb_retrievals(operator.tenant_id, [(hit.slug, hit.tenant_id) for hit in delivered])
+    return response
 
 
 def _hit_payload(hit: KbEntrySearchHit) -> dict[str, Any]:
@@ -259,11 +265,7 @@ def _may_change_any_entry(operator: Operator) -> bool:
     approvals in this tenant (the rule of the approvals queue, one list
     for approvals and reviews). Anyone else changes only their own entries.
     """
-    if operator.tenant_role == TenantRole.TENANT_ADMIN:
-        return True
-    return is_human_principal(operator) and (
-        operator.tenant_role != TenantRole.READ_ONLY or operator.approver
-    )
+    return may_confirm(operator)
 
 
 async def _add_to_knowledge_handler(
@@ -302,6 +304,17 @@ async def _add_to_knowledge_handler(
     slug: str = arguments["slug"]
     body: str = arguments["body"]
     metadata = arguments.get("metadata")
+    if (
+        isinstance(metadata, dict)
+        and metadata.get("status") == "confirmed"
+        and not may_confirm(operator)
+    ):
+        raise McpPermissionDeniedError(
+            "add_to_knowledge: only a reviewer (a person who can decide approvals in this "
+            "tenant) or a tenant admin may set status confirmed. Save the entry as a "
+            "candidate; the weekly upkeep report lists used candidates for a reviewer.",
+            data={"reason": "confirm_needs_reviewer", "slug": slug},
+        )
     may_change_any = _may_change_any_entry(operator)
 
     service = KbService()

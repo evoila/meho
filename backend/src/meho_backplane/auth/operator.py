@@ -366,6 +366,11 @@ class Operator(BaseModel):
     #: Such a token reaches ``POST /api/v1/kb/export`` and nothing else, in
     #: the same way as ``kb_import_only``.
     kb_export_only: bool = False
+    #: The login may only run the conventions drift check
+    #: (``conventions_drift_only`` claim). Such a token reaches
+    #: ``POST /api/v1/settings/conventions-drift`` and nothing else, in the
+    #: same way as :attr:`kb_import_only`.
+    conventions_drift_only: bool = False
     runner_id: UUID | None = None
     check_runner_dispatch: bool = False
     #: The ``auth_time`` claim: when the person last entered their

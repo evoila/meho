@@ -1480,6 +1480,33 @@ def _extract_limiting_flag(claims: Any, claim_name: str) -> bool:
     return True
 
 
+#: The claim that marks a login that may only run the conventions drift check.
+CONVENTIONS_DRIFT_ONLY_CLAIM: str = "conventions_drift_only"
+
+
+def _extract_conventions_drift_only(claims: Any) -> bool:
+    """Return whether the token may only run the conventions drift check.
+
+    Read like ``kb_import_only``: no claim, ``false`` or ``"false"`` gives
+    ``False``; ``true`` or ``"true"`` gives ``True``. Any other value also
+    gives ``True``, because the flag takes rights away. Such a value is
+    logged under ``malformed_conventions_drift_only_claim``.
+    """
+    raw = claims.get(CONVENTIONS_DRIFT_ONLY_CLAIM)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
+        return raw.strip().lower() == "true"
+    structlog.get_logger(__name__).warning(
+        "malformed_conventions_drift_only_claim",
+        claim_name=CONVENTIONS_DRIFT_ONLY_CLAIM,
+        reason="not_a_boolean",
+    )
+    return True
+
+
 def _tenants_claim_malformed(claims: Any, settings: Settings) -> bool:
     """Return ``True`` when the ``meho_tenants`` claim is there but not all good.
 
@@ -1826,6 +1853,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             approver=approver,
             kb_import_only=_extract_kb_import_only(claims),
             kb_export_only=_extract_kb_export_only(claims),
+            conventions_drift_only=_extract_conventions_drift_only(claims),
             runner_id=runner_id,
             tenants=tenants,
             self_approver=self_approver,

@@ -36,6 +36,8 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Any, Final
 
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+
 __all__ = [
     "CANDIDATE_EXPIRY_MONTHS",
     "LESSON_APPLIES_TO",
@@ -47,6 +49,7 @@ __all__ = [
     "add_candidate_expiry",
     "header_expires_at",
     "header_rows",
+    "may_confirm",
     "normalise_lesson_header",
 ]
 
@@ -149,6 +152,20 @@ def add_candidate_expiry(
         learned = _parse_iso(result["learned_at"])
         result["expires_at"] = _add_months(learned, CANDIDATE_EXPIRY_MONTHS).isoformat()
     return result
+
+
+def may_confirm(operator: Operator) -> bool:
+    """Say whether *operator* may set ``status: confirmed`` on a knowledge or memory entry.
+
+    A tenant admin may. A reviewer may: a person who can decide approvals
+    in this tenant. An agent may not; it saves a ``candidate``, and the
+    weekly upkeep report lists used candidates for a reviewer.
+    """
+    if operator.tenant_role == TenantRole.TENANT_ADMIN:
+        return True
+    return is_human_principal(operator) and (
+        operator.tenant_role != TenantRole.READ_ONLY or operator.approver
+    )
 
 
 def header_expires_at(metadata: Mapping[str, Any] | None) -> datetime | None:

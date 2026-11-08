@@ -159,6 +159,9 @@ Goal G10 (Operator web UI, [#336](https://github.com/evoila/meho/issues/336)) sh
 > and does not change #9: one UI team across the MEHO web interfaces, one shared component
 > library and style guide, one login, and one top bar with an app switcher. The approvals
 > page is still the first surface to improve; it is improved as a server-built page.
+>
+> **Note (2026-11-08):** the project owner confirmed the withdrawal above. Decisions #9
+> and #10 stand as written; the pages stay server-built, the approvals page included.
 
 - **HTMX 2** for partial-page swaps over the wire. GA Jun 2024; 2.x supported in perpetuity per [htmx.org/posts/2024-06-17-htmx-2-0-0-is-released](https://htmx.org/posts/2024-06-17-htmx-2-0-0-is-released/). Operator-driven actions (e.g., `meho vsphere vm.list`) render a Jinja2 template fragment that HTMX swaps into the page; no full-page reload.
 - **Jinja2** for HTML templates — already FastAPI's recommended templating. One template tree per surface (broadcast feed, topology, KB search, memory, audit, connectors).

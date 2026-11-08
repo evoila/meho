@@ -2957,7 +2957,7 @@ meho kb
 
 ### `meho kb add`
 
-Create or re-index one kb entry (tenant_admin)
+Create or update one kb entry (tenant_admin)
 
 ```
 meho kb add <slug> [flags]
@@ -2967,6 +2967,7 @@ meho kb add <slug> [flags]
 - `--body` — entry body: inline text, @<path> to read a file, or @- to read from stdin
 - `--create-anyway` — create the new entry even when similar entries exist
 - `--dry-run` — write nothing; list the similar entries and say whether the write would go through
+- `--expected-revision` — revision_id of the entry as you read it (required to update an existing slug)
 - `--json` — emit raw KbEntry JSON instead of the human summary
 - `--metadata` — comma-separated key=value pairs to attach as entry metadata (e.g. owner=ops,source=runbook)
 

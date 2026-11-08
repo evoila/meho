@@ -17,6 +17,12 @@
             "default": false,
             "type": "boolean"
           },
+          "expected_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "metadata": {
             "additionalProperties": true,
             "type": [

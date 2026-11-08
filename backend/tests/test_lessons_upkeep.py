@@ -24,6 +24,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, LessonRetrieval, MemoryRevision
 from meho_backplane.kb.service import KbService
+from meho_backplane.kb.stale_revision import KbStaleRevisionError
 from meho_backplane.lessons import upkeep
 from meho_backplane.lessons.upkeep import (
     SYSTEM_OPERATOR_SUB,
@@ -69,6 +70,15 @@ async def _status(slug: str) -> dict[str, object]:
     entry = await KbService().get_entry(TENANT, slug)
     assert entry is not None
     return entry.metadata
+
+
+async def _update(slug: str, body: str, metadata: dict[str, object] | None = None) -> None:
+    """Change an existing entry, naming the revision it has now."""
+    entry = await KbService().get_entry(TENANT, slug)
+    assert entry is not None
+    await KbService().create_entry(
+        TENANT, slug, body, metadata, expected_revision=entry.revision_id
+    )
 
 
 @pytest.mark.asyncio
@@ -117,6 +127,30 @@ async def test_expired_entries_are_retired_and_others_stay() -> None:
     assert (await _status("new"))["status"] == "candidate"
     assert (await _status("kept"))["status"] == "confirmed"
     assert reports[TENANT].retired == ["old"]
+
+
+@pytest.mark.asyncio
+async def test_a_retired_entry_has_a_new_revision_and_an_older_write_is_stale() -> None:
+    past = (NOW - timedelta(days=1)).isoformat()
+    before, _ = await KbService().create_entry(
+        TENANT, "old", "old", {"status": "candidate", "expires_at": past}, actor_sub="user-a"
+    )
+
+    await run_upkeep(now=NOW)
+
+    after = await KbService().get_entry(TENANT, "old")
+    assert after is not None
+    assert after.revision_id != before.revision_id
+    revision = await KbService().get_revision(TENANT, after.id, after.revision_id)
+    assert revision is not None
+    assert revision.body == "old"
+    with pytest.raises(KbStaleRevisionError) as refused:
+        await KbService().create_entry(
+            TENANT, "old", "old", {"status": "candidate"}, expected_revision=before.revision_id
+        )
+    assert refused.value.detail.changed_by == SYSTEM_OPERATOR_SUB
+    assert after.metadata["last_updated_by_sub"] == SYSTEM_OPERATOR_SUB
+    assert after.metadata["created_by_sub"] == "user-a"
 
 
 @pytest.mark.asyncio
@@ -348,7 +382,7 @@ async def test_an_entry_confirmed_after_the_read_is_not_retired() -> None:
     )
 
     async def reviewer_confirms() -> None:
-        await KbService().create_entry(TENANT, "old", "old", {"status": "confirmed"})
+        await _update("old", "old", {"status": "confirmed"})
 
     with _after_scan(reviewer_confirms):
         reports = await run_upkeep(now=NOW)
@@ -381,7 +415,7 @@ async def test_a_copy_edited_after_the_scan_is_not_replaced() -> None:
     await KbService().create_entry(TENANT, "b", "same")
 
     async def edit_copy() -> None:
-        await KbService().create_entry(TENANT, "b", "a new, different lesson")
+        await _update("b", "a new, different lesson")
 
     with _after_scan(edit_copy):
         reports = await run_upkeep(now=NOW)
@@ -398,7 +432,7 @@ async def test_a_copy_is_not_replaced_when_the_kept_entry_changed_or_is_gone() -
     await KbService().create_entry(TENANT, "d", "other")
 
     async def edit_and_delete_keepers() -> None:
-        await KbService().create_entry(TENANT, "a", "a new body")
+        await _update("a", "a new body")
         assert await KbService().delete_entry(TENANT, "c")
 
     with _after_scan(edit_and_delete_keepers):

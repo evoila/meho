@@ -467,6 +467,63 @@ meho approvals result <id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit the raw JSON answer instead of the human-readable view
 
+### `meho approvals runs`
+
+Approve the operation list of one automation run once (list / show / approve / revoke)
+
+```
+meho approvals runs
+```
+
+#### `meho approvals runs approve`
+
+Approve the whole operation list of one run, once
+
+```
+meho approvals runs approve <run-approval-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--confirm` — approve without showing the list and asking
+- `--json` — emit raw RunApprovalRead JSON
+
+#### `meho approvals runs list`
+
+List run approvals (default: pending ones)
+
+```
+meho approvals runs list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw RunApprovalListResponse JSON
+- `--limit` — the most rows to show (1-500)
+- `--principal` — only the run approvals of this service principal (token subject)
+- `--status` — pending, approved, revoked, ended, expired or all
+
+#### `meho approvals runs revoke`
+
+Revoke a run approval; the next listed call waits for approval
+
+```
+meho approvals runs revoke <run-approval-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw RunApprovalRead JSON
+- `--reason` — optional reason, stored with the revoke
+
+#### `meho approvals runs show`
+
+Show one run approval and its operation list
+
+```
+meho approvals runs show <run-approval-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw RunApprovalRead JSON
+
 ### `meho approvals show`
 
 Inspect a pending approval request
@@ -2908,6 +2965,8 @@ meho kb add <slug> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--body` — entry body: inline text, @<path> to read a file, or @- to read from stdin
+- `--create-anyway` — create the new entry even when similar entries exist
+- `--dry-run` — write nothing; list the similar entries and say whether the write would go through
 - `--json` — emit raw KbEntry JSON instead of the human summary
 - `--metadata` — comma-separated key=value pairs to attach as entry metadata (e.g. owner=ops,source=runbook)
 
@@ -4624,11 +4683,25 @@ meho secret read <mount> <path> [flags]
 
 ## `meho sensor`
 
-Manage deterministic-check sensors (list / create / edit / delete / results)
+Manage deterministic-check sensors (list / create / edit / delete / results / ack)
 
 ```
 meho sensor
 ```
+
+### `meho sensor ack`
+
+Acknowledge a sensor finding until a set time, with a reason (operator or approver)
+
+```
+meho sensor ack <sensor_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the raw acknowledgement JSON instead of the summary
+- `--note` — short text that says why; required
+- `--reason` — accepted_risk | fix_planned | false_alarm; required
+- `--until` — end time (RFC 3339) or duration from now (e.g. 72h); required
 
 ### `meho sensor create`
 
@@ -4853,6 +4926,7 @@ meho status [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--first-start` — show the first-start checks (DNS name, certificate, clock, reachability of the systems) as a red/green list; needs no login
 - `--json` — emit a single JSON document on stdout instead of the human summary
 - `--op-class` — filter --watch events by op_class (read, write, credential_read, audit_query)
 - `--principal` — filter --watch events by principal_sub (JWT subject claim)

@@ -3,8 +3,8 @@
 
 """Create the ``lesson_retrieval`` table.
 
-Revision ID: 0143
-Revises: 0142
+Revision ID: 0145
+Revises: 0144
 Create Date: 2026-11-07
 
 One row for each knowledge or memory entry that a search gave to an agent
@@ -31,8 +31,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0143"
-down_revision: str | None = "0142"
+revision: str = "0145"
+down_revision: str | None = "0144"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

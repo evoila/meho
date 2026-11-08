@@ -61,11 +61,35 @@ What is true after the Job ran:
 | Second person | `coreKeycloak.firstLogin.approverUsername` (default `approver`) | `MEHO-SA-Operators` | `tenant_role: operator` |
 
 Both get a 32-character password from the one alphabet `[A-Za-z0-9]`, stored
-as a temporary credential with the required action `UPDATE_PASSWORD`, so
-Keycloak forces a change at the first login. The realm's user profile also
-wants a first name, a last name and an email, so the first browser login
-asks for those too. Until both are done, a login without a browser (for
+as a temporary credential with the required actions `UPDATE_PASSWORD` and
+`CONFIGURE_TOTP`, so Keycloak forces a change at the first login and then
+asks the person to set up an authenticator app. The realm's user profile
+also wants a first name, a last name and an email, so the first browser
+login asks for those too. After the code app, the login shows twelve
+recovery codes once (see "Recovery codes" below). A later login asks for
+the code, or for one recovery code instead. Until both are done, a login
+without a browser (for
 example the password grant) is refused with "Account is not fully set up".
+
+**Recovery codes.** Keycloak reads the realm file only at its first start,
+so every run sets two realm settings through the Admin API
+(`core/keycloak_recovery.py`): the "Configure OTP" required action gets the
+option "Add recovery codes" (config key `add-recovery-codes`), and the step
+"Recovery Authentication Code Form" of the `browser` flow goes from Disabled
+to Alternative. Reading and changing both need `manage-realm`: the
+first-start account has it; `meho-admin` has it only with the company login
+on. So on an upgrade of an older install the stage cannot read them: it
+prints one line ("recovery codes: not checked ...") that names the page
+docs-site/install/keycloak-realm.md, "Recovery codes on an older install",
+and goes on. That page has two ways: give `meho-admin` `manage-realm` once
+and run the upgrade again, or set both by hand as the console admin. The
+stage does not fail here, so an upgrade still finishes. A run that finds
+both set changes nothing. An account that exists already keeps its required
+actions, so the code app is asked of new installs only. A test that logs in
+as one of these accounts without a browser must send the code too (the
+password grant takes it as `totp`). The real-Keycloak test sets up a code
+app for each account with a secret it makes up, makes the code from it,
+and checks that a login without the code or with a wrong one fails.
 
 The Secret `<release>-core-first-login` holds `admin_username`,
 `admin_password`, `approver_username` and `approver_password`. The install
@@ -283,7 +307,8 @@ first start had the company login off lacks the two roles; when the company
 login is turned on later, its Job stops with a sentence that names them.
 Add them once to the service account of `meho-admin` (realm-management
 client roles), with a Keycloak admin login or a temporary one from
-Keycloak's `bootstrap-admin` recovery command, then run `helm upgrade`
+Keycloak's `bootstrap-admin` recovery command
+(docs-site/install/keycloak-break-glass.md), then run `helm upgrade`
 again. With the two roles, the backplane, which uses `meho-admin`, can
 also change login settings of realm `meho`; it could already change people
 and groups with `manage-users`.
@@ -442,6 +467,14 @@ when nothing is missing. The Secrets it makes carry only the label
   A running realm gets them once with `keycloak.realm.update` or by hand;
   see `docs-site/install/keycloak-realm.md`, "Remember the browser, and
   passkeys".
+- Safer settings of the realm file: `eventsEnabled`, `eventsExpiration`
+  (180 days), `adminEventsEnabled`, `adminEventsDetailsEnabled` off,
+  the realm attribute `adminEventsExpiration` (180 days), the lock after
+  wrong passwords (`failureFactor` 5, `waitIncrementSeconds` 60,
+  `maxFailureWaitSeconds` 600, `maxDeltaTimeSeconds` 43200,
+  `permanentLockout` off) and `accessTokenLifespan` 300. Like the other
+  realm settings they reach a new realm only; a running realm gets them
+  by hand, see docs-site/install/keycloak-break-glass.md.
 - A person who exists is never touched: not their groups, not their
   password. To start over for one person, delete the person in Keycloak;
   the Job makes them again from the Secret.
@@ -455,7 +488,9 @@ when nothing is missing. The Secrets it makes carry only the label
   1. In Keycloak, set the new secret on the client `meho-admin` (realm
      `meho`, Clients, Credentials). Log in as the console admin (Secret
      `<release>-core-console-admin`) at
-     `https://<host>/auth/admin/master/console/#/meho`.
+     `https://<host>/auth/admin/master/console/#/meho`. With no working
+     admin login, make a temporary admin first by the steps of
+     docs-site/install/keycloak-break-glass.md (Keycloak must be stopped).
   2. Write the same value into the Secret `<release>-core-keycloak-admin`
      (key `client_secret`).
   3. Restart the pods that read it, or run `helm upgrade`. The Job then

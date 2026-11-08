@@ -383,6 +383,14 @@ session; NULL for a plain REST call) and `parent_audit_id` (the multi-step
 parent's audit id when a child step was cleared). Details:
 [`approvals.md`](approvals.md#service-principal-standing-grants--safety_level-gate-3151--3152).
 
+## Run approvals (#4126)
+
+A standing grant covers one operation for good. A **run approval** covers
+the operation list of one automation run: the add-on asks, a person
+approves the list once, and it ends with the run. The gate checks it after
+the standing grants, with the same delete rule. See
+[run-approvals.md](run-approvals.md).
+
 ## Read scope: limit a service principal's reads to named targets (#4992)
 
 A standing grant can only let a service principal do more. The read scope

@@ -44,6 +44,7 @@ func newStatusCmd() *cobra.Command {
 		jsonOut           bool
 		backplaneOverride string
 		watch             bool
+		firstStart        bool
 		opClass           string
 		principal         string
 		target            string
@@ -65,6 +66,11 @@ func newStatusCmd() *cobra.Command {
 			"is not allowed. status then shows the identity, the tenants and " +
 			"the database state from /api/v1/health/live, and says that the " +
 			"other checks need the operator role.\n\n" +
+			"With --first-start the command reads the public /first-start " +
+			"endpoint (no login needed) and prints one line per check: the " +
+			"DNS name, the certificate, the clock and the reachability of " +
+			"the systems in the settings. A red line says what to fix. " +
+			"Exit code 6 when any line is red.\n\n" +
 			"With --watch the command subscribes to /api/v1/feed and streams " +
 			"one rendered line per broadcast event until the operator hits " +
 			"Ctrl-C. Filters (--op-class, --principal, --target) forward to " +
@@ -93,6 +99,13 @@ func newStatusCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(err.Error()), jsonOut)
 			}
+			if firstStart {
+				if watch {
+					return output.RenderError(cmd.ErrOrStderr(),
+						output.Usage("--first-start and --watch cannot be used together"), jsonOut)
+				}
+				return runFirstStart(cmd, backplaneURL, jsonOut)
+			}
 			if watch {
 				return runWatch(cmd.Context(), watchOptions{
 					BackplaneURL: backplaneURL,
@@ -114,6 +127,8 @@ func newStatusCmd() *cobra.Command {
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	cmd.Flags().BoolVarP(&watch, "watch", "w", false,
 		"stream a live SSE feed of broadcast events (one line per event; Ctrl-C to exit)")
+	cmd.Flags().BoolVar(&firstStart, "first-start", false,
+		"show the first-start checks (DNS name, certificate, clock, reachability of the systems) as a red/green list; needs no login")
 	cmd.Flags().StringVar(&opClass, "op-class", "",
 		"filter --watch events by op_class (read, write, credential_read, audit_query)")
 	cmd.Flags().StringVar(&principal, "principal", "",

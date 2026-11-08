@@ -51,6 +51,12 @@ the install.
 {{- /* The login of the running backplane; the owner login above stays for the migration. */ -}}
 {{- $want = append $want (dict "kind" "postgres-meho-app" "named" .Values.postgres.runtime.credentialsSecret "valuesKey" "postgres.runtime.credentialsSecret" "keys" (list "password" "url") "host" (printf "%s-postgres" $rel)) -}}
 {{- $want = append $want (dict "kind" "postgres-keycloak" "named" .Values.corePostgres.existingSecrets.keycloak "valuesKey" "corePostgres.existingSecrets.keycloak" "keys" (list "password")) -}}
+{{- else if .Values.coreKeycloak.enabled -}}
+{{- /* Your own PostgreSQL: the role's password Secret is made unless the operator names one. */ -}}
+{{- $want = append $want (dict "kind" "postgres-keycloak" "named" .Values.coreKeycloak.database.passwordSecret.name "valuesKey" "coreKeycloak.database.passwordSecret.name" "keys" (list .Values.coreKeycloak.database.passwordSecret.key)) -}}
+{{- if .Values.coreKeycloak.database.create.enabled -}}
+{{- $want = append $want (dict "kind" "keycloak-db-admin" "named" .Values.coreKeycloak.database.create.adminSecret.name "valuesKey" "coreKeycloak.database.create.adminSecret.name" "keys" (list "username" "password")) -}}
+{{- end -}}
 {{- end -}}
 {{- if .Values.coreKeycloak.enabled -}}
 {{- $want = append $want (dict "kind" "keycloak-bootstrap" "named" .Values.coreKeycloak.existingSecrets.bootstrap "valuesKey" "coreKeycloak.existingSecrets.bootstrap" "keys" (list "client_id" "client_secret")) -}}

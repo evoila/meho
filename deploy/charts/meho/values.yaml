@@ -52,6 +52,14 @@ replicaCount: 1
 updateStrategy:
   type: Recreate
 
+# -- Seconds Kubernetes waits for a new backplane pod to get Ready before it
+# marks the rollout as failed (`ProgressDeadlineExceeded`). `kubectl rollout
+# status` and Argo CD then report a failure, even though the pod may still be
+# starting. Keep this higher than `probes.startup.failureThreshold` ×
+# `probes.startup.periodSeconds` (900s by default), plus time to pull the
+# image. The default is 1200s (20 min).
+progressDeadlineSeconds: 1200
+
 # -- How the backplane pod stops (#5024, docs/codebase/shutdown-drain.md).
 # The pod's grace period is preStopSleepSeconds + drainSeconds + 30 seconds.
 shutdown:
@@ -1417,8 +1425,10 @@ coreKeycloak:
   # `-core-keycloak-admin`, `-core-ui-auth` and `-core-check-runner`, and
   # deploys the Keycloak subchart (`charts/keycloak/`): Keycloak on the
   # official image at `https://<host>/auth`, with the MEHO realm loaded at
-  # the first start. Needs `corePostgres.enabled: true`. Every other key is
-  # described in `charts/keycloak/values.yaml`; set it here.
+  # the first start. Works with the built-in PostgreSQL or with your own: with
+  # `corePostgres.enabled: false`, set `database.host` and either a password
+  # Secret or `database.create` (see `charts/keycloak/values.yaml`). Every
+  # other key is described in `charts/keycloak/values.yaml`; set it here.
   #
   # While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`,
   # `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and

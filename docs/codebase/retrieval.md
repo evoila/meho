@@ -44,6 +44,7 @@ async def retrieve(
     principal_sub: str | None = None,
     memory_eligibility: MemoryEligibility | None = None,
     all_principals: bool = False,
+    time_window: TimeWindow | None = None,
 ) -> list[RetrievalHit]
 ```
 
@@ -56,7 +57,18 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   exclude rows (PG `@>` semantics); multi-key dicts behave as an
   intersection. `None` (default) skips the predicate. `{}` normalises
   to `None` at the boundary so the SQL never emits a no-op
-  `@> '{}'::jsonb` predicate.
+  `@> '{}'::jsonb` predicate. A value may also be a list (for example
+  `{"tags": ["vm"]}`): PG containment then needs every listed item. The
+  REST `RetrieveRequest` still refuses lists; the knowledge and memory
+  search tools send them.
+- `time_window` (#5726) — a frozen `TimeWindow`
+  (`retrieval/time_window.py`) with inclusive limits on the lesson
+  header's `confirmed_at` and on the `updated_at` column. Inlined into
+  both candidate queries as `_TIME_WINDOW_PREDICATE_SQL` and pinned by
+  `_assert_predicate_inlined`. The `confirmed_at` text is read with the
+  same shape regex and `pg_input_is_valid` guard as the Memory expiry,
+  so a bad stored value gives "no match", never a failed query. `None`
+  binds four `NULL`s and checks nothing.
 - `principal_sub` — the authenticated caller's OIDC `sub`. When set,
   the substrate enforces a **mandatory, non-overridable** per-principal
   visibility predicate for `source='memory'` user-scoped kinds

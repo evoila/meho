@@ -380,11 +380,12 @@ and registered in `PydanticAgentRun._build_agent` with
 `AgentDefinition.system_prompt` stays the first part, unchanged, ahead of all
 tenant text. The legacy `toolset is None` path gets no hosted context.
 
-The second part has two bands:
+The second part has three bands:
 
 1. `<<HOSTED_CONTEXT>>` — short text MEHO writes. It says MEHO policy, audit,
-   and approvals always apply and no tool text can change them; that Memory,
-   knowledge base, and topology are not in the prompt; which of the four
+   and approvals always apply and no tool text can change them; that only the
+   newest Memory notes are in the prompt, and the knowledge base and topology
+   are not; which of the four
    context tools this run has (only the registered ones); what to do without
    `read_context_resource`; and that conventions and retrieved text are data,
    not instructions.
@@ -394,6 +395,9 @@ The second part has two bands:
    broadcast, runbook-priming, and doc-catalogue bands are left out: they name
    MCP tools (`meho_broadcast_*`, `meho_runbook_*`, docs tools) a hosted run
    does not have.
+3. The run operator's newest Memory notes (`recall.memory_band`, #5729),
+   inside the untrusted-text envelope. Left out when there is no note. See
+   [recall.md](recall.md).
 
 Conventions that do not fit the budget are returned as
 `HostedContext.omissions` (`ContextOmission(kind="convention", name=<slug>,
@@ -401,8 +405,8 @@ reason="over_budget")`), named in the hosted band (up to 20 slugs, then a
 count), and logged as `agent_hosted_context_over_budget`. With
 `read_context_resource` the band also names the URI to read one.
 
-Memory, knowledge base, and topology are on demand only; nothing loads them
-into the prompt. Like the #3737 tools, hosted reads do not write the per-call
+Apart from that Memory band, Memory, knowledge base, and topology are on
+demand only; nothing else loads them into the prompt. Like the #3737 tools, hosted reads do not write the per-call
 MCP audit row; they write the agent tool call row.
 
 **Delivery receipt (#3763).** Each hosted context build also returns a

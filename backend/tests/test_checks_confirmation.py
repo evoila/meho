@@ -191,7 +191,7 @@ async def _record(
             evaluated_at=evaluated_at,
         )
         await session.commit()
-        return committed
+        return committed.changed
 
 
 async def _get_sensor(sensor_id: uuid.UUID) -> Sensor:

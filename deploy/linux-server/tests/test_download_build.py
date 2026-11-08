@@ -113,7 +113,7 @@ class ImageReferenceTests(PackagingTestCase):
             f"docker.io/library/busybox:1.37@{BUSYBOX}": f"{FULL_BUSYBOX} 1.37 {BUSYBOX}",
             f"index.docker.io/library/busybox:1.37@{BUSYBOX}": f"{FULL_BUSYBOX} 1.37 {BUSYBOX}",
             "ghcr.io/evoila/meho:v0.36.0": "ghcr.io/evoila/meho v0.36.0 -",
-            "quay.io/openbao/openbao-ubi:2.7.1": "quay.io/openbao/openbao-ubi 2.7.1 -",
+            "quay.io/openbao/openbao:2.7.1": "quay.io/openbao/openbao 2.7.1 -",
             "localhost:5000/meho:1": "localhost:5000/meho 1 -",
         }
         for reference, expected in cases.items():

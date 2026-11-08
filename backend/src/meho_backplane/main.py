@@ -83,6 +83,9 @@ from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
 from meho_backplane.api.v1.checks import router as api_v1_checks_router
+from meho_backplane.api.v1.checks_dashboard_files import (
+    router as api_v1_checks_dashboard_files_router,
+)
 from meho_backplane.api.v1.checks_dashboards import (
     router as api_v1_checks_dashboards_router,
 )
@@ -1346,6 +1349,8 @@ app.include_router(api_v1_sensors_router)
 # cross-tenant. Distinct module from api_v1_checks_router (the #2415 gateway
 # assignment/result surface) -- the ``dashboards`` sub-path does not collide.
 app.include_router(api_v1_checks_dashboards_router)
+# Export a Dashboard and its Sensors to a file, and import it at another site.
+app.include_router(api_v1_checks_dashboard_files_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``

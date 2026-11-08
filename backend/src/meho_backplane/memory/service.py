@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document, MemoryRevision
-from meho_backplane.lesson_header import normalise_lesson_header
+from meho_backplane.lesson_header import may_confirm, normalise_lesson_header
 from meho_backplane.memory._internal import (
     MEMORY_SOURCE,
     auto_slug,
@@ -127,7 +127,9 @@ class MemoryService:
         ------
         PermissionDeniedError
             When the RBAC matrix denies the write (e.g. an ``operator``
-            role attempting to write a ``TENANT``-scoped memory).
+            role attempting to write a ``TENANT``-scoped memory), or when
+            *metadata* sets ``status: confirmed`` and *operator* is not a
+            reviewer (:func:`~meho_backplane.lesson_header.may_confirm`).
         ValueError
             When ``target_name`` is missing for a target-scoped write.
         """
@@ -141,6 +143,12 @@ class MemoryService:
             # ``scope`` is overwritten below with the real scope; the other
             # names MEHO keeps are refused.
             metadata = normalise_lesson_header(metadata, allowed_reserved=frozenset({"scope"}))
+            if metadata.get("status") == "confirmed" and not may_confirm(operator):
+                raise PermissionDeniedError(
+                    scope,
+                    "only a reviewer (a person who can decide approvals in this tenant) "
+                    "or a tenant admin may set status confirmed; save the entry as a candidate",
+                )
 
         # validate_slug runs in addition to MemoryEntryCreate's Field
         # pattern so direct callers (not going through Pydantic) cannot

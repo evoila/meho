@@ -438,6 +438,11 @@ adds a revision with `written_by_sub = system:knowledge-upkeep`. The
 upkeep does not merge or retire memory entries: the expiry sweeper above
 already deletes expired ones.
 
+Only a reviewer or a tenant admin may write `status: confirmed` on a
+memory entry (`MemoryService.remember`, the rule of
+[kb.md](kb.md#lesson-header-and-shared-scope-lesson_headerpy-kbsharedpy)). Any other caller, such as an agent, gets
+a permission refusal (REST 403) and nothing is written.
+
 ### Promote path
 
 Widening of a row's scope along two ladders: `user → user-tenant →

@@ -71,7 +71,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import (
     InvalidKbSlugError,
     KbEntryNotOwnedError,
@@ -81,7 +81,7 @@ from meho_backplane.kb.schemas import (
     KbSharedSlugError,
 )
 from meho_backplane.kb.service import KbService
-from meho_backplane.lesson_header import LessonHeaderError
+from meho_backplane.lesson_header import LessonHeaderError, may_confirm
 from meho_backplane.lessons.retrievals import record_kb_retrievals
 from meho_backplane.mcp.registry import (
     READ_ONLY,
@@ -251,11 +251,7 @@ def _may_change_any_entry(operator: Operator) -> bool:
     approvals in this tenant (the rule of the approvals queue, one list
     for approvals and reviews). Anyone else changes only their own entries.
     """
-    if operator.tenant_role == TenantRole.TENANT_ADMIN:
-        return True
-    return is_human_principal(operator) and (
-        operator.tenant_role != TenantRole.READ_ONLY or operator.approver
-    )
+    return may_confirm(operator)
 
 
 async def _add_to_knowledge_handler(
@@ -297,7 +293,7 @@ async def _add_to_knowledge_handler(
     if (
         isinstance(metadata, dict)
         and metadata.get("status") == "confirmed"
-        and not _may_change_any_entry(operator)
+        and not may_confirm(operator)
     ):
         raise McpPermissionDeniedError(
             "add_to_knowledge: only a reviewer (a person who can decide approvals in this "

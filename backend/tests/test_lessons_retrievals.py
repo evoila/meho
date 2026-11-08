@@ -5,8 +5,8 @@
 
 Covers :mod:`meho_backplane.lessons.retrievals` through the MCP handlers of
 ``search_knowledge`` and ``search_memory``, and the rule in
-``add_to_knowledge`` that only a reviewer or a tenant admin may set
-``status: confirmed``.
+``add_to_knowledge`` and in the memory service that only a reviewer or a
+tenant admin may set ``status: confirmed``.
 """
 
 from __future__ import annotations
@@ -261,5 +261,38 @@ async def test_a_reviewer_or_tenant_admin_confirms_a_candidate(operator: Operato
         operator, {"slug": "lesson", "body": "x", "metadata": {"status": "confirmed"}}
     )
     stored = await KbService().get_entry(TENANT, "lesson")
+    assert stored is not None
+    assert stored.metadata["status"] == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_cannot_confirm_its_own_memory_candidate() -> None:
+    from meho_backplane.memory.rbac import PermissionDeniedError
+    from meho_backplane.memory.service import MemoryService
+
+    agent = _operator(kind=PrincipalKind.AGENT)
+    service = MemoryService()
+    await service.remember(
+        agent, MemoryScope.USER, "x", slug="lesson", metadata={"status": "candidate"}
+    )
+    with pytest.raises(PermissionDeniedError, match="reviewer"):
+        await service.remember(
+            agent, MemoryScope.USER, "x", slug="lesson", metadata={"status": "confirmed"}
+        )
+    stored = await service.recall(agent, MemoryScope.USER, "lesson")
+    assert stored is not None
+    assert stored.metadata["status"] == "candidate"
+
+
+@pytest.mark.asyncio
+async def test_a_reviewer_confirms_a_memory_entry() -> None:
+    from meho_backplane.memory.service import MemoryService
+
+    reviewer = _operator()
+    service = MemoryService()
+    await service.remember(
+        reviewer, MemoryScope.USER, "x", slug="lesson", metadata={"status": "confirmed"}
+    )
+    stored = await service.recall(reviewer, MemoryScope.USER, "lesson")
     assert stored is not None
     assert stored.metadata["status"] == "confirmed"

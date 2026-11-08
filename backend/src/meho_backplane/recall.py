@@ -37,6 +37,7 @@ one, matches any version. ``9`` and ``9.x`` match ``9.0.1``.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -293,7 +294,9 @@ async def memory_band(operator: Operator) -> str:
     read gives a short band that says so, never an empty one.
     """
     try:
-        entries = await MemoryService().list_memories(operator, limit=_CANDIDATES)
+        # Shielded: a run cancelled during this short read lets the read end
+        # and give its database connection back, instead of breaking it off.
+        entries = await asyncio.shield(MemoryService().list_memories(operator, limit=_CANDIDATES))
     except Exception:
         _log.warning("recall_memory_band_failed", tenant_id=str(operator.tenant_id), exc_info=True)
         return "\n".join([_BAND_HEADING, "", _BAND_UNAVAILABLE])

@@ -302,12 +302,8 @@ register_mcp_tool(
                             "type": "boolean",
                             "default": False,
                             "description": (
-                                "When true, keep only active claim steps: "
-                                "trusted announcements that are not the "
-                                "completion step and whose TTL (ts + "
-                                "ttl_minutes) has not run out. Operation "
-                                "events, older untrusted announcements and "
-                                "announcements without a TTL are left out."
+                                "When true, keep only active claims: "
+                                "trusted, not completed, TTL not run out."
                             ),
                         },
                     },
@@ -957,12 +953,8 @@ register_mcp_tool(
                             "type": "boolean",
                             "default": False,
                             "description": (
-                                "When true, keep only active claim steps: "
-                                "trusted announcements that are not the "
-                                "completion step and whose TTL (ts + "
-                                "ttl_minutes) has not run out. Operation "
-                                "events, older untrusted announcements and "
-                                "announcements without a TTL are left out."
+                                "When true, keep only active claims: "
+                                "trusted, not completed, TTL not run out."
                             ),
                         },
                     },

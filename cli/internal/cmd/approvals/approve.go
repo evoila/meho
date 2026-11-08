@@ -228,7 +228,7 @@ func runDecision(
 	}
 	endedWithoutResult := false
 	if opts.Wait && verb == "approve" && !runHasEnded(detail) {
-		detail, endedWithoutResult, err = waitForRun(cmd, client, requestID, answer.runID(), detail, jsonOut)
+		detail, endedWithoutResult, err = waitForRun(cmd, client, requestID, answer.runID(), jsonOut)
 		if err != nil {
 			return routeRequestError(cmd, backplaneURL, err, jsonOut)
 		}

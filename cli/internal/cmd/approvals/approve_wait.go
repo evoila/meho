@@ -164,7 +164,6 @@ func waitForRun(
 	client *api.AuthedClient,
 	requestID uuid.UUID,
 	runID *uuid.UUID,
-	detail *api.ApprovalRequestView,
 	jsonOut bool,
 ) (*api.ApprovalRequestView, bool, error) {
 	ctx := cmd.Context()
@@ -187,7 +186,7 @@ func waitForRun(
 			continue
 		}
 		failures = 0
-		detail = again
+		detail := again
 		if runHasEnded(detail) {
 			return detail, false, nil
 		}

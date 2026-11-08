@@ -512,6 +512,8 @@ included, and an unquoted shell operator (`;` `&` `|` `<` `>` `(` `)`)
 ends it, so `sh -ec "PGPASSWORD=x;id"` keeps `id` and the commands after
 a secret stay visible. An option group without `c` (`sh -e`) does not
 start a shell string: the next item is a direct argument.
+The command-line hider lives in `redaction/command_line.py`; the
+`linux.script.run` preview uses it too, for the script text.
 Then the same two-step redaction as the generic params echo
 runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
 tokens) and the value of a field with a secret-shaped name (a `secret`

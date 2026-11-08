@@ -41,6 +41,7 @@ from unittest.mock import patch
 
 import pytest
 
+from meho_backplane.retrieval.eval.operation_search import OperationSearchResult
 from meho_backplane.retrieval.eval.runner import (
     EvalResult,
     RegressionEpsilon,
@@ -85,17 +86,16 @@ def _make_perfect_retrieve_fn() -> Any:
     """Stub that returns the corpus's first expected hit as the top-1.
 
     Models a retrieval system that always nails the ground truth
-    across every shipped surface — the kb corpus's first
-    expected_hit, the operations corpus's first expected_op_id, and
-    the memory corpus's first ``(scope, slug)`` pair are returned as
-    the single hit for their respective surfaces. The ``source``
+    across the ``documents`` surfaces — the kb corpus's first
+    expected_hit and the memory corpus's first ``(scope, slug)`` pair
+    are returned as the single hit for their respective surfaces. The
+    operations surface uses :func:`_make_perfect_search_operations_fn`. The ``source``
     argument the runner threads through picks the right answer map
     at call time.
     """
     from meho_backplane.retrieval.eval.corpus import load_corpus
 
     kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
-    ops_answers = {row.query: row.expected_op_ids[0] for row in load_corpus("operations")}
     memory_answers = {row.query: row.expected_hits[0] for row in load_corpus("memory")}
 
     async def perfect(
@@ -107,14 +107,6 @@ def _make_perfect_retrieve_fn() -> Any:
         limit: int = 10,
         principal_sub: str | None = None,
     ) -> list[RetrievalHit]:
-        # Operations branch — the runner passes ``source="operations"``;
-        # RetrievalHit.source_id is the op_id (per
-        # ``runner._operations_hits_to_op_ids``).
-        if source == "operations":
-            op_id = ops_answers.get(query)
-            if op_id is None:
-                return []
-            return [_make_hit(op_id, source="operations")]
         # Memory branch — the runner passes ``source="memory"``;
         # RetrievalHit.source_id encodes ``"<scope>:<slug>"`` so the
         # runner's ``_memory_hits_to_pairs`` recovers ``"<scope>/<slug>"``
@@ -130,6 +122,21 @@ def _make_perfect_retrieve_fn() -> Any:
         if slug is None:
             return []
         return [_make_hit(slug, source=source or "kb")]
+
+    return perfect
+
+
+def _make_perfect_search_operations_fn() -> Any:
+    """Stub operation search that returns the corpus's first expected op_id."""
+    from meho_backplane.retrieval.eval.corpus import load_corpus
+
+    ops_answers = {row.query: row.expected_op_ids[0] for row in load_corpus("operations")}
+
+    async def perfect(
+        *, tenant_id: uuid.UUID, connector_id: str, query: str, limit: int
+    ) -> OperationSearchResult:
+        op_id = ops_answers.get(query)
+        return OperationSearchResult(op_ids=[op_id] if op_id else [])
 
     return perfect
 
@@ -333,6 +340,7 @@ async def test_eval_all_perfect_across_all_three_surfaces_returns_green() -> Non
     result = await eval_all(
         tenant_id=uuid.uuid4(),
         retrieve_fn=_make_perfect_retrieve_fn(),
+        search_operations_fn=_make_perfect_search_operations_fn(),
     )
 
     assert isinstance(result, EvalResult)
@@ -346,6 +354,7 @@ async def test_eval_all_red_kb_flips_overall_to_red() -> None:
     result = await eval_all(
         tenant_id=uuid.uuid4(),
         retrieve_fn=_make_terrible_retrieve_fn(),
+        search_operations_fn=_make_perfect_search_operations_fn(),
     )
 
     kb = next(s for s in result.surfaces if s.surface == "kb")
@@ -359,6 +368,7 @@ async def test_eval_all_surface_filter_scopes_the_run() -> None:
     result = await eval_all(
         tenant_id=uuid.uuid4(),
         retrieve_fn=_make_perfect_retrieve_fn(),
+        search_operations_fn=_make_perfect_search_operations_fn(),
         surfaces=["kb"],
     )
 
@@ -483,6 +493,7 @@ async def test_save_and_load_baseline_round_trip(tmp_path: Path) -> None:
     eval_result = await eval_all(
         tenant_id=uuid.uuid4(),
         retrieve_fn=_make_perfect_retrieve_fn(),
+        search_operations_fn=_make_perfect_search_operations_fn(),
     )
 
     path = tmp_path / "baseline.json"
@@ -507,6 +518,7 @@ async def test_save_baseline_creates_parent_dir(tmp_path: Path) -> None:
     eval_result = await eval_all(
         tenant_id=uuid.uuid4(),
         retrieve_fn=_make_perfect_retrieve_fn(),
+        search_operations_fn=_make_perfect_search_operations_fn(),
     )
 
     nested_path = tmp_path / "a" / "b" / "c" / "baseline.json"
@@ -523,6 +535,7 @@ async def test_save_baseline_writes_pretty_json_with_trailing_newline(
     eval_result = await eval_all(
         tenant_id=uuid.uuid4(),
         retrieve_fn=_make_perfect_retrieve_fn(),
+        search_operations_fn=_make_perfect_search_operations_fn(),
     )
 
     path = tmp_path / "baseline.json"

@@ -41,9 +41,12 @@ body.
 Which entries:
 
 - **Knowledge:** at most 3. The header `product` equals the target's
-  product (upper and lower case are the same). The header `version` is
-  missing, or the target has no version, or the target's version equals
-  it or starts with it and a dot (`8.0` and `8.x` match `8.0.2`). The
+  product (upper and lower case are the same). The target's version is
+  the version the probe found (`fingerprint.version`), else the version
+  the operator typed (`version`), read by
+  `connectors/resolver.py` `resolve_target_version`. The header `version`
+  is missing, or the target has no version, or the target's version
+  equals it or starts with it and a dot (`8.0` and `8.x` match `8.0.2`). The
   tenant's own entries and the shared entries it may read
   (`kb/shared.py`); its own entry wins on the same slug. Confirmed
   entries come first, then the newest.
@@ -76,8 +79,9 @@ directly and do not get it.
 `memory_band(operator)` returns a short band: the heading
 `## Recent Memory notes`, one sentence that says the notes are data, and
 one envelope with the newest notes (at most 5) of the `user`,
-`user-tenant` and `tenant` scopes the caller may read. Target notes come
-before an operation instead. With no note the band is left out. A failed
+`user-tenant` and `tenant` scopes the caller may read. It reads each of
+the three scopes on its own, so many target notes cannot push them out.
+Target notes come before an operation instead. With no note the band is left out. A failed
 read gives a band that says the notes could not be loaded.
 
 - MCP: `mcp/server.py` `_session_instructions` puts it after the tenant

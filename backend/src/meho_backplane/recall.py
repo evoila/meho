@@ -31,8 +31,10 @@ whole envelope stays under :data:`MAX_BLOCK_CHARS` (before an operation) or
 whole and counted.
 
 Knowledge matches on the header ``product`` (upper and lower case are the
-same) and ``version``. An entry without a version, or a target without
-one, matches any version. ``9`` and ``9.x`` match ``9.0.1``.
+same) and ``version``. The target's version is the probed one first
+(:func:`~meho_backplane.connectors.resolver.resolve_target_version`). An
+entry without a version, or a target without one, matches any version.
+``9`` and ``9.x`` match ``9.0.1``.
 """
 
 from __future__ import annotations
@@ -48,12 +50,13 @@ import structlog
 from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.resolver import resolve_target_version
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.kb.schemas import KB_KIND_ENTRY, KB_SOURCE
 from meho_backplane.kb.shared import visible_to
 from meho_backplane.lesson_header import header_expires_at
-from meho_backplane.memory.schemas import TARGET_SCOPED, MemoryEntry, memory_locator
+from meho_backplane.memory.schemas import MemoryEntry, MemoryScope, memory_locator
 from meho_backplane.memory.service import MemoryService
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
@@ -92,6 +95,17 @@ MAX_BAND_CHARS: Final[int] = 1500
 
 #: How many rows are read before the filters below pick the top few.
 _CANDIDATES: Final[int] = 25
+
+#: The scopes of the start-text band. Target notes come before an operation.
+_BAND_SCOPES: Final[tuple[MemoryScope, ...]] = (
+    MemoryScope.USER,
+    MemoryScope.USER_TENANT,
+    MemoryScope.TENANT,
+)
+
+#: Band reads in flight. The loop keeps only weak references to a task, so a
+#: shielded read must be held here until it ends.
+_BAND_READS: set[asyncio.Task[list[MemoryEntry]]] = set()
 
 _MAX_SOURCE_CHARS: Final[int] = 120
 _HIDDEN_TYPES: Final[frozenset[str]] = frozenset({"observation"})
@@ -259,14 +273,18 @@ def unavailable_block() -> dict[str, Any]:
 async def recall_for_target(operator: Operator, target: Any) -> dict[str, Any]:
     """Build the ``team_knowledge`` block for an operation on *target*.
 
-    *target* is the resolved target row (``name``, ``product``,
-    ``version``). ``status`` is ``found`` (with ``text``, ``shown`` and
+    *target* is the resolved target row (``name``, ``product``, and the
+    version: the probed fingerprint version first, else ``version``, as
+    :func:`~meho_backplane.connectors.resolver.resolve_target_version` reads
+    it). ``status`` is ``found`` (with ``text``, ``shown`` and
     ``left_out``), ``none`` (nothing matches) or ``unavailable`` (the lookup
     failed, so nothing is known). A failed lookup never fails the
     operation's answer.
     """
     try:
-        knowledge = await _knowledge_items(operator.tenant_id, target.product, target.version)
+        knowledge = await _knowledge_items(
+            operator.tenant_id, target.product, resolve_target_version(target)
+        )
         notes = await MemoryService().list_memories(
             operator, target_name=target.name, limit=_CANDIDATES
         )
@@ -286,6 +304,20 @@ async def recall_for_target(operator: Operator, target: Any) -> dict[str, Any]:
     }
 
 
+async def _general_notes(operator: Operator) -> list[MemoryEntry]:
+    """Read the newest notes of each band scope, merged newest first.
+
+    One read per scope, so many target notes cannot fill the read limit and
+    push the general notes out.
+    """
+    service = MemoryService()
+    entries: list[MemoryEntry] = []
+    for scope in _BAND_SCOPES:
+        entries += await service.list_memories(operator, scope=scope, limit=_CANDIDATES)
+    entries.sort(key=lambda entry: entry.updated_at, reverse=True)
+    return entries
+
+
 async def memory_band(operator: Operator) -> str:
     """Return the Memory band of the start text, or ``""`` when there is no note.
 
@@ -293,15 +325,17 @@ async def memory_band(operator: Operator) -> str:
     target notes come before an operation on that target instead. A failed
     read gives a short band that says so, never an empty one.
     """
+    read = asyncio.ensure_future(_general_notes(operator))
+    _BAND_READS.add(read)
+    read.add_done_callback(_BAND_READS.discard)
     try:
         # Shielded: a run cancelled during this short read lets the read end
         # and give its database connection back, instead of breaking it off.
-        entries = await asyncio.shield(MemoryService().list_memories(operator, limit=_CANDIDATES))
+        entries = await asyncio.shield(read)
     except Exception:
         _log.warning("recall_memory_band_failed", tenant_id=str(operator.tenant_id), exc_info=True)
         return "\n".join([_BAND_HEADING, "", _BAND_UNAVAILABLE])
-    general = [entry for entry in entries if entry.scope not in TARGET_SCOPED]
-    items = _memory_items(general, MAX_START_MEMORIES)
+    items = _memory_items(entries, MAX_START_MEMORIES)
     if not items:
         return ""
     prefix = "\n".join([_BAND_HEADING, "", _BAND_NOTE, ""])

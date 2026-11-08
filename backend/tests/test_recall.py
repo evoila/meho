@@ -14,7 +14,6 @@ import jsonschema
 import pytest
 
 import meho_backplane.mcp.tools.operations as operations_tools
-import meho_backplane.recall as recall_mod
 from meho_backplane.agent.hosted_context import assemble_hosted_context
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.service import KbService
@@ -88,9 +87,14 @@ def _operator(
 
 
 async def _target(
-    name: str = _TARGET, product: str = "vcenter", version: str | None = "8.0.2"
+    name: str = _TARGET,
+    product: str = "vcenter",
+    version: str | None = "8.0.2",
+    fingerprint: dict[str, Any] | None = None,
 ) -> None:
-    await _insert_target(tenant_id=_TENANT, name=name, product=product, version=version)
+    await _insert_target(
+        tenant_id=_TENANT, name=name, product=product, version=version, fingerprint=fingerprint
+    )
 
 
 async def _kb(slug: str, tenant_id: uuid.UUID = _TENANT, **metadata: object) -> None:
@@ -184,6 +188,19 @@ async def test_a_preview_on_a_known_target_shows_the_matching_lesson() -> None:
 
 
 @pytest.mark.usefixtures("_stub_operations")
+async def test_the_probed_version_picks_the_lessons() -> None:
+    """A probed target with no typed version matches on its fingerprint version."""
+    await _target(version=None, fingerprint={"product": "vcenter", "version": "8.0.2"})
+    await _kb("vc-eight", product="vcenter", version="8.0", summary="Only for version eight.")
+    await _kb("vc-seven", product="vcenter", version="7.0", summary="Only for version seven.")
+
+    text = (await _preview())[RECALL_KEY]["text"]
+
+    assert "Only for version eight." in text
+    assert "Only for version seven." not in text
+
+
+@pytest.mark.usefixtures("_stub_operations")
 async def test_the_block_stays_under_the_size_limit() -> None:
     await _target()
     for number in range(5):
@@ -249,7 +266,7 @@ async def test_a_failed_lookup_says_unavailable(monkeypatch: pytest.MonkeyPatch)
     async def broken(*_args: object) -> list[object]:
         raise RuntimeError("database gone")
 
-    monkeypatch.setattr(recall_mod, "_knowledge_items", broken)
+    monkeypatch.setattr("meho_backplane.recall._knowledge_items", broken)
 
     answer = await _preview()
 
@@ -328,6 +345,25 @@ async def test_the_start_text_carries_the_newest_scoped_memories() -> None:
     assert hosted.text.index(band) > 0
 
 
+async def test_many_newer_target_notes_do_not_push_out_the_band() -> None:
+    operator = _operator()
+    service = MemoryService()
+    await service.remember(operator, MemoryScope.USER, "My older general note.", "general")
+    for number in range(30):
+        await service.remember(
+            operator,
+            MemoryScope.TARGET,
+            f"Target note {number}.",
+            f"t-{number}",
+            target_name=_TARGET,
+        )
+
+    band = await memory_band(operator)
+
+    assert "My older general note." in band
+    assert "Target note" not in band
+
+
 async def test_no_memory_band_without_notes() -> None:
     assert await memory_band(_operator(uuid.uuid4())) == ""
 
@@ -354,7 +390,7 @@ async def test_every_block_form_matches_the_output_schema(monkeypatch: pytest.Mo
     async def broken(*_args: object) -> list[object]:
         raise RuntimeError("database gone")
 
-    monkeypatch.setattr(recall_mod, "_knowledge_items", broken)
+    monkeypatch.setattr("meho_backplane.recall._knowledge_items", broken)
     answers.append(await _preview())
 
     assert [answer[RECALL_KEY]["status"] for answer in answers] == ["found", "none", "unavailable"]

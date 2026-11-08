@@ -62,6 +62,11 @@ class QueryResult(BaseModel):
     expected ground truth; ``baseline_*`` mirrors are populated when
     the baseline ran. Frozen so the runner can't accidentally mutate
     a row while folding the surface aggregate.
+
+    ``not_run_reason`` is set when the question could not be run on
+    this install (operations surface: its connector cannot be searched
+    here). Such a row has no hits and zeros, and the surface aggregate
+    leaves it out (#4752).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -76,6 +81,7 @@ class QueryResult(BaseModel):
     baseline_precision_at_5: float | None = None
     baseline_reciprocal_rank: float | None = None
     baseline_coverage_at_5: float | None = None
+    not_run_reason: str | None = None
 
 
 class SurfaceResult(BaseModel):
@@ -91,6 +97,11 @@ class SurfaceResult(BaseModel):
     ``baseline_verdict`` is computed only when the baseline ran;
     ``None`` otherwise. The MEHO-≥-baseline overlay applies in the
     aggregate verdict (see runner._apply_baseline_check).
+
+    ``query_count`` counts the scored questions only. ``not_run_count``
+    counts the questions that could not be run on this install; they
+    are in ``queries`` with their ``not_run_reason`` but do not move the
+    metrics or the verdict (#4752).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -106,6 +117,7 @@ class SurfaceResult(BaseModel):
     baseline_mrr: float | None = None
     baseline_coverage: float | None = None
     baseline_verdict: Verdict | None = None
+    not_run_count: int = 0
     queries: list[QueryResult] = Field(default_factory=list)
 
 

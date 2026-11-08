@@ -1112,9 +1112,12 @@ query and `limit`:
    (`docs_search/service.py::search_docs`). The backend gets the
    caller's token, as for `search_docs`.
 4. A wiki hit whose page the store's hits hold as an imported copy is
-   left out (`duplicate_count`). The page is matched by its path: the
-   copy's provenance `relative_path` against the end of the hit's
-   `source_url` / `upstream_url` path or its `document_id`. The store
+   left out (`duplicate_count`). Only the caller's own tenant's hits
+   count: a shared hit of another tenant comes from that tenant's wiki.
+   The page is matched by its whole path: the copy's provenance
+   `relative_path` must equal the hit's `document_id` or the path after
+   `blob/<commit>/` in its `source_url` / `upstream_url`. A page with
+   the same file name in another folder stays in the answer. The store
    hit stays: it has the slug for a full read and is what the recall
    before an operation uses.
 
@@ -1125,7 +1128,8 @@ The answer:
   `source_url` (the source link the index sent, for a Git page its path
   and commit), its text wrapped as untrusted. The store hits keep their
   shape. `wiki` holds `collection`, `searched`, `reason`, `message`,
-  `hit_count` and `duplicate_count`. When the answer is too large, the
+  `hit_count` and `duplicate_count`. The size limit counts the whole
+  answer, `wiki` included. When the answer is too large, the
   lowest-ranked hits are left out first, so wiki hits go before store
   hits.
 - REST: `RetrieveResponse.wiki` is a `KbWikiSearch` with the hits in

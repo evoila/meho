@@ -55,7 +55,9 @@ from meho_backplane.mcp.tools.knowledge import (
     _search_knowledge_handler,
 )
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.retrieval.retriever import RetrievalHit
+from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import BLOCK_START
 from tests._kb_embedding_stub import fake_embedding_service
 from tests.mcp_test_fixtures import (
@@ -275,6 +277,78 @@ async def test_a_page_only_named_alike_is_not_a_copy() -> None:
     response, _ = await _search(_operator(), store=[_store_hit(metadata=imported)])
     assert response["wiki"]["duplicate_count"] == 0
     assert response["wiki"]["hit_count"] == 1
+
+
+def _imported(path: str) -> dict[str, object]:
+    return stamp_provenance(
+        {},
+        source_kind="import",
+        relative_path=path,
+        ingested_at=datetime(2026, 11, 8, tzinfo=UTC),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "imported_path",
+    ["snapshot-limits.md", "vcenter/snapshot-limits.md", "products/nsx/snapshot-limits.md"],
+)
+async def test_the_same_file_name_in_another_folder_is_not_a_copy(imported_path: str) -> None:
+    """Only the whole page path matches, not the end of it."""
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    response, _ = await _search(_operator(), store=[_store_hit(metadata=_imported(imported_path))])
+    assert response["wiki"]["duplicate_count"] == 0
+    assert response["wiki"]["hit_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_shared_import_of_another_tenant_is_not_a_copy() -> None:
+    """Another tenant's import comes from that tenant's wiki, even with the same path."""
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    shared = _store_hit(tenant_id=_TENANT_B, metadata=_imported(_PAGE_PATH))
+    response, _ = await _search(_operator(), store=[shared])
+    assert response["wiki"]["duplicate_count"] == 0
+    assert response["wiki"]["hit_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_hit_without_a_page_link_matches_only_by_its_whole_document_id() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    same = _WIKI_CHUNK.model_copy(
+        update={"chunk_id": "same", "source_url": None, "document_id": _PAGE_PATH}
+    )
+    other = _WIKI_CHUNK.model_copy(
+        update={"chunk_id": "other", "source_url": None, "document_id": f"x/{_PAGE_PATH}"}
+    )
+    response, _ = await _search(
+        _operator(),
+        store=[_store_hit(metadata=_imported(_PAGE_PATH))],
+        corpus=_corpus(same, other),
+    )
+    assert [hit.get("chunk_id") for hit in response["hits"][1:]] == ["other"]
+    assert response["wiki"]["duplicate_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_size_limit_counts_the_wiki_status() -> None:
+    """The final answer, ``wiki`` included, stays within the limit."""
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    whole, _ = await _search(_operator())
+    without_wiki = {key: value for key, value in whole.items() if key != "wiki"}
+    limit = measure_delivered_wire_bytes(without_wiki, structured=False)
+
+    with patch.object(get_settings(), "result_complete_response_wire_max_bytes", limit):
+        response, _ = await _search(_operator())
+
+    assert measure_delivered_wire_bytes(response, structured=False) <= limit
+    assert response["delivery"] == "partial"
+    assert response["omitted_hits"] == 1
+    assert response["wiki"]["collection"] == _WIKI
+    assert [hit["slug"] for hit in response["hits"]] == ["vcenter-snapshot-notes"]
 
 
 # --- the wiki is not searched: the answer says why ----------------------------

@@ -30,10 +30,15 @@ its answer also carries :func:`wiki_note_for`: the collection, and whether
 the export (:mod:`meho_backplane.kb.page_export`) sends the lesson to the
 wiki as a page for review, or why not yet.
 
-A wiki page that the store also holds as an imported copy (provenance
-``source_kind="import"`` with the page path) is shown once: as the store
-hit, which has the slug for a full read and is what the recall before an
-operation uses. The import refreshes the copy after every merge in the wiki.
+A wiki page that the store also holds as an imported copy is shown once:
+as the store hit, which has the slug for a full read and is what the recall
+before an operation uses. The import refreshes the copy after every merge in
+the wiki. A store hit is such a copy only when the caller's own tenant owns
+it (a shared hit of another tenant comes from that tenant's wiki), its
+provenance says ``source_kind="import"``, and its page path is the whole
+path of the wiki page: the path after ``blob/<commit>/`` in the hit's
+source link, or the hit's ``document_id``. A page with only the same file
+name in another folder is a different page and stays in the answer.
 """
 
 from __future__ import annotations
@@ -128,13 +133,14 @@ async def search_wiki(
     query: str,
     *,
     limit: int,
-    stored_metadata: Iterable[Mapping[str, object]],
+    stored: Iterable[tuple[uuid.UUID | None, Mapping[str, object]]],
     filtered: bool,
 ) -> KbWikiSearch | None:
     """Search the caller's wiki collection; ``None`` when the tenant has none.
 
-    *stored_metadata* is the metadata of the store's hits in the same
-    answer, used to leave out wiki pages the store holds as imported copies.
+    *stored* holds the owning tenant and the metadata of each store hit in
+    the same answer, used to leave out wiki pages the store holds as
+    imported copies.
     *filtered* is true when the search uses filters, a time window or the
     shared scope: the wiki cannot apply them, so it is not searched.
     """
@@ -161,7 +167,7 @@ async def search_wiki(
     except CorpusUnavailable as exc:
         _log.warning("kb_wiki_search_unavailable", collection_key=key, error=str(exc))
         return _not_searched(key, "index_unavailable")
-    imported = _imported_paths(stored_metadata)
+    imported = _imported_paths(operator.tenant_id, stored)
     hits = [chunk.model_copy(update={"collection": key}) for chunk in result.chunks]
     kept = [chunk for chunk in hits if not _is_imported_copy(chunk, imported)]
     structlog.contextvars.bind_contextvars(
@@ -227,10 +233,14 @@ def _message(key: str, reason: WikiSkipReason) -> str:
     return f"The team wiki (docs collection `{key}`) was not searched: {why}."
 
 
-def _imported_paths(stored_metadata: Iterable[Mapping[str, object]]) -> set[str]:
-    """Return the wiki page paths of the imported copies among the store's hits."""
+def _imported_paths(
+    tenant_id: uuid.UUID, stored: Iterable[tuple[uuid.UUID | None, Mapping[str, object]]]
+) -> set[str]:
+    """Return the wiki page paths of the caller's own imported copies among the store's hits."""
     paths: set[str] = set()
-    for metadata in stored_metadata:
+    for owner, metadata in stored:
+        if owner != tenant_id:
+            continue
         provenance = read_provenance(dict(metadata))
         if provenance.source_kind == "import" and provenance.relative_path:
             paths.add(provenance.relative_path.strip("/"))
@@ -240,19 +250,24 @@ def _imported_paths(stored_metadata: Iterable[Mapping[str, object]]) -> set[str]
 def _is_imported_copy(chunk: DocsChunk, imported: set[str]) -> bool:
     """Say whether the page of *chunk* is one of the *imported* page paths.
 
-    The chunk's page is read from its source link (``source_url`` or
-    ``upstream_url``, for example ``.../blob/<commit>/products/x/page.md``)
-    or its ``document_id``. A path matches when it ends with a whole
-    imported path.
+    The page path is the ``document_id``, or the path after
+    ``blob/<commit>/`` in the source link (``source_url`` or
+    ``upstream_url``, for example ``.../-/blob/<commit>/products/x/page.md``).
+    Only a path equal to an imported path matches.
     """
     if not imported:
         return False
-    candidates = [chunk.document_id or ""]
+    candidates = {(chunk.document_id or "").strip("/")}
     for link in (chunk.source_url, chunk.upstream_url):
         if link:
-            candidates.append(unquote(urlsplit(link).path))
-    for candidate in candidates:
-        text = candidate.strip("/")
-        if any(text == path or text.endswith(f"/{path}") for path in imported):
-            return True
-    return False
+            candidates.add(_page_path_of(link))
+    return not candidates.isdisjoint(imported)
+
+
+def _page_path_of(link: str) -> str:
+    """Return the page path after ``blob/<commit>/`` in *link*, or ``""``."""
+    parts = unquote(urlsplit(link).path).strip("/").split("/")
+    if "blob" not in parts:
+        return ""
+    page = parts[parts.index("blob") + 2 :]
+    return "/".join(page)

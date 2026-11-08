@@ -219,17 +219,17 @@ async def _search_knowledge_handler(
         operator,
         query,
         limit=limit,
-        stored_metadata=[hit.metadata for hit in hits],
+        stored=[(hit.tenant_id, hit.metadata) for hit in hits],
         filtered=bool(filters) or time_window is not None or scope == "shared",
     )
     payloads = [_hit_payload(hit) for hit in hits]
     if wiki is not None:
         payloads.extend(_wiki_hit_payload(chunk) for chunk in wiki.hits)
     response = _bounded_search_response(
-        payloads, get_settings().result_complete_response_wire_max_bytes
+        payloads,
+        get_settings().result_complete_response_wire_max_bytes,
+        extra={"wiki": _wiki_status_payload(wiki)} if wiki is not None else None,
     )
-    if wiki is not None:
-        response["wiki"] = _wiki_status_payload(wiki)
     delivered = hits[: len(response["hits"])]
     await record_kb_retrievals(operator.tenant_id, [(hit.slug, hit.tenant_id) for hit in delivered])
     return response
@@ -271,8 +271,13 @@ _PARTIAL_SEARCH_REMEDIATION: Final[str] = (
 )
 
 
-def _bounded_search_response(hits: list[dict[str, Any]], max_bytes: int) -> dict[str, Any]:
+def _bounded_search_response(
+    hits: list[dict[str, Any]], max_bytes: int, *, extra: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Keep the response within *max_bytes* on the wire, dropping the lowest-ranked hits.
+
+    *extra* holds more keys of the response (the ``wiki`` status). They are
+    measured with the hits, so the whole answer stays within *max_bytes*.
 
     Uses the shared wire measurement (#3641) and its ``delivery`` states:
     ``complete`` when every hit fits, ``partial`` when some lower-ranked
@@ -281,7 +286,7 @@ def _bounded_search_response(hits: list[dict[str, Any]], max_bytes: int) -> dict
     """
     kept = len(hits)
     while True:
-        response: dict[str, Any] = {"hits": hits[:kept], "delivery": "complete"}
+        response: dict[str, Any] = {"hits": hits[:kept], "delivery": "complete", **(extra or {})}
         if kept < len(hits):
             omitted = len(hits) - kept
             response["delivery"] = "partial"

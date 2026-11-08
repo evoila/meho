@@ -335,7 +335,7 @@ async def retrieve_endpoint(
             operator,
             body.query,
             limit=body.limit,
-            stored_metadata=[hit.doc_metadata for hit in hits],
+            stored=[(hit.tenant_id, hit.doc_metadata) for hit in hits],
             filtered=body.kind is not None or bool(body.metadata_filters),
         )
 

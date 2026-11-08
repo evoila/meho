@@ -1033,9 +1033,9 @@ def test_migration_vocabularies_match_the_model() -> None:
         Path(__file__).resolve().parents[1]
         / "alembic"
         / "versions"
-        / "0143_create_sensor_acknowledgements.py"
+        / "0144_create_sensor_acknowledgements.py"
     )
-    spec = importlib.util.spec_from_file_location("_mig_0143", path)
+    spec = importlib.util.spec_from_file_location("_mig_0144", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

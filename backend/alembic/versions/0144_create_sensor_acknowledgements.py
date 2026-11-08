@@ -3,8 +3,8 @@
 
 """Create the ``sensor_acknowledgements`` table.
 
-Revision ID: 0143
-Revises: 0142
+Revision ID: 0144
+Revises: 0143
 Create Date: 2026-11-07
 
 A person can acknowledge a Sensor that is not green, for a set time and
@@ -31,8 +31,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0143"
-down_revision: str | None = "0142"
+revision: str = "0144"
+down_revision: str | None = "0143"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

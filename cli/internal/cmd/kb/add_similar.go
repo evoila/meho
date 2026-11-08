@@ -34,6 +34,12 @@ func renderSimilarCheck(
 	if status != http.StatusConflict && (!opts.DryRun || status != http.StatusOK) {
 		return false, nil
 	}
+	// Another 409, such as stale_revision, is not a similar-entries
+	// answer; the caller shows it as an error.
+	if status == http.StatusConflict &&
+		(resp.JSON409 == nil || resp.JSON409.Reason != api.KbSimilarCheckReasonSimilarEntries) {
+		return false, nil
+	}
 	check := resp.JSON409
 	if status == http.StatusOK {
 		check = decodeJSONBody[api.KbSimilarCheck](resp.HTTPResponse, resp.Body)

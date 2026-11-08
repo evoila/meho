@@ -615,7 +615,7 @@ def test_upload_bulk_success_and_partial_failure() -> None:
 
 
 def test_upload_idempotent_same_body() -> None:
-    """Re-uploading identical content yields success without duplicating the entry."""
+    """Uploading a slug that exists is refused, shows a link, and keeps one entry."""
     _seed_tenant(_TENANT_A, "tenant-a")
     with respx.mock(assert_all_called=False) as mock_router:
         mock_discovery_and_jwks(mock_router, _JWKS)
@@ -637,11 +637,11 @@ def test_upload_idempotent_same_body() -> None:
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert "alert-success" in r1.text
-    assert "alert-success" in r2.text
+    assert "alert-error" in r2.text
+    assert "exists already" in r2.text
+    assert 'href="/ui/kb/idempotent"' in r2.text
 
-    # No-op assertion (AC3): the second upload must NOT create a duplicate.
-    # Re-uploading identical content is body_hash-idempotent, so exactly one
-    # entry for the slug must exist after both uploads, with a stable id.
+    # The second upload must NOT create a duplicate or change the entry.
     async def _entries() -> list[object]:
         from meho_backplane.kb import KbService
 

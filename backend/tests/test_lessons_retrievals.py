@@ -282,11 +282,17 @@ async def test_an_agent_cannot_confirm_its_own_candidate() -> None:
 )
 async def test_a_reviewer_or_tenant_admin_confirms_a_candidate(operator: Operator) -> None:
     agent = _operator(kind=PrincipalKind.AGENT)
-    await _add_to_knowledge_handler(
+    first = await _add_to_knowledge_handler(
         agent, {"slug": "lesson", "body": "x", "metadata": {"status": "candidate"}}
     )
     await _add_to_knowledge_handler(
-        operator, {"slug": "lesson", "body": "x", "metadata": {"status": "confirmed"}}
+        operator,
+        {
+            "slug": "lesson",
+            "body": "x",
+            "metadata": {"status": "confirmed"},
+            "expected_revision": first["revision_id"],
+        },
     )
     stored = await KbService().get_entry(TENANT, "lesson")
     assert stored is not None

@@ -300,7 +300,7 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # shape as ``service_principal_grant`` above.
     "service_principal_read_scope",
     # ``run_approval.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
-    # migration ``0142`` (#4126 run approvals), the same shape as above.
+    # migration ``0143`` (#4126 run approvals), the same shape as above.
     "run_approval",
     # ``addon_pairing.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0079`` (#3025 add-on pairing handshake). PG rejects

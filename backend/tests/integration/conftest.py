@@ -440,7 +440,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   table referenced in a foreign key constraint``.
         # * ``sandbox_delete_grant`` — migration 0115 (#4622 sandbox mode delete
         #   grants) carries the same real ``REFERENCES tenant(id)`` FK.
-        # * ``run_approval`` — migration 0142 (#4126 run approvals) carries the
+        # * ``run_approval`` — migration 0143 (#4126 run approvals) carries the
         #   same real ``REFERENCES tenant(id)`` FK.
         # * ``service_principal_read_scope`` — migration 0117 (#4992 read scope)
         #   carries the same real ``REFERENCES tenant(id)`` FK.

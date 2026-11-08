@@ -40,7 +40,7 @@ Rules that never change:
   setting ``run_approval_target_kinds_enabled`` is on.
 * One run (tenant, token subject, run reference) has at most one open
   request at a time. The service refuses a second one (HTTP 409), and the
-  partial unique index ``run_approval_open_run_idx`` (migration ``0142``)
+  partial unique index ``run_approval_open_run_idx`` (migration ``0143``)
   refuses the one of two requests that arrive at the same time on two
   workers and both pass that check.
 """
@@ -312,7 +312,7 @@ async def _insert_one_open(session: AsyncSession, row: RunApproval, now: datetim
 
     Two requests for the same run on two workers can both pass
     :func:`_refuse_live_or_record_expired`. The partial unique index
-    ``run_approval_open_run_idx`` (migration ``0142``) lets only one insert.
+    ``run_approval_open_run_idx`` (migration ``0143``) lets only one insert.
     The other insert fails, its savepoint rolls back, the transaction stays
     usable, and the error names the row the winner stored.
     """

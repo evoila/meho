@@ -394,7 +394,7 @@ meho agent-principal revoke <name> [flags]
 
 ## `meho approvals`
 
-Manage approval requests (list / show / result / approve / reject / withdraw)
+Manage approval requests (list / show / result / approve / reject / withdraw / mark-checked)
 
 ```
 meho approvals
@@ -428,7 +428,21 @@ meho approvals list [flags]
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
 - `--order` — sort order: oldest or newest (default: newest; oldest when --filter-work-ref is set)
+- `--outcome-unknown` — list approved changes whose outcome MEHO does not know, for you to check
 - `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
+
+### `meho approvals mark-checked`
+
+Record what you found on the target of a run with an unknown outcome
+
+```
+meho approvals mark-checked <id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw JSON response instead of summary
+- `--note` — what you checked (required)
+- `--outcome` — what you found: happened or did-not-happen (required)
 
 ### `meho approvals reject`
 

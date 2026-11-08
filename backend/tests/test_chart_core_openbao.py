@@ -426,8 +426,8 @@ def test_notes_show_the_command_never_the_key(tmp_path: Path) -> None:
         in on
     )
     assert (
-        "Copy this to your key store now; for a keyholder at every restart, "
-        "delete the Secret and restart OpenBao" in on
+        "Copy the unseal key to the clipboard" in on
+        and "For a keyholder at every restart, delete the Secret and restart OpenBao" in on
     )
     assert "kubectl -n meho rollout restart statefulset test-vault" in on
     assert "OpenBao" not in notes()

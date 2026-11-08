@@ -93,6 +93,8 @@ async def _seed() -> None:
                 review_status="enabled",
             )
         )
+        # The descriptors reference the group; write it first.
+        await session.flush()
         session.add(
             EndpointDescriptor(
                 tenant_id=_TENANT,

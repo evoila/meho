@@ -96,6 +96,8 @@ async def _seed() -> None:
                 review_status="enabled",
             )
         )
+        # The descriptors reference the group; write it first.
+        await session.flush()
         for op_id, summary in ((_OP, "List items."), (_OTHER_OP, "Read the account.")):
             method, _, path = op_id.partition(":")
             session.add(

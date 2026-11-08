@@ -66,6 +66,11 @@ from meho_backplane.mcp.registry import (
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.mcp.tools._operation_recall import with_recall
+from meho_backplane.operation_picks.recorder import (
+    recorded_background_call,
+    recorded_call,
+    recorded_search,
+)
 from meho_backplane.operations._contract_guidance import (
     CUT_MARK,
     GUIDANCE_MAX_CHARS,
@@ -148,10 +153,17 @@ async def _search_operations_handler(
     Shares :func:`_list_operation_groups_handler`'s connector-error
     mapping so both discovery meta-tools surface the same typed
     ``-32602`` taxonomy (#1482). An unknown ``op_id`` in exact-op mode
-    (#3668) maps the same way, with ``data.reason=unknown_op``.
+    (#3668) maps the same way, with ``data.reason=unknown_op``. Each call
+    writes one search record (:mod:`meho_backplane.operation_picks`).
     """
     try:
-        return with_data_notice(await search_operations(operator, arguments))
+        answer = await recorded_search(
+            operator,
+            arguments,
+            transport="mcp",
+            run=lambda: search_operations(operator, arguments),
+        )
+        return with_data_notice(answer)
     except (UnknownConnectorError, ConnectorNotIngestedError) as exc:
         raise _connector_error_to_invalid_params(exc) from exc
     except UnknownOperationError as exc:
@@ -171,7 +183,8 @@ async def _call_operation_handler(
     A call that names a target also carries ``team_knowledge``
     (:mod:`meho_backplane.mcp.tools._operation_recall`), also when it
     starts in the background with ``async: true``. A check of a run with
-    ``run_id`` does not.
+    ``run_id`` does not. Each call (not a check) writes one call record
+    (:mod:`meho_backplane.operation_picks`).
     """
     call_arguments = dict(arguments)
     run_async = bool(call_arguments.pop("async", False))
@@ -192,9 +205,20 @@ async def _call_operation_handler(
             await poll_call(operator, call_arguments, str(run_id), wait_seconds=wait_seconds or 0)
         )
     if run_async:
-        answer = with_data_notice(await submit_async_call(operator, call_arguments))
+        result = await recorded_background_call(
+            operator,
+            call_arguments,
+            transport="mcp",
+            submit=lambda wrap: submit_async_call(operator, call_arguments, wrap=wrap),
+        )
     else:
-        answer = with_data_notice(await call_operation(operator, call_arguments))
+        result = await recorded_call(
+            operator,
+            call_arguments,
+            transport="mcp",
+            run=lambda: call_operation(operator, call_arguments),
+        )
+    answer = with_data_notice(result)
     return await with_recall(
         operator,
         call_arguments,

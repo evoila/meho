@@ -196,8 +196,7 @@ func showRequest(w io.Writer, header string, d *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "  What else is affected:\n    %s\n", output.SafeLines(string(b)))
 	}
 	if len(d.ProposedEffect) > 0 {
-		b, _ := json.MarshalIndent(d.ProposedEffect, "    ", "  ")
-		fmt.Fprintf(w, "  Parameters and preview:\n    %s\n", output.SafeLines(string(b)))
+		printEffect(w, "  ", "Parameters and preview:", d.ProposedEffect)
 	}
 }
 

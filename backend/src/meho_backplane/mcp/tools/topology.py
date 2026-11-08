@@ -129,6 +129,7 @@ from meho_backplane.mcp.server import (
 )
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
 from meho_backplane.operations._lookup import connector_product_known, parse_connector_id
+from meho_backplane.operations.answer_ready import ANSWER_READY_OUTPUT_PROPERTIES
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import UnknownConnectorError
@@ -1316,6 +1317,7 @@ register_mcp_tool(
                 "sample_rows_returned": {"type": "integer"},
                 "sample_bytes": {"type": "integer"},
                 "source_key": {"type": "string"},
+                **ANSWER_READY_OUTPUT_PROPERTIES,
                 "preview_omits": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1769,6 +1771,7 @@ register_mcp_tool(
                 "sample_rows_returned": {"type": "integer"},
                 "sample_bytes": {"type": "integer"},
                 "source_key": {"type": "string"},
+                **ANSWER_READY_OUTPUT_PROPERTIES,
                 "handle": {
                     "type": "object",
                     "description": (

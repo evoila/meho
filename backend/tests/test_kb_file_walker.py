@@ -399,9 +399,11 @@ def test_header_date_and_version_are_kept_as_text(tmp_path: Path) -> None:
         "version: 3.10\nratio: 0.5\ncount: 3\nflag: true\n---\nBody.",
     )
     (record,) = walk_kb_directory(tmp_path)
+    # learned_at and confirmed_at are lesson header dates, so they come
+    # back in full ISO form.
     assert record.metadata == {
-        "learned_at": "2026-11-03",
-        "confirmed_at": "2026-11-03T10:00:00Z",
+        "learned_at": "2026-11-03T00:00:00+00:00",
+        "confirmed_at": "2026-11-03T10:00:00+00:00",
         "version": "3.10",
         "ratio": "0.5",
         "count": 3,
@@ -415,7 +417,7 @@ def test_quoted_header_values_are_unchanged(tmp_path: Path) -> None:
         '---\nlearned_at: "2026-11-03"\nversion: "3.10"\n---\nBody.',
     )
     (record,) = walk_kb_directory(tmp_path)
-    assert record.metadata == {"learned_at": "2026-11-03", "version": "3.10"}
+    assert record.metadata == {"learned_at": "2026-11-03T00:00:00+00:00", "version": "3.10"}
 
 
 def test_dates_in_nested_header_values_and_keys_are_text(tmp_path: Path) -> None:

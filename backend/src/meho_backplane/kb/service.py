@@ -114,6 +114,7 @@ from meho_backplane.kb.schemas import (
     KB_SOURCE,
     META_CREATED_BY_SUB,
     META_KB_PASSAGE,
+    META_SHARED,
     KbEntry,
     KbEntryNotOwnedError,
     KbEntryRevision,
@@ -124,9 +125,16 @@ from meho_backplane.kb.schemas import (
     KbReservedMetadataError,
     validate_slug,
 )
+from meho_backplane.kb.shared import (
+    check_may_share,
+    refuse_shared_slug,
+    shared_owner_tenants,
+    visible_to,
+)
+from meho_backplane.lesson_header import add_candidate_expiry, normalise_lesson_header
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
 
-__all__ = ["KbIngestRootError", "KbListOrder", "KbService"]
+__all__ = ["KbIngestRootError", "KbListOrder", "KbService", "add_shared_hits"]
 
 #: Row order of :meth:`KbService.list_entries`. ``"slug"`` (the default)
 #: sorts A to Z by slug; ``"newest"`` puts the most recently updated
@@ -240,7 +248,7 @@ class KbService:
             stmt = (
                 select(Document, current_revision_id())
                 .where(
-                    Document.tenant_id == tenant_id,
+                    visible_to(tenant_id),
                     Document.source == KB_SOURCE,
                 )
                 .order_by(
@@ -265,6 +273,9 @@ class KbService:
         """Return the full :class:`KbEntry` for *(tenant_id, slug)*; ``None`` if absent.
 
         Backs ``meho kb show`` (T4) and ``GET /api/v1/kb/{slug}`` (T2).
+        An entry of the shared scope (see :mod:`meho_backplane.kb.shared`)
+        is returned too, with the owner tenant's id.
+
         Slug is NOT re-validated here -- a caller passing an
         out-of-shape slug just gets ``None`` (no row will match the
         natural key) rather than a 422. The route / CLI layer does the
@@ -273,17 +284,19 @@ class KbService:
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            result = await session.execute(
-                select(Document, current_revision_id()).where(
-                    Document.tenant_id == tenant_id,
-                    Document.source == KB_SOURCE,
-                    Document.source_id == slug,
+            rows = (
+                await session.execute(
+                    select(Document, current_revision_id()).where(
+                        visible_to(tenant_id),
+                        Document.source == KB_SOURCE,
+                        Document.source_id == slug,
+                    )
                 )
-            )
-            row = result.one_or_none()
-        if row is None:
+            ).all()
+        if not rows:
             return None
-        doc, revision_id = row
+        # The tenant's own entry wins over a shared one with the same slug.
+        doc, revision_id = next((r for r in rows if r[0].tenant_id == tenant_id), rows[0])
         return _doc_to_entry(doc, revision_id)
 
     async def get_revision(
@@ -311,6 +324,7 @@ class KbService:
         *,
         actor_sub: str | None = None,
         own_entries_only: bool = False,
+        may_set_curation_keys: bool | None = None,
     ) -> tuple[KbEntry, bool]:
         """Insert (or re-index) one kb entry; return ``(entry, created)``.
 
@@ -344,7 +358,16 @@ class KbService:
         :data:`~meho_backplane.kb.schemas.CURATION_METADATA_KEYS` raises
         :class:`~meho_backplane.kb.schemas.KbReservedMetadataError`. So
         an operator can create entries and change only its own, and
-        cannot make an entry look curated. Attribution comes from
+        cannot make an entry look curated. *may_set_curation_keys*
+        splits the two rules: it defaults to ``not own_entries_only``,
+        and the MCP tool passes ``False`` for a reviewer, who may change
+        any entry but still may not set those keys.
+
+        *metadata* is checked as a lesson header
+        (:mod:`meho_backplane.lesson_header`; a wrong value raises
+        ``LessonHeaderError``). A ``candidate`` with no ``expires_at``
+        gets six months after ``learned_at``. A slug that is a shared
+        entry of another tenant raises ``KbSharedSlugError``. Attribution comes from
         :func:`~meho_backplane.kb.attribution.merge_attribution`:
         ``created_by_sub`` set once and preserved across overwrites,
         ``last_updated_by_sub`` rewritten each write, both in
@@ -369,8 +392,14 @@ class KbService:
         :class:`~meho_backplane.kb.schemas.InvalidKbSlugError`).
         """
         validate_slug(slug)
-        if own_entries_only:
-            _refuse_reserved_metadata(metadata)
+        metadata = await _checked_direct_metadata(
+            tenant_id,
+            slug,
+            metadata,
+            may_set_curation_keys=not own_entries_only
+            if may_set_curation_keys is None
+            else may_set_curation_keys,
+        )
 
         doc, revision_id, created = await write_entry(
             tenant_id=tenant_id,
@@ -477,7 +506,76 @@ class KbService:
             limit=CANDIDATE_LIMIT,
             metadata_filters=metadata_filters,
         )
+        ranked = await add_shared_hits(
+            ranked,
+            tenant_id=tenant_id,
+            query=query,
+            kind=kind_filter,
+            limit=CANDIDATE_LIMIT,
+            metadata_filters=metadata_filters,
+        )
         return _group_by_entry(ranked, limit)
+
+
+async def add_shared_hits(
+    own: list[RetrievalHit],
+    *,
+    tenant_id: uuid.UUID,
+    query: str,
+    kind: str | None,
+    limit: int,
+    metadata_filters: dict[str, Any] | None,
+) -> list[RetrievalHit]:
+    """Add the kb hits of the shared scope to *own*, best first, at most *limit*.
+
+    Each owner tenant is searched on its own, narrowed to its ``shared``
+    entries. A shared hit whose slug the tenant has itself is dropped, so
+    the tenant's own entry wins. A ``shared`` filter of the caller other
+    than ``true`` excludes every shared entry, so then *own* is returned
+    unchanged. Used by :meth:`KbService.search_entries` and by
+    ``POST /api/v1/retrieve`` with ``source="kb"`` (``meho kb search``).
+    """
+    owners = shared_owner_tenants() - {tenant_id}
+    filters = dict(metadata_filters or {})
+    if not owners or filters.get(META_SHARED, True) is not True:
+        return own
+    filters[META_SHARED] = True
+    own_slugs = {_hit_slug(hit) for hit in own}
+    merged = list(own)
+    for owner in sorted(owners):
+        shared_hits = await retrieve(
+            tenant_id=owner,
+            query=query,
+            source=KB_SOURCE,
+            kind=kind,
+            limit=limit,
+            metadata_filters=filters,
+        )
+        merged.extend(hit for hit in shared_hits if _hit_slug(hit) not in own_slugs)
+    merged.sort(key=lambda hit: hit.fused_score, reverse=True)
+    return merged[:limit]
+
+
+async def _checked_direct_metadata(
+    tenant_id: uuid.UUID,
+    slug: str,
+    metadata: dict[str, object] | None,
+    *,
+    may_set_curation_keys: bool,
+) -> dict[str, object] | None:
+    """Check the caller metadata of a direct create and return it with dates as text.
+
+    Raises for a curation key the caller may not set, a wrong lesson
+    header value, a ``shared`` the tenant may not set, and a slug that is
+    a shared entry of another tenant.
+    """
+    if not may_set_curation_keys:
+        _refuse_reserved_metadata(metadata)
+    if metadata is not None:
+        metadata = normalise_lesson_header(metadata, allowed_reserved=frozenset({"provenance"}))
+    check_may_share(tenant_id, metadata)
+    await refuse_shared_slug(tenant_id, slug)
+    return metadata
 
 
 def _refuse_reserved_metadata(metadata: dict[str, object] | None) -> None:
@@ -521,11 +619,12 @@ def _direct_write_metadata(
         # No caller metadata and no actor: keep the existing keys, but
         # still record this write's provenance.
         merged = dict(existing) if existing is not None else {}
+    now = datetime.now(UTC)
     return stamp_provenance(
-        merged,
+        add_candidate_expiry(merged, existing=existing, now=now),
         source_kind="direct",
         relative_path=None,
-        ingested_at=datetime.now(UTC),
+        ingested_at=now,
     )
 
 
@@ -551,7 +650,7 @@ def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearc
     groups: dict[str, tuple[RetrievalHit, list[KbPassageEvidence]]] = {}
     for hit in ranked:
         locator = _locator(hit)
-        slug = hit.source_id if locator is None else str(hit.doc_metadata[META_KB_PASSAGE]["slug"])
+        slug = _hit_slug(hit)
         if slug not in groups:
             if len(groups) == limit:
                 continue
@@ -568,6 +667,13 @@ def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearc
                 )
             )
     return [_entry_hit(slug, best, evidence) for slug, (best, evidence) in groups.items()]
+
+
+def _hit_slug(hit: RetrievalHit) -> str:
+    """Return the slug of the entry a ranked row belongs to."""
+    if _locator(hit) is None:
+        return hit.source_id
+    return str(hit.doc_metadata[META_KB_PASSAGE]["slug"])
 
 
 def _locator(hit: RetrievalHit) -> KbPassageLocator | None:

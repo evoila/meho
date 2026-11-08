@@ -462,6 +462,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
 | `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). Optional `labels` / `annotations` maps go on the Secret's metadata. |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
+| `k8s.cronjob.list`     | safe      | `BatchV1Api.list_namespaced_cron_job` (or `list_cron_job_for_all_namespaces`): name, namespace, schedule, suspended, last schedule time (`ops_cronjob_list.py`). |
 | `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
 | `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
 | `k8s.secret.delete`    | **destructive** | `CoreV1Api.delete_namespaced_secret`. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_secret_write.py`. |
@@ -854,7 +855,7 @@ match. `ops_secret_compare.py` answers that without showing the value.
 
 Every namespaced list op on this connector
 (`k8s.pod.list`, `k8s.deployment.list`, `k8s.workload.list`,
-`k8s.job.list`, `k8s.event.list`, `k8s.service.list`,
+`k8s.job.list`, `k8s.cronjob.list`, `k8s.event.list`, `k8s.service.list`,
 `k8s.ingress.list`, `k8s.configmap.list`, `k8s.secret.list`) shares
 the same input-parameter shape via the building blocks in
 [`ops_listparams.py`](../../backend/src/meho_backplane/connectors/kubernetes/ops_listparams.py):
@@ -1027,8 +1028,10 @@ in the `workload` group over `BatchV1Api`.
   the counts stay inline if the JSONFlux reducer ever spills the pod
   list to a handle.
 
-Not covered: CronJob reads, and `k8s.ls /<namespace>` does not count
-Jobs yet (`K8S_NAMESPACED_KIND_LISTERS` is unchanged).
+`k8s.cronjob.list` (`ops_cronjob_list.py`) lists CronJobs with the
+same selectors and paging as `k8s.job.list`. A row has `name`,
+`namespace`, `schedule`, `suspended` and `last_schedule_time`. Not
+covered: `k8s.ls /<namespace>` does not count Jobs or CronJobs yet (`K8S_NAMESPACED_KIND_LISTERS` is unchanged).
 
 ### ConfigMap privacy split
 
@@ -1423,9 +1426,16 @@ The `k8s.ls` handler is a thin path parser:
   pays one round-trip per probed kind, not one per row.
 - `/<namespace>/<kind>` -- forwards through
   `KubernetesConnector.execute()` to `k8s.<kind>.list`. The shim is the
-  same dispatcher path direct callers use; an unknown kind comes back
-  as the structured `unknown_op` envelope and the forwarder surfaces it
-  verbatim under `result`.
+  same dispatcher path direct callers use. The forwarder passes the
+  caller's operator (`execute(..., operator=operator)`), so the sub-op
+  reads the target's credentials under the caller's identity; a system
+  operator could not (the client cache refuses it and Vault rejects its
+  placeholder token). `statefulsets` and
+  `daemonsets` go to `k8s.workload.list` with the matching `kind`. A
+  kind with no list op, and any sub-op that does not return `ok`, make
+  `k8s.ls` raise, so the top-level answer is an error and not `ok` with
+  an error inside. The `unknown_op` message names the kinds `k8s.ls` can
+  list (`_LS_LISTABLE_KINDS`; a test checks each one has an op).
 
 ## Dependencies
 

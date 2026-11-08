@@ -1548,6 +1548,12 @@ class Settings(BaseModel):
     # through :attr:`gsm_param_allowed_project_set`. Set via
     # ``GSM_PARAM_ALLOWED_PROJECTS``.
     gsm_param_allowed_projects: str = Field(default="")
+    # Tenants whose knowledge entries marked ``shared`` every tenant on this
+    # instance can read. Comma-separated tenant ids, whitespace ignored.
+    # Empty (the default) means no tenant may share and no entry is shared.
+    # Only the owner tenant can write them. Read through
+    # :attr:`kb_shared_tenant_set`. Set via ``KB_SHARED_TENANT_IDS``.
+    kb_shared_tenant_ids: str = Field(default="")
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -2326,6 +2332,17 @@ class Settings(BaseModel):
     vault_kv_folder_max_keys: int = Field(default=500, ge=1, le=10000)
 
     @property
+    def kb_shared_tenant_set(self) -> frozenset[UUID]:
+        """The tenant ids in :attr:`kb_shared_tenant_ids`, as a set.
+
+        Raises :class:`ValueError` for an entry that is not a UUID, so a
+        typo does not quietly turn sharing off.
+        """
+        return frozenset(
+            UUID(entry.strip()) for entry in self.kb_shared_tenant_ids.split(",") if entry.strip()
+        )
+
+    @property
     def gsm_param_allowed_project_set(self) -> frozenset[str]:
         """The project ids in :attr:`gsm_param_allowed_projects`, as a set."""
         return frozenset(
@@ -2810,6 +2827,7 @@ def get_settings() -> Settings:
             or "urn:ietf:params:oauth:token-type:jwt"
         ),
         gsm_param_allowed_projects=os.environ.get("GSM_PARAM_ALLOWED_PROJECTS", "").strip(),
+        kb_shared_tenant_ids=os.environ.get("KB_SHARED_TENANT_IDS", "").strip(),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

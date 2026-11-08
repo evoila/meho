@@ -298,14 +298,21 @@ who can approve the admin's changes (`approver`). Both are in the
 Secret `meho-core-first-login`. Keycloak asks for a new password, a
 name and an email at the first login. Then it asks you to set up an
 authenticator app, and shows twelve recovery codes once. Save them: each
-works one time, instead of the code from the app. Read the admin's login with:
+works one time, instead of the code from the app. Read the admin's user name,
+and copy the password to the clipboard so it does not show on screen:
 
 ```bash
 kubectl -n meho get secret meho-core-first-login \
   -o jsonpath='{.data.admin_username}' | base64 -d; echo
+# macOS
 kubectl -n meho get secret meho-core-first-login \
-  -o jsonpath='{.data.admin_password}' | base64 -d; echo
+  -o jsonpath='{.data.admin_password}' | base64 -d | pbcopy
+# Linux with X11: ... | base64 -d | xclip -selection clipboard
+# Linux with Wayland: ... | base64 -d | wl-copy
 ```
+
+Do not run the password command without the last pipe. Clear the clipboard
+after the first login.
 
 Keep these passwords in your own key store.
 

@@ -93,8 +93,11 @@ and checks that a login without the code or with a wrong one fails.
 
 The Secret `<release>-core-first-login` holds `admin_username`,
 `admin_password`, `approver_username` and `approver_password`. The install
-notes print the `kubectl get secret … -o jsonpath` command; they never print
-a value. The Secret is the source on later runs: if a person is missing but
+notes show the `kubectl get secret … -o jsonpath | base64 -d` command with
+a pipe into the clipboard (`pbcopy`, `xclip -selection clipboard` or
+`wl-copy`) for each password, and warn that the command without the pipe
+shows the password on screen. They never print a value. The OpenBao unseal
+key line works the same way. The Secret is the source on later runs: if a person is missing but
 the Secret exists, the Job makes the person again with the stored password.
 Changing a user name in values after the first install has no effect.
 

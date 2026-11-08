@@ -7,8 +7,9 @@
 #
 # Order of choices:
 #   1. The model is already installed at this version: use it.
-#   2. The model file is in the tool folder (the job restores that folder
-#      with actions/cache, keyed by the version): install it.
+#   2. The model file is in the tool folder with the right sha256 (the job
+#      restores that folder with actions/cache, keyed by the version):
+#      install it.
 #   3. Download it with fetch_with_retry.sh, check the sha256, keep it in the
 #      tool folder so the cache can save it, and install it.
 set -euo pipefail
@@ -35,7 +36,8 @@ if [[ "${installed}" == "${version}" ]]; then
   exit 0
 fi
 
-if [[ -f "${tool_dir}/${wheel}" ]]; then
+# The sha256 check also catches a half-written file from a stopped job.
+if echo "${sha}  ${tool_dir}/${wheel}" | sha256sum -c --status - 2>/dev/null; then
   echo "${name} ${version} comes from the cache."
 else
   echo "${name} ${version} is not installed or in the cache. Downloading it."

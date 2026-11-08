@@ -103,9 +103,7 @@ class FakeCommandsTestCase(unittest.TestCase):
         path.write_bytes(tool_program(printed_version))
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
-    def run_script(
-        self, script: Path, *args: str, **env: str
-    ) -> subprocess.CompletedProcess[str]:
+    def run_script(self, script: Path, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(script), *args],
             env={
@@ -140,9 +138,7 @@ class FakeCommandsTestCase(unittest.TestCase):
 class RetryTests(FakeCommandsTestCase):
     def counting_command(self, *statuses: int) -> str:
         """A fake command that exits with each status in turn."""
-        (self.tmp / "statuses").write_text(
-            "\n".join(str(status) for status in statuses) + "\n"
-        )
+        (self.tmp / "statuses").write_text("\n".join(str(status) for status in statuses) + "\n")
         self.fake(
             "flaky",
             f"""\
@@ -351,9 +347,7 @@ class InstallSpacyModelTests(FakeCommandsTestCase):
         self.pip_install = f"uv pip install --no-deps {self.wheel}"
 
     def install(self, sha: str | None = None, **env: str):
-        return self.run_script(
-            INSTALL_MODEL, "en_model", "3.8.0", sha or self.good_sha, **env
-        )
+        return self.run_script(INSTALL_MODEL, "en_model", "3.8.0", sha or self.good_sha, **env)
 
     def test_model_installed_at_the_version_is_used(self) -> None:
         result = self.install(INSTALLED_MODEL="3.8.0")
@@ -373,6 +367,14 @@ class InstallSpacyModelTests(FakeCommandsTestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("comes from the cache", result.stdout)
         self.assertEqual(self.calls(), [self.pip_install])
+
+    def test_damaged_cached_model_is_downloaded_again(self) -> None:
+        self.wheel.parent.mkdir(parents=True)
+        self.wheel.write_bytes(b"half a file")
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.calls(), [f"curl {self.url}", self.pip_install])
+        self.assertEqual(self.wheel.read_bytes(), b"content")
 
     def test_model_is_downloaded_and_kept_for_the_cache(self) -> None:
         result = self.install()

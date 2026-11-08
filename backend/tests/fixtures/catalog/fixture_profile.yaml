@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Test data. A tiny valid ExecutionProfile for the `_fixture/1.0` row of
+# the test catalog (catalog.yaml in this folder). Tests use it to check the
+# shipped-profile path: the start-up check parses it with
+# ExecutionProfile.model_validate + validate_execution_profile, and the
+# start-up stamp builds a profiled connector class from it. `basic` is a
+# named auth scheme; `none` paging fits a one-shot read connector.
+product: _fixture
+version: "1.0"
+auth:
+  scheme: basic
+  secret_fields:
+    - username
+    - password
+fingerprint:
+  path: /things
+  authenticated: true
+  version_key: version
+  version_splitter: none
+probe: delegate
+pagination:
+  strategy: none
+  items_key: things

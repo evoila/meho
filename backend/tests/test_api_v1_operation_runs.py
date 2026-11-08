@@ -126,7 +126,9 @@ class _FakeService:
         self.run_id = run_id
         self.submitted: list[dict[str, Any]] = []
 
-    async def submit_call(self, operator: Any, arguments: dict[str, Any]) -> uuid.UUID:
+    async def submit_call(
+        self, operator: Any, arguments: dict[str, Any], *, wrap: Any = None
+    ) -> uuid.UUID:
         self.submitted.append(arguments)
         return self.run_id
 

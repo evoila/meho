@@ -104,6 +104,7 @@ class TenantPolicies(_Strict):
     announce_gate_enabled: StrictBool | None = None
     flight_recorder: FlightRecorderPolicy | None = None
     mail_recipient_allowlist: str | None = None
+    run_approval_target_kinds: StrictBool | None = None
 
     @field_validator("mail_recipient_allowlist")
     @classmethod

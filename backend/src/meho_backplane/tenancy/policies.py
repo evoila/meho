@@ -40,6 +40,7 @@ __all__ = [
     "set_announce_gate_enabled",
     "set_flight_recorder_policy",
     "set_mail_recipient_allowlist",
+    "set_run_approval_target_kinds",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -146,4 +147,24 @@ def set_announce_gate_enabled(tenant: Tenant, value: bool) -> bool:
         object_session(tenant), lambda: invalidate_announce_gate_cache(tenant_id)
     )
     _log.info("tenant_announce_gate_updated", tenant_id=str(tenant.id), enabled=value)
+    return True
+
+
+def set_run_approval_target_kinds(tenant: Tenant, value: bool) -> bool:
+    """Set *tenant*'s run approval target kind setting (#4126); return whether it changed.
+
+    ``True`` lets a run approval list a target kind (a product) in place of
+    one target. Read at call time with no cache, so nothing to evict. The
+    settings import is its only writer besides direct seeding.
+    """
+    old_value = tenant.run_approval_target_kinds_enabled
+    if old_value == value:
+        return False
+    tenant.run_approval_target_kinds_enabled = value
+    structlog.contextvars.bind_contextvars(
+        audit_run_approval_target_kinds_before=old_value,
+        audit_run_approval_target_kinds_after=value,
+        audit_tenant_id=str(tenant.id),
+    )
+    _log.info("tenant_run_approval_target_kinds_updated", tenant_id=str(tenant.id), enabled=value)
     return True

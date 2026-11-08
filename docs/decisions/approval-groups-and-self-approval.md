@@ -5,7 +5,7 @@
 **Issue:** [#3326](https://github.com/evoila/meho/issues/3326)
 **Initiative:** [#3325](https://github.com/evoila/meho/issues/3325) — MEHO-SA-Operators approve their own changes on purpose; AI never approves
 **Groups from:** [login-role-groups.md](login-role-groups.md) ([#3959](https://github.com/evoila/meho/issues/3959))
-**Narrows:** requirement 1 of [governed-delete-operations.md](governed-delete-operations.md), only the "no self-approval" clause, and only for MEHO-SA-Operators
+**Narrows:** requirement 1 of [governed-delete-operations.md](governed-delete-operations.md), only the "no self-approval" clause, and only for MEHO-SA-Operators and MEHO-Admins
 **Replaces:** the "DENY for agent principals" rule for `destructive` changes in [governed-delete-operations.md](governed-delete-operations.md)
 
 ## The decision in short
@@ -13,7 +13,7 @@
 - **The purpose of an approval:** a person looks at a change and approves it on purpose.
 - **AI tools and agents never approve.** Not their own changes, and not anyone else's.
 - **Only the web interface counts as a person.** Every call made with a token follows the agent rule: only safe operations run at once.
-- **People in the MEHO-SA-Operators group may approve their own changes**, on purpose.
+- **People in the MEHO-SA-Operators group may approve their own changes**, on purpose. Since 8 Nov 2026 people in MEHO-Admins may too.
 - **Approval needs proof that a person is present:** a click in the web interface, or on the command line a fresh sign-in or a one-time code. A plain API token never approves.
 
 The rest of this record says this in detail. The full table of who may approve what is in [#3325](https://github.com/evoila/meho/issues/3325) ("Who can do what"). This record does not copy every cell of it.
@@ -35,7 +35,7 @@ The groups come from the login ([login-role-groups.md](login-role-groups.md)).
 
 - **MEHO-Operators** run changes. Their `dangerous` and `destructive` changes wait for a MEHO-SA-Operator or an admin. They may not approve their own `dangerous` or `destructive` change.
 - **MEHO-SA-Operators** run changes like Operators. They may also approve their own changes, on purpose. "SA" means self-approval.
-- **MEHO-Admins** may approve other people's changes, also `dangerous` and `destructive` ones.
+- **MEHO-Admins** may approve other people's changes, also `dangerous` and `destructive` ones. They may also approve their own changes, on purpose, in the same way as MEHO-SA-Operators. **Changed on 8 Nov 2026:** the product owner decided "Admins should be able to self-approve as well." A login holds exactly one role group, so without this an admin could not approve their own change. The audit row records the same rule, `sa_operator_self_approval`.
 - **MEHO-Approvers** (optional) may approve other people's lower-risk changes that need approval. They may not approve `dangerous` or `destructive` changes.
 - **No group membership means no self-approval.**
 
@@ -96,10 +96,10 @@ The groups come from the login ([login-role-groups.md](login-role-groups.md)).
 
 Requirement 1 says: *"Mandatory human approval, always. No standing grant applies, no self-approval, no autonomous-session approval."*
 
-- This record replaces the **"no self-approval"** clause, on one condition only: a member of MEHO-SA-Operators may approve their own change, on purpose.
+- This record replaces the **"no self-approval"** clause, on one condition only: a member of MEHO-SA-Operators or MEHO-Admins may approve their own change, on purpose.
 - For everyone else, "no self-approval" stays.
 - **"Mandatory human approval"**, **"no standing grant"** and **"no autonomous-session approval"** stay fully in force.
-- A MEHO-SA-Operator's self-approval is still a human approval, given on purpose. It is not an automatic run.
+- A self-approval by a MEHO-SA-Operator or a MEHO-Admin is still a human approval, given on purpose. It is not an automatic run.
 
 ### "DENY for agent principals" for destructive: replaced
 
@@ -134,7 +134,7 @@ This record changes no code. The code Tasks under #3325 implement it.
 2. The new waiting rules ([#3980](https://github.com/evoila/meho/issues/3980)) ship after it. In the other order, every `dangerous` change would need a second person until #3328 ships.
 3. Self-approval on the command line ships with the fresh sign-in check ([#3979](https://github.com/evoila/meho/issues/3979)), or after it.
 
-**Upgrade note:** before a site upgrades to the version with these rules, it needs at least one member in MEHO-SA-Operators. Otherwise nobody can approve their own `dangerous` or `destructive` change, and only a MEHO-Admin can approve such a change for someone else. On a site with only one admin, the admin's own `dangerous` and `destructive` changes would wait, and nobody could approve them. The upgrade notes and the docs say this ([#3330](https://github.com/evoila/meho/issues/3330)).
+**Upgrade note:** before a site upgrades to the version with these rules, it needs at least one member in MEHO-SA-Operators or MEHO-Admins. Since admins may approve their own changes (8 Nov 2026), a site with an admin needs no MEHO-SA-Operators member. A site that wants a second person to check an admin's risky changes keeps the admins out of risky work and gives the people who run changes the MEHO-Operators group. The upgrade notes and the docs say this.
 
 ## References
 

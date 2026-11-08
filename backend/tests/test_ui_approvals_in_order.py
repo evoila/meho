@@ -305,7 +305,7 @@ def test_plan_shows_for_each_pending_step_whether_the_person_may_approve_it() ->
     own = _step_row(body, 1)
     assert 'data-approve-right="yes"' in own
     assert 'data-approve-reason="own_change"' in own
-    assert "You may approve it as a MEHO-SA-Operator." in own
+    assert "MEHO-SA-Operators and MEHO-Admins may approve their own changes." in own
     other = _step_row(body, 2)
     assert 'data-approve-right="yes"' in other
     assert 'data-approve-reason="ok"' in other
@@ -562,8 +562,10 @@ def test_self_approval_refusal_stops_the_run() -> None:
     s1 = _seed(1, "caution", principal_sub=_REVIEWER_SUB)
     s2 = _seed(2, "caution")
     resume = _fake_resume(failing_ops=set())
+    # A plain operator: an admin may approve their own change (#5969).
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
 
-    response = _post(session_id, resume)
+    response = _post(session_id, resume, operator=operator)
 
     assert 'data-approval-in-order-stopped="1"' in response.text
     assert "The approval was refused" in response.text
@@ -591,7 +593,7 @@ def test_a_self_approved_step_says_so_and_the_done_banner_counts_it() -> None:
     assert "1 of them was your own change. The audit log records it as a self-approval." in body
     own = _step_row(body, 1)
     assert 'data-testid="approval-self-approved"' in own
-    assert "You approved your own change as a MEHO-SA-Operator." in own
+    assert "You approved your own change, as a member of MEHO-SA-Operators or MEHO-Admins." in own
     assert "data-approve-right" not in own
     other = _step_row(body, 2)
     assert 'data-testid="approval-self-approved"' not in other
@@ -624,7 +626,8 @@ def test_an_own_destructive_step_waits_with_the_self_approval_note_then_says_so(
     done = _post(session_id, resume, operator=_sa_operator(), confirm_id=str(s1)).text
 
     assert _request_status(s1) == "approved"
-    assert "You approved your own change as a MEHO-SA-Operator." in _step_row(done, 1)
+    confirmation = "You approved your own change, as a member of MEHO-SA-Operators or MEHO-Admins."
+    assert confirmation in _step_row(done, 1)
     assert "1 of them was your own change." in done
 
 

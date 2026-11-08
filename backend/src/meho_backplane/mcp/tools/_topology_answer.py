@@ -33,6 +33,7 @@ from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.operations.delivery_budget import (
     handle_is_readable,
     measure_delivered_wire_bytes,
+    with_too_large_line,
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
@@ -130,6 +131,9 @@ _REDUCER: Final[JsonFluxReducer] = JsonFluxReducer()
 
 #: ``op_id`` the spilled rows are stored under.
 _OP_ID: Final[str] = "query_topology"
+
+#: Summary keys that repeat the rows (``JSONFLUX_ANSWER_READY`` on).
+_ANSWER_READY_KEYS: Final[tuple[str, ...]] = ("items", "counts")
 
 
 def _completeness(
@@ -254,15 +258,18 @@ def _smaller_answers(
 ) -> Iterator[dict[str, Any]]:
     """Yield ever smaller finished answers for a body over the wire ceiling.
 
-    ``partial`` (only with a readable handle): the inline preview is
-    dropped and the rows stay readable through the handle. ``unavailable``:
-    the inline rows and the handle are dropped. The last resort keeps only
+    ``partial`` (only with a readable handle): the inline preview and the
+    answer-ready ``items`` and ``counts`` are dropped and the rows stay
+    readable through the handle, whose read-more line says so.
+    ``unavailable``: the handle is dropped too. The last resort keeps only
     ``kind``, ``completeness`` and ``delivery``. Nothing is cut without
     saying so.
     """
-    if handle_is_readable(handle):
-        partial = {key: value for key, value in body.items() if key != rows_key}
-        partial["handle"] = {**body["handle"], "sample_rows": None}
+    inline = (rows_key, *_ANSWER_READY_KEYS)
+    short_handle = with_too_large_line(handle) if handle_is_readable(handle) else None
+    if short_handle is not None:
+        partial = {key: value for key, value in body.items() if key not in inline}
+        partial["handle"] = {**short_handle.model_dump(mode="json"), "sample_rows": None}
         yield _finished(
             partial,
             "partial",
@@ -272,7 +279,7 @@ def _smaller_answers(
             limits=limits,
             over_size=over_size,
         )
-    without_rows = {key: value for key, value in body.items() if key not in (rows_key, "handle")}
+    without_rows = {key: value for key, value in body.items() if key not in (*inline, "handle")}
     receipt = {"kind": body["kind"]}
     for smaller in (without_rows, receipt):
         yield _finished(

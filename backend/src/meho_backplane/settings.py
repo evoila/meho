@@ -825,6 +825,14 @@ class Settings(BaseModel):
         the smallest payload that would trigger reduction. Operators tune it
         via ``JSONFLUX_SAMPLE_BYTE_BUDGET``. Read once per reduce through
         :func:`get_settings`'s cache.
+    jsonflux_answer_ready:
+        Off by default. When on, a reduced reply also carries ``items``
+        (every row in 1 to 3 short columns, when that fits in about 3 KB)
+        and ``counts`` (how many rows have each value, for columns with 10
+        or fewer values), and the handle gets one short line on how to read
+        more instead of two long texts
+        (:mod:`meho_backplane.operations.answer_ready`). It stays off until
+        model tests show it helps. Env ``JSONFLUX_ANSWER_READY``.
     composite_max_depth:
         Hard cap on the recursion depth a composite operation
         (``source_kind='composite'``) may reach via successive
@@ -1758,6 +1766,7 @@ class Settings(BaseModel):
     result_complete_response_wire_max_bytes: int = Field(default=262144, gt=0)
     result_query_response_wire_max_bytes: int = Field(default=2097152, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
+    jsonflux_answer_ready: bool = False
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
     topology_refresh_interval_seconds: int = Field(default=3600, gt=0)
@@ -3003,6 +3012,9 @@ def get_settings() -> Settings:
         ),
         jsonflux_sample_byte_budget=int(
             os.environ.get("JSONFLUX_SAMPLE_BYTE_BUDGET", "4096"),
+        ),
+        jsonflux_answer_ready=parse_bool_env(
+            os.environ.get("JSONFLUX_ANSWER_READY", "false"),
         ),
         composite_max_depth=int(
             os.environ.get("COMPOSITE_MAX_DEPTH", "8"),

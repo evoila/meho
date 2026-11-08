@@ -39,8 +39,16 @@ add_to_path() {
   fi
 }
 
+# The first complete version number that the tool prints, without a leading
+# "v". The whole number is compared, so 2.12.20 is not taken for 2.12.2.
+installed_version() {
+  "${name}" "${version_arg}" 2>&1 \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[-+.0-9A-Za-z]*' \
+    | head -n 1
+}
+
 if command -v "${name}" >/dev/null 2>&1 \
-   && "${name}" "${version_arg}" 2>&1 | grep -qF "${version#v}"; then
+   && [[ "$(installed_version)" == "${version#v}" ]]; then
   echo "${name} ${version} is already on the runner."
   exit 0
 fi

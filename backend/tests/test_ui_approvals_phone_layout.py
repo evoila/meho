@@ -23,13 +23,16 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import respx
 from fastapi import HTTPException
+from sqlalchemy import update
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.ui.routes.approvals import routes
 from meho_backplane.ui.routes.approvals.waiting import WaitingFirstPager
 from tests.test_ui_approvals import (
     _HX_HEADERS,
@@ -245,6 +248,45 @@ def test_waiting_request_behind_many_batches_still_comes_first() -> None:
     assert ops_one[1:] == [f"own.{i:02d}" for i in range(24, 0, -1)]
     ops_two = re.findall(r'aria-label="Review approval request for ([^"]+)"', page_two)
     assert ops_two == ["own.00"]
+
+
+def test_request_decided_between_batches_does_not_hide_a_waiting_request() -> None:
+    # A batch of 5 reads the 26 seeded requests in 6 queries. Someone approves
+    # the newest request just before the last query. With a counted offset
+    # the queue moves up by one row, and the last query would start after the
+    # oldest request: the one waiting for this person.
+    _seed_newer_others_and_one_older_waiting()
+    operator = AsyncMock(return_value=_operator(tenant_id=_TENANT_A))
+    real_list_pending = routes.list_pending
+    calls = 0
+
+    async def list_pending_with_a_decision(db_session: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 6:
+            first = (await real_list_pending(db_session, **{**kwargs, "after": None}))[0]
+            await db_session.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == first.id)
+                .values(status=ApprovalRequestStatus.APPROVED.value)
+            )
+        return await real_list_pending(db_session, **kwargs)
+
+    with (
+        patch("meho_backplane.ui.routes.approvals.routes._WAITING_SCAN_BATCH", 5),
+        patch(
+            "meho_backplane.ui.routes.approvals.routes.list_pending",
+            new=list_pending_with_a_decision,
+        ),
+    ):
+        page_one = _get_list("/ui/approvals/list?tab=pending&order=newest", operator)
+
+    assert calls == 6
+    ops_one = _row_ops(page_one)
+    assert ops_one[0] == "older.waiting"
+    assert _waiting_ops(page_one) == ["older.waiting"]
+    # The approved request was still pending when the first batch read it.
+    assert ops_one[1:] == [f"own.{i:02d}" for i in range(24, 0, -1)]
 
 
 # ---------------------------------------------------------------------------

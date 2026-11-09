@@ -3275,8 +3275,10 @@ the `sm:` width (640 px) as the switch point.
   newer ones, and "Load more" goes on in the same order. The route reads
   the queue in batches of 500 (`_WAITING_SCAN_BATCH`), and the pager keeps
   only the rows the page can need, so a long queue does not fill memory.
-  Both list orders break ties on the request id, so the batches never skip
-  or repeat a row. The other tabs do not check the person and keep their
+  Each batch starts right after the last row of the batch before
+  (`list_pending(after=…)`, sorted by time and then request id), not at a
+  counted offset. So a request that someone decides during the scan does
+  not move the rest of the queue, and the scan skips no row. The other tabs do not check the person and keep their
   order.
 - **The person check can fail.** The list pages are open with the session
   alone. To know who may approve, the Pending tab also checks the

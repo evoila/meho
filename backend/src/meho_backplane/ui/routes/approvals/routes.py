@@ -466,12 +466,14 @@ async def _list_pending_waiting_first(
     is cut, so a request waiting for this person is on page one even when
     hundreds of newer requests are not. The queue is read in batches of
     :data:`_WAITING_SCAN_BATCH`; :class:`WaitingFirstPager` keeps only the
-    rows the page can need. Returns ``(rows, has_more, waiting ids)``.
+    rows the page can need. Each batch starts after the last row of the
+    batch before (not at a counted offset), so a request decided during the
+    scan does not make the scan skip a row. Returns ``(rows, has_more, waiting ids)``.
     """
     pager = WaitingFirstPager(operator, offset=offset, size=_HISTORY_PAGE_SIZE)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
-        scanned = 0
+        last: ApprovalRequest | None = None
         while True:
             batch = await list_pending(
                 db_session,
@@ -479,13 +481,13 @@ async def _list_pending_waiting_first(
                 status="pending",
                 work_ref=work_ref,
                 limit=_WAITING_SCAN_BATCH,
-                offset=scanned,
                 order=order,
+                after=last,
             )
             pager.add(batch)
             if len(batch) < _WAITING_SCAN_BATCH:
                 break
-            scanned += len(batch)
+            last = batch[-1]
     return pager.page()
 
 

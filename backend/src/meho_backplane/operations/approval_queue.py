@@ -3674,6 +3674,7 @@ async def list_pending(
     limit: int = 50,
     offset: int = 0,
     order: ApprovalListOrder = "newest",
+    after: ApprovalRequest | None = None,
 ) -> list[ApprovalRequest]:
     """Page through approval requests in *tenant_id*.
 
@@ -3691,12 +3692,39 @@ async def list_pending(
     oldest-first order breaks ties on ``id`` so it matches the step numbers
     :func:`pending_chain_positions` gives. Both orders break ties on ``id``,
     so pages read one after another (``offset``) never skip or repeat a row.
+
+    ``after`` starts the list right after that row in *order*, instead of
+    counting rows with ``offset``. A reader that walks the whole list in
+    batches passes the last row of the batch before. Then a request that is
+    decided between two batches does not move the rest of the list, so no
+    row is skipped.
     """
     stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
         stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+    if after is not None:
+        if order == "oldest":
+            stmt = stmt.where(
+                or_(
+                    ApprovalRequest.created_at > after.created_at,
+                    and_(
+                        ApprovalRequest.created_at == after.created_at,
+                        ApprovalRequest.id > after.id,
+                    ),
+                )
+            )
+        else:
+            stmt = stmt.where(
+                or_(
+                    ApprovalRequest.created_at < after.created_at,
+                    and_(
+                        ApprovalRequest.created_at == after.created_at,
+                        ApprovalRequest.id < after.id,
+                    ),
+                )
+            )
     if order == "oldest":
         stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
     else:

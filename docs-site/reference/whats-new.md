@@ -40,8 +40,8 @@ notes.
   Hetzner Robot and DNS systems appear on the topology map.
 - **First-start checks.** `meho status --first-start` checks the DNS
   name, the certificate, the clock and every system, and names the fix.
-- **Every release has a security sheet and an operation catalog**, both
-  signed.
+- **Every release has a security sheet and a signed operation
+  catalog.**
 - **Security fix in the container image.** The zlib package in the
   image is updated to Debian's fixed version.
 - **Tighter rules.** Machine logins no longer write targets or topology

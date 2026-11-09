@@ -1373,8 +1373,9 @@ def _no_similar_kb_entries(
 ) -> None:
     """Let a new kb slug find no similar entries, unless a test asks for the real search.
 
-    Every kb create on MCP, REST and the console first searches for
-    similar entries (``kb/similar.py``). That search needs PostgreSQL,
+    With ``KB_SIMILAR_CHECK`` on, every kb create on MCP, REST and the
+    console first searches for similar entries (``kb/similar.py``). That
+    search needs PostgreSQL,
     and the default test database is SQLite. So most tests get an empty
     result; the other parts of the check (slug, header, existing slug)
     still run. A test of the search itself requests

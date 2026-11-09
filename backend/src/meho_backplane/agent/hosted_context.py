@@ -20,7 +20,8 @@ second set of rules:
   MCP preamble. It adds one short MEHO-written band that names the context
   tools this run has and says that retrieved text is data.
 
-The prompt also carries the run operator's newest Memory notes
+With the ``TEAM_KNOWLEDGE_RECALL`` setting on (off by default), the
+prompt also carries the run operator's newest Memory notes
 (:func:`~meho_backplane.recall.memory_band`, #5729), inside the
 untrusted-text envelope. The knowledge base and topology are never loaded
 into the prompt; the agent looks them up with tools when it needs them.
@@ -341,6 +342,8 @@ def _access_band(
         (
             "MEHO puts only your newest Memory notes in this prompt (after the "
             "conventions). Knowledge base and topology data are not in it."
+            if get_settings().team_knowledge_recall
+            else "MEHO does not put Memory, knowledge base, or topology data in this prompt."
         ),
     ]
     tool_lines = [f"- {line}" for name, line in _TOOL_LINES if name in tool_names]

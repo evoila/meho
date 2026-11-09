@@ -222,7 +222,9 @@ exists, extend it (read it, merge, re-add with the same slug and the
 creating a near-duplicate. The mirror habit on the read side: `search_*`
 **before asking the operator** a question the corpus may already answer.
 
-For knowledge, MEHO also checks this itself. Before it writes a **new**
+For knowledge, MEHO can also check this itself. The check is off by
+default; an operator turns it on with the setting `KB_SIMILAR_CHECK=true`
+(Helm: `config.kbSimilarCheck: "true"`). Then, before it writes a **new**
 slug, it looks for entries that say something similar: first entries
 with the same `product` and `version` in the metadata, then entries
 close in meaning. When it finds some, it writes nothing and lists them

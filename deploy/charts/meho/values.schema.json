@@ -505,6 +505,16 @@
         "approvalOneTimeCodeAcrValues": {
           "type": "string",
           "description": "Comma-separated `acr` values that mean a one-time code step (#3979). Rendered into `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (default) = off."
+        },
+        "teamKnowledgeRecall": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Show what the team knows without a search: a `team_knowledge` block on `preview_operation` and `call_operation` for a known target, and the caller's newest Memory notes in the MCP start text and in hosted runs. Rendered into `TEAM_KNOWLEDGE_RECALL`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/recall.md`."
+        },
+        "kbSimilarCheck": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Check a new knowledge entry for similar entries first; when some exist, nothing is written and the writer gets the list. Rendered into `KB_SIMILAR_CHECK`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/kb.md`."
         }
       }
     },

@@ -223,6 +223,11 @@ jobs:
           fi
           echo "OK: the image will be published as ${want}."
 
+      - name: Stage the Tailwind CLI for the image build
+        uses: ./.github/actions/stage-tailwind
+        with:
+          archs: amd64 arm64
+
       - name: Build image to quarantine digest (no release tag)
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0

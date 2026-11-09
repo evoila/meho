@@ -409,6 +409,18 @@ anyway. So a person approves the confirm too. Pick a timer long enough for
 the checks and for that approval. If the approval comes too late, the
 confirm refuses and the old rules come back by themselves.
 
+### File mode and owner (`file.write`)
+
+`file.write` writes the new content to a temp file in the same folder,
+then renames it over the old file. The temp file starts as `0600`. When the
+file already exists, the script copies the old file's mode and owner onto
+the temp file before the rename. So a `0644 root:root` file stays
+`0644 root:root`, and a daemon that reads it as a non-root user can still
+read it. If the copy fails, the script stops before the rename: the old
+file stays as it was and the op returns `written: false`. A new file is
+created `0600` and owned by root. If a non-root service must read a new
+file, change its mode afterwards.
+
 ### Root elevation
 
 Every write that needs root funnels through `_sudo.py`'s

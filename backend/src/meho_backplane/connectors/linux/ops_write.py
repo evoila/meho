@@ -13,7 +13,8 @@ reloading the firewall -- into governed, previewable, audited operations.
 Tier table:
 
 * ``linux.file.write`` -- ``dangerous`` + approval (group ``file``). Atomic
-  backup -> write (``umask 077`` temp + rename) -> optional
+  backup -> write (``umask 077`` temp + rename, keeping an existing file's
+  mode and owner) -> optional
   ``validate_command`` -> rollback-on-fail of a path-confined, allow-listed
   config file. Its ``content`` may carry secrets, so it is pinned
   ``credential_write`` in the broadcast clamp and previews only at park time
@@ -309,7 +310,11 @@ def build_file_write_script(
     """Render the root-owned atomic file-write bash script.
 
     Backup (optional) -> atomic write (``umask 077``, base64 -> same-dir temp ->
-    rename) -> optional ``validate_command`` -> rollback-on-fail. The content
+    rename) -> optional ``validate_command`` -> rollback-on-fail. When the file
+    already exists, the temp file takes its mode and owner before the rename, so
+    the write does not change who can read the file. If they cannot be copied,
+    the script stops before the rename and the original file stays as it was.
+    A new file is created ``0600`` and owned by root. The content
     and the validate command are base64-carried (never spliced raw); every path
     is ``shlex.quote``d. ``set -e`` is deliberately *not* used so a non-zero
     validate exit routes to the rollback branch rather than aborting the script
@@ -334,6 +339,11 @@ def build_file_write_script(
         'tmp="$(mktemp "$dir/.meho-write.XXXXXX")" || { echo "===MEHO_WRITE_ERR:mktemp===" >&2; exit 4; }',  # noqa: E501
         f'if ! printf %s {q_b64} | base64 -d > "$tmp"; then rm -f "$tmp"; echo "===MEHO_WRITE_ERR:decode===" >&2; exit 4; fi',  # noqa: E501
         'chmod 0600 "$tmp"',
+        # Keep the mode and owner of a file that is already there: the rename
+        # would otherwise leave it 0600 root:root and lock out a non-root daemon.
+        'if [ -f "$path" ]; then',
+        '  owner="$(stat -L -c %u:%g "$path")" && mode="$(stat -L -c %a "$path")" && chown "$owner" "$tmp" && chmod "$mode" "$tmp" || { rm -f "$tmp"; echo "===MEHO_WRITE_ERR:mode===" >&2; exit 4; }',  # noqa: E501
+        "fi",
         'if ! mv -f "$tmp" "$path"; then rm -f "$tmp"; echo "===MEHO_WRITE_ERR:mv===" >&2; exit 4; fi',  # noqa: E501
     ]
     if validate_command is not None:
@@ -1075,6 +1085,9 @@ _FILE_WRITE_OP = LinuxOp(
         "backup=false), write the new content atomically (umask 077, temp + "
         "rename) as root, then -- if validate_command is set -- run it and roll "
         "back to the backup when it fails, so a bad config never stays live. "
+        "An existing file keeps its mode and owner (for example 0644 root:root "
+        "stays 0644 root:root); a new file is created 0600, owned by root. "
+        "Root runs need sudo_password (or password) in the target's Vault secret. "
         "safety_level=dangerous, requires_approval=true: a dispatch parks for a "
         "human before anything changes. Returns {written, path, backup_path, "
         "validated, rolled_back}; the content is never echoed."
@@ -1133,7 +1146,12 @@ _FILE_WRITE_OP = LinuxOp(
             "missing config the first-boot run never wrote, a corrected "
             "directive -- with a backup and an optional validate/rollback gate. "
             "Approval-gated: it parks for a human. Do NOT put bare secrets in "
-            "content (it is stored verbatim for the approval re-dispatch). " + SSH_TRANSPORT_NOTE
+            "content (it is stored verbatim for the approval re-dispatch). "
+            "An existing file keeps its mode and owner. A new file is created "
+            "0600 and owned by root; if a non-root service must read it, "
+            "change the mode afterwards. The target's Vault secret needs a "
+            "sudo_password (or password) field: a key-only target fails after "
+            "approval with 'carries no sudo_password / password'. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {
             "path": "Absolute path under an allowed write root.",

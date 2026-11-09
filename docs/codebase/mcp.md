@@ -222,6 +222,11 @@ When #4112 set the limits, the default list went from 96,804 to 66,092
 characters. The largest tool, `query_topology`, went from 16,302 to
 5,537.
 
+A client that needs fewer tools can also ask for a tool profile (see
+"Tool profiles" below). The `investigate` list has about a third of the
+text of the full list (23,261 characters), `operate` about half
+(35,776). The full list is 69,209.
+
 What a description keeps:
 
 - what the tool is for, and when to call it (the proactive-trigger
@@ -243,6 +248,35 @@ What moved out:
 
 If the test fails, shorten the text first. Raise a limit only with a
 reason in the pull request.
+
+### Taking `query_topology` off the default list (#5980)
+
+`query_topology` was the largest tool on the default list. Few sessions
+use it, so its text mostly takes up room. Two changes:
+
+- **Shorter description.** It went from 1,927 to about 1,050
+  characters. The tool's text as the size test counts it went from
+  5,537 to 4,655 characters. With its output schema, the whole
+  `tools/list` entry went from 13,572 to 12,688 characters.
+- **A switch to take it off the default list.** Set
+  `MCP_TOPOLOGY_OFF_DEFAULT_LIST=true` (`Settings.mcp_topology_off_default_list`,
+  default `false`). Then `query_topology` is on the operator surface:
+  only a session with the `mcp:admin` scope lists and calls it. A call
+  from another session gets the same answer as for any other operator
+  tool. The switch is off by default, so nothing changes until an
+  operator turns it on. On a Helm install, set it through `extraEnv`.
+
+How it works: `registry.tool_surface(defn)` returns the surface a tool
+is on in this deploy. It is `defn.surface`, except for `query_topology`
+when the switch is on. The `tools/list` filter (`all_tools_for`), the
+call-time check in `handlers.py` and the `surface_summary` of
+`meho_status` all use it, so they agree. The registered definition does
+not change, and the conformance test still pins the default list with
+`query_topology` on it. `tests/test_mcp_topology_off_default_list.py`
+covers the switch.
+
+The CLI (`meho topology ...`), the REST routes and hosted agents that
+name `query_topology` in their tool list are not affected.
 
 ### Runbook family canonicalisation (#1612)
 
@@ -763,6 +797,17 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
     rules (fix `params` on `invalid_params`; `awaiting_approval` is a
     success that waits for a person and must not be retried; a
     destructive op needs `preview_operation` first).
+  - `guidance` — only when the switch `OPERATION_CONTRACT_GUIDANCE` is
+    on (off by default, #4757) and the op has written guidance. It holds
+    the prose keys of the op's `llm_instructions`: `when_to_call` (and
+    the older `when_to_use`), `preconditions`, `parameter_hints` (a map
+    of parameter name to hint), `output_shape` and `next_step`. Each text
+    is cut to 1000 characters and the whole block to 3000; a cut text
+    ends with `…`, and when the total runs out the later keys are left
+    out. Machine keys (`pagination_hint`, `result_*`) are not in it.
+    With the switch off, or without guidance, the key is not in the
+    answer at all. The rules live in `operations/_contract_guidance.py`;
+    tests in `backend/tests/test_operation_contract_guidance.py`.
 - **Unknown op.** A known connector with no such enabled op raises
   `UnknownOperationError`: MCP answers `-32602` with
   `data.reason="unknown_op"`, REST answers `404` with
@@ -771,10 +816,42 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   is deterministic and never returns an empty list.
 - **Slim ranked hits.** A ranked hit carries `op_id`, `summary`,
   `description`, `group_key`, `safety_level` and `requires_approval`.
+  It never carries the written guidance, also with the switch on.
   The ranking scores (`fused_score`, `bm25_score`, `cosine_score`) are
   added only when the caller sets `include_scores` **and** is
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
+- **The admin's description, behind a switch (#4753).** An admin can
+  replace an operation's text with `meho_connector_edit_op`
+  (`custom_description`). The backplane switch
+  `AGENT_READS_CUSTOM_DESCRIPTION` (an env var, off by default) decides
+  whether the agent reads it.
+  - **Off (default):** the agent reads the original `description` in
+    each ranked hit, in the exact-op contract and in the keyword (BM25)
+    half of search, as before the switch existed. An override saved
+    earlier changes nothing for the agent.
+  - **On:** when `custom_description` is set and not empty, the agent
+    reads it in place of the original `description` in all three
+    places. In the keyword half, the admin's words count and the
+    replaced words no longer count. The meaning half (the embedding)
+    includes the admin's text in both states, so the original words can
+    still find the operation through its embedding, and the `matched` /
+    `ambiguous` label still follows the fused scores. Setting it to
+    `null` brings the original text back.
+  - Each state has its own keyword index: `endpoint_descriptor_bm25_idx`
+    (migration `0005`) for off, `endpoint_descriptor_bm25_custom_idx`
+    (migration `0148`) for on. Turn the switch on only after `0148` ran,
+    else the keyword half scans the table. Code: `agent_description`,
+    `BM25_ORIGINAL_DOCUMENT_SQL` and `BM25_CUSTOM_DOCUMENT_SQL` in
+    `operations/_search.py`; the switch is
+    `Settings.agent_reads_custom_description`.
+  - **Before turning it on** (measurement plan of the pull request):
+    on the benchmark lane, compare the routing score with the switch
+    off and on, for a small model and for Claude, on a few operations
+    with a weak description and a clear `custom_description`. Then one
+    live run on a test install: set a `custom_description`, search
+    with words that appear only in it, check the hit shows the new
+    text, set it to `null`, check the original is back.
 
 The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
 the `outcome` fields described in the next section) and the exact-op
@@ -916,6 +993,58 @@ explicitly.
   registration, doc-collection create/delete, memory promotion,
   approvals **read**, and audit query.
 
+## Tool profiles (#4172)
+
+A client can ask for a smaller tool list. It adds `?profile=<name>` to
+the MCP URL, for example `https://<meho-host>/mcp?profile=investigate`.
+A small model then sees 9 or 13 tools, not 26, and keeps more of its
+context window for the job.
+
+| Profile | Tools |
+|---|---|
+| `investigate` (9) | `meho_status`, `meho_connector_list`, `list_targets`, `list_operation_groups`, `search_operations`, `call_operation`, `result_query`, `search_knowledge`, `search_memory` |
+| `operate` (13) | `investigate` plus `preview_operation`, `meho_broadcast_recent`, `meho_broadcast_announce`, `meho_broadcast_watch` |
+
+The lists are in `mcp/profiles.py`.
+
+How it works:
+
+- The MCP route reads the `profile` URL parameter
+  (`_dispatch_mcp_request` in `mcp/server.py`) and stores it on the
+  request's `Operator` as `mcp_tool_profile`. Only this route sets it.
+- `all_tools_for` (`mcp/registry.py`) runs the four gates above first,
+  then keeps only the profile's tools. So a profile only removes tools.
+  An `mcp:admin` session with a profile still sees only the profile.
+- `tools/call` checks the profile again (`handle_tools_call`). A call to
+  a tool outside the profile is refused with `reason: not_in_profile`,
+  and the handler does not run. The refusal is audited as a 403.
+- No profile, or an empty `profile=`, gives the full list, as before.
+- An unknown name, or two different names, is refused with HTTP 400
+  before the body is read. A typo must not quietly give the full list.
+  Names are not case-sensitive.
+- The session-start text follows the profile. The broadcast band is
+  there only when `meho_broadcast_announce` is on the list (#4113). A
+  profile without the runbook tools gets no runbook band, and a profile
+  without the docs tools gets no docs collection list
+  (`_session_instructions`). Tenant conventions are tenant text and are
+  not changed.
+- `meho_status` shows the hidden working tools in
+  `surface_summary.missing_working_tools`, because it uses the same
+  filter.
+
+Why a URL parameter and not a header: every MCP client can set the
+server URL, and not every client can set a header. MEHO checks the
+token audience against its configured MCP resource URI
+(`mcp_resource_uri`), which has no query. So on the server side the
+same token works with and without a profile. Whether each client's
+login flow accepts a server URL with a query has not been tried in a
+lab yet.
+
+A profile does not change what the person may do. `call_operation` in
+the `investigate` profile can still run a change, under the person's
+role, the operation's risk level and the approval rules. The profile
+only makes the tool list shorter.
+
 ## The current tenant of a session (#5239)
 
 One login can list several tenants (the `meho_tenants` claim). An MCP
@@ -957,8 +1086,8 @@ is not set.
 - `meho_status` (and `GET /api/v1/health`) then answers with
   `operator.tenant_id` and `operator.tenant_role` set to `null`,
   `operator.tenants` (each tenant's `tenant_id`, `name`, `tenant_role`,
-  `current`), `vault.detail = "tenant_not_chosen"` and the database
-  state. It runs no tenant work (no credential check, no add-on
+  `current`), `vault.detail = "tenant_not_chosen"`, the database
+  state and `server_time` (#5504). It runs no tenant work (no credential check, no add-on
   pairings, no tool comparison). With a current tenant, `meho_status`
   answers as before and also lists `operator.tenants`, with `current`
   set on the current one. Inside an agent run that a person started, no
@@ -1048,9 +1177,9 @@ add-on-family gate.
 | `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
-| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. Since #5504 also the server's time now in UTC (`server_time`, ISO 8601 to the second, for example `2026-10-31T14:34:28Z`), so an agent with no shell can write down a correct time. |
 | `preview_operation` | operator | — | Preview an operation without running it. |
-| `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
+| `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). With `MCP_TOPOLOGY_OFF_DEFAULT_LIST=true` it moves to the operator surface (#5980). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |
 | `result_query` | operator | — | Read rows back from a JSONFlux result handle: page a window, or run a bounded structured query (filter / project / group / aggregate) server-side. |
 | `search_docs` | operator | `meho-docs` | Search a vendor-document collection for an authoritative fact. |

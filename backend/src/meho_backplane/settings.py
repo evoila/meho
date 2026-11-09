@@ -702,6 +702,13 @@ class Settings(BaseModel):
         ``REQUEST_USAGE_RETENTION_DAYS``: without usage collection, routine
         activity would leave no record at all, so the pod refuses to start.
         Env var ``AUDIT_WRAPPER_ROWS_RETIRED``.
+    operation_search_store_query_text:
+        Also store the query text of each ``search_operations`` call in its
+        search record (#4750). Default ``False``: the record keeps only a
+        SHA-256 hash of the query, because the text can show what someone
+        was working on. The records exist only when
+        ``REQUEST_USAGE_RETENTION_DAYS`` is set, and the same daily job
+        deletes them. Env var ``OPERATION_SEARCH_STORE_QUERY_TEXT``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1199,6 +1206,15 @@ class Settings(BaseModel):
         human review across timezone-distant teams without tying up an
         agent loop indefinitely on a forgotten request. Set via
         ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
+    agent_operation_tools_from_mcp:
+        Off by default. When on, a hosted agent run gets
+        ``list_operation_groups``, ``search_operations`` and
+        ``call_operation`` with the input schema and text of the MCP tools
+        of the same name (:mod:`meho_backplane.agent.toolset_operations`):
+        exact-op mode on ``search_operations``, and ``preview_hash`` and
+        ``idempotency_key`` on ``call_operation``. When off, hosted runs
+        keep the older hand-written copies. It stays off until model tests
+        show it helps. Env ``AGENT_OPERATION_TOOLS_FROM_MCP``.
     approval_allow_self_approval:
         Self-approval **emergency break-glass** switch (G11.7-T1 #1401).
         Default ``False`` (fail-closed): a person who is not a
@@ -1383,6 +1399,16 @@ class Settings(BaseModel):
         scope. Deployments with fine-grained scope enforcement set
         this to the value the IdP expects. Set via
         ``VCF_PAIF_OIDC_SCOPE``.
+    operation_contract_guidance:
+        Off by default (#4757). When on, the exact-op contract of
+        ``search_operations`` (a call with ``op_id``) also carries a
+        ``guidance`` block: the written advice from the operation's
+        ``llm_instructions`` (``when_to_call`` / ``when_to_use``,
+        ``preconditions``, ``parameter_hints``, ``output_shape``,
+        ``next_step``), with a size limit
+        (:mod:`meho_backplane.operations._contract_guidance`). Ranked hits
+        do not change. It stays off until model tests show it helps.
+        Env ``OPERATION_CONTRACT_GUIDANCE``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
@@ -1410,6 +1436,14 @@ class Settings(BaseModel):
         :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
         so operators can confirm the deploy's audit-replay capture
         state without diffing env vars.
+    mcp_topology_off_default_list:
+        Whether ``query_topology`` leaves the default MCP tool list.
+        Default ``False``: every session lists it, as before. Set
+        ``MCP_TOPOLOGY_OFF_DEFAULT_LIST=true`` to move it to the tools a
+        session gets only when it asks for the ``mcp:admin`` scope. A
+        session without the scope does not list it, and a call answers
+        with the same message as for the other admin tools. This saves
+        its text in every session that has no use for the tool.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -1729,6 +1763,8 @@ class Settings(BaseModel):
     # #3757: off by default. Must stay declared after
     # ``request_usage_retention_days``: its validator reads that value.
     audit_wrapper_rows_retired: bool = False
+    # #4750: off by default; the search record keeps only the query hash.
+    operation_search_store_query_text: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -2041,6 +2077,8 @@ class Settings(BaseModel):
     # tying up an agent loop indefinitely on a forgotten request. Set via
     # ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
     agent_approval_wait_timeout_seconds: float = Field(default=1800.0, gt=0)
+    # #4754 — hosted operation tools from the MCP tools; see the docstring.
+    agent_operation_tools_from_mcp: bool = False
     # G11.5-T3 #1077 — OpenAI-compatible backend configuration for the
     # agent runtime's multi-provider resolver. Sources the credentials
     # the settings-driven default OpenAI backend builder consumes; tenants
@@ -2276,7 +2314,9 @@ class Settings(BaseModel):
     # external orchestrator (or running tests without the drain) opt out.
     event_drain_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
     event_drain_enabled: bool = True
+    operation_contract_guidance: bool = False
     mcp_require_session_id: bool = False
+    mcp_topology_off_default_list: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -2336,6 +2376,15 @@ class Settings(BaseModel):
     #: (:func:`~meho_backplane.docs_search.call_log.log_query_text`). Set via
     #: ``DOCS_DEBUG_LOG_QUERY_TEXT``.
     docs_debug_log_query_text: bool = False
+    #: Whether the agent reads an admin's ``custom_description`` (#4753).
+    #: ``False`` (default): ``search_operations`` hits, the exact-op contract
+    #: and the keyword half of search use the original ``description``, as
+    #: before. ``True``: when an admin set a non-empty ``custom_description``
+    #: with ``meho_connector_edit_op``, it takes the place of ``description``
+    #: in all three. The keyword half then uses the index of migration
+    #: ``0148`` (``endpoint_descriptor_bm25_custom_idx``). Set via
+    #: ``AGENT_READS_CUSTOM_DESCRIPTION``.
+    agent_reads_custom_description: bool = False
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -2954,6 +3003,9 @@ def get_settings() -> Settings:
         audit_wrapper_rows_retired=parse_bool_env(
             os.environ.get("AUDIT_WRAPPER_ROWS_RETIRED", "false"),
         ),
+        operation_search_store_query_text=parse_bool_env(
+            os.environ.get("OPERATION_SEARCH_STORE_QUERY_TEXT", "false"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
@@ -3200,6 +3252,9 @@ def get_settings() -> Settings:
         agent_approval_wait_timeout_seconds=float(
             os.environ.get("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "1800.0"),
         ),
+        agent_operation_tools_from_mcp=parse_bool_env(
+            os.environ.get("AGENT_OPERATION_TOOLS_FROM_MCP", "false"),
+        ),
         openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
         openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip(),
         openai_default_model=os.environ.get(
@@ -3278,8 +3333,14 @@ def get_settings() -> Settings:
         event_drain_enabled=parse_bool_env(
             os.environ.get("EVENT_DRAIN_ENABLED", "true"),
         ),
+        operation_contract_guidance=parse_bool_env(
+            os.environ.get("OPERATION_CONTRACT_GUIDANCE", "false"),
+        ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),
+        ),
+        mcp_topology_off_default_list=parse_bool_env(
+            os.environ.get("MCP_TOPOLOGY_OFF_DEFAULT_LIST"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
@@ -3296,6 +3357,9 @@ def get_settings() -> Settings:
         ),
         docs_debug_log_query_text=parse_bool_env(
             os.environ.get("DOCS_DEBUG_LOG_QUERY_TEXT"),
+        ),
+        agent_reads_custom_description=parse_bool_env(
+            os.environ.get("AGENT_READS_CUSTOM_DESCRIPTION"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

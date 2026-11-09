@@ -14,6 +14,8 @@ Same shape as the sibling retention loops (for example
 * sleep first, then prune, so the first tick does not race startup;
 * one bounded ``DELETE ... WHERE occurred_at < cutoff`` on the
   ``request_usage_event_occurred_at_idx`` index;
+* the same cutoff deletes the operation search and call records
+  (:mod:`meho_backplane.operation_picks`, #4750);
 * one summary ``INTERNAL`` audit row per tick, on a system sentinel
   tenant, so a deletion of stored data is on record;
 * a failed tick is logged and the loop goes on.
@@ -35,6 +37,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, RequestUsageEvent
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.metrics import note_loop_tick
+from meho_backplane.operation_picks.retention import delete_pick_records_older_than
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -86,10 +89,12 @@ async def prune_request_usage_once(*, now: datetime | None = None) -> int | None
     started = time.perf_counter()
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
     dropped = await _delete_events_older_than(cutoff)
+    dropped_pick_records = await delete_pick_records_older_than(cutoff)
     duration_ms = (time.perf_counter() - started) * 1000.0
     _log.info(
         "request_usage_retention_tick_done",
         dropped_rows=dropped,
+        dropped_pick_records=dropped_pick_records,
         retention_days=retention_days,
     )
     try:
@@ -103,6 +108,7 @@ async def prune_request_usage_once(*, now: datetime | None = None) -> int | None
             duration_ms=duration_ms,
             payload={
                 "dropped_rows": dropped,
+                "dropped_pick_records": dropped_pick_records,
                 "retention_days": retention_days,
                 "cutoff": cutoff.isoformat(),
             },

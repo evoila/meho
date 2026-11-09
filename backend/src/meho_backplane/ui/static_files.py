@@ -33,6 +33,12 @@ internal operator console; the payoff is that a deploy can never leave a
 browser rendering against a stale stylesheet. HTML pages are already
 served ``Cache-Control: no-store`` by the UI routers, so only the static
 mount needed this.
+
+The service worker of the installable app
+(``static/src/app/service-worker.js``) is served from this mount too, so
+it gets ``Service-Worker-Allowed: /ui/``. A browser lets a service worker
+control only the pages under its own folder unless that header allows a
+wider scope; with it the worker may control every console page.
 """
 
 from __future__ import annotations
@@ -40,6 +46,11 @@ from __future__ import annotations
 from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
+
+#: The service worker file, as a path inside the static mount.
+SERVICE_WORKER_PATH = "src/app/service-worker.js"
+#: The widest scope the service worker may register: all console pages.
+SERVICE_WORKER_SCOPE = "/ui/"
 
 
 class RevalidateStaticFiles(StaticFiles):
@@ -57,4 +68,6 @@ class RevalidateStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> Response:
         response = await super().get_response(path, scope)
         response.headers.setdefault("cache-control", "no-cache")
+        if path == SERVICE_WORKER_PATH:
+            response.headers["service-worker-allowed"] = SERVICE_WORKER_SCOPE
         return response

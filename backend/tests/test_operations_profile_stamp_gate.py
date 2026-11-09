@@ -52,12 +52,12 @@ from meho_backplane.operations.ingest._internals import (
     enable_time_auto_shim_warnings,
 )
 from meho_backplane.operations.ingest.boot_stamp import stamp_catalog_profiled_connectors
-from meho_backplane.operations.ingest.catalog import ConnectorSpecCatalog, ConnectorSpecEntry
 from meho_backplane.operations.ingest.connector_registration import (
     ensure_connector_class_registered,
     resolved_profiled_connector_class,
 )
 from meho_backplane.settings import get_settings
+from tests.fixtures.catalog import load_fixture_catalog
 
 _PRODUCT = "acme"
 _VERSION = "1.2"
@@ -520,7 +520,7 @@ _FIXTURE_IMPL_ID = "fixture-rest"
 
 
 async def _seed_staged_fixture_connector(*, tenant_id: uuid.UUID, ops: int = 3) -> None:
-    """Seed a staged (disabled-ops) group under the built-in fixture triple."""
+    """Seed a staged (disabled-ops) group under the test catalog's fixture triple."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         group_id = uuid.uuid4()
@@ -598,21 +598,7 @@ async def test_boot_stamp_registers_but_never_enables_ops() -> None:
     """
     tenant_id = uuid.uuid4()
     await _seed_staged_fixture_connector(tenant_id=tenant_id)
-    catalog = ConnectorSpecCatalog(
-        entries=(
-            ConnectorSpecEntry.model_validate(
-                {
-                    "product": "_fixture",
-                    "version": "1.0",
-                    "impl_id": "fixture-rest",
-                    "requires_connector_class": "ProfiledRestConnector_fixture_1_0",
-                    "upstream": None,
-                    "spec_resource": "_fixture_minimal.yaml",
-                    "profile_resource": "_fixture_minimal.yaml",
-                }
-            ),
-        )
-    )
+    catalog = load_fixture_catalog()
 
     registered = await stamp_catalog_profiled_connectors(catalog)
 
@@ -630,21 +616,7 @@ async def test_boot_stamp_registers_but_never_enables_ops() -> None:
 @pytest.mark.asyncio
 async def test_boot_stamp_writes_one_profile_stamp_audit_row() -> None:
     """The boot trigger records the dispatchability change as a single audit row."""
-    catalog = ConnectorSpecCatalog(
-        entries=(
-            ConnectorSpecEntry.model_validate(
-                {
-                    "product": "_fixture",
-                    "version": "1.0",
-                    "impl_id": "fixture-rest",
-                    "requires_connector_class": "ProfiledRestConnector_fixture_1_0",
-                    "upstream": None,
-                    "spec_resource": "_fixture_minimal.yaml",
-                    "profile_resource": "_fixture_minimal.yaml",
-                }
-            ),
-        )
-    )
+    catalog = load_fixture_catalog()
 
     await stamp_catalog_profiled_connectors(catalog)
 

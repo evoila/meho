@@ -118,6 +118,8 @@ import pytest
 import respx
 from fastapi import FastAPI
 from httpx import ASGITransport
+from scripts.retrieval_eval import eval_surface
+from scripts.retrieval_eval.corpus import load_corpus
 from sqlalchemy import select
 
 from meho_backplane.api.v1.kb import router as kb_router
@@ -125,8 +127,6 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.kb.service import KbService
-from meho_backplane.retrieval.eval import eval_surface
-from meho_backplane.retrieval.eval.corpus import load_corpus
 from tests._kb_embedding_stub import StubPassageTokenizer
 from tests.acceptance._consumer_kb import (
     CONSUMER_KB_REASON,
@@ -730,11 +730,10 @@ async def test_eval_corpus_retrieval_quality_against_real_kb(
 ) -> None:
     """AC #7: 10-query eval corpus ranks expected hits in the top-5.
 
-    Runs :func:`eval_surface("kb", tenant_id=A)` -- the same call the
-    operator-facing ``meho retrieval eval --surface kb`` and CI's
-    ``run_eval_gate.py`` make -- against the real ingested consumer
+    Runs :func:`eval_surface("kb", tenant_id=A)` -- the same engine
+    CI's ``run_eval_gate.py`` uses -- against the real ingested consumer
     kb. The runner consumes the 10-query G4.3-T1 eval corpus
-    (:mod:`meho_backplane.retrieval.eval.kb_queries.yaml`) and folds
+    (:mod:`scripts.retrieval_eval.kb_queries.yaml`) and folds
     per-query hits into MRR, coverage@5, and precision@5.
 
     The canary gates retrieval quality on **MRR (top-1 ranking)** and
@@ -801,8 +800,8 @@ async def test_eval_corpus_retrieval_quality_against_real_kb(
         f"{[(q.query, q.coverage_at_5) for q in result.queries]}"
     )
 
-    # Per-surface verdict gate -- the worst-of metric rollup the CLI's
-    # ``meho retrieval eval`` and CI's exit-1-on-red gate key off. A
+    # Per-surface verdict gate -- the worst-of metric rollup CI's
+    # exit-1-on-red gate keys off. A
     # red kb surface must fail the canary even if the two hard metric
     # gates above happen to clear (e.g. precision@5 collapse).
     assert result.verdict != "red", (

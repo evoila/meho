@@ -171,7 +171,7 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
-from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+from meho_backplane.connectors.vault.tenant_paths import is_derived_secret_ref, tenant_secret_ref
 from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
 from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
@@ -223,8 +223,9 @@ _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 MACHINE_TARGET_WRITE_REMEDIATION: Final[str] = (
     "target writes on REST are for people. A machine login (agent, service "
     "or runner) registers a target with call_operation(connector_id="
-    "'targets-registry-1.x', op_id='targets.register') and removes one with "
-    "op_id='targets.remove'; MEHO checks both against the approval rules. A "
+    "'targets-registry-1.x', op_id='targets.register'), changes one with "
+    "op_id='targets.update' and removes one with op_id='targets.remove'; "
+    "MEHO checks each against the approval rules. A "
     "person changes a target in the operator console or with the meho CLI."
 )
 
@@ -446,6 +447,9 @@ def _to_full(t: TargetORM) -> Target:
         port=t.port,
         fqdn=t.fqdn,
         secret_ref=t.secret_ref,
+        secret_ref_derived=is_derived_secret_ref(
+            t.secret_ref, tenant_id=t.tenant_id, target_name=t.name
+        ),
         auth_model=AuthModel(t.auth_model),
         vpn_required=t.vpn_required,
         verify_tls=t.verify_tls,
@@ -1787,9 +1791,22 @@ async def update_target(
     same write-time gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
     PATCH not sending the field are untouched; no-op when the guard is disabled. See
     :func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an
-    id (:func:`resolve_route_target`).
+    id (:func:`resolve_route_target`). The change itself is
+    :func:`apply_target_update`.
     """
     t = await resolve_route_target(session, operator.tenant_id, name)
+    return await apply_target_update(t, body, operator, session)
+
+
+async def apply_target_update(
+    t: TargetORM, body: TargetUpdate, operator: Operator, session: AsyncSession
+) -> Target:
+    """Apply the sent fields of *body* to the loaded row *t*, with every check of PATCH.
+
+    The caller finds the row. REST ``PATCH`` finds it by name, alias or id;
+    the ``targets.update`` op finds it by id only and locks it. Nothing is
+    looked up by name here, so the change lands on the row the caller found.
+    """
     updates = body.model_dump(exclude_unset=True)
     # T1 (#1780). Snapshot the pre-patch TLS-verification state *before*
     # the ``setattr`` loop below mutates the row, so the audit fold-in

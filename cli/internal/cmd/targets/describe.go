@@ -147,7 +147,11 @@ func printTargetSummary(w io.Writer, t *api.Target) {
 	fmt.Fprintf(w, "%-18s %s\n", "auth_model:", string(t.AuthModel))
 	fmt.Fprintf(w, "%-18s %t\n", "vpn_required:", t.VpnRequired)
 	if t.SecretRef != nil && *t.SecretRef != "" {
-		fmt.Fprintf(w, "%-18s %s\n", "secret_ref:", *t.SecretRef)
+		if t.SecretRefDerived != nil && *t.SecretRefDerived {
+			fmt.Fprintf(w, "%-18s %s (built from the target name; store the credential there or set --secret-ref)\n", "secret_ref:", *t.SecretRef)
+		} else {
+			fmt.Fprintf(w, "%-18s %s\n", "secret_ref:", *t.SecretRef)
+		}
 	}
 	if t.SecretFieldMap != nil && len(*t.SecretFieldMap) > 0 {
 		fmt.Fprintf(w, "%-18s %s\n", "secret_field_map:", formatSecretFieldMap(*t.SecretFieldMap))

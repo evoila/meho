@@ -54,6 +54,7 @@ spec:
         flight_recorder: { enabled: true, retention_days: 14, agent_readable: null }
         mail_recipient_allowlist: "@example.com"
         run_approval_target_kinds: false
+        knowledge_wiki_collection: null
       conventions:
         - slug: change-window
           title: Change window
@@ -74,6 +75,9 @@ spec:
   parts:
     - `policies`: the tenant's switches, such as the flight recorder
       and the mail allow list. `null` means "use the default".
+      `knowledge_wiki_collection` names the docs collection of the
+      tenant's team wiki (see
+      [Lessons in a team wiki](memory-and-knowledge.md#lessons-in-a-team-wiki)).
     - `conventions`: the tenant's conventions, one per `slug`.
     - `targets`: the tenant's targets, one per `name`. A target has the
       same fields as when you register it (see

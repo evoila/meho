@@ -80,6 +80,7 @@ carries a clean message the MCP front maps to ``-32602``.
 
 from __future__ import annotations
 
+import shlex
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -138,12 +139,12 @@ _GROUP_KEY = "registry"
 _GROUP_WHEN_TO_USE = (
     "Write to the tenant's target registry: register a new target "
     "(name + product + host, plus optional connection detail) so it can "
-    "be dispatched against, detect a target's product and version, or "
-    "remove a target whose system is gone. Use "
+    "be dispatched against, detect a target's product and version, change "
+    "a target's fields, or remove a target whose system is gone. Use "
     "when onboarding a system the agent must later drive — an rke2 "
     "cluster, a vCenter, a DNS server — or when cleaning up after it. "
-    "A registration from an agent principal waits for a person to approve "
-    "it; a removal always waits for a second person to approve it. "
+    "A registration from an agent principal, and every change, waits for a "
+    "person to approve it; a removal always waits for a second person. "
     "Target reads live on list_targets / query_topology, not here."
 )
 
@@ -176,7 +177,12 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "host": "Required. Dialable host/IP; SSRF-screened.",
         "secret_ref": "Optional. Must sit in the tenant's Vault subtree; omit to derive it.",
     },
-    "output_shape": "{'target_id', 'name', 'product', 'host', 'tenant_id'}",
+    "output_shape": "{'target_id', 'name', 'product', 'host', 'tenant_id', 'next_step'}",
+    "next_step": (
+        "The new target is not probed yet. Call targets.probe with its name, "
+        "so MEHO detects the product and version and picks the right "
+        "connector implementation."
+    ),
 }
 
 
@@ -218,7 +224,28 @@ async def targets_register(
         "product": created.product,
         "host": created.host,
         "tenant_id": str(created.tenant_id),
+        "secret_ref": created.secret_ref,
+        "secret_ref_derived": created.secret_ref_derived,
+        "next_step": _probe_next_step(created.name),
     }
+
+
+def _probe_next_step(name: str) -> str:
+    """Tell the caller how to detect the product and version of a new target.
+
+    Registration does not contact the system: its login is often stored
+    only after the target exists. So a new target has no fingerprint, and
+    the register result names the probe that adds one. The CLI command
+    quotes the name for a POSIX shell and ends the options with ``--``, so
+    it is safe to copy for any valid name.
+    """
+    cli_command = f"meho targets probe -- {shlex.quote(name)}"
+    return (
+        f"Target {name!r} is not probed yet, so MEHO does not know its product "
+        f"version. Probe it next: call_operation with connector_id "
+        f"{TARGETS_REGISTRY_CONNECTOR_ID!r}, op_id 'targets.probe' and params "
+        f"{{'name': {name!r}}}, or `{cli_command}` in the CLI."
+    )
 
 
 def _http_exception_message(exc: HTTPException) -> str:

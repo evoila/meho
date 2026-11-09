@@ -16,6 +16,7 @@ points at that row, and no user is created.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -297,6 +298,67 @@ async def test_keycloak_403_fails_the_approved_run(
     run = _assert_failed_run_recorded(request, run_rows, error_code="connector_http_403")
     assert run.payload["error"]["http_status"] == 403
     assert "not-a-real-password" not in str(run.payload)
+
+
+def _approve_in_background(request_id: uuid.UUID, *, users_status: int) -> dict[str, Any]:
+    """Approve over ``/decide`` with ``async: true``; wait for the run; return the 202 body.
+
+    The client keeps its event loop open while the request is read again,
+    so the background run can end (#5110).
+    """
+    key = make_rsa_keypair("kid-5110")
+    with respx.mock(assert_all_called=False) as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        mock.post(f"{_KC_BASE_URL}/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": "kc-admin-token", "expires_in": 300}
+        )
+        mock.post(url__regex=rf"^{_KC_BASE_URL}/admin/realms/[^/]+/users$").respond(
+            users_status, json={"error": "HTTP 403 Forbidden"}
+        )
+        token = mint_token(
+            key,
+            fresh_sign_in=True,
+            sub="approver",
+            tenant_role=TenantRole.OPERATOR.value,
+            tenant_id=str(_TENANT_ID),
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/approvals/{request_id}/decide",
+                headers=headers,
+                json={"decision": "approved", "async": True},
+            )
+            assert response.status_code == 202, response.text
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                view = client.get(f"/api/v1/approvals/{request_id}", headers=headers).json()
+                if view["result_state"] not in ("started", "not_started"):
+                    break
+                time.sleep(0.05)
+            assert view["result_state"] == "failed", view
+    return dict(response.json())
+
+
+async def test_background_approve_runs_once_with_its_audit_row(
+    monkeypatch: pytest.MonkeyPatch, keycloak_target: Any
+) -> None:
+    """``/decide`` with ``async: true`` (#5110): one run, one audit row, as inline."""
+
+    async def _vault_password(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        return {"password": "not-a-real-password"}
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors._shared.vault_creds.load_vault_secret_data", _vault_password
+    )
+    request_id = await _park(keycloak_target)
+
+    body = _approve_in_background(request_id, users_status=403)
+
+    assert body["decision"] == "approved"
+    assert body["run_id"]
+    request, run_rows, _ = await _run_rows(request_id)
+    _assert_failed_run_recorded(request, run_rows, error_code="connector_http_403")
 
 
 @pytest.mark.parametrize(

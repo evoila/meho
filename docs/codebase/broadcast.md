@@ -376,6 +376,13 @@ not offer the tool, because MEHO cannot see tools the client hides. The
 conventions write path keeps the default (`include_broadcast=True`), so
 its result does not change.
 
+People read the feed; only agents post (#5770). A session that is not
+an agent (`auth/agent_admission.py::is_agent_caller` is false: no hosted
+run and no agent token) gets `BROADCAST_READER_BAND` instead. It keeps
+the "read the feed first" step and tells the session to skip
+`meho_broadcast_announce`. The plugin skill and its `call_operation`
+reminder say the same, and the tool description says it first.
+
 ### Read path (SSE and UI history)
 
 See *Reader side* in the overview. `/ui/broadcast/stream` and
@@ -452,7 +459,14 @@ path, merged as a clobber-free union of distinct keys
 3. `reflex_advisory` — #3133, built in `broadcast/reflex.py`, a
    session-scoped coordination nudge (read-before-act /
    announce-before-mutate) deduped per `(session, heuristic)`; see
-   [`docs/codebase/reflex-advisory.md`](reflex-advisory.md). #3133 also
+   [`docs/codebase/reflex-advisory.md`](reflex-advisory.md). Who gets
+   each nudge (#5489): every agent session gets the read nudge until it
+   has read the feed (for a service login with a `work_ref`, a read in
+   its MCP session counts). Only a caller that may publish (a live
+   hosted agent run or a registered agent principal, see "Who can
+   publish" below) gets the announce nudge; a person or a service login
+   does not. The full table is in
+   [`reflex-advisory.md`](reflex-advisory.md). #3133 also
    ships the opt-in **announce gate** (`broadcast/announce_gate.py`),
    which *rejects* — rather than nudges — a caution-or-higher write-class
    op dispatched without an active claim in a tenant that opted in.
@@ -476,7 +490,12 @@ from server-side facts only. There are two ways in:
 
 Everything else gets the stable machine error `agent_identity_required`
 (MCP `-32602` with `error.data = {code, reason, remediation}`, REST
-`403` with the same `detail`). MEHO never guesses an agent from the
+`403` with the same `detail`). A caller that is not an agent at all (a
+person's login outside a hosted run) gets a remediation that says to
+skip the step: its operations are already in the audit log. On MCP this
+refusal comes before the input check (#5770): the tool's `caller_check`
+runs `require_agent_caller`, which needs no database read, before the
+dispatcher checks the arguments. MEHO never guesses an agent from the
 transport, a person's login client, a CLI login, a flag, or a `run_id`
 the caller sent.
 

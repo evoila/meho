@@ -44,7 +44,7 @@ func runDecisionText(t *testing.T, decide mockHandler, verb string, jsonOut bool
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	cmd.SetContext(context.Background())
-	err = runDecision(cmd, stubID, verb, "", jsonOut, srv.URL)
+	err = runDecision(cmd, stubID, verb, "", decisionOpts{JSONOut: jsonOut, BackplaneOverride: srv.URL})
 	return stdout.String(), &stderr, err
 }
 

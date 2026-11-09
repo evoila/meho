@@ -388,72 +388,38 @@
         }
       }
     },
-    "/api/v1/retrieve/eval": {
-      "post": {
+    "/api/v1/retrieve/operation-picks": {
+      "get": {
         "tags": [
           "retrieval"
         ],
-        "summary": "Eval Endpoint",
-        "description": "Run the eval corpus against the retrieving tenant's substrate.\n\nTenant-scoped to ``operator.tenant_id`` \u2014 no surface accepts a\ndifferent tenant id from the body. ``read_only`` operators get\n403 via :func:`require_role` before reaching this handler.\n\nThe request's ``surface`` value flows through to\n:func:`~meho_backplane.retrieval.eval.runner.eval_all`; ``\"all\"``\nruns every shipped corpus, single-surface values scope the run.\nThe ``baseline=\"grep\"`` flag is honoured for kb only (v0.2 ships\nno operations / memory baseline); other surfaces silently ignore\nit.\n\nAudit overrides + enrichment contextvars are bound **before** the\nrunner kicks off so a handler exception still produces an audit\nrow with partial payload. The runner itself is in-process \u2014\nno HTTP round-trip back to ``/api/v1/retrieve``.",
-        "operationId": "eval_endpoint_api_v1_retrieve_eval_post",
+        "summary": "Operation Picks Endpoint",
+        "description": "Return the operation pick numbers per connector and day.\n\n*since* accepts ``<N>d`` / ``<N>h`` or an ISO-8601 date; a malformed\nvalue is a 400. *connector_id* narrows the report to one connector. A\n*tenant_filter* naming another tenant is a 403 unless the caller is a\nplatform admin. No records in the window is an empty ``buckets`` list.",
+        "operationId": "operation_picks_endpoint_api_v1_retrieve_operation_picks_get",
         "parameters": [
           {
-            "name": "authorization",
-            "in": "header",
+            "name": "since",
+            "in": "query",
             "required": false,
             "schema": {
               "type": "string",
+              "maxLength": 32,
+              "default": "30d",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
               "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EvalRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EvalResult"
-                }
-              }
+              "title": "Connector Id"
             }
           },
-          "501": {
-            "description": "Server-side baseline evaluation is not implemented; the request body's ``baseline`` field is non-empty and v0.2 has no checked-in corpus snapshot. Run the baseline locally via ``meho retrieval eval --baseline grep``."
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/retrieve/retire-checklist": {
-      "post": {
-        "tags": [
-          "retrieval"
-        ],
-        "summary": "Retire Checklist Endpoint",
-        "description": "Return the five-criterion retire-decision checklist per surface.\n\nThe usage criteria read request usage events (``request_usage``),\nnot ``audit_log``. MEHO collects them only when\n``REQUEST_USAGE_RETENTION_DAYS`` is set, so they stay unmet when that\nsetting is off, and they cover only the time since collection started.\n\nTenant scoping mirrors the sibling usage route:\nCallers are scoped to ``operator.tenant_id``; a ``tenant_filter``\nquery parameter naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638).\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
-        "operationId": "retire_checklist_endpoint_api_v1_retrieve_retire_checklist_post",
-        "parameters": [
           {
             "name": "tenant_filter",
             "in": "query",
@@ -476,23 +442,13 @@
             }
           }
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RetireChecklistRequest"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RetireChecklistReport"
+                  "$ref": "#/components/schemas/OperationPickReport"
                 }
               }
             }
@@ -1356,7 +1312,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's tenant subtree\nis rejected with a structured 422 (``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the\nsame write-time gate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is disabled. See\n:func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an\nid (:func:`resolve_route_target`).",
+        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's tenant subtree\nis rejected with a structured 422 (``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the\nsame write-time gate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is disabled. See\n:func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an\nid (:func:`resolve_route_target`). The change itself is\n:func:`apply_target_update`.",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {
@@ -6087,7 +6043,7 @@
           "knowledge"
         ],
         "summary": "Ingest Kb",
-        "description": "Server-side bulk ingest from a directory on the backplane host.\n\n``tenant_admin`` only -- bulk ingest is a privileged operation.\nThe request shape accepts both ``directory`` and ``tarball_url``\nfields (the task body's contract), but only the ``directory``\nbranch is implemented in v0.2; a ``tarball_url`` request returns\n**501 Not Implemented**, mirroring\n:mod:`meho_backplane.api.v1.retrieve_eval`'s posture toward its\nunimplemented baseline field.\n\nWalks the supplied directory via\n:meth:`KbService.ingest_directory` and returns the five-bucket\n:class:`KbIngestionResult` (files sharing a slug are listed in\n``conflicts`` and not written). The directory is **confined to**\n``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``): a path\nresolving outside it (``..`` traversal or escaping symlink) raises\n:class:`~meho_backplane.kb.KbIngestRootError`, mapped to a **400**\n``kb_ingest_path_outside_root`` here before any file is read --\nclosing the path-traversal / LFI hole (#101 L8 + L14) even for a\n``tenant_admin``. A path inside the root that does not exist or is\nnot a directory fails closed with ``directory_not_found`` /\n``not_a_directory`` (also 400).\n\nBinds ``audit_op_id=\"kb.ingest\"`` + ``audit_op_class=\"write\"``\nplus the five result counters in the audit payload (NOT the\nfile contents or paths). ``audit_dry_run`` flags dry-run calls so an operator\ncan grep their audit log for trial vs real ingests.",
+        "description": "Server-side bulk ingest from a directory on the backplane host.\n\n``tenant_admin`` only -- bulk ingest is a privileged operation.\nThe request shape accepts both ``directory`` and ``tarball_url``\nfields (the task body's contract), but only the ``directory``\nbranch is implemented in v0.2; a ``tarball_url`` request returns\n**501 Not Implemented**.\n\nWalks the supplied directory via\n:meth:`KbService.ingest_directory` and returns the five-bucket\n:class:`KbIngestionResult` (files sharing a slug are listed in\n``conflicts`` and not written). The directory is **confined to**\n``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``): a path\nresolving outside it (``..`` traversal or escaping symlink) raises\n:class:`~meho_backplane.kb.KbIngestRootError`, mapped to a **400**\n``kb_ingest_path_outside_root`` here before any file is read --\nclosing the path-traversal / LFI hole (#101 L8 + L14) even for a\n``tenant_admin``. A path inside the root that does not exist or is\nnot a directory fails closed with ``directory_not_found`` /\n``not_a_directory`` (also 400).\n\nBinds ``audit_op_id=\"kb.ingest\"`` + ``audit_op_class=\"write\"``\nplus the five result counters in the audit payload (NOT the\nfile contents or paths). ``audit_dry_run`` flags dry-run calls so an operator\ncan grep their audit log for trial vs real ingests.",
         "operationId": "ingest_kb_api_v1_kb_ingest_post",
         "parameters": [
           {
@@ -6195,7 +6151,7 @@
           "knowledge"
         ],
         "summary": "Export Kb Pages",
-        "description": "Return the caller's confirmed, generic entries as Markdown pages (#5730).\n\nThe team wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
+        "description": "Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).\n\nThe team wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
         "operationId": "export_kb_pages_api_v1_kb_export_post",
         "parameters": [
           {
@@ -11891,7 +11847,7 @@
           "approvals"
         ],
         "summary": "Decide Approval Request",
-        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.\n\nAn approval needs a fresh approval sign-in (#3979, #5515), the same\ncheck as ``/approve``: otherwise the route answers 401 with\n``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\nand ``max_age`` (RFC 9470), and the request stays pending. A rejection\nneeds no fresh sign-in.",
+        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.\n\nAn approval needs a fresh approval sign-in (#3979, #5515), the same\ncheck as ``/approve``: otherwise the route answers 401 with\n``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\nand ``max_age`` (RFC 9470), and the request stays pending. A rejection\nneeds no fresh sign-in.\n\nWith ``async: true`` an approval answers at once (#5110): the decision\nis saved and audited as above, the operation starts in the background\nthrough the same resume path (same run claim, same audit), and the\nanswer is HTTP 202 with the run id (:class:`DecideAcceptedBody`).",
         "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
         "parameters": [
           {
@@ -11932,6 +11888,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DecideResponseBody"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Approved; the operation runs in the background (async: true).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecideAcceptedBody"
                 }
               }
             }
@@ -20578,69 +20544,6 @@
         }
       }
     },
-    "/ui/retrieval/eval": {
-      "post": {
-        "tags": [
-          "ui-retrieval"
-        ],
-        "summary": "Retrieval Eval",
-        "description": "Run the Eval Quality fragment (delegates to :func:`_render_eval`).",
-        "operationId": "retrieval_eval_ui_retrieval_eval_post",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/retrieval/retire-checklist": {
-      "post": {
-        "tags": [
-          "ui-retrieval"
-        ],
-        "summary": "Retrieval Retire Checklist",
-        "description": "Run the Retire Checklist fragment (delegates to :func:`_render_retire`).",
-        "operationId": "retrieval_retire_checklist_ui_retrieval_retire_checklist_post",
-        "requestBody": {
-          "content": {
-            "application/x-www-form-urlencoded": {
-              "schema": {
-                "$ref": "#/components/schemas/Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/ui/runbooks": {
       "get": {
         "tags": [
@@ -21899,6 +21802,94 @@
         }
       }
     },
+    "/ui/approvals/{request_id}/run": {
+      "get": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approval Run State",
+        "description": "The run part of the outcome card, as it is now.",
+        "operationId": "approval_run_state_ui_approvals__request_id__run_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/approvals/{request_id}/row": {
+      "get": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approval History Row",
+        "description": "One row of the approvals list, as it is now.",
+        "operationId": "approval_history_row_ui_approvals__request_id__row_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/approvals/{request_id}/outcome-check": {
       "post": {
         "tags": [
@@ -21929,6 +21920,54 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runs/notices": {
+      "get": {
+        "tags": [
+          "ui-run-notices"
+        ],
+        "summary": "Run Notices",
+        "description": "One notice per ended run of *run_id*; a hidden marker for an unknown one.",
+        "operationId": "run_notices_ui_runs_notices_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "default": [],
+              "title": "Run Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -24028,6 +24067,190 @@
         }
       }
     },
+    "/ui/account/push/subscriptions": {
+      "get": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Subscriptions",
+        "operationId": "ui_account_push_subscriptions_ui_account_push_subscriptions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/push/subscribe": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Subscribe",
+        "operationId": "ui_account_push_subscribe_ui_account_push_subscribe_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_push_subscribe_ui_account_push_subscribe_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/push/unsubscribe": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Unsubscribe",
+        "operationId": "ui_account_push_unsubscribe_ui_account_push_unsubscribe_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_push_unsubscribe_ui_account_push_unsubscribe_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/push/status": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Status",
+        "operationId": "ui_account_push_status_ui_account_push_status_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_push_status_ui_account_push_status_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/push/remove": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Remove",
+        "operationId": "ui_account_push_remove_ui_account_push_remove_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_push_remove_ui_account_push_remove_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/first-start": {
       "get": {
         "tags": [
@@ -25536,6 +25759,11 @@
             "nullable": true,
             "title": "Principal Name"
           },
+          "principal_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Kind"
+          },
           "op_id": {
             "type": "string",
             "title": "Op Id"
@@ -26701,44 +26929,6 @@
         "title": "BackendReadiness",
         "description": "Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).\n\nThe liveness snapshot a probe reads back from a collection's backend.\nThe collection-probe route persists ``doc_count`` / ``last_ingested_at``\n/ ``readiness`` onto the ``doc_collections`` row and transitions\n``status`` from this result **on success only** \u2014 modelled on\n:class:`~meho_backplane.connectors.schemas.FingerprintResult`, which\n``probe_target`` caches onto ``Target.fingerprint`` the same way.\n\n``index_built`` is the managed-RAG footgun this surface exists to\nhide: a managed-RAG ANN index answers searches only once it has been\nexplicitly (re)built, and rebuilds serialize per project. ``False``\nmeans the backend is reachable but the index is not yet answerable \u2014\nthe probe maps it to ``status='rebuilding'`` / ``'provisioning'`` so\nthe search path can fail typed rather than return a silent empty 200.\n\nFrozen so a persisted snapshot cannot be mutated after the probe\nreads it. ``detail`` is the free-form JSON the ``readiness`` column\nstores verbatim for operator diagnostics (never agent-facing)."
       },
-      "BaselineMetricsOverride": {
-        "properties": {
-          "precision_at_5": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Precision At 5"
-          },
-          "mrr": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Mrr"
-          },
-          "coverage": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Coverage"
-          },
-          "kind": {
-            "type": "string",
-            "maxLength": 16,
-            "minLength": 1,
-            "title": "Kind",
-            "default": "grep"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "precision_at_5",
-          "mrr",
-          "coverage"
-        ],
-        "title": "BaselineMetricsOverride",
-        "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
-      },
       "Body__create_ui_event_sources_post": {
         "properties": {
           "name": {
@@ -27458,18 +27648,6 @@
         "type": "object",
         "title": "Body_retrieval_diagnostics_ui_retrieval_diagnostics_post"
       },
-      "Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post": {
-        "properties": {
-          "tenant_filter": {
-            "type": "string",
-            "maxLength": 64,
-            "title": "Tenant Filter",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "title": "Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post"
-      },
       "Body_retrieval_usage_ui_retrieval_usage_post": {
         "properties": {
           "since": {
@@ -27660,6 +27838,60 @@
         },
         "type": "object",
         "title": "Body_runbooks_runs_start_ui_runbooks_runs_post"
+      },
+      "Body_ui_account_push_remove_ui_account_push_remove_post": {
+        "properties": {
+          "subscription_id": {
+            "type": "string",
+            "title": "Subscription Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_push_remove_ui_account_push_remove_post"
+      },
+      "Body_ui_account_push_status_ui_account_push_status_post": {
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_push_status_ui_account_push_status_post"
+      },
+      "Body_ui_account_push_subscribe_ui_account_push_subscribe_post": {
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "default": ""
+          },
+          "p256dh": {
+            "type": "string",
+            "title": "P256Dh",
+            "default": ""
+          },
+          "auth": {
+            "type": "string",
+            "title": "Auth",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_push_subscribe_ui_account_push_subscribe_post"
+      },
+      "Body_ui_account_push_unsubscribe_ui_account_push_unsubscribe_post": {
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_push_unsubscribe_ui_account_push_unsubscribe_post"
       },
       "Body_ui_account_revoke_session_ui_account_sessions_revoke_post": {
         "properties": {
@@ -30302,56 +30534,6 @@
         "title": "ConventionsDriftResponse",
         "description": "The drift check's answer. ``in_sync`` is true only when nothing differs.\n\n``added``: ``{slug, value}``, a rule in the file that MEHO does not have.\n``changed``: ``{slug, before, after}``, only the fields an import would\nchange. ``only_in_meho``: ``{slug}``, an operational convention the file\ndoes not have. All three are empty when ``mistakes`` is not."
       },
-      "CriterionResult": {
-        "properties": {
-          "name": {
-            "type": "string",
-            "enum": [
-              "daily_use_duration",
-              "operator_breadth",
-              "eval_precision",
-              "meho_vs_baseline",
-              "open_blockers"
-            ],
-            "title": "Name"
-          },
-          "verdict": {
-            "type": "string",
-            "enum": [
-              "green",
-              "yellow",
-              "red"
-            ],
-            "title": "Verdict"
-          },
-          "observed_value": {
-            "type": "string",
-            "maxLength": 64,
-            "title": "Observed Value"
-          },
-          "threshold_summary": {
-            "type": "string",
-            "maxLength": 64,
-            "title": "Threshold Summary"
-          },
-          "notes": {
-            "type": "string",
-            "maxLength": 256,
-            "nullable": true,
-            "title": "Notes"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "name",
-          "verdict",
-          "observed_value",
-          "threshold_summary"
-        ],
-        "title": "CriterionResult",
-        "description": "One row of the per-surface checklist.\n\nFrozen + ``extra=\"forbid\"`` so the structured output is stable for\nthe CLI table renderer and any future dashboard consumer. The\n``observed_value`` + ``threshold_summary`` pair is what the\nhuman-readable table prints verbatim \u2014 keep both short (\u2264 32\nchars each) so the table stays scannable in an 80-column terminal."
-      },
       "CurrentStepResponse": {
         "properties": {
           "kind": {
@@ -31212,6 +31394,67 @@
         "title": "DbStatus",
         "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe.\n\n``revision``, ``head`` and ``detail`` (#4830) carry the probe's\nvalues, so an operator can confirm an upgrade from ``meho status``\nwithout a shell into the pod: ``revision`` is the revision stamped\nin the database, ``head`` the revision this build expects, and\n``detail`` the same text ``/ready`` shows for the ``db`` check.\n``revision`` is ``None`` when the database has no revision or could\nnot be read; ``head`` is ``None`` when the migration scripts could\nnot be loaded. After a rollback ``revision`` is newer than ``head``\nwhile ``migrated`` stays ``True`` (``docs/codebase/migrations.md``,\n\"Rollback contract\"). The defaults keep older response decoders\nworking."
       },
+      "DecideAcceptedBody": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "decided_by": {
+            "type": "string",
+            "nullable": true,
+            "title": "Decided By"
+          },
+          "decided_by_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Decided By Name"
+          },
+          "self_approved": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Self Approved"
+          },
+          "approval_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Approval Rule"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "pending"
+          },
+          "async": {
+            "type": "boolean",
+            "title": "Async",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "decision",
+          "reason",
+          "run_id"
+        ],
+        "title": "DecideAcceptedBody",
+        "description": "Answer of ``/decide`` with ``async: true`` on an approval (HTTP 202, #5110).\n\nThe decision is saved and audited. The operation runs in the\nbackground: ``run_id`` names that run. Read the request with\n``GET /api/v1/approvals/{id}`` until ``result_state`` is no longer\n``started`` or ``not_started``. The decision fields mean the same as\nin :class:`DecideResponseBody`."
+      },
       "DecideRequestBody": {
         "properties": {
           "decision": {
@@ -31225,6 +31468,12 @@
             "title": "Reason",
             "description": "Optional rationale recorded on the decision audit row. End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.",
             "default": ""
+          },
+          "async": {
+            "type": "boolean",
+            "title": "Async",
+            "description": "Answer at once (#5110). When true and the decision is 'approved', MEHO saves the decision, starts the operation in the background and answers HTTP 202 with a run id. Read the request with GET /api/v1/approvals/{id} to see the run end (result_state). Ignored on a rejection. Default false: the answer comes after the operation ends, as before.",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -32330,67 +32579,6 @@
         "title": "EqualsCompare",
         "description": "Strict-equality comparator: ``ok`` on match, ``critical`` otherwise.\n\nEquality is type-strict for booleans -- ``True`` never equals ``1`` -- so\nthe ``value`` operand keeps whatever JSON scalar type it was given (Pydantic\nsmart-union preserves it) and the evaluator compares with matching strictness."
       },
-      "EvalRequest": {
-        "properties": {
-          "surface": {
-            "type": "string",
-            "enum": [
-              "kb",
-              "memory",
-              "operations",
-              "all"
-            ],
-            "title": "Surface",
-            "default": "all"
-          },
-          "baseline": {
-            "type": "string",
-            "maxLength": 16,
-            "nullable": true,
-            "title": "Baseline"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "title": "EvalRequest",
-        "description": "POST body for ``/api/v1/retrieve/eval``.\n\nFrozen + extra=forbid so a typo (``surfaces`` instead of\n``surface``) fails 422 at the framework boundary rather than\nsilently running the default surface and giving the caller a\nconfusing \"I asked for memory, why did kb run?\" response."
-      },
-      "EvalResult": {
-        "properties": {
-          "ran_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Ran At"
-          },
-          "surfaces": {
-            "items": {
-              "$ref": "#/components/schemas/SurfaceResult"
-            },
-            "type": "array",
-            "title": "Surfaces"
-          },
-          "overall_verdict": {
-            "type": "string",
-            "enum": [
-              "green",
-              "yellow",
-              "red"
-            ],
-            "title": "Overall Verdict"
-          },
-          "thresholds": {
-            "$ref": "#/components/schemas/Thresholds"
-          }
-        },
-        "type": "object",
-        "required": [
-          "ran_at",
-          "surfaces",
-          "overall_verdict"
-        ],
-        "title": "EvalResult",
-        "description": "Top-level eval result \u2014 the shape the API + CLI return.\n\n``overall_verdict`` is the worst-of every surface (a red surface\nflips the whole result red); the CLI's exit-1-on-red CI-gate\nsemantics key off this field. ``ran_at`` is the UTC timestamp\nthe runner started; consumers comparing two saved baselines see\nwhen each was captured."
-      },
       "EventIngestResponse": {
         "properties": {
           "event_id": {
@@ -33332,6 +33520,12 @@
           "agent_model_spend": {
             "$ref": "#/components/schemas/AgentModelSpend",
             "nullable": true
+          },
+          "server_time": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Server Time"
           }
         },
         "type": "object",
@@ -33342,7 +33536,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them.\n\n``connector_packages`` (#5036) lists the connector packages this image\ncarries, the same list ``GET /version`` shows. It is empty for the\nplain public image.\n\n``operation_catalog`` (#5019) names the release that wrote the shared\noperation rows and says whether it is this pod's release\n(:class:`OperationCatalogStatus`). The ``None`` default keeps older\nresponse decoders working; the handler always fills it.\n\n``agent_model_spend`` (#5771) says whether the spend limits count the\ncost of runs on the default agent model (:class:`AgentModelSpend`).\nThe ``None`` default keeps older response decoders working; the\nhandler always fills it."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them.\n\n``connector_packages`` (#5036) lists the connector packages this image\ncarries, the same list ``GET /version`` shows. It is empty for the\nplain public image.\n\n``operation_catalog`` (#5019) names the release that wrote the shared\noperation rows and says whether it is this pod's release\n(:class:`OperationCatalogStatus`). The ``None`` default keeps older\nresponse decoders working; the handler always fills it.\n\n``agent_model_spend`` (#5771) says whether the spend limits count the\ncost of runs on the default agent model (:class:`AgentModelSpend`).\nThe ``None`` default keeps older response decoders working; the\nhandler always fills it.\n\n``server_time`` (#5504) is the server's time now, in UTC, to the\nsecond (ISO 8601 with a ``Z`` suffix). An agent with no shell has no\nother clock, so it reads this when it must write down the time. Both\nanswers fill it, also the one for a login that chose no tenant. The\n``None`` default keeps older response decoders working."
       },
       "ImportedSensor": {
         "properties": {
@@ -34420,6 +34614,55 @@
         "title": "KbSimilarEntry",
         "description": "One existing entry that is similar to the entry about to be created."
       },
+      "KbWikiSearch": {
+        "properties": {
+          "collection": {
+            "type": "string",
+            "title": "Collection"
+          },
+          "searched": {
+            "type": "boolean",
+            "title": "Searched"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "docs_addon_off",
+              "not_entitled",
+              "unknown_collection",
+              "collection_not_ready",
+              "index_unavailable",
+              "filtered"
+            ],
+            "nullable": true,
+            "title": "Reason"
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "title": "Message"
+          },
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/DocsChunk"
+            },
+            "type": "array",
+            "title": "Hits"
+          },
+          "duplicate_count": {
+            "type": "integer",
+            "title": "Duplicate Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "collection",
+          "searched"
+        ],
+        "title": "KbWikiSearch",
+        "description": "What the wiki part of one knowledge search did.\n\n``searched`` is false when the wiki was not searched; then ``reason``\nand ``message`` say why and ``hits`` is empty. ``hits`` are the wiki's\nhits, best first, each with ``collection`` set and its ``source_url``\n(the source link the index sent). ``duplicate_count`` counts the wiki\nhits left out because the store's hits already hold their imported copy."
+      },
       "KindFilterValue": {
         "type": "string",
         "enum": [
@@ -34509,6 +34752,12 @@
           "sensor_runner": {
             "$ref": "#/components/schemas/SensorRunnerStatus",
             "nullable": true
+          },
+          "server_time": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Server Time"
           }
         },
         "type": "object",
@@ -34517,7 +34766,7 @@
           "db"
         ],
         "title": "LivenessResponse",
-        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret.\n\n``db`` shares :class:`DbStatus` with the deep check, so it carries\nthe migration revision too (#4830). It still never touches Vault."
+        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret.\n\n``db`` shares :class:`DbStatus` with the deep check, so it carries\nthe migration revision too (#4830). It still never touches Vault.\n\n``server_time`` (#5504) is the same field as on the deep check: the\nserver's time now, in UTC, to the second. ``meho status`` falls back\nto this route for a login with the ``read_only`` role, so that login\nreads the time here. A clock read; no Vault, no connector."
       },
       "ManualStep": {
         "properties": {
@@ -35361,6 +35610,127 @@
         "title": "OperationOverrideRow",
         "description": "One operator override of a risk level or approval flag (#4711).\n\n``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or\n``install`` (the whole install). ``safety_level`` / ``requires_approval``\nare the values that apply in that scope: the classification with every\noverride there. ``reason`` is the reason a platform admin gave for\nturning approval off."
       },
+      "OperationPickBucket": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "searches": {
+            "type": "integer",
+            "title": "Searches",
+            "description": "search_operations calls."
+          },
+          "searches_followed_by_call": {
+            "type": "integer",
+            "title": "Searches Followed By Call",
+            "description": "Searches that a later call on the same connector was linked to."
+          },
+          "calls": {
+            "type": "integer",
+            "title": "Calls",
+            "description": "call_operation calls."
+          },
+          "calls_in_results": {
+            "type": "integer",
+            "title": "Calls In Results",
+            "description": "Calls whose op_id was in the linked search."
+          },
+          "calls_at_rank_1": {
+            "type": "integer",
+            "title": "Calls At Rank 1",
+            "description": "Calls whose op_id was the first result."
+          },
+          "calls_in_top_3": {
+            "type": "integer",
+            "title": "Calls In Top 3",
+            "description": "Calls whose op_id was in the first three results."
+          },
+          "calls_in_results_ok": {
+            "type": "integer",
+            "title": "Calls In Results Ok",
+            "description": "Calls whose op_id was in the linked search and that returned ok."
+          },
+          "calls_not_in_results": {
+            "type": "integer",
+            "title": "Calls Not In Results",
+            "description": "Calls after a search whose op_id was not in its results."
+          },
+          "calls_unknown_op": {
+            "type": "integer",
+            "title": "Calls Unknown Op",
+            "description": "Calls to an op_id that does not exist."
+          },
+          "calls_without_search": {
+            "type": "integer",
+            "title": "Calls Without Search",
+            "description": "Calls with no search on the same connector in the 5 minutes before."
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "connector_id",
+          "searches",
+          "searches_followed_by_call",
+          "calls",
+          "calls_in_results",
+          "calls_at_rank_1",
+          "calls_in_top_3",
+          "calls_in_results_ok",
+          "calls_not_in_results",
+          "calls_unknown_op",
+          "calls_without_search"
+        ],
+        "title": "OperationPickBucket",
+        "description": "The numbers of one connector on one day."
+      },
+      "OperationPickReport": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Since"
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Until"
+          },
+          "connector_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Connector Id"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/OperationPickBucket"
+            },
+            "type": "array",
+            "title": "Buckets"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "since",
+          "until",
+          "connector_id",
+          "buckets"
+        ],
+        "title": "OperationPickReport",
+        "description": "The report for one tenant and window."
+      },
       "OperationRunStatus": {
         "type": "string",
         "enum": [
@@ -36161,74 +36531,6 @@
         ],
         "title": "PublishTemplateResponse",
         "description": "Response for ``meho_runbook_publish_template`` -- the now-published coordinates."
-      },
-      "QueryResult": {
-        "properties": {
-          "query": {
-            "type": "string",
-            "title": "Query"
-          },
-          "expected_hits": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Expected Hits"
-          },
-          "meho_hits": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Meho Hits"
-          },
-          "precision_at_5": {
-            "type": "number",
-            "title": "Precision At 5"
-          },
-          "reciprocal_rank": {
-            "type": "number",
-            "title": "Reciprocal Rank"
-          },
-          "coverage_at_5": {
-            "type": "number",
-            "title": "Coverage At 5"
-          },
-          "baseline_hits": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "nullable": true,
-            "title": "Baseline Hits"
-          },
-          "baseline_precision_at_5": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Precision At 5"
-          },
-          "baseline_reciprocal_rank": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Reciprocal Rank"
-          },
-          "baseline_coverage_at_5": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Coverage At 5"
-          }
-        },
-        "type": "object",
-        "required": [
-          "query",
-          "expected_hits",
-          "meho_hits",
-          "precision_at_5",
-          "reciprocal_rank",
-          "coverage_at_5"
-        ],
-        "title": "QueryResult",
-        "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate."
       },
       "ReadDocsRequest": {
         "properties": {
@@ -37108,120 +37410,6 @@
         "title": "ResultQuerySpec",
         "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``aggregate`` \u2264 8, ``group_by`` \u2264 4,\n``order_by`` \u2264 4, ``select`` \u2264 64, and each ``IN`` value list \u2264 1000)\nand the operator/aggregate allow-lists are enforced here, at construction;\nfield-vs-schema validation needs the handle's columns and happens in\n:func:`compile_query`.\n\n``path`` is the other read: an RFC 6901 pointer into a document handle,\nor into the top-level fields a rows handle left out of its inline\nsummary. It is never compiled to SQL, so it cannot be combined with any\nrelational field (checked here, at construction)."
       },
-      "RetireChecklistReport": {
-        "properties": {
-          "ran_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Ran At"
-          },
-          "tenant_id": {
-            "type": "string",
-            "format": "uuid",
-            "nullable": true,
-            "title": "Tenant Id"
-          },
-          "since": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Since"
-          },
-          "until": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Until"
-          },
-          "surfaces": {
-            "items": {
-              "$ref": "#/components/schemas/SurfaceChecklist"
-            },
-            "type": "array",
-            "title": "Surfaces"
-          },
-          "overall_verdict": {
-            "type": "string",
-            "enum": [
-              "READY TO RETIRE",
-              "REVIEW MANUALLY",
-              "NOT YET"
-            ],
-            "title": "Overall Verdict"
-          },
-          "counted_surfaces": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Counted Surfaces"
-          },
-          "rest_excluded": {
-            "type": "boolean",
-            "title": "Rest Excluded",
-            "default": true
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "ran_at",
-          "tenant_id",
-          "since",
-          "until",
-          "surfaces",
-          "overall_verdict"
-        ],
-        "title": "RetireChecklistReport",
-        "description": "Top-level shape returned by :func:`compute_retire_checklist`.\n\nFrozen + ``extra=\"forbid\"`` so the CLI's ``--json`` consumers can\npin the shape; ``ran_at`` lets two saved reports be compared\nchronologically without external metadata."
-      },
-      "RetireChecklistRequest": {
-        "properties": {
-          "surface": {
-            "type": "string",
-            "enum": [
-              "kb",
-              "memory",
-              "operations",
-              "all"
-            ],
-            "title": "Surface",
-            "default": "all"
-          },
-          "blocker_counts": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "propertyNames": {
-              "enum": [
-                "kb",
-                "memory",
-                "operations"
-              ]
-            },
-            "type": "object",
-            "nullable": true,
-            "title": "Blocker Counts"
-          },
-          "baseline_overrides": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/BaselineMetricsOverride"
-            },
-            "propertyNames": {
-              "enum": [
-                "kb",
-                "memory",
-                "operations"
-              ]
-            },
-            "type": "object",
-            "nullable": true,
-            "title": "Baseline Overrides"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "title": "RetireChecklistRequest",
-        "description": "POST body for ``/api/v1/retrieve/retire-checklist``.\n\nFrozen + ``extra=\"forbid\"`` so a typo (``surfaces`` instead of\n``surface``, or ``blocker_count`` instead of ``blocker_counts``)\nfails 422 at the framework boundary rather than silently running\nthe default and giving the caller a confusing report.\n\n``blocker_counts`` is the surface\u2192count mapping the CLI fills in\nfrom a local ``gh issue list`` lookup. ``None`` (the default) is\nvalid \u2014 the service reports criterion 5 as yellow (unknown). Every\nkey must be one of the three supported surfaces; the\n``dict[Literal, int]`` shape pins that at the Pydantic boundary.\n\n``baseline_overrides`` is the surface\u2192baseline-metrics mapping the\nCLI can fill in from a local ``meho retrieval eval --baseline grep``\nrun. Without it, criterion 4 stays yellow for v0.2 production\ncallers because the backplane has no server-side corpus snapshot."
-      },
       "RetrievalHit": {
         "properties": {
           "document_id": {
@@ -37366,6 +37554,11 @@
           "query_duration_ms": {
             "type": "number",
             "title": "Query Duration Ms"
+          },
+          "wiki": {
+            "$ref": "#/components/schemas/KbWikiSearch",
+            "nullable": true,
+            "description": "Only with source='kb' on a tenant that keeps its lessons in a team wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
           }
         },
         "type": "object",
@@ -40044,44 +40237,6 @@
         "title": "StepPosition",
         "description": "1-indexed position of the current step within the template.\n\n:attr:`n` is the 1-indexed step number; :attr:`total` is the\ntemplate's full step count. Position is the **only** structural\nhint about the template's overall shape that the run surface\nexposes -- operators need to know \"step 3 of 12\" for progress UX,\nbut exposing the count alone is materially different from\nexposing the *contents* of the other steps (which :class:`StepBody`\ndeliberately does not).\n\nInvariants (enforced by :meth:`_validate_n_within_total`):\n\n* ``n >= 1`` (Pydantic ``Field(ge=1)``) -- there is no step 0.\n* ``total >= 1`` (Pydantic ``Field(ge=1)``) -- a runbook has at\n  least one step; an empty template is rejected at publish time\n  anyway (#1295).\n* ``n <= total`` -- you cannot be on step 11 of a 10-step template."
       },
-      "SurfaceChecklist": {
-        "properties": {
-          "surface": {
-            "type": "string",
-            "enum": [
-              "kb",
-              "memory",
-              "operations"
-            ],
-            "title": "Surface"
-          },
-          "verdict": {
-            "type": "string",
-            "enum": [
-              "READY TO RETIRE",
-              "REVIEW MANUALLY",
-              "NOT YET"
-            ],
-            "title": "Verdict"
-          },
-          "criteria": {
-            "items": {
-              "$ref": "#/components/schemas/CriterionResult"
-            },
-            "type": "array",
-            "title": "Criteria"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "surface",
-          "verdict",
-          "criteria"
-        ],
-        "title": "SurfaceChecklist",
-        "description": "Per-surface checklist: the five criteria + the surface verdict."
-      },
       "SurfaceMetrics": {
         "properties": {
           "surface": {
@@ -40147,93 +40302,6 @@
         ],
         "title": "SurfaceMetrics",
         "description": "The four reflex metrics for one surface (``agent`` / ``cli_rest``).\n\nEach ratio is reported as a rounded percentage/rate together with\nthe raw numerator and denominator, so a consumer can re-derive the\nratio and a zero-denominator surface reads as ``None`` (N/A) rather\nthan a misleading ``0.0``. Frozen so report instances can be passed\naround without accidental mutation."
-      },
-      "SurfaceResult": {
-        "properties": {
-          "surface": {
-            "type": "string",
-            "enum": [
-              "kb",
-              "memory",
-              "operations"
-            ],
-            "title": "Surface"
-          },
-          "query_count": {
-            "type": "integer",
-            "title": "Query Count"
-          },
-          "precision_at_5": {
-            "type": "number",
-            "title": "Precision At 5"
-          },
-          "mrr": {
-            "type": "number",
-            "title": "Mrr"
-          },
-          "coverage": {
-            "type": "number",
-            "title": "Coverage"
-          },
-          "verdict": {
-            "type": "string",
-            "enum": [
-              "green",
-              "yellow",
-              "red"
-            ],
-            "title": "Verdict"
-          },
-          "baseline_kind": {
-            "type": "string",
-            "const": "grep",
-            "nullable": true,
-            "title": "Baseline Kind"
-          },
-          "baseline_precision_at_5": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Precision At 5"
-          },
-          "baseline_mrr": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Mrr"
-          },
-          "baseline_coverage": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Coverage"
-          },
-          "baseline_verdict": {
-            "type": "string",
-            "enum": [
-              "green",
-              "yellow",
-              "red"
-            ],
-            "nullable": true,
-            "title": "Baseline Verdict"
-          },
-          "queries": {
-            "items": {
-              "$ref": "#/components/schemas/QueryResult"
-            },
-            "type": "array",
-            "title": "Queries"
-          }
-        },
-        "type": "object",
-        "required": [
-          "surface",
-          "query_count",
-          "precision_at_5",
-          "mrr",
-          "coverage",
-          "verdict"
-        ],
-        "title": "SurfaceResult",
-        "description": "Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.\n\nThe verdict band is computed from the macro-mean metrics against\nthe configured :class:`Thresholds` (default\n:data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A\nsurface with ``query_count == 0`` (corpus YAML hasn't shipped\nyet) returns ``verdict=\"green\"`` deliberately \u2014 see runner.py\ndocstring.\n\n``baseline_verdict`` is computed only when the baseline ran;\n``None`` otherwise. The MEHO-\u2265-baseline overlay applies in the\naggregate verdict (see runner._apply_baseline_check)."
       },
       "SurfaceSummary": {
         "properties": {
@@ -40322,6 +40390,12 @@
             "nullable": true,
             "title": "Secret Ref"
           },
+          "secret_ref_derived": {
+            "type": "boolean",
+            "title": "Secret Ref Derived",
+            "description": "True when secret_ref is the path MEHO builds from the target name (tenants/<tenant_id>/<name>), as it does for a target added without a secret_ref.",
+            "default": false
+          },
           "auth_model": {
             "$ref": "#/components/schemas/AuthModel"
           },
@@ -40365,7 +40439,8 @@
             "additionalProperties": true,
             "type": "object",
             "nullable": true,
-            "title": "Fingerprint"
+            "title": "Fingerprint",
+            "description": "Product and version from the last successful probe. null means the target is not probed yet (a new target is never probed): run POST /api/v1/targets/{name}/probe, or `meho targets probe <name>` in the CLI."
           },
           "preferred_impl_id": {
             "type": "string",
@@ -40642,6 +40717,12 @@
             "type": "string",
             "nullable": true,
             "title": "Secret Ref"
+          },
+          "secret_ref_derived": {
+            "type": "boolean",
+            "title": "Secret Ref Derived",
+            "description": "True when secret_ref is the path MEHO builds from the target name (tenants/<tenant_id>/<name>), as it does for a target added without a secret_ref.",
+            "default": false
           },
           "auth_model": {
             "$ref": "#/components/schemas/AuthModel"
@@ -41254,34 +41335,6 @@
         ],
         "title": "ThresholdCompare",
         "description": "Numeric-bound comparator: ``ok`` / ``degraded`` / ``critical``.\n\nThe observed value is tested ``value <op> bound``. ``critical`` is checked\nbefore ``degraded``, so the more-severe band wins. At least one bound is\nrequired; when both are set they must be ordered by severity for the\noperator direction (``gt``/``gte``: ``degraded <= critical``; ``lt``/``lte``:\n``degraded >= critical``). Non-numeric (or boolean) input is ``unknown``."
-      },
-      "Thresholds": {
-        "properties": {
-          "precision_at_5": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Precision At 5",
-            "default": 0.8
-          },
-          "mrr": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Mrr",
-            "default": 0.5
-          },
-          "coverage": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Coverage",
-            "default": 0.9
-          }
-        },
-        "type": "object",
-        "title": "Thresholds",
-        "description": "Per-metric green-band thresholds for a verdict computation.\n\nFrozen so the threshold object passed into :func:`verdict` cannot\nbe mutated mid-run (a stale or rewritten threshold mid-eval would\ninvalidate every subsequent verdict and silently shift the CI\ngate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,\nnot stored \u2014 keeping it derived means the contract \"yellow is 70%\nof green\" can't drift between green-threshold customisation and\nthe yellow boundary.\n\nDefaults match the Initiative #373 / Task #441 contract; tests and\nfuture re-tunings construct ``Thresholds(...)`` with explicit\nvalues."
       },
       "TopologyDiffEntry": {
         "properties": {
@@ -41949,7 +42002,7 @@
           "total_searches"
         ],
         "title": "UsageReport",
-        "description": "Top-level shape returned by :func:`compute_usage` + the API route.\n\n``buckets`` is sorted by ``(date, surface)`` ascending \u2014 the text\ntable renderer relies on this for its grouping behaviour, and\n``--json`` consumers (T6's retire-checklist, future dashboards)\nbenefit from deterministic ordering even when nothing else\npins it.\n\n``tenant_id`` is the tenant the report is scoped to (the\noperator's own tenant by default, or the\n``tenant_admin``-supplied filter). ``None`` is reserved for the\ncross-tenant case; v0.2 has one production tenant so this is\neffectively a v0.2.next placeholder, but the shape is locked\ntoday so consumers don't break when the cross-tenant verb lands."
+        "description": "Top-level shape returned by :func:`compute_usage` + the API route.\n\n``buckets`` is sorted by ``(date, surface)`` ascending \u2014 the text\ntable renderer relies on this for its grouping behaviour, and\n``--json`` consumers (scripts, dashboards) benefit from\ndeterministic ordering even when nothing else pins it.\n\n``tenant_id`` is the tenant the report is scoped to (the\noperator's own tenant by default, or the\n``tenant_admin``-supplied filter). ``None`` is reserved for the\ncross-tenant case; v0.2 has one production tenant so this is\neffectively a v0.2.next placeholder, but the shape is locked\ntoday so consumers don't break when the cross-tenant verb lands."
       },
       "ValidationError": {
         "properties": {

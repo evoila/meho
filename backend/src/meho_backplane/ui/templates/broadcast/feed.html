@@ -176,9 +176,12 @@
          click via ``hx-target``. The placeholder shape mirrors the
          happy-path / not-found fragments so the outerHTML swap stays
          semantically consistent. Shared by the live + history panes. -#}
+      {#- The placeholder hint shows from ``lg`` up only: on a phone
+          (#6000) it would sit under the feed with nothing to say. The
+          drawer fragment that replaces it shows on every width. -#}
       <aside
         id="event-drawer"
-        class="card bg-base-100 border-base-300 border shadow-sm self-start"
+        class="card bg-base-100 border-base-300 border shadow-sm self-start hidden lg:flex"
         aria-live="polite"
         aria-label="Event detail drawer"
       >

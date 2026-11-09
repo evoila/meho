@@ -29,9 +29,13 @@ What's shipped:
 - `search_operations(connector_id, query)`, `list_operation_groups(connector_id)`,
   and `call_operation(connector_id, op_id, target, params)` all return
   cataloged ops.
-- Per-op `description`, `safety_level`, `requires_approval`,
-  `llm_instructions` metadata is curated and surfaces through the MCP +
-  REST API.
+- Per-op `description`, `safety_level`, `requires_approval` and
+  `llm_instructions` metadata is curated. `description`, `safety_level`
+  and `requires_approval` reach every agent. The prose keys of
+  `llm_instructions` reach an agent only in the exact-op contract of
+  `search_operations`, and only while the switch
+  `OPERATION_CONTRACT_GUIDANCE` is on (off by default). See "How the
+  guidance reaches an agent" below.
 - Integration tests (testcontainers / k3d / mock-loader) exercise the
   dispatch path against an **injected loader** — not against real
   per-target credentials.
@@ -251,8 +255,8 @@ as soon as its registrar runs; nothing needs to be added to the test.
 The fourteen rules (the rule name is in brackets):
 
 1. A one-line summary of at most 120 characters, and a description of at
-   most 300 characters. Longer guidance goes into `llm_instructions`.
-   (`summary`)
+   most 300 characters. Longer guidance goes into `llm_instructions`
+   (see "How the guidance reaches an agent" below). (`summary`)
 2. Every parameter field, top level and nested, has a description.
    (`field_descriptions`)
 3. The response schema names its fields: `properties`, or `items` with
@@ -371,6 +375,28 @@ them in its spec class or registrar.
 
 Group texts are not checked for safety claims here; that is a separate
 test.
+
+### How the guidance reaches an agent
+
+The texts in `llm_instructions` do not reach every agent yet.
+
+- **Summary and description** reach every agent: in each
+  `search_operations` hit and in the exact-op contract.
+- **The prose keys of `llm_instructions`** (`when_to_call` /
+  `when_to_use`, `preconditions`, `parameter_hints`, `output_shape`,
+  `next_step`) reach an agent only in the exact-op contract
+  (`search_operations` with `op_id`), in its `guidance` block. They are
+  cut to a size limit. This happens only while the switch
+  `OPERATION_CONTRACT_GUIDANCE` is on. It is off by default until model
+  tests show that it helps. Details: `docs/codebase/mcp.md`, exact-op
+  mode.
+- **Machine keys** (`pagination_hint`, `result_ordering`,
+  `result_scalars`, `result_objects`, `result_digest`) are read by MEHO
+  itself to shape the result. `pagination_hint` is also in the contract.
+- Search does not rank on `llm_instructions`, and ranked hits never
+  carry it.
+- A tenant admin can read the full `llm_instructions` in the console and
+  through `GET /api/v1/operations/{descriptor_id}`.
 
 ## How group texts reach running installs
 

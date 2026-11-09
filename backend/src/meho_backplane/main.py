@@ -115,8 +115,9 @@ from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
-from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
-from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
+from meho_backplane.api.v1.retrieve_operation_picks import (
+    router as api_v1_retrieve_operation_picks_router,
+)
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
 from meho_backplane.api.v1.run_approvals import router as api_v1_run_approvals_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
@@ -1051,27 +1052,9 @@ app.include_router(api_v1_retrieve_router)
 # `audit_query` class via the `audit_op_id` / `audit_op_class`
 # contextvar overrides honoured by the chassis broadcast publisher.
 app.include_router(api_v1_retrieve_usage_router)
-# G4.3-T2 (#441) -- corpus-driven retrieval-quality eval at
-# `POST /api/v1/retrieve/eval`. Operator role minimum; tenant-scoped
-# to the operator's JWT claim. Broadcast publishes under the canonical
-# op_id `meho.retrieval.eval` + aggregate-only `audit_query` class
-# via the same `audit_op_id` / `audit_op_class` contextvar overrides
-# T5's retrieve_usage adopted -- the eval queries themselves can be
-# operator-sensitive so the broadcast event ships in aggregate-only
-# mode.
-app.include_router(api_v1_retrieve_eval_router)
-# G4.3-T6 (#445) -- retire-decision checklist verb at
-# `POST /api/v1/retrieve/retire-checklist`. Combines T2 eval results +
-# T5 usage telemetry + a CLI-supplied open-blocker count into the
-# five-criterion per-surface green/yellow/red checklist Goal #215
-# decision #2 locked. Operator role minimum; tenant_admin gates the
-# cross-tenant `tenant_filter` field. Broadcast publishes under the
-# canonical op_id `meho.retrieval.retire_checklist` + aggregate-only
-# `audit_query` class via the same `audit_op_id` / `audit_op_class`
-# contextvar overrides T2 + T5 adopted -- surface filters + blocker
-# counts can leak retire-decision intent so the broadcast event ships
-# in aggregate-only mode.
-app.include_router(api_v1_retrieve_retire_router)
+# #4750 -- per connector and day: did the agent call an operation the
+# search returned, and did it run? `GET /api/v1/retrieve/operation-picks`.
+app.include_router(api_v1_retrieve_operation_picks_router)
 # G4.5-T3 (#1521) — federated vendor-document retrieval at
 # `POST /api/v1/search_docs` (the `meho-docs` add-on, Initiative #1518).
 # Operator role minimum; tenant-scoped via the forwarded operator JWT.

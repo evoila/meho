@@ -288,11 +288,10 @@ The only smell bucket worth actively chasing is **`S3776` cognitive complexity**
 ## Security hotspots — accepted false positives
 
 28 hotspots; 25 are `S5332` clear-text-HTTP in **test** fixtures (bulk-mark *Safe*).
-The three that touch production are all reviewed and **accepted**:
+The ones that touch production are all reviewed and **accepted**:
 
 | Finding | Verdict |
 |---|---|
-| `go:S4036` PATH-exec of `gh` — `cli/internal/cmd/retrieval/retire_checklist.go` | **Safe.** Bounded-context `gh` invocation, already `//nolint:gosec`. You can't hardcode the path to `gh`. |
 | `python:S5852` ReDoS — `backend/src/meho_backplane/operations/ingest/_llm_grouping_internals.py` | **Low risk.** ```` ```json ```` fence-stripper over bounded LLM output, not adversarial input. |
 | `docker:S6504` group-write — `backend/Dockerfile` (`chmod -R g=u /opt/meho`) | **Safe.** Deliberate OpenShift / arbitrary-UID pattern: the container runs as any UID in group 0, and fastembed must *write* the model cache at runtime. Required, not gratuitous. |
 

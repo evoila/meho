@@ -112,6 +112,14 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
+from meho_backplane.operations._search_clear_lead import (
+    search_clear_lead,
+    top_hit_lead_is_unclear,
+)
+from meho_backplane.operations._search_plain_sentences import (
+    group_leaves_one_operation,
+    top_hit_holds_a_query_word,
+)
 from meho_backplane.operations.addon_orchestration import (
     bound_parent_linkage,
     resolve_or_open_orchestration_run,
@@ -380,6 +388,10 @@ class OperationSearchHit(BaseModel):
     words (BM25), on meaning (cosine), or both. They are not on the wire
     by default (#3668): :func:`search_operations` drops them unless a
     ``tenant_admin`` caller asks for them with ``include_scores``.
+
+    ``description`` is the original text, or the admin's
+    ``custom_description`` while the ``AGENT_READS_CUSTOM_DESCRIPTION``
+    switch is on (:func:`~meho_backplane.operations._search.agent_description`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1148,7 +1160,11 @@ async def _visible_group_keys(
     return [g.group_key for g in groups]
 
 
-def _classify_hits(hits: list[OperationSearchHit]) -> SearchOutcome:
+def _classify_hits(
+    hits: list[OperationSearchHit],
+    *,
+    top_holds_a_word: bool = False,
+) -> SearchOutcome:
     """Decide ``matched`` or ``ambiguous`` for a non-empty hit list.
 
     Reads the scores the retriever already returned; never re-ranks.
@@ -1156,9 +1172,14 @@ def _classify_hits(hits: list[OperationSearchHit]) -> SearchOutcome:
     close in meaning, the usual shape of a misleading near-match — or when
     the top two ``fused_score`` values sit inside
     :data:`SEARCH_NEAR_TIE_BAND`.
+
+    *top_holds_a_word* is ``True`` when the top hit has no BM25 score but
+    its text holds a word of the query (switch ``SEARCH_PLAIN_SENTENCES``,
+    #5490): then it counts as a word match, and only the near-tie check
+    can still make the result ``ambiguous``.
     """
     top = hits[0]
-    if top.bm25_score is None:
+    if top.bm25_score is None and not top_holds_a_word:
         return "ambiguous"
     if len(hits) > 1 and top.fused_score - hits[1].fused_score < SEARCH_NEAR_TIE_BAND:
         return "ambiguous"
@@ -1293,9 +1314,27 @@ async def _run_search(
         group_id=group_id,
         query=query,
         limit=max(limit, SEARCH_CLASSIFY_MIN_HITS),
+        keep_best_meaning=search_clear_lead(),
     )
     if hits:
-        return hits[:limit], _classify_hits(hits), None
+        outcome = _classify_hits(
+            hits,
+            top_holds_a_word=await top_hit_holds_a_query_word(session, hits=hits, query=query),
+        )
+        if outcome == "matched" and top_hit_lead_is_unclear(hits):
+            outcome = "ambiguous"
+        if outcome == "ambiguous" and await group_leaves_one_operation(
+            session,
+            hits=hits,
+            group_id=group_id,
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        ):
+            # Nothing is left to narrow (#5490, ``SEARCH_PLAIN_SENTENCES``).
+            outcome = "matched"
+        return hits[:limit], outcome, None
     has_enabled = await _has_enabled_operation(
         session,
         tenant_id=tenant_id,
@@ -1411,7 +1450,7 @@ async def search_operations(
             op_id=op_id,
             tenant_id=str(operator.tenant_id),
         )
-        return {"operation": contract.model_dump(mode="json")}
+        return {"operation": contract.as_payload()}
 
     query = arguments["query"]
     group_key: str | None = arguments.get("group")

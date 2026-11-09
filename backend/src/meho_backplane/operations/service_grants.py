@@ -326,8 +326,7 @@ def credential_read_grant_reason(op_id: str) -> str | None:
     if classify_op(op_id) != "credential_read":
         return None
     return (
-        f"A standing grant cannot cover {op_id}: it shows a secret, "
-        "so a person always approves it."
+        f"A standing grant cannot cover {op_id}: it shows a secret, so a person always approves it."
     )
 
 

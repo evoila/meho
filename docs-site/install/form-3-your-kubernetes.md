@@ -25,6 +25,9 @@ This chapter does not need it.
 Everything else ships inside the Helm release: the activity-feed store
 (Valkey), the database migrations and the operations catalog.
 
+On VKS (vSphere Kubernetes Service), read the
+[VKS notes](#vks-vsphere-kubernetes-service) first.
+
 ## Step 2: Decide the hostname and the certificate
 
 MEHO serves one hostname, set as `ingress.host`. The chart derives the
@@ -246,3 +249,61 @@ meho status
 
 **You now have a running MEHO and a logged-in operator.** Go on with
 [the setup page and the settings file](setup-page.md).
+
+## Notes for your platform
+
+### VKS (vSphere Kubernetes Service)
+
+VKS is the Kubernetes that VMware Cloud Foundation (VCF) runs on a
+vSphere Supervisor. MEHO is tested on a VKS cluster with Kubernetes
+v1.35.5 on VCF 9.1. The chart needs no change for VKS. The steps above
+stay the same, with these differences:
+
+- **The way in.** VKS brings no ingress controller. The cluster admin
+  installs [Traefik](https://doc.traefik.io/traefik/) from its Helm
+  chart first, in its own namespace `traefik`. Its Service of type
+  LoadBalancer gets an address from the Supervisor. Point your DNS name
+  to that address.
+- **Storage.** VKS makes one storage class for each vSphere storage
+  policy of the namespace, and marks none as the default. The cluster
+  admin sets the annotation
+  `storageclass.kubernetes.io/is-default-class: "true"` on one class.
+  Or you name a class in your values file
+  (`corePostgres.persistence.storageClass` and
+  `coreVault.persistence.storageClass`).
+- **Rights.** The kubeconfig from the Supervisor login
+  (`kubectl vsphere login`) is a cluster admin inside the VKS cluster.
+  MEHO needs less: an admin of one namespace is enough. For that, the
+  cluster admin makes the namespace and a Role with a RoleBinding for
+  the person who installs. Then leave out `--create-namespace` in
+  Step 4.
+- **Pod security.** MEHO runs under the strictest pod security rule
+  (`restricted`). You do not need to relax anything.
+- **The values.** Use the example file
+  [`values-vks.yaml`](https://github.com/evoila/meho/blob/main/deploy/values-examples/values-vks.yaml).
+  It sets Traefik as the way in with HTTPS only, turns on the web
+  console, and turns on the network rules of the built-in OpenBao and
+  Keycloak. Without these two rules, every pod in the cluster can reach
+  OpenBao and Keycloak. In your own `values.yaml` from Step 3, remove
+  the line `className: nginx`. Then pass both files in Step 4, the
+  example file first:
+
+    ```bash
+    helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
+      --namespace meho \
+      -f values-vks.yaml -f values.yaml
+    ```
+
+- **vCenter and NSX.** List their networks in
+  `networkPolicy.extraEgress`, as in Step 3. Without it, MEHO cannot
+  reach the vCenter it runs on.
+
+!!! warning "No firewall rule between the nodes"
+
+    Do not block the traffic from a worker node to its control plane,
+    for example with an NSX firewall rule. If you do, the Supervisor
+    rebuilds the worker nodes every few minutes.
+
+One message is normal: right after the install, the Pods of PostgreSQL
+and OpenBao show the warning "unbound immediate PersistentVolumeClaims"
+for about 20 seconds. It goes away when vSphere has made the disks.

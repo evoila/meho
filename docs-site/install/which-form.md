@@ -12,6 +12,9 @@ Start at the first question and stop at the first "yes".
 
 1. **Do you run VMware vSphere or VMware Cloud Foundation (VCF)?**
    Yes: use form 1, the [VMware appliance](form-1-vmware-appliance.md).
+   If you want MEHO inside your own VKS cluster (vSphere Kubernetes
+   Service) instead, use form 3,
+   [your Kubernetes](form-3-your-kubernetes.md#vks-vsphere-kubernetes-service).
 2. **Do you run your own Kubernetes or OpenShift cluster, and may you
    install a Helm chart on it?**
    Yes: use form 3, [your Kubernetes](form-3-your-kubernetes.md).
@@ -33,7 +36,7 @@ Start at the first question and stop at the first "yes".
 |---|---|---|
 | 1. VMware appliance | Not released yet. | VMware vSphere, as the release notes say when it ships. |
 | 2. Linux server | Ubuntu 24.04 on x86-64. | Another Linux with systemd. The install shows a "not tested" warning and goes on. |
-| 3. Your Kubernetes | Kubernetes 1.28 or newer on kind, and on RKE2 (the Kubernetes inside form 2). | Other Kubernetes that follow the standard, and OpenShift. |
+| 3. Your Kubernetes | Kubernetes 1.28 or newer on kind, and on RKE2 (the Kubernetes inside form 2). VKS (vSphere Kubernetes Service) on VMware Cloud Foundation 9.1, with Kubernetes 1.35. | Other Kubernetes that follow the standard, and OpenShift. |
 
 Not on the list? Ask evoila before you use it in production.
 

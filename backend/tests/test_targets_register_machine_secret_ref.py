@@ -170,8 +170,13 @@ async def test_granted_service_login_with_another_path_is_refused(
 
 @pytest.mark.parametrize(
     "extra",
-    [{}, {"secret_ref": _own_ref("new-vc")}, {"secret_ref": None}],
-    ids=["omitted", "own-path", "null"],
+    [
+        {},
+        {"secret_ref": _own_ref("new-vc")},
+        {"secret_ref": f"vault:{_own_ref('new-vc')}"},
+        {"secret_ref": None},
+    ],
+    ids=["omitted", "own-path", "own-path-with-scheme", "null"],
 )
 async def test_granted_service_login_with_own_or_no_path_runs(
     _service_client: TestClient, _seeded: None, extra: dict[str, Any]
@@ -188,11 +193,20 @@ async def test_granted_service_login_with_own_or_no_path_runs(
     assert await _stored_ref("new-vc") == [expected]
 
 
-@pytest.mark.parametrize("removed", [False, True], ids=["live", "removed"])
+@pytest.mark.parametrize(
+    ("removed", "stored"),
+    [
+        (False, _own_ref("new-vc")),
+        (True, _own_ref("new-vc")),
+        (False, f"vault:{_own_ref('new-vc')}"),
+        (False, f" vault:/{_own_ref('new-vc')}/ "),
+    ],
+    ids=["live", "removed", "live-with-scheme", "live-with-scheme-and-slashes"],
+)
 async def test_own_path_of_another_target_is_refused(
-    _service_client: TestClient, _seeded: None, removed: bool
+    _service_client: TestClient, _seeded: None, removed: bool, stored: str
 ) -> None:
-    await _set_ref("shared-login", _own_ref("new-vc"), removed=removed)
+    await _set_ref("shared-login", stored, removed=removed)
 
     body = _register(
         _service_client, {"name": "new-vc", "product": "vault", "host": "vault-c.example"}

@@ -301,8 +301,11 @@ from Vault there.
   multi-step run. Such a call may store only the new target's own path
   `tenants/<tenant_id>/<name>`, or no path (`secret_ref: null`). MEHO
   also refuses the own path when another target of the tenant, live or
-  removed, already stores it. The answer names the path and says what
-  to do: leave out `secret_ref`, pick another name, or ask a person.
+  removed, already stores it. MEHO compares the paths as it reads them:
+  the same store and the same path after it cuts the scheme, so
+  `vault:tenants/<tenant_id>/<name>` counts as the own path too. The
+  answer names the path and says what to do: leave out `secret_ref`,
+  pick another name, or ask a person.
   A person's own call, and a call a person approved (the verdict is
   `needs-approval`), may use any path inside the tenant. The check is
   `machine_secret_ref_refusal` in

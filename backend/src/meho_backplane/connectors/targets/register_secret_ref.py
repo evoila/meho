@@ -29,9 +29,11 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import PrincipalKind
+from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.db.models import PermissionVerdict, Target
 from meho_backplane.operations._audit import policy_decision_var
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +47,18 @@ __all__ = ["machine_secret_ref_refusal"]
 def _same_path_form(path: str) -> str:
     """Return *path* without blanks and empty segments, to compare two paths."""
     return "/".join(segment for segment in path.strip().split("/") if segment)
+
+
+def _read_key(path: str, default_backend: str) -> tuple[str, str]:
+    """Return the store and the path MEHO reads for *path*, to compare two paths.
+
+    MEHO cuts the scheme (for example ``vault:``) before it reads a
+    credential, so ``vault:tenants/t/a`` and ``tenants/t/a`` read the same
+    credential on a deploy whose default store is Vault. Both give the
+    same key here.
+    """
+    kind, store_ref = split_credential_ref(path.strip(), default_backend=default_backend)
+    return kind, _same_path_form(store_ref)
 
 
 def _person_decides(operator: Operator) -> bool:
@@ -63,6 +77,13 @@ async def machine_secret_ref_refusal(
     with no path, and for the new target's own path when no other target
     of the tenant uses it. Every other machine-login call gets a refusal
     that names the path and what to do instead.
+
+    Paths are compared as MEHO reads them: the same store and the same
+    path after the scheme is cut.
+
+    A step of an approved multi-step run runs with the verdict
+    ``auto-execute``, so this check treats it as a machine call without a
+    person. No multi-step operation calls ``targets.register`` today.
     """
     if _person_decides(operator):
         return None
@@ -70,7 +91,9 @@ async def machine_secret_ref_refusal(
     ref = body.secret_ref if "secret_ref" in body.model_fields_set else own
     if ref is None:
         return None
-    if _same_path_form(ref) != _same_path_form(own):
+    default_backend = get_settings().credential_backend
+    wanted = _read_key(own, default_backend)
+    if _read_key(ref, default_backend) != wanted:
         return (
             f"secret_ref {ref!r} is not the new target's own credential path {own!r}. "
             "A machine login can register a target only with its own path or with "
@@ -83,8 +106,7 @@ async def machine_secret_ref_refusal(
             Target.secret_ref.is_not(None),
         )
     )
-    wanted = _same_path_form(own)
-    if any(_same_path_form(stored) == wanted for stored in rows if stored is not None):
+    if any(_read_key(stored, default_backend) == wanted for stored in rows if stored is not None):
         return (
             f"the credential path {own!r} already belongs to another target of the "
             "tenant. A machine login cannot register a target on it unless a person "

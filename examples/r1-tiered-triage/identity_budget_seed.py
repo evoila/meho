@@ -11,13 +11,19 @@ script is the operator's seed surface; it writes one daily
 ``identity_budget`` row per principal via
 :func:`meho_backplane.operations.identity_budget.set_limits`.
 
-Run shape (substitute the real tenant id + principal subs)::
+Run shape (substitute the real tenant id + principal sub)::
 
     cd backend
     uv run python ../examples/r1-tiered-triage/identity_budget_seed.py \\
         --tenant-id 11111111-1111-1111-1111-111111111111 \\
-        --cheap-sub agent:r1-cheap-tier-classifier \\
-        --deep-sub agent:r1-deep-tier-investigator
+        --cheap-sub agent:r1-cheap-tier-classifier
+
+In this example both tiers run under the one agent login
+(``agent:r1-cheap-tier-classifier``): the deep tier runs inside the
+cheap tier's run, so its model calls count against the cheap tier's
+row. ``--deep-sub`` is optional. Pass it only when you run the deep
+tier under a login of its own; the script then also writes the deep
+tier's ``$10 / day`` row.
 
 After seeding, the runtime's
 :func:`meho_backplane.operations.budget_enforcement.evaluate_pre_run_budget`
@@ -67,7 +73,7 @@ async def _seed(
     *,
     tenant_id: UUID,
     cheap_sub: str,
-    deep_sub: str,
+    deep_sub: str | None,
 ) -> None:
     """Write the daily budget row for each agent principal.
 
@@ -96,6 +102,9 @@ async def _seed(
             # 96 runs at */15 + headroom for manual reruns.
             request_limit=200,
         )
+        if deep_sub is None or deep_sub == cheap_sub:
+            await session.commit()
+            return
         await set_limits(
             session,
             tenant_id=tenant_id,
@@ -129,8 +138,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--deep-sub",
-        required=True,
-        help='OIDC sub for the deep-tier principal (e.g. "agent:r1-deep-tier-investigator").',
+        default=None,
+        help=(
+            "Optional OIDC sub for a separate deep-tier login. Leave it out when "
+            "both tiers run under the cheap tier's login (the example's setup)."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -145,10 +157,10 @@ def main(argv: list[str] | None = None) -> int:
             deep_sub=args.deep_sub,
         ),
     )
-    print(
-        f"seeded daily budgets: cheap={args.cheap_sub} (cost_limit=$2.00, requests=200), "
-        f"deep={args.deep_sub} (cost_limit=$10.00, requests=100)",
-    )
+    message = f"seeded daily budgets: cheap={args.cheap_sub} (cost_limit=$2.00, requests=200)"
+    if args.deep_sub is not None and args.deep_sub != args.cheap_sub:
+        message += f", deep={args.deep_sub} (cost_limit=$10.00, requests=100)"
+    print(message)
     return 0
 
 

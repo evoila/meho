@@ -132,8 +132,8 @@ operation tools (`list_operation_groups`, `search_operations`,
 `broadcast_recent`, `broadcast_watch`), and the opt-in read tools
 (`query_topology`, `search_memory`, `search_knowledge`,
 `read_context_resource`), plus `invoke_agent` when composition is
-wired and the toolset spec names it. An agent can read memory but cannot write it. An agent
-definition that names `add_to_memory` in its toolset spec gets a
+wired and the toolset spec names it. An agent can read memory but
+cannot write it. An agent definition that names `add_to_memory` in its toolset spec gets a
 logged warning and the tool is not registered; the model cannot
 call it.
 
@@ -163,9 +163,15 @@ parent's identity (the cheap tier's `Operator`). This means:
 
 - Cheap tier's tenant + role + sub are what the deep tier sees as
   its `Operator`.
-- The deep tier's own `AgentPermission` rows (keyed on the deep
-  tier's principal `sub` from `agent:r1-deep-tier-investigator`)
-  layer on top of the inherited operator's role.
+- Both definitions name `agent:r1-cheap-tier-classifier` as their
+  `identity_ref`. The cron trigger runs the cheap tier as that
+  agent login, and `_resolve_child_definition` in
+  `agent/invocation.py` returns only definitions the agent login
+  owns. A deep tier owned by another login would not resolve on a
+  scheduled firing.
+- All `AgentPermission` rows in `permissions.json` are keyed on
+  that one login's `sub`; the deep tier's `call_operation` calls
+  are checked against them.
 - The deep tier's child `agent_run` row records `parent_run_id` =
   the cheap tier's run id (`AgentRun.parent_run_id`; `audit_log` has
   no `parent_run_id` column, and its actor column is `actor_sub`).
@@ -173,8 +179,8 @@ parent's identity (the cheap tier's `Operator`). This means:
 Lineage is therefore reconstructable from the audit log: a
 forensic walker follows `parent_run_id` up to the cheap tier's
 scheduled-trigger row and out to the broadcast event that fired
-it; it follows `act_sub` to each tier's principal and the grants
-they hold.
+it; it follows `act_sub` to the agent login and the grants it
+holds.
 
 ## Per-firing escalation cap
 
@@ -194,28 +200,31 @@ requires also editing the cheap-tier prompt).
 
 ## Cost interaction
 
-Two budgets fire on every closed-loop tick:
+The budget rows a closed-loop tick uses:
 
-- **Cheap-tier budget.** The cheap tier's principal's daily
-  `identity_budget` row. Refused at `cost_consumed >= cost_limit`
-  (no model call); degraded at `cost_consumed >= 0.8 * cost_limit`
-  (no-op for the cheap tier — its requested tier is already
-  `fast`).
-- **Deep-tier budget.** The deep tier's principal's daily row.
-  Same enforcement, but degradation is meaningful (the resolver
-  routes `deep` -> `fast` at the threshold; the prompt still asks
-  for a `PolicyDecision`, but the cheaper model produces it). A
-  hit on `cost_limit` raises `BudgetExceededError`; the cheap
-  tier's `invoke_agent` call surfaces a `ModelRetry` ("child agent
-  '<name>' failed: <error>. Try a different approach or answer
-  directly.", `agent/invoke.py`). The cheap tier can then decide
-  whether to skip the event, defer it, or surface it to the
-  operator as an unprocessable escalation.
+- **The agent login's budget.** Both tiers run under the one
+  agent login, so one daily `identity_budget` row covers a whole
+  firing. The deep tier runs inside the cheap tier's run and shares
+  its usage, so its model calls count against the same row.
+  Refused at `cost_consumed >= cost_limit` (no model call);
+  degraded at `cost_consumed >= 0.8 * cost_limit` (no-op for the
+  cheap tier — its requested tier is already `fast`).
+- **Separate deep-tier budget (optional).** `identity_budget_seed.py`
+  takes an optional `--deep-sub` for a setup where the deep tier
+  also runs on its own under a login of its own. That row applies
+  only to those direct runs. When a child run fails (for example
+  with `BudgetExceededError`), the cheap tier's `invoke_agent` call
+  surfaces a `ModelRetry` ("child agent '<name>' failed: <error>.
+  Try a different approach or answer directly.",
+  `agent/invoke.py`). The cheap tier can then decide whether to
+  skip the event, defer it, or surface it to the operator as an
+  event it cannot process.
 
 The seed values in `identity_budget_seed.py` are deliberately
-small (`$2/day` cheap, `$10/day` deep) so a real-world consumer
-copying this example out has to think about the numbers rather
-than land on a multi-thousand-dollar cap by accident.
+small (`$2/day` for the agent login, `$10/day` for an optional
+deep-tier login) so a real-world consumer copying this example
+out has to think about the numbers rather than land on a
+multi-thousand-dollar cap by accident.
 
 ## Dependencies
 

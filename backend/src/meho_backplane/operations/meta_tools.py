@@ -113,7 +113,7 @@ from meho_backplane.operations._lookup import (
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
 from meho_backplane.operations._search_clear_lead import (
-    clear_lead_min_hits,
+    search_clear_lead,
     top_hit_lead_is_unclear,
 )
 from meho_backplane.operations._search_plain_sentences import (
@@ -1313,7 +1313,8 @@ async def _run_search(
         impl_id=impl_id,
         group_id=group_id,
         query=query,
-        limit=max(limit, SEARCH_CLASSIFY_MIN_HITS, clear_lead_min_hits()),
+        limit=max(limit, SEARCH_CLASSIFY_MIN_HITS),
+        keep_best_meaning=search_clear_lead(),
     )
     if hits:
         outcome = _classify_hits(

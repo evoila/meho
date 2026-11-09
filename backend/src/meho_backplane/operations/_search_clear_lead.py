@@ -14,6 +14,13 @@ default) adds one rule: when another hit is closer in meaning than the top
 hit, the top hit is not clearly ahead, so the search answers ``ambiguous``.
 Only the outcome changes, never the hits or their order.
 
+The hit that is closer in meaning can rank below any cut: below ten
+keyword hits it ranks eleventh. So with the switch on, the search also
+reads the candidate with the best meaning score
+(``keep_best_meaning`` of :func:`~meho_backplane.operations._search.hybrid_search`),
+and the rule compares the top hit against it. The returned list is still
+cut to ``limit``.
+
 A wider near-tie band is not used. In a local measurement it took
 ``matched`` away from six right answers for each wrong one. It also cannot
 work for a search with no keyword hits: those top two hits are always
@@ -23,7 +30,7 @@ exactly one list position apart.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from meho_backplane.settings import get_settings
 
@@ -31,26 +38,14 @@ if TYPE_CHECKING:
     from meho_backplane.operations.meta_tools import OperationSearchHit
 
 __all__ = [
-    "SEARCH_CLEAR_LEAD_MIN_HITS",
-    "clear_lead_min_hits",
     "search_clear_lead",
     "top_hit_lead_is_unclear",
 ]
-
-#: Hits the search reads with the switch on, even for a smaller ``limit``.
-#: The hit that is closer in meaning can sit below the top two: in the live
-#: search it was fourth. The result is the same for every ``limit``.
-SEARCH_CLEAR_LEAD_MIN_HITS: Final[int] = 10
 
 
 def search_clear_lead() -> bool:
     """Return the state of the ``SEARCH_CLEAR_LEAD`` switch."""
     return get_settings().search_clear_lead
-
-
-def clear_lead_min_hits() -> int:
-    """Return the fewest hits the search must read for the switch's rule."""
-    return SEARCH_CLEAR_LEAD_MIN_HITS if search_clear_lead() else 0
 
 
 def top_hit_lead_is_unclear(hits: Sequence[OperationSearchHit]) -> bool:

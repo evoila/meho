@@ -17,9 +17,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from meho_backplane.operations._search import _rrf_fuse
 from meho_backplane.operations._search_clear_lead import (
-    SEARCH_CLEAR_LEAD_MIN_HITS,
-    clear_lead_min_hits,
     search_clear_lead,
     top_hit_lead_is_unclear,
 )
@@ -63,6 +62,12 @@ _CLEAR_TOP = [
     _hit("vault.kv.get", 0.0322, 0.1, 0.8),
     _hit("vault.kv.put", 0.0164, None, 0.7),
 ]
+#: Ten keyword hits above a hit found by meaning alone, which ranks
+#: eleventh. Its meaning score is the best of all hits.
+_DEEP_CLOSER = [
+    *(_hit(f"vmware.vm.part{n}", 0.033 - n * 0.001, 1.0 - n * 0.05, 0.7) for n in range(10)),
+    _hit(_LIST_VMS, 0.0164, None, 0.9),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -87,13 +92,25 @@ async def _outcome(
     hits: list[OperationSearchHit],
     *,
     limit: int = 10,
-) -> tuple[list[OperationSearchHit], str, list[int]]:
-    """Run the search with a stand-in retriever and return what it asked for."""
-    asked: list[int] = []
+) -> tuple[list[OperationSearchHit], str, list[tuple[int, bool]]]:
+    """Run the search with a stand-in retriever and return what it asked for.
+
+    The stand-in cuts like the real search: the top ``limit`` hits, plus
+    the hit with the best meaning score when ``keep_best_meaning`` is set
+    and the cut left it out (:func:`_rrf_fuse`).
+    """
+    asked: list[tuple[int, bool]] = []
 
     async def fake_hybrid_search(session: Any, **kwargs: Any) -> list[OperationSearchHit]:
-        asked.append(kwargs["limit"])
-        return hits[: kwargs["limit"]]
+        cut, keep = kwargs["limit"], kwargs["keep_best_meaning"]
+        asked.append((cut, keep))
+        kept = hits[:cut]
+        scored = [h for h in hits if h.cosine_score is not None]
+        if keep and scored:
+            best = max(scored, key=lambda h: h.cosine_score or 0.0)
+            if best not in kept:
+                kept.append(best)
+        return kept
 
     monkeypatch.setattr("meho_backplane.operations.meta_tools.hybrid_search", fake_hybrid_search)
     found, outcome, _ = await _run_search(
@@ -111,7 +128,6 @@ async def _outcome(
 
 def test_switch_is_off_by_default() -> None:
     assert search_clear_lead() is False
-    assert clear_lead_min_hits() == 0
 
 
 @pytest.mark.asyncio
@@ -121,7 +137,7 @@ async def test_live_search_stays_matched_with_the_switch_off(
     hits, outcome, asked = await _outcome(monkeypatch, _LIVE_SEARCH)
     assert outcome == "matched"
     assert hits == _LIVE_SEARCH
-    assert asked == [10]
+    assert asked == [(10, False)]
 
 
 @pytest.mark.asyncio
@@ -155,7 +171,21 @@ async def test_small_limit_cannot_hide_the_closer_hit(
     hits, outcome, asked = await _outcome(monkeypatch, _LIVE_SEARCH, limit=limit)
     assert outcome == "ambiguous"
     assert hits == _LIVE_SEARCH[:limit]
-    assert asked == [SEARCH_CLEAR_LEAD_MIN_HITS]
+    assert asked == [(max(limit, SEARCH_CLASSIFY_MIN_HITS), True)]
+
+
+@pytest.mark.asyncio
+async def test_closer_hit_below_tenth_is_found_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default ``limit`` of ten cannot hide the closer hit at rank eleven."""
+    _, outcome_off, _ = await _outcome(monkeypatch, _DEEP_CLOSER)
+    assert outcome_off == "matched"
+
+    _switch_on(monkeypatch)
+    hits, outcome, _ = await _outcome(monkeypatch, _DEEP_CLOSER)
+    assert outcome == "ambiguous"
+    assert hits == _DEEP_CLOSER[:10]
 
 
 @pytest.mark.asyncio
@@ -163,7 +193,7 @@ async def test_small_limit_reads_the_old_number_of_hits_with_the_switch_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, _, asked = await _outcome(monkeypatch, _LIVE_SEARCH, limit=1)
-    assert asked == [SEARCH_CLASSIFY_MIN_HITS]
+    assert asked == [(SEARCH_CLASSIFY_MIN_HITS, False)]
 
 
 @pytest.mark.asyncio
@@ -172,7 +202,7 @@ async def test_large_limit_is_kept_with_the_switch_on(
 ) -> None:
     _switch_on(monkeypatch)
     _, _, asked = await _outcome(monkeypatch, _CLEAR_TOP, limit=30)
-    assert asked == [30]
+    assert asked == [(30, True)]
 
 
 @pytest.mark.asyncio
@@ -224,3 +254,33 @@ def test_no_meaning_scores_at_all_say_nothing(monkeypatch: pytest.MonkeyPatch) -
     assert (
         top_hit_lead_is_unclear([_hit("a", 0.03, 1.0, None), _hit("b", 0.02, 0.5, None)]) is False
     )
+
+
+class _Row:
+    def __init__(self, score: float | None, row_id: uuid.UUID | None = None) -> None:
+        self.id = row_id or uuid.uuid4()
+        self.score = score
+
+
+def test_cut_keeps_the_best_meaning_candidate_below_it() -> None:
+    """The real cut: ten keyword hits, and the best meaning candidate ranks eleventh."""
+    keyword = [_Row(1.0 - n * 0.05) for n in range(10)]
+    meaning_only = _Row(0.9)
+    meaning = [meaning_only, *(_Row(0.7 - n * 0.01, row.id) for n, row in enumerate(keyword))]
+
+    plain = _rrf_fuse(keyword, meaning, limit=10)
+    kept = _rrf_fuse(keyword, meaning, limit=10, keep_best_meaning=True)
+
+    assert meaning_only.id not in [e.descriptor_id for e in plain]
+    # The top ten and their order stay the same; the best meaning
+    # candidate comes after them.
+    assert [e.descriptor_id for e in kept[:10]] == [e.descriptor_id for e in plain]
+    assert kept[10].descriptor_id == meaning_only.id
+    assert len(kept) == 11
+
+
+def test_cut_adds_nothing_when_the_best_meaning_candidate_is_inside() -> None:
+    keyword = [_Row(1.0), _Row(0.5)]
+    meaning = [keyword[0], _Row(0.4)]
+    assert len(_rrf_fuse(keyword, meaning, limit=2, keep_best_meaning=True)) == 2
+    assert len(_rrf_fuse(keyword, [], limit=1, keep_best_meaning=True)) == 1

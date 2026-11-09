@@ -201,3 +201,35 @@ async def test_one_clear_top_hit_stays_matched_with_the_switch(
     result = await _search(_CLEAR_QUERY)
     assert result["outcome"] == "matched", result
     assert result["hits"][0]["op_id"] == _CLEAR_OP
+
+
+@pytest.mark.asyncio
+async def test_closer_hit_below_tenth_answers_ambiguous_with_the_switch(
+    pg_engine: None,  # noqa: F811 -- fixture
+    fixed_vectors: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten keyword hits above the right operation, which ranks eleventh."""
+    keyword_ops = tuple(
+        (
+            f"GET:/vcenter/vm/{{vm}}/part-{n}",
+            "List virtual machines parts." if n == 0 else f"List part {n} of virtual machines.",
+            "List virtual machines. " * (10 - n),
+            0.30 + n * 0.05,
+        )
+        for n in range(10)
+    )
+    await _seed((*keyword_ops, (_RIGHT_OP, "VMs in the inventory.", "All VMs.", 0.10)))
+
+    _set_switch(monkeypatch, on=False)
+    off = await _search(_QUERY, limit=20)
+    assert [h["op_id"] for h in off["hits"]].index(_RIGHT_OP) == 10, off
+    default_off = await _search(_QUERY)
+    assert _RIGHT_OP not in [h["op_id"] for h in default_off["hits"]]
+    assert default_off["outcome"] == "matched", default_off
+
+    _set_switch(monkeypatch, on=True)
+    default_on = await _search(_QUERY)
+    assert default_on["outcome"] == "ambiguous", default_on
+    # Only the outcome changes: same hits, same order, same scores.
+    assert default_on["hits"] == default_off["hits"]

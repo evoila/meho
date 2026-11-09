@@ -931,9 +931,10 @@ Every other result has an `outcome` field:
   - When another hit has a better meaning score (`cosine_score`) than the
     top hit, the answer is `ambiguous`. A top hit with no meaning score
     counts as behind any hit that has one.
-  - With the switch on, the search reads at least 10 hits
-    (`SEARCH_CLEAR_LEAD_MIN_HITS`), because the closer hit can sit below
-    the top two. The returned list is then cut to `limit`.
+  - With the switch on, the search also reads the candidate with the best
+    meaning score, even when it ranks below `limit` (for example eleventh,
+    below ten keyword hits). The top hit is compared against it. The
+    returned list is still cut to `limit`.
   - Off: the same answers as before the switch existed.
   - Why not a wider near-tie band: a band of two list positions took
     `matched` away from six right top hits for each wrong one, over the

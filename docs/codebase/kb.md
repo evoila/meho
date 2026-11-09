@@ -1117,13 +1117,19 @@ query and `limit`:
    The page is matched by its whole path: the copy's provenance
    `relative_path` must equal the hit's `document_id` or the path after
    `blob/<commit>/` in its `source_url` / `upstream_url`. A page with
-   the same file name in another folder stays in the answer. The import
-   does not record which repository a page came from, so the stored
-   entry's whole text must also be the wiki hit's text (spaces and line
-   breaks aside). A page at the same path in another repository that
-   only shares a paragraph with the copy stays. A page that the index
-   splits into several hits is not matched, so it shows twice. When the
-   match cannot be shown, the wiki hit stays.
+   the same file name in another folder stays in the answer. A wiki hit
+   is only one part of a page, and the import does not record which
+   repository a page came from. So the hit's text must be part of the
+   stored entry's text, and then the whole wiki page is compared: it is
+   read once per search through `read_docs` (mode `page`) with the hit's
+   `read_handle`, and its text without the lesson header must be the
+   stored entry's whole text (spaces and line breaks aside, Unicode in
+   form NFC). A page at the same path in another repository that only
+   shares a paragraph with the copy stays, and so does a longer page
+   whose one paragraph is the copy. When the page cannot be read in full
+   (the collection offers no read, the read is refused or fails, or the
+   page is cut or has more to read), the wiki hit stays. The read counts
+   toward the caller's read limit at the backend.
    The store hit stays: it has the slug for a full read and is what the
    recall before an operation uses.
 

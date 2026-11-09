@@ -15,23 +15,26 @@ collection where the tenant keeps its lessons. These tests cover:
   not-ready collection, with the index down, or with filters, the store's
   hits still come back and ``wiki`` says why the wiki was not searched;
 * a wiki page that the store holds as an imported copy is shown once, and
-  only when the stored copy's whole text is the wiki hit's text (a page at
-  the same path in another repository stays, also when it shares a
-  paragraph with the copy);
+  only when the whole wiki page (read with the hit's read handle) is the
+  stored copy's whole text: a page at the same path in another repository
+  stays, also when it shares a paragraph with the copy or when the copy is
+  only one part of the wiki page; a page that cannot be read in full stays;
 * ``add_to_knowledge`` stores the lesson as a direct write and its answer
   names the collection and says whether the lesson goes to the wiki;
 * the setting is per tenant;
 * ``POST /api/v1/retrieve`` with ``source="kb"`` (``meho kb search``)
   gives the same wiki result.
 
-The docs backend is faked at the ``corpus-http`` transport seam, the same
-seam ``tests/test_mcp_tools_docs.py`` patches. The store search is faked
+The docs backend is faked at the ``corpus-http`` transport seams (search
+and read), the same seams ``tests/test_mcp_tools_docs.py`` and
+``tests/test_mcp_tools_docs_read.py`` patch. The store search is faked
 at the retriever, as in ``tests/test_mcp_tools_knowledge.py``.
 """
 
 from __future__ import annotations
 
 import json
+import unicodedata
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -44,7 +47,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.api.v1.retrieve import router as retrieve_router
-from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, CorpusUnavailable
+from meho_backplane.auth.corpus import (
+    CorpusChunk,
+    CorpusReadError,
+    CorpusSearchResponse,
+    CorpusUnavailable,
+    UpstreamRead,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Tenant
@@ -75,6 +84,10 @@ from tests.mcp_test_fixtures import (
 _WIKI = "team-wiki"
 _ENTITLED = frozenset({"meho-docs", f"meho-docs:{_WIKI}"})
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
+_READ_SEAM = "meho_backplane.docs_search.backends.corpus_http.read_corpus"
+#: A wiki collection that offers read, so a hit carries a read handle.
+_READ_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"read": "upstream"}}
+_HANDLE = "eyJ2IjoxLCJ0IjoiaCJ9.c2lnbmVkLWhhbmRsZQ"
 _STORE_SEAM = "meho_backplane.kb.service.retrieve"
 _REST_STORE_SEAM = "meho_backplane.api.v1.retrieve.retrieve"
 _TENANT_B = uuid.UUID("00000000-0000-0000-0000-00000000b0b0")
@@ -85,7 +98,10 @@ _WIKI_CHUNK = CorpusChunk(
     content="Keep at most 32 snapshots per VM.",
     source_url=f"https://git.example.com/team/wiki/-/blob/abc123/{_PAGE_PATH}",
     score=0.9,
+    read_handle=_HANDLE,
 )
+#: A longer wiki page at the same path: the hit above is one paragraph of it.
+_LONG_PAGE = "# Snapshot limits\n\nKeep at most 32 snapshots per VM.\n\nDelete old ones weekly."
 _LESSON = {"type": "lesson", "applies_to": "product-and-version", "status": "candidate"}
 
 
@@ -151,6 +167,18 @@ def _corpus(*chunks: CorpusChunk) -> AsyncMock:
     return AsyncMock(return_value=CorpusSearchResponse(chunks=list(chunks)))
 
 
+def _page(text: str | None, **fields: Any) -> AsyncMock:
+    """A ``read_corpus`` stand-in that returns *text* as the whole wiki page."""
+    reply = {"mode": "page", "text": text, "disclosure": "full", **fields}
+    return AsyncMock(return_value=UpstreamRead.model_validate(reply))
+
+
+async def _seed_wiki() -> None:
+    """The caller's tenant keeps its lessons in ``_WIKI``, a collection that offers read."""
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI, backend=_READ_ON)
+
+
 async def _seed_import(
     path: str = _PAGE_PATH,
     body: str = "Keep at most 32 snapshots\nper VM.",
@@ -173,13 +201,16 @@ async def _search(
     *,
     store: list[RetrievalHit] | None = None,
     corpus: AsyncMock | None = None,
+    read: AsyncMock | None = None,
     **arguments: Any,
 ) -> tuple[dict[str, Any], AsyncMock]:
     corpus = corpus if corpus is not None else _corpus(_WIKI_CHUNK)
     hits = store if store is not None else [_store_hit(operator.tenant_id)]
+    read = read if read is not None else _page(_WIKI_CHUNK.content)
     with (
         patch(_STORE_SEAM, new=AsyncMock(return_value=hits)),
         patch(_CORPUS_SEAM, new=corpus),
+        patch(_READ_SEAM, new=read),
     ):
         response = await _search_knowledge_handler(operator, {"query": "snapshot", **arguments})
     return response, corpus
@@ -257,8 +288,7 @@ async def test_wiki_hits_come_next_to_the_store_hits() -> None:
 
 @pytest.mark.asyncio
 async def test_an_imported_copy_of_a_wiki_page_is_shown_once() -> None:
-    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
-    await seed_doc_collection(collection_key=_WIKI)
+    await _seed_wiki()
     assert await _seed_import() == "snapshot-limits"
     imported = stamp_provenance(
         {"status": "confirmed"},
@@ -288,8 +318,7 @@ async def test_an_imported_copy_of_a_wiki_page_is_shown_once() -> None:
 @pytest.mark.asyncio
 async def test_a_page_only_named_alike_is_not_a_copy() -> None:
     """``limits.md`` is not ``snapshot-limits.md``: only a whole path matches."""
-    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
-    await seed_doc_collection(collection_key=_WIKI)
+    await _seed_wiki()
     slug = await _seed_import("limits.md")
     imported = stamp_provenance(
         {},
@@ -318,8 +347,7 @@ def _imported(path: str) -> dict[str, object]:
 )
 async def test_the_same_file_name_in_another_folder_is_not_a_copy(imported_path: str) -> None:
     """Only the whole page path matches, not the end of it."""
-    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
-    await seed_doc_collection(collection_key=_WIKI)
+    await _seed_wiki()
     slug = await _seed_import(imported_path)
     hit = _store_hit(slug=slug, metadata=_imported(imported_path))
     response, _ = await _search(_operator(), store=[hit])
@@ -330,8 +358,7 @@ async def test_the_same_file_name_in_another_folder_is_not_a_copy(imported_path:
 @pytest.mark.asyncio
 async def test_a_shared_import_of_another_tenant_is_not_a_copy() -> None:
     """Another tenant's import comes from that tenant's wiki, even with the same path."""
-    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
-    await seed_doc_collection(collection_key=_WIKI)
+    await _seed_wiki()
     slug = await _seed_import()
     shared = _store_hit(tenant_id=_TENANT_B, slug=slug, metadata=_imported(_PAGE_PATH))
     response, _ = await _search(_operator(), store=[shared])
@@ -341,8 +368,7 @@ async def test_a_shared_import_of_another_tenant_is_not_a_copy() -> None:
 
 @pytest.mark.asyncio
 async def test_a_hit_without_a_page_link_matches_only_by_its_whole_document_id() -> None:
-    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
-    await seed_doc_collection(collection_key=_WIKI)
+    await _seed_wiki()
     same = _WIKI_CHUNK.model_copy(
         update={"chunk_id": "same", "source_url": None, "document_id": _PAGE_PATH}
     )
@@ -362,8 +388,7 @@ async def test_a_hit_without_a_page_link_matches_only_by_its_whole_document_id()
 @pytest.mark.asyncio
 async def test_the_same_path_from_another_repository_is_not_a_copy() -> None:
     """A page with this path imported from another repository has other text: it stays."""
-    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
-    await seed_doc_collection(collection_key=_WIKI)
+    await _seed_wiki()
     slug = await _seed_import(body="Notes from another repository about snapshots.")
     response, _ = await _search(
         _operator(), store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))]
@@ -379,13 +404,14 @@ async def test_the_same_path_from_another_repository_is_not_a_copy() -> None:
 @pytest.mark.asyncio
 async def test_a_shared_paragraph_at_the_same_path_is_not_a_copy() -> None:
     """Pages from two repositories share a paragraph but differ elsewhere: the wiki hit stays."""
-    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
-    await seed_doc_collection(collection_key=_WIKI)
+    await _seed_wiki()
     slug = await _seed_import(
-        body="# Snapshot limits\n\nKeep at most 32 snapshots per VM.\n\nDelete old ones weekly."
+        body="# Snapshot limits\n\nKeep at most 32 snapshots per VM.\n\nCheck them monthly."
     )
     response, _ = await _search(
-        _operator(), store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))]
+        _operator(),
+        store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))],
+        read=_page(_LONG_PAGE),
     )
     wiki_hit = response["hits"][1]
     assert wiki_hit["chunk_id"] == _WIKI_CHUNK.chunk_id
@@ -397,13 +423,154 @@ async def test_a_shared_paragraph_at_the_same_path_is_not_a_copy() -> None:
 @pytest.mark.asyncio
 async def test_an_import_whose_stored_text_is_missing_is_not_a_copy() -> None:
     """The store hit says it is an import, but no stored text proves it: the wiki hit stays."""
-    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
-    await seed_doc_collection(collection_key=_WIKI)
+    await _seed_wiki()
     response, _ = await _search(
         _operator(), store=[_store_hit(slug="snapshot-limits", metadata=_imported(_PAGE_PATH))]
     )
     assert response["wiki"]["duplicate_count"] == 0
     assert response["wiki"]["hit_count"] == 1
+
+
+#: A lesson header at the top of a wiki page; the import does not store it in the text.
+_HEADER = "---\ntype: lesson\napplies_to: product-and-version\nstatus: confirmed\n---\n"
+_UMLAUT = "Größe: höchstens 32 Snapshots je VM, älteste zuerst löschen."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_body", "hit_text", "page_text", "duplicates"),
+    [
+        pytest.param(
+            "Keep at most 32 snapshots per VM.",
+            "Keep at most 32 snapshots per VM.",
+            _LONG_PAGE,
+            0,
+            id="short-copy-is-one-paragraph-of-a-longer-page",
+        ),
+        pytest.param(
+            "# Snapshot limits", "# Snapshot limits", _LONG_PAGE, 0, id="hit-at-the-start"
+        ),
+        pytest.param(
+            "Delete old ones weekly.", "Delete old ones weekly.", _LONG_PAGE, 0, id="hit-at-the-end"
+        ),
+        pytest.param(
+            "# Snapshot limits", "# Snapshot limits", "# Snapshot limits", 1, id="only-a-title"
+        ),
+        pytest.param(_LONG_PAGE, "# Snapshot limits", _LONG_PAGE, 1, id="start-of-a-whole-copy"),
+        pytest.param(
+            _LONG_PAGE, "Delete old ones weekly.", _LONG_PAGE, 1, id="end-of-a-whole-copy"
+        ),
+        pytest.param(
+            "Keep at most 32 snapshots per VM.",
+            "Keep at most 32 snapshots per VM.",
+            f"{_HEADER}Keep at most 32 snapshots per VM.\n",
+            1,
+            id="page-with-a-lesson-header",
+        ),
+        pytest.param(
+            _UMLAUT, _UMLAUT, unicodedata.normalize("NFD", _UMLAUT), 1, id="non-ascii-copy"
+        ),
+        pytest.param(
+            _UMLAUT, _UMLAUT, f"{_UMLAUT}\n\nÄltere Notizen folgen.", 0, id="non-ascii-longer"
+        ),
+        pytest.param(
+            "Keep at most 32 snapshots per VM.",
+            "Keep at most 32 snapshots per VM.",
+            "",
+            0,
+            id="empty-page",
+        ),
+        pytest.param(
+            "Keep at most 32 snapshots per VM.",
+            " \n ",
+            "Keep at most 32 snapshots per VM.",
+            0,
+            id="empty-hit",
+        ),
+    ],
+)
+async def test_a_wiki_hit_is_left_out_only_when_the_whole_page_is_the_copy(
+    stored_body: str, hit_text: str, page_text: str, duplicates: int
+) -> None:
+    """The hit is one part of the wiki page: only the whole page proves the copy."""
+    await _seed_wiki()
+    slug = await _seed_import(body=stored_body)
+    read = _page(page_text)
+    response, _ = await _search(
+        _operator(),
+        store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))],
+        corpus=_corpus(_WIKI_CHUNK.model_copy(update={"content": hit_text})),
+        read=read,
+    )
+    assert response["wiki"]["duplicate_count"] == duplicates
+    assert response["wiki"]["hit_count"] == 1 - duplicates
+    if not duplicates:
+        wiki_hit = response["hits"][1]
+        assert wiki_hit["source_url"].endswith(f"/blob/abc123/{_PAGE_PATH}")
+        assert wiki_hit["read_handle"] == _HANDLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(_page(_WIKI_CHUNK.content, truncated=True), id="page-cut"),
+        pytest.param(_page(_WIKI_CHUNK.content, next="next-cursor-token"), id="more-to-read"),
+        pytest.param(_page(None, disclosure="link"), id="link-only"),
+        pytest.param(AsyncMock(side_effect=CorpusUnavailable("down")), id="index-down"),
+        pytest.param(
+            AsyncMock(
+                side_effect=CorpusReadError("x", kind=CorpusReadError.KIND_RATE_LIMITED, status=429)
+            ),
+            id="read-refused",
+        ),
+    ],
+)
+async def test_a_wiki_hit_stays_when_its_whole_page_cannot_be_read(read: AsyncMock) -> None:
+    await _seed_wiki()
+    slug = await _seed_import()
+    response, _ = await _search(
+        _operator(), store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))], read=read
+    )
+    read.assert_awaited_once()
+    assert response["wiki"]["duplicate_count"] == 0
+    assert response["wiki"]["hit_count"] == 1
+    assert response["hits"][0]["slug"] == slug
+
+
+@pytest.mark.asyncio
+async def test_a_wiki_hit_stays_when_the_collection_offers_no_read() -> None:
+    """Without read the hit has no read handle, so the page cannot be compared."""
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+    slug = await _seed_import()
+    read = _page(_WIKI_CHUNK.content)
+    response, _ = await _search(
+        _operator(), store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))], read=read
+    )
+    read.assert_not_called()
+    assert response["wiki"]["duplicate_count"] == 0
+    assert response["wiki"]["hit_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_page_in_several_hits_is_read_once_and_left_out_whole() -> None:
+    await _seed_wiki()
+    slug = await _seed_import(body=_LONG_PAGE)
+    first = _WIKI_CHUNK.model_copy(update={"content": "# Snapshot limits"})
+    second = _WIKI_CHUNK.model_copy(
+        update={"chunk_id": "wiki-snapshot-limits-0002", "content": "Delete old ones weekly."}
+    )
+    read = _page(_LONG_PAGE)
+    response, _ = await _search(
+        _operator(),
+        store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))],
+        corpus=_corpus(first, second),
+        read=read,
+    )
+    read.assert_awaited_once()
+    assert response["wiki"]["duplicate_count"] == 2
+    assert response["wiki"]["hit_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -641,24 +808,40 @@ async def test_kb_search_over_rest_gives_the_same_wiki_result() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stored_body", "duplicates"),
+    ("stored_body", "page_text", "duplicates"),
     [
-        ("Keep at most 32 snapshots\nper VM.", 1),
-        ("Notes from another repository about snapshots.", 0),
-        ("# Snapshot limits\n\nKeep at most 32 snapshots per VM.\n\nOther advice.", 0),
+        pytest.param("Keep at most 32 snapshots\nper VM.", _WIKI_CHUNK.content, 1, id="whole-copy"),
+        pytest.param(
+            "Notes from another repository about snapshots.",
+            _WIKI_CHUNK.content,
+            0,
+            id="other-text",
+        ),
+        pytest.param(
+            "# Snapshot limits\n\nKeep at most 32 snapshots per VM.\n\nOther advice.",
+            _WIKI_CHUNK.content,
+            0,
+            id="copy-holds-more",
+        ),
+        pytest.param(
+            "Keep at most 32 snapshots per VM.",
+            _LONG_PAGE,
+            0,
+            id="short-copy-is-one-paragraph-of-a-longer-page",
+        ),
     ],
 )
 async def test_kb_search_over_rest_leaves_out_only_proven_copies(
-    stored_body: str, duplicates: int
+    stored_body: str, page_text: str, duplicates: int
 ) -> None:
-    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
-    await seed_doc_collection(collection_key=_WIKI)
+    await _seed_wiki()
     slug = await _seed_import(body=stored_body)
     client = _retrieve_client(_operator())
     store = [_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))]
     with (
         patch(_REST_STORE_SEAM, new=AsyncMock(return_value=store)),
         patch(_CORPUS_SEAM, new=_corpus(_WIKI_CHUNK)),
+        patch(_READ_SEAM, new=_page(page_text)),
     ):
         response = client.post("/api/v1/retrieve", json={"query": "snapshot", "source": "kb"})
     wiki = response.json()["wiki"]

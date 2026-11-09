@@ -33,8 +33,10 @@ wiki as a page for review, or why not yet.
 A wiki page that the store also holds as an imported copy is shown once:
 as the store hit, which has the slug for a full read and is what the recall
 before an operation uses. The import refreshes the copy after every merge in
-the wiki. The import does not record which repository a page came from, so
-a wiki hit is left out only when all of these hold:
+the wiki. A wiki hit is only one part of a page, and the import does not
+record which repository a page came from. So neither the hit's text nor its
+path proves that the stored copy is the same page. A wiki hit is left out
+only when all of these hold:
 
 * the caller's own tenant owns the store hit (a shared hit of another
   tenant comes from that tenant's wiki);
@@ -43,17 +45,23 @@ a wiki hit is left out only when all of these hold:
   ``blob/<commit>/`` in the hit's source link, or the hit's
   ``document_id`` (a page with only the same file name in another folder
   is a different page);
-* the stored entry's whole text is the wiki hit's text (spaces and line
-  breaks aside). A page at the same path in another repository may share
-  a paragraph with the stored copy, but then the stored copy holds more
-  than that hit, so the hit stays. A page that the index splits into
-  several hits is not matched and shows twice.
+* the hit's text is part of the stored entry's text;
+* the whole wiki page, read through the same ``read_docs`` service with
+  the hit's ``read_handle`` (mode ``page``), is the stored entry's whole
+  text. A lesson header at the top of the page is not compared, because
+  the import does not store it in the text. Runs of spaces and line
+  breaks count as one space, and Unicode text is compared in one normal
+  form (NFC).
 
-When any of these cannot be shown, the wiki hit stays.
+When any of these cannot be shown, the wiki hit stays: the hit has no
+``read_handle`` (the collection does not offer read), the read is refused
+or fails, it returns no text, or the backend cut the page or has more of it
+to read. Each page is read at most once per search.
 """
 
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Final, Literal
@@ -71,18 +79,22 @@ from meho_backplane.docs_search import (
     CollectionForbiddenError,
     CollectionNotReadyError,
     DocsChunk,
+    DocsReadError,
     UnknownCollectionError,
     build_docs_scope,
     collection_capability_key,
+    read_docs,
     resolve_entitled_ready_collection,
     search_docs,
 )
+from meho_backplane.kb.file_walker import KbFileParseError, parse_front_matter
 from meho_backplane.kb.page_export import KbExportPage, KbExportRemoval, KbExportSkip, plan_entry
 from meho_backplane.kb.provenance import read_provenance
 from meho_backplane.kb.schemas import KB_SOURCE
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
+    from meho_backplane.docs_collections import DocCollection
     from meho_backplane.kb.schemas import KbEntry
 
 __all__ = [
@@ -180,7 +192,7 @@ async def search_wiki(
         _log.warning("kb_wiki_search_unavailable", collection_key=key, error=str(exc))
         return _not_searched(key, "index_unavailable")
     hits = [chunk.model_copy(update={"collection": key}) for chunk in result.chunks]
-    copies = await _imported_copies(operator.tenant_id, stored, hits)
+    copies = await _imported_copies(operator, key, collection, stored, hits)
     kept = [chunk for chunk in hits if chunk.chunk_id not in copies]
     structlog.contextvars.bind_contextvars(
         audit_wiki_status=_SEARCHED, audit_wiki_hit_count=len(kept)
@@ -246,16 +258,19 @@ def _message(key: str, reason: WikiSkipReason) -> str:
 
 
 async def _imported_copies(
-    tenant_id: uuid.UUID,
+    operator: Operator,
+    key: str,
+    collection: DocCollection,
     stored: Iterable[tuple[uuid.UUID | None, str, Mapping[str, object]]],
     hits: list[DocsChunk],
 ) -> set[str]:
     """Return the chunk ids of the wiki *hits* that are proven imported copies.
 
     See the module docstring for the rules. The stored text is read only
-    for the caller's own imported entries whose page path a hit has.
+    for the caller's own imported entries whose page path a hit has, and a
+    wiki page is read only when a hit's text is part of such an entry.
     """
-    slugs_by_path = _imported_slugs(tenant_id, stored)
+    slugs_by_path = _imported_slugs(operator.tenant_id, stored)
     matched = {chunk.chunk_id: _matching_slugs(chunk, slugs_by_path) for chunk in hits}
     wanted = set().union(*matched.values())
     if not wanted:
@@ -263,18 +278,51 @@ async def _imported_copies(
     async with get_sessionmaker()() as session:
         rows = await session.execute(
             select(Document.source_id, Document.body).where(
-                Document.tenant_id == tenant_id,
+                Document.tenant_id == operator.tenant_id,
                 Document.source == KB_SOURCE,
                 Document.source_id.in_(wanted),
             )
         )
         bodies = {slug: _plain(body) for slug, body in rows.tuples()}
+    pages: dict[frozenset[str], str | None] = {}
     copies: set[str] = set()
     for chunk in hits:
         text = _plain(chunk.content)
-        if text and any(text == bodies.get(slug) for slug in matched[chunk.chunk_id]):
+        slugs = frozenset(slug for slug in matched[chunk.chunk_id] if slug in bodies)
+        if not text or chunk.read_handle is None:
+            continue
+        if not any(text in bodies[slug] for slug in slugs):
+            continue
+        if slugs not in pages:
+            pages[slugs] = await _whole_page(operator, key, collection, chunk.read_handle)
+        page = pages[slugs]
+        if page and any(page == bodies[slug] for slug in slugs):
             copies.add(chunk.chunk_id)
     return copies
+
+
+async def _whole_page(
+    operator: Operator, key: str, collection: DocCollection, read_handle: str
+) -> str | None:
+    """Return the whole wiki page of a hit without its lesson header, or ``None``.
+
+    ``None`` when the page cannot be read in full: the read is refused or
+    fails, it has no text, or the backend cut it or has more of it to read.
+    """
+    try:
+        read = await read_docs(
+            operator, read_handle, scope=build_docs_scope(key), collection=collection, mode="page"
+        )
+    except (DocsReadError, CorpusUnavailable) as exc:
+        _log.info("kb_wiki_page_read_failed", collection_key=key, reason=type(exc).__name__)
+        return None
+    if read.text is None or read.truncated or read.next is not None:
+        return None
+    try:
+        _header, body = parse_front_matter(read.text, "wiki page")
+    except KbFileParseError:
+        return None
+    return _plain(body)
 
 
 def _imported_slugs(
@@ -310,8 +358,8 @@ def _matching_slugs(chunk: DocsChunk, slugs_by_path: Mapping[str, set[str]]) -> 
 
 
 def _plain(text: str) -> str:
-    """Return *text* with each run of spaces and line breaks made one space."""
-    return " ".join(text.split())
+    """Return *text* in Unicode form NFC, each run of spaces and line breaks one space."""
+    return " ".join(unicodedata.normalize("NFC", text).split())
 
 
 def _page_path_of(link: str) -> str:

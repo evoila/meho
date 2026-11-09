@@ -3160,6 +3160,7 @@ live login: do not log it or share it.</p>
 <span class="w">        </span><span class="nt">flight_recorder</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> enabled</span><span class="p">:</span><span class="w"> </span><span class="nv">true</span><span class="p p-Indicator">,</span><span class="nt"> retention_days</span><span class="p">:</span><span class="w"> </span><span class="nv">14</span><span class="p p-Indicator">,</span><span class="nt"> agent_readable</span><span class="p">:</span><span class="w"> </span><span class="nv">null</span><span class="w"> </span><span class="p p-Indicator">}</span>
 <span class="w">        </span><span class="nt">mail_recipient_allowlist</span><span class="p">:</span><span class="w"> </span><span class="s">"@example.com"</span>
 <span class="w">        </span><span class="nt">run_approval_target_kinds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">        </span><span class="nt">knowledge_wiki_collection</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">null</span>
 <span class="w">      </span><span class="nt">conventions</span><span class="p">:</span>
 <span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">slug</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">change-window</span>
 <span class="w">          </span><span class="nt">title</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Change window</span>
@@ -3179,7 +3180,10 @@ live login: do not log it or share it.</p>
 <li><code>spec.tenants</code> holds one block per tenant. Each block has three
   parts:<ul>
 <li><code>policies</code>: the tenant's switches, such as the flight recorder
-  and the mail allow list. <code>null</code> means "use the default".</li>
+  and the mail allow list. <code>null</code> means "use the default".
+  <code>knowledge_wiki_collection</code> names the docs collection of the
+  tenant's team wiki (see
+  <a href="../memory-and-knowledge/#lessons-in-a-team-wiki">Lessons in a team wiki</a>).</li>
 <li><code>conventions</code>: the tenant's conventions, one per <code>slug</code>.</li>
 <li><code>targets</code>: the tenant's targets, one per <code>name</code>. A target has the
   same fields as when you register it (see

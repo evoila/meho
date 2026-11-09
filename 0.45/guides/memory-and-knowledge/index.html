@@ -2262,6 +2262,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#lessons-in-a-team-wiki" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lessons in a team wiki
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-discipline-search-before-you-write" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3009,6 +3020,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#lessons-in-a-team-wiki" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lessons in a team wiki
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-discipline-search-before-you-write" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3263,6 +3285,40 @@ the current revision, who changed it and when, and what changed. Read the
 entry again, merge your change, and retry. A change to the header
 (metadata) counts as a change. A write that changes neither body nor
 metadata costs only an <code>updated_at</code> bump (no re-embed).</p>
+<h2 id="lessons-in-a-team-wiki">Lessons in a team wiki<a class="headerlink" href="#lessons-in-a-team-wiki" title="Permanent link">&para;</a></h2>
+<p>A team can keep its lessons as pages in a Git wiki. Then a lesson lives
+in two places: the wiki is the source of truth, and MEHO keeps a copy.</p>
+<p>To set it up:</p>
+<ol>
+<li>Load the wiki into a knowledge index and add it to MEHO as a docs
+   collection (see <a href="#grounded-docs-search-add-on">Grounded docs search</a>).</li>
+<li>Give the tenant the capability <code>meho-docs:&lt;collection&gt;</code>.</li>
+<li>Set <code>knowledge_wiki_collection: &lt;collection&gt;</code> under the tenant's
+   <code>policies</code> in the <a href="../settings-file/">settings file</a>. Leave it out or
+   set it to <code>null</code> to keep lessons in MEHO only.</li>
+</ol>
+<p>What changes for the tenant:</p>
+<ul>
+<li><code>search_knowledge</code> and <code>meho kb search</code> also search the wiki. A wiki
+  hit has <code>source: wiki</code>, its <code>collection</code> and its <code>source_url</code> (the link
+  to the page). The answer's <code>wiki</code> says whether the wiki was searched.
+  When it was not, <code>wiki.message</code> says why: no docs add-on, no capability,
+  the collection is not ready, the knowledge index did not answer, or the
+  search used filters, a time window or scope <code>shared</code>, which the wiki
+  cannot apply. The knowledge hits still come back.</li>
+<li>When MEHO holds an imported copy of a wiki page, the page is shown once,
+  as the knowledge hit. This happens only when the copy has the same path
+  and MEHO can read the whole wiki page and finds the same text. When the
+  wiki collection does not offer reading pages, or the read fails, the
+  page shows in both places.</li>
+<li><code>add_to_knowledge</code> still stores the lesson in MEHO. Its answer has a
+  <code>wiki</code> part: the collection, and whether the lesson also goes to the
+  wiki. A lesson with <code>applies_to: product-and-version</code>, a full lesson
+  header and status <code>candidate</code> reaches the wiki as a candidate page
+  through the knowledge export, and a person reviews it there.</li>
+<li>A person can also write the wiki page directly. The import brings it
+  into MEHO after the merge.</li>
+</ul>
 <h2 id="the-discipline-search-before-you-write">The discipline: search before you write<a class="headerlink" href="#the-discipline-search-before-you-write" title="Permanent link">&para;</a></h2>
 <p>Both <code>add_*</code> tools say the same thing, and it is the single most
 important habit: <strong><code>search_*</code> first.</strong> Re-adding a note under a new slug

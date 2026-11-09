@@ -387,7 +387,8 @@ async def test_a_tenant_never_sees_another_tenants_sessions(client: TestClient) 
     assert client.get(f"/api/v1/sessions/{_SID}", headers=_headers(**other)).status_code == 404
     url = f"/api/v1/sessions/{_SID}/uploads/1"
     assert client.get(url, headers=_headers(**other)).status_code == 404
-    assert client.delete(f"/api/v1/sessions/{_SID}", headers=_headers(**other)).status_code == 404
+    deleted = client.delete(f"/api/v1/sessions/{_SID}", headers=_headers(**other))
+    assert deleted.status_code == 404
     # The same session id in tenant B is a separate session.
     resp = _upload(client, _transcript(_LINE_2), tenant=_TENANT_B)
     assert resp.json()["outcome"] == "created"
@@ -401,14 +402,16 @@ async def test_only_an_admin_deletes_and_the_files_go_too(
     _upload(client, _transcript(_LINE_1))
     _upload(client, _transcript(_LINE_1, _LINE_2))
     url = f"/api/v1/sessions/{_SID}"
-    assert client.delete(url, headers=_headers()).status_code == 403
+    refused = client.delete(url, headers=_headers())
+    assert refused.status_code == 403
     resp = client.delete(url, headers=_headers(**_ADMIN))
     assert resp.status_code == 204
     assert store.objects == {}
     assert await _records() == []
     [row] = await _audit("sessions.delete")
     assert row.payload["objects"] == 2
-    assert client.delete(url, headers=_headers(**_ADMIN)).status_code == 404
+    again = client.delete(url, headers=_headers(**_ADMIN))
+    assert again.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -423,7 +426,8 @@ async def test_a_failed_storage_call_leaves_the_index_unchanged(
     store.fail = False
     _upload(client, _transcript(_LINE_1))
     store.fail = True
-    assert client.delete(f"/api/v1/sessions/{_SID}", headers=_headers(**_ADMIN)).status_code == 502
+    failed = client.delete(f"/api/v1/sessions/{_SID}", headers=_headers(**_ADMIN))
+    assert failed.status_code == 502
     assert len(await _records()) == 1
 
 

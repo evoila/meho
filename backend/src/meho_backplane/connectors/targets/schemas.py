@@ -210,6 +210,14 @@ TARGETS_REGISTER_RESPONSE_SCHEMA: dict[str, Any] = {
                 "where it is."
             ),
         },
+        "next_step": {
+            "type": "string",
+            "description": (
+                "What to do next. A new target is not probed yet: run "
+                "`targets.probe` with its name to detect the product and "
+                "version."
+            ),
+        },
     },
     "required": [
         "target_id",
@@ -219,6 +227,7 @@ TARGETS_REGISTER_RESPONSE_SCHEMA: dict[str, Any] = {
         "tenant_id",
         "secret_ref",
         "secret_ref_derived",
+        "next_step",
     ],
 }
 

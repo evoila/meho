@@ -80,6 +80,7 @@ carries a clean message the MCP front maps to ``-32602``.
 
 from __future__ import annotations
 
+import shlex
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -176,7 +177,12 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "host": "Required. Dialable host/IP; SSRF-screened.",
         "secret_ref": "Optional. Must sit in the tenant's Vault subtree; omit to derive it.",
     },
-    "output_shape": "{'target_id', 'name', 'product', 'host', 'tenant_id'}",
+    "output_shape": "{'target_id', 'name', 'product', 'host', 'tenant_id', 'next_step'}",
+    "next_step": (
+        "The new target is not probed yet. Call targets.probe with its name, "
+        "so MEHO detects the product and version and picks the right "
+        "connector implementation."
+    ),
 }
 
 
@@ -220,7 +226,26 @@ async def targets_register(
         "tenant_id": str(created.tenant_id),
         "secret_ref": created.secret_ref,
         "secret_ref_derived": created.secret_ref_derived,
+        "next_step": _probe_next_step(created.name),
     }
+
+
+def _probe_next_step(name: str) -> str:
+    """Tell the caller how to detect the product and version of a new target.
+
+    Registration does not contact the system: its login is often stored
+    only after the target exists. So a new target has no fingerprint, and
+    the register result names the probe that adds one. The CLI command
+    quotes the name for a POSIX shell and ends the options with ``--``, so
+    it is safe to copy for any valid name.
+    """
+    cli_command = f"meho targets probe -- {shlex.quote(name)}"
+    return (
+        f"Target {name!r} is not probed yet, so MEHO does not know its product "
+        f"version. Probe it next: call_operation with connector_id "
+        f"{TARGETS_REGISTRY_CONNECTOR_ID!r}, op_id 'targets.probe' and params "
+        f"{{'name': {name!r}}}, or `{cli_command}` in the CLI."
+    )
 
 
 def _http_exception_message(exc: HTTPException) -> str:

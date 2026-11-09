@@ -3053,6 +3053,9 @@
               "name": {
                 "type": "string"
               },
+              "next_step": {
+                "type": "string"
+              },
               "product": {
                 "type": "string"
               },
@@ -3079,7 +3082,8 @@
               "host",
               "tenant_id",
               "secret_ref",
-              "secret_ref_derived"
+              "secret_ref_derived",
+              "next_step"
             ],
             "type": "object"
           },

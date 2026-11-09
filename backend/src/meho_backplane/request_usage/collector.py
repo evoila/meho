@@ -79,6 +79,7 @@ __all__ = [
     "build_route_catalog",
     "collection_enabled",
     "current_request_id",
+    "current_session_id",
     "note_context_selected",
     "note_request_fallback_status",
     "note_request_route",
@@ -247,6 +248,17 @@ def current_request_id() -> uuid.UUID | None:
     (#3747). A request id that is not a UUID becomes ``None``.
     """
     return _uuid_or_none(structlog.contextvars.get_contextvars().get("request_id"))
+
+
+def current_session_id() -> uuid.UUID | None:
+    """Return the current agent session id, or ``None``.
+
+    The MCP session id the client sent back (when it is a UUID), else the
+    hosted agent session id. The same value a ``request_finished`` event
+    stores as ``session_id``.
+    """
+    session_id, _ = _lineage_ids(structlog.contextvars.get_contextvars())
+    return session_id
 
 
 def _route_label(scope: Scope, state: _BoundaryState, transport: Transport) -> str:

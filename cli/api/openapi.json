@@ -388,6 +388,84 @@
         }
       }
     },
+    "/api/v1/retrieve/operation-picks": {
+      "get": {
+        "tags": [
+          "retrieval"
+        ],
+        "summary": "Operation Picks Endpoint",
+        "description": "Return the operation pick numbers per connector and day.\n\n*since* accepts ``<N>d`` / ``<N>h`` or an ISO-8601 date; a malformed\nvalue is a 400. *connector_id* narrows the report to one connector. A\n*tenant_filter* naming another tenant is a 403 unless the caller is a\nplatform admin. No records in the window is an empty ``buckets`` list.",
+        "operationId": "operation_picks_endpoint_api_v1_retrieve_operation_picks_get",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "30d",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "nullable": true,
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationPickReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/retrieve/eval": {
       "post": {
         "tags": [
@@ -33332,6 +33410,12 @@
           "agent_model_spend": {
             "$ref": "#/components/schemas/AgentModelSpend",
             "nullable": true
+          },
+          "server_time": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Server Time"
           }
         },
         "type": "object",
@@ -33342,7 +33426,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them.\n\n``connector_packages`` (#5036) lists the connector packages this image\ncarries, the same list ``GET /version`` shows. It is empty for the\nplain public image.\n\n``operation_catalog`` (#5019) names the release that wrote the shared\noperation rows and says whether it is this pod's release\n(:class:`OperationCatalogStatus`). The ``None`` default keeps older\nresponse decoders working; the handler always fills it.\n\n``agent_model_spend`` (#5771) says whether the spend limits count the\ncost of runs on the default agent model (:class:`AgentModelSpend`).\nThe ``None`` default keeps older response decoders working; the\nhandler always fills it."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them.\n\n``connector_packages`` (#5036) lists the connector packages this image\ncarries, the same list ``GET /version`` shows. It is empty for the\nplain public image.\n\n``operation_catalog`` (#5019) names the release that wrote the shared\noperation rows and says whether it is this pod's release\n(:class:`OperationCatalogStatus`). The ``None`` default keeps older\nresponse decoders working; the handler always fills it.\n\n``agent_model_spend`` (#5771) says whether the spend limits count the\ncost of runs on the default agent model (:class:`AgentModelSpend`).\nThe ``None`` default keeps older response decoders working; the\nhandler always fills it.\n\n``server_time`` (#5504) is the server's time now, in UTC, to the\nsecond (ISO 8601 with a ``Z`` suffix). An agent with no shell has no\nother clock, so it reads this when it must write down the time. Both\nanswers fill it, also the one for a login that chose no tenant. The\n``None`` default keeps older response decoders working."
       },
       "ImportedSensor": {
         "properties": {
@@ -34509,6 +34593,12 @@
           "sensor_runner": {
             "$ref": "#/components/schemas/SensorRunnerStatus",
             "nullable": true
+          },
+          "server_time": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Server Time"
           }
         },
         "type": "object",
@@ -34517,7 +34607,7 @@
           "db"
         ],
         "title": "LivenessResponse",
-        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret.\n\n``db`` shares :class:`DbStatus` with the deep check, so it carries\nthe migration revision too (#4830). It still never touches Vault."
+        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret.\n\n``db`` shares :class:`DbStatus` with the deep check, so it carries\nthe migration revision too (#4830). It still never touches Vault.\n\n``server_time`` (#5504) is the same field as on the deep check: the\nserver's time now, in UTC, to the second. ``meho status`` falls back\nto this route for a login with the ``read_only`` role, so that login\nreads the time here. A clock read; no Vault, no connector."
       },
       "ManualStep": {
         "properties": {
@@ -35360,6 +35450,127 @@
         ],
         "title": "OperationOverrideRow",
         "description": "One operator override of a risk level or approval flag (#4711).\n\n``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or\n``install`` (the whole install). ``safety_level`` / ``requires_approval``\nare the values that apply in that scope: the classification with every\noverride there. ``reason`` is the reason a platform admin gave for\nturning approval off."
+      },
+      "OperationPickBucket": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "searches": {
+            "type": "integer",
+            "title": "Searches",
+            "description": "search_operations calls."
+          },
+          "searches_followed_by_call": {
+            "type": "integer",
+            "title": "Searches Followed By Call",
+            "description": "Searches that a later call on the same connector was linked to."
+          },
+          "calls": {
+            "type": "integer",
+            "title": "Calls",
+            "description": "call_operation calls."
+          },
+          "calls_in_results": {
+            "type": "integer",
+            "title": "Calls In Results",
+            "description": "Calls whose op_id was in the linked search."
+          },
+          "calls_at_rank_1": {
+            "type": "integer",
+            "title": "Calls At Rank 1",
+            "description": "Calls whose op_id was the first result."
+          },
+          "calls_in_top_3": {
+            "type": "integer",
+            "title": "Calls In Top 3",
+            "description": "Calls whose op_id was in the first three results."
+          },
+          "calls_in_results_ok": {
+            "type": "integer",
+            "title": "Calls In Results Ok",
+            "description": "Calls whose op_id was in the linked search and that returned ok."
+          },
+          "calls_not_in_results": {
+            "type": "integer",
+            "title": "Calls Not In Results",
+            "description": "Calls after a search whose op_id was not in its results."
+          },
+          "calls_unknown_op": {
+            "type": "integer",
+            "title": "Calls Unknown Op",
+            "description": "Calls to an op_id that does not exist."
+          },
+          "calls_without_search": {
+            "type": "integer",
+            "title": "Calls Without Search",
+            "description": "Calls with no search on the same connector in the 5 minutes before."
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "connector_id",
+          "searches",
+          "searches_followed_by_call",
+          "calls",
+          "calls_in_results",
+          "calls_at_rank_1",
+          "calls_in_top_3",
+          "calls_in_results_ok",
+          "calls_not_in_results",
+          "calls_unknown_op",
+          "calls_without_search"
+        ],
+        "title": "OperationPickBucket",
+        "description": "The numbers of one connector on one day."
+      },
+      "OperationPickReport": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Since"
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Until"
+          },
+          "connector_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Connector Id"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/OperationPickBucket"
+            },
+            "type": "array",
+            "title": "Buckets"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "since",
+          "until",
+          "connector_id",
+          "buckets"
+        ],
+        "title": "OperationPickReport",
+        "description": "The report for one tenant and window."
       },
       "OperationRunStatus": {
         "type": "string",
@@ -40381,7 +40592,8 @@
             "additionalProperties": true,
             "type": "object",
             "nullable": true,
-            "title": "Fingerprint"
+            "title": "Fingerprint",
+            "description": "Product and version from the last successful probe. null means the target is not probed yet (a new target is never probed): run POST /api/v1/targets/{name}/probe, or `meho targets probe <name>` in the CLI."
           },
           "preferred_impl_id": {
             "type": "string",

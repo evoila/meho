@@ -827,6 +827,59 @@ pill state on a non-dashboard surface (`/ui/memory`) — including that
 both a hung **async** probe and a blocking **sync** probe render
 "starting" promptly rather than blocking the render.
 
+## Installable app
+
+A person can install the console as an app from the browser, on a phone
+or on a Mac or Windows laptop. The app opens on the approvals page in its
+own window. The pages stay server-built; there is no build step.
+
+The pieces, all plain static files under `ui/static/src/`:
+
+| File | What it does |
+|---|---|
+| `pwa/manifest.webmanifest` | The web app manifest: name, icons, start page `/ui/approvals`, scope `/ui/`, `display: standalone`, brand colours. Served as `application/manifest+json`. |
+| `brand/icon-192.png`, `brand/icon-512.png`, `brand/icon-maskable-512.png`, `brand/apple-touch-icon.png` | App icons, drawn from `brand/favicon.svg`. The maskable icon keeps the mark inside the safe area Android may crop to; the 180 px touch icon is for iPhone and iPad. |
+| `app/service-worker.js` | The service worker (a script the browser runs in the background). |
+| `app/pwa-register.js` | Registers the worker with scope `/ui/`. |
+| `pwa/offline.html` | Shown when MEHO cannot be reached: "Connect to the VPN and try again." |
+
+`_head_assets.html` links the manifest and the touch icon and loads
+`pwa-register.js`, so every console page and the wall page carry them.
+The account page has a short "Install MEHO as an app" card with the steps
+for each browser.
+
+Rules of the service worker:
+
+- It caches **only** the app shell: the fixed `SHELL_URLS` list (icons,
+  CSS, fonts, the theme script, the manifest, the offline page). That list
+  is the whole allow-list. It never writes a console page (approvals,
+  broadcast or any other), an `/api` answer, or a URL with a query to the
+  cache.
+- A page always comes from MEHO. When MEHO cannot be reached, the worker
+  answers with the offline page, so the app never shows an old approval
+  list.
+- Shell files come from MEHO first (so a release shows at once); the
+  cached copy is used only when MEHO cannot be reached.
+- Every other request is left to the browser.
+
+Why the worker file sits under `/ui/static/`: that path is the one the
+session check lets through, and the browser fetches the worker without a
+session. A worker may only control pages under its own folder, so the
+static mount (`static_files.py`) sends `Service-Worker-Allowed: /ui/` with
+this one file.
+
+Change a file in `SHELL_URLS`? Nothing to do: shell files are loaded from
+MEHO first. Change the list itself or the caching rules? Raise the
+version in `CACHE_NAME`; the next activate deletes the old cache.
+
+Tests: `tests/test_ui_pwa.py` checks the served types, the manifest and
+icons, the offline page, and runs the worker in `node` against fake
+browser objects to prove approvals, broadcast and `/api` are never
+cached (skipped where `node` is missing).
+
+Installing needs HTTPS (or `localhost`). Opening the app needs the same
+network access as the console, for example the VPN.
+
 ## Dependencies
 
 - **`jinja2 >= 3.1.6`** — already a backplane dependency; no

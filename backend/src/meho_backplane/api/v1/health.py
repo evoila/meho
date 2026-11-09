@@ -78,7 +78,7 @@ per-operator Vault tenant-scope exemption in
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -568,6 +568,12 @@ class HealthResponse(BaseModel):
     cost of runs on the default agent model (:class:`AgentModelSpend`).
     The ``None`` default keeps older response decoders working; the
     handler always fills it.
+
+    ``server_time`` (#5504) is the server's time now, in UTC, to the
+    second (ISO 8601 with a ``Z`` suffix). An agent with no shell has no
+    other clock, so it reads this when it must write down the time. Both
+    answers fill it, also the one for a login that chose no tenant. The
+    ``None`` default keeps older response decoders working.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -588,6 +594,7 @@ class HealthResponse(BaseModel):
     connector_packages: list[ConnectorPackage] = []
     operation_catalog: OperationCatalogStatus | None = None
     agent_model_spend: AgentModelSpend | None = None
+    server_time: datetime | None = None
 
 
 class LivenessResponse(BaseModel):
@@ -613,6 +620,11 @@ class LivenessResponse(BaseModel):
 
     ``db`` shares :class:`DbStatus` with the deep check, so it carries
     the migration revision too (#4830). It still never touches Vault.
+
+    ``server_time`` (#5504) is the same field as on the deep check: the
+    server's time now, in UTC, to the second. ``meho status`` falls back
+    to this route for a login with the ``read_only`` role, so that login
+    reads the time here. A clock read; no Vault, no connector.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -620,6 +632,7 @@ class LivenessResponse(BaseModel):
     operator: OperatorIdentity
     db: DbStatus
     sensor_runner: SensorRunnerStatus | None = None
+    server_time: datetime | None = None
 
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
@@ -990,7 +1003,13 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         connector_packages=list(installed_connector_packages()),
         operation_catalog=await _operation_catalog_status(),
         agent_model_spend=_agent_model_spend(),
+        server_time=_server_time(),
     )
+
+
+def _server_time() -> datetime:
+    """The time now in UTC, to the second (#5504)."""
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 def _agent_model_spend() -> AgentModelSpend:
@@ -1013,6 +1032,7 @@ async def _tenant_not_chosen_response(operator: Operator) -> HealthResponse:
         vault=VaultStatus(reachable=False, read_ok=False, detail="tenant_not_chosen"),
         db=_db_status(db_state),
         mcp_session_id_capture=mcp_session_id_capture_mode(),
+        server_time=_server_time(),
     )
 
 
@@ -1058,6 +1078,7 @@ async def liveness(
         operator=_operator_identity(operator),
         db=_db_status(db_state),
         sensor_runner=_sensor_runner_status(),
+        server_time=_server_time(),
     )
 
 

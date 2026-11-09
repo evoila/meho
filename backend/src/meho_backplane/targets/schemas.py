@@ -331,7 +331,14 @@ class Target(BaseModel):
     secret_field_map: Mapping[str, str] = Field(default_factory=dict)
     extras: Mapping[str, Any]
     notes: str | None
-    fingerprint: Mapping[str, Any] | None
+    fingerprint: Mapping[str, Any] | None = Field(
+        description=(
+            "Product and version from the last successful probe. null means "
+            "the target is not probed yet (a new target is never probed): "
+            "run POST /api/v1/targets/{name}/probe, or `meho targets probe "
+            "<name>` in the CLI."
+        ),
+    )
     preferred_impl_id: str | None
     # #3272 / #3212 (F1). Per-target capture override, tri-state: ``None`` inherit
     # / ``True`` force ON / ``False`` force OFF (resolved by ``should_capture``).

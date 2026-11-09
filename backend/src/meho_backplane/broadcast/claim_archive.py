@@ -30,7 +30,10 @@ __all__ = ["CLAIM_STEPS_NEWEST_FIRST", "ended_claim_ids"]
 
 #: Newest committed step first. A row a pod on the older release wrote has
 #: no number yet. It takes the next number on the next scan, so it counts
-#: as newer than every numbered row.
+#: as newer than every numbered row. A ``completion`` still ends its claim
+#: when such a row sorts above it
+#: (:func:`~meho_backplane.broadcast.claim_state.latest_claim_steps`,
+#: :func:`ended_claim_ids`).
 CLAIM_STEPS_NEWEST_FIRST: Final[tuple[UnaryExpression[int | None], ...]] = (
     AgentAnnouncement.seq.desc().nulls_first(),
 )
@@ -39,18 +42,30 @@ CLAIM_STEPS_NEWEST_FIRST: Final[tuple[UnaryExpression[int | None], ...]] = (
 async def ended_claim_ids(
     session: AsyncSession, tenant_id: UUID, steps: Sequence[AgentAnnouncement]
 ) -> frozenset[UUID]:
-    """Return the claims of *steps* whose newest stored step ended them.
+    """Return the claims of *steps* that have ended.
 
-    A claim has ended when its newest step does not keep it active: the
-    ``completion``, or a step whose TTL has run out. Reads past *steps*,
-    because the newest step can be outside the page. Every *steps* row
-    must have its ``seq``. The newest step of a claim is never below the
-    lowest ``seq`` of *steps*, which bounds the read.
+    A claim has ended when it has a stored ``completion``, or when its
+    newest step does not keep it active (its TTL has run out). Reads past
+    *steps*, because these steps can be outside the page. Every *steps*
+    row must have its ``seq``.
+
+    The completion is looked up by claim alone, not by ``seq``: a start
+    an older release wrote without a number gets its number later, so it
+    can have a higher ``seq`` than the completion that ended it. For the
+    TTL check, the newest step of a claim is never below the lowest
+    ``seq`` of *steps*, which bounds that read.
     """
     claimed = [step for step in steps if step.claim_id is not None]
     if not claimed:
         return frozenset()
     claim_ids = {step.claim_id for step in claimed}
+    completed = await session.execute(
+        select(AgentAnnouncement.claim_id).where(
+            AgentAnnouncement.tenant_id == tenant_id,
+            AgentAnnouncement.claim_id.in_(claim_ids),
+            AgentAnnouncement.phase == "completion",
+        )
+    )
     newest_seqs = (
         select(func.max(AgentAnnouncement.seq))
         .where(
@@ -67,8 +82,9 @@ async def ended_claim_ids(
         )
     )
     now = datetime.now(UTC)
-    return frozenset(
+    expired = {
         cast("UUID", row.claim_id)
         for row in newest.scalars()
         if not is_active_claim_step(row_to_announcement(row), now)
-    )
+    }
+    return frozenset(expired | {cast("UUID", claim_id) for claim_id in completed.scalars()})

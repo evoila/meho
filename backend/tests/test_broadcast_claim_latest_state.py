@@ -104,6 +104,28 @@ async def _step(
     return str(event.event_id)
 
 
+async def _unnumbered_start(
+    tenant_id: UUID, claim_id: UUID, *, principal_sub: str = _PEER, minutes_ago: float = 3
+) -> str:
+    """Store a ``start`` without ``seq``, as a pod on the older release writes it."""
+    start = trusted_event(
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        claim_id=claim_id,
+        phase="start",
+        target=_TARGET,
+        ttl_minutes=60,
+        planned_op_class="write",
+        ts=datetime.now(UTC) - timedelta(minutes=minutes_ago),
+    )
+    row = _announcement_row(start, None, 0)
+    row.seq = None
+    async with get_sessionmaker()() as session:
+        session.add(row)
+        await session.commit()
+    return str(start.event_id)
+
+
 async def _recent_ids(tenant_id: UUID) -> list[str]:
     answer = await read_announcement_history(
         _operator(tenant_id),
@@ -275,3 +297,51 @@ async def test_claim_lookup_uses_the_step_committed_last(tenant_id: UUID) -> Non
     gap = await announce_claim_gap(_operator(tenant_id), op_class="write", target_name=_TARGET)
 
     assert gap is None
+
+
+@pytest.mark.parametrize("read", _ACTIVE_READS)
+async def test_active_only_drops_unnumbered_start_of_a_completed_claim(
+    read: Any, tenant_id: UUID
+) -> None:
+    claim_id = uuid4()
+    await _unnumbered_start(tenant_id, claim_id)
+    await _step(tenant_id, claim_id, "completion", ttl_minutes=None)
+
+    assert await read(tenant_id) == []
+
+
+async def test_advisory_ignores_completed_claim_with_an_unnumbered_start(tenant_id: UUID) -> None:
+    claim_id = uuid4()
+    await _unnumbered_start(tenant_id, claim_id)
+    await _step(tenant_id, claim_id, "completion", ttl_minutes=None)
+
+    assert (
+        await build_target_activity_advisory(
+            _operator(tenant_id), op_class="write", target_name=_TARGET
+        )
+        == {}
+    )
+
+
+async def test_claim_lookup_ignores_completed_claim_with_an_unnumbered_start(
+    tenant_id: UUID,
+) -> None:
+    claim_id = uuid4()
+    await _unnumbered_start(tenant_id, claim_id, principal_sub=_ME)
+    await _step(tenant_id, claim_id, "completion", principal_sub=_ME, ttl_minutes=None)
+
+    gap = await announce_claim_gap(_operator(tenant_id), op_class="write", target_name=_TARGET)
+
+    assert gap == "no_claim"
+
+
+async def test_unnumbered_start_without_completion_stays_active(tenant_id: UUID) -> None:
+    claim_id = uuid4()
+    start = await _unnumbered_start(tenant_id, claim_id)
+
+    advisory = await build_target_activity_advisory(
+        _operator(tenant_id), op_class="write", target_name=_TARGET
+    )
+
+    assert [entry["phase"] for entry in advisory[ADVISORY_EXTRAS_KEY]] == ["start"]
+    assert await _recent_ids(tenant_id) == [start]

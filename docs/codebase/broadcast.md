@@ -617,7 +617,10 @@ own. So nothing may wait for an announcement a person cannot make:
   lookup use only trusted claims, judged by their newest step (see *When
   a claim is active* above). "Newest" means committed last: the reads
   sort by `seq`, because a step's time is set before the write takes
-  the tenant's lock and server clocks can differ. `active_only` keeps
+  the tenant's lock and server clocks can differ. A stored `completion`
+  always ends its claim, whatever the order says: the publisher refuses
+  every step after it, and a start that an older release wrote without
+  a number gets a higher `seq` later than the completion. `active_only` keeps
   only steps that keep their claim active: legacy rows, steps without a
   TTL and `completion` steps do not pass. The archive reads also check
   the newest stored step of each claim

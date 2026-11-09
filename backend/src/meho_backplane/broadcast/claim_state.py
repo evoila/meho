@@ -53,14 +53,19 @@ def latest_claim_steps(steps: Iterable[AgentAnnouncementEvent]) -> list[AgentAnn
 
     *steps* must be ordered newest committed first
     (:data:`~meho_backplane.broadcast.claim_archive.CLAIM_STEPS_NEWEST_FIRST`).
-    Steps that are not trusted
-    claim steps are left out. The result keeps the newest-first order.
+    A ``completion`` is always the newest step of its claim: the publisher
+    refuses every step after it. So it wins over the order, which can be
+    wrong for a row an older release wrote without a number. Steps that
+    are not trusted claim steps are left out. The result keeps the
+    newest-first order.
     """
+    trusted = [step for step in steps if step.is_trusted_claim]
+    completions = {step.claim_id: step for step in trusted if step.phase == "completion"}
     seen: set[object] = set()
     latest: list[AgentAnnouncementEvent] = []
-    for step in steps:
-        if not step.is_trusted_claim or step.claim_id in seen:
+    for step in trusted:
+        if step.claim_id in seen:
             continue
         seen.add(step.claim_id)
-        latest.append(step)
+        latest.append(completions.get(step.claim_id, step))
     return latest

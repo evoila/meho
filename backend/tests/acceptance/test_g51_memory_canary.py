@@ -570,9 +570,9 @@ async def test_five_scope_remember_recall_round_trip(
     scope_cases: list[tuple[MemoryScope, Operator, str | None, str]] = [
         (MemoryScope.USER, op_a_operator, None, "user-pref-body"),
         (MemoryScope.USER_TENANT, op_a_operator, None, "user-tenant-body"),
-        (MemoryScope.USER_TARGET, op_a_operator, "rdc-vcenter", "user-target-body"),
+        (MemoryScope.USER_TARGET, op_a_operator, "acme-vcenter", "user-target-body"),
         (MemoryScope.TENANT, op_a_admin, None, "tenant-shared-body"),
-        (MemoryScope.TARGET, op_a_operator, "rdc-vcenter", "target-shared-body"),
+        (MemoryScope.TARGET, op_a_operator, "acme-vcenter", "target-shared-body"),
     ]
 
     for scope, writer, target_name, body in scope_cases:
@@ -679,17 +679,17 @@ async def test_user_target_scope_blocks_cross_target_and_cross_operator(
     await service.remember(
         operator=op_a_operator,
         scope=MemoryScope.USER_TARGET,
-        slug="rdc-private-note",
-        body="Op A's private rdc-vcenter note.",
-        target_name="rdc-vcenter",
+        slug="acme-private-note",
+        body="Op A's private acme-vcenter note.",
+        target_name="acme-vcenter",
     )
 
     # Same operator, different target -- different source_id, None.
     cross_target = await service.recall(
         operator=op_a_operator,
         scope=MemoryScope.USER_TARGET,
-        slug="rdc-private-note",
-        target_name="holodeck-lab",
+        slug="acme-private-note",
+        target_name="acme-holodeck",
     )
     assert cross_target is None
 
@@ -697,8 +697,8 @@ async def test_user_target_scope_blocks_cross_target_and_cross_operator(
     cross_op = await service.recall(
         operator=op_a_operator_2,
         scope=MemoryScope.USER_TARGET,
-        slug="rdc-private-note",
-        target_name="rdc-vcenter",
+        slug="acme-private-note",
+        target_name="acme-vcenter",
     )
     assert cross_op is None
 

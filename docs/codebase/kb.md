@@ -1122,7 +1122,9 @@ query and `limit`:
    repository a page came from. So the hit's text must be part of the
    stored entry's text, and then the whole wiki page is compared: it is
    read once per search through `read_docs` (mode `page`) with the hit's
-   `read_handle`, and its text without the lesson header must be the
+   `read_handle`. A page is named by the hit's `document_id` and source
+   links, so pages at the same path in another repository or at another
+   commit are each read. Its text without the lesson header must be the
    stored entry's whole text (spaces and line breaks aside, Unicode in
    form NFC). A page at the same path in another repository that only
    shares a paragraph with the copy stays, and so does a longer page

@@ -56,7 +56,9 @@ only when all of these hold:
 When any of these cannot be shown, the wiki hit stays: the hit has no
 ``read_handle`` (the collection does not offer read), the read is refused
 or fails, it returns no text, or the backend cut the page or has more of it
-to read. Each page is read at most once per search.
+to read. Each page is read at most once per search. A page is named by
+the hit's ``document_id`` and source links, so pages at the same path in
+another repository or at another commit are each read and compared.
 """
 
 from __future__ import annotations
@@ -284,18 +286,19 @@ async def _imported_copies(
             )
         )
         bodies = {slug: _plain(body) for slug, body in rows.tuples()}
-    pages: dict[frozenset[str], str | None] = {}
+    pages: dict[tuple[str, str, str], str | None] = {}
     copies: set[str] = set()
     for chunk in hits:
         text = _plain(chunk.content)
-        slugs = frozenset(slug for slug in matched[chunk.chunk_id] if slug in bodies)
+        slugs = {slug for slug in matched[chunk.chunk_id] if slug in bodies}
         if not text or chunk.read_handle is None:
             continue
         if not any(text in bodies[slug] for slug in slugs):
             continue
-        if slugs not in pages:
-            pages[slugs] = await _whole_page(operator, key, collection, chunk.read_handle)
-        page = pages[slugs]
+        page_key = _page_identity(chunk)
+        if page_key not in pages:
+            pages[page_key] = await _whole_page(operator, key, collection, chunk.read_handle)
+        page = pages[page_key]
         if page and any(page == bodies[slug] for slug in slugs):
             copies.add(chunk.chunk_id)
     return copies
@@ -355,6 +358,20 @@ def _matching_slugs(chunk: DocsChunk, slugs_by_path: Mapping[str, set[str]]) -> 
         if link:
             candidates.add(_page_path_of(link))
     return set().union(*(slugs_by_path.get(path, set()) for path in candidates))
+
+
+def _page_identity(chunk: DocsChunk) -> tuple[str, str, str]:
+    """Return what names the wiki page of *chunk*: its document id and source links.
+
+    Hits with the same path from another repository or another commit have
+    other links, so each such page is read on its own. The part after ``#``
+    (a heading or line anchor) does not name another page.
+    """
+    return (
+        chunk.document_id or "",
+        (chunk.source_url or "").partition("#")[0],
+        (chunk.upstream_url or "").partition("#")[0],
+    )
 
 
 def _plain(text: str) -> str:

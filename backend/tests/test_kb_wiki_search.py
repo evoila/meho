@@ -574,6 +574,42 @@ async def test_a_page_in_several_hits_is_read_once_and_left_out_whole() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pages_at_one_path_in_two_repositories_are_each_read() -> None:
+    """Two hits share a path, one page per repository: only the proven copy is left out."""
+    await _seed_wiki()
+    slug = await _seed_import(body=_WIKI_CHUNK.content)
+    other_handle = "eyJ2IjoxLCJ0IjoiaCJ9.b3RoZXItaGFuZGxl"
+    other = _WIKI_CHUNK.model_copy(
+        update={
+            "chunk_id": "wiki-snapshot-limits-other",
+            "source_url": f"https://git.example.com/other/wiki/-/blob/def456/{_PAGE_PATH}",
+            "read_handle": other_handle,
+        }
+    )
+    pages = {_HANDLE: _WIKI_CHUNK.content, other_handle: _LONG_PAGE}
+
+    async def read_page(_operator: Operator, handle: str, **_: Any) -> UpstreamRead:
+        return UpstreamRead.model_validate(
+            {"mode": "page", "text": pages[handle], "disclosure": "full"}
+        )
+
+    read = AsyncMock(side_effect=read_page)
+    response, _ = await _search(
+        _operator(),
+        store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))],
+        corpus=_corpus(_WIKI_CHUNK, other),
+        read=read,
+    )
+    assert read.await_count == 2
+    assert response["wiki"]["duplicate_count"] == 1
+    assert response["wiki"]["hit_count"] == 1
+    wiki_hit = response["hits"][1]
+    assert wiki_hit["chunk_id"] == other.chunk_id
+    assert wiki_hit["source_url"] == other.source_url
+    assert wiki_hit["read_handle"] == other_handle
+
+
+@pytest.mark.asyncio
 async def test_the_size_limit_counts_the_wiki_status() -> None:
     """The final answer, ``wiki`` included, stays within the limit."""
     await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)

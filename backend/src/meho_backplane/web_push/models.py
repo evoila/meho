@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The ``push_subscription`` table (migration ``0149``)."""
+"""The ``push_subscription`` table (migration ``0150``)."""
 
 from __future__ import annotations
 

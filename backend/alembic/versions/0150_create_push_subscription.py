@@ -3,8 +3,8 @@
 
 """Create ``push_subscription``.
 
-Revision ID: 0149
-Revises: 0148
+Revision ID: 0150
+Revises: 0149
 Create Date: 2026-11-09
 
 A person can switch on "Notify me about approvals" per browser on the
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0149"
-down_revision: str | None = "0148"
+revision: str = "0150"
+down_revision: str | None = "0149"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

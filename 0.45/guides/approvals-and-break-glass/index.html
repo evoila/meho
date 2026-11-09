@@ -2100,6 +2100,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#changes-of-rights-need-a-second-person" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changes of rights need a second person
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#when-you-are-the-only-operator" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3059,6 +3070,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#changes-of-rights-need-a-second-person" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changes of rights need a second person
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#when-you-are-the-only-operator" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3426,6 +3448,34 @@ neither, gets <code>403 approval_group_required</code>.</p>
 "withdrawn by the sender", nobody can approve it, and the operation does
 not run. A person, an agent or a service account can each withdraw its
 own request.</p>
+<h2 id="changes-of-rights-need-a-second-person">Changes of rights need a second person<a class="headerlink" href="#changes-of-rights-need-a-second-person" title="Permanent link">&para;</a></h2>
+<p>A change that adds a login to a group, gives a login a role, or changes the
+attributes of a group follows more rules:</p>
+<ul>
+<li>The login the change is for cannot approve it. This holds for every group.
+  A second login of the same person is not a second person. If you have two
+  logins, ask a colleague to approve.</li>
+<li>A change of a group's attributes changes the rights of everyone in the
+  group. In MEHO's own login realm, a person in the group cannot approve it.</li>
+<li>MEHO must know which login and which group the change is for. When a user
+  name or a group name could not be looked up when the request was made, or
+  when MEHO could not read who is in the group, nobody can approve the
+  request. Send a new one.</li>
+<li>In MEHO's own login realm, a second person who is a tenant admin must
+  approve the change. For the platform admin group or role, a platform admin
+  must approve it. A MEHO-SA-Operator cannot approve such a change of their
+  own.</li>
+</ul>
+<p>The approval is for the login and the group as they were when the request
+was made. If a user name or a group name points at another account or group
+when the approved change runs, the change does not run. Send a new request.</p>
+<p>MEHO also checks again, right before the change runs and on each retry, who
+is in the group. If the person who approved a change of a group's attributes
+is in that group now, or MEHO cannot read who is in the group, the change does
+not run. The same happens when the change now needs a stricter approval than
+the one it got. Send a new request.</p>
+<p>The decision record in the audit log names the login the change is for and
+says whether it is the approver.</p>
 <h2 id="when-you-are-the-only-operator">When you are the only operator<a class="headerlink" href="#when-you-are-the-only-operator" title="Permanent link">&para;</a></h2>
 <p>On a team, a colleague approves your change. On a <strong>one-operator</strong>
 deploy you are both the requester and the only person who could

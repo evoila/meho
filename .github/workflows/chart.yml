@@ -154,7 +154,7 @@ jobs:
           files=$(gh api --paginate \
             "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
             --jq '.[].filename')
-          if grep -qE '^(deploy/charts/meho/|deploy/linux-server/packaging/render-values\.yaml$|deploy/linux-server/values-single-node\.yaml$|\.github/workflows/chart\.yml$)' <<<"$files"; then
+          if grep -qE '^(deploy/charts/meho/|deploy/linux-server/packaging/render-values\.yaml$|deploy/linux-server/values-single-node\.yaml$|deploy/golden/|scripts/ci/helm_golden\.py$|\.github/workflows/chart\.yml$)' <<<"$files"; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
           else
             echo "chart=false" >> "$GITHUB_OUTPUT"
@@ -790,6 +790,14 @@ jobs:
             --set coreVault.authDelegator=true \
             | python3 scripts/ci/check_chart_namespace_scope.py --namespace meho-scope \
                 --label "coreVault.authDelegator on" --allow-auth-delegator
+
+      - name: Check the golden renders of the chart
+        # deploy/golden/ holds what `helm template` makes of the chart for
+        # three fixed sets of values (built-in core, bring-your-own, OpenShift).
+        # A chart change that changes the installed objects must update these
+        # files, so the review shows the effect. Fix a failure with
+        # `python scripts/ci/helm_golden.py --write`.
+        run: python3 scripts/ci/helm_golden.py
 
   helm-test:
     # Internal "run" job — the REQUIRED branch-protection context lives on the

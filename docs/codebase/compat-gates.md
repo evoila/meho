@@ -1,19 +1,20 @@
-# Compatibility gate for the REST API and the MCP tools
+# Compatibility gate for the REST API, the MCP tools and the Helm values
 
 The CI workflow `.github/workflows/compat-gates.yml` stops a pull request
-that breaks clients of the REST API or the MCP tools. A breaking change can
+that breaks clients of the REST API, the MCP tools or the Helm values. A breaking change can
 still merge, but only when the pull request says so on purpose: it has the
 `breaking-change` label and a `## Breaking changes` section that tells
 clients what to change.
 
 ## Overview
 
-Two committed files describe what clients depend on:
+Three sets of files describe what clients depend on:
 
 | File | What it holds | Kept equal to the code by |
 | --- | --- | --- |
 | `cli/api/openapi.json` | The REST API. Only paths under `/api/v1/` carry the promise; the console paths under `/ui/` do not. | the `ci.yml` job `cli-api-snapshot-freshness` |
 | `backend/contracts/mcp-tools-list.json` | Every MCP tool: its name, its surface (`working` or `operator`), its input schema and its output schema. Reader text (`description`, `title`, `examples`, `$comment`) is left out. | `backend/tests/test_mcp_tools_snapshot_drift.py` |
+| `deploy/charts/meho/values.yaml` and `values.schema.json` | The Helm values an operator sets. | the chart itself |
 
 The workflow compares each file with the same file on the base branch and
 lists every breaking change.
@@ -24,11 +25,14 @@ lists every breaking change.
    or gets new text. Each of these runs the job again.
 2. The job checks out the merge commit. `HEAD^1` is the base branch.
 3. It installs `oasdiff` (pinned version, checked against its sha256).
-4. `scripts/ci/check_contract_compat.py --base HEAD^1` runs both checks:
+4. `scripts/ci/check_contract_compat.py --base HEAD^1` runs all checks:
    - **REST API:** `oasdiff breaking --fail-on ERR --match-path '^/api/v1/'`.
      Only `oasdiff`'s definite breaking changes (`error` level) count. Its
      warnings are not shown and do not fail the job.
    - **MCP tools:** the script's own rules (below).
+   - **Helm values:** a key that `values.yaml` had at the base and no longer
+     has is breaking (lists count as one value). `values.schema.json` is
+     compared with the rules for an MCP input schema (below).
 5. No breaking change: the job passes. A breaking change: the job lists it.
    It passes only when the pull request has the `breaking-change` label and
    a `## Breaking changes` section with text under the heading.
@@ -70,6 +74,11 @@ integer is also a number, and a branch without `type` accepts every type.
 Enum values compare the JSON Schema way: `1` and `1.0` are the same value
 (an integer), `true` is not `1`, and the string `"1"` is not the number `1`.
 `anyOf` has no such rule: more branches only accept more.
+
+The schema of the Helm values uses the input rules: a removed property, a
+newly required property, a narrower type or a removed enum value is
+breaking. The schema's `if` / `then` / `allOf` rules and
+`additionalProperties` are not compared.
 
 A new tool, a new optional argument, a new output field and a new enum
 value in an input are not breaking.
@@ -113,9 +122,28 @@ break needs a `Breaking changes` line in the CHANGELOG. See
 
 - The job does not run in the merge queue: labels are not visible there.
   Add a merge queue path before the check becomes required.
-- Not covered yet: Helm values (golden renders of the chart), the update
-  from the previous release, the CLI verbs and flags, and environment
-  variables.
+- Not covered yet: the update from the previous release, the CLI verbs and
+  flags, and environment variables.
+- The Helm check sees keys and the schema, not a changed default or a
+  changed template. The golden renders (below) show those in review, but
+  they do not fail a pull request as breaking.
+
+## Golden renders of the chart
+
+`deploy/golden/*.yaml` hold the output of `helm template` for three fixed
+sets of values: `built-in-core`, `bring-your-own` and `openshift`. The step
+"Check the golden renders of the chart" in the `validate` job of
+`.github/workflows/chart.yml` runs `scripts/ci/helm_golden.py`. It fails
+when a golden file is not equal to the render. Fix it with:
+
+```bash
+python scripts/ci/helm_golden.py --write
+```
+
+and commit the files. The three values that change on every render (two
+generated passwords and the checksum after one) are written as
+`<random>`. A new generated value needs a new rule in `mask_random`. The
+script needs `helm`; the test is `backend/tests/test_ci_helm_golden.py`.
 
 ## References
 

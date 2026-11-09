@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Fail when a change breaks the REST API or the MCP tools of MEHO.
+"""Fail when a change breaks the REST API, the MCP tools or the Helm values of MEHO.
 
-Clients depend on two committed snapshots:
+Clients depend on committed snapshots and on the chart's values files:
 
 * ``cli/api/openapi.json`` — the REST API. Only the public paths under
   ``/api/v1/`` carry the promise; the console paths under ``/ui/`` do not.
 * ``backend/contracts/mcp-tools-list.json`` — the MCP tools: names, the
   surface they are listed on, and their input and output schemas.
+* ``deploy/charts/meho/values.yaml`` and ``values.schema.json`` — the Helm
+  values an operator sets.
 
 Other checks keep both files equal to the code (the CI job
 ``cli-api-snapshot-freshness`` and ``tests/test_mcp_tools_snapshot_drift.py``).
@@ -29,6 +31,11 @@ tree and lists every breaking change:
   removed from an input or added to an output is breaking. In an input
   ``oneOf``, two branches that newly accept the same type are breaking too
   (a value that fits two branches fails ``oneOf``).
+* Helm values: a key removed from ``values.yaml`` (an operator's
+  ``--set`` or values file for it stops working), and in
+  ``values.schema.json`` the same rules as for an MCP input schema (a
+  removed property, a newly required property, a narrower type, a removed
+  enum value).
 
 A breaking change is allowed only on a pull request that has the
 ``breaking-change`` label **and** a ``## Breaking changes`` section in its
@@ -44,7 +51,7 @@ Usage::
     python scripts/ci/check_contract_compat.py --base HEAD^1 \\
         --labels "breaking-change,docs" --pr-body-file body.md
 
-CI: ``.github/workflows/compat-gates.yml``. Standard library only; the
+CI: ``.github/workflows/compat-gates.yml``. Needs PyYAML; the
 REST check needs the ``oasdiff`` binary (``--oasdiff``).
 """
 
@@ -59,9 +66,13 @@ import sys
 import tempfile
 from typing import Any
 
+import yaml
+
 OPENAPI_PATH = "cli/api/openapi.json"
 MCP_PATH = "backend/contracts/mcp-tools-list.json"
 PUBLIC_PATHS = "^/api/v1/"
+VALUES_PATH = "deploy/charts/meho/values.yaml"
+VALUES_SCHEMA_PATH = "deploy/charts/meho/values.schema.json"
 LABEL = "breaking-change"
 
 _BREAKING_HEADING = re.compile(r"^#{2,6}\s*Breaking changes\s*$", re.IGNORECASE)
@@ -437,6 +448,35 @@ def mcp_breaking(base: dict[str, Any], head: dict[str, Any]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Helm values
+# ---------------------------------------------------------------------------
+
+
+def _key_paths(node: Any, prefix: str = "") -> set[str]:
+    """Return the dotted path of every key in a nested mapping (lists are leaves)."""
+    paths: set[str] = set()
+    if not isinstance(node, dict):
+        return paths
+    for key, value in node.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        paths.add(path)
+        paths |= _key_paths(value, path)
+    return paths
+
+
+def values_breaking(base_text: str, head_text: str) -> list[str]:
+    """List the keys that ``values.yaml`` had at the base and no longer has."""
+    base_keys = _key_paths(yaml.safe_load(base_text))
+    head_keys = _key_paths(yaml.safe_load(head_text))
+    return [f"Helm value {path!r} removed" for path in sorted(base_keys - head_keys)]
+
+
+def values_schema_breaking(base: Any, head: Any) -> list[str]:
+    """List the breaking changes between two ``values.schema.json`` files."""
+    return compare_schema("Helm values schema", base, head, True)
+
+
+# ---------------------------------------------------------------------------
 # Is the break allowed?
 # ---------------------------------------------------------------------------
 
@@ -490,6 +530,24 @@ def collect(root: pathlib.Path, base_ref: str, oasdiff: str) -> list[str]:
     else:
         head_mcp = (root / MCP_PATH).read_text(encoding="utf-8")
         found += mcp_breaking(json.loads(base_mcp), json.loads(head_mcp))
+    found += _helm_breaking(root, base_ref)
+    return found
+
+
+def _helm_breaking(root: pathlib.Path, base_ref: str) -> list[str]:
+    found: list[str] = []
+    base_values = read_at(root, base_ref, VALUES_PATH)
+    if base_values is None:
+        print(f"note: {VALUES_PATH} does not exist at {base_ref}; Helm values check skipped")
+    else:
+        head_values = (root / VALUES_PATH).read_text(encoding="utf-8")
+        found += values_breaking(base_values, head_values)
+    base_schema = read_at(root, base_ref, VALUES_SCHEMA_PATH)
+    if base_schema is None:
+        print(f"note: {VALUES_SCHEMA_PATH} does not exist at {base_ref}; Helm schema check skipped")
+    else:
+        head_schema = (root / VALUES_SCHEMA_PATH).read_text(encoding="utf-8")
+        found += values_schema_breaking(json.loads(base_schema), json.loads(head_schema))
     return found
 
 
@@ -505,12 +563,12 @@ def main(argv: list[str] | None = None) -> int:
     root = pathlib.Path(args.root).resolve()
     try:
         found = collect(root, args.base, args.oasdiff)
-    except (CheckError, json.JSONDecodeError, OSError) as exc:
+    except (CheckError, json.JSONDecodeError, yaml.YAMLError, OSError) as exc:
         print(f"::error title=Compatibility check could not run::{exc}")
         return 2
 
     if not found:
-        print(f"No breaking change in the REST API or the MCP tools since {args.base}.")
+        print(f"No breaking change in the REST API, the MCP tools or the Helm values since {args.base}.")
         return 0
     print(f"{len(found)} breaking change(s) since {args.base}:")
     for line in found:
@@ -527,8 +585,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     print(
-        "::error title=Breaking change::This change breaks clients of the REST API or the "
-        f"MCP tools. It needs {missing}. In that section, write what a client must change. "
+        "::error title=Breaking change::This change breaks clients of the REST API, the "
+        f"MCP tools or the Helm values. It needs {missing}. In that section, write what a client must change. "
         "Or change the code so that it stays compatible."
     )
     return 1

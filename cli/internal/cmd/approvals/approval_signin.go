@@ -190,14 +190,13 @@ func showRequest(w io.Writer, header string, d *api.ApprovalRequestView) {
 	if d.TargetId != nil {
 		fmt.Fprintf(w, "  Target:       %s\n", targetLabel(d.TargetId.String(), rc))
 	}
-	fmt.Fprintf(w, "  Requested by: %s\n", principalLabel(d.PrincipalSub, d.PrincipalName))
+	fmt.Fprintf(w, "  Requested by: %s\n", requesterLabel(d.PrincipalSub, d.PrincipalName, d.PrincipalKind))
 	if rc != nil && rc.BlastRadius != nil {
 		b, _ := json.MarshalIndent(*rc.BlastRadius, "    ", "  ")
 		fmt.Fprintf(w, "  What else is affected:\n    %s\n", output.SafeLines(string(b)))
 	}
 	if len(d.ProposedEffect) > 0 {
-		b, _ := json.MarshalIndent(d.ProposedEffect, "    ", "  ")
-		fmt.Fprintf(w, "  Parameters and preview:\n    %s\n", output.SafeLines(string(b)))
+		printEffect(w, "  ", "Parameters and preview:", d.ProposedEffect)
 	}
 }
 

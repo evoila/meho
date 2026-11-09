@@ -393,19 +393,24 @@ async def test_legacy_entry_reads_as_legacy_until_next_ingest(
 
 
 @pytest.mark.asyncio
-async def test_direct_create_is_last_write_wins_with_direct_provenance(
+async def test_direct_update_replaces_the_entry_with_direct_provenance(
     stub_embedding: AsyncMock,
 ) -> None:
-    """Explicit create replaces the entry; provenance says ``direct``; caller cannot forge it."""
+    """An update from the revision read replaces the entry; provenance says ``direct``."""
     tenant_id = uuid.uuid4()
     service = KbService()
-    await service.create_entry(tenant_id, "shared", "First.", actor_sub="user-a")
+    first, _ = await service.create_entry(tenant_id, "shared", "First.", actor_sub="user-a")
     forged: dict[str, object] = {
         "provenance": {"source_kind": "directory", "relative_path": "x.md"}
     }
 
     entry, created = await service.create_entry(
-        tenant_id, "shared", "Second.", forged, actor_sub="user-b"
+        tenant_id,
+        "shared",
+        "Second.",
+        forged,
+        actor_sub="user-b",
+        expected_revision=first.revision_id,
     )
 
     assert created is False
@@ -848,7 +853,11 @@ async def test_create_entry_overwrite_preserves_creator_updates_mutator(
     assert created_a is True
 
     second, created_b = await service.create_entry(
-        tenant_id=tenant_id, slug="shared", body="B body", actor_sub="user-b"
+        tenant_id=tenant_id,
+        slug="shared",
+        body="B body",
+        actor_sub="user-b",
+        expected_revision=first.revision_id,
     )
     assert created_b is False  # overwrite, not create → route returns 200
     assert second.id == first.id  # same row
@@ -923,7 +932,12 @@ async def test_create_entry_own_entries_only_allows_create_and_own_overwrite(
     )
     assert created is True
     second, created_again = await service.create_entry(
-        tenant_id=tenant_id, slug="mine", body="v2", actor_sub="user-a", own_entries_only=True
+        tenant_id=tenant_id,
+        slug="mine",
+        body="v2",
+        actor_sub="user-a",
+        own_entries_only=True,
+        expected_revision=first.revision_id,
     )
     assert created_again is False
     assert second.id == first.id
@@ -1012,23 +1026,28 @@ async def test_create_entry_own_entries_only_refuses_a_concurrent_create_by_anot
 
 
 @pytest.mark.asyncio
-async def test_create_entry_concurrent_create_by_a_tenant_admin_is_an_overwrite(
+async def test_create_entry_concurrent_create_by_a_tenant_admin_is_refused(
     stub_embedding: AsyncMock,
 ) -> None:
-    """An unlimited writer that loses the race overwrites, and reports it as one.
+    """An unlimited writer that loses the race is refused, not allowed to overwrite.
 
-    ``created`` comes from the read of the try that went through, so
-    the route answers 200, not 201, and the first creator is preserved.
+    Both writers read the slug as free. The rerun of the loser reads
+    the first writer's entry and names no revision, so it is refused
+    with the current revision. The first entry stays as it was.
     """
+    from meho_backplane.kb.stale_revision import KbStaleRevisionError
+
     tenant_id = uuid.uuid4()
     service = KbService()
-    entry, created = await _create_while_another_principal_creates_first(
-        service, tenant_id, own_entries_only=False
-    )
-    assert created is False
-    assert entry.body == "B body"
-    assert entry.metadata["created_by_sub"] == "user-a"
-    assert entry.metadata["last_updated_by_sub"] == "user-b"
+    with pytest.raises(KbStaleRevisionError) as info:
+        await _create_while_another_principal_creates_first(
+            service, tenant_id, own_entries_only=False
+        )
+    kept = await service.get_entry(tenant_id, "raced")
+    assert kept is not None
+    assert kept.body == "A body"
+    assert info.value.detail.cause == "exists"
+    assert info.value.detail.current_revision_id == kept.revision_id
 
 
 @pytest.mark.asyncio

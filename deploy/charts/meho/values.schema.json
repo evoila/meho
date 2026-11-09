@@ -822,6 +822,16 @@
         "secretKey": { "type": "string", "minLength": 1 }
       }
     },
+    "webPush": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Approval notifications in the browser (web push). Off by default. The push key (VAPID) is injected as WEB_PUSH_VAPID_PRIVATE_KEY only via secretKeyRef. See docs/codebase/ui.md.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": { "type": "string", "description": "Your own Secret with the push key. Empty = `<release>-core-web-push`, which the install makes when a built-in part is on." },
+        "secretKey": { "type": "string", "minLength": 1 }
+      }
+    },
     "corePostgres": {
       "type": "object",
       "description": "Built-in PostgreSQL subchart values (`charts/postgres/`, #4039): one PostgreSQL 17 server with pgvector and two databases, `meho` and `keycloak`, each owned by a role of the same name that is not a superuser. The chart creates the `vector` extension itself. It reads the Secrets `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key `password`), which the install's secrets Job makes. On by default; with it on the chart also points the backplane's DATABASE_URL at `<release>-core-postgres-meho` and its NetworkPolicy at the PostgreSQL pod (#4047). With it off the chart renders exactly what it rendered before.",

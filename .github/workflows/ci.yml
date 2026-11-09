@@ -400,9 +400,9 @@ jobs:
               return 1
             fi
             rc=0
-            grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/spec_shelf\.sh$)' "${non_md}" || rc=$?
+            grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/(spec_shelf\.sh|install_spacy_model\.sh|tool-versions\.env)$)' "${non_md}" || rc=$?
             case "${rc}" in
-              0) c_backend_python=true; echo "backend/, ci.yml or spec-shelf list change detected -> backend_python=true (full run)" ;;
+              0) c_backend_python=true; echo "backend/, ci.yml, spec-shelf list or spaCy model pin change detected -> backend_python=true (full run)" ;;
               1) c_backend_python=false; echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)" ;;
               *) reason="backend check failed (grep exit ${rc})"; return 1 ;;
             esac
@@ -943,7 +943,16 @@ jobs:
         env:
           MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run python -m meho_backplane.retrieval.warm
+        run: |
+          "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m meho_backplane.retrieval.warm
+
+      - name: Restore the spaCy model from the cache
+        # install_spacy_model.sh uses the model when it is installed at the
+        # pinned version, then this cache, and downloads (three tries) last.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
 
       - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
         # G11.4-T3 (#1072) ships the Tier-2 Presidio NER adapter
@@ -960,8 +969,8 @@ jobs:
         # accepting either model -- so this step suffices for the
         # unit lane's correctness signal without paying the ``lg``
         # download wall every run. Each shard provisions the sm model
-        # (its file set may include the Tier-2 lanes); the ~12 MB
-        # download is cheap enough to not warrant caching.
+        # (its file set may include the Tier-2 lanes). The model version
+        # is pinned in scripts/ci/tool-versions.env.
         #
         # ``MEHO_REDACTION_SPACY_MODEL`` is the runtime override the
         # presidio.py adapter reads; setting it here pins the unit
@@ -969,7 +978,9 @@ jobs:
         # adapter's default. Production deployments leave the env
         # unset and let the adapter pick the documented default.
         run: |
-          uv run python -m spacy download en_core_web_sm
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          "${GITHUB_WORKSPACE}/scripts/ci/install_spacy_model.sh" en_core_web_sm "${SPACY_MODEL_VER}" "${SPACY_MODEL_SHA}"
           # Smoke-test the import path so a presidio<->spacy model-
           # version mismatch fails THIS PR, not the integration lane.
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
@@ -1791,13 +1802,24 @@ jobs:
         env:
           MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run python -m meho_backplane.retrieval.warm
+        run: |
+          "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m meho_backplane.retrieval.warm
+
+      - name: Restore the spaCy model from the cache
+        # install_spacy_model.sh uses the model when it is installed at the
+        # pinned version, then this cache, and downloads (three tries) last.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
 
       - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
         # Same model the unit lane provisions — the Tier-2 redaction tests in
         # the unit sweep need it, and this job re-runs that sweep.
         run: |
-          uv run python -m spacy download en_core_web_sm
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          "${GITHUB_WORKSPACE}/scripts/ci/install_spacy_model.sh" en_core_web_sm "${SPACY_MODEL_VER}" "${SPACY_MODEL_SHA}"
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
@@ -2622,25 +2644,31 @@ jobs:
           check-latest: true
           cache-dependency-path: cli/go.sum
 
-      - name: golangci-lint
-        # v9.2.0: cli/.golangci.yml was migrated from v1 to v2 schema in
-        # PR #640 (alongside the go 1.25 bump) so the action major upgrade
-        # is now safe. golangci-lint must be built with a Go whose
-        # language version (1.26) is not lower than the targeted one, or
-        # it fails with "the Go language version used to build
-        # golangci-lint is lower than the targeted Go version" (as v1.64.8,
-        # built with Go 1.24, did once go-version was bumped to 1.25).
-        # The v2.12.2 release binary is built with go1.26.2, so it
-        # supports the Go 1.26 target without a bump.
-        # golangci-lint-action v7+ refuses v1.x binaries; v9.2.0 requires
-        # golangci-lint >= v2.x and fully supports the v2 config schema.
-        # SHA pinned to v9.2.0 commit (devops_best_practices: pin to
-        # immutable SHA). Dependabot ignore list updated to track v9.x
-        # minor/patch bumps rather than the now-retired v6 pin.
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+      - name: Restore golangci-lint from the cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          version: v2.12.2
-          working-directory: cli
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-golangci-lint-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
+      - name: Install golangci-lint
+        # The program comes from the runner, then the cache, and is
+        # downloaded with retries last. The version is pinned in
+        # scripts/ci/tool-versions.env. The release binary of v2.12.2 is
+        # built with go1.26.2, so it supports the Go 1.26 target (an
+        # older build fails with "the Go language version used to build
+        # golangci-lint is lower than the targeted Go version").
+        # cli/.golangci.yml uses the v2 schema.
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          "${GITHUB_WORKSPACE}/scripts/ci/install_tool.sh" golangci-lint "${GOLANGCI_LINT_VER}" \
+            "https://github.com/golangci/golangci-lint/releases/download/${GOLANGCI_LINT_VER}/golangci-lint-${GOLANGCI_LINT_VER#v}-linux-amd64.tar.gz" \
+            "${GOLANGCI_LINT_SHA}" "golangci-lint-${GOLANGCI_LINT_VER#v}-linux-amd64/golangci-lint"
+
+      - name: golangci-lint
+        working-directory: cli
+        run: golangci-lint run
 
       - name: Go build
         # Smoke build of every package — fails fast on a broken import
@@ -2861,9 +2889,17 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Restore kubeconform from the cache
+        # install_tool.sh uses kubeconform from the runner when it has the
+        # pinned version, then this cache, and downloads (three tries) last.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-kubeconform-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
       - name: Install kubeconform
         # kubeconform validates rendered manifests against Kubernetes
-        # JSON Schemas offline. Pin to v0.6.7 by SHA256 — same shape
+        # JSON Schemas offline. Pinned by SHA256 in scripts/ci/tool-versions.env — same shape
         # chart.yml uses (devops_best_practices: no `curl|sh` of
         # unpinned binaries). Install to $HOME/.local/bin because the
         # self-hosted meho-runners-ci pool runs as a non-root user that
@@ -2874,16 +2910,11 @@ jobs:
         # GitHub-hosted runner this job uses since #4626.
         run: |
           set -euo pipefail
-          KC_VER=v0.6.7
-          KC_SHA=95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
-          curl -fsSL -o /tmp/kubeconform.tar.gz \
-            "https://github.com/yannh/kubeconform/releases/download/${KC_VER}/kubeconform-linux-amd64.tar.gz"
-          echo "${KC_SHA}  /tmp/kubeconform.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/kubeconform.tar.gz -C /tmp/ kubeconform
-          mkdir -p "${HOME}/.local/bin"
-          install -m 0755 /tmp/kubeconform "${HOME}/.local/bin/kubeconform"
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-          "${HOME}/.local/bin/kubeconform" -v
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          VERSION_ARG=-v "${GITHUB_WORKSPACE}/scripts/ci/install_tool.sh" kubeconform "${KUBECONFORM_VER}" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VER}/kubeconform-linux-amd64.tar.gz" \
+            "${KUBECONFORM_SHA}" kubeconform
 
       - name: Helm lint
         # The chart ships safe-by-default empty fields that

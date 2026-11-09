@@ -5,7 +5,8 @@
 
 Covers the rules of :mod:`meho_backplane.kb.page_import`: update by slug
 and safe to run twice, the dry run, the conflict report, the
-``source: meho://kb/<slug>`` link back to an entry, empty header values,
+``source: meho://kb/<slug>`` link back to an entry, the ``shared``
+setting that stays when a page does not name it, empty header values,
 and every refusal (no header, candidate, customer fact in a shared
 tenant, secret, bad path, bad slug, a shared slug of another tenant, a
 failed write).
@@ -136,6 +137,39 @@ async def test_an_update_keeps_the_owner_of_the_entry() -> None:
     assert entry is not None
     assert entry.metadata["created_by_sub"] == "person-1"
     assert entry.metadata["last_updated_by_sub"] == IMPORTER
+
+
+@pytest.mark.asyncio
+async def test_an_update_keeps_shared_when_the_page_does_not_name_it() -> None:
+    header = {"type": "lesson", "applies_to": "product-and-version", "status": "confirmed"}
+    await KbService().create_entry(
+        SHARED_TENANT, "team-rule", "Some text.", {**header, "shared": True}, actor_sub="person-1"
+    )
+    same = await _run(_page("team-rule.md"), tenant=SHARED_TENANT)
+    assert same.pages[0].action == "unchanged"
+    changed = await _run(_page("team-rule.md", body="New text."), tenant=SHARED_TENANT)
+    assert changed.pages[0].action == "update"
+    entry = await KbService().get_entry(SHARED_TENANT, "team-rule")
+    assert entry is not None
+    assert entry.metadata["shared"] is True
+    assert entry.body.strip() == "New text."
+    assert (await KbService().get_entry(TENANT, "team-rule")) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_names_shared_sets_it() -> None:
+    header = {"type": "lesson", "applies_to": "product-and-version", "status": "confirmed"}
+    await KbService().create_entry(
+        SHARED_TENANT, "team-rule", "Some text.", {**header, "shared": True}, actor_sub="person-1"
+    )
+    result = await _run(
+        _page("team-rule.md", header=CONFIRMED + "shared: false\n"), tenant=SHARED_TENANT
+    )
+    assert result.pages[0].action == "update"
+    entry = await KbService().get_entry(SHARED_TENANT, "team-rule")
+    assert entry is not None
+    assert entry.metadata["shared"] is False
+    assert (await KbService().get_entry(TENANT, "team-rule")) is None
 
 
 @pytest.mark.asyncio

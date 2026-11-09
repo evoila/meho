@@ -58,14 +58,19 @@
   ``title``) -- name **alongside** the GUID, never instead. When no name was
   recorded the raw ``sub`` renders alone (fail-open). A ``None`` ref renders
   nothing, so a caller can pass an undecided request's reviewer directly.
-  Deliberately no email / service marker -- unlike ``principal_chip`` this is
-  the display-name-only shape for surfaces whose contract forbids other PII. -#}
+  Deliberately no email -- unlike ``principal_chip`` this is the
+  display-name-only shape for surfaces whose contract forbids other PII.
+  When ``.machine_kind`` is set (an agent, service or runner login, #3885),
+  a badge names that kind, so the reader sees a machine asked, not a person. -#}
 {%- macro subject(ref) -%}
   {%- if ref and ref.resolved -%}
     <span class="font-medium" title="{{ ref.sub }}">{{ ref.name }}</span>
     <span class="font-mono text-xs opacity-60 break-all">{{ ref.sub }}</span>
   {%- elif ref -%}
     <span class="font-mono text-xs break-all" title="OIDC subject (no display name recorded)">{{ ref.sub }}</span>
+  {%- endif -%}
+  {%- if ref and ref.machine_kind -%}
+    {{ " " }}<span class="badge badge-outline badge-xs" title="A machine login, not a person." data-subject-kind="{{ ref.machine_kind }}">{{ ref.machine_kind }}</span>
   {%- endif -%}
 {%- endmacro -%}
 

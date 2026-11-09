@@ -413,6 +413,7 @@ meho approvals approve <id> [<id>...] | --filter-work-ref REF --in-order [flags]
 - `--in-order` — approve every pending request of --filter-work-ref oldest first; stop at the first failure
 - `--json` — emit raw JSON response instead of summary
 - `--reason` — optional rationale for the approval; the command help explains the Instructed-by: layout
+- `--wait` — wait until the approved operation has ended, then print how it ended (asks again every few seconds)
 
 ### `meho approvals list`
 
@@ -2949,7 +2950,7 @@ meho k8s service list [flags]
 
 ## `meho kb`
 
-Operate the MEHO knowledge base (ingest / search / list / show / add / delete)
+Operate the MEHO knowledge base (ingest / search / list / show / add / delete / export)
 
 ```
 meho kb
@@ -2957,7 +2958,7 @@ meho kb
 
 ### `meho kb add`
 
-Create or re-index one kb entry (tenant_admin)
+Create or update one kb entry (tenant_admin)
 
 ```
 meho kb add <slug> [flags]
@@ -2967,6 +2968,7 @@ meho kb add <slug> [flags]
 - `--body` — entry body: inline text, @<path> to read a file, or @- to read from stdin
 - `--create-anyway` — create the new entry even when similar entries exist
 - `--dry-run` — write nothing; list the similar entries and say whether the write would go through
+- `--expected-revision` — revision_id of the entry as you read it (required to update an existing slug)
 - `--json` — emit raw KbEntry JSON instead of the human summary
 - `--metadata` — comma-separated key=value pairs to attach as entry metadata (e.g. owner=ops,source=runbook)
 
@@ -2981,6 +2983,18 @@ meho kb delete <slug> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--confirm` — skip the stdin confirmation prompt
 - `--json` — emit a machine-readable success envelope instead of the human line
+
+### `meho kb export`
+
+Write the generic kb entries as Markdown pages into a local folder (operator)
+
+```
+meho kb export <directory> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--dry-run` — list what would be added, changed and removed, and write nothing
+- `--json` — emit the plan as JSON instead of the human summary
 
 ### `meho kb ingest`
 
@@ -4114,41 +4128,25 @@ meho remember <body> [flags]
 
 ## `meho retrieval`
 
-Retrieval-quality + migration-decision tooling
+Retrieval usage and operation-pick telemetry
 
 ```
 meho retrieval
 ```
 
-### `meho retrieval eval`
+### `meho retrieval picks`
 
-Run the checked-in eval corpus + report precision@5 / MRR / coverage
-
-```
-meho retrieval eval [flags]
-```
-
-- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--baseline` — baseline kind to also run; only `grep` is supported in v0.2 (kb surface only)
-- `--compare-baseline` — compare today's eval against this saved baseline; exit 1 on any per-metric regression
-- `--json` — emit a machine-readable JSON envelope on stdout instead of the human table
-- `--save-baseline` — write the eval result to this file for future regression comparison
-- `--surface` — retrieval surface to evaluate (kb|memory|operations|all)
-
-### `meho retrieval retire-checklist`
-
-Run the 5-criterion retire-decision checklist per retrieval surface
+Show if calls used an operation the search returned (per connector and day)
 
 ```
-meho retrieval retire-checklist [flags]
+meho retrieval picks [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--baseline-file` — JSON file containing per-surface baseline metrics (output of `meho retrieval eval --baseline grep --save-baseline ...`); without it, criterion 4 stays yellow
-- `--gh-repo` — GitHub repo to query for `retrieval-migration-blocker` issues
-- `--json` — emit the structured RetireChecklistReport on stdout instead of the human table
-- `--no-blockers` — skip the gh lookup; the backplane reports criterion 5 as REVIEW MANUALLY
-- `--surface` — retrieval surface to evaluate (kb|memory|operations|all)
+- `--connector` — show only this connector id (for example `k8s-1.x`)
+- `--json` — print the raw OperationPickReport instead of the table
+- `--since` — window start; accepts relative (`30d`, `7d`, `24h`) or ISO-8601 date (`2026-04-01`)
+- `--tenant` — tenant UUID (platform admin only; others get a 403)
 
 ### `meho retrieval usage`
 

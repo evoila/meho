@@ -933,6 +933,18 @@ class Tenant(Base):
         default=False,
         server_default=sa.false(),
     )
+    # Where the tenant keeps its lessons (#5976): the key of one docs
+    # collection, the team wiki loaded into a knowledge index.
+    # ``search_knowledge`` and ``meho kb search`` also search it, and
+    # ``add_to_knowledge`` says the lesson goes there as a candidate page
+    # (:mod:`meho_backplane.kb.wiki_search`). ``NULL`` (default): lessons
+    # live in MEHO only, as before. Nullable, so migration ``0150`` needs
+    # no backfill.
+    knowledge_wiki_collection: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -1153,6 +1165,10 @@ class KbRevision(Base):
     * ``embedding_model`` / ``chunker_version`` -- which embedding
       model and chunking rule indexed this body. ``None`` on backfill
       rows, because the migration cannot know them.
+    * ``entry_metadata`` -- the entry's metadata (the header) as of this
+      revision. A change to the body or to the metadata adds a
+      revision, so one revision id names one exact state of the entry.
+      ``None`` on rows stored before this column existed.
     * ``created_at`` -- when the revision was stored.
     """
 
@@ -1180,6 +1196,10 @@ class KbRevision(Base):
     origin: Mapped[str] = mapped_column(Text, nullable=False)
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunker_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entry_metadata: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1248,6 +1268,46 @@ class MemoryRevision(Base):
             "revision_number",
             unique=True,
         ),
+    )
+
+
+class LessonRetrieval(Base):
+    """One knowledge or memory entry that a search gave to an agent session.
+
+    The weekly knowledge upkeep (:mod:`meho_backplane.lessons.upkeep`) and
+    the learning numbers of ``meho audit reflex``
+    (:mod:`meho_backplane.lessons.metrics`) read these rows. A row is
+    written only for a call that has a session id, because only a session
+    can later show that the entry was used.
+
+    * ``tenant_id`` -- the tenant of the session that searched.
+    * ``store`` -- ``"kb"`` or ``"memory"``.
+    * ``entry_id`` -- the ``documents.id`` of the entry. No foreign key:
+      the row stays when the entry is deleted, so the numbers of the past
+      do not change.
+    * ``entry_tenant_id`` -- the tenant that owns the entry (another
+      tenant for a shared knowledge entry).
+    * ``status`` -- the header ``status`` of the entry at that moment, or
+      ``None``.
+    * ``expired`` -- whether the entry's ``expires_at`` had passed at that
+      moment.
+    """
+
+    __tablename__ = "lesson_retrieval"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    store: Mapped[str] = mapped_column(Text, nullable=False)
+    entry_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    entry_tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    agent_session_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index("lesson_retrieval_tenant_time_idx", "tenant_id", "retrieved_at"),
+        Index("lesson_retrieval_entry_idx", "entry_id"),
     )
 
 
@@ -1863,7 +1923,11 @@ class EndpointDescriptor(Base):
     * ``endpoint_descriptor_bm25_idx`` (PG only) — GIN over
       ``to_tsvector('english', coalesce(summary, '') || ' ' ||
       coalesce(description, ''))``. Powers the BM25 half of
-      ``search_operations``'s hybrid retrieval. Declared in
+      ``search_operations``'s hybrid retrieval. Its twin
+      ``endpoint_descriptor_bm25_custom_idx`` (migration ``0148``) is
+      GIN over the same text with ``nullif(custom_description, '')``
+      in place of ``description``; the keyword query uses it while the
+      ``AGENT_READS_CUSTOM_DESCRIPTION`` switch is on. Declared in
       migration ``0005`` via raw SQL because Alembic has no clean
       API for expression-based GIN; intentionally **not** in
       :attr:`__table_args__` because declaring it would force
@@ -6875,7 +6939,14 @@ class ApprovalRequest(Base):
       hoist-at-write pattern as ``audit_log.principal_name`` (#1212); NULL
       when the token carried no name (fail-open) and on pre-0097 rows.
       Display name only -- never email or other profile fields. Added by
-      migration ``0097``.
+      migration ``0097``. For a machine token without a ``name`` claim
+      it is the registered agent name or the client id (#3885).
+
+    * ``principal_kind`` -- Text nullable. The requester's
+      ``principal_kind`` (``user`` / ``agent`` / ``service`` / ``runner``),
+      saved at park time so the console and the CLI can mark a machine
+      requester as not a person (#3885). NULL on rows parked before
+      migration ``0149``.
 
     * ``op_id`` / ``connector_id`` -- the operation + connector the
       dispatcher was asked to call. Stored verbatim for resume.
@@ -7100,6 +7171,9 @@ class ApprovalRequest(Base):
     # Display name only -- no email / groups / other profile fields. Added
     # by migration ``0097``.
     principal_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The requester's principal kind (#3885), so the approval surfaces can
+    # mark an agent requester as not a person. NULL before migration 0149.
+    principal_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Dispatch coordinates for resume.
     op_id: Mapped[str] = mapped_column(Text, nullable=False)
     connector_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -9695,6 +9769,68 @@ class RequestUsageEvent(Base):
     route: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+
+
+class OperationSearchRecord(Base):
+    """One ``search_operations`` call: what it was asked and what it returned.
+
+    Written by :mod:`meho_backplane.operation_picks.recorder`, only when
+    ``REQUEST_USAGE_RETENTION_DAYS`` is set. The request usage retention job
+    deletes rows older than that window. Migration ``0147`` makes the table.
+
+    * ``transport`` -- ``mcp``, ``rest`` or ``agent`` (a hosted agent run).
+    * ``mode`` -- ``ranked`` (a query) or ``exact`` (one ``op_id``).
+    * ``op_ids`` -- the returned operation ids, in rank order.
+    * ``query_hash`` -- SHA-256 of the query text; ``NULL`` in exact mode.
+    * ``query_text`` -- the query itself, only when
+      ``OPERATION_SEARCH_STORE_QUERY_TEXT`` is on. Otherwise ``NULL``.
+    """
+
+    __tablename__ = "operation_search_record"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    group_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    search_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    op_ids: Mapped[list[str]] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))
+    query_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    query_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class OperationCallRecord(Base):
+    """One ``call_operation`` call, linked to the search it followed.
+
+    Written next to :class:`OperationSearchRecord`, under the same switch
+    and retention. ``search_id`` is the newest search of the same caller,
+    session and connector within five minutes, or ``NULL`` when there was
+    none. ``rank`` is the 1-based place of ``op_id`` in that search's
+    results, or ``NULL`` when it was not there. ``outcome`` is the call's
+    status (``ok``, ``error``, ``denied``, ...) or ``unknown_op``.
+    """
+
+    __tablename__ = "operation_call_record"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    search_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class InstanceSettingsRevision(Base):

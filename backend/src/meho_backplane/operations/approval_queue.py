@@ -93,6 +93,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import (
@@ -254,8 +255,8 @@ class ApprovalRule(StrEnum):
     Recorded as ``approval_rule`` on the ``approval.decision`` audit row
     and on the ``approval.approved`` step event, next to ``self_approved``.
 
-    * ``sa_operator_self_approval`` — a MEHO-SA-Operator approved their own
-      change.
+    * ``sa_operator_self_approval`` — a MEHO-SA-Operator or a MEHO-Admin
+      approved their own change (both groups may, #5969).
     * ``break_glass_self_approval`` — the requester approved their own
       ``safe`` or ``caution`` change under ``APPROVAL_ALLOW_SELF_APPROVAL``.
     * ``sa_operator_or_admin`` — another person's ``dangerous`` or
@@ -440,8 +441,9 @@ class SelfApprovalForbiddenError(ApprovalError):
 
     Raised by :func:`approve_request` when
     ``operator.sub == request.principal_sub``, the person is not in the
-    MEHO-SA-Operators group (:attr:`~meho_backplane.auth.operator.Operator.may_self_approve`,
-    #3328), and the audited single-operator break-glass mode
+    MEHO-SA-Operators or MEHO-Admins group
+    (:attr:`~meho_backplane.auth.operator.Operator.may_self_approve`), and
+    the audited single-operator break-glass mode
     (``Settings.approval_allow_self_approval``) does not cover the change.
     Break-glass never covers a ``dangerous`` or ``destructive`` change
     (*high_risk*). The route layer maps this to 403.
@@ -479,7 +481,8 @@ class SelfApprovalForbiddenError(ApprovalError):
         #: The plain refusal text, without ids, for the web interface.
         self.reason_text = (
             "You cannot approve your own change. Only members of the "
-            f"MEHO-SA-Operators group may approve their own changes. {who_can}"
+            "MEHO-SA-Operators and MEHO-Admins groups may approve their own "
+            f"changes. {who_can}"
         )
         break_glass = (
             ""
@@ -1298,10 +1301,12 @@ async def _write_audit_row(
     # and the DISPATCH run rows (#4029) carry.
     # ``operator`` is the requester on a "request" row / the reviewer on a
     # "decision" row, so the name always pairs with ``operator_sub``. Omitted
-    # when the token had no name (resolver fails open to the raw sub); display
-    # name only, email is never widened onto this surface.
-    if operator.name:
-        payload["principal_name"] = operator.name
+    # when there is no name (resolver fails open to the raw sub); display
+    # name only, email is never widened onto this surface. An agent token
+    # has no ``name`` claim: its registered name or client id is used (#3885).
+    principal_name = await principal_display_name(session, operator)
+    if principal_name:
+        payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
     if extra_payload:
@@ -1380,6 +1385,9 @@ class ResumeRequester(NamedTuple):
     sub: str
     act: str | None
     name: str | None
+    #: The requester's ``principal_kind`` (#3885). ``None`` on a row parked
+    #: before migration 0149.
+    kind: str | None = None
 
 
 #: The requester of the approval request whose composite is being re-run
@@ -1543,10 +1551,12 @@ async def create_pending_request(
     # ``None``. The prior ``getattr(operator, "identity_act", None)`` was
     # dead code — ``Operator`` has no such field, so it was always ``None``.
     principal_act: str | None = resolve_actor_sub()
-    principal_sub = operator.sub
-    principal_name = operator.name
     if requester is not None:
-        principal_sub, principal_act, principal_name = requester
+        principal_sub, principal_act, principal_name, principal_kind = requester
+    else:
+        principal_sub = operator.sub
+        principal_name = await principal_display_name(session, operator)
+        principal_kind = operator.principal_kind.value
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the
     # same request-time ContextVar the audit writers read (bound at the
@@ -1583,11 +1593,13 @@ async def create_pending_request(
         run_id=run_id,
         principal_sub=principal_sub,
         principal_act=principal_act,
-        # Requester display name hoisted from the JWT ``name`` claim at park
-        # time (#3300) so every approvals surface renders a name alongside
-        # ``principal_sub``. ``None`` when the token carried no name --
+        # Requester display name hoisted at park time (#3300) so every
+        # approvals surface renders a name alongside ``principal_sub``: the
+        # JWT ``name`` claim, else for a machine token the registered agent
+        # name or the client id (#3885). ``None`` when there is none --
         # fail-open to the raw sub. Same pattern as audit_log.principal_name.
         principal_name=principal_name,
+        principal_kind=principal_kind,
         op_id=op_id,
         connector_id=connector_id,
         target_id=target_id,
@@ -2799,7 +2811,12 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
     """The requester saved on *request* (#4217)."""
-    return ResumeRequester(request.principal_sub, request.principal_act, request.principal_name)
+    return ResumeRequester(
+        request.principal_sub,
+        request.principal_act,
+        request.principal_name,
+        request.principal_kind,
+    )
 
 
 @contextmanager
@@ -3464,8 +3481,8 @@ def _check_self_approval(
     comparison is on the stable ``sub`` claim, so a renamed display name
     can never turn into a self-approval. Then, in order:
 
-    1. A MEHO-SA-Operator (:attr:`Operator.may_self_approve`, #3327) may
-       approve their own change at every risk level (#3328). On the
+    1. A MEHO-SA-Operator or a MEHO-Admin (:attr:`Operator.may_self_approve`)
+       may approve their own change at every risk level. On the
        command line and REST the approve routes have already required a
        fresh sign-in (#3979).
     2. A person may approve their own ``caution`` change that waited only
@@ -3684,6 +3701,7 @@ async def list_pending(
     limit: int = 50,
     offset: int = 0,
     order: ApprovalListOrder = "newest",
+    after: ApprovalRequest | None = None,
 ) -> list[ApprovalRequest]:
     """Page through approval requests in *tenant_id*.
 
@@ -3699,17 +3717,45 @@ async def list_pending(
     newest request first; ``"oldest"`` lists the oldest first, which is the
     order a chain of requests under one change ticket was sent in. The
     oldest-first order breaks ties on ``id`` so it matches the step numbers
-    :func:`pending_chain_positions` gives.
+    :func:`pending_chain_positions` gives. Both orders break ties on ``id``,
+    so pages read one after another (``offset``) never skip or repeat a row.
+
+    ``after`` starts the list right after that row in *order*, instead of
+    counting rows with ``offset``. A reader that walks the whole list in
+    batches passes the last row of the batch before. Then a request that is
+    decided between two batches does not move the rest of the list, so no
+    row is skipped.
     """
     stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
         stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+    if after is not None:
+        if order == "oldest":
+            stmt = stmt.where(
+                or_(
+                    ApprovalRequest.created_at > after.created_at,
+                    and_(
+                        ApprovalRequest.created_at == after.created_at,
+                        ApprovalRequest.id > after.id,
+                    ),
+                )
+            )
+        else:
+            stmt = stmt.where(
+                or_(
+                    ApprovalRequest.created_at < after.created_at,
+                    and_(
+                        ApprovalRequest.created_at == after.created_at,
+                        ApprovalRequest.id < after.id,
+                    ),
+                )
+            )
     if order == "oldest":
         stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
     else:
-        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc(), ApprovalRequest.id.desc())
     stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return list(result.scalars().all())

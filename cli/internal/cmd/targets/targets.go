@@ -68,7 +68,7 @@
 // more backplane routes and renders the response in either a human-
 // readable form or `--json` mode. Authentication piggybacks on the
 // token meho login wrote — same pattern as `meho operation` and
-// `meho retrieval eval`.
+// `meho retrieval usage`.
 //
 // Single-target create ships as `meho targets add <name>` (alias
 // `create`; Task #2862) — see add.go, which reuses import.go's

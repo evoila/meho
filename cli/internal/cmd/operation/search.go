@@ -108,7 +108,7 @@ func rateLimitedEnvelope(body []byte) *rateLimitedError {
 //
 //	meho operation search <connector_id> --op-id <op_id> [--json]
 //
-// Exit codes mirror groups + retrieval/eval.
+// Exit codes mirror groups.
 func newSearchCmd() *cobra.Command {
 	var (
 		groupKey          string

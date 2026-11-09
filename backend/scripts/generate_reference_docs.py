@@ -140,13 +140,10 @@ def _catalog_kind_by_triple() -> dict[tuple[str, str, str], str]:
     statement of a connector's ingest kind: a row that names an
     ``upstream`` spec URL or ships a bundled ``spec_resource`` is a
     generic (spec-ingested) connector; a row with neither is a typed
-    (hand-coded) one. The mechanism-fixture row (``product="_fixture"``)
-    is not a shippable connector and is skipped.
+    (hand-coded) one.
     """
     kinds: dict[tuple[str, str, str], str] = {}
     for entry in load_catalog().entries:
-        if entry.product == "_fixture":
-            continue
         generic = bool(getattr(entry, "upstream", None)) or bool(
             getattr(entry, "spec_resource", None)
         )

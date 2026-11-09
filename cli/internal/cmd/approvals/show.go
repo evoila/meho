@@ -5,7 +5,6 @@ package approvals
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -165,7 +164,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	if rc != nil && rc.ParentCompositeOpId != nil && *rc.ParentCompositeOpId != "" {
 		fmt.Fprintf(w, "Part of:      %s\n", output.SafeText(*rc.ParentCompositeOpId))
 	}
-	fmt.Fprintf(w, "Principal:    %s\n", principalLabel(d.PrincipalSub, d.PrincipalName))
+	fmt.Fprintf(w, "Principal:    %s\n", requesterLabel(d.PrincipalSub, d.PrincipalName, d.PrincipalKind))
 	if d.PrincipalAct != nil {
 		fmt.Fprintf(w, "Acting as:    %s\n", output.SafeText(*d.PrincipalAct))
 	}
@@ -216,8 +215,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	printOutcomeCheck(w, d)
 	printResultHint(w, d)
 	if d.ProposedEffect != nil {
-		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")
-		fmt.Fprintf(w, "Effect:\n  %s\n", output.SafeLines(string(b)))
+		printEffect(w, "", "Effect:", d.ProposedEffect)
 	}
 }
 

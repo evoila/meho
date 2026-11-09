@@ -21,7 +21,6 @@ Every shipped profile is dry-run-parsed + scheme-validated at startup by
 boot guard), so a malformed profile or a reserved/unknown auth scheme
 crashes boot.
 
-T1 (#1975) ships the mechanism plus ``_fixture_minimal.yaml`` — a tiny
-valid profile exercising the boot-time validator. T2 (#1976) authors the
-real per-product profiles.
+The tests check this path with their own catalog and profile in
+``backend/tests/fixtures/catalog/``; no test data ships here.
 """

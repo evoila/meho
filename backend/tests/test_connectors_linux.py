@@ -1330,6 +1330,7 @@ _WRITE_OP_IDS: frozenset[str] = frozenset(
         "linux.script.run",
         "linux.sysctl.write",
         "linux.firewall.load",
+        "linux.firewall.confirm",
     }
 )
 
@@ -1337,7 +1338,7 @@ _EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS
 
 
 def test_linux_ops_count_matches_expected() -> None:
-    # about + seven read verbs + five write verbs = thirteen.
+    # about + seven read verbs + six write verbs = fourteen.
     assert len(LINUX_OPS) == len(_EXPECTED_OP_IDS)
 
 
@@ -1365,7 +1366,10 @@ def test_linux_read_ops_all_safe_read_only_no_approval() -> None:
 
 
 def test_linux_write_ops_carry_the_correct_tier() -> None:
-    """AC: the four dangerous writes require approval; service.control is caution.
+    """AC: the four dangerous writes require approval; two writes are caution.
+
+    ``service.control`` runs at once in the web interface. ``firewall.confirm``
+    is ``caution`` but always waits for approval, as the contract check asks.
 
     No write op is registered ``destructive`` (so the destructive-tier
     blast-radius builder gate does not apply here), and none carries the
@@ -1379,8 +1383,10 @@ def test_linux_write_ops_carry_the_correct_tier() -> None:
 
     assert by_id["linux.service.control"].safety_level == "caution"
     assert by_id["linux.service.control"].requires_approval is False
+    assert by_id["linux.firewall.confirm"].safety_level == "caution"
+    assert by_id["linux.firewall.confirm"].requires_approval is True
 
-    for op_id in _WRITE_OP_IDS - {"linux.service.control"}:
+    for op_id in _WRITE_OP_IDS - {"linux.service.control", "linux.firewall.confirm"}:
         op = by_id[op_id]
         assert op.safety_level == "dangerous", f"{op.op_id!r} must be dangerous"
         assert op.requires_approval is True, f"{op.op_id!r} must require approval"

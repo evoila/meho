@@ -34,8 +34,6 @@ v1 POST / PATCH / PUT, plus :class:`CallOperationBody` outside
 
 * :class:`meho_backplane.api.v1.retrieve.RetrieveRequest`
 * :class:`meho_backplane.api.v1.audit_models.AuditQueryRequest`
-* :class:`meho_backplane.api.v1.retrieve_eval.EvalRequest`
-* :class:`meho_backplane.api.v1.retrieve_retire.RetireChecklistRequest`
 * :class:`meho_backplane.api.v1.kb.KbEntryCreate`
 * :class:`meho_backplane.api.v1.kb.IngestKbRequest`
 * :class:`meho_backplane.targets.schemas.TargetCreate`
@@ -67,8 +65,6 @@ from meho_backplane.api.v1.audit_models import AuditQueryRequest
 from meho_backplane.api.v1.kb import IngestKbRequest, KbEntryCreate
 from meho_backplane.api.v1.retrieve import RetrieveRequest
 from meho_backplane.api.v1.retrieve import router as retrieve_router
-from meho_backplane.api.v1.retrieve_eval import EvalRequest
-from meho_backplane.api.v1.retrieve_retire import RetireChecklistRequest
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -103,8 +99,6 @@ from ._oidc_jwt_helpers import public_jwks as _public_jwks
 _REQUEST_MODELS: list[tuple[type[BaseModel], dict[str, Any]]] = [
     (RetrieveRequest, {"query": "vault"}),
     (AuditQueryRequest, {}),
-    (EvalRequest, {}),
-    (RetireChecklistRequest, {}),
     (KbEntryCreate, {"slug": "k8s-ingress", "body": "Ingress runbook"}),
     (IngestKbRequest, {"directory": "/tmp/kb"}),
     (

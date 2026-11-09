@@ -149,8 +149,8 @@ func (e *apiResponseError) Error() string {
 }
 
 // renderRequestError translates an error from one of the per-verb
-// request helpers into the right output.RenderError category. Same
-// classification ladder as retrieval/eval.go: token-not-found and
+// request helpers into the right output.RenderError category.
+// Token-not-found and
 // no-refresh-token surface as auth_expired with `meho login` hints;
 // a non-2xx response from the backplane after auth refresh wraps as
 // *apiResponseError so the renderer can split 401 from the rest;

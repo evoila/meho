@@ -478,3 +478,14 @@ async def test_kubernetes_store_create_conflict_and_error() -> None:
         await KubernetesSecretStore(_FakeCoreV1(create_status=422), "ns").create(
             "x", {"k": "v"}, "Opaque"
         )
+
+
+def test_web_push_key_is_a_p256_private_key() -> None:
+    from meho_backplane.core.secrets import MakeEntry, build_data
+    from meho_backplane.web_push.keys import public_key_for
+
+    first = build_data(MakeEntry(name="rel-core-web-push", kind="web-push"))
+    second = build_data(MakeEntry(name="rel-core-web-push", kind="web-push"))
+    assert set(first) == {"vapid_private_key"}
+    assert first != second
+    assert len(public_key_for(first["vapid_private_key"])) == 87

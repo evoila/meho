@@ -115,8 +115,9 @@ from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
-from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
-from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
+from meho_backplane.api.v1.retrieve_operation_picks import (
+    router as api_v1_retrieve_operation_picks_router,
+)
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
 from meho_backplane.api.v1.run_approvals import router as api_v1_run_approvals_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
@@ -185,6 +186,7 @@ from meho_backplane.gateway.unreported_mint import (
 )
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
+from meho_backplane.lessons.upkeep import start_knowledge_upkeep, stop_knowledge_upkeep
 from meho_backplane.logging import configure_logging
 from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
@@ -584,6 +586,7 @@ class _BackgroundTasks:
 
     topology_scheduler: asyncio.Task[None]
     memory_expiry: asyncio.Task[None] | None
+    knowledge_upkeep: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
     announcement_retention: asyncio.Task[None] | None
     evidence_retention: asyncio.Task[None] | None
@@ -640,6 +643,11 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     memory_expiry: asyncio.Task[None] | None = None
     if settings.memory_expiry_enabled:
         memory_expiry = start(start_memory_expiry_sweeper)
+    # Weekly knowledge upkeep and report (lessons/upkeep.py); gated on
+    # KNOWLEDGE_UPKEEP_ENABLED.
+    knowledge_upkeep: asyncio.Task[None] | None = None
+    if settings.knowledge_upkeep_enabled:
+        knowledge_upkeep = start(start_knowledge_upkeep)
     # G9.3-T6 #858 — gated on TOPOLOGY_HISTORY_PRUNE_ENABLED.
     # ``RETENTION_DAYS=0`` keeps the loop running but every tick is a
     # no-op (heartbeat-only); ``PRUNE_ENABLED=false`` skips starting
@@ -754,6 +762,7 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
+        knowledge_upkeep=knowledge_upkeep,
         topology_history=topology_history,
         announcement_retention=announcement_retention,
         evidence_retention=evidence_retention,
@@ -831,6 +840,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_announcement_retention_sweeper(tasks.announcement_retention)
     if tasks.topology_history is not None:
         await stop_topology_history_retention_sweeper(tasks.topology_history)
+    if tasks.knowledge_upkeep is not None:
+        await stop_knowledge_upkeep(tasks.knowledge_upkeep)
     if tasks.memory_expiry is not None:
         await stop_memory_expiry_sweeper(tasks.memory_expiry)
     await stop_topology_refresh_scheduler(tasks.topology_scheduler)
@@ -1041,27 +1052,9 @@ app.include_router(api_v1_retrieve_router)
 # `audit_query` class via the `audit_op_id` / `audit_op_class`
 # contextvar overrides honoured by the chassis broadcast publisher.
 app.include_router(api_v1_retrieve_usage_router)
-# G4.3-T2 (#441) -- corpus-driven retrieval-quality eval at
-# `POST /api/v1/retrieve/eval`. Operator role minimum; tenant-scoped
-# to the operator's JWT claim. Broadcast publishes under the canonical
-# op_id `meho.retrieval.eval` + aggregate-only `audit_query` class
-# via the same `audit_op_id` / `audit_op_class` contextvar overrides
-# T5's retrieve_usage adopted -- the eval queries themselves can be
-# operator-sensitive so the broadcast event ships in aggregate-only
-# mode.
-app.include_router(api_v1_retrieve_eval_router)
-# G4.3-T6 (#445) -- retire-decision checklist verb at
-# `POST /api/v1/retrieve/retire-checklist`. Combines T2 eval results +
-# T5 usage telemetry + a CLI-supplied open-blocker count into the
-# five-criterion per-surface green/yellow/red checklist Goal #215
-# decision #2 locked. Operator role minimum; tenant_admin gates the
-# cross-tenant `tenant_filter` field. Broadcast publishes under the
-# canonical op_id `meho.retrieval.retire_checklist` + aggregate-only
-# `audit_query` class via the same `audit_op_id` / `audit_op_class`
-# contextvar overrides T2 + T5 adopted -- surface filters + blocker
-# counts can leak retire-decision intent so the broadcast event ships
-# in aggregate-only mode.
-app.include_router(api_v1_retrieve_retire_router)
+# #4750 -- per connector and day: did the agent call an operation the
+# search returned, and did it run? `GET /api/v1/retrieve/operation-picks`.
+app.include_router(api_v1_retrieve_operation_picks_router)
 # G4.5-T3 (#1521) — federated vendor-document retrieval at
 # `POST /api/v1/search_docs` (the `meho-docs` add-on, Initiative #1518).
 # Operator role minimum; tenant-scoped via the forwarded operator JWT.

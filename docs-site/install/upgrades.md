@@ -75,6 +75,56 @@ ownership to Helm. (Observed in the field: `--take-ownership` is *not*
 the right flag here — it adopts whole un-owned resources, not
 individual fields, and does not clear a per-field conflict.)
 
+## Upgrade fails with `spec.strategy.rollingUpdate: Forbidden`
+
+From v0.46.0 the chart uses the `Recreate` update strategy: the old pod
+stops before the new one starts. An install made with an older chart has
+the strategy `RollingUpdate` on its live Deployment, with a
+`rollingUpdate` block that Kubernetes filled in. Helm 4 with server-side
+apply does not remove that block, and Kubernetes refuses it together with
+`Recreate`:
+
+```text
+Deployment.apps "meho" is invalid: spec.strategy.rollingUpdate: Forbidden: may not be specified when strategy `type` is 'Recreate'
+```
+
+**The chart fixes this itself.** On such an upgrade it runs a short Job
+before the upgrade (`<release>-…-update-strategy`). The Job removes the
+block and sets `Recreate` on the live Deployment. No pod restarts for this.
+Helm removes the Job once it has succeeded. Helm 3 needs no Job: it removes
+the block on its own.
+
+**If a revision already failed** with this message (an upgrade to a chart
+built between v0.45.0 and this fix), the old pod still runs the old
+version. Check with `helm history meho -n meho`. Then:
+
+1. Run `helm upgrade` again with a chart that has the fix. The Job fixes
+   the Deployment first, and the release ends `deployed`.
+2. If you must stay on the chart that failed, fix the Deployment by hand
+   and run the same `helm upgrade` again:
+
+   ```bash
+   kubectl patch deployment meho -n meho --type=merge \
+     -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+   ```
+
+3. Check the result. The release is `deployed`, and the Deployment has
+   `Recreate` and no `rollingUpdate` block:
+
+   ```bash
+   helm status meho -n meho
+   kubectl get deploy meho -n meho -o jsonpath='{.spec.strategy}'
+   ```
+
+**Argo CD** renders the chart with `helm template`, so it never runs this
+Job. With server-side apply on, run the `kubectl patch` above once, then
+sync.
+
+**Later, back to `RollingUpdate`:** the change above belongs to the field
+manager `meho-update-strategy` (or `kubectl-patch`). If you later set
+`updateStrategy.type: RollingUpdate`, Helm 4 reports a conflict with that
+manager. Use `--force-conflicts`, as in the section above.
+
 ## Rollback
 
 `helm rollback meho` is supported, with one asymmetry to know:
@@ -121,6 +171,7 @@ Read these when your upgrade crosses the version in question:
 | **v0.45.0** | Every call made with a token now runs only `safe` operations at once: MCP, the command line and REST, also with a person's own token, and every agent (#3980). `caution`, `dangerous` and `destructive` changes sent this way wait for an approval click. In the web interface, `caution` still runs at once, and `dangerous` changes now wait for an approval click too. An agent's `dangerous` or `destructive` request now waits for a person's approval instead of being refused. Service principals are unchanged: their standing grants keep working. Who may approve follows the login groups (since v0.44.0): only a MEHO-SA-Operator or a MEHO-Admin approves another person's `dangerous` or `destructive` change, and only a MEHO-SA-Operator approves their own. | **Before the upgrade**, put at least one person in `MEHO-SA-Operators` ([Keycloak realm setup](keycloak-realm.md#who-may-approve-their-own-changes)). Otherwise nobody can approve their own `dangerous` or `destructive` change, and on a site with a single admin these changes wait with nobody to approve them. Tell command-line, MCP and REST users that they will see more waiting requests. They approve them in the web interface, or with `meho approvals approve` after a fresh sign-in (with an authenticator code when your realm asks for one). A person, for example a MEHO-Operator, may approve their own `caution` change that waited only because it came with a token, with a click in the web interface. Scripts that run `caution` changes with a token now get a waiting request (`awaiting_approval`) instead of a result; give fixed automation a service principal with a standing grant. See [Approvals and break-glass](../guides/approvals-and-break-glass.md). |
 | **v0.45.0** | When a connector states the target versions its operations work on, MEHO runs an operation only on a target inside that range. MEHO checks this each time the operation runs. Outside the range, the call is refused with `unqualified_target_version`, and the error names the range and the target's version. For an operation from an API file, MEHO first looks for the same operation on the connector version that matches the target, and runs it there when it exists and is turned on. MEHO checks the range for operations from an API file and for multi-step operations. From v0.45.0 the VMware connectors state the target versions their multi-step operations work on, so MEHO now applies the check to them. A Sensor on a connector whose range does not include the target's version can read `unknown`. A scheduled job or another saved call on such a connector is refused. | **Before the upgrade**, list your Sensors with `meho sensor list --json` and check that each one uses the connector that matches its target's version. For example, use `vmware-rest-8.0` for a vCenter 8.0.x target and `vmware-rest-9.0` for a vCenter 9.0.x target. A Sensor cannot be changed, so delete a wrong one and create it again on the right connector. Check scheduled jobs and other saved calls the same way. See [Pick the connector version that matches the target](../guides/sensors-quickstart.md#pick-the-connector-version-that-matches-the-target). |
 | **v0.46.0** | The key of the hashes and fingerprints in audit rows and approval requests is a secret of its own (`paramsHashKey` in the chart). With a built-in part, the install makes it in the Secret `<release>-core-params-hash` and keeps it on every upgrade. A new database password then keeps every hash. New audit hashes do not match the ones made with the key from the database URL. | **Built-in core:** nothing to do. **No built-in part:** store at least 32 random characters in a Kubernetes Secret and set `paramsHashKey.secretName`. A request that waits for approval while you set the key still matches its own params. Without it, MEHO makes the key from the database URL, and a new database password changes it. To rotate the key, follow "Rotating `PARAMS_HASH_KEY`" in [`docs/codebase/approvals.md`](https://github.com/evoila/meho/blob/main/docs/codebase/approvals.md). |
+| **v0.46.0** | The chart uses the `Recreate` update strategy: the old pod stops before the new one starts. An install made with an older chart has `RollingUpdate` and a `rollingUpdate` block on its live Deployment. | **Nothing to do.** Before a Helm 4 upgrade from such an install, the chart runs a short Job that removes the block. If an upgrade already failed with `spec.strategy.rollingUpdate: Forbidden`, see [Upgrade fails with `spec.strategy.rollingUpdate: Forbidden`](#upgrade-fails-with-specstrategyrollingupdate-forbidden). |
 
 The authoritative, always-current version of this table lives in
 [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes);

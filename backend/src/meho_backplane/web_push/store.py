@@ -13,7 +13,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import Insert, delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.web_push.endpoints import CheckedSubscription, push_service_name
@@ -21,8 +24,10 @@ from meho_backplane.web_push.models import PushSubscription
 
 __all__ = [
     "MAX_SUBSCRIPTIONS_PER_PERSON",
+    "PushStoreError",
     "SubscriptionView",
     "delete_own_by_endpoint",
+    "is_own_endpoint",
     "list_for_person",
     "list_for_tenant",
     "remove_subscription",
@@ -31,6 +36,17 @@ __all__ = [
 
 #: A person rarely has more browsers than this. Above it, the oldest go.
 MAX_SUBSCRIPTIONS_PER_PERSON = 10
+
+
+class PushStoreError(Exception):
+    """A database write failed. Carries no endpoint and no key.
+
+    SQLAlchemy errors quote the statement's values, which here are the
+    endpoint and the two keys. So the write functions raise this error
+    instead, without the original one attached, and a log of it shows
+    none of them. Each write runs in a savepoint, so after this error the
+    request's own transaction still works.
+    """
 
 
 @dataclass(frozen=True)
@@ -64,23 +80,51 @@ async def save_subscription(
     The endpoint names one browser. When it is stored already (the same
     browser switched on again, or another person now uses it), the row is
     replaced, so a browser belongs to the person who switched it on last.
-    Above :data:`MAX_SUBSCRIPTIONS_PER_PERSON` the person's oldest rows go.
+    One ``INSERT ... ON CONFLICT`` does this, so two saves of the same
+    browser at the same time both succeed. Above
+    :data:`MAX_SUBSCRIPTIONS_PER_PERSON` the person's oldest rows go.
+
+    Raises :class:`PushStoreError` when the database refuses the write.
     """
-    await db.execute(
-        delete(PushSubscription).where(PushSubscription.endpoint == subscription.endpoint)
-    )
-    db.add(
-        PushSubscription(
-            id=uuid.uuid4(),
-            operator_sub=operator_sub,
-            tenant_id=tenant_id,
-            endpoint=subscription.endpoint,
-            p256dh=subscription.p256dh,
-            auth=subscription.auth,
-            created_at=datetime.now(UTC),
-        )
-    )
-    await db.flush()
+    try:
+        async with db.begin_nested():
+            await _upsert(
+                db, operator_sub=operator_sub, tenant_id=tenant_id, subscription=subscription
+            )
+            await _drop_oldest(db, operator_sub=operator_sub)
+    except SQLAlchemyError:
+        raise PushStoreError("could not save the push subscription") from None
+
+
+async def _upsert(
+    db: AsyncSession,
+    *,
+    operator_sub: str,
+    tenant_id: uuid.UUID,
+    subscription: CheckedSubscription,
+) -> None:
+    values = {
+        "id": uuid.uuid4(),
+        "operator_sub": operator_sub,
+        "tenant_id": tenant_id,
+        "endpoint": subscription.endpoint,
+        "p256dh": subscription.p256dh,
+        "auth": subscription.auth,
+        "created_at": datetime.now(UTC),
+    }
+    replaced = {k: v for k, v in values.items() if k not in ("id", "endpoint")}
+    conn = await db.connection()
+    stmt: Insert
+    if conn.dialect.name == "postgresql":
+        pg = pg_insert(PushSubscription).values(**values)
+        stmt = pg.on_conflict_do_update(index_elements=["endpoint"], set_=replaced)
+    else:
+        lite = sqlite_insert(PushSubscription).values(**values)
+        stmt = lite.on_conflict_do_update(index_elements=["endpoint"], set_=replaced)
+    await db.execute(stmt)
+
+
+async def _drop_oldest(db: AsyncSession, *, operator_sub: str) -> None:
     rows = (
         await db.execute(
             select(PushSubscription.id)
@@ -95,14 +139,38 @@ async def save_subscription(
 
 
 async def delete_own_by_endpoint(db: AsyncSession, *, operator_sub: str, endpoint: str) -> bool:
-    """Delete this person's subscription of one browser; ``True`` when one was deleted."""
-    result = await db.execute(
-        delete(PushSubscription)
-        .where(PushSubscription.operator_sub == operator_sub)
-        .where(PushSubscription.endpoint == endpoint.strip())
-        .returning(PushSubscription.id)
-    )
-    return result.first() is not None
+    """Delete this person's subscription of one browser; ``True`` when one was deleted.
+
+    Raises :class:`PushStoreError` when the database refuses the write.
+    """
+    try:
+        async with db.begin_nested():
+            result = await db.execute(
+                delete(PushSubscription)
+                .where(PushSubscription.operator_sub == operator_sub)
+                .where(PushSubscription.endpoint == endpoint.strip())
+                .returning(PushSubscription.id)
+            )
+            deleted = result.first() is not None
+    except SQLAlchemyError:
+        raise PushStoreError("could not delete the push subscription") from None
+    return deleted
+
+
+async def is_own_endpoint(db: AsyncSession, *, operator_sub: str, endpoint: str) -> bool:
+    """``True`` when this person has a stored subscription for this browser.
+
+    Raises :class:`PushStoreError` when the database refuses the read.
+    """
+    try:
+        found = await db.execute(
+            select(PushSubscription.id)
+            .where(PushSubscription.operator_sub == operator_sub)
+            .where(PushSubscription.endpoint == endpoint.strip())
+        )
+    except SQLAlchemyError:
+        raise PushStoreError("could not read the push subscription") from None
+    return found.first() is not None
 
 
 async def list_for_person(db: AsyncSession, *, operator_sub: str) -> list[SubscriptionView]:

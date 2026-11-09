@@ -930,12 +930,26 @@ to `POST /ui/account/push/subscribe`. MEHO checks it
 - `p256dh` is a P-256 public key (65 bytes) and `auth` is 16 bytes, both
   base64url.
 
-MEHO stores the row in `push_subscription` (migration `0149`) for the
+MEHO stores the row in `push_subscription` (migration `0150`) for the
 signed-in person and the current tenant, with the time. The person and the
 tenant come from the session, never from the form. The endpoint names one
 browser, so it is unique: switching on again replaces the row, and when
 another person switches on the same browser, the browser moves to them. A
 person keeps at most ten browsers; the oldest go first.
+
+The save is one `INSERT ... ON CONFLICT (endpoint) DO UPDATE`, so two saves
+of the same browser at the same time both succeed. When the database
+refuses a write, the route answers 503 with one plain sentence. The store
+raises `PushStoreError` without the database error attached, because that
+error quotes the endpoint and the keys.
+
+**What the switch shows.** The switch shows "on" only when MEHO has this
+browser saved for the signed-in person, not only when the browser holds a
+subscription. The script asks `POST /ui/account/push/status` (form field
+`endpoint`; answer `{"on": true|false}`) when the page opens and again each
+time the list below reloads. So the switch shows "off" after a "Remove" in
+the list, and for a person who signs in on a browser that another person
+switched on.
 
 Switching off drops the subscription in the browser and posts
 `POST /ui/account/push/unsubscribe`, which deletes the person's own row for

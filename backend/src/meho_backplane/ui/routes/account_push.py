@@ -16,12 +16,19 @@ or while the push key is missing):
   person (from the session, never from the body).
 * ``POST /ui/account/push/unsubscribe`` -- form field ``endpoint``: deletes
   the person's own subscription of this browser.
+* ``POST /ui/account/push/status`` -- form field ``endpoint``: answers
+  ``{"on": true}`` when the signed-in person has a stored subscription for
+  this browser, else ``{"on": false}``. The switch shows this answer, not
+  only what the browser holds. It is a POST so the endpoint never lands in
+  a URL or an access log.
 * ``POST /ui/account/push/remove`` -- form field ``subscription_id``:
   deletes one subscription of the person, or (for a ``tenant_admin``) one
   made in the current tenant. Any other id is 404.
 
 The script ``static/src/app/push-subscribe.js`` drives the switch. Logs name
 the person, tenant, row id and push service, never the endpoint or keys.
+When the database refuses a write, the route answers 503 with one plain
+sentence and logs only the event name (:class:`PushStoreError`).
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_session
@@ -44,7 +51,9 @@ from meho_backplane.web_push.endpoints import (
 )
 from meho_backplane.web_push.keys import push_public_key
 from meho_backplane.web_push.store import (
+    PushStoreError,
     delete_own_by_endpoint,
+    is_own_endpoint,
     list_for_person,
     list_for_tenant,
     remove_subscription,
@@ -59,6 +68,16 @@ _require_ui_session_dep = Depends(require_ui_session)
 _get_session_dep = Depends(get_session)
 
 _NOT_FOUND = "Not Found"
+_STORE_FAILED = "MEHO could not store that just now. Try again."
+
+
+def _store_failed(event: str, session_ctx: UISessionContext) -> PlainTextResponse:
+    _log.warning(
+        event,
+        operator_sub=session_ctx.operator_sub,
+        tenant_id=str(session_ctx.tenant_id),
+    )
+    return PlainTextResponse(_STORE_FAILED, status_code=503)
 
 
 def _require_push_on() -> None:
@@ -111,12 +130,15 @@ async def _subscribe(
             reason=str(exc),
         )
         return PlainTextResponse(str(exc), status_code=422)
-    await save_subscription(
-        db_session,
-        operator_sub=session_ctx.operator_sub,
-        tenant_id=session_ctx.tenant_id,
-        subscription=checked,
-    )
+    try:
+        await save_subscription(
+            db_session,
+            operator_sub=session_ctx.operator_sub,
+            tenant_id=session_ctx.tenant_id,
+            subscription=checked,
+        )
+    except PushStoreError:
+        return _store_failed("ui_push_subscription_save_failed", session_ctx)
     _log.info(
         "ui_push_subscription_saved",
         operator_sub=session_ctx.operator_sub,
@@ -131,11 +153,14 @@ async def _unsubscribe(
     endpoint: str = Form(default=""),
     session_ctx: UISessionContext = _require_ui_session_dep,
     db_session: AsyncSession = _get_session_dep,
-) -> HTMLResponse:
+) -> Response:
     _require_push_on()
-    deleted = await delete_own_by_endpoint(
-        db_session, operator_sub=session_ctx.operator_sub, endpoint=endpoint
-    )
+    try:
+        deleted = await delete_own_by_endpoint(
+            db_session, operator_sub=session_ctx.operator_sub, endpoint=endpoint
+        )
+    except PushStoreError:
+        return _store_failed("ui_push_subscription_delete_failed", session_ctx)
     _log.info(
         "ui_push_subscription_switched_off",
         operator_sub=session_ctx.operator_sub,
@@ -143,6 +168,21 @@ async def _unsubscribe(
         deleted=deleted,
     )
     return await _render_list(request, session_ctx=session_ctx, db_session=db_session)
+
+
+async def _status(
+    endpoint: str = Form(default=""),
+    session_ctx: UISessionContext = _require_ui_session_dep,
+    db_session: AsyncSession = _get_session_dep,
+) -> Response:
+    _require_push_on()
+    try:
+        on = await is_own_endpoint(
+            db_session, operator_sub=session_ctx.operator_sub, endpoint=endpoint
+        )
+    except PushStoreError:
+        return _store_failed("ui_push_subscription_status_failed", session_ctx)
+    return JSONResponse({"on": on})
 
 
 async def _remove(
@@ -198,6 +238,13 @@ def build_account_push_router() -> APIRouter:
         methods=["POST"],
         name="ui_account_push_unsubscribe",
         response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/account/push/status",
+        _status,
+        methods=["POST"],
+        name="ui_account_push_status",
+        response_class=JSONResponse,
     )
     router.add_api_route(
         "/ui/account/push/remove",

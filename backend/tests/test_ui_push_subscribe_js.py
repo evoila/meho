@@ -9,6 +9,10 @@
 * MEHO refuses the subscription: the browser drops it again and the switch
   shows off, with MEHO's sentence.
 * Off: the browser drops the subscription and MEHO is told the endpoint.
+* The browser holds a subscription that MEHO has not saved for this person
+  (another person switched it on): the switch shows off.
+* The row is removed in the list: the switch turns off when the list
+  reloads.
 
 Skipped where ``node`` is missing; CI runners have it.
 """
@@ -40,7 +44,10 @@ const vm = require("vm");
 const scenario = process.argv[3];
 
 const out = { posts: [], events: [], subscribedWith: null, unsubscribed: false };
-let subscription = scenario === "off" ? makeSub() : null;
+const browserHasOne = ["off", "not-mine", "removed"].includes(scenario);
+let subscription = browserHasOne ? makeSub() : null;
+// What MEHO has saved for the signed-in person.
+let savedForMe = scenario === "off" || scenario === "removed";
 function makeSub() {
   return {
     endpoint: "https://fcm.googleapis.com/fcm/send/made-up",
@@ -76,8 +83,12 @@ const document = {
   cookie: "meho_csrf=tok123",
   querySelector: (sel) =>
     (sel === "[data-push-switch]" ? toggle : sel === "[data-push-status]" ? status : null),
-  body: { dispatchEvent: (e) => { out.events.push(e.type); } },
+  body: {
+    dispatchEvent: (e) => { out.events.push(e.type); },
+    addEventListener: (name, fn) => { bodyListeners[name] = fn; },
+  },
 };
+const bodyListeners = {};
 const window = {
   atob: (s) => Buffer.from(s, "base64").toString("binary"),
   mehoCsrfToken: {
@@ -88,6 +99,9 @@ const window = {
   Notification: {},
   fetch: async (path, init) => {
     out.posts.push({ path, headers: init.headers, body: init.body });
+    if (path === "/ui/account/push/status") {
+      return { ok: true, status: 200, json: async () => ({ on: savedForMe }) };
+    }
     if (scenario === "on-refused") {
       const text = async () => "The push endpoint is not a push service.";
       return { ok: false, status: 422, text };
@@ -109,6 +123,21 @@ const settle = () => new Promise((r) => setTimeout(r, 20));
 (async () => {
   await settle();
   out.startChecked = toggle.checked;
+  if (scenario === "not-mine") {
+    out.checked = toggle.checked;
+    out.disabled = toggle.disabled;
+    process.stdout.write(JSON.stringify(out));
+    return;
+  }
+  if (scenario === "removed") {
+    // A "Remove" in the list deletes the row; the list then reloads.
+    savedForMe = false;
+    bodyListeners["htmx:afterSettle"]({ target: { id: "account-push-subscriptions" } });
+    await settle();
+    out.checked = toggle.checked;
+    process.stdout.write(JSON.stringify(out));
+    return;
+  }
   toggle.checked = scenario !== "off";
   changeHandler();
   await settle();
@@ -172,6 +201,29 @@ def test_switch_off_drops_the_subscription_and_tells_meho(tmp_path: Path) -> Non
     out = _run(tmp_path, "off")
     assert out["startChecked"] is True
     assert out["unsubscribed"] is True
-    assert [p["path"] for p in out["posts"]] == ["/ui/account/push/unsubscribe"]
-    assert "endpoint=https%3A%2F%2Ffcm.googleapis.com" in out["posts"][0]["body"]
+    assert [p["path"] for p in out["posts"]] == [
+        "/ui/account/push/status",
+        "/ui/account/push/unsubscribe",
+    ]
+    assert out["posts"][0]["headers"]["X-CSRF-Token"] == "tok123"
+    assert "endpoint=https%3A%2F%2Ffcm.googleapis.com" in out["posts"][1]["body"]
     assert out["checked"] is False
+
+
+def test_a_browser_subscription_meho_has_not_saved_for_me_shows_off(tmp_path: Path) -> None:
+    out = _run(tmp_path, "not-mine")
+    assert [p["path"] for p in out["posts"]] == ["/ui/account/push/status"]
+    assert "endpoint=https%3A%2F%2Ffcm.googleapis.com" in out["posts"][0]["body"]
+    assert out["startChecked"] is False
+    assert out["disabled"] is False
+    assert out["unsubscribed"] is False
+
+
+def test_removing_the_row_turns_the_switch_off_when_the_list_reloads(tmp_path: Path) -> None:
+    out = _run(tmp_path, "removed")
+    assert out["startChecked"] is True
+    assert out["checked"] is False
+    assert [p["path"] for p in out["posts"]] == [
+        "/ui/account/push/status",
+        "/ui/account/push/status",
+    ]

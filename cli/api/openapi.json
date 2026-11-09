@@ -24025,6 +24025,45 @@
         }
       }
     },
+    "/ui/account/push/status": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Status",
+        "operationId": "ui_account_push_status_ui_account_push_status_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_push_status_ui_account_push_status_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/account/push/remove": {
       "post": {
         "tags": [
@@ -27664,6 +27703,17 @@
         },
         "type": "object",
         "title": "Body_ui_account_push_remove_ui_account_push_remove_post"
+      },
+      "Body_ui_account_push_status_ui_account_push_status_post": {
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_push_status_ui_account_push_status_post"
       },
       "Body_ui_account_push_subscribe_ui_account_push_subscribe_post": {
         "properties": {

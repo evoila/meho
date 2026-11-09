@@ -12,6 +12,12 @@
 // After each change the list below the switch reloads (event
 // "meho-push-changed").
 //
+// The switch shows "on" only when MEHO has this browser saved for the
+// signed-in person (/ui/account/push/status), not only when the browser
+// holds a subscription: the row may have been removed, or another person
+// may have switched it on. It checks again each time the list reloads, so
+// a "Remove" in the list turns the switch off.
+//
 // The requests carry the CSRF token and the page tenant, the same as htmx
 // requests (csrf-token.js, page-tenant.js). Plain first-party JS, no inline
 // script.
@@ -20,6 +26,9 @@
 
   var SUBSCRIBE_PATH = "/ui/account/push/subscribe";
   var UNSUBSCRIBE_PATH = "/ui/account/push/unsubscribe";
+  var STATUS_PATH = "/ui/account/push/status";
+  var LIST_ID = "account-push-subscriptions";
+  var CHECK_FAILED = "MEHO could not check this browser. Try again later.";
 
   // Decode a base64url text to the bytes the browser wants for
   // applicationServerKey.
@@ -65,6 +74,29 @@
           });
         }
         document.body.dispatchEvent(new CustomEvent("meho-push-changed"));
+      });
+  }
+
+  // True when MEHO has this browser saved for the signed-in person.
+  function savedForMe(subscription) {
+    if (!subscription) {
+      return Promise.resolve(false);
+    }
+    return window
+      .fetch(STATUS_PATH, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: headers(),
+        body: new URLSearchParams({ endpoint: subscription.endpoint }).toString(),
+      })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error(CHECK_FAILED);
+        }
+        return response.json();
+      })
+      .then(function (body) {
+        return !!(body && body.on);
       });
   }
 
@@ -123,30 +155,50 @@
     var publicKey = toggle.getAttribute("data-vapid-public-key") || "";
     navigator.serviceWorker.ready
       .then(function (registration) {
-        return registration.pushManager.getSubscription().then(function (subscription) {
-          toggle.checked = !!subscription;
-          toggle.disabled = false;
-          toggle.addEventListener("change", function () {
-            var wanted = toggle.checked;
-            toggle.disabled = true;
-            say("");
-            var work = wanted ? switchOn(registration, publicKey) : switchOff(registration);
-            work
-              .then(function () {
-                say(wanted ? "Notifications are on in this browser." : "Notifications are off in this browser.");
-              })
-              .catch(function (error) {
-                say(error && error.message ? error.message : "That did not work. Try again.");
-                // Show what the browser really has now.
-                return registration.pushManager.getSubscription().then(function (current) {
-                  toggle.checked = !!current;
-                });
-              })
-              .finally(function () {
-                toggle.disabled = false;
-              });
-          });
+        function showSaved() {
+          return registration.pushManager
+            .getSubscription()
+            .then(savedForMe)
+            .then(function (on) {
+              toggle.checked = on;
+            });
+        }
+        // The list reloads after every change, also after "Remove" in it.
+        document.body.addEventListener("htmx:afterSettle", function (event) {
+          if (event.target && event.target.id === LIST_ID && !toggle.disabled) {
+            showSaved().catch(function () {
+              say(CHECK_FAILED);
+            });
+          }
         });
+        return showSaved()
+          .catch(function () {
+            toggle.checked = false;
+            say(CHECK_FAILED);
+          })
+          .then(function () {
+            toggle.disabled = false;
+            toggle.addEventListener("change", function () {
+              var wanted = toggle.checked;
+              toggle.disabled = true;
+              say("");
+              var work = wanted ? switchOn(registration, publicKey) : switchOff(registration);
+              work
+                .then(function () {
+                  say(wanted ? "Notifications are on in this browser." : "Notifications are off in this browser.");
+                })
+                .catch(function (error) {
+                  say(error && error.message ? error.message : "That did not work. Try again.");
+                  // Show what MEHO really has now.
+                  return showSaved().catch(function () {
+                    toggle.checked = false;
+                  });
+                })
+                .finally(function () {
+                  toggle.disabled = false;
+                });
+            });
+          });
       })
       .catch(function () {
         say("This browser cannot show notifications here.");

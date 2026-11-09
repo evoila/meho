@@ -10,8 +10,10 @@
 * An endpoint that is not a browser maker's push service is refused.
 * A person removes only their own rows; a ``tenant_admin`` removes any row
   of their tenant, and none of another tenant.
+* ``/ui/account/push/status`` is on only for the person who saved the
+  browser, and off again after the row is removed.
 * The private push key, the endpoint and the subscription keys never appear
-  in a log line or an answer.
+  in a log line or an answer, also not when the database refuses a write.
 """
 
 from __future__ import annotations
@@ -33,12 +35,15 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import Tenant
+from meho_backplane.logging import configure_logging
+from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -47,12 +52,15 @@ from meho_backplane.ui.auth.session_store import create_session, reset_fernet_ca
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
+from meho_backplane.web_push import store as store_module
+from meho_backplane.web_push.endpoints import check_subscription
 from meho_backplane.web_push.keys import (
     new_private_key,
     public_key_for,
     reset_key_cache_for_testing,
 )
 from meho_backplane.web_push.models import PushSubscription
+from meho_backplane.web_push.store import save_subscription
 from tests._oidc_jwt_helpers import (
     AUDIENCE,
     ISSUER,
@@ -73,6 +81,7 @@ _SUBSCRIBE = "/ui/account/push/subscribe"
 _UNSUBSCRIBE = "/ui/account/push/unsubscribe"
 _REMOVE = "/ui/account/push/remove"
 _LIST = "/ui/account/push/subscriptions"
+_STATUS = "/ui/account/push/status"
 
 
 def _b64url(data: bytes) -> str:
@@ -147,7 +156,11 @@ def _seed_tenant(tenant_id: uuid.UUID, slug: str) -> None:
 
 
 def _client(
-    *, sub: str = _ME, tenant_id: uuid.UUID = _TENANT_A, role: TenantRole | None = None
+    *,
+    sub: str = _ME,
+    tenant_id: uuid.UUID = _TENANT_A,
+    role: TenantRole | None = None,
+    app: FastAPI | None = None,
 ) -> tuple[TestClient, respx.MockRouter]:
     """A signed-in client; with *role*, the role lift sees that role.
 
@@ -179,7 +192,7 @@ def _client(
             return made.id
 
     session_id = asyncio.run(_do())
-    client = TestClient(_app(), follow_redirects=False)
+    client = TestClient(app or _app(), follow_redirects=False)
     client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
     token = mint_csrf_token(str(session_id))
     client.cookies.set(CSRF_COOKIE_NAME, token)
@@ -209,7 +222,13 @@ def _ids_of(client: TestClient, sub: dict[str, str]) -> uuid.UUID:
 
 @pytest.mark.parametrize(
     ("method", "path"),
-    [("GET", _LIST), ("POST", _SUBSCRIBE), ("POST", _UNSUBSCRIBE), ("POST", _REMOVE)],
+    [
+        ("GET", _LIST),
+        ("POST", _SUBSCRIBE),
+        ("POST", _UNSUBSCRIBE),
+        ("POST", _STATUS),
+        ("POST", _REMOVE),
+    ],
 )
 def test_routes_answer_404_with_the_setting_off(
     monkeypatch: pytest.MonkeyPatch, method: str, path: str
@@ -303,6 +322,26 @@ def test_switch_on_twice_keeps_one_row_and_moves_the_browser_to_the_new_person()
         mock_other.stop()
     rows = _rows()
     assert [r.operator_sub for r in rows] == [_OTHER]
+
+
+def test_saving_the_same_browser_twice_in_one_transaction_keeps_one_row() -> None:
+    """The save is one ``INSERT ... ON CONFLICT``, so a second save of the
+    same browser replaces the row instead of hitting the unique constraint."""
+    first = check_subscription(**_subscription())
+    second = check_subscription(**{**_subscription(), "endpoint": first.endpoint})
+
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            for checked in (first, second):
+                await save_subscription(
+                    session, operator_sub=_ME, tenant_id=_TENANT_A, subscription=checked
+                )
+
+    asyncio.run(_do())
+    rows = _rows()
+    assert len(rows) == 1
+    assert rows[0].p256dh == second.p256dh
+    assert rows[0].auth == second.auth
 
 
 def test_a_person_keeps_at_most_ten_browsers() -> None:
@@ -459,6 +498,51 @@ def test_a_tenant_admin_cannot_remove_a_subscription_of_another_tenant() -> None
 
 
 # ---------------------------------------------------------------------------
+# Does MEHO have this browser for me?
+# ---------------------------------------------------------------------------
+
+
+def test_status_is_on_only_for_the_person_who_saved_the_browser() -> None:
+    sub = _subscription()
+    me, mock_me = _client()
+    other, mock_other = _client(sub=_OTHER)
+    try:
+        before = me.post(_STATUS, data={"endpoint": sub["endpoint"]})
+        assert me.post(_SUBSCRIBE, data=sub).status_code == 200
+        mine = me.post(_STATUS, data={"endpoint": sub["endpoint"]})
+        theirs = other.post(_STATUS, data={"endpoint": sub["endpoint"]})
+    finally:
+        mock_me.stop()
+        mock_other.stop()
+    assert before.status_code == 200, before.text
+    assert before.json() == {"on": False}
+    assert mine.json() == {"on": True}
+    assert theirs.json() == {"on": False}
+
+
+def test_status_is_off_after_the_row_is_removed() -> None:
+    sub = _subscription()
+    me, mock = _client()
+    try:
+        my_id = _ids_of(me, sub)
+        assert me.post(_REMOVE, data={"subscription_id": str(my_id)}).status_code == 200
+        after = me.post(_STATUS, data={"endpoint": sub["endpoint"]})
+    finally:
+        mock.stop()
+    assert after.json() == {"on": False}
+
+
+def test_status_needs_the_csrf_token() -> None:
+    client, mock = _client()
+    client.headers.pop("X-CSRF-Token")
+    try:
+        response = client.post(_STATUS, data={"endpoint": _subscription()["endpoint"]})
+    finally:
+        mock.stop()
+    assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # Secrets never in logs or answers
 # ---------------------------------------------------------------------------
 
@@ -494,3 +578,37 @@ def test_keys_and_endpoint_never_reach_a_log_or_an_answer(
 
 def test_settings_repr_hides_the_private_key() -> None:
     assert _PRIVATE_KEY not in repr(get_settings())
+
+
+def test_a_failed_write_logs_no_endpoint_and_no_key(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A database error quotes the statement's values; none of them may reach
+    the log written by the real logging setup and request middleware."""
+    sub = _subscription()
+
+    async def _refused(*_args: Any, **_kwargs: Any) -> None:
+        raise IntegrityError(
+            "INSERT INTO push_subscription (endpoint, p256dh, auth) VALUES (?, ?, ?)",
+            (sub["endpoint"], sub["p256dh"], sub["auth"]),
+            Exception("UNIQUE constraint failed: push_subscription.endpoint"),
+        )
+
+    monkeypatch.setattr(store_module, "_upsert", _refused)
+    configure_logging()
+    app = _app()
+    app.add_middleware(RequestContextMiddleware)
+    client, mock = _client(app=app)
+    try:
+        response = client.post(_SUBSCRIBE, data=sub)
+    finally:
+        mock.stop()
+    out, err = capfd.readouterr()
+    assert response.status_code == 503
+    assert "Try again" in response.text
+    assert "ui_push_subscription_save_failed" in out
+    for text in (out, err, response.text):
+        assert sub["endpoint"] not in text
+        assert sub["p256dh"] not in text
+        assert sub["auth"] not in text
+    assert _rows() == []

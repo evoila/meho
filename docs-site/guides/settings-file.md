@@ -78,8 +78,8 @@ spec:
       MEHO accepts this key and ignores it, because that switch no
       longer exists.
       `knowledge_wiki_collection` names the docs collection of the
-      tenant's team wiki (see
-      [Lessons in a team wiki](memory-and-knowledge.md#lessons-in-a-team-wiki)).
+      tenant's own wiki (see
+      [Lessons in your own wiki](memory-and-knowledge.md#lessons-in-your-own-wiki)).
     - `conventions`: the tenant's conventions, one per `slug`.
     - `targets`: the tenant's targets, one per `name`. A target has the
       same fields as when you register it (see

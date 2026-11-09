@@ -7,6 +7,7 @@
 **Groups from:** [login-role-groups.md](login-role-groups.md) ([#3959](https://github.com/evoila/meho/issues/3959))
 **Narrows:** requirement 1 of [governed-delete-operations.md](governed-delete-operations.md), only the "no self-approval" clause, and only for MEHO-SA-Operators and MEHO-Admins
 **Replaces:** the "DENY for agent principals" rule for `destructive` changes in [governed-delete-operations.md](governed-delete-operations.md)
+**Superseded in part by:** [configurable policy](2026-11-09-configurable-policy.md) (proposed, waits for the owner's confirmation). It replaces the section "No exceptions": categories, custom roles and routing may give different rules per connector, operation group and operation. The rest of this record stays.
 
 ## The decision in short
 

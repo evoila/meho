@@ -135,6 +135,9 @@ from meho_backplane.api.v1.service_grants import router as api_v1_service_grants
 from meho_backplane.api.v1.service_read_scopes import (
     router as api_v1_service_read_scopes_router,
 )
+from meho_backplane.api.v1.sessions import (
+    router as api_v1_sessions_router,
+)
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.tenants import router as api_v1_tenants_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
@@ -239,6 +242,11 @@ from meho_backplane.request_usage.retention import (
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.sandbox_mode import assert_sandbox_mode_consistent
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
+from meho_backplane.session_store.config import load_config as load_session_store_config
+from meho_backplane.session_store.retention import (
+    start_session_store_cleanup,
+    stop_session_store_cleanup,
+)
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
     start_topology_history_retention_sweeper,
@@ -591,6 +599,7 @@ class _BackgroundTasks:
     announcement_retention: asyncio.Task[None] | None
     evidence_retention: asyncio.Task[None] | None
     request_usage_retention: asyncio.Task[None] | None
+    session_store_cleanup: asyncio.Task[None] | None
     audit_raw_payload_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
@@ -673,6 +682,12 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     request_usage_retention: asyncio.Task[None] | None = None
     if settings.request_usage_retention_days is not None:
         request_usage_retention = start(start_request_usage_retention_sweeper)
+    # #4901 -- agent session store cleanup. Gated on
+    # SESSION_STORE_CLEANUP_ENABLED; a run does nothing while the store is
+    # not configured.
+    session_store_cleanup: asyncio.Task[None] | None = None
+    if load_session_store_config().cleanup_enabled:
+        session_store_cleanup = start(start_session_store_cleanup)
     # Security review S19 #307 — audit_log.raw_payload age-off. Gated on
     # RAW_PAYLOAD_PRUNE_ENABLED so operators with an external age-off can skip
     # the loop. ``RETENTION_DAYS=0`` keeps the loop running as a no-op
@@ -767,6 +782,7 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
         announcement_retention=announcement_retention,
         evidence_retention=evidence_retention,
         request_usage_retention=request_usage_retention,
+        session_store_cleanup=session_store_cleanup,
         audit_raw_payload_retention=audit_raw_payload_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
@@ -832,6 +848,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.audit_raw_payload_retention is not None:
         await stop_audit_raw_payload_reaper(tasks.audit_raw_payload_retention)
+    if tasks.session_store_cleanup is not None:
+        await stop_session_store_cleanup(tasks.session_store_cleanup)
     if tasks.request_usage_retention is not None:
         await stop_request_usage_retention_sweeper(tasks.request_usage_retention)
     if tasks.evidence_retention is not None:
@@ -1309,6 +1327,10 @@ app.include_router(api_v1_agent_principals_router)
 # the JWT; cross-tenant probes return 404. The minted runner token is caged
 # to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
 app.include_router(api_v1_runner_principals_router)
+# #4901 -- the agent session store: upload, list, show, download, delete and
+# the tenant's retention period. Person-only; rights per route in
+# session_store/rights.py; every call writes its own audit row.
+app.include_router(api_v1_sessions_router)
 # Initiative #2415 (#2498) -- outbound long-poll command plane (runner-facing).
 # GET /gateway/{runner}/next (blocking long-poll: 200 with a claimed command
 # envelope or 204 on timeout) + POST /gateway/{runner}/result (200 / 404 / 409).

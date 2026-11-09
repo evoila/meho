@@ -188,6 +188,11 @@ them at once.
   The anchor name is never shown back.
 - The file is parsed and checked in a worker thread, not on the event loop,
   so a large file does not hold up other requests.
+- The secret check reads each string a fixed number of times, so its time
+  grows in step with the file size. A string or key longer than 64,000
+  characters (the longest field, a convention body) is refused with its
+  path before the secret check runs. A long key is named by the path of its
+  mapping, never by itself. Nothing else is checked, as with a secret.
 - `!!binary`, `!!pairs`, `!!omap` and `!!set` values are refused and never
   built: each would hide its contents from the secret check and reach JSON
   as readable text. Nothing else is checked, as with a secret.

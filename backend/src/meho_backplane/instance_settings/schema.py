@@ -35,6 +35,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import pairwise
 from typing import Annotated, Any, Final, Literal
 from uuid import UUID
 
@@ -58,12 +59,14 @@ __all__ = [
     "API_VERSION",
     "KIND",
     "MAX_FILE_BYTES",
+    "MAX_STRING_CHARS",
     "ParsedSettings",
     "SettingsConvention",
     "SettingsFile",
     "SettingsTarget",
     "SettingsTenant",
     "TenantPolicies",
+    "find_over_long_strings",
     "find_secret_shaped_values",
     "format_validation_errors",
     "parse_settings_file",
@@ -77,6 +80,10 @@ KIND: Final[str] = "Settings"
 #: Refuse anything larger before parsing it. A settings file for a large
 #: site (hundreds of targets, dozens of conventions) is well under 1 MiB.
 MAX_FILE_BYTES: Final[int] = 4 * 1024 * 1024
+
+#: The longest text the file holds in one place: a convention body. A longer
+#: string or key is refused before the secret check reads it.
+MAX_STRING_CHARS: Final[int] = 64_000
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +148,7 @@ class SettingsConvention(_Strict):
 
     slug: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")
     title: str = Field(default="", min_length=1, max_length=200)
-    body: str = Field(min_length=1, max_length=64_000)
+    body: str = Field(min_length=1, max_length=MAX_STRING_CHARS)
     kind: ConventionKind = ConventionKind.REFERENCE
     priority: StrictInt = Field(default=0, ge=-32768, le=32767)
 
@@ -370,11 +377,14 @@ _DuplicateKeyLoader.add_constructor("tag:yaml.org,2002:timestamp", _construct_ti
 # Secret-shaped values
 # ---------------------------------------------------------------------------
 
-_PEM_PRIVATE_KEY_RE: Final = re.compile(
-    r"-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----.+?-----END ([A-Z0-9 ]+ )?PRIVATE KEY-----",
-    re.DOTALL,
-)
-_JWT_RE: Final = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")
+# Each check reads the text a fixed number of times, so its time grows in
+# step with the length of the text. MEHO runs these checks in one process
+# for every tenant, and a regex search holds the interpreter lock.
+_PEM_BEGIN_RE: Final = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
+_PEM_END_RE: Final = re.compile(r"-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
+_B64URL_RUN_RE: Final = re.compile(r"[A-Za-z0-9_-]+")
+#: The shortest JWT header or payload part: ``eyJ`` and eight more characters.
+_JWT_PART_MIN: Final = 11
 _BASE64_RE: Final = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
 #: Raw symmetric-key sizes (AES-128/192/256, HMAC-384/512, Fernet = 32).
 _BINARY_KEY_LENGTHS: Final[frozenset[int]] = frozenset({16, 24, 32, 48, 64})
@@ -417,9 +427,50 @@ def _looks_like_der_private_key(data: bytes) -> bool:
     return len(data) >= 64 and data[0] == 0x30 and b"\x02\x01\x00" in data[2:8]
 
 
+def _has_pem_private_key(text: str) -> bool:
+    # The first BEGIN line ends first, so one END line after it is enough.
+    begin = _PEM_BEGIN_RE.search(text)
+    return begin is not None and _PEM_END_RE.search(text, begin.end() + 1) is not None
+
+
+def _jwt_header_start(text: str, start: int, end: int) -> int | None:
+    """Where a JWT header can start in the run ``text[start:end]``, or ``None``.
+
+    The header starts at the first ``eyJ`` that follows no letter, digit or
+    ``_`` and leaves at least :data:`_JWT_PART_MIN` characters to the end of
+    the run. A later ``eyJ`` in the same run is always shorter.
+    """
+    pos = text.find("eyJ", start, end)
+    while pos != -1 and end - pos >= _JWT_PART_MIN:
+        before = text[pos - 1] if pos > 0 else ""
+        if not (before.isalnum() or before == "_"):
+            return pos
+        pos = text.find("eyJ", pos + 1, end)
+    return None
+
+
+def _jwt_headers(text: str) -> list[str]:
+    """Each header of a ``<header>.<payload>.<signature>`` shape in *text*.
+
+    The text is split once into runs of base64url characters. A header run
+    is followed by a dot, then a payload run that starts with ``eyJ``, then
+    a dot.
+    """
+    runs = [m.span() for m in _B64URL_RUN_RE.finditer(text)]
+    headers: list[str] = []
+    for (start, end), (p_start, p_end) in pairwise(runs):
+        if p_start != end + 1 or text[end] != "." or text[p_end : p_end + 1] != ".":
+            continue
+        if p_end - p_start < _JWT_PART_MIN or not text.startswith("eyJ", p_start):
+            continue
+        header_start = _jwt_header_start(text, start, end)
+        if header_start is not None:
+            headers.append(text[header_start:end])
+    return headers
+
+
 def _jwt_shaped(text: str) -> bool:
-    for match in _JWT_RE.finditer(text):
-        header = match.group(0).split(".", 1)[0]
+    for header in _jwt_headers(text):
         try:
             decoded = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
         except (binascii.Error, ValueError):
@@ -433,7 +484,7 @@ def _secret_kind(text: str) -> str | None:
     """Name what *text* looks like ("a private key", "a JWT", ...) or ``None``."""
     if _MASK_RE.match(text.strip()):
         return "a mask"
-    if _PEM_PRIVATE_KEY_RE.search(text):
+    if _has_pem_private_key(text):
         return "a private key"
     if _jwt_shaped(text):
         return "a JWT"
@@ -442,7 +493,7 @@ def _secret_kind(text: str) -> str | None:
         return None
     if not _is_binary(decoded):
         inner = decoded.decode("utf-8")
-        if _PEM_PRIVATE_KEY_RE.search(inner):
+        if _has_pem_private_key(inner):
             return "a base64-encoded private key"
         if _jwt_shaped(inner):
             return "a base64-encoded JWT"
@@ -500,6 +551,34 @@ def find_secret_shaped_values(data: Any, loc: tuple[int | str, ...] = ()) -> lis
             sentences.extend(find_secret_shaped_values(item, (*loc, index)))
     elif isinstance(data, str) and (kind := _secret_kind(data)):
         sentences.append(_secret_sentence(loc, kind, is_key=False))
+    return sentences
+
+
+def find_over_long_strings(data: Any, loc: tuple[int | str, ...] = ()) -> list[str]:
+    """Walk *data* and return one sentence per string or key over the limit.
+
+    The limit is :data:`MAX_STRING_CHARS`. A long key is named by the path of
+    its mapping, never by itself, and its value is not walked.
+    """
+    sentences: list[str] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(key, str) and len(key) > MAX_STRING_CHARS:
+                sentences.append(
+                    f"`{render_path(loc)}` has a key name longer than "
+                    f"{MAX_STRING_CHARS:,} characters; the settings file holds no text "
+                    f"that long."
+                )
+                continue
+            sentences.extend(find_over_long_strings(value, (*loc, str(key))))
+    elif isinstance(data, list | tuple | set | frozenset):
+        for index, item in enumerate(data):
+            sentences.extend(find_over_long_strings(item, (*loc, index)))
+    elif isinstance(data, str) and len(data) > MAX_STRING_CHARS:
+        sentences.append(
+            f"`{render_path(loc)}` is longer than {MAX_STRING_CHARS:,} characters; "
+            f"the settings file holds no text that long."
+        )
     return sentences
 
 
@@ -610,12 +689,13 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
     """Parse and check *content*; collect every mistake as one sentence each.
 
     Order: size and encoding, YAML syntax (anchors and aliases are refused),
-    repeated keys, refused YAML types, ``apiVersion``, secret-shaped values,
-    the model, repeated items. All checks that can run do run, so a file with
+    repeated keys, refused YAML types, ``apiVersion``, over-long strings,
+    secret-shaped values, the model, repeated items. All checks that can run do run, so a file with
     an unknown key, an unknown ``apiVersion`` and a
-    target with no host yields three sentences. The one exception is a
-    secret: once one is found nothing else is checked and no model is
-    returned, so no later check (or the import) ever handles the value.
+    target with no host yields three sentences. The exceptions are an
+    over-long string and a secret: once one is found nothing else is checked
+    and no model is returned, so no later check (or the import) ever handles
+    the value.
     """
     loaded = _load_yaml(content)
     if isinstance(loaded, str):
@@ -645,6 +725,10 @@ def parse_settings_file(content: bytes) -> ParsedSettings:
     api_version = raw.get("apiVersion")
     if api_version is not None and api_version != API_VERSION:
         mistakes.append(f"`apiVersion` is not a file format this MEHO reads; use `{API_VERSION}`.")
+    too_long = find_over_long_strings(raw)
+    if too_long:
+        # Stop like a secret does: the secret check never read these values.
+        return ParsedSettings(None, [*mistakes, *too_long])
     secrets = find_secret_shaped_values(raw)
     if secrets:
         # Stop here: no later check may see, and so repeat, a refused value.

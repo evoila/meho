@@ -207,6 +207,17 @@ async def test_a_token_create_may_reuse_the_name_of_a_removed_target(client: Tes
     _assert_waits(response, "targets.register")
 
 
+async def test_a_token_change_against_the_stored_ca_pin_answers_422_at_once(
+    client: TestClient,
+) -> None:
+    await _insert_target(name=_EXISTING, host=_EXISTING_HOST, tls_ca_pin="stored-pem")
+    response = _send(client, "PATCH", f"/api/v1/targets/{_EXISTING}", {"verify_tls": False})
+
+    assert response.status_code == 422, response.text
+    assert "mutually exclusive" in response.text
+    assert await _requests() == []
+
+
 async def test_a_token_change_waits_and_runs_on_the_same_target_id(client: TestClient) -> None:
     row = await _insert_target(name=_EXISTING, host=_EXISTING_HOST, aliases=["old-alias"])
     response = _send(client, "PATCH", "/api/v1/targets/old-alias", {"host": "other.example"})

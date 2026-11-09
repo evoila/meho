@@ -66,8 +66,10 @@ re-run of a failed approved call by the requester, also a service login.
   `DELETE` look the target up first and send its id, so the approved
   change goes to the target the approver saw. Checks that need no write
   run first and answer at once: the create and update checks (product,
-  `preferred_impl_id`, `secret_ref` scope, Vault login keys), 404 for an
-  unknown target, and 409
+  `preferred_impl_id`, `secret_ref` scope, Vault login keys), the TLS
+  check of `PATCH` on the stored row with the sent fields (a `tls_ca_pin`
+  with `verify_tls: false`), 409 for a `POST` whose name a live target of
+  the tenant already has, 404 for an unknown target, and 409
   `target_has_references` for a delete without `force`. Nothing is written until a person approves it. The CLI
   prints the approval id and exits 0.
 - Only a person in the web interface (`Operator.web_session`) writes at

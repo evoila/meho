@@ -2115,6 +2115,7 @@ async def update_target_route(
         return await update_target(name=name, body=body, operator=operator, session=session)
     t = await resolve_route_target(session, operator.tenant_id, name)
     updates = body.model_dump(mode="json", exclude_unset=True)
+    _enforce_merged_tls_trust_exclusion(t, updates)
     _validate_update_body_fields(dict(updates), t, operator)
     return await _dispatch_targets_write(
         operator, "targets.update", {"target_id": str(t.id), **updates}

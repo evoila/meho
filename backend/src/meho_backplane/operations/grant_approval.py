@@ -38,7 +38,17 @@ Right before an approved change runs, :func:`grant_changed_since_request`
 resolves the login and the group again against the live system. When a
 name now names another login or group, or cannot be read, the change does
 not run. So the approval binds the change to the ids the approver saw,
-not to a name that can move while the request waits.
+not to a name that can move while the request waits. The same check
+compares the facts that decided who may approve with the live system, so
+they also bind the run:
+
+* A change of a group's attributes in the login realm does not run when
+  the person who approved it is in the group now, or when MEHO cannot read
+  who is in the group. A person can join the group after the request was
+  made, so the list saved with the request is not enough.
+* The change does not run when it now needs a stricter approval than the
+  one it got: the realm became a login realm, the group became the platform
+  admin group, or MEHO cannot read which case it is.
 
 The decision audit row names the login the change is for and says whether
 it is the approver (:func:`grant_audit_fields`).
@@ -58,7 +68,9 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import ApprovalRequest
 
 __all__ = [
+    "GRANT_REASON_APPROVER_IN_GROUP",
     "GRANT_REASON_CHANGED",
+    "GRANT_REASON_STRICTER",
     "GRANT_REASON_UNREADABLE",
     "GrantFacts",
     "check_grant_approval",
@@ -78,9 +90,23 @@ GRANT_REASON_CHANGED: Final[str] = (
 
 #: Why a run was refused: the login or group could not be read again.
 GRANT_REASON_UNREADABLE: Final[str] = (
-    "MEHO could not read the login or group this change is for, so it could not "
-    "check that it is still the one on the approval card. The operation did not "
-    "run. Send a new request."
+    "MEHO could not read the login or group this change is for, or who is in the "
+    "group, so it could not check that the change is still the one on the approval "
+    "card. The operation did not run. Send a new request."
+)
+
+#: Why a run was refused: the approver joined the group while the request waited.
+GRANT_REASON_APPROVER_IN_GROUP: Final[str] = (
+    "The person who approved this change is now in the group it changes, so the "
+    "change is for their own login too. The operation did not run. Send a new "
+    "request, and ask a second person who is not in the group to approve it."
+)
+
+#: Why a run was refused: the change needs a stricter approval than it got.
+GRANT_REASON_STRICTER: Final[str] = (
+    "This change now needs a stricter approval than the one it got: the realm or "
+    "group it is for changed while the request waited, or MEHO could not read it. "
+    "The operation did not run. Send a new request."
 )
 
 
@@ -135,6 +161,10 @@ def _first_text(params: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     return next((v for k in keys if (v := _text(params.get(k)))), None)
 
 
+def _member_ids(raw: Any) -> tuple[str, ...] | None:
+    return tuple(m for m in raw if isinstance(m, str)) if isinstance(raw, list) else None
+
+
 def _stamp(request: ApprovalRequest) -> dict[str, Any]:
     preview = (request.proposed_effect or {}).get("preview")
     stamp = preview.get("grant") if isinstance(preview, dict) else None
@@ -148,10 +178,6 @@ def grant_facts(request: ApprovalRequest) -> GrantFacts | None:
         return None
     params = request.params if isinstance(request.params, dict) else {}
     stamp = _stamp(request)
-    members_raw = stamp.get("members")
-    members = None
-    if isinstance(members_raw, list):
-        members = tuple(m for m in members_raw if isinstance(m, str))
     return GrantFacts(
         for_login=bool(op.user_id_params),
         for_group=bool(op.group_id_params),
@@ -159,7 +185,7 @@ def grant_facts(request: ApprovalRequest) -> GrantFacts | None:
         group_id=_first_text(params, op.group_id_params) or _text(stamp.get("group_id")),
         login_realm=stamp.get("login_realm") is not False,
         platform_admin=stamp.get("platform_admin") is not False,
-        members=members,
+        members=_member_ids(stamp.get("members")),
     )
 
 
@@ -301,9 +327,12 @@ async def grant_changed_since_request(
     (:func:`~meho_backplane.operations.approval_object_check.live_card`)
     and compares the login and the group it names with the ones the
     approver saw. Returns :data:`GRANT_REASON_UNREADABLE` when the card
-    does not build or names no login or group, :data:`GRANT_REASON_CHANGED`
-    when a name now names another id, and ``None`` for a request that is
-    not a change of rights or whose ids are the approved ones.
+    does not build, names no login or group, or cannot say who is in the
+    group, :data:`GRANT_REASON_CHANGED` when a name now names another id,
+    :data:`GRANT_REASON_STRICTER` when the change now needs a stricter
+    approval, :data:`GRANT_REASON_APPROVER_IN_GROUP` when the approver is
+    now in the group the change is for, and ``None`` for a request that
+    is not a change of rights or for which all of this still holds.
     """
     facts = grant_facts(request)
     if facts is None:
@@ -327,6 +356,19 @@ async def grant_changed_since_request(
     if not isinstance(live, dict):
         _log.warning("approval_resume_grant_unreadable", **log_fields)
         return GRANT_REASON_UNREADABLE
+    reason = (
+        _id_moved(facts, live)
+        or _stricter_now(facts, live)
+        or _approver_joined_group(request, facts, live)
+    )
+    if reason is not None:
+        kind = "unreadable" if reason == GRANT_REASON_UNREADABLE else "changed"
+        _log.warning(f"approval_resume_grant_{kind}", **log_fields)
+    return reason
+
+
+def _id_moved(facts: GrantFacts, live: dict[str, Any]) -> str | None:
+    """Why the login or the group on the live card is not the approved one."""
     checks: list[tuple[str | None, str | None]] = []
     if facts.for_login:
         checks.append((facts.user_id, _text(live.get("user_id"))))
@@ -334,9 +376,28 @@ async def grant_changed_since_request(
         checks.append((facts.group_id, _text(live.get("group_id"))))
     for approved, now in checks:
         if now is None:
-            _log.warning("approval_resume_grant_unreadable", **log_fields)
             return GRANT_REASON_UNREADABLE
         if approved is None or not _same_login(approved, now):
-            _log.warning("approval_resume_grant_changed", **log_fields)
             return GRANT_REASON_CHANGED
+    return None
+
+
+def _stricter_now(facts: GrantFacts, live: dict[str, Any]) -> str | None:
+    """Why the live change needs a stricter approval than the one it got."""
+    realm_is_stricter = not facts.login_realm and live.get("login_realm") is not False
+    group_is_stricter = not facts.platform_admin and live.get("platform_admin") is not False
+    return GRANT_REASON_STRICTER if realm_is_stricter or group_is_stricter else None
+
+
+def _approver_joined_group(
+    request: ApprovalRequest, facts: GrantFacts, live: dict[str, Any]
+) -> str | None:
+    """Why the person who approved a group change is not outside the group now."""
+    if not facts.login_realm or facts.for_login or not facts.for_group:
+        return None
+    members = _member_ids(live.get("members"))
+    if members is None or request.reviewed_by is None:
+        return GRANT_REASON_UNREADABLE
+    if any(_same_login(member, request.reviewed_by) for member in members):
+        return GRANT_REASON_APPROVER_IN_GROUP
     return None

@@ -973,6 +973,18 @@ change of rights, also without a preview hash, in the shared resume check
 `refuse_resume_if_preview_changed` (the approve surfaces and the agent's
 own resume) and in the re-run after a failure (`approval_rerun`).
 
+**The run is also bound to the facts that decided who may approve.** The
+same check refuses the run:
+
+- for a group attribute change in the login realm, when the approver
+  (`reviewed_by`) is in the group now. A person can join the group after
+  the request was made, so the saved member list is not enough. When the
+  live member list cannot be read, or no approver is recorded, the run is
+  refused too;
+- when the change now needs a stricter approval than the one it got: the
+  live card says login realm or platform admin where the saved one said
+  no, or cannot say which it is.
+
 ## The "may I approve this?" answer (#3329)
 
 People see, for each request, whether they may approve it and why not.

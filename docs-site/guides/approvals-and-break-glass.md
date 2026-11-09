@@ -233,6 +233,12 @@ The approval is for the login and the group as they were when the request
 was made. If a user name or a group name points at another account or group
 when the approved change runs, the change does not run. Send a new request.
 
+MEHO also checks again, right before the change runs and on each retry, who
+is in the group. If the person who approved a change of a group's attributes
+is in that group now, or MEHO cannot read who is in the group, the change does
+not run. The same happens when the change now needs a stricter approval than
+the one it got. Send a new request.
+
 The decision record in the audit log names the login the change is for and
 says whether it is the approver.
 

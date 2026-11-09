@@ -12,6 +12,9 @@
 * The decision audit row names the login the change is for.
 * Right before the approved change runs, the login and the group must
   still have the ids the approver saw.
+* Right before the approved change runs, the approver must still be
+  outside the group whose attributes change, and the change must not need
+  a stricter approval than the one it got.
 """
 
 from __future__ import annotations
@@ -38,9 +41,12 @@ from meho_backplane.operations.approval_queue import (
     create_pending_request,
     refuse_resume_if_preview_changed,
 )
+from meho_backplane.operations.approval_rerun import _object_changed
 from meho_backplane.operations.approval_rights import approve_right
 from meho_backplane.operations.grant_approval import (
+    GRANT_REASON_APPROVER_IN_GROUP,
     GRANT_REASON_CHANGED,
+    GRANT_REASON_STRICTER,
     GRANT_REASON_UNREADABLE,
     grant_changed_since_request,
 )
@@ -441,7 +447,15 @@ async def test_the_run_goes_ahead_when_the_ids_are_the_approved_ones(
 ) -> None:
     params = {"group_name": "role-x", "username": "second-login"}
     request = await _row(await _park(params, _grant(user_id=_OTHER_USER)))
-    _live_grant(monkeypatch, {"user_id": _OTHER_USER.upper(), "group_id": _GROUP})
+    _live_grant(
+        monkeypatch,
+        {
+            "user_id": _OTHER_USER.upper(),
+            "group_id": _GROUP,
+            "login_realm": True,
+            "platform_admin": False,
+        },
+    )
 
     reason = await grant_changed_since_request(_person("person-admin"), request, None, params)
 
@@ -482,6 +496,147 @@ async def test_the_resume_check_refuses_a_moved_login_without_a_preview_hash(
     stored = await _row(request.id)
     assert stored.resume_result is not None
     assert stored.resume_result["extras"]["error_code"] == "object_changed_since_approval"
+
+
+_ATTR_PARAMS: dict[str, Any] = {"id": _GROUP, "attributes": {"tenant_role": ["admin"]}}
+_APPROVER = "55555555-5555-5555-5555-555555555555"
+
+
+def _live_group(members: list[str] | None, **more: Any) -> dict[str, Any]:
+    return {
+        "group_id": _GROUP,
+        "login_realm": True,
+        "platform_admin": False,
+        "members": members,
+        **more,
+    }
+
+
+async def _approved_group_change() -> ApprovalRequest:
+    """A group attribute change that the approver passed while outside the group."""
+    request_id = await _park(_ATTR_PARAMS, _grant(members=[_OTHER_USER]), op_id=_ATTRS)
+    await _approve(request_id, _person(_APPROVER), _ATTR_PARAMS)
+    return await _row(request_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approver", [_APPROVER, _APPROVER.upper()])
+async def test_the_run_is_refused_when_the_approver_joined_the_group(
+    monkeypatch: pytest.MonkeyPatch, approver: str
+) -> None:
+    """The saved member list does not have the approver. The live one does."""
+    request = await _approved_group_change()
+    _live_grant(monkeypatch, _live_group([_OTHER_USER, approver]))
+
+    # The run uses the identity of the requester, not the approver.
+    reason = await grant_changed_since_request(_person(_REQUESTER), request, None, _ATTR_PARAMS)
+
+    assert reason == GRANT_REASON_APPROVER_IN_GROUP
+
+
+@pytest.mark.asyncio
+async def test_the_resume_check_refuses_when_the_approver_joined_the_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = await _approved_group_change()
+    _live_grant(monkeypatch, _live_group([_APPROVER]))
+
+    refusal = await refuse_resume_if_preview_changed(
+        _person(_REQUESTER), request, None, _ATTR_PARAMS
+    )
+
+    assert refusal is not None
+    assert refusal.extras is not None
+    assert refusal.extras["error_code"] == "object_changed_since_approval"
+    assert refusal.extras["reason"] == GRANT_REASON_APPROVER_IN_GROUP
+
+
+@pytest.mark.asyncio
+async def test_a_retry_is_refused_when_the_approver_joined_the_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = await _approved_group_change()
+    _live_grant(monkeypatch, _live_group([_APPROVER]))
+
+    assert await _object_changed(_person(_REQUESTER), request, None, _ATTR_PARAMS) is True
+
+
+@pytest.mark.asyncio
+async def test_a_retry_goes_ahead_when_the_approver_is_outside_the_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = await _approved_group_change()
+    _live_grant(monkeypatch, _live_group([_OTHER_USER]))
+
+    assert await _object_changed(_person(_REQUESTER), request, None, _ATTR_PARAMS) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live", [_live_group(None), {**_live_group(None), "members": "odd"}])
+async def test_the_run_is_refused_when_members_cannot_be_read_again(
+    monkeypatch: pytest.MonkeyPatch, live: dict[str, Any]
+) -> None:
+    request = await _approved_group_change()
+    _live_grant(monkeypatch, live)
+
+    reason = await grant_changed_since_request(_person(_REQUESTER), request, None, _ATTR_PARAMS)
+
+    assert reason == GRANT_REASON_UNREADABLE
+
+
+@pytest.mark.asyncio
+async def test_the_run_is_refused_when_the_approver_is_not_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group change with no approver on the row is refused, never allowed."""
+    request_id = await _park(_ATTR_PARAMS, _grant(members=[_OTHER_USER]), op_id=_ATTRS)
+    request = await _row(request_id)
+    assert request.reviewed_by is None
+    _live_grant(monkeypatch, _live_group([_OTHER_USER]))
+
+    reason = await grant_changed_since_request(_person(_REQUESTER), request, None, _ATTR_PARAMS)
+
+    assert reason == GRANT_REASON_UNREADABLE
+
+
+@pytest.mark.asyncio
+async def test_a_group_change_outside_the_login_realm_reads_no_members_at_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_id = await _park(_ATTR_PARAMS, _grant(login_realm=False, members=None), op_id=_ATTRS)
+    await _approve(request_id, _person(_APPROVER), _ATTR_PARAMS)
+    _live_grant(monkeypatch, _live_group(None, login_realm=False))
+
+    reason = await grant_changed_since_request(
+        _person(_REQUESTER), await _row(request_id), None, _ATTR_PARAMS
+    )
+
+    assert reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approved", "live_change"),
+    [
+        ({"platform_admin": False}, {"platform_admin": True}),
+        ({"platform_admin": False}, {"platform_admin": None}),
+        ({"login_realm": False, "members": None}, {"login_realm": True}),
+        ({"login_realm": False, "members": None}, {"login_realm": None}),
+    ],
+)
+async def test_the_run_is_refused_when_the_change_needs_a_stricter_approval_now(
+    monkeypatch: pytest.MonkeyPatch, approved: dict[str, Any], live_change: dict[str, Any]
+) -> None:
+    grant = _grant(**{"members": [_OTHER_USER], **approved})
+    request_id = await _park(_ATTR_PARAMS, grant, op_id=_ATTRS)
+    await _approve(request_id, _person(_APPROVER), _ATTR_PARAMS)
+    _live_grant(monkeypatch, {**_live_group([_OTHER_USER]), **live_change})
+
+    reason = await grant_changed_since_request(
+        _person(_REQUESTER), await _row(request_id), None, _ATTR_PARAMS
+    )
+
+    assert reason == GRANT_REASON_STRICTER
 
 
 # ---------------------------------------------------------------------------

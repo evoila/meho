@@ -94,24 +94,6 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Added
-
-- Move settings from the command line and the web console. `meho settings
-  export`, `import` (with `--preview`, `--yes` and `--json`) and `history`, a
-  settings page in the console with the same preview, and `meho targets export`,
-  which writes the entries of the settings file. On a fresh install the first
-  login lands on the settings page, to fill in the form or import a file (#4048).
-- `meho login --ca-file <pem>` for the first login, before the customer's
-  certificate is in place. Later commands keep trusting that CA (#4048).
-
-### Fixed
-
-- `meho targets import` reads back `version: null` from an exported file, and an
-  explicit `extras: {}` now clears the stored map on `--update` (#3649, #4048).
-- The console's bulk target import keeps `version`, `verify_tls`, `tls_ca_pin`,
-  `tls_server_name`, `secret_field_map` and `flight_recorder_capture` as real
-  fields, as the CLI does, instead of storing them in `extras` (#3649, #4048).
-
 ## [0.45.0] - 2026-11-06
 
 **Calls made with a token now run only `safe` operations at once.** This

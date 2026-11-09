@@ -65,7 +65,7 @@ from sqlalchemy.orm import aliased
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
 from meho_backplane.topology.identity_mode import not_legacy_scope
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
 from meho_backplane.ui.routes.connectors.operator import OperatorRoleProbe, resolve_role_probe
@@ -278,7 +278,7 @@ async def _fetch_recent_ops(
 
 
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 guard.
-_require_ui_session_dep = Depends(require_ui_session)
+_require_ui_operator_dep = Depends(require_ui_operator)
 _get_raw_session_dep = Depends(get_raw_session)
 _resolve_role_probe_dep = Depends(resolve_role_probe)
 
@@ -427,7 +427,7 @@ def build_detail_router() -> APIRouter:
     async def _handler(
         request: Request,
         node_id: uuid.UUID,
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
         db_session: AsyncSession = _get_raw_session_dep,
         role_probe: OperatorRoleProbe = _resolve_role_probe_dep,
     ) -> HTMLResponse:

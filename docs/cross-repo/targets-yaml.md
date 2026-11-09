@@ -3,38 +3,30 @@ SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 evoila Group
 -->
 
-# `targets.yaml` — cross-repo handshake for the `rdc-meho` target
+# `targets.yaml` — cross-repo handshake for the MEHO target
 
 > Cross-repo handshake between `evoila/meho` (this repo, producer)
-> and
-> `evoila-bosnia/claude-rdc-hetzner-dc`
-> (private; consumer of MEHO and operator of the rke2-infra
-> dogfooding cluster).
+> and the consumer's infrastructure repo (private; it runs MEHO
+> in its own cluster and manages it as a target).
 >
 > This page is the upstream-side **tracker** for the consumer's
 > `targets.yaml` registration of MEHO as a managed target. The
 > actual `targets.yaml` file lives on the consumer side — what
 > lives here is the **schema** the consumer file conforms to, the
-> shape of the `rdc-meho` entry, and the verification commands
+> shape of the MEHO entry, and the verification commands
 > either side can run to prove the contract holds.
 
 ## Tracking issue
 
-This handshake spec is the producer-side half of
-`evoila-bosnia/meho-internal#58`
-(parent Initiative
-#54,
-parent Goal
-#11 —
-DoD bullet 5). The consumer-side issue that lands the
+This handshake spec is the producer-side half of the v0.1
+"MEHO is a managed target" acceptance item. The consumer-side issue that lands the
 `targets.yaml` entry and wires it into the connector chassis is
 drafted at
 [`./issue-58-consumer-ticket-body.md`](./issue-58-consumer-ticket-body.md).
 
 ## Why this handshake exists
 
-Goal #11
-DoD bullet 5 lands when MEHO is a managed target the consumer's
+The v0.1 acceptance item lands when MEHO is a managed target the consumer's
 connector chassis can probe — like any other system the consumer
 operates. The contract crosses two repo boundaries:
 
@@ -42,14 +34,14 @@ operates. The contract crosses two repo boundaries:
    federation chain** that pass the install + smoke + rollback
    acceptance bars (DoD bullets 1–3, contracts at
    [`docs/acceptance/`](../acceptance/README.md)).
-2. **Consumer (`claude-rdc-hetzner-dc`) registers MEHO as a
+2. **Consumer (the infrastructure repo) registers MEHO as a
    target** in its `targets.yaml` so the chassis can health-probe
    it, hand it to deploy automation, and surface it on the
    consumer-side operator dashboard.
 
 This document is the spec for half 2. It does not redefine the
 chassis — it describes the contract MEHO is held to and the
-`rdc-meho` entry that satisfies it.
+MEHO entry that satisfies it.
 
 ## What `targets.yaml` is
 
@@ -63,21 +55,20 @@ location of the file.
 
 Verbatim location convention on the consumer side:
 `targets.yaml` at the consumer repo root, peer to
-`manifests/meho/{install.sh, smoke.sh, values-rdc.yaml}` (per Goal
-#11 cross-repo deps). If the consumer's chassis stores targets
-under a different layout (`config/targets/rdc-meho.yaml`,
+`manifests/meho/{install.sh, smoke.sh, values.yaml}`. If the consumer's chassis stores targets
+under a different layout (`config/targets/meho.yaml`,
 `environments/dogfood/targets.yaml`, …), the producer-side
 contract is the same; only the relative path differs.
 
 ## Schema
 
-The `rdc-meho` entry's required + recommended fields. Field names
+The MEHO entry's required + recommended fields. Field names
 are lower_snake_case; lists are YAML sequences; strings are
 single-line.
 
 ```yaml
 targets:
-  - name: rdc-meho                       # REQUIRED — chassis lookup key
+  - name: meho                           # REQUIRED — chassis lookup key
     description: ...                     # RECOMMENDED — one-line operator-visible blurb
     repo:                                # REQUIRED — producer-side identifying coordinates
       url: https://github.com/evoila/meho
@@ -85,31 +76,28 @@ targets:
     image:                               # REQUIRED — what runs in the cluster
       registry: ghcr.io
       repository: evoila/meho            # backplane image, NOT the chart
-      tag_policy: sha-<git-sha>          # immutable tags only — Goal #11 deploy discipline rejects :latest
+      tag_policy: sha-<git-sha>          # immutable tags only — :latest is rejected
     chart:                               # REQUIRED — what helm installs
       registry: oci://ghcr.io/evoila
       chart: meho-chart
-      version_pin: <semver>              # consumer pins; producer publishes versioned + sha-tagged
+      version_pin: <semver>              # consumer pins; producer publishes release and per-commit charts
     deploy:                              # REQUIRED — how the chassis rolls a new image forward
       strategy: helm-upgrade-install
-      values_file: manifests/meho/values-rdc.yaml
+      values_file: manifests/meho/values.yaml
       install_script: manifests/meho/install.sh
-      dispatch_event:                    # REQUIRED — links to `repository_dispatch` from producer
-        event_type: meho-image-pushed    # G2.7-T3 producer-side; see rke2-infra-coordination.md
-        source_repo: evoila/meho
     smoke_gate:                          # REQUIRED — promotes a candidate image to "deployable"
       workflow: pr-smoke.yml             # producer-side workflow producing the counter
       source_repo: evoila/meho
       counter:
         contract: docs/acceptance/green-counter.md
-        min_streak: 5                    # Goal #11 DoD bullet 4 — 5 consecutive green PRs
+        min_streak: 5                    # 5 consecutive green PRs
     probes:                              # REQUIRED — chassis health-probe targets
       health:
-        url: https://meho.evba.lab/api/v1/health   # authenticated
+        url: https://meho.example.com/api/v1/health   # authenticated, needs the operator role
         auth: service-account-jwt
         timeout_seconds: 5
       liveness:
-        url: https://meho.evba.lab/healthz         # anonymous (per #25 federation spec)
+        url: https://meho.example.com/healthz         # anonymous
         auth: none
         timeout_seconds: 2
     acceptance:                          # RECOMMENDED — producer-side contracts the chassis can link to
@@ -117,7 +105,7 @@ targets:
       smoke: docs/acceptance/smoke.md
       rollback: docs/acceptance/rollback.md
       green_counter: docs/acceptance/green-counter.md
-    owner: rdc                           # REQUIRED — operator-owning team on consumer side
+    owner: platform-team                 # REQUIRED — operator-owning team on consumer side
     sensitivity: dogfood                 # REQUIRED — chassis routing hint (dogfood ≠ prod)
     notes: |                             # OPTIONAL — free-form operator notes
       v0.1 first managed target; one environment only (dogfood).
@@ -134,29 +122,31 @@ targets:
 | `repo.default_branch` | required | string | Used by the chassis when no explicit ref is passed |
 | `image.registry` | required | string | Always `ghcr.io` for v0.1 |
 | `image.repository` | required | string | `evoila/meho` (the backplane image); **not** `evoila/meho-chart` (chart) |
-| `image.tag_policy` | required | string | Document only — chassis uses the latest `sha-<git-sha>` tag the smoke gate has promoted. The literal string `sha-<git-sha>` is the **template**; the chassis substitutes from the latest green dispatch event |
+| `image.tag_policy` | required | string | Document only — chassis uses the latest `sha-<git-sha>` tag the smoke gate has promoted. The literal string `sha-<git-sha>` is the **template**; the chassis fills in the full 40-character commit SHA of the image it picked |
 | `chart.registry` | required | string | OCI registry URL for the helm chart |
 | `chart.chart` | required | string | `meho-chart` |
-| `chart.version_pin` | required | string | Consumer pins the chart semver. Producer publishes both `<semver>` and `sha-<git-sha>`-tagged charts on every merge; consumer decides cadence |
+| `chart.version_pin` | required | string | Consumer pins the chart version. Producer publishes a `<x.y.z>` chart for each release tag and a `0.1.<YYYYMMDD>-<short-sha>` chart for every commit on `main`; consumer decides cadence |
 | `deploy.strategy` | required | enum | `helm-upgrade-install` for v0.1. Other values are chassis-defined |
 | `deploy.values_file` | required | path | Consumer-side relative path to the values overlay |
 | `deploy.install_script` | required | path | Consumer-side relative path to `install.sh` — the wrapper invoking the producer-side `install-verify.sh` |
-| `deploy.dispatch_event.event_type` | required | string | Must match the producer-side `repository_dispatch` event type from G2.7-T3 (currently `meho-image-pushed`). Drift between producer and consumer here is a silent failure mode — the chassis subscribes to one event type and the producer emits another |
-| `deploy.dispatch_event.source_repo` | required | string | `evoila/meho` |
 | `smoke_gate.workflow` | required | string | `pr-smoke.yml` — the producer-side per-PR ephemeral-cluster smoke workflow |
 | `smoke_gate.source_repo` | required | string | `evoila/meho` |
 | `smoke_gate.counter.contract` | required | path | Relative path on the producer side to the green-counter contract |
-| `smoke_gate.counter.min_streak` | required | integer | `5` for v0.1 (Goal #11 DoD bullet 4). Raising this in v0.2 is intentional |
-| `probes.health.url` | required | URL | Authenticated `/api/v1/health` — the federation-summary endpoint |
-| `probes.health.auth` | required | enum | `service-account-jwt` for v0.1; the chassis mints a Vault-issued JWT scoped to the probe service-account |
+| `smoke_gate.counter.min_streak` | required | integer | `5` for v0.1. Raising this in v0.2 is intentional |
+| `probes.health.url` | required | URL | Authenticated `/api/v1/health` — the federation-summary endpoint. A monitoring account with only the `read_only` role uses `/api/v1/health/live` instead: it checks the login and the database and never calls Vault |
+| `probes.health.auth` | required | enum | `service-account-jwt`: a JWT from the Keycloak realm MEHO trusts, for a service account with at least the `operator` role. A lower role gets 403 `insufficient_role` |
 | `probes.health.timeout_seconds` | required | integer | 5 seconds — comfortably above the federation chain's warm-cluster latency floor |
 | `probes.liveness.url` | required | URL | Anonymous `/healthz` |
-| `probes.liveness.auth` | required | enum | `none` — `/healthz` is unauthenticated by design (per `backend/src/meho_backplane/api/v1/health.py`) |
+| `probes.liveness.auth` | required | enum | `none` — `/healthz` is unauthenticated by design (per `backend/src/meho_backplane/health.py`) |
 | `probes.liveness.timeout_seconds` | required | integer | 2 seconds — `/healthz` is a single in-process check |
 | `acceptance.*` | recommended | paths | Producer-side acceptance contracts. Optional but the chassis links to these from its dashboard when present |
 | `owner` | required | string | Operator-owning team on consumer side |
 | `sensitivity` | required | enum | Chassis routing hint: `dogfood`, `staging`, `prod`. v0.1 is `dogfood` only |
 | `notes` | optional | string | Free-form operator notes |
+
+MEHO sends no `repository_dispatch` event when it pushes an image.
+The chassis finds a new image by watching the tags of
+`ghcr.io/evoila/meho` or the GitHub Releases feed of `evoila/meho`.
 
 ### Anti-patterns
 
@@ -164,30 +154,25 @@ targets:
   image are distinct artefacts; the chart references the image.
   `targets.yaml` names the image — what runs in the cluster — not
   the chart.
-- **`image.tag_policy: latest`.** Forbidden by Goal #11 deploy
-  discipline. Use `sha-<git-sha>` (the canonical CI-built tag).
-- **Missing `dispatch_event.event_type`.** Without this, the
-  chassis never gets the "new image available" signal and
-  promotion stalls silently. The `repository_dispatch` event is
-  the only producer-to-consumer channel; missing the subscription
-  is a contract violation.
+- **`image.tag_policy: latest`.** Forbidden by the deploy rules.
+  Use `sha-<git-sha>` (the canonical CI-built tag).
 - **`min_streak: 1`.** Defeats the purpose of the green counter.
-  Goal #11 chose 5 to enforce "the smoke is so reliable that 5 in
+  The v0.1 acceptance bar chose 5 to enforce "the smoke is so reliable that 5 in
   a row is not lucky"; the streak length is part of the
   acceptance bar.
-- **Duplicate `name: rdc-meho` entries.** The chassis is allowed
+- **Duplicate `name: meho` entries.** The chassis is allowed
   one canonical lookup; multiple entries with the same `name` is
   a chassis-time error.
 
 ## Worked example
 
-The complete `rdc-meho` entry as it should appear in the
+The complete MEHO entry as it should appear in the
 consumer's `targets.yaml`:
 
 ```yaml
 targets:
-  - name: rdc-meho
-    description: MEHO governance backplane — RDC dogfood lab, evba.lab.
+  - name: meho
+    description: MEHO governance backplane — dogfood environment.
     repo:
       url: https://github.com/evoila/meho
       default_branch: main
@@ -198,14 +183,11 @@ targets:
     chart:
       registry: oci://ghcr.io/evoila
       chart: meho-chart
-      version_pin: 0.1.0-beta
+      version_pin: 0.45.0
     deploy:
       strategy: helm-upgrade-install
-      values_file: manifests/meho/values-rdc.yaml
+      values_file: manifests/meho/values.yaml
       install_script: manifests/meho/install.sh
-      dispatch_event:
-        event_type: meho-image-pushed
-        source_repo: evoila/meho
     smoke_gate:
       workflow: pr-smoke.yml
       source_repo: evoila/meho
@@ -214,11 +196,11 @@ targets:
         min_streak: 5
     probes:
       health:
-        url: https://meho.evba.lab/api/v1/health
+        url: https://meho.example.com/api/v1/health
         auth: service-account-jwt
         timeout_seconds: 5
       liveness:
-        url: https://meho.evba.lab/healthz
+        url: https://meho.example.com/healthz
         auth: none
         timeout_seconds: 2
     acceptance:
@@ -226,7 +208,7 @@ targets:
       smoke: docs/acceptance/smoke.md
       rollback: docs/acceptance/rollback.md
       green_counter: docs/acceptance/green-counter.md
-    owner: rdc
+    owner: platform-team
     sensitivity: dogfood
     notes: |
       v0.1 first managed target; one environment only (dogfood).
@@ -241,16 +223,16 @@ consumer side — that is the consumer-side issue's job (drafted at
 
 ## Health probe contract
 
-The chassis probes the `rdc-meho` target on a chassis-defined
+The chassis probes the MEHO target on a chassis-defined
 interval (typically every 30–60 seconds; chassis-side
 configurable). Each probe:
 
-1. Mints a short-lived service-account JWT scoped to the probe
-   identity, via Vault's OIDC role binding to the consumer's
-   Keycloak realm (the same federation path that operator probes
-   use; see [`docs/acceptance/smoke.md`](../acceptance/smoke.md)
-   leg #4 — Vault).
-2. Issues `GET https://meho.evba.lab/api/v1/health` with
+1. Gets a short-lived service-account JWT for the probe identity
+   from the Keycloak realm MEHO trusts. The account needs at least
+   the `operator` role. MEHO forwards this JWT to Vault, the same
+   federation path that operator probes use (see
+   [`docs/acceptance/smoke.md`](../acceptance/smoke.md) leg #4 — Vault).
+2. Issues `GET https://meho.example.com/api/v1/health` with
    `Authorization: Bearer <jwt>` and a timeout matching
    `probes.health.timeout_seconds`.
 3. Asserts HTTP 200 AND `.operator.sub` non-empty AND
@@ -258,16 +240,18 @@ configurable). Each probe:
    `.db.migrated == true`. Same field set the smoke verifier
    asserts (legs #2, #4, #5 of `docs/acceptance/smoke.md`); the
    chassis is in effect running a continuous one-leg smoke.
+   MEHO reports Vault problems as HTTP 200 with these flags set
+   to `false`, not as a 5xx.
 4. On 5xx or timeout, falls back to the anonymous `/healthz`
    probe (one extra round-trip, 2 second timeout). If `/healthz`
    also fails, the chassis records the target as `unhealthy` and
    pages on the chassis-side rotation.
 
 The probe surface is **read-only**. The federation chain's
-side-effects (one audit row per authenticated call, per Task #28's
-sync-row-before-response contract) are deliberate — every probe
-contributes one audit row, which is the closing-comment artefact
-on issue #58 cross-checks against (5 consecutive merged PRs each
+side-effects (one audit row per authenticated call: the audit row is written
+before the response) are deliberate — every probe
+contributes one audit row, which the consumer-side close-out
+cross-checks against (5 consecutive merged PRs each
 contribute a smoke run's worth of audit rows; the probe
 contributes its own steady-state stream).
 
@@ -295,19 +279,19 @@ print(f'{len(blocks)} yaml blocks parsed clean')
 
 The verifier runs locally during this PR's Phase 7 verification.
 
-### Consumer-side (deferred — issue #58 consumer-side close-out)
+### Consumer-side (deferred — consumer-side close-out)
 
 ```bash
 # 1. targets.yaml entry exists and is parseable.
-cd ~/repos/evoila-bosnia/claude-rdc-hetzner-dc
-yq '.targets[] | select(.name == "rdc-meho")' targets.yaml
-# Should return the rdc-meho entry (non-empty, parseable).
+cd <your-infrastructure-repo>
+yq '.targets[] | select(.name == "meho")' targets.yaml
+# Should return the MEHO entry (non-empty, parseable).
 
 # 2. Required fields are populated per the schema in this doc.
 yq '
-  .targets[] | select(.name == "rdc-meho") |
+  .targets[] | select(.name == "meho") |
   [.name, .repo.url, .image.registry, .image.repository,
-   .chart.registry, .chart.chart, .deploy.dispatch_event.event_type,
+   .chart.registry, .chart.chart,
    .smoke_gate.workflow, .smoke_gate.counter.min_streak,
    .probes.health.url, .probes.liveness.url,
    .owner, .sensitivity] | @json
@@ -315,7 +299,7 @@ yq '
 # Should print the populated fields; no nulls.
 
 # 3. Chassis probe lands.
-~/repos/evoila-bosnia/claude-rdc-hetzner-dc/scripts/probe.sh rdc-meho
+./scripts/probe.sh meho
 # Should return health-payload + status success.
 ```
 
@@ -334,19 +318,19 @@ consumer's existing `targets.yaml` keeps working unchanged.
 ### Step 0 — Authenticate
 
 ```bash
-meho login https://meho.evba.lab
+meho login https://meho.example.com
 ```
 
 Stores a bearer token in the OS keyring (or
-`$XDG_CONFIG_HOME/meho/credentials.json` on headless hosts). The
-tenant is bound to the JWT's `tenant_id` claim — `meho targets
-import` writes into that tenant; there is no `--tenant` flag in
-v0.2.
+`$XDG_CONFIG_HOME/meho/credentials.json` on headless hosts).
+`meho targets import` writes into your current tenant. With one
+tenant, that is the tenant of your login. With several, pick one
+first with `meho tenants use <name>`. There is no `--tenant` flag.
 
 ### Step 1 — Dry-run the import
 
 ```bash
-meho targets import rdc-hetzner-dc/targets.yaml --dry-run
+meho targets import infra/targets.yaml --dry-run
 ```
 
 Prints the per-entry plan. Dry-run is **existence-accurate and
@@ -365,19 +349,19 @@ or capturing for diff against a follow-up dry-run.
 ### Step 2 — First import
 
 ```bash
-meho targets import rdc-hetzner-dc/targets.yaml
+meho targets import infra/targets.yaml
 ```
 
 Default mode aborts on the first duplicate `name` in the tenant —
 the plan is built before any write fires, so a partial-conflict
-YAML never leaves the tenant half-imported. The 25-target consumer
+YAML never leaves the tenant half-imported. The 24-target consumer
 file applies in ~5 seconds (sequential POSTs; concurrency is
 v0.2.next polish).
 
 ### Step 3 — Iterate with `--update`
 
 ```bash
-meho targets import rdc-hetzner-dc/targets.yaml --update
+meho targets import infra/targets.yaml --update
 ```
 
 `--update` PATCHes existing targets and POSTs new ones,
@@ -397,7 +381,7 @@ of this section for the bug history (PR #362's review on issue
 | `flight_recorder_capture` | top-level column | per-target flight-recorder capture setting: leave it out to inherit, `true` for on, `false` for off (#3272) |
 | `preferred_impl_id` | top-level column | G0.3-T1.5 (#477) amendment — G0.6 resolver tie-break override |
 | `verify_tls`, `tls_ca_pin`, `tls_server_name` | top-level column | per-target TLS trust (#1780 / #1784) and SNI / cert-verification hostname (#2002, mapped by #2643) — set `tls_server_name` to the cert's FQDN when the appliance is reached by IP |
-| `secret_field_map` | top-level column | `{connector_field: source_field}` (#3711) — read the secret's `source_field` when the connector asks for `connector_field`; field names only |
+| `secret_field_map` | top-level column | `{connector_field: source_field}` (#3711) — read the secret's `source_field` when the connector asks for `connector_field`; field names only. The flag `--secret-field <connector_field>=<source_field>` (repeatable) adds the same entry to every target in the file and wins over the YAML |
 | `extras` (explicit block) | `extras` JSONB | merges with the spilled-extras map from unknown keys; no warning |
 | `fingerprint` | dropped with warning | server-managed; only the probe verb writes it |
 | any other key | spilled into `extras` JSONB, with a warning | the consumer's `sso_realm`, `kubeconfig_field`, `account`, `project_id` land here. The import prints one warning per key (#3649), so a typo or a missing column is visible. Move the key under `extras:` to silence it |
@@ -435,18 +419,18 @@ chassis runner.
 meho targets list
 
 # Spot-check a single entry against the YAML:
-meho targets describe rdc-vcenter --json | jq '.notes'
+meho targets describe vcenter-prod --json | jq '.notes'
 
 # Re-run --update --dry-run; an empty plan means the backplane is
 # in sync with the YAML.
-meho targets import rdc-hetzner-dc/targets.yaml --update --dry-run
+meho targets import infra/targets.yaml --update --dry-run
 ```
 
 The Python integration test
 [`backend/tests/test_api_v1_targets_import.py`](../../backend/tests/test_api_v1_targets_import.py)
 pins this round-trip against a SHA-pinned snapshot of the
-consumer's real `targets.yaml`; the snapshot lives at
-`backend/tests/fixtures/rdc-hetzner-dc-targets.yaml`.
+consumer's real `targets.yaml`; the snapshot lives in
+`backend/tests/fixtures/`.
 
 ## Status
 
@@ -455,17 +439,13 @@ consumer's real `targets.yaml`; the snapshot lives at
 | Schema definition | producer | landed in this PR ([`./targets-yaml.md`](./targets-yaml.md)) |
 | Worked example | producer | landed in this PR ([Worked example](#worked-example) above) |
 | Green-counter contract | producer | landed in this PR ([`docs/acceptance/green-counter.md`](../acceptance/green-counter.md)) |
-| README badge placeholder | producer | landed in this PR (top of README, replaced when consumer-side endpoint live) |
+| README badge placeholder | producer | not in the README; the README rewrite in #1456 dropped it |
 | Consumer-side `targets.yaml` entry | consumer | pending — tracked at [`./issue-58-consumer-ticket-body.md`](./issue-58-consumer-ticket-body.md) |
-| Connector-chassis probe of `rdc-meho` | consumer | pending — tracked at [`./issue-58-consumer-ticket-body.md`](./issue-58-consumer-ticket-body.md) |
-| 5-PR green-counter observed | consumer | pending — closing-comment artefact on issue #58 |
+| Connector-chassis probe of the MEHO entry | consumer | pending — tracked at [`./issue-58-consumer-ticket-body.md`](./issue-58-consumer-ticket-body.md) |
+| 5-PR green-counter observed | consumer | pending — consumer-side close-out |
 
 ## References
 
-- Parent Goal: #11 — Deployable v0.1 — DoD bullet 5
-- Parent Initiative: #54 — G2.8 Acceptance / dogfood proof
-- Predecessor: #50 — Per-PR ephemeral cluster smoke (G2.7-T2)
-- Predecessor: #53 — Cross-repo coordination tracker (G2.7-T5)
 - Sibling handshake: [`./rke2-infra-coordination.md`](./rke2-infra-coordination.md) — per-PR ephemeral smoke + `repository_dispatch`
 - Green-counter contract: [`docs/acceptance/green-counter.md`](../acceptance/green-counter.md)
 - Smoke acceptance contract: [`docs/acceptance/smoke.md`](../acceptance/smoke.md) — federation chain legs the probe relies on

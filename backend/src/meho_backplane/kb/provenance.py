@@ -11,6 +11,9 @@ on every write so a reader can tell where an entry came from:
   directory (POSIX separators).
 * ``source_kind="direct"`` -- written by an explicit create or
   replace (REST, MCP, console); ``relative_path`` is ``None``.
+* ``source_kind="import"`` -- written by a page import
+  (``POST /api/v1/kb/import``); ``relative_path`` is the page path the
+  caller sent.
 
 ``ingested_at`` is the UTC time of the write. No absolute host path is
 ever stored. Reading is defensive: rows written before this block
@@ -30,7 +33,7 @@ from meho_backplane.kb.schemas import META_PROVENANCE, KbProvenance
 
 __all__ = ["read_provenance", "stamp_provenance"]
 
-_SourceKind = Literal["directory", "direct"]
+_SourceKind = Literal["directory", "direct", "import"]
 
 
 class _StoredProvenance(BaseModel):

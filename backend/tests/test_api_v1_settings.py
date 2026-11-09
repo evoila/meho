@@ -275,13 +275,15 @@ async def test_export_shape_and_no_secrets(client: TestClient) -> None:
     assert doc["apiVersion"] == "meho.evoila.com/v1"
     assert doc["kind"] == "Settings"
     assert set(doc["metadata"]) == {"exportedAt", "exportedFrom"}
-    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0137"
+    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0152"
     (tenant,) = doc["spec"]["tenants"]
     assert tenant["id"] == str(_TENANT)
     assert tenant["policies"] == {
         "announce_gate_enabled": True,
         "flight_recorder": {"enabled": True, "retention_days": 14, "agent_readable": None},
         "mail_recipient_allowlist": "@example.com",
+        "run_approval_target_kinds": False,
+        "knowledge_wiki_collection": None,
     }
     assert [c["slug"] for c in tenant["conventions"]] == ["change-window"]
     targets = {t["name"]: t for t in tenant["targets"]}
@@ -515,6 +517,41 @@ def test_tenant_id_may_be_left_out_in_a_one_tenant_file(client: TestClient) -> N
         resp = _import(client, _token(key), content, preview=True)
     assert resp.status_code == 200, resp.text
     assert resp.json()["diff"]["policies"]["changed"][0]["key"] == "announce_gate_enabled"
+
+
+@pytest.mark.asyncio
+async def test_import_turns_on_run_approval_target_kinds(client: TestClient) -> None:
+    """The settings file turns on target kinds in run approvals (#4126)."""
+    content = (
+        "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
+        "spec:\n  tenants:\n    - policies: {run_approval_target_kinds: true}\n"
+    )
+    key = make_rsa_keypair("kid-run-approval-kinds")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _import(client, _token(key), content)
+    assert resp.status_code == 200, resp.text
+    (tenant,) = [t for t in await _rows(Tenant) if t.id == _TENANT]
+    assert tenant.run_approval_target_kinds_enabled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "stored"), [("team-wiki", "team-wiki"), ('""', None)])
+async def test_import_sets_the_knowledge_wiki_collection(
+    client: TestClient, value: str, stored: str | None
+) -> None:
+    """The settings file names the docs collection of the team wiki (#5976)."""
+    content = (
+        "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
+        f"spec:\n  tenants:\n    - policies: {{knowledge_wiki_collection: {value}}}\n"
+    )
+    key = make_rsa_keypair("kid-wiki-collection")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _import(client, _token(key), content)
+    assert resp.status_code == 200, resp.text
+    (tenant,) = [t for t in await _rows(Tenant) if t.id == _TENANT]
+    assert tenant.knowledge_wiki_collection == stored
 
 
 # ---------------------------------------------------------------------------

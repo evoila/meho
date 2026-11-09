@@ -78,8 +78,10 @@ Route inventory
   and no Approve/Deny actions. Mints + re-sets the ``meho_csrf`` cookie so
   the modal's own ``hx-headers`` echo lines up with the cookie (the modal
   render rotates it -- #1693 / #1754).
-* ``POST /ui/approvals/{id}/approve`` -- approve in-process, re-dispatch
-  the parked op, record the add-on step event.
+* ``POST /ui/approvals/{id}/approve`` -- approve in-process, start the
+  parked op in the background and answer at once (#5110), record the
+  add-on step event. ``GET /ui/approvals/{id}/run`` and ``.../row``
+  (:mod:`.run_watch`) show the run as it is now.
 * ``POST /ui/approvals/{id}/reject`` -- reject in-process, publish.
 
 The ``params`` / ``params_hash`` columns are internal (swap-defence +
@@ -149,7 +151,9 @@ from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_context import (
     ReviewerContext,
     resolve_reviewer_context,
+    resolve_target_names,
 )
+from meho_backplane.operations.approval_outcome_check import list_outcome_unknown
 from meho_backplane.operations.approval_queue import (
     MAX_REASON_LENGTH,
     ApprovalGroupForbiddenError,
@@ -175,7 +179,6 @@ from meho_backplane.operations.approval_queue import (
     pending_chain_positions,
     record_approval_step_event,
     reject_request,
-    resume_dispatch_after_approval,
 )
 from meho_backplane.operations.approval_rights import (
     WEB_APPROVAL_HINT,
@@ -195,10 +198,15 @@ from meho_backplane.ui.routes.approvals.render import (
     RESULT_STATE_PILL,
     STATUS_PILL_CLASS,
     project_request_to_view,
-    project_run_result,
-    project_stored_run_result,
     set_csrf_cookie,
 )
+from meho_backplane.ui.routes.approvals.run_watch import (
+    POLL_SECONDS,
+    build_run_watch_router,
+    live_runs_for,
+    start_approved_run,
+)
+from meho_backplane.ui.routes.approvals.waiting import WaitingFirstPager
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_approvals_router"]
@@ -217,6 +225,11 @@ _PENDING_LIMIT: Final[int] = 50
 #: glance cap (which would silently truncate the history). One page is kept
 #: small so the first paint is fast; "Load more" advances the offset.
 _HISTORY_PAGE_SIZE: Final[int] = 25
+
+#: How many pending requests the Pending tab reads per query when it sorts
+#: "waiting for you" first (#6000). The check runs in Python, so the tab
+#: reads every pending request of the view, one batch at a time.
+_WAITING_SCAN_BATCH: Final[int] = 500
 
 #: Maximum work_ref length accepted by the history filter. ``work_ref`` is
 #: an opaque external change-ticket string (e.g. ``"gh:evoila/meho#1"``);
@@ -237,7 +250,13 @@ _HISTORY_TABS: Final[dict[str, str | None]] = {
     "expired": "expired",
     "withdrawn": "withdrawn",
     "all": None,
+    # Approved requests whose outcome MEHO does not know (#5026). Not a
+    # status: the list has its own rule (``list_outcome_unknown``).
+    "outcome_unknown": "approved",
 }
+
+#: The tab of approved runs whose outcome MEHO does not know (#5026).
+_OUTCOME_UNKNOWN_TAB: Final[str] = "outcome_unknown"
 
 #: Default tab when none is supplied. Pending is the actionable queue, so a
 #: bare ``/ui/approvals`` lands the operator on the work that needs them.
@@ -319,6 +338,24 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
     return operator
 
 
+async def _operator_or_none(session: UISessionContext) -> Operator | None:
+    """Return the session's :class:`Operator`, or ``None`` when it cannot be checked.
+
+    The Pending tab uses it to put the requests this person may approve
+    first. The list pages are open with the session alone, and a list is
+    still useful without that order. So any failed check (a session that
+    ended, a tenant switched in another tab, the sign-in service not
+    reachable) shows the plain order with no "waiting for you" mark,
+    instead of an error. The decision routes keep the strict
+    :func:`_resolve_operator`.
+    """
+    try:
+        return await _resolve_operator(session)
+    except Exception as exc:
+        log.warning("ui_approvals_waiting_order_skipped", error=type(exc).__name__)
+        return None
+
+
 def _is_htmx(request: Request) -> bool:
     """Return whether *request* is an HTMX-driven fetch.
 
@@ -379,6 +416,7 @@ async def _list_history_for_session(
     work_ref: str | None,
     offset: int,
     order: ApprovalListOrder,
+    outcome_unknown: bool = False,
 ) -> tuple[list[ApprovalRequest], bool]:
     """Page through this tenant's approval history in *order*.
 
@@ -390,9 +428,22 @@ async def _list_history_for_session(
     Over-fetches one row (``limit + 1``) to detect a further page without a
     second count query, then trims to the page size. Returns
     ``(rows, has_more)``; ``has_more`` drives the "Load more" affordance.
+
+    ``outcome_unknown`` (#5026) lists the approved requests whose outcome
+    MEHO does not know instead, the same list REST, MCP and the CLI show.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
+        if outcome_unknown:
+            rows = await list_outcome_unknown(
+                db_session,
+                tenant_id=session.tenant_id,
+                work_ref=work_ref,
+                limit=_HISTORY_PAGE_SIZE + 1,
+                offset=offset,
+                order=order,
+            )
+            return rows[:_HISTORY_PAGE_SIZE], len(rows) > _HISTORY_PAGE_SIZE
         rows = await list_pending(
             db_session,
             tenant_id=session.tenant_id,
@@ -404,6 +455,45 @@ async def _list_history_for_session(
         )
     has_more = len(rows) > _HISTORY_PAGE_SIZE
     return rows[:_HISTORY_PAGE_SIZE], has_more
+
+
+async def _list_pending_waiting_first(
+    session: UISessionContext,
+    operator: Operator,
+    *,
+    work_ref: str | None,
+    offset: int,
+    order: ApprovalListOrder,
+) -> tuple[list[ApprovalRequest], bool, set[uuid.UUID]]:
+    """Page the Pending tab with the requests *operator* may approve first.
+
+    The split runs over every pending request of the view before the page
+    is cut, so a request waiting for this person is on page one even when
+    hundreds of newer requests are not. The queue is read in batches of
+    :data:`_WAITING_SCAN_BATCH`; :class:`WaitingFirstPager` keeps only the
+    rows the page can need. Each batch starts after the last row of the
+    batch before (not at a counted offset), so a request decided during the
+    scan does not make the scan skip a row. Returns ``(rows, has_more, waiting ids)``.
+    """
+    pager = WaitingFirstPager(operator, offset=offset, size=_HISTORY_PAGE_SIZE)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        last: ApprovalRequest | None = None
+        while True:
+            batch = await list_pending(
+                db_session,
+                tenant_id=session.tenant_id,
+                status="pending",
+                work_ref=work_ref,
+                limit=_WAITING_SCAN_BATCH,
+                order=order,
+                after=last,
+            )
+            pager.add(batch)
+            if len(batch) < _WAITING_SCAN_BATCH:
+                break
+            last = batch[-1]
+    return pager.page()
 
 
 async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) -> ApprovalRequest:
@@ -562,6 +652,8 @@ def build_approvals_router() -> APIRouter:
         """Reject a pending request in-process (delegates below)."""
         return await _decide(request, session, request_id, decision="rejected", reason=reason)
 
+    # The card and the list ask these again while a run is going (#5110).
+    router.include_router(build_run_watch_router())
     return router
 
 
@@ -645,15 +737,45 @@ async def _build_history_context(
         resolved_order = "oldest"
     else:
         resolved_order = "newest"
-    rows, has_more = await _list_history_for_session(
-        session,
-        status_filter=_HISTORY_TABS[tab],
-        work_ref=work_ref_filter,
-        offset=offset,
-        order=resolved_order,
-    )
+    operator = await _operator_or_none(session) if tab == "pending" else None
+    waiting: set[uuid.UUID] = set()
+    if operator is not None:
+        rows, has_more, waiting = await _list_pending_waiting_first(
+            session, operator, work_ref=work_ref_filter, offset=offset, order=resolved_order
+        )
+    else:
+        rows, has_more = await _list_history_for_session(
+            session,
+            status_filter=_HISTORY_TABS[tab],
+            work_ref=work_ref_filter,
+            offset=offset,
+            order=resolved_order,
+            outcome_unknown=tab == _OUTCOME_UNKNOWN_TAB,
+        )
+    # The "outcome unknown" rows name the target to check (#5026); the
+    # other tabs show the target in the modal only.
+    target_names: dict[uuid.UUID, str] = {}
+    if tab == _OUTCOME_UNKNOWN_TAB:
+        async with sessionmaker() as db_session:
+            target_names = await resolve_target_names(
+                db_session, tenant_id=session.tenant_id, requests=rows
+            )
+    # Where each approved run is now; a running row asks again (#5110).
+    live = await live_runs_for(session.tenant_id, rows)
     return {
-        "requests": [project_request_to_view(row, chain=positions.get(row.id)) for row in rows],
+        "requests": [
+            {
+                **project_request_to_view(
+                    row,
+                    chain=positions.get(row.id),
+                    target_name=target_names.get(row.target_id) if row.target_id else None,
+                ),
+                "live": live.get(row.id),
+                "waiting_for_me": row.id in waiting,
+            }
+            for row in rows
+        ],
+        "poll_seconds": POLL_SECONDS,
         "order": resolved_order,
         "order_choice": order_choice,
         "status_pill_class": STATUS_PILL_CLASS,
@@ -811,9 +933,10 @@ async def _decide(
     and an ``HX-Trigger`` response header fires ``meho:approval-decided`` so
     the app-shell bell decrements its count and closes the dialog (the
     issue's "modal closes and the badge decrements"). An approve additionally
-    re-dispatches the parked op via the shared
-    :func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`
-    helper (the existing approve path), exactly as the REST route does.
+    starts the parked op in the background
+    (:func:`~meho_backplane.ui.routes.approvals.run_watch.start_approved_run`,
+    #5110) and answers within a second: a quick run shows its result, a
+    long one shows "running" and the card asks again until it ends.
 
     A recoverable decision failure (self-approval 403, already-decided 409,
     role 403, not-found 404, a sign-in too old to approve 401) re-renders
@@ -861,28 +984,13 @@ async def _decide(
             error_hint=WEB_APPROVAL_HINT if approve_refused else None,
         )
 
-    # Approve re-dispatches the parked op (the committed approval is the
-    # authorization). Reject does not. Mirrors the REST /approve route; the
-    # service helper owns target re-hydration + the fail-closed branches.
+    # Approve starts the parked op in the background (the committed approval
+    # is the authorization) and answers within a second, however long the
+    # op runs (#5110). Reject runs nothing. The card asks again until the
+    # run ends.
     run: dict[str, object] | None = None
     if decision == "approved":
-        dispatch_result = await resume_dispatch_after_approval(
-            operator=operator, request=approval, params=None
-        )
-        log.info(
-            "ui_approval_redispatched",
-            approval_request_id=str(request_id),
-            op_id=approval.op_id,
-            dispatch_status=dispatch_result.status,
-            operator_sub=operator.sub,
-        )
-        run = project_run_result(dispatch_result, parked_op_id=approval.op_id)
-        if run is None:
-            # Another resumer (usually the waiting requester) won the run
-            # claim. It may have refused the run or run it and failed, so
-            # the card reads the stored result instead of saying the
-            # operation was re-dispatched.
-            run = await project_stored_run_result(approval)
+        run = await start_approved_run(operator, approval)
 
     context: dict[str, object] = {
         # The reason already passed validation in the service, so this
@@ -895,6 +1003,7 @@ async def _decide(
         "self_approval_message": self_approval_confirmation(
             getattr(approval, "_approval_rule", None)
         ),
+        "poll_seconds": POLL_SECONDS,
     }
     response = get_templates().TemplateResponse(request, "approvals/_decided.html", context)
     # Drive the app-shell bell: decrement the live count + close the modal.

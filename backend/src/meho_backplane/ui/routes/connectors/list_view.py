@@ -70,7 +70,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
@@ -236,7 +236,7 @@ def _next_direction_factory(
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 idiom
 #: matching the chassis dashboard + topology + memory routes (no
 #: function calls in default argument positions).
-_require_ui_session_dep = Depends(require_ui_session)
+_require_ui_operator_dep = Depends(require_ui_operator)
 _get_raw_session_dep = Depends(get_raw_session)
 _role_probe_dep = Depends(resolve_role_probe)
 
@@ -434,7 +434,7 @@ def build_list_router() -> APIRouter:
         sort: _SortColumn = Query(default=_SortColumn.NAME),
         direction: _SortDirection = Query(default=_SortDirection.ASC, alias="dir"),
         product: str | None = Query(default=None, max_length=100),
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
         db_session: AsyncSession = _get_raw_session_dep,
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:

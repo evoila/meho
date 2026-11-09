@@ -6,8 +6,11 @@
   (Initiative #1836 Task #1883). Returned in place of the readiness card when
   a re-probe maps to 503 (``CorpusUnavailable`` -- backend unreachable, row
   status left UNCHANGED via success-only write-back) or 409
-  (``DocCollectionStateError`` -- e.g. probing a disabled collection), and
-  when an enable / disable hits a forbidden ``invalid_collection_transition``.
+  (``DocCollectionStateError`` -- e.g. probing a disabled collection), 403
+  (a global row changed by someone who is not a platform admin), and when an
+  enable / disable hits a forbidden ``invalid_collection_transition``.
+  htmx does not swap an error response on its own; the detail page's
+  ``corpus-collection-actions.js`` turns the swap on for these fragments.
 
   The wrapper keeps the same ``id="collection-readiness-card"`` so a follow-up
   successful re-probe (after the operator fixes the underlying state) swaps

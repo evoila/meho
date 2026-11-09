@@ -349,8 +349,9 @@ _ACCOUNT_OPS: tuple[AzureTypedOp, ...] = (
         summary="Read the state of a long-running Azure operation once, without sending it again.",
         description=(
             "Polls the URL of an operation reference once (GET) and returns the state: "
-            "Succeeded, Failed, Canceled or still running. The URL must be on the "
-            "target's Resource Manager host and in its subscription. Read-only."
+            "Succeeded, Failed, Canceled or still running. The URL must be an "
+            "operation status URL on the target's Resource Manager host and in "
+            "its subscription. Read-only."
         ),
         parameter_schema=_OPERATION_STATUS_PARAMS,
         response_schema=_OPERATION_STATUS_RESPONSE,

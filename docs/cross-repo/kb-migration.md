@@ -9,11 +9,11 @@ Copyright (c) 2026 evoila Group
 
 ## Why this matters
 
-- The consumer's `evoila-bosnia/claude-rdc-hetzner-dc` repo carries a `kb/` directory — the team's distilled vendor knowledge (vCenter / NSX / Vault / Keycloak / k8s / Argo / Harbor / general; ~44 entries at the time of writing, and growing).
+- The consumer's infrastructure repo carries a `kb/` directory — the team's distilled vendor knowledge (vCenter / NSX / Vault / Keycloak / k8s / Argo / Harbor / general; the count keeps growing).
 - Today every operator's Claude session relies on the repo being cloned and `grep kb/`. New knowledge reaches the team only via PR review + clone. **Two operators landing the same kb entry independently is a real failure mode.**
-- Per [decision #2](../decisions/locked-decisions.md): MEHO ingests the corpus once; the repo `kb/` stays live as the fallback for ≥1 month; the in-repo copy retires only when `meho kb search` is in daily use and the team agrees. There is no auto-retirement — the retire decision is an explicit operator call backed by the G4.3 eval.
+- Per [decision #2](../decisions/locked-decisions.md): MEHO ingests the corpus once; the repo `kb/` stays live as the fallback for ≥1 month; the in-repo copy retires only when `meho kb search` is in daily use and the team agrees. There is no auto-retirement — the retire decision is an explicit operator call.
 
-The entry count is a moving target — the canary acceptance test asserts the body-hash idempotency property, not a fixed cardinality. Treat "44" below as "however many `*.md` files the consumer's `kb/` currently holds".
+The entry count is a moving target — the canary acceptance test asserts the body-hash idempotency property, not a fixed cardinality. Treat `<file count>` below as "however many `*.md` files the consumer's `kb/` currently holds".
 
 ## Prerequisites
 
@@ -27,8 +27,8 @@ The entry count is a moving target — the canary acceptance test asserts the bo
 ### 1. Clone the consumer repo
 
 ```bash
-git clone git@github.com:evoila-bosnia/claude-rdc-hetzner-dc.git
-cd claude-rdc-hetzner-dc
+git clone git@github.com:<your-org>/<your-infra-repo>.git
+cd <your-infra-repo>
 ```
 
 ### 2. Dry-run first
@@ -61,11 +61,12 @@ The ingest reads only regular files inside the folder. It skips links (to files 
 
 ```bash
 meho kb list                       # all entries, slug-sorted, 200-char preview each
+meho kb list --order newest        # most recently updated first
 meho kb search "vsphere snapshot"  # ranked hits via hybrid BM25 + cosine
 meho kb show vcenter-9.0-snapshot-revert   # full Markdown body of one entry
 ```
 
-`meho kb list` should return the ingested count. `meho kb search` returns ranked hits (slug + ~200-char snippet + fused score); `--json` exposes the per-signal BM25 / cosine scores and ranks for retrieval tuning. `meho kb show <slug>` returns the full body. Note the recipe: **search → identify slug → `show` (or, for agents, the `meho://kb/{slug}` resource) for the full body** — the snippet is deliberately truncated so a search response stays small.
+`meho kb list` should return the ingested count. `meho kb search` returns ranked hits (slug + ~200-char snippet + fused score); `--json` exposes the per-signal BM25 / cosine scores and ranks for retrieval tuning. `meho kb show <slug>` returns the full body. Note the recipe: **search → identify slug → `show` (or, for agents, `search_knowledge` with `slug`, or the `meho://kb/{slug}` resource) for the full body** — the snippet is deliberately truncated so a search response stays small.
 
 ### 5. Re-ingest after consumer-side updates
 
@@ -81,51 +82,42 @@ Idempotent. The body-hash short-circuit from the G0.4 substrate means an unchang
 - The consumer repo's `kb/` **stays live as the fallback.** Do not delete it yet.
 - Operators use `meho kb search` for daily lookups; `grep kb/` is the override when search misses.
 - Re-ingest on a cadence that tracks the consumer's `kb/` churn (a cron or a post-`git pull` hook on the deploy host). The cost is bounded by the number of *changed* entries, not corpus size.
-- Measure whether the migration is succeeding with the G4.3 eval (already shipped — see "Measuring the overlap" below). The retire decision is data-driven, not a calendar event.
+- Check whether daily use is moving to MEHO with `meho retrieval usage` (see "Measuring the overlap" below). The retire decision is based on real use, not a calendar date.
 
 ## Measuring the overlap
 
-The eval tooling is already on `main` (G4.3-T1 [#440](https://github.com/evoila/meho/issues/440) corpus + G4.3-T2 [#441](https://github.com/evoila/meho/issues/441) runner). The remaining operationalisation is tracked by G4.3 Initiative [#373](https://github.com/evoila/meho/issues/373).
-
 ```bash
-meho retrieval eval --json    # precision@5 / MRR / coverage@5 vs the grep baseline
+meho retrieval usage --json    # searches per day and per surface, for your tenant
 ```
 
-This runs the seeded 10-query kb eval corpus through MEHO's hybrid retrieval and against a `grep` baseline, and reports precision@5, MRR, and coverage@5. The Initiative #373 green defaults are MRR ≥ 0.50 and coverage@5 ≥ 0.90 (the canary test [`backend/tests/acceptance/test_g41_kb_canary.py`](../../backend/tests/acceptance/test_g41_kb_canary.py) gates on these). Decision #2's acceptance — 10 sampled queries return answers equivalent to `grep kb/` — is exactly what this eval measures; treat a sustained green eval over the overlap window as the quantitative half of the retire decision.
+This reports, per day and per surface, how many searches ran, how many operators ran them, and how often a search led to a next step. Use it to see whether the team really searches MEHO instead of `grep kb/`.
+
+> **Which searches are counted — read this before you start dogfooding.** Only the MCP search tools count: `search_knowledge` (kb), `search_memory` (memory), `search_operations` (operations). MEHO counts them from request usage events (route `tool:<tool name>`). It records these events only when `REQUEST_USAGE_RETENTION_DAYS` is set; without it, the report shows no searches. The `counted_surfaces` field of `meho retrieval usage --json` names the counted tools (e.g. `["mcp:search_knowledge", "mcp:search_memory", "mcp:search_operations"]`).
+>
+> **REST `POST /api/v1/retrieve` is not counted** (`rest_excluded: true` in the same response). It runs the same search, but a REST `/retrieve` call does not count, while a `search_knowledge` call does.
+>
+> **What this means:** if you dogfood the overlap only through REST `/retrieve` (or before `/mcp` is set up), `total_searches` stays `0` for the whole window. The migration did not fail; the counted tools just saw no traffic. Dogfood through the MCP `search_knowledge` tool (the agent-facing surface) so the searches count. `counted_surfaces` and `rest_excluded` on every `usage` response tell you why a zero is a zero.
 
 ## Retiring the in-repo copy
 
-The retire decision is **operator-driven** and surface-scoped. Run the checklist verb (note: it is `meho retrieval retire-checklist`, not a `kb`-specific verb — one checklist scores all three retrieval surfaces; kb is one of them):
+The retire decision is **operator-driven**. MEHO does not decide it for you. When the usage report shows that daily lookups have moved to MEHO over the overlap window, and the team agrees:
 
-```bash
-meho retrieval retire-checklist --json
-```
-
-It combines the eval results with the open-blocker count (GitHub issues labelled `retrieval-migration-blocker`) into a per-surface GREEN / YELLOW / RED verdict over five criteria. When the **kb** surface is GREEN on all five and the team agrees daily use has shifted:
-
-> **Which surface feeds the overlap clock — read this before you start dogfooding.** The daily-use criteria (criterion 1 "days since first daily use" and criterion 2 "operator breadth") are fed **only by the audited MCP search meta-tools**: `search_knowledge` (kb), `search_memory` (memory), `search_operations` (operations). Those land in `audit_log` under `/mcp/tools/call/<tool>` and are the surfaces named in the `counted_surfaces` field of both `meho retrieval usage --json` and `meho retrieval retire-checklist --json` (e.g. `["mcp:search_knowledge", "mcp:search_memory", "mcp:search_operations"]`).
->
-> **REST `POST /api/v1/retrieve` is deliberately excluded** (`rest_excluded: true` in the same responses). It runs the identical retrieval substrate but audits under `/api/v1/retrieve`, which is not a counted path — so a `search_knowledge` call ticks the clock while a REST `/retrieve` call does not. Counting REST too is intentionally out of scope for v0.2 (it would change audit volume and risk double-counting against the MCP path).
->
-> **Practical consequence:** if you dogfood the ≥1-month overlap exclusively through REST `/retrieve` (or before `/mcp` is configured at all), `total_searches` stays `0` and the retire checklist stays RED on criteria 1 + 2 for the entire window — not because the migration failed, but because the counted surface saw no traffic. Dogfood through the MCP `search_knowledge` tool (the agent-facing surface) so the overlap clock actually ticks. The zero is no longer silent: `counted_surfaces` + `rest_excluded` on every `usage` / `retire-checklist` response tell you exactly why a zero is a zero.
-
-1. Open a PR in `evoila-bosnia/claude-rdc-hetzner-dc` removing `kb/`.
+1. Open a PR in the consumer's repo removing `kb/`.
 2. Update the consumer's `CLAUDE.md` to drop "grep `kb/`" patterns in favour of "use `meho kb search`".
 3. Keep the deleted directory recoverable from git history (a tag or the merge commit SHA is enough — see Rollback).
 
-Do not retire on a calendar alone. A GREEN checklist over a sustained window is the contract; the 1-month overlap is the *minimum*, not the trigger.
+Do not retire on a calendar alone. The 1-month overlap is the *minimum*, not the trigger.
 
 ## Rollback
 
-If a retrieval-quality regression surfaces after retiring the in-repo copy:
+If search quality gets worse after retiring the in-repo copy:
 
-1. From the consumer repo checkout (the same `claude-rdc-hetzner-dc` working directory established in step 1), restore the deleted directory from git history:
+1. From the consumer repo checkout (the same working directory established in step 1), restore the deleted directory from git history:
    ```bash
    git checkout <pre-retire-sha> -- kb/
    ```
    (`<pre-retire-sha>` is the commit immediately before the retire PR merged — the parent of the deletion commit.)
-2. Open an issue in the consumer repo labelled `retrieval-migration-blocker` so the next `meho retrieval retire-checklist` run flips the kb surface off GREEN until the regression is resolved.
-3. Re-investigate via `meho retrieval eval --json`: did precision@5 / MRR / coverage@5 drop? Is a specific query class failing? Re-ingest with `meho kb ingest ./kb --json` after the consumer-side `kb/` is restored, then re-measure.
+2. Re-ingest with `meho kb ingest ./kb --json` after the consumer-side `kb/` is restored, and check which queries return poor hits with `meho kb search --json`.
 
 Retiring is reversible by design — the corpus is in git on the consumer side and re-ingest is idempotent and cheap.
 
@@ -133,7 +125,7 @@ Retiring is reversible by design — the corpus is in git on the consumer side a
 
 Once daily use is established, new knowledge is written through MEHO directly (no PR review cycle — the entry reaches every operator in the tenant on write):
 
-- **Agent path.** `add_to_knowledge {"slug": "...", "body": "...", "metadata": {...}}`. The agent must `search_knowledge` for the topic **first** — re-adding under a different slug fragments the corpus and dilutes retrieval. A same-slug re-add merges in place via the body-hash short-circuit. `add_to_knowledge` is `operator`-role on the agent surface (deliberately narrower than the REST `tenant_admin` gate — the audit row + broadcast event provide traceability).
+- **Agent path.** `add_to_knowledge {"slug": "...", "body": "...", "metadata": {...}}`. The agent must `search_knowledge` for the topic **first** — re-adding under a different slug fragments the corpus and dilutes retrieval. A same-slug re-add merges in place via the body-hash short-circuit. `add_to_knowledge` is `operator`-role on the agent surface (deliberately narrower than the REST `tenant_admin` gate — the audit row + broadcast event provide traceability). An `operator` changes only the entries it created and cannot set the `source_kind` metadata key; a `tenant_admin` can change any entry.
 - **Operator CLI.** `tenant_admin` only:
   ```bash
   meho kb add my-product-9.0-topic --body @./entry.md --metadata source=runbook,owner=ops
@@ -148,5 +140,4 @@ Ephemeral session notes do **not** belong in the kb — those go in `add_to_memo
 - [`docs/architecture/kb.md`](../architecture/kb.md) — the architecture companion: module shape, `KbService` method map, the four surfaces, RBAC matrix.
 - [Initiative #331 G4.1](https://github.com/evoila/meho/issues/331) — scope + definition of done.
 - [decision #2](../decisions/locked-decisions.md) — one-shot import + 1-month overlap.
-- [Initiative #373 G4.3](https://github.com/evoila/meho/issues/373) — retrieval migration tooling (eval + retire-checklist) that operationalises the retire decision.
 - [`docs/cross-repo/README.md`](./README.md) — the index of cross-repo coordination specs and operator runbooks this doc is listed in.

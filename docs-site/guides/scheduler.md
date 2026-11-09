@@ -21,10 +21,7 @@ that keeps them firing.
     - Creating and cancelling triggers needs **tenant_admin**; listing
       needs **operator**.
     - The scheduler is **Beta** — see the
-      [feature-maturity index](../reference/maturity.md#scheduler). Its
-      road to GA is tracked in
-      [#2668](https://github.com/evoila/meho/issues/2668), the same
-      issue that hardened the durable-credential behavior below.
+      [feature-maturity index](../reference/maturity.md#scheduler).
 
 ## The surface at a glance
 
@@ -36,15 +33,17 @@ that keeps them firing.
 
 ## Create a trigger
 
-Every trigger binds one `--agent-definition` and one `--kind`. A
+Every trigger binds one `--agent-definition` and one `--kind`.
+`--agent-definition` takes the UUID of the agent definition, not its
+name. Find it on the `id:` line of `meho agent show <name>`. A
 **cron** trigger fires repeatedly on a 5-field expression evaluated in
 its persisted `--timezone`:
 
 ```bash
 meho scheduler create --kind cron \
-  --agent-definition nightly-reconcile \
+  --agent-definition <definition-uuid> \
   --cron-expr "0 2 * * *" --timezone Europe/Vienna \
-  --inputs '{"scope": "prod"}' \
+  --inputs '{"prompt": "Reconcile the prod scope."}' \
   --work-ref gh:evoila/meho#520
 ```
 
@@ -53,14 +52,17 @@ to a terminal state:
 
 ```bash
 meho scheduler create --kind one_off \
-  --agent-definition drain-and-patch --fire-at 2026-08-10T22:00:00Z
+  --agent-definition <definition-uuid> --fire-at 2026-08-10T22:00:00Z \
+  --inputs '{"prompt": "Drain and patch esx-3."}'
 ```
 
 A third kind, **event**, fires an agent run in response to a backplane
 event (`--event-filter`) rather than a clock. The knobs worth knowing:
 
 - `--inputs` — a JSON object rendered into the agent's prompt at fire
-  time.
+  time. A `cron` or `one_off` trigger needs it, and it must make a
+  non-empty prompt (for example `{"prompt": "…"}`). MEHO refuses an
+  empty `{}` with 422. An `event` trigger may leave it out.
 - `--identity-sub` — the identity the scheduler impersonates at fire
   time (default `__scheduler__`); an override you rarely set. What makes
   the agent, not you, the requester of a scheduled write is the **bound
@@ -96,16 +98,14 @@ JWT to forward to Vault's OIDC auth method. The scheduler instead sources
 the agent's `client_credentials` secret **Vault-first**, under its own
 static service token (`VAULT_SCHEDULER_TOKEN`), from
 `SCHEDULER_AGENT_VAULT_PATH_PATTERN` (default
-`secret/data/agents/{client_id}/credentials`), falling back to a pod env
+`secret/data/agents/{tenant_id}_{client_id}/credentials`), falling back to a pod env
 var only when Vault yields nothing.
 
 That static token is the failure point unattended operation used to hit:
 a periodic Vault token **dies in the field** — it ages out, or an
 operator forgets to re-mint it — and every credential read then `403`s,
 so the scheduler **silently skips its fires**. A job that ran for weeks
-just stops, quietly. The hardening shipped with the
-[#2668](https://github.com/evoila/meho/issues/2668) line closes that
-hole three ways:
+just stops, quietly. MEHO closes that hole three ways:
 
 - **Self-heal instead of skip.** On a `lookup-self`-confirmed dead
   token, the scheduler mints a **fresh** Vault token by `jwt_login` as
@@ -126,8 +126,11 @@ When credentials genuinely cannot be resolved (no self-heal path
 provisioned), the loop does the honest thing: it logs
 `scheduler_credentials_unresolved`, **skips** the fire, and records
 `last_skip_reason='credentials_unresolved'` with an incremented
-`skip_count` on the trigger row — so `meho scheduler list` shows you
-exactly why a job isn't running, instead of leaving you to guess.
+`skip_count` on the trigger row. `meho scheduler list` shows the count
+in the `SKIPS` column; `meho scheduler list --json` also shows
+`last_skip_reason`. After 10 skips in a row, MEHO sets the trigger to
+`paused` and stops trying. Fix the cause, cancel the trigger, and create
+it again.
 
 !!! note "Provisioning the headless mint"
 
@@ -153,11 +156,11 @@ this page is its agent-run twin.
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| A trigger shows `last_skip_reason=credentials_unresolved` and a rising `skip_count` | The scheduler could not resolve the agent's credentials and skipped the fire (loudly, not silently). | Stage the agent's `client_credentials` secret at `secret/data/agents/{client_id}/credentials`, or provision the self-heal mint (`vault-provisioning.md`). |
+| A trigger shows `last_skip_reason=credentials_unresolved` and a rising `skip_count`, or is `paused` after 10 skips | The scheduler could not resolve the agent's credentials and skipped the fire (loudly, not silently). | Stage the agent's `client_credentials` secret at `secret/data/agents/{tenant_id}_{client_id}/credentials`, or provision the self-heal mint (`vault-provisioning.md`). Create a `paused` trigger again. |
 | Startup logs `scheduler_vault_token_will_expire` (ERROR) | `VAULT_SCHEDULER_TOKEN` is non-renewable or has an `explicit_max_ttl` — it will die despite renewal. | Re-mint it as a periodic token: `vault token create -period=768h …`. |
 | `403 insufficient_role` on `scheduler create` / `cancel` | Creating and cancelling triggers need **tenant_admin**; listing is operator. | Use a tenant_admin session to author triggers. |
-| A cron trigger never fires | The `--cron-expr` didn't parse, or `--timezone` is wrong, so `next_fire_at` was never set to a reachable instant. | Check `meho scheduler list` for `next_fire_at`; fix the 5-field expression / IANA timezone and recreate. |
+| `scheduler create` answers 422 | MEHO checks the trigger when you create it: a cron expression that does not parse, an unknown `--timezone`, or missing `--inputs` on a `cron` / `one_off` trigger. No trigger is made. | Fix the 5-field expression, the IANA timezone or the inputs, and create it again. |
 | A scheduled write is stuck `awaiting_approval` | Working as designed — every agent write above `safe` waits for a person, under the agent's subject. | Approve it as yourself; because the requester is the agent, it is not your own change. A `dangerous` or `destructive` write needs a MEHO-SA-Operator or an admin ([approvals](approvals-and-break-glass.md)). |
 | A run interrupted mid-flight (scheduler restart) shows as failed | The default `--in-flight-policy=fail_into_audit` records a killed-mid-run trigger as a failure rather than silently resuming it. | Set `--in-flight-policy=resume` at create time if you want interrupted runs picked back up on restart. |
 
-**Next:** [Satellite gateway](satellite-gateway.md).
+**Next:** [Event ingestion](event-ingestion.md).

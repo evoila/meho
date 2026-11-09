@@ -10,7 +10,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -54,6 +53,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/secret"
 	"github.com/evoila/meho/cli/internal/cmd/sensor"
 	serviceprincipal "github.com/evoila/meho/cli/internal/cmd/service-principal"
+	"github.com/evoila/meho/cli/internal/cmd/sessions"
 	"github.com/evoila/meho/cli/internal/cmd/settings"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/tenants"
@@ -81,23 +81,56 @@ import (
 // to pick the process exit code (auth_expired → 2, unreachable → 3,
 // unexpected → 4, generic → 1).
 func Execute() error {
-	trustSavedCA(os.Stderr)
 	return newRootCmdFor(os.Args[1:]).Execute()
 }
 
-// trustSavedCA trusts the CA file `meho login --ca-file` recorded. It
-// runs before the command tree is built, because that build already
-// fetches the dynamic commands from the backplane. A file that is gone
-// only warns: the request that follows then fails on the certificate
-// with the transport's own message.
-func trustSavedCA(errOut io.Writer) {
+// trustSavedCA trusts the CA file `meho login --ca-file` recorded, but
+// only when this command works against the backplane the file was
+// recorded for. A `--backplane` flag or a `meho login` that names
+// another backplane must not get that CA: it could vouch for a server
+// that then receives this person's credentials. The trust covers the
+// whole process, because the same install's Keycloak host needs it too.
+//
+// A file that is gone only warns: the request that follows then fails
+// on the certificate with the transport's own message.
+func trustSavedCA(cmd *cobra.Command, args []string) {
 	cfg, err := auth.LoadConfig()
 	if err != nil || cfg.CAFile == "" {
 		return
 	}
-	if err := auth.TrustCAFile(cfg.CAFile); err != nil {
-		fmt.Fprintf(errOut, "warning: the CA file from `meho login` is not usable: %v\n", err)
+	if named := namedBackplane(cmd, args); named != "" && !sameBackplane(named, cfg.BackplaneURL) {
+		return
 	}
+	if err := auth.TrustCAFile(cfg.CAFile); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: the CA file from `meho login` is not usable: %v\n", err)
+	}
+}
+
+// namedBackplane is the backplane the command line names, or "" when
+// the command uses the saved one.
+func namedBackplane(cmd *cobra.Command, args []string) string {
+	if cmd.Name() == "login" && cmd.Parent() == cmd.Root() && len(args) > 0 {
+		return args[0]
+	}
+	if f := cmd.Flags().Lookup("backplane"); f != nil && f.Changed {
+		return f.Value.String()
+	}
+	return ""
+}
+
+// discoveryClient is the client for the dynamic-command fetch against
+// the saved backplane. That fetch runs while the command tree is built,
+// before flags are parsed, so it gets the saved CA on its own client
+// instead of the process-wide trust of trustSavedCA.
+func discoveryClient(cfg auth.Config) *http.Client {
+	if cfg.CAFile == "" {
+		return http.DefaultClient
+	}
+	client, err := auth.ClientTrustingCAFile(cfg.CAFile)
+	if err != nil {
+		return http.DefaultClient
+	}
+	return client
 }
 
 // newRootCmd builds the command tree for the process's own arguments.
@@ -161,10 +194,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newDoctorCmd())
 
-	// G4.3-T2 (#441) -- retrieval-quality + migration-decision tooling.
-	// `meho retrieval eval` ships first; sibling verbs (usage T5b #464,
-	// retire-checklist T6 #445) graft onto the same parent in their own
-	// PRs.
+	// `meho retrieval usage` -- retrieval usage telemetry.
 	root.AddCommand(retrieval.NewRootCmd())
 
 	// G0.6-T13 (#481) -- operation meta-tool surface for the G0.6
@@ -197,6 +227,9 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// file (#4048). Static: it must work on the first day, before any
 	// target or dynamic command exists.
 	root.AddCommand(settings.NewRootCmd())
+	// #4901 -- agent session store admin verbs (list / show / delete).
+	// Wraps /api/v1/sessions; operator to read, tenant_admin to delete.
+	root.AddCommand(sessions.NewRootCmd())
 	// T3 (#2880) -- event_source registry admin verbs (add / list /
 	// describe / update / delete). Wraps /api/v1/event-sources/*.
 	root.AddCommand(eventsource.NewRootCmd())
@@ -786,7 +819,7 @@ func registerDynamicSubcommands(root *cobra.Command) {
 	// discovery.fetchTimeout cap applied internally. Using
 	// cobra.Command.Context() would be nicer but cobra hasn't
 	// constructed it yet at command-tree-build time.
-	manifest, err := discovery.Fetch(context.Background(), http.DefaultClient, cfg.BackplaneURL)
+	manifest, err := discovery.Fetch(context.Background(), discoveryClient(cfg), cfg.BackplaneURL)
 	if err != nil {
 		// Decoding failures (the only error class Fetch returns)
 		// are surfaced as a stderr warning but never abort.

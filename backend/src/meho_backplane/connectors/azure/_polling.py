@@ -27,14 +27,14 @@ with the result, so the caller can poll later.
 Every poll URL is checked with
 :func:`~meho_backplane.connectors.azure._http.check_azure_url` before the
 token is sent to it: https, the target's host, the target's subscription, at
-most 4 KB. It must also be an operation status URL (a path part with
-"operation" in it, such as ``operations``, ``operationStatuses`` or
-``operationResults``).
+most 4 KB. It must also have the shape of an operation status URL
+(:func:`check_poll_url`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -81,6 +81,14 @@ _HEADER_FOR_KIND: Final[dict[str, str]] = {
     "azure-asyncoperation": "azure-asyncoperation",
     "location": "location",
 }
+
+#: The last but one path part of an operation status URL, in lower case.
+_STATUS_KINDS: Final[frozenset[str]] = frozenset(
+    {"operations", "operationstatuses", "operationresults", "asyncoperations"}
+)
+
+#: A resource provider namespace, such as ``Microsoft.Compute``.
+_NAMESPACE_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)+")
 
 _monotonic = time.monotonic
 _sleep = asyncio.sleep
@@ -160,10 +168,40 @@ class OperationState:
         }
 
 
+def _is_status_path(path: str) -> bool:
+    """Return whether *path* has the shape of an Azure operation status URL.
+
+    The path ends in ``<kind>/<id>``: *kind* is one of :data:`_STATUS_KINDS`
+    (any case) and *id* is not empty. The part before it is one of:
+
+    * ``/subscriptions/<sub>``
+    * ``/subscriptions/<sub>/providers/<namespace>``
+    * ``/subscriptions/<sub>/providers/<namespace>/locations/<location>``
+    * each of the three above with ``/resourceGroups/<group>`` after
+      ``<sub>``
+
+    No path part may be empty. :func:`check_azure_url` checks ``<sub>``.
+    """
+    parts = path.split("/")[1:]
+    if len(parts) < 4 or not all(parts) or parts[-2].lower() not in _STATUS_KINDS:
+        return False
+    scope = parts[2:-2]
+    if scope and scope[0].lower() == "resourcegroups":
+        if len(scope) < 2:
+            return False
+        scope = scope[2:]
+    if not scope:
+        return True
+    if len(scope) < 2 or scope[0].lower() != "providers" or not _NAMESPACE_RE.fullmatch(scope[1]):
+        return False
+    location = scope[2:]
+    return not location or (len(location) == 2 and location[0].lower() == "locations")
+
+
 def check_poll_url(target: AzureTargetLike, url: str) -> None:
     """Refuse a poll URL that breaks the URL rules or is no operation status URL."""
     parsed = check_azure_url(target, url)
-    if not any("operation" in part.lower() for part in parsed.path.split("/")):
+    if not _is_status_path(parsed.path):
         raise AzureUrlRefusedError(
             f"Azure target {target.name!r}: the poll URL is not an Azure operation "
             "status URL. MEHO sent no token to it."

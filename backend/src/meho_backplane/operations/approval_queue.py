@@ -76,7 +76,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -93,6 +93,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import (
@@ -116,10 +117,10 @@ from meho_backplane.operations._audit import (
 )
 from meho_backplane.operations._errors import (
     result_already_resumed,
-    result_denied,
     result_object_changed_since_approval,
     result_preview_changed_since_approval,
     result_release_changed_while_waiting,
+    result_resume_params_unavailable,
     result_target_changed_since_approval,
     result_target_gone_since_approval,
 )
@@ -148,8 +149,15 @@ from meho_backplane.operations.approval_resume_checks import (
     preview_changed_since_request,
     target_changed_since_request,
 )
+from meho_backplane.operations.grant_approval import (
+    check_grant_approval,
+    grant_audit_fields,
+    grant_changed_since_request,
+)
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
+from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -194,7 +202,9 @@ __all__ = [
     "find_remote_write_approval",
     "get_decision_delegation",
     "get_request",
+    "is_high_risk_level",
     "list_pending",
+    "may_approve_high_risk",
     "parse_delegation",
     "pending_chain_positions",
     "read_approval_result",
@@ -205,6 +215,7 @@ __all__ = [
     "rehydrate_resume_target",
     "reject_request",
     "request_waits_only_for_token_call",
+    "result_state_of_envelope",
     "resume_dispatch_after_approval",
     "withdraw_request",
 ]
@@ -244,8 +255,8 @@ class ApprovalRule(StrEnum):
     Recorded as ``approval_rule`` on the ``approval.decision`` audit row
     and on the ``approval.approved`` step event, next to ``self_approved``.
 
-    * ``sa_operator_self_approval`` — a MEHO-SA-Operator approved their own
-      change.
+    * ``sa_operator_self_approval`` — a MEHO-SA-Operator or a MEHO-Admin
+      approved their own change (both groups may, #5969).
     * ``break_glass_self_approval`` — the requester approved their own
       ``safe`` or ``caution`` change under ``APPROVAL_ALLOW_SELF_APPROVAL``.
     * ``sa_operator_or_admin`` — another person's ``dangerous`` or
@@ -430,8 +441,9 @@ class SelfApprovalForbiddenError(ApprovalError):
 
     Raised by :func:`approve_request` when
     ``operator.sub == request.principal_sub``, the person is not in the
-    MEHO-SA-Operators group (:attr:`~meho_backplane.auth.operator.Operator.may_self_approve`,
-    #3328), and the audited single-operator break-glass mode
+    MEHO-SA-Operators or MEHO-Admins group
+    (:attr:`~meho_backplane.auth.operator.Operator.may_self_approve`), and
+    the audited single-operator break-glass mode
     (``Settings.approval_allow_self_approval``) does not cover the change.
     Break-glass never covers a ``dangerous`` or ``destructive`` change
     (*high_risk*). The route layer maps this to 403.
@@ -469,7 +481,8 @@ class SelfApprovalForbiddenError(ApprovalError):
         #: The plain refusal text, without ids, for the web interface.
         self.reason_text = (
             "You cannot approve your own change. Only members of the "
-            f"MEHO-SA-Operators group may approve their own changes. {who_can}"
+            "MEHO-SA-Operators and MEHO-Admins groups may approve their own "
+            f"changes. {who_can}"
         )
         break_glass = (
             ""
@@ -884,12 +897,33 @@ class ApprovalResultState(StrEnum):
       agent waiter) store the envelope they get back.
     * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
     * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
+    * :attr:`UNCERTAIN` -- a result is stored, its ``status`` is not ``ok``,
+      and it says MEHO does not know if the change happened
+      (``extras.execution_outcome == "uncertain"``). This covers a lost
+      vendor answer after the request was sent, a failed audit write, and an
+      approved run that MEHO lost in a restart. MEHO never runs it again, and
+      every view says: do not run it again, check the target first.
     """
 
     NOT_STARTED = "not_started"
     STARTED = "started"
     EXECUTED = "executed"
     FAILED = "failed"
+    UNCERTAIN = "uncertain"
+
+
+def result_state_of_envelope(envelope: Mapping[str, Any]) -> ApprovalResultState:
+    """The run state a stored result envelope stands for (#5025).
+
+    The one rule every approval view uses: ``ok`` is ``executed``, an error
+    that says the outcome is unknown is ``uncertain``, any other result is
+    ``failed``.
+    """
+    if envelope.get("status") == "ok":
+        return ApprovalResultState.EXECUTED
+    if envelope_is_uncertain(envelope):
+        return ApprovalResultState.UNCERTAIN
+    return ApprovalResultState.FAILED
 
 
 def approval_result_state(request: ApprovalRequest) -> ApprovalResultState | None:
@@ -897,9 +931,7 @@ def approval_result_state(request: ApprovalRequest) -> ApprovalResultState | Non
     if request.status != ApprovalRequestStatus.APPROVED.value:
         return None
     if request.resume_result is not None:
-        if request.resume_result.get("status") == "ok":
-            return ApprovalResultState.EXECUTED
-        return ApprovalResultState.FAILED
+        return result_state_of_envelope(request.resume_result)
     if request.resumed_at is not None:
         return ApprovalResultState.STARTED
     return ApprovalResultState.NOT_STARTED
@@ -1269,10 +1301,12 @@ async def _write_audit_row(
     # and the DISPATCH run rows (#4029) carry.
     # ``operator`` is the requester on a "request" row / the reviewer on a
     # "decision" row, so the name always pairs with ``operator_sub``. Omitted
-    # when the token had no name (resolver fails open to the raw sub); display
-    # name only, email is never widened onto this surface.
-    if operator.name:
-        payload["principal_name"] = operator.name
+    # when there is no name (resolver fails open to the raw sub); display
+    # name only, email is never widened onto this surface. An agent token
+    # has no ``name`` claim: its registered name or client id is used (#3885).
+    principal_name = await principal_display_name(session, operator)
+    if principal_name:
+        payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
     if extra_payload:
@@ -1351,6 +1385,9 @@ class ResumeRequester(NamedTuple):
     sub: str
     act: str | None
     name: str | None
+    #: The requester's ``principal_kind`` (#3885). ``None`` on a row parked
+    #: before migration 0149.
+    kind: str | None = None
 
 
 #: The requester of the approval request whose composite is being re-run
@@ -1514,10 +1551,12 @@ async def create_pending_request(
     # ``None``. The prior ``getattr(operator, "identity_act", None)`` was
     # dead code — ``Operator`` has no such field, so it was always ``None``.
     principal_act: str | None = resolve_actor_sub()
-    principal_sub = operator.sub
-    principal_name = operator.name
     if requester is not None:
-        principal_sub, principal_act, principal_name = requester
+        principal_sub, principal_act, principal_name, principal_kind = requester
+    else:
+        principal_sub = operator.sub
+        principal_name = await principal_display_name(session, operator)
+        principal_kind = operator.principal_kind.value
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the
     # same request-time ContextVar the audit writers read (bound at the
@@ -1554,11 +1593,13 @@ async def create_pending_request(
         run_id=run_id,
         principal_sub=principal_sub,
         principal_act=principal_act,
-        # Requester display name hoisted from the JWT ``name`` claim at park
-        # time (#3300) so every approvals surface renders a name alongside
-        # ``principal_sub``. ``None`` when the token carried no name --
+        # Requester display name hoisted at park time (#3300) so every
+        # approvals surface renders a name alongside ``principal_sub``: the
+        # JWT ``name`` claim, else for a machine token the registered agent
+        # name or the client id (#3885). ``None`` when there is none --
         # fail-open to the raw sub. Same pattern as audit_log.principal_name.
         principal_name=principal_name,
+        principal_kind=principal_kind,
         op_id=op_id,
         connector_id=connector_id,
         target_id=target_id,
@@ -1855,6 +1896,7 @@ async def approve_request(
         "reviewed_by": operator.sub,
         "self_approved": self_approved,
         "approval_rule": rule.value,
+        **grant_audit_fields(request, operator),
     }
     if reason:
         extra["reason"] = reason
@@ -2293,12 +2335,13 @@ async def resume_dispatch_after_approval(
       hash-verified against ``params_hash`` by :func:`approve_request`).
     * ``/decide`` and the MCP by-id approve hold only the request id, so
       they pass ``params=None`` and this helper falls back to the params
-      stored on the row at park time (``request.params``, #1503). A row
-      written before migration 0036 has ``params IS NULL`` and no
-      caller-supplied params — there is nothing to re-dispatch, so the
-      helper **fails closed** with a structured ``denied`` result naming
-      the gap (the op must be resumed via REST ``/approve`` + params, the
-      pre-0036 path).
+      stored on the row at park time (``request.params``, #1503). When
+      the row holds no params MEHO can run with (``_stored_call``), there
+      is nothing to re-dispatch: the run is refused like the release and
+      target refusals (:func:`_refuse_resume`, error code
+      ``approval_resume_params_unavailable``), so the request ends as a
+      failed run with a reason, and the requester can re-run it with the
+      params (#6064).
 
     Target re-hydration (G11.7-T1 #1401): the row persists only
     ``target_id``, not the full target. A write op whose handler reads
@@ -2339,12 +2382,16 @@ async def resume_dispatch_after_approval(
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
     """
+    # #5024: a stopping pod starts no new run. The claim stays free, so
+    # nothing is used up and nothing was sent.
+    if is_draining():
+        return shutting_down_result(request.op_id)
     # The requester's reveal choice is on the request row, outside the
     # params and the hash (``create_pending_request``). It goes on the
     # params of the run only.
     effective_params, reveal_secret = _stored_call(request, params)
     if effective_params is None and request.execution_handle is None:
-        return _resume_pre0036_denied(operator, request)
+        return await _refuse_resume_params_unavailable(operator, request)
 
     release_refusal = await refuse_resume_if_release_changed(operator, request)
     if release_refusal is not None:
@@ -2355,14 +2402,19 @@ async def resume_dispatch_after_approval(
         return target_refusal
 
     # Exactly-one-resumer claim (#2293): win the atomic conditional UPDATE
-    # right before executing -- after the pre-0036 params check above, so
-    # that gap never burns the claim and leaves the op un-executable. A
-    # refusal above (release or target) takes the claim itself: such a
-    # request never runs later. A lost claim means another
+    # right before executing. A refusal above (no params to run with,
+    # release or target) takes the claim itself and stores the refusal as
+    # the run result: such a request never runs later. A lost claim means another
     # resumer already executed the approved op (the in-process agent waiter
     # that read the same approved row, or a racing operator
     # surface), so no-op with a benign already_resumed result rather than
     # double-dispatching the approved write.
+    #
+    # #5024, checked again: the stop may have come during the lookups
+    # above. The claim is the last step before the run, so this is the
+    # last point at which nothing is used up yet.
+    if is_draining():
+        return shutting_down_result(request.op_id)
     if not await claim_resume(request.id):
         _log().info(
             "approval_resume_already_claimed",
@@ -2422,16 +2474,36 @@ def _stored_call(
     (``request.reveal_secret``). So the choice also survives for a
     credential write, whose params are not on the row and come from the
     caller on a re-run. The params are ``None`` when the row stores none and
-    none were sent. Stored params whose secret-named values were replaced
-    by a marker (after the first run, :func:`claim_resume`) count as none:
-    they can no longer run the call.
+    none were sent, or when the stored params can no longer run the call
+    (:func:`_stored_params_can_run`).
     """
     if params is not None:
         params, _ = split_reveal_secret(params)
     effective: dict[str, Any] | None = params
-    if effective is None and not holds_hidden_param_values(request.params):
+    if effective is None and _stored_params_can_run(request):
         effective = cast(dict[str, Any] | None, request.params)
     return effective, bool(request.reveal_secret)
+
+
+def _stored_params_can_run(request: ApprovalRequest) -> bool:
+    """True when the params stored on *request* are still the ones the requester sent.
+
+    Stored params without a marker (``[REDACTED:param_name]``) can run.
+    With a marker, there are two cases (#6064):
+
+    * MEHO wrote it (:func:`claim_resume` or :func:`end_run_input`): the
+      real secret value is gone, so the params no longer match the
+      request's ``params_hash``. They cannot run the call.
+    * The requester sent it as a value, for example an object read from
+      MEHO and passed back unchanged. The hash covers it, so the params
+      still match ``params_hash``. They run as sent.
+    """
+    stored = cast(dict[str, Any] | None, request.params)
+    if stored is None:
+        return False
+    if not holds_hidden_param_values(stored):
+        return True
+    return params_hash_matches(stored, request.params_hash)
 
 
 async def refuse_resume_if_release_changed(
@@ -2572,10 +2644,13 @@ async def refuse_resume_if_preview_changed(
     object the approval card named must still be the object the live
     system has under the call's name
     (:func:`~meho_backplane.operations.approval_object_check.object_changed_since_request`).
-    Returns ``None`` when both hold, or when the request stored no preview
-    hash. Else the operation does not run: the refusal is stored as the
-    request's run result, so every read surface shows the run as failed
-    with the ``preview_changed_since_approval`` or
+    A third check runs for every change of rights, with or without a
+    preview hash: the login and the group it is for must still have the
+    ids the approver saw
+    (:func:`~meho_backplane.operations.grant_approval.grant_changed_since_request`).
+    Returns ``None`` when all hold. Else the operation does not run: the
+    refusal is stored as the request's run result, so every read surface
+    shows the run as failed with the ``preview_changed_since_approval`` or
     ``object_changed_since_approval`` error code. The caller has already
     won the one-resumer claim, so the request cannot run later.
 
@@ -2597,6 +2672,8 @@ async def refuse_resume_if_preview_changed(
         )
     else:
         reason = await object_changed_since_request(operator, request, target, params)
+        if reason is None:
+            reason = await grant_changed_since_request(operator, request, target, params)
         if reason is None:
             return None
         refusal = result_object_changed_since_approval(
@@ -2725,14 +2802,17 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any, *, parked_op
         )
 
 
-def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
-    """Fail-closed result for a pre-0036 row with no stored params to re-dispatch.
+async def _refuse_resume_params_unavailable(
+    operator: Operator, request: ApprovalRequest
+) -> OperationResult:
+    """Refuse an approved run that has no params MEHO can run with (#6064).
 
-    A row parked before migration 0036 has ``params IS NULL`` and is
-    approved via a surface that carries no params (/decide, MCP by-id), so
-    there is nothing to re-dispatch — refuse rather than dispatch an empty
-    call. Reached before the claim, so it never burns it. Extracted to keep
-    :func:`resume_dispatch_after_approval` under the function-size budget.
+    The surface sent no params, and :func:`_stored_call` found none on the
+    row. The run is recorded like the other refusals (:func:`_refuse_resume`):
+    the claim is taken, one audit row is written, and the refusal is stored
+    as the run result. So the request ends as a failed run with a reason on
+    every surface, instead of staying approved and not run, and the
+    requester can re-run it with the params.
     """
     _log().warning(
         "approval_resume_params_unavailable",
@@ -2741,20 +2821,18 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
         connector_id=request.connector_id,
         operator_sub=operator.sub,
     )
-    return result_denied(
-        request.op_id,
-        (
-            f"approval request {request.id} has no stored params "
-            "(parked before migration 0036); re-dispatch refused — "
-            "approve via REST /approve with the original params instead"
-        ),
-        0.0,
-    )
+    refusal = result_resume_params_unavailable(request.op_id, approval_request_id=request.id)
+    return await _refuse_resume(operator, request, refusal, audit_payload={})
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
     """The requester saved on *request* (#4217)."""
-    return ResumeRequester(request.principal_sub, request.principal_act, request.principal_name)
+    return ResumeRequester(
+        request.principal_sub,
+        request.principal_act,
+        request.principal_name,
+        request.principal_kind,
+    )
 
 
 @contextmanager
@@ -3376,6 +3454,21 @@ def _check_reviewer_role(operator: Operator) -> None:
 _HIGH_RISK_TIERS = frozenset({"dangerous", "destructive"})
 
 
+def is_high_risk_level(level: str | None) -> bool:
+    """True when *level* is ``dangerous`` or ``destructive`` (the group rule applies)."""
+    return level in _HIGH_RISK_TIERS
+
+
+def may_approve_high_risk(operator: Operator) -> bool:
+    """True when *operator* may approve another principal's high-risk change (#3328).
+
+    The groups of ``docs/decisions/approval-groups-and-self-approval.md``:
+    a MEHO-SA-Operator or a tenant admin. Run approvals use the same rule
+    (:meth:`~meho_backplane.operations.run_approvals.RunApprovalService.approve`).
+    """
+    return operator.may_self_approve or operator.tenant_role == TenantRole.TENANT_ADMIN
+
+
 def _request_safety_level(request: ApprovalRequest) -> str | None:
     """Return the risk level the dispatcher stamped on *request*, or ``None``."""
     level = (request.proposed_effect or {}).get("safety_level")
@@ -3404,8 +3497,8 @@ def _check_self_approval(
     comparison is on the stable ``sub`` claim, so a renamed display name
     can never turn into a self-approval. Then, in order:
 
-    1. A MEHO-SA-Operator (:attr:`Operator.may_self_approve`, #3327) may
-       approve their own change at every risk level (#3328). On the
+    1. A MEHO-SA-Operator or a MEHO-Admin (:attr:`Operator.may_self_approve`)
+       may approve their own change at every risk level. On the
        command line and REST the approve routes have already required a
        fresh sign-in (#3979).
     2. A person may approve their own ``caution`` change that waited only
@@ -3483,9 +3576,9 @@ def _check_approver_group(
     if self_rule is not None:
         return self_rule
     level = _request_safety_level(request)
-    if level not in _HIGH_RISK_TIERS:
+    if not is_high_risk_level(level):
         return ApprovalRule.REVIEWER
-    if operator.may_self_approve or operator.tenant_role == TenantRole.TENANT_ADMIN:
+    if may_approve_high_risk(operator):
         return ApprovalRule.SA_OPERATOR_OR_ADMIN
     raise ApprovalGroupForbiddenError(
         request.id,
@@ -3549,6 +3642,7 @@ async def _load_pending_for_approval(
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
+    check_grant_approval(operator, request)
     rule = _check_approver_group(operator, request)
     _check_approver_role_floor(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
@@ -3623,6 +3717,7 @@ async def list_pending(
     limit: int = 50,
     offset: int = 0,
     order: ApprovalListOrder = "newest",
+    after: ApprovalRequest | None = None,
 ) -> list[ApprovalRequest]:
     """Page through approval requests in *tenant_id*.
 
@@ -3638,17 +3733,45 @@ async def list_pending(
     newest request first; ``"oldest"`` lists the oldest first, which is the
     order a chain of requests under one change ticket was sent in. The
     oldest-first order breaks ties on ``id`` so it matches the step numbers
-    :func:`pending_chain_positions` gives.
+    :func:`pending_chain_positions` gives. Both orders break ties on ``id``,
+    so pages read one after another (``offset``) never skip or repeat a row.
+
+    ``after`` starts the list right after that row in *order*, instead of
+    counting rows with ``offset``. A reader that walks the whole list in
+    batches passes the last row of the batch before. Then a request that is
+    decided between two batches does not move the rest of the list, so no
+    row is skipped.
     """
     stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
         stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+    if after is not None:
+        if order == "oldest":
+            stmt = stmt.where(
+                or_(
+                    ApprovalRequest.created_at > after.created_at,
+                    and_(
+                        ApprovalRequest.created_at == after.created_at,
+                        ApprovalRequest.id > after.id,
+                    ),
+                )
+            )
+        else:
+            stmt = stmt.where(
+                or_(
+                    ApprovalRequest.created_at < after.created_at,
+                    and_(
+                        ApprovalRequest.created_at == after.created_at,
+                        ApprovalRequest.id < after.id,
+                    ),
+                )
+            )
     if order == "oldest":
         stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
     else:
-        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc(), ApprovalRequest.id.desc())
     stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return list(result.scalars().all())

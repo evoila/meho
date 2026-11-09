@@ -30,6 +30,9 @@ operational facts for this tenant. Prefer it over local `kb/` files.
   whole knowledge store.
 - `meho kb show <slug>` — full body of one entry; `meho kb list` —
   enumerate entries.
+- When the tenant keeps its lessons in its own wiki, the same search also
+  searches the wiki. A wiki hit has `source: wiki`, its collection and its
+  source link. When the wiki was not searched, the answer says why.
 
 ## Knowledge — recording facts
 
@@ -39,6 +42,10 @@ operational facts for this tenant. Prefer it over local `kb/` files.
   tenant.
 - `meho kb delete <slug>` — remove an entry; `meho kb ingest <directory>` —
   bulk-import an existing directory of markdown facts.
+- When the tenant keeps its lessons in its own wiki, a lesson lives in both
+  places: the wiki (a Git repo) is the source of truth, and MEHO keeps a
+  copy. `add_to_knowledge` still stores the lesson. Its answer (`wiki`) says
+  whether the lesson also goes to the wiki as a candidate page for review.
 
 ## Vendor docs (RAG) — capability-gated
 

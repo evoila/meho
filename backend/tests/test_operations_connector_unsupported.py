@@ -165,6 +165,7 @@ class _AuthModelRejectingConnector(HttpConnector):
     """
 
     product = "demo"
+    accepts_ingested_operations = True
     version = "1.0"
     impl_id = "demo-rest"
     supported_version_range = ">=1.0,<2.0"

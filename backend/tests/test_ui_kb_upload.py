@@ -82,6 +82,15 @@ from tests.conftest import (
     public_jwks,
 )
 
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -606,7 +615,7 @@ def test_upload_bulk_success_and_partial_failure() -> None:
 
 
 def test_upload_idempotent_same_body() -> None:
-    """Re-uploading identical content yields success without duplicating the entry."""
+    """Uploading a slug that exists is refused, shows a link, and keeps one entry."""
     _seed_tenant(_TENANT_A, "tenant-a")
     with respx.mock(assert_all_called=False) as mock_router:
         mock_discovery_and_jwks(mock_router, _JWKS)
@@ -628,11 +637,11 @@ def test_upload_idempotent_same_body() -> None:
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert "alert-success" in r1.text
-    assert "alert-success" in r2.text
+    assert "alert-error" in r2.text
+    assert "exists already" in r2.text
+    assert 'href="/ui/kb/idempotent"' in r2.text
 
-    # No-op assertion (AC3): the second upload must NOT create a duplicate.
-    # Re-uploading identical content is body_hash-idempotent, so exactly one
-    # entry for the slug must exist after both uploads, with a stable id.
+    # The second upload must NOT create a duplicate or change the entry.
     async def _entries() -> list[object]:
         from meho_backplane.kb import KbService
 
@@ -850,3 +859,155 @@ def _fake_embedding_service() -> AsyncMock:
     svc = fake_embedding_service()
     svc.dimension = 384
     return svc
+
+
+_OLD_REVISION = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
+_SHARED_REVISION = uuid.UUID("00000000-0000-4000-8000-0000000000bb")
+
+
+def _similar_check(slug: str) -> object:
+    """A check with one entry the operator may change and one shared entry it may not."""
+    from meho_backplane.kb.similar import KbSimilarCheck, KbSimilarEntry
+
+    return KbSimilarCheck(
+        slug=slug,
+        reason="similar_entries",
+        would_write=False,
+        slug_exists=False,
+        similar=[
+            KbSimilarEntry(
+                slug="old-entry",
+                entry_id=uuid.uuid4(),
+                revision_id=_OLD_REVISION,
+                summary="The old summary",
+                product="vcenter",
+                version="8.0",
+                status="candidate",
+                snippet="old text of the entry",
+                score=0.93,
+                match="same_product_version",
+                may_change=True,
+            ),
+            KbSimilarEntry(
+                slug="shared-entry",
+                entry_id=uuid.uuid4(),
+                revision_id=_SHARED_REVISION,
+                summary="The shared summary",
+                product=None,
+                version=None,
+                status=None,
+                snippet="shared text",
+                score=0.88,
+                match="close_meaning",
+                may_change=False,
+            ),
+        ],
+        min_score=0.85,
+        next_step="n",
+    )
+
+
+def _assert_similar_entries_shown(html: str) -> None:
+    """The result shows every field of each entry, and whether it can be changed."""
+    assert "/ui/kb/old-entry" in html
+    assert "The old summary" in html
+    assert "vcenter" in html
+    assert "8.0" in html
+    assert "candidate" in html
+    assert str(_OLD_REVISION) in html
+    assert "old text of the entry" in html
+    assert "0.93" in html
+    assert "same product and version" in html
+    assert "You can update this entry" in html
+    assert "/ui/kb/shared-entry" in html
+    assert "The shared summary" in html
+    assert str(_SHARED_REVISION) in html
+    assert "shared text" in html
+    assert "0.88" in html
+    assert "you cannot change it" in html
+
+
+def test_upload_with_similar_entries_saves_nothing_and_shows_them() -> None:
+    """An upload next to similar entries is not saved; the result shows them in full."""
+    check = _similar_check("my-entry")
+    _seed_tenant(_TENANT_A, "tenant-a")
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_discovery_and_jwks(mock_router, _JWKS)
+        token = _mint_admin_token(_TENANT_A)
+        session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        csrf = mint_csrf_token(str(session_id))
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=check,
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
+                new_callable=AsyncMock,
+            ) as fake_create,
+        ):
+            refused = _upload_single(client, filename="my-entry.md", csrf=csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as fake_check,
+            patch(
+                "meho_backplane.retrieval.indexer.get_embedding_service",
+                return_value=_fake_embedding_service(),
+            ),
+        ):
+            accepted = client.post(
+                "/ui/kb/upload",
+                files={"file": ("my-entry.md", io.BytesIO(_SMALL_MD), "text/markdown")},
+                data={"slug": "", "create_anyway": "true"},
+                headers={CSRF_HEADER_NAME: csrf, "X-CSRF-Token": csrf},
+                cookies={CSRF_COOKIE_NAME: csrf},
+            )
+
+    assert refused.status_code == 200, refused.text
+    assert "alert-error" in refused.text
+    assert "Create anyway" in refused.text
+    _assert_similar_entries_shown(refused.text)
+    fake_create.assert_not_awaited()
+    assert accepted.status_code == 200, accepted.text
+    assert "alert-success" in accepted.text
+    assert fake_check.await_args.kwargs["create_anyway"] is True
+
+
+def test_bulk_upload_with_similar_entries_shows_them_per_file() -> None:
+    """A bulk upload shows the similar entries of a refused file next to that file."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_discovery_and_jwks(mock_router, _JWKS)
+        token = _mint_admin_token(_TENANT_A)
+        session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        csrf = mint_csrf_token(str(session_id))
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=_similar_check("my-entry"),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
+                new_callable=AsyncMock,
+            ) as fake_create,
+        ):
+            response = _upload_bulk(
+                client,
+                files=[("my-entry.md", _SMALL_MD), ("notes.txt", b"plain")],
+                csrf=csrf,
+            )
+
+    assert response.status_code == 200, response.text
+    assert "2 failed" in response.text
+    assert "Only .md files are accepted" in response.text
+    _assert_similar_entries_shown(response.text)
+    fake_create.assert_not_awaited()

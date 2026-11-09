@@ -184,6 +184,16 @@ def test_approval_hand_off_can_be_turned_off_or_named() -> None:
     assert _secret_ref(env["APPROVAL_HANDOFF_ENCRYPTION_KEY"])[0] == "my-handoff"
 
 
+def test_params_hash_key_comes_from_its_own_made_secret() -> None:
+    env = _env(_render())
+    assert _secret_ref(env["PARAMS_HASH_KEY"]) == ("test-core-params-hash", "params_hash_key")
+
+
+def test_params_hash_key_can_name_your_own_secret() -> None:
+    env = _env(_render("--set", "paramsHashKey.secretName=my-hash-key"))
+    assert _secret_ref(env["PARAMS_HASH_KEY"]) == ("my-hash-key", "params_hash_key")
+
+
 def test_ingress_uses_the_made_certificate() -> None:
     ingress = _find(_render(), "Ingress", "test-meho")
     assert ingress["spec"]["tls"] == [{"hosts": ["meho.test"], "secretName": "test-core-tls"}]

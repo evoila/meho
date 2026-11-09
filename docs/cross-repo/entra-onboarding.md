@@ -14,6 +14,10 @@ application permissions, and an admin must grant consent for them. Without
 consent, every read fails with a clear error that names the missing
 permission.
 
+This page is about reading a directory. To let people sign in to MEHO
+with their Entra ID account, see
+[`docs-site/install/login/entra-id.md`](../../docs-site/install/login/entra-id.md).
+
 The code is in
 [`backend/src/meho_backplane/connectors/entra/`](../../backend/src/meho_backplane/connectors/entra/).
 The engineering page is

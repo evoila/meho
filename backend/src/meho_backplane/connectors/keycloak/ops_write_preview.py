@@ -140,6 +140,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     find_group,
     find_user,
 )
+from meho_backplane.connectors.keycloak.ops_write_grant import register_grant_ops, with_grant_facts
 from meho_backplane.connectors.keycloak.ops_write_realm_delete import (
     check_realm_guards,
     realm_blast_radius,
@@ -564,11 +565,21 @@ def _register_keycloak_preview_builders() -> None:
     """
     register_preview_builder("keycloak.realm.create", _realm_create_preview)
     register_preview_builder("keycloak.user.create", _user_create_preview)
-    register_preview_builder("keycloak.role_mapping.assign", _role_mapping_assign_preview)
+    register_grant_ops()
+    register_preview_builder(
+        "keycloak.role_mapping.assign",
+        with_grant_facts("keycloak.role_mapping.assign", _role_mapping_assign_preview),
+    )
     register_preview_builder("keycloak.user.reset_password", _user_reset_password_preview)
     register_preview_builder("keycloak.group.create", _group_create_preview)
-    register_preview_builder("keycloak.group.update_attributes", _group_update_attributes_preview)
-    register_preview_builder("keycloak.group.member.add", _group_membership_preview("add"))
+    register_preview_builder(
+        "keycloak.group.update_attributes",
+        with_grant_facts("keycloak.group.update_attributes", _group_update_attributes_preview),
+    )
+    register_preview_builder(
+        "keycloak.group.member.add",
+        with_grant_facts("keycloak.group.member.add", _group_membership_preview("add")),
+    )
     register_preview_builder("keycloak.group.member.remove", _group_membership_preview("remove"))
     register_preview_builder("keycloak.user.delete", _user_delete_preview)
     register_preview_builder("keycloak.group.delete", _group_delete_preview)

@@ -97,15 +97,15 @@ and vice versa.
   otherwise default these op_ids to ``"other"`` (none of the verbs
   end in ``.list`` / ``.create`` / ``.delete``).
 
-Eval corpus (G4.3-T4 #443 shipped at retrieval/eval/memory_queries.yaml)
-=======================================================================
+Eval corpus (scripts/retrieval_eval/memory_queries.yaml)
+========================================================
 
 The Initiative #332 issue body names a new file
 ``backend/src/meho_backplane/memory/eval/queries.yaml`` -- this was
 the planning shape before G4.3-T1 (#440, CLOSED) shipped the
-corpus-loader contract under :mod:`meho_backplane.retrieval.eval`,
-and G4.3-T4 (#443, CLOSED) shipped the 10-query memory corpus at
-``backend/src/meho_backplane/retrieval/eval/memory_queries.yaml``.
+corpus-loader contract under :mod:`scripts.retrieval_eval`,
+and G4.3-T4 (#443, CLOSED) shipped the 10-query memory corpus, now at
+``backend/scripts/retrieval_eval/memory_queries.yaml``.
 Duplicating it under the memory module would fork the canonical
 single-source-of-truth the loader points at. The canary consumes
 the shipped corpus via :func:`load_corpus("memory")` -- the eval
@@ -168,6 +168,8 @@ import pytest
 import respx
 from fastapi import FastAPI
 from httpx import ASGITransport
+from scripts.retrieval_eval import eval_surface
+from scripts.retrieval_eval.corpus import load_corpus
 from sqlalchemy import select
 
 from meho_backplane.api.v1.memory import router as memory_router
@@ -178,8 +180,6 @@ from meho_backplane.db.models import AuditLog
 from meho_backplane.memory.rbac import PermissionDeniedError
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
-from meho_backplane.retrieval.eval import eval_surface
-from meho_backplane.retrieval.eval.corpus import load_corpus
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, GUARD_PREFIX
 from tests._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -522,8 +522,8 @@ def _target_name_for(scope: MemoryScope, slug: str) -> str | None:
 
     Target-flavoured scopes require ``target_name`` at the write
     boundary (service-layer guard). The memory eval corpus's slugs
-    encode the target in the prefix (``rdc-vcenter-vpn-setup``,
-    ``holodeck-lab-known-issues``); we derive the target from the
+    encode the target in the prefix (``acme-vcenter-vpn-setup``,
+    ``acme-holodeck-known-issues``); we derive the target from the
     slug's first hyphen-separated segment. The mapping doesn't need
     to be perfect -- the canary only requires *some* deterministic
     ``target_name`` so the write succeeds + the natural key encodes
@@ -534,8 +534,8 @@ def _target_name_for(scope: MemoryScope, slug: str) -> str | None:
     # Map slug prefixes to canonical target names. Keep this table
     # in sync with the slug prefixes the eval corpus YAML uses.
     slug_to_target: dict[str, str] = {
-        "rdc-vcenter": "rdc-vcenter",
-        "holodeck-lab": "holodeck-lab",
+        "acme-vcenter": "acme-vcenter",
+        "acme-holodeck": "acme-holodeck",
     }
     for prefix, target in slug_to_target.items():
         if slug.startswith(prefix):
@@ -570,9 +570,9 @@ async def test_five_scope_remember_recall_round_trip(
     scope_cases: list[tuple[MemoryScope, Operator, str | None, str]] = [
         (MemoryScope.USER, op_a_operator, None, "user-pref-body"),
         (MemoryScope.USER_TENANT, op_a_operator, None, "user-tenant-body"),
-        (MemoryScope.USER_TARGET, op_a_operator, "rdc-vcenter", "user-target-body"),
+        (MemoryScope.USER_TARGET, op_a_operator, "acme-vcenter", "user-target-body"),
         (MemoryScope.TENANT, op_a_admin, None, "tenant-shared-body"),
-        (MemoryScope.TARGET, op_a_operator, "rdc-vcenter", "target-shared-body"),
+        (MemoryScope.TARGET, op_a_operator, "acme-vcenter", "target-shared-body"),
     ]
 
     for scope, writer, target_name, body in scope_cases:
@@ -679,17 +679,17 @@ async def test_user_target_scope_blocks_cross_target_and_cross_operator(
     await service.remember(
         operator=op_a_operator,
         scope=MemoryScope.USER_TARGET,
-        slug="rdc-private-note",
-        body="Op A's private rdc-vcenter note.",
-        target_name="rdc-vcenter",
+        slug="acme-private-note",
+        body="Op A's private acme-vcenter note.",
+        target_name="acme-vcenter",
     )
 
     # Same operator, different target -- different source_id, None.
     cross_target = await service.recall(
         operator=op_a_operator,
         scope=MemoryScope.USER_TARGET,
-        slug="rdc-private-note",
-        target_name="holodeck-lab",
+        slug="acme-private-note",
+        target_name="acme-holodeck",
     )
     assert cross_target is None
 
@@ -697,8 +697,8 @@ async def test_user_target_scope_blocks_cross_target_and_cross_operator(
     cross_op = await service.recall(
         operator=op_a_operator_2,
         scope=MemoryScope.USER_TARGET,
-        slug="rdc-private-note",
-        target_name="rdc-vcenter",
+        slug="acme-private-note",
+        target_name="acme-vcenter",
     )
     assert cross_op is None
 
@@ -1169,11 +1169,10 @@ async def test_eval_corpus_retrieval_quality_against_seeded_memory(
 ) -> None:
     """AC #8: 10-query memory eval corpus ranks expected (scope, slug) in top-5.
 
-    Runs :func:`eval_surface("memory", tenant_id=A)` -- the same call
-    the operator-facing ``meho retrieval eval --surface memory`` and
-    CI's ``run_eval_gate.py`` make -- against the seeded memory
+    Runs :func:`eval_surface("memory", tenant_id=A)` -- the same
+    engine CI's ``run_eval_gate.py`` uses -- against the seeded memory
     corpus. The runner consumes the 10-query memory corpus
-    (:mod:`meho_backplane.retrieval.eval.memory_queries.yaml`,
+    (:mod:`scripts.retrieval_eval.memory_queries.yaml`,
     shipped by G4.3-T4 #443) and folds per-query hits into MRR,
     coverage@5, and precision@5.
 
@@ -1191,6 +1190,7 @@ async def test_eval_corpus_retrieval_quality_against_seeded_memory(
     result = await eval_surface(
         "memory",
         tenant_id=op_a_operator.tenant_id,
+        principal_sub=op_a_operator.sub,
     )
 
     assert result.surface == "memory"

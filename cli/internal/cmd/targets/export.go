@@ -5,14 +5,16 @@ package targets
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/cmd/settings"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -37,8 +39,10 @@ func newExportCmd() *cobra.Command {
 			"exactly the entry shape of `spec.tenants[].targets` in the settings " +
 			"file. `meho targets import` reads it back; a target's password is " +
 			"never in it.\n\n" +
-			"The tenant is your own, or the one set with `meho tenants use`. A " +
-			"platform_admin with neither passes --tenant.",
+			"The tenant is your own, or the one this command works in: " +
+			"$MEHO_TENANT, or the one set with `meho tenants use` for this " +
+			"backplane. A platform_admin with neither, or with a tenant name " +
+			"instead of an id, passes --tenant.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -48,7 +52,7 @@ func newExportCmd() *cobra.Command {
 				return err
 			}
 			if tenant == "" {
-				tenant = chosenTenant()
+				tenant = selectedTenantID(cmd.Context())
 			}
 			data, err := settings.Export(cmd.Context(), backplaneURL, tenant)
 			if err != nil {
@@ -71,20 +75,27 @@ func newExportCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&outFile, "out", "", "file to write (default: stdout)")
-	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (defaults to the one set with 'meho tenants use')")
+	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (defaults to $MEHO_TENANT, then the one set with 'meho tenants use')")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print errors as JSON; the file itself stays YAML")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to export from (defaults to the URL recorded by 'meho login')")
 	return cmd
 }
 
-// chosenTenant is the tenant from `meho tenants use`, or "".
-func chosenTenant() string {
-	cfg, err := auth.LoadConfig()
-	if err != nil || cfg.Tenant == nil {
+// selectedTenantID is the tenant this command works in, the one the
+// Meho-Tenant header carries: $MEHO_TENANT, or the stored choice when
+// the command uses that choice's backplane. So the header and tenant_id
+// never name different tenants.
+//
+// A name returns "": tenant_id takes only an id. The header still
+// selects the tenant for a tenant_admin, and a platform_admin's export
+// of several tenants stops at the --tenant question.
+func selectedTenantID(ctx context.Context) string {
+	tenant := api.TenantFrom(ctx)
+	if _, err := uuid.Parse(tenant); err != nil {
 		return ""
 	}
-	return cfg.Tenant.ID
+	return tenant
 }
 
 // targetsDocument cuts `targets:` out of a settings file. It works on

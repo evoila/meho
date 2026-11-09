@@ -122,7 +122,8 @@ hyphen.
 
 MEHO checks that a person is in only one role group. It knows the role
 groups by name, from the `JWT_ROLE_GROUPS` setting. The default is the
-five `MEHO-*` groups that ship with MEHO.
+five `MEHO-*` groups that ship with MEHO. Upper and lower case do not
+count: `meho-acme-readers` is the same group as `MEHO-acme-Readers`.
 
 Add the new names to the setting, through `extraEnv` in your Helm
 values. The value replaces the default, so list the five default groups
@@ -138,6 +139,12 @@ extraEnv:
 
 Without this step, logins still work, but MEHO does not notice a person
 who is in a default group and in a new group at the same time.
+
+This check runs only for a login whose token has no `meho_tenants`
+list. A realm with the `meho-tenants` mapper (the standard setup from
+v0.39.0 on) sends that list, and MEHO then takes the tenant from the
+`meho_tenant` attribute of the groups instead. See
+[One person in several tenants](several-tenants.md).
 
 ## Step 4: Create the users
 

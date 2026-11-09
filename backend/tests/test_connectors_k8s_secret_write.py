@@ -38,6 +38,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
+import hvac.exceptions
 import pytest
 from kubernetes_asyncio import client as k8s
 from kubernetes_asyncio.client.exceptions import ApiException
@@ -45,6 +46,10 @@ from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op
+from meho_backplane.connectors._shared.vault_creds import (
+    SecretRefReadError,
+    TargetSecretNotFoundError,
+)
 from meho_backplane.connectors.kubernetes import (
     KUBERNETES_OPS,
     KubernetesConnector,
@@ -408,6 +413,30 @@ async def test_ref_without_the_field_names_the_update_op(monkeypatch: pytest.Mon
                 "string_data_secret_ref": {"t": f"{_REF_ROOT}/apps/x#t"},
             },
         )
+
+
+async def test_ref_with_no_secret_is_a_param_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    ref = f"{_REF_ROOT}/apps/missing"
+    install_fake_client(
+        monkeypatch,
+        read_exc=hvac.exceptions.InvalidPath(None, method="get", url=f"https://vault.test/{ref}"),
+    )
+    core = _core_v1(_existing_secret())
+    with pytest.raises(SecretRefReadError) as info:
+        await _update(
+            core,
+            {
+                "name": "db-creds",
+                "namespace": "apps",
+                "string_data_secret_ref": {"t": f"{ref}#t"},
+            },
+        )
+
+    assert not isinstance(info.value, TargetSecretNotFoundError)
+    assert info.value.param == "string_data_secret_ref"
+    assert info.value.cause_class == "InvalidPath"
+    assert _TARGET.name not in str(info.value)
+    core.patch_namespaced_secret.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -440,6 +440,8 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   table referenced in a foreign key constraint``.
         # * ``sandbox_delete_grant`` — migration 0115 (#4622 sandbox mode delete
         #   grants) carries the same real ``REFERENCES tenant(id)`` FK.
+        # * ``run_approval`` — migration 0143 (#4126 run approvals) carries the
+        #   same real ``REFERENCES tenant(id)`` FK.
         # * ``service_principal_read_scope`` — migration 0117 (#4992 read scope)
         #   carries the same real ``REFERENCES tenant(id)`` FK.
         # * ``service_principal_grant`` — migration 0078 (#3151/#3152 standing
@@ -487,15 +489,15 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
                 "approval_request, agent_permission, "
                 "agent_principal, runner_principal, runner_write_allowlist, "
                 "runner_assignments, runner_check_results, "
-                "scheduled_trigger, sensor_results, sensor, "
+                "scheduled_trigger, sensor_results, sensor_acknowledgements, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, runner_effect_chain, "
                 "service_principal_grant, sandbox_delete_grant, "
-                "service_principal_read_scope, addon_pairing, operation_run, "
+                "service_principal_read_scope, run_approval, addon_pairing, operation_run, "
                 "addon_capability, addon_orchestration_run, "
                 "service_principal_grant, sandbox_delete_grant, addon_pairing, addon_step_event, "
                 "agent_run, audit_log, identity_budget, "
-                "documents, kb_revision, graph_edge, "
+                "documents, kb_revision, memory_revision, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, "
                 "dispatch_trace_span, dispatch_trace, tenant",
@@ -564,15 +566,15 @@ async def pg_engine_empty_tenant(
                 "approval_request, agent_permission, "
                 "agent_principal, runner_principal, runner_write_allowlist, "
                 "runner_assignments, runner_check_results, "
-                "scheduled_trigger, sensor_results, sensor, "
+                "scheduled_trigger, sensor_results, sensor_acknowledgements, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, runner_effect_chain, "
                 "service_principal_grant, sandbox_delete_grant, "
-                "service_principal_read_scope, addon_pairing, operation_run, "
+                "service_principal_read_scope, run_approval, addon_pairing, operation_run, "
                 "addon_capability, addon_orchestration_run, "
                 "service_principal_grant, sandbox_delete_grant, addon_pairing, addon_step_event, "
                 "agent_run, audit_log, identity_budget, "
-                "documents, kb_revision, graph_edge, "
+                "documents, kb_revision, memory_revision, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, "
                 "dispatch_trace_span, dispatch_trace, tenant",

@@ -38,7 +38,7 @@ The full decision, with the reasons, is in the
 | Active Directory or another LDAP directory | [AD / LDAP](ad-ldap.md): Keycloak reads the directory. |
 | Microsoft Entra ID | [Entra ID](entra-id.md): Keycloak sends people to Entra. |
 | authentik | [Company login with authentik](../company-login-authentik.md): set up with Helm values. |
-| Your own Keycloak | [Your own Keycloak](customer-keycloak.md): it stays in front of MEHO's Keycloak. |
+| Your own Keycloak | [Your own Keycloak](customer-keycloak.md): it stays in front of MEHO's Keycloak. To use it in place of MEHO's Keycloak, see [Keycloak realm setup](../keycloak-realm.md). |
 
 Entra ID, authentik and your own Keycloak connect through OpenID
 Connect. You set them up with the Helm values

@@ -89,6 +89,7 @@ flags. Concrete non-Anthropic backends are #1076 / #1077 / #1078.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextvars import ContextVar
@@ -114,6 +115,7 @@ from meho_backplane.agent.invoke import (
     ChildAgentResolver,
     ChildRunFinalizer,
     ChildRunRecorder,
+    ChildRunResult,
     current_agent_run_id_var,
     make_invoke_agent_tool,
 )
@@ -149,6 +151,7 @@ __all__ = [
     "AgentRunResult",
     "AgentRunStatus",
     "BudgetExceededError",
+    "ModelChoice",
     "ModelFactory",
     "PydanticAgentRun",
     "ScheduledRunNoInputError",
@@ -690,6 +693,24 @@ def _request_usages(messages: Iterable[ModelMessage]) -> list[TokenUsage]:
     ]
 
 
+def _usages_so_far(run: Any, child_usages: list[TokenUsage]) -> list[TokenUsage]:
+    """Usage of the requests a loop has finished, with those of its child runs."""
+    return [*_request_usages(run.new_messages()), *child_usages]
+
+
+def _sum_usages(usages: Iterable[TokenUsage]) -> TokenUsage:
+    """Add up the four token streams of several model requests."""
+    total = TokenUsage(input_tokens=0, output_tokens=0)
+    for usage in usages:
+        total = TokenUsage(
+            input_tokens=total.input_tokens + usage.input_tokens,
+            output_tokens=total.output_tokens + usage.output_tokens,
+            cache_read_tokens=total.cache_read_tokens + usage.cache_read_tokens,
+            cache_write_tokens=total.cache_write_tokens + usage.cache_write_tokens,
+        )
+    return total
+
+
 def _capability_omissions(resolution: ToolsetResolution) -> tuple[ContextOmission, ...]:
     """Return the requested tools a run did not get, as receipt omissions.
 
@@ -746,10 +767,19 @@ class AgentRunEvent:
     as a plain value object (not a framework type) so the SSE transport
     serialises it without importing ``pydantic_ai`` — the seam-confinement
     invariant the package docstring states.
+
+    ``usage`` and ``request_usages`` are set only on the
+    :attr:`~AgentRunEventKind.FINAL` event: the run's token totals and the
+    usage of each model request (also those of child runs), the same
+    amounts :class:`AgentRunResult` carries. The invoker charges them to the
+    person's spend cap. They are not part of ``data``, so the SSE frame does
+    not send them to the client.
     """
 
     kind: AgentRunEventKind
     data: dict[str, Any]
+    usage: TokenUsage | None = None
+    request_usages: tuple[TokenUsage, ...] = ()
 
 
 @dataclass(slots=True)
@@ -773,6 +803,25 @@ class AgentRunHandle:
 
     run_id: UUID
     _task: asyncio.Task[AgentRunResult]
+    #: Usage of every model request the loop has finished so far (also the
+    #: requests of child runs). The loop keeps it current, so the caller can
+    #: charge a run that failed or was cancelled for the calls it made.
+    request_usages: list[TokenUsage] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelChoice:
+    """The model one run uses, and the names its records show (#5850).
+
+    ``provider`` and ``name`` go on the ``agent_run`` row and on every
+    audit row of the run's tool calls. A model from the resolver reports
+    them itself (``Model.system`` and ``Model.model_name``), so the
+    records name the model that answers, not a default setting.
+    """
+
+    model: Model
+    provider: str
+    name: str
 
 
 @runtime_checkable
@@ -788,6 +837,14 @@ class AgentRun(Protocol):
     adapter supplies the implementation.
     """
 
+    def choose_model(self, definition: AgentDefinition, operator: Operator) -> ModelChoice:
+        """Build the model a run of *definition* uses, with its record names.
+
+        Raises :class:`AgentRunError` when no model can be built (for
+        example a missing API key, or no backend for the tier).
+        """
+        ...
+
     def start(
         self,
         definition: AgentDefinition,
@@ -795,12 +852,14 @@ class AgentRun(Protocol):
         inputs: str,
         *,
         run_id: UUID | None = None,
+        model: Model | None = None,
     ) -> AgentRunHandle:
         """Begin a bounded run; return immediately with a live handle.
 
         *run_id* is the id the caller already gave out (the durable
         ``agent_run`` row id). The handle and every error then use it, so the
-        caller can match them. ``None`` makes a fresh id.
+        caller can match them. ``None`` makes a fresh id. *model* is the
+        model from :meth:`choose_model`; ``None`` builds it here.
         """
         ...
 
@@ -825,6 +884,9 @@ class AgentRun(Protocol):
         operator: Operator,
         inputs: str,
         run_id: UUID,
+        usage_sink: list[TokenUsage] | None = None,
+        *,
+        model: Model | None = None,
     ) -> AsyncIterator[AgentRunEvent]:
         """Run the loop and yield structured progress events as they happen.
 
@@ -836,7 +898,11 @@ class AgentRun(Protocol):
         its own pace — the right shape for an SSE response whose lifetime
         is the run's lifetime. ``run_id`` is supplied by the caller (the
         T6 ``agent_run`` row id) so the streamed events share the run's
-        lineage key.
+        lineage key. *model* works as in :meth:`start`.
+
+        *usage_sink*, when given, is kept current with the usage of every
+        model request the loop has finished, so the caller can charge a run
+        that ends by an error or a closed stream.
         """
         ...
 
@@ -1085,6 +1151,7 @@ class PydanticAgentRun:
         operator: Operator,
         run_id: UUID | None = None,
         receipts: list[HostedContextReceipt] | None = None,
+        model: Model | None = None,
     ) -> Agent[Operator, Any]:
         """Construct the framework agent for *definition* under *operator*.
 
@@ -1119,9 +1186,11 @@ class PydanticAgentRun:
         *and* ``definition.tier`` is set, the model comes from the resolver
         — picked from the tenant's policy + egress constraint + capability
         flags. Otherwise the legacy :attr:`model_factory` is called (the
-        zero-arg path tests rely on and the pre-G11.5 default).
+        zero-arg path tests rely on and the pre-G11.5 default). A *model*
+        the caller already chose (:meth:`choose_model`) is used as is.
         """
-        model = self._resolve_model(definition, operator)
+        if model is None:
+            model = self._resolve_model(definition, operator)
         invoke_tool = self._maybe_build_invoke_tool()
         if definition.toolset is not None:
             resolution = resolve_agent_toolset(definition.toolset, operator)
@@ -1172,6 +1241,26 @@ class PydanticAgentRun:
         )
         _register_default_meta_tools(agent)
         return agent
+
+    def choose_model(self, definition: AgentDefinition, operator: Operator) -> ModelChoice:
+        """Build the model for one run and name it for the run's records (#5850).
+
+        A model from :attr:`model_resolver` names itself: the provider is
+        ``Model.system`` and the name is ``Model.model_name``, the name
+        sent to the endpoint. The legacy :attr:`model_factory` path keeps
+        the names of ``AGENT_DEFAULT_MODEL``, the model
+        :func:`default_model_factory` builds.
+
+        Raises:
+            AgentRunError: no model can be built for this run.
+        """
+        model = self._resolve_model(definition, operator)
+        if self.model_resolver is not None and definition.tier is not None:
+            return ModelChoice(model=model, provider=model.system, name=model.model_name)
+        from .invocation import _split_model_id
+
+        provider, name = _split_model_id(get_settings().agent_default_model)
+        return ModelChoice(model=model, provider=provider, name=name)
 
     def _resolve_model(
         self,
@@ -1229,6 +1318,7 @@ class PydanticAgentRun:
         inputs: str,
         run_id: UUID,
         receipts: list[HostedContextReceipt] | None = None,
+        request_usages: list[TokenUsage] | None = None,
     ) -> AgentRunResult:
         """Drive one bounded loop and return its result.
 
@@ -1239,10 +1329,20 @@ class PydanticAgentRun:
         type is uniform regardless of which framework exception fired.
         """
         limits = UsageLimits(request_limit=definition.request_limit)
-        request_usages: list[TokenUsage] = []
-        token = _run_request_usages_var.set(request_usages)
+        if request_usages is None:
+            request_usages = []
+        child_usages: list[TokenUsage] = []
+        token = _run_request_usages_var.set(child_usages)
         try:
-            run_result = await agent.run(inputs, deps=operator, usage_limits=limits)
+            async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
+                try:
+                    async for _node in run:
+                        request_usages[:] = _usages_so_far(run, child_usages)
+                finally:
+                    # Also when the loop fails or is cancelled: the requests
+                    # it finished spent tokens.
+                    request_usages[:] = _usages_so_far(run, child_usages)
+                run_result = run.result
         except UsageLimitExceeded as exc:
             _log.warning(
                 "agent_run_budget_exhausted",
@@ -1252,9 +1352,15 @@ class PydanticAgentRun:
                 operator_sub=operator.sub,
             )
             raise AgentRunError(f"turn budget exhausted: {exc}") from exc
+        except AgentRunError:
+            raise
+        except Exception as exc:
+            _log.warning("agent_run_failed", run_id=str(run_id), error=str(exc))
+            raise AgentRunError(f"agent run {run_id} failed: {exc}") from exc
         finally:
             _run_request_usages_var.reset(token)
-        request_usages.extend(_request_usages(run_result.new_messages()))
+        if run_result is None:  # pragma: no cover - iter always sets a result
+            raise AgentRunError(f"agent run {run_id} produced no result")
         usage = run_result.usage
         totals = TokenUsage.from_run_usage(usage)
         result = AgentRunResult(
@@ -1287,7 +1393,7 @@ class PydanticAgentRun:
         operator: Operator,
         inputs: str,
         usage: RunUsage,
-    ) -> Any:
+    ) -> ChildRunResult:
         """Drive one child loop budget-aware, sharing the parent's usage.
 
         The :class:`~meho_backplane.agent.invoke.ChildRunner` the
@@ -1307,7 +1413,9 @@ class PydanticAgentRun:
         the parent loop's ``invoke_agent`` tool call, on the parent's event
         loop) and returns the child's output directly rather than a handle: the
         parent tool needs the child's answer to continue, and the child's
-        lifecycle is bounded by the parent tool call.
+        lifecycle is bounded by the parent tool call. The result also carries
+        the child's own token counts (#5853), summed over the child's own model
+        responses, so the child's run row can store them.
 
         The child's receipt log line (#3763) names the run id the
         ``invoke_agent`` tool bound before calling here: the child's own
@@ -1316,6 +1424,7 @@ class PydanticAgentRun:
         child = self._build_agent(definition, operator)
         limits = UsageLimits(request_limit=definition.request_limit)
         parent_request_usages = _run_request_usages_var.get()
+        child_usages: list[TokenUsage] = []
         try:
             async with child.iter(
                 inputs, deps=operator, usage=usage, usage_limits=limits
@@ -1328,8 +1437,9 @@ class PydanticAgentRun:
                     # before that spent tokens, and those tokens are in the
                     # parent's shared total, so the parent's cost must
                     # include them.
+                    child_usages = _request_usages(child_run.new_messages())
                     if parent_request_usages is not None:
-                        parent_request_usages.extend(_request_usages(child_run.new_messages()))
+                        parent_request_usages.extend(child_usages)
         except UsageLimitExceeded as exc:
             _log.warning(
                 "agent_child_run_budget_exhausted",
@@ -1342,7 +1452,7 @@ class PydanticAgentRun:
         run_result = child_run.result
         if run_result is None:
             raise AgentRunError(f"child agent {definition.name!r} ended without a result")
-        return run_result.output
+        return ChildRunResult(output=run_result.output, usage=_sum_usages(child_usages))
 
     def start(
         self,
@@ -1351,10 +1461,12 @@ class PydanticAgentRun:
         inputs: str,
         *,
         run_id: UUID | None = None,
+        model: Model | None = None,
     ) -> AgentRunHandle:
         """Begin a bounded run; return immediately with a live handle.
 
-        *run_id* is the caller's run id (the durable ``agent_run`` row id).
+        *model* is the model from :meth:`choose_model`; ``None`` builds it
+        here. *run_id* is the caller's run id (the durable ``agent_run`` row id).
         The handle, the logs, and a failure message all use it, so they match
         what ``meho agent run`` and ``run-status`` show (#4232). ``None``
         makes a fresh id for callers with no durable row.
@@ -1377,9 +1489,10 @@ class PydanticAgentRun:
         receipts: list[HostedContextReceipt] = []
         if run_id is None:
             run_id = uuid4()
-        agent = self._build_agent(definition, operator, run_id, receipts)
+        agent = self._build_agent(definition, operator, run_id, receipts, model)
+        request_usages: list[TokenUsage] = []
         task = asyncio.create_task(
-            self._run_loop(agent, definition, operator, inputs, run_id, receipts),
+            self._run_loop(agent, definition, operator, inputs, run_id, receipts, request_usages),
             name=f"agent-run-{run_id}",
         )
         _log.info(
@@ -1390,7 +1503,7 @@ class PydanticAgentRun:
             structured_output=definition.output_type is not None,
             operator_sub=operator.sub,
         )
-        return AgentRunHandle(run_id=run_id, _task=task)
+        return AgentRunHandle(run_id=run_id, _task=task, request_usages=request_usages)
 
     def poll(self, handle: AgentRunHandle) -> AgentRunStatus:
         """Return the run's current lifecycle state without blocking.
@@ -1446,8 +1559,14 @@ class PydanticAgentRun:
         operator: Operator,
         inputs: str,
         run_id: UUID,
+        usage_sink: list[TokenUsage] | None = None,
+        *,
+        model: Model | None = None,
     ) -> AsyncIterator[AgentRunEvent]:
         """Drive the loop inline and yield structured progress events.
+
+        *model* is the model from :meth:`choose_model`; ``None`` builds it
+        here.
 
         Uses the framework's node graph (:meth:`~pydantic_ai.Agent.iter`)
         to surface the loop's progress — one :class:`AgentRunEvent` per
@@ -1469,22 +1588,37 @@ class PydanticAgentRun:
         the run's message history after the call-tools node completes —
         the plain (non-streaming) node-graph path the deterministic test
         model supports.
+
+        The ``FINAL`` event carries the run's usage, the same totals and
+        per-request usages :meth:`_run_loop` returns, so the invoker charges a
+        streamed run like a run that is not streamed. *usage_sink* is kept
+        current after every node, so a run that ends by an error or a closed
+        stream is charged for the requests it finished.
         """
         emitted_tool_returns = 0
+        request_usages: list[TokenUsage] = []
+        sink = usage_sink if usage_sink is not None else []
+        usages_token = _run_request_usages_var.set(request_usages)
         try:
-            agent = self._build_agent(definition, operator, run_id)
+            agent = self._build_agent(definition, operator, run_id, model=model)
             limits = UsageLimits(request_limit=definition.request_limit)
             async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
-                async for node in run:
-                    events, emitted_tool_returns = _node_events(node, run, emitted_tool_returns)
-                    for event in events:
-                        yield event
+                try:
+                    async for node in run:
+                        sink[:] = _usages_so_far(run, request_usages)
+                        events, emitted_tool_returns = _node_events(node, run, emitted_tool_returns)
+                        for event in events:
+                            yield event
+                finally:
+                    sink[:] = _usages_so_far(run, request_usages)
                 result = run.result
                 if result is None:  # pragma: no cover - iter always sets a result
                     raise AgentRunError(f"agent run {run_id} produced no result")
                 yield AgentRunEvent(
                     kind=AgentRunEventKind.FINAL,
                     data={"output": _coerce_output(result.output)},
+                    usage=TokenUsage.from_run_usage(result.usage),
+                    request_usages=tuple(sink),
                 )
         except UsageLimitExceeded as exc:
             _log.warning(
@@ -1510,3 +1644,8 @@ class PydanticAgentRun:
                 kind=AgentRunEventKind.ERROR,
                 data={"error": str(exc)},
             )
+        finally:
+            # A generator closed by the event loop's finalizer runs this in
+            # another context, where the token does not apply.
+            with contextlib.suppress(ValueError):
+                _run_request_usages_var.reset(usages_token)

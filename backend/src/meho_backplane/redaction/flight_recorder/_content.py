@@ -46,8 +46,9 @@ __all__ = ["CONTENT_POLICY_ID", "scrub_content"]
 CONTENT_POLICY_ID: Final[str] = "flight-recorder-credential-shapes"
 
 #: Tight, credential-only Tier-1 policy. Only the *secret*-shaped named
-#: patterns are pinned; the infra-leak shapes (``uuid`` / ``ipv4`` /
-#: ``ipv6`` / ``fqdn``) are deliberately excluded -- a hostname or UUID
+#: patterns are pinned (the same ones as the default policy); the infrastructure
+#: shapes (``uuid`` / ``ipv4`` / ``ipv6`` / ``fqdn``) are deliberately
+#: excluded -- a hostname or UUID
 #: in a trace is not a secret and over-redacting them would gut the
 #: trace's debugging value. ``action='redact'`` replaces the whole match
 #: with a fixed marker: partial reveal of a credential is itself a leak.
@@ -60,6 +61,22 @@ _CONTENT_POLICY: Final[RedactionPolicy] = RedactionPolicy.model_validate(
             "strings in any surviving header value or body leaf (#3213)."
         ),
         "rules": [
+            # The same patterns, in the same order, as the default policy of
+            # the normal answer (``redaction/policies/default.yaml``), so a
+            # trace hides at least what the answer hides. The order matters
+            # there for the same reasons; a test keeps the two lists equal.
+            {
+                "name": "fr-bind-key-secret",
+                "pattern": "bind_key_secret",
+                "action": "redact",
+                "reason": "TSIG / rndc key secret in a BIND config file",
+            },
+            {
+                "name": "fr-pem-private-key",
+                "pattern": "pem_private_key",
+                "action": "redact",
+                "reason": "PEM private key block",
+            },
             {
                 "name": "fr-authorization-header",
                 "pattern": "authorization_header",
@@ -99,6 +116,18 @@ _CONTENT_POLICY: Final[RedactionPolicy] = RedactionPolicy.model_validate(
                 "action": "redact",
                 "reason": "embedded kubeconfig credential",
             },
+            {
+                "name": "fr-password-hash",
+                "pattern": "password_hash",
+                "action": "redact",
+                "reason": "crypt(3) password hash, as in /etc/shadow",
+            },
+            {
+                "name": "fr-ceph-key",
+                "pattern": "ceph_key",
+                "action": "redact",
+                "reason": "Ceph key, as in a keyring file or ceph auth output",
+            },
         ],
     },
 )
@@ -116,12 +145,13 @@ def scrub_content(payload: Any) -> tuple[Any, bool]:
     Before the shape patterns run, the value of each secret-named field is
     replaced (:func:`~meho_backplane.redaction.secret_fields.scrub_secret_fields`,
     #5031): a ``{"password": "..."}`` entry, or the same pair as JSON text in
-    a string, has no label the patterns could find. *fired* is ``True`` for
+    a string, has no label the patterns could find. A number under a secret
+    name is replaced too, as in the normal answer. *fired* is ``True`` for
     that step too.
 
     Never raises for input shape: non-str / non-container leaves pass
     through untouched (the engine's documented contract).
     """
-    fields_scrubbed = scrub_secret_fields(payload)
+    fields_scrubbed = scrub_secret_fields(payload, hide_numbers=True)
     result = redact(fields_scrubbed, _CONTENT_POLICY)
     return result.redacted, bool(result.manifest) or fields_scrubbed != payload

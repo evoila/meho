@@ -5,7 +5,7 @@ Copyright (c) 2026 evoila Group
 
 # Knowledge base (G4.1)
 
-> Reads [CLAUDE.md](../../CLAUDE.md) postulate 5 (the agent surface is a narrow waist of meta-tools — `search_knowledge` / `add_to_knowledge` are 2 of the ~17) and postulate 7 (audit is synchronous, append-only). Sister to [operations-substrate.md](operations-substrate.md): that doc owns the dispatcher and the `endpoint_descriptor` table; this doc owns the kb layer that rides on the G0.4 `documents` retrieval substrate.
+> Reads [CLAUDE.md](../../CLAUDE.md) postulate 5 (the agent surface is a narrow waist of meta-tools — `search_knowledge` / `add_to_knowledge` are 2 of the 26 working-surface tools listed in [`docs/codebase/mcp.md`](../codebase/mcp.md)) and postulate 7 (audit is synchronous, append-only). Sister to [operations-substrate.md](operations-substrate.md): that doc owns the dispatcher and the `endpoint_descriptor` table; this doc owns the kb layer that rides on the G0.4 `documents` retrieval substrate.
 >
 > Covers the implementation that landed under [Initiative #331 G4.1](https://github.com/evoila/meho/issues/331) (Tasks #415-#420). The operator runbook that uses this surface is [`docs/cross-repo/kb-migration.md`](../cross-repo/kb-migration.md).
 
@@ -27,6 +27,7 @@ The substrate lives in [`backend/src/meho_backplane/kb/`](../../backend/src/meho
 | [`file_walker.py`](../../backend/src/meho_backplane/kb/file_walker.py) | `walk_kb_directory(root, errors=None) -> Iterator[KbFileRecord]`. Recursively yields one record per ingestible `*.md` file, sorted by relative path (each record carries `relative_path`): skips hidden paths and any path matched by an optional root-level `.kb-ignore` file (one glob pattern per line, `#` comments). Slug = front-matter `slug:` override when present, else `Path.stem`; validated. Front-matter parsed via `python-frontmatter` 1.x; malformed YAML → `KbFileParseError`. `errors=None` is strict mode (first bad file aborts); a supplied list is best-effort mode (per-file failures are collected, the walk continues). |
 | [`directory_ingest.py`](../../backend/src/meho_backplane/kb/directory_ingest.py) | The directory-ingest path `KbService.ingest_directory` delegates to: the `KB_INGEST_ROOT` guard (`KbIngestRootError`, re-exported from `service.py`), the sorted pre-walk, `_find_slug_conflicts`, and the per-file classify-and-write step. |
 | [`provenance.py`](../../backend/src/meho_backplane/kb/provenance.py) | `stamp_provenance()` writes the service-owned `metadata["provenance"]` block (`source_kind` `directory` / `direct`, root-relative path, `ingested_at`); rejects absolute or `..` paths. `read_provenance()` returns a `KbProvenance`, `state="legacy"` when the block is missing or malformed. |
+| [`revisions.py`](../../backend/src/meho_backplane/kb/revisions.py) | `write_entry` — the only write path. It updates the head `documents` row, adds a `kb_revision` row when the body changes, and swaps the search passages (`source="kb-passage"`, made from the current body only) in one transaction. `get_revision` and `delete_entry_rows` read and delete by exact id. |
 | [`service.py`](../../backend/src/meho_backplane/kb/service.py) | `KbService` — the single class every front-end calls. Stateless, method-scoped: each public method opens its own `AsyncSession` and commits before returning. Per-file commits during ingest are deliberate (one bad file in a 44-entry corpus must not roll back the good files). |
 | [`__init__.py`](../../backend/src/meho_backplane/kb/__init__.py) | Re-exports `KbService`, `KbEntry`, `KbEntrySearchHit`, `KbIngestionResult`. |
 
@@ -39,12 +40,12 @@ There is no separate per-operation handler module — the issue's draft outline 
 | Method | Wraps | Used by |
 |---|---|---|
 | `ingest_directory(directory, tenant_id, *, dry_run=False) -> KbIngestionResult` | Pre-walks every file (sorted), reports each slug claimed by 2+ files as a conflict and writes none of them (existing entry unchanged), then `index_document` (G0.4-T3) per remaining file, with an extra `SELECT` per file to classify inserted / updated / skipped. Stores `provenance` (`source_kind`, relative path, `ingested_at`; never an absolute path). `dry_run` classifies without writing. **Confined to `KB_INGEST_ROOT`** (default `/opt/meho/kb-ingest`): the directory is resolved (symlinks followed, `..` collapsed) and a path landing outside the root raises `KbIngestRootError` before any file is read — the path-traversal / LFI guard from #101 (L8 + L14). The guard runs in `dry_run` mode too. Inside the directory, only regular files are read; links and special files are skipped. | `POST /api/v1/kb/ingest`, `meho kb ingest` |
-| `list_entries(tenant_id, *, filter_pattern=None, limit=100, offset=0) -> list[KbEntry]` | Direct `select(Document)` scoped to `source="kb"`, slug-sorted. `filter_pattern` is a forwarded SQL `LIKE`. Pure list, no retrieval. | `GET /api/v1/kb`, `meho kb list` |
+| `list_entries(tenant_id, *, filter_pattern=None, limit=100, offset=0, order="slug") -> list[KbEntry]` | Direct `select(Document)` scoped to `source="kb"`, slug-sorted by default; `order="newest"` sorts by `updated_at`, newest first. `filter_pattern` is a forwarded SQL `LIKE`. Pure list, no retrieval. | `GET /api/v1/kb`, `meho kb list` |
 | `get_entry(tenant_id, slug) -> KbEntry \| None` | Natural-key `select`. Slug is **not** re-validated here (the route/CLI does it); a malformed slug just yields `None`. | `GET /api/v1/kb/{slug}`, `meho kb show`, `meho://kb/{slug}` |
-| `create_entry(tenant_id, slug, body, metadata=None) -> KbEntry` | `validate_slug` then `index_document`. Body-hash short-circuit means a same-body re-add costs only an `updated_at` bump. `metadata=None` preserves an existing row's metadata; `{}` clears it. | `POST /api/v1/kb`, `add_to_knowledge` |
+| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False, expected_revision=None) -> tuple[KbEntry, bool]` | `validate_slug` then a write that names the revision it read (a write without it only creates; a stale one raises `KbStaleRevisionError`). Returns the entry and whether it was created. An unchanged body and metadata cost only an `updated_at` bump. `metadata=None` preserves an existing row's metadata; `{}` clears it. With `own_entries_only=True` (the MCP tool for an `operator`) it refuses to overwrite an entry another principal created, and refuses the reserved curation metadata keys. | `POST /api/v1/kb`, `add_to_knowledge` |
 | `get_revision(tenant_id, entry_id, revision_id) -> KbEntryRevision \| None` | Exact read of one retained, never-changed body in `kb_revision`. `None` for a foreign, mismatched, unknown or deleted id. | `meho://kb/id/{entry}/revision/{revision}` |
 | `delete_entry(tenant_id, slug) -> bool` | Deletes the entry and all its retained revisions in one transaction. Returns whether a row existed. | `DELETE /api/v1/kb/{slug}`, `meho kb delete` |
-| `search_entries(tenant_id, query, *, filters=None, limit=10) -> list[KbEntrySearchHit]` | `retrieve()` (G0.4-T4) with `source="kb"` pinned. Adapts `RetrievalHit` → `KbEntrySearchHit` (slug instead of source_id, a ~200-char snippet instead of full body). `filters` consumes only the `"kind"` key in v0.2; other keys are reserved. | `POST /api/v1/retrieve` (CLI search verb), `search_knowledge` |
+| `search_entries(tenant_id, query, *, filters=None, limit=10) -> list[KbEntrySearchHit]` | `retrieve()` (G0.4-T4) with `source="kb"` pinned. Ranks the search passages and groups them into one `KbEntrySearchHit` per entry (slug, a ~200-char snippet instead of full body, the best passage's scores, and the matching passages with their revision ids). `filters["kind"]` narrows the kind; every other key is a containment filter on `documents.metadata`. | `POST /api/v1/retrieve` (CLI search verb), `search_knowledge` |
 
 The snippet/full-body split is the load-bearing agent recipe: `search → decide on a slug → fetch the full body` without round-tripping every full body on every search.
 
@@ -60,18 +61,18 @@ All four converge on `KbService`. None is a wrapper for another — each is a tr
 |---|---|---|
 | `GET /api/v1/kb` | `operator` | Paginated list. Query params `filter` (SQL `LIKE`), `limit` (1-500, default 100), `offset`. Returns `{"entries": [KbEntryPreview]}` — body truncated to a 200-char preview. |
 | `GET /api/v1/kb/{slug}` | `operator` | Full entry. Absent **or cross-tenant** slug → 404 `slug_not_found` (the conflation prevents enumerating other tenants via status differential). |
-| `POST /api/v1/kb` | `tenant_admin` | Create / re-index. 201. Invalid slug → 422. |
+| `POST /api/v1/kb` | `tenant_admin` | Create / re-index. 201 on create, 200 when it replaced an existing entry (last write wins). Invalid slug → 422. |
 | `DELETE /api/v1/kb/{slug}` | `tenant_admin` | Idempotent: 204 whether the row existed or not (a 404-on-missing would let an operator probe for a slug they can't read). |
 | `POST /api/v1/kb/ingest` | `tenant_admin` | Server-side bulk ingest from a directory on the backplane host. The directory is **confined to `KB_INGEST_ROOT`** (default `/opt/meho/kb-ingest`) — a path resolving outside it (traversal or escaping symlink) returns **400** `kb_ingest_path_outside_root` before any file is read (path-traversal / LFI guard, #101). `tarball_url` is accepted by the request schema for forward-compat but returns **501** — only `directory` is implemented in v0.2. |
 
-There is **no kb search route**. kb-scoped search rides the G0.4-T5 `POST /api/v1/retrieve` route with `source="kb"`. Every route binds `audit_op_id` (`kb.list` / `kb.show` / `kb.create` / `kb.delete` / `kb.ingest`) + `audit_op_class` (`read` / `write`) before the service call so the chassis audit middleware and the decision-#3 broadcast classifier shape the row correctly; the ingest route additionally binds the five `KbIngestionResult` counters into the audit payload — never the file contents.
+There is **no kb search route**. kb-scoped search rides the G0.4-T5 `POST /api/v1/retrieve` route with `source="kb"`. Every route binds `audit_op_id` (`kb.list` / `kb.show` / `kb.create` / `kb.delete` / `kb.ingest`) + `audit_op_class` (`read` / `write`) before the service call so the chassis audit middleware shapes the row correctly (MEHO posts no broadcast event for these calls; the audit row is the record); the ingest route additionally binds the five `KbIngestionResult` counters into the audit payload — never the file contents.
 
 ### MCP meta-tools (T3 #417)
 
-[`backend/src/meho_backplane/mcp/tools/knowledge.py`](../../backend/src/meho_backplane/mcp/tools/knowledge.py) — two of the ~17 agent-facing meta-tools:
+[`backend/src/meho_backplane/mcp/tools/knowledge.py`](../../backend/src/meho_backplane/mcp/tools/knowledge.py) — two of the 26 working-surface meta-tools:
 
 - **`search_knowledge(query?, slug?, filters?, limit?)`** — `op_class="read"`, `operator` role. With `query`: hybrid retrieval over the tenant's kb corpus. Default limit 10, cap 50. Returns `{"hits": [...]}` with a 200-char snippet per hit. With `slug` (#4138): returns the whole entry as `{"entry": {...}}`, through the same read as `meho://kb/{slug}`, and ignores the other arguments. Both arguments are optional in the schema; a call with neither gets `-32602`.
-- **`add_to_knowledge(slug, body, metadata?)`** — `op_class="write"`, `operator` role (deliberately **not** `tenant_admin` like the REST `POST` route: the agent surface is intentionally narrow; the audit row + broadcast event provide traceability, and the stricter REST gate is for fleet-wide bulk imports the agent surface does not perform). `InvalidKbSlugError` → JSON-RPC `-32602`.
+- **`add_to_knowledge(slug, body, metadata?)`** — `op_class="write"`, `operator` role (deliberately **not** `tenant_admin` like the REST `POST` route: the agent surface is intentionally narrow; the audit row provides traceability, and the stricter REST gate is for fleet-wide bulk imports the agent surface does not perform). An `operator` can create entries and change only the entries it created (`own_entries_only`). `InvalidKbSlugError` → JSON-RPC `-32602`.
 
 The tool descriptions are load-bearing agent UX (`search_knowledge` is one of the most-called tools across every G3-G9 flow) and teach the recipe "search → pick a slug → read the full body with `search_knowledge` and `slug`, or with the `meho://kb/{slug}` resource".
 
@@ -102,17 +103,17 @@ Per CLAUDE.md postulate 5, the agent never sees vendor-specific tools. The kb fl
 
 1. When the agent needs an answer it doesn't already have, `search_knowledge` is one of its first calls (before asking the operator a factual question — the answer may already be captured).
 2. It picks a hit by slug. If the 200-char snippet is not enough, it reads the full body with `search_knowledge` and that `slug`, or with `resources/read` on `meho://kb/{slug}`.
-3. When the agent (or the operator working with it) learns something generalisable, it `search_knowledge` first to avoid duplicates, then `add_to_knowledge` — same-slug re-add merges in place via the body-hash short-circuit. Ephemeral session notes belong in `add_to_memory` (G5), not the kb.
+3. When the agent (or the operator working with it) learns something generalisable, it `search_knowledge` first to avoid duplicates, then `add_to_knowledge` — to change an existing entry it reads it, merges, and re-adds with the `revision_id` it read as `expected_revision`. Ephemeral session notes belong in `add_to_memory` (G5), not the kb.
 
 ## Decision #2 migration shape
 
 - One-shot import: the operator points `meho kb ingest` at their cloned consumer `kb/` directory; re-running after a consumer-side `git pull` is cheap (body-hash skip re-embeds only changed entries).
 - ≥1-month overlap: the consumer repo's `kb/` stays live as the fallback; operators use `meho kb search` for daily lookups, `grep` is the override.
-- Operator-driven retire — there is **no auto-retirement**. The retire decision is operationalised by G4.3's `meho retrieval retire-checklist` (a surface-scoped 5-criterion checklist; kb is one of three surfaces it scores), backed by the G4.3 eval corpus (#440, closed) and eval runner (#441, closed — `meho retrieval eval` / `POST /api/v1/retrieve/eval`, precision@5 / MRR / coverage@5 vs the `grep` baseline). The G4.3 Initiative [#373](https://github.com/evoila/meho/issues/373) tracks the remaining operationalisation. The operator runbook [`docs/cross-repo/kb-migration.md`](../cross-repo/kb-migration.md) is the end-to-end recipe.
+- Operator-driven retire — there is **no auto-retirement**. The team decides when to delete the in-repo copy. `meho retrieval usage` shows whether daily lookups have moved to MEHO. The operator runbook [`docs/cross-repo/kb-migration.md`](../cross-repo/kb-migration.md) is the end-to-end recipe.
 
 ## What's intentionally out of scope
 
-- **Per-entry version history** — v0.2.next.
+- **A history browser for kb entries** — each body change keeps the old body in `kb_revision`, readable by exact id (`meho://kb/id/{entry}/revision/{revision}`), but there is no list or diff of revisions.
 - **Tarball ingest** — the request schema accepts `tarball_url` but the route returns 501; v0.2.next.
 - **kb editing UI (web admin)** — Goal G10.2 [#339](https://github.com/evoila/meho/issues/339).
 - **Vendor docs ingestion** (the larger `docs/<product>-<version>/` shelf) — covered by the G0.6 + G0.7 operation-search surface, not the kb layer.
@@ -123,6 +124,6 @@ Per CLAUDE.md postulate 5, the agent never sees vendor-specific tools. The kb fl
 - [Initiative #331 G4.1](https://github.com/evoila/meho/issues/331) — scope + DoD. Tasks: T1 [#415](https://github.com/evoila/meho/issues/415), T2 [#416](https://github.com/evoila/meho/issues/416), T3 [#417](https://github.com/evoila/meho/issues/417), T4 [#418](https://github.com/evoila/meho/issues/418), T5 [#419](https://github.com/evoila/meho/issues/419), T6 [#420](https://github.com/evoila/meho/issues/420).
 - Substrate: [#225 G0.4 retrieval substrate](https://github.com/evoila/meho/issues/225) — `index_document` ([`retrieval/indexer.py`](../../backend/src/meho_backplane/retrieval/indexer.py)), `retrieve` ([`retrieval/retriever.py`](../../backend/src/meho_backplane/retrieval/retriever.py)).
 - [decision #2](../decisions/locked-decisions.md) — one-shot import + 1-month overlap.
-- Downstream: [#373 G4.3](https://github.com/evoila/meho/issues/373) — retrieval migration tooling (eval + `meho retrieval retire-checklist`).
+- Retrieval quality CI gate: `scripts/ci/run_eval_gate.py` scores the eval runner in `backend/scripts/retrieval_eval/` (test tooling, not part of the product).
 - Canary acceptance: [`backend/tests/acceptance/test_g41_kb_canary.py`](../../backend/tests/acceptance/test_g41_kb_canary.py) (T5 #419).
 - [docs/architecture/connectors.md](connectors.md), [docs/architecture/mcp.md](mcp.md), [docs/architecture/audit.md](audit.md).

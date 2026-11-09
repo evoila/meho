@@ -8,6 +8,7 @@ Copyright (c) 2026 evoila Group
 **Status:** reviewed — no code-change defects; two hardening follow-ups already
 tracked (see Findings)
 **Date:** 2026-08-30
+**Superseded in part by:** [sandbox-mode.md](sandbox-mode.md). On an instance in sandbox mode, a tenant admin may give a service principal a standing grant that also covers deletes. Axis 1 below holds on every other instance.
 **Initiative:** [#2900](https://github.com/evoila/meho/issues/2900) (add-on
 pairing contract)
 **Task:** [#3030](https://github.com/evoila/meho/issues/3030) (proof plane —
@@ -25,7 +26,7 @@ records the verdict. Findings that are real, exploitable defects are filed as
 issues; a clean axis is recorded here.
 
 The scope is the **backplane-side** contract only. The paired add-ons themselves
-(meho-automation, meho-ssp) and their own posture are out of scope, as is any
+and their own posture are out of scope, as is any
 relaxation of the backplane-internal-only network stance — paired add-ons live
 on the same private network and the pairing contract does not change that.
 

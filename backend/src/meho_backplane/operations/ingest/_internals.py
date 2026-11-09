@@ -584,10 +584,11 @@ async def write_audit_row(
     fills lineage when that setting is on). ``None`` for a plain REST
     request without a session.
 
-    ``event_class`` is ``operation_execution`` for every action except an
-    edit of one operation's settings (:data:`OP_EDIT_OP`), which passes
-    ``config_change`` (#5791): its payload names the edited ``op_id``, and
-    a filter for operations that ran must not return it.
+    ``event_class`` is ``operation_execution`` for every action except a
+    settings change, which passes ``config_change``: an edit of one
+    operation (:data:`OP_EDIT_OP`, #5791) and a tenant's own on or off
+    switch (``meho_connector_tenant_setting``, #5864). No operation ran,
+    so a filter for operations that ran must not return these rows.
     """
     audit_id = uuid.uuid4()
     row = AuditLog(

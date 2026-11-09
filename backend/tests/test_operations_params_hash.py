@@ -47,8 +47,10 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._validate import (
+    compute_audit_digest_hash,
     compute_audit_params_hash,
     compute_params_hash,
+    compute_value_fingerprint,
     params_hash_candidates,
     params_hash_matches,
 )
@@ -180,6 +182,59 @@ def test_params_hash_matches_the_keyed_and_the_earlier_plain_hash() -> None:
     other = {**_PARAMS, "username": "user-b"}
     assert not params_hash_matches(other, _plain_sha256(_PARAMS))
     assert not params_hash_matches(other, compute_params_hash(_PARAMS))
+
+
+_ALL_KEYED: list[Any] = [
+    compute_params_hash,
+    compute_audit_params_hash,
+    lambda params: compute_audit_digest_hash(json.dumps(params, sort_keys=True)),
+    lambda params: compute_value_fingerprint(json.dumps(params, sort_keys=True).encode()),
+]
+
+
+def _new_database_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'other.db'}")
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("hash_fn", _ALL_KEYED)
+def test_own_key_keeps_every_hash_across_a_database_url_change(
+    hash_fn: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PARAMS_HASH_KEY", "own-test-key-of-this-install")
+    get_settings.cache_clear()
+    before = hash_fn(_PARAMS)
+    _new_database_url(monkeypatch, tmp_path)
+    assert hash_fn(_PARAMS) == before
+
+
+@pytest.mark.parametrize("hash_fn", _ALL_KEYED)
+def test_own_key_changes_every_hash(hash_fn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from_database_url = hash_fn(_PARAMS)
+    monkeypatch.setenv("PARAMS_HASH_KEY", "own-test-key-of-this-install")
+    get_settings.cache_clear()
+    own = hash_fn(_PARAMS)
+    assert own != from_database_url
+    monkeypatch.setenv("PARAMS_HASH_KEY", "another-test-key")
+    get_settings.cache_clear()
+    assert hash_fn(_PARAMS) != own
+
+
+def test_request_hashed_from_the_database_url_matches_after_the_own_key_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = compute_params_hash(_PARAMS)
+    monkeypatch.setenv("PARAMS_HASH_KEY", "own-test-key-of-this-install")
+    get_settings.cache_clear()
+    assert compute_params_hash(_PARAMS) != stored
+    assert params_hash_candidates(_PARAMS) == (
+        compute_params_hash(_PARAMS),
+        stored,
+        _plain_sha256(_PARAMS),
+    )
+    assert params_hash_matches(_PARAMS, stored)
+    assert params_hash_matches(_PARAMS, compute_params_hash(_PARAMS))
+    assert not params_hash_matches({**_PARAMS, "password": "second-test-value"}, stored)
 
 
 # ---------------------------------------------------------------------------

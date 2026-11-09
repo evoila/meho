@@ -48,6 +48,11 @@ from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.operations.deny_reasons import READ_SCOPE_DENIED, deny_reason_code
+from meho_backplane.operations.uncertain_outcome import (
+    UNCERTAIN_ADVICE,
+    UNCERTAIN_OUTCOME,
+    request_may_have_reached_vendor,
+)
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
@@ -93,6 +98,7 @@ __all__ = [
     "result_rate_limited",
     "result_receipt_too_large",
     "result_release_changed_while_waiting",
+    "result_resume_params_unavailable",
     "result_target_changed_since_approval",
     "result_target_gone_since_approval",
     "result_target_invalid_type",
@@ -1256,6 +1262,36 @@ def result_release_changed_while_waiting(
     )
 
 
+def result_resume_params_unavailable(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+) -> OperationResult:
+    """An approved request did not run: MEHO does not have its params (#6064).
+
+    The approval surface sent no params, and the request row holds none
+    MEHO can run with: there are none, or MEHO already replaced the secret
+    values with a marker. Nothing was sent. The request ends as a failed
+    run, so the requester can run it again and send the params with it.
+    """
+    reason = (
+        "The request was approved, but MEHO does not have the settings it needs "
+        "to run it. The operation did not run. The requester can run it again "
+        "and send the settings with it, or ask again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"approval_resume_params_unavailable: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "approval_resume_params_unavailable",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
+        },
+    )
+
+
 def result_target_changed_since_approval(
     op_id: str,
     *,
@@ -1549,8 +1585,17 @@ def result_connector_timeout(
     op_id: str,
     exc: httpx.TransportError,
     duration_ms: float,
+    *,
+    changes_target: bool = False,
 ) -> OperationResult:
     """Return a structured timeout or other HTTP transport-fault result.
+
+    *changes_target* is ``True`` for an operation that may change the target.
+    When the request may already have reached the vendor (a read timeout, or
+    a dropped connection after MEHO wrote the request), the result then
+    carries ``execution_outcome: uncertain`` and ``retry: False``, the same
+    as :func:`result_audit_commit_failed`. A connect timeout, and any fault
+    of a read operation, stay a plain error.
 
     ``httpx`` exposes a per-request timeout map through the request extension.
     A non-timeout transport failure has no truthful phase, so it is labelled
@@ -1586,10 +1631,16 @@ def result_connector_timeout(
         "configured_timeout": configured_timeout,
         "exception_message": _sanitize_free_text(str(exc)),
     }
+    error = f"connector_timeout: {type(exc).__name__}"
+    if changes_target and request_may_have_reached_vendor(exc):
+        extras["execution_outcome"] = UNCERTAIN_OUTCOME
+        extras["retry"] = False
+        extras["remediation"] = UNCERTAIN_ADVICE
+        error += f". {UNCERTAIN_ADVICE}"
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"connector_timeout: {type(exc).__name__}",
+        error=error,
         duration_ms=duration_ms,
         extras=extras,
     )

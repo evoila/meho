@@ -58,9 +58,11 @@ Cache invalidation
 ==================
 
 Every successful mutation calls
-:func:`~meho_backplane.broadcast.overrides.invalidate_tenant_cache`
-so the next publish for the tenant reloads from the DB instead of
-serving up-to-60s-stale cached rules. Listing reads from DB directly
+:func:`~meho_backplane.broadcast.overrides.invalidate_tenant_cache`,
+now and again after the session commits
+(:func:`~meho_backplane.db.after_commit.clear_now_and_after_commit`),
+so the next publish for the tenant reloads the saved rules from the DB
+instead of serving up-to-60s-stale cached rules. Listing reads from DB directly
 (no cache involvement).
 
 Glob-not-regex validation
@@ -90,6 +92,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.broadcast.overrides import invalidate_tenant_cache
+from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import BroadcastOverride
 
@@ -350,7 +353,8 @@ async def create_override_impl(
         pattern=row.op_id_pattern,
         detail=row.detail,
     )
-    invalidate_tenant_cache(operator.tenant_id)
+    tenant_id = operator.tenant_id
+    clear_now_and_after_commit(session.sync_session, lambda: invalidate_tenant_cache(tenant_id))
     return row
 
 
@@ -387,7 +391,8 @@ async def delete_override_impl(
             detail="broadcast_override_not_found",
         )
     _bind_remove_audit(override_id=override_id)
-    invalidate_tenant_cache(operator.tenant_id)
+    tenant_id = operator.tenant_id
+    clear_now_and_after_commit(session.sync_session, lambda: invalidate_tenant_cache(tenant_id))
 
 
 # ---------------------------------------------------------------------------

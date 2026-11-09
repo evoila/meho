@@ -48,8 +48,8 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
 - `meho_backplane.db.models.Sensor` — the ORM row. 30 columns: identity
   (`connector_id` + `op_id`), `params`/`target`, `assertion` (JSON), the
   cadence union, `severity`/`for_seconds`, the confirmation knobs
-  `retry_times`/`retry_backoff_seconds` (#2799, create-only like every
-  other sensor knob), the latest-result projection (including the
+  `retry_times`/`retry_backoff_seconds` (#2799, set at create; the edit
+  path does not change them), the latest-result projection (including the
   soft-state window `pending_state`/`pending_count`), and
   `status`/`status_reason`. `pending_state`'s CHECK admits `CheckState`
   minus `skip` (`skip` is a rollup-side derivation, never an evaluation
@@ -79,7 +79,7 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
   `list_results` (the trend query) + the guard exceptions
   (`SensorIdentitySubForbiddenError`, `SensorOperationNotFoundError`,
   `SensorRequiresSafeOperationError`, `SensorNameConflictError`,
-  `SensorResultsCursorError`), each carrying an `error_code` the transports
+  `SensorConnectorMismatchError`, `SensorResultsCursorError`), each carrying an `error_code` the transports
   surface verbatim.
 - `meho_backplane.checks.evidence_retention` — the lifespan-owned retention
   prune sweeper for `sensor_results` (#2756).
@@ -107,15 +107,15 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
    connector row when it has one, otherwise the built-in row). No descriptor ⇒ 422 `sensor_operation_not_found`.
 4. **Safe-only guard**: `descriptor.safety_level != "safe"` ⇒ 422
    `sensor_requires_safe_operation`. This is the create-time half of a
-   two-point enforcement. The dispatch-time policy gate
-   (`operations/dispatcher.dispatch`) does **not** re-consult
-   `safety_level` for the runner's synthetic `USER` operator (it parks
-   only the `destructive` / `requires_approval` tiers), so the runner
-   itself re-asserts the safe floor at dispatch (#303, `checks/runner.py`
-   `_run_evaluation`, "Dispatch identity"): a descriptor re-ingested
-   above `safe` after create records `unknown`
-   (`reason: op_not_safe_at_dispatch`) instead of auto-executing on
-   schedule. A `safe` operation that its connector marks as a safe write
+   two-point enforcement. The runner dispatches as a synthetic `USER`
+   operator with no web session, so the policy gate
+   (`operations/_validate.policy_gate`) follows the token rule: only a
+   `safe` op runs at once, anything else would wait for approval. The
+   runner does not leave it to that gate. It checks the safe floor
+   itself before it dispatches (`checks/runner.py` `_safe_tier_floor`,
+   "Dispatch identity"): a descriptor re-ingested above `safe` after
+   create records `unknown` (`reason: op_not_safe_at_dispatch`) and the
+   op does not run. A `safe` operation that its connector marks as a safe write
    (`declare_safe_writes` / `is_safe_write` in `meho_backplane.op_classes`, for example the
    GitHub ticket writes, which need no approval) is refused the same way:
    422 `sensor_requires_safe_operation` at create
@@ -130,7 +130,14 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
    `ingest_safety_class_changed` warning per change, so the operator
    knows which sensors to re-audit (see
    `docs/codebase/spec-ingestion.md`, `IngestionResult`).
-5. `create_sensor` inserts the row, materialising `next_fire_at`
+5. **Connector fit check (#5858)**: when the body names a target, the
+   service looks it up in the Sensor's tenant and checks the connector
+   against the target's product and version (see **Connector fit** below).
+   A connector that does not fit ⇒ 422 `sensor_connector_mismatch` (the
+   validation-error list shape, `msg` is the plain warning), unless the
+   body sets `force: true`. A target that is not found does not block the
+   create; the runner reports it, as before.
+6. `create_sensor` inserts the row, materialising `next_fire_at`
    (`now + interval_seconds` for interval; `next_fire_after(cron_expr, …)`
    for cron) so #2505's claim query (`status='active' AND next_fire_at <= now`)
    is uniform across kinds. A duplicate `(tenant_id, name)` ⇒ 409
@@ -180,6 +187,39 @@ transaction** as the projection update, gated on retention being enabled —
 history and projection can never diverge. The row records the *observed*
 outcome of each evaluation (committed, soft/pending, or re-confirmed), so a
 flapping reading that never commits still lands in history.
+
+### Connector fit (#5858)
+
+`checks/connector_fit.py` answers one question: does the Sensor's
+connector work with its target's product and version? The answer is
+`SensorRead.connector_fit` (`SensorConnectorFit`: `target_product`,
+`target_version`, `warning`, `matching_connector_id`). It is not a column.
+`SensorAdminService.list_` and `create` fill it on every read, so a new
+probe that changes the target's version shows in the next list.
+
+- The target version is `resolve_target_version` (the probed version, else
+  the version an operator set), the same value the dispatcher reads.
+- The match is `connectors.resolver.connector_serves_target`: the
+  resolver's own candidate filter (product equal, version inside the
+  connector's `supported_version_range`). No second version check exists.
+- The connector named in the warning is the one `resolve_connector_or_label`
+  picks for the target, when it is another connector. The resolver returns
+  a class, and a class can also be registered as a fallback that accepts
+  every version. So the id built from the class is checked with
+  `connector_serves_target` first. When it does not fit, the warning says
+  no connector fits.
+- No warning when MEHO cannot tell: no target, a target not found, no
+  product, an unknown version, or a `connector_id` with no registered
+  class.
+
+Targets are looked up once per name, in the Sensor's tenant, with
+`targets.resolver.resolve_target` (name, then alias). The lookup runs
+inside `structlog.contextvars.bound_contextvars`, so it does not leave a
+`target_id` on the audit row of the list call.
+
+Surfaces: the `connector_fit` field on REST and MCP, the `CONNECTOR` and
+`TARGET` columns plus a warning line in `meho sensor list`, and the
+`Target` column plus a warning under the operation on `/ui/sensors`.
 
 ### The rule runs over the full result (#4117)
 
@@ -303,10 +343,142 @@ Surfaces: REST (`api/v1/sensors.py`, registered in `main.py`), MCP
 (`mcp/tools/sensors.py`, auto-loaded), Go CLI (`cli/internal/cmd/sensor/`).
 Each surface carries the four verbs — `list` / `create` / `delete` plus the
 `results` trend query (#2756): `GET /api/v1/sensors/{id}/results`, the
-`meho_sensor_results` MCP tool, and `meho sensor results <id>`. There is
-**no** update / pause / resume path — `status` is server-initialized to
-`active` at create (clients cannot supply it; a body carrying `status` is a
-422) and transitions to `paused` only via #2505's runner parking.
+`meho_sensor_results` MCP tool, and `meho sensor results <id>`. REST and
+the CLI also carry **edit** (`PATCH /api/v1/sensors/{id}`,
+`meho sensor edit <id>`; see **Edit** below). There is **no** pause /
+resume path — `status` is server-initialized to `active` at create
+(clients cannot supply it; a body carrying `status` is a 422) and
+transitions to `paused` only via #2505's runner parking.
+
+**Edit** (`PATCH /api/v1/sensors/{id}` → `checks/sensor_edit.edit_sensor`)
+changes a Sensor in place, so its id, its `sensor_results` history and its
+Dashboard memberships stay:
+
+1. The body (`SensorUpdate`, `extra="forbid"`) can change `name`,
+   `connector_id`, `op_id`, `params`, `assertion`, the cadence
+   (`cadence_kind`, `interval_seconds`, `cron_expr`, `timezone`) and
+   `severity`. A field left out or sent as `null` keeps its value; an
+   empty body is a 422. Sending `cadence_kind` clears the field of the
+   other kind.
+2. In one transaction: the shared connector-usage lock, then the row with
+   `SELECT ... FOR UPDATE`, so two edits cannot overwrite each other.
+3. The row merged with the body must be a valid `SensorCreate` (else 422
+   `sensor_edit_invalid`), and its operation must exist and be a safe read
+   — the same checks as create (422 `sensor_operation_not_found` /
+   `sensor_requires_safe_operation`). A taken name is 409.
+4. When a value really changes: the row is updated, `next_fire_at` is set
+   to now (the runner checks it on its next tick), the soft-state window
+   (`pending_state` / `pending_count`) is cleared because it was measured
+   with the old settings, and a Sensor the runner had parked is `active`
+   again (its new cadence passed the create check). `last_state` stays
+   until that run. When nothing changes, the row is not written.
+5. The route binds `audit_before` / `audit_after` with only the changed
+   fields, after `scrub_secret_fields` hides secret-named values, so the
+   audit row of the request (`op_id=sensor.edit`) carries the old and new
+   values.
+
+`identity_sub`, `target`, `for_seconds` and the retry knobs are not
+editable.
+
+A Dashboard has the same edit (`PATCH /api/v1/checks/dashboards/{id}` →
+`checks/dashboard_edit.edit_dashboard`, `meho dashboard edit <id>`):
+`add_sensor_ids` / `remove_sensor_ids`, `name`, `notify_email` (an empty
+string turns mail off) and `notify_min_state`. The id stays. Adding a
+member that is already there, or removing one that is not, changes
+nothing, so the same edit is safe to send twice. An added Sensor that is
+not in the tenant is 422 `sensor_not_found`; more than 200 members is 422
+`dashboard_edit_invalid`. The audit row (`op_id=dashboard.edit`) carries
+`before` / `after`, with `sensor_ids` as sorted lists when the members
+change.
+
+### Acknowledged findings (#4128)
+
+A person can acknowledge a Sensor that is not green: until when, why
+and who. Code: `checks/acknowledgement.py`, table
+`sensor_acknowledgements` (migration `0144`), model
+`SensorAcknowledgement`.
+
+- **Create.** `POST /api/v1/sensors/{id}/acknowledgement`
+  (`api/v1/sensor_acknowledgements.py`), `meho sensor ack`. Body
+  `SensorAcknowledgementCreate`: `expires_at` (required, with a time
+  zone), `reason` (`accepted_risk` / `fix_planned` / `false_alarm`),
+  `note` (1..500 characters). Gate `require_approvals_access` (role
+  `operator` or higher, or the `approver` claim, so a `read_only`
+  approver can acknowledge) and `require_human_principal`: agent,
+  service and runner tokens get 403, also with the `approver` claim.
+  No MCP tool. Refusals: no or naive `expires_at` (422 at the body), an
+  end time in the past or more than 90 days away (422
+  `sensor_ack_invalid_end_time`), a green or never-checked Sensor (422
+  `sensor_ack_not_failing`), an active acknowledgement already there
+  (409 `sensor_ack_already_open`; a partial unique index on
+  `sensor_id WHERE ended_at IS NULL` also stops a race), another
+  tenant (404). The request's audit row (`op_id=sensor.acknowledge`)
+  carries the new row under `after`.
+- **Active** means `ended_at IS NULL` and `expires_at` in the future. Every
+  reader checks the time itself, so an acknowledgement stops counting at
+  its end time.
+- **End.** `settle_acknowledgement` runs inside `record_sensor_result`,
+  after the confirmation gate, in the same transaction. Past its end time
+  it ends as `expired` (`ended_at = expires_at`); when the committed state
+  ranks worse than `acked_state` (`ok`/`skip` < `unknown`/`degraded` <
+  `critical`) it ends as `state_worse`. Each end adds an `INTERNAL` audit
+  row (`operator_sub=system:checks-acknowledgement`, path
+  `sensor.acknowledgement.expire` or `sensor.acknowledgement.end`) to the
+  same transaction. So the expiry row is written at the Sensor's next
+  result after the end time, not at the end time itself; a paused Sensor
+  gets it only when it runs again. `record_sensor_result` returns a
+  `RecordedResult` that says how the acknowledgement ended; the runner
+  passes an `expired` end to `investigate_on_transition`, which mails
+  that the acknowledgement ended when the Sensor still fails
+  (`checks-notifications.md`).
+- **Effects.** The advisory (`checks-advisory.md`) says `acknowledged`
+  for a Dashboard whose every non-green member is acknowledged, and its
+  warning comes back at once when the acknowledgement ends. The
+  warning mail (`checks-notifications.md`) is skipped when every Sensor
+  it is about is acknowledged, and comes back as an "acknowledgement
+  ended" mail when the time is up and the Sensor still fails. The Dashboard detail
+  (`DashboardMemberView.acknowledgement`, REST and `/ui/checks/{id}`)
+  shows who, until when and why next to the real states. The rollup, the
+  states and the investigator do not change.
+
+### Export and import as a file
+
+A Dashboard and its Sensors can move to another site as one JSON file
+(`checks/dashboard_file.py`, `checks/dashboard_file_schemas.py`, routes in
+`api/v1/checks_dashboard_files.py`).
+
+- **Export** (`GET /api/v1/checks/dashboard-files/export?name=<name>`,
+  `meho dashboard export <name> [--output <file>]`, role `operator`): the
+  file (`format: meho-dashboard/1`) holds the Dashboard's description,
+  `notify_min_state` and `investigator_prompt`, and for each member Sensor
+  the fields of a create: operation, params, rule, cadence, severity,
+  `for_seconds` and the retry settings. It holds no ids, no state and no
+  mail address. Each Sensor's target is a placeholder: its target name at
+  this site. Other keys of a stored target are left out.
+- **Import** (`POST /api/v1/checks/dashboard-files/import`,
+  `meho dashboard import <file> --map-target <placeholder>=<target>`, role
+  `tenant_admin`): MEHO checks the whole file first and refuses it, with
+  422 and one entry per problem, when a placeholder has no entry in
+  `target_map` (`dashboard_import_unmapped_target`), a mapped target is not
+  found (`dashboard_import_target_not_found`), an operation is not found or
+  is not a safe read (`dashboard_import_unknown_operation` /
+  `dashboard_import_unsafe_operation`), or a connector does not fit its
+  target (`dashboard_import_connector_mismatch`, unless `force`). Nothing is
+  written then.
+- Then, in one transaction with the shared connector-usage lock, Sensors and
+  the Dashboard are matched by name in the tenant. A missing one is created,
+  a different one is updated (like an edit: due at once, the soft-state
+  window cleared), an equal one is not written. The Dashboard's members
+  become the Sensors of the file; a member that is not in the file leaves
+  the Dashboard but is not deleted. The Dashboard's mail address stays. So
+  the same file imported twice changes nothing the second time
+  (`changed: false`). A name taken by a parallel write is 409
+  `dashboard_import_conflict`; running the import again is safe.
+- `dry_run` answers with the same result (what would be created, updated or
+  left) and writes nothing; the request counts as a preview for the audit.
+- The audit row (`op_id=dashboard.import`) carries the Dashboard name and
+  id, `dry_run`, the `target_map` and what happened to each Sensor and to
+  the members. It carries no params.
 
 ## Dependencies
 
@@ -357,12 +529,18 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
   itself. See
   `docs/codebase/connectors-net-diagnostics.md` § *Refusal is a dispatch
   error, not a reading*.
+- **An evaluation that is already running when an edit commits** still
+  records its result, measured with the old settings. The run the edit
+  makes due is not lost: the runner leaves a row due while its previous
+  evaluation is running (it does not advance `next_fire_at`), so the new
+  settings run on the first tick after that evaluation ends.
 - The safe-only guard's descriptor read and the insert are in separate
   sessions (a TOCTOU window); acceptable because the runner re-asserts the
-  safe-tier floor at dispatch (#303), so a race that lands a non-safe
+  safe-tier floor at dispatch, so a race that lands a non-safe
   descriptor records `unknown` rather than executing.
-- **The `identity_sub` ownership guard (#2699) is create-time only.** There
-  is no update route, so it covers every new row, but any `sensor` row
+- **The `identity_sub` ownership guard (#2699) is create-time only.** The
+  edit route cannot change `identity_sub`, so it covers every new row, but
+  any `sensor` row
   persisted *before* the guard landed with a spoofed `identity_sub` keeps
   dispatching (and audit-attributing) under it — no data migration
   normalises historical rows. Deployments that ran the pre-guard build

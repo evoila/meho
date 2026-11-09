@@ -10,9 +10,9 @@ lifecycle (T1 #1884 ships the list + start modal; each row links here).
 
 This is a pure UI/BFF build over the in-process
 :class:`~meho_backplane.runbooks.run_service.RunbookRunService` -- the
-``require_ui_session`` floor for the read page, the ``require_ui_operator``
-role floor for next / abort (or the ``require_ui_admin`` hard gate, for
-reassign) + a direct service call, never the Bearer ``/api/v1`` surface.
+``require_ui_operator`` role floor for the read page and for next / abort
+(or the ``require_ui_admin`` hard gate, for reassign) + a direct service
+call, never the Bearer ``/api/v1`` surface.
 The closest write-surface precedent is
 :mod:`meho_backplane.ui.routes.runbooks.lifecycle` (HTMX fragment swap +
 typed-error -> inline alert + CSRF re-mint).
@@ -144,7 +144,6 @@ from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_admin,
     require_ui_operator,
-    require_ui_session,
 )
 from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
 from meho_backplane.ui.routes.runbooks.driver_render import (
@@ -160,13 +159,12 @@ __all__ = ["register_driver_routes"]
 log = structlog.get_logger(__name__)
 
 #: Module-level ``Depends`` closures (B008 idiom -- no call in a default
-#: arg). ``_require_session`` is the session floor the read page sits on;
-#: ``_require_operator`` is the ``operator`` role floor the next / abort
-#: POSTs sit on (``read_only`` gets 403 at the dependency, like on REST);
+#: arg). ``_require_operator`` is the ``operator`` role floor the read page
+#: and the next / abort POSTs sit on (``read_only`` gets 403 at the
+#: dependency, like on REST);
 #: ``_require_admin`` is the hard ``tenant_admin`` gate the reassign POST
 #: sits on (an operator gets 403 at the dependency, before the handler
 #: body runs).
-_require_session = Depends(require_ui_session)
 _require_operator = Depends(require_ui_operator)
 _require_admin = Depends(require_ui_admin)
 
@@ -559,7 +557,7 @@ def register_driver_routes(router: APIRouter) -> None:
     async def runbooks_run_driver(
         run_id: uuid.UUID,
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         return await render_driver_page(request, session, run_id)
 

@@ -227,6 +227,7 @@ Two resources combine to materialise a Secret the chart can consume:
 | `secret/meho/postgres` (property `url`) | The full `DATABASE_URL`: `postgresql+asyncpg://<user>:<pass>@<host>:<port>/<db>` | The Deployment env `DATABASE_URL` via `postgres.credentialsSecret` |
 | `secret/meho/keycloak/client_secret` (property `client_secret`) | The Keycloak OAuth client secret backing `keycloak.audience` | v0.2 federation wiring (rendered optionally today for end-to-end sync verification) |
 | `secret/meho/agent` (property `api_key`) | The Anthropic API key the G11.1 agent LLM loop authenticates with | The Deployment env `ANTHROPIC_API_KEY` via `agent.secretName` (resolved through `meho.agentSecretName`) when `agent.enabled: true` |
+| `secret/meho/agent-openai` (property `api_key`) | The API key of the OpenAI-compatible model endpoint | The Deployment env `OPENAI_API_KEY` via `agent.openai.secretName` (resolved through `meho.agentOpenaiSecretName`) when `agent.openai.enabled: true` |
 | `secret/meho/keycloak/admin_client_secret` (property `client_secret`) | The G11.2 Keycloak Admin client secret gating agent-principal registration | The Deployment env `KEYCLOAK_ADMIN_CLIENT_SECRET` via `keycloakAdmin.clientSecret.secretName` (resolved through `meho.keycloakAdminSecretName`) when `keycloakAdmin.enabled: true` |
 
 The `secret/meho` base is configurable via `vault.paths.kv` — adjust the
@@ -275,6 +276,90 @@ env vars resolve when both opt-ins are enabled. The
 chart with both opt-ins on and greps for the `secretKeyRef` shape so
 a regression flipping `ANTHROPIC_API_KEY` to plaintext is rejected
 before merge.
+
+## OpenAI-compatible model endpoint (#5851)
+
+MEHO's own agents can use a model server that accepts the same requests
+as OpenAI's API, for example vLLM, Ollama or OpenAI itself. The
+`agent.openai` block sets the three backplane settings for it:
+
+| Value | Env var | How it is passed |
+| --- | --- | --- |
+| `agent.openai.secretName` + `agent.openai.secretKey` (default `api_key`) | `OPENAI_API_KEY` | `secretKeyRef` only. There is no value for the key itself; the chart refuses one. |
+| `agent.openai.baseUrl` | `OPENAI_BASE_URL` | Plain value. Empty: not set, and the backplane uses OpenAI's own service. |
+| `agent.openai.defaultModel` | `OPENAI_DEFAULT_MODEL` | Plain value. Empty: not set, and the backplane uses its own default. |
+
+```yaml
+agent:
+  openai:
+    enabled: true
+    baseUrl: https://model.example.internal/v1
+    defaultModel: openai:meta-llama/Llama-3.1-8B-Instruct
+    secretName: model-endpoint-creds   # a Secret you make, key `api_key`
+  modelBackend: openai   # AGENT_MODEL_BACKEND: send agent runs to this endpoint
+```
+
+`agent.modelBackend` sets `AGENT_MODEL_BACKEND`, the backend every agent
+run uses: `anthropic`, `openai`, `bedrock` or `vcf-paif`. Empty (the
+default): the chart does not set it, and the backplane uses `anthropic`.
+
+- The block is separate from `agent.enabled` (the Anthropic key). Turn
+  on one of them or both.
+- Off by default. Then the chart renders exactly what it rendered before
+  this block existed.
+- The key comes from a Secret you make (`secretName`), or from Vault
+  through the External Secrets Operator: set
+  `eso.agentOpenai.enabled: true` and `eso.secretStore.name`, and leave
+  `secretName` empty. The chart then makes the `<release>-agent-openai`
+  Secret from `secret/meho/agent-openai`, property `api_key`
+  (`eso.agentOpenai.remoteKey` / `remoteProperty` change this).
+- A model server that needs no key still needs some value in the Secret.
+  The backplane refuses to start an agent with an empty key.
+- `enabled: true` with neither Secret path fails at `helm template` with
+  a message that names both.
+- `helm test <release>` runs a small Pod
+  (`templates/tests/test-agent-openai-config.yaml`) that checks the env
+  vars resolve. It never calls the model server.
+
+### Let the backplane reach the model server
+
+With `networkPolicy.enabled: true` (the default), the backplane cannot
+reach the model server until you open it in `networkPolicy.extraEgress`.
+Open only the address and port of the model server.
+
+A model server outside the cluster, by address range:
+
+```yaml
+networkPolicy:
+  extraEgress:
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.0/28   # the model server's addresses
+      ports:
+        - port: 443
+          protocol: TCP
+```
+
+A model server in the same cluster, by its namespace and Pod labels:
+
+```yaml
+networkPolicy:
+  extraEgress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: model-server
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vllm
+      ports:
+        - port: 8000      # the Pod's port, not the Service port
+          protocol: TCP
+```
+
+The rule is checked against the Pod the connection reaches, so use the
+port the model server's container listens on (vLLM uses 8000 by
+default), even when `baseUrl` names a Service on another port.
 
 ## Operator-console (browser BFF) OAuth wiring (#2594)
 

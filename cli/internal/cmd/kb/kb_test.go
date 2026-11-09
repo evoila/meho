@@ -85,6 +85,7 @@ func TestNewRootCmdRegistersAllSixVerbs(t *testing.T) {
 		"show":   false,
 		"add":    false,
 		"delete": false,
+		"export": false,
 	}
 	for _, sub := range root.Commands() {
 		name := strings.SplitN(sub.Use, " ", 2)[0]
@@ -111,7 +112,7 @@ func TestRootCmdHelpListsAllVerbs(t *testing.T) {
 		t.Fatalf("`meho kb --help` failed: %v", err)
 	}
 	help := buf.String()
-	for _, want := range []string{"ingest", "search", "list", "show", "add", "delete", "tenant"} {
+	for _, want := range []string{"ingest", "search", "list", "show", "add", "delete", "export", "tenant"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("expected `meho kb --help` to mention %q; got:\n%s", want, help)
 		}
@@ -656,7 +657,7 @@ func TestListQueryParamsSetsAllFilters(t *testing.T) {
 // empty object. The substrate defaults to {} when the field is
 // absent or null; both shapes pass the validator.
 func TestBuildAddBodyOmitsMetadataWhenNil(t *testing.T) {
-	body := buildAddBody("slug", "content", nil)
+	body := buildAddBody("slug", "content", nil, nil)
 	if body.Metadata != nil {
 		t.Errorf("expected nil Metadata when none supplied; got %+v", body.Metadata)
 	}
@@ -669,7 +670,7 @@ func TestBuildAddBodyOmitsMetadataWhenNil(t *testing.T) {
 // the body's Metadata pointer so the wire payload carries it.
 func TestBuildAddBodyWiresMetadata(t *testing.T) {
 	md := map[string]any{"owner": "ops"}
-	body := buildAddBody("slug", "content", md)
+	body := buildAddBody("slug", "content", md, nil)
 	if body.Metadata == nil {
 		t.Fatalf("expected non-nil Metadata; got nil")
 	}

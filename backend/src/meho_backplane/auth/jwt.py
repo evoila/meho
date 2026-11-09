@@ -913,23 +913,37 @@ def _extract_tenants(
 _GROUPS_CLAIM_NAME: str = "groups"
 
 
-def _role_groups_in_token(claims: Any, settings: Settings) -> list[str]:
-    """Return the configured role groups the token's ``groups`` claim names.
+def _group_key(name: str) -> str:
+    """Return the form of a group name that MEHO compares.
 
     The group-membership mapper can send plain names or full paths
-    (``/MEHO-Operators``), so a leading ``/`` is dropped on both sides
-    before comparing. Each group is listed once, in the order
-    :attr:`Settings.jwt_role_groups` lists them, so the 401 message and
-    the log event are stable.
+    (``/MEHO-Operators``), so a leading ``/`` is dropped. Upper and lower
+    case do not count: ``meho-operators`` is the same group as
+    ``MEHO-Operators``.
+    """
+    return name.lstrip("/").casefold()
+
+
+def _role_groups_in_token(claims: Any, settings: Settings) -> list[str]:
+    """Return the role groups the token's ``groups`` claim names.
+
+    A token group is a role group when :func:`_group_key` gives the same
+    key as a name in :attr:`Settings.jwt_role_groups`. Each group is
+    listed once, in the order of that setting, with the name as the
+    token spells it, so the 401 message and the log event are stable and
+    show the names the admin sees in Keycloak.
     """
     raw = claims.get(_GROUPS_CLAIM_NAME)
     if not isinstance(raw, list):
         return []
-    names = {item.lstrip("/") for item in raw if isinstance(item, str)}
+    names: dict[str, str] = {}
+    for item in raw:
+        if isinstance(item, str):
+            names.setdefault(_group_key(item), item.lstrip("/"))
     found: list[str] = []
     for group in settings.jwt_role_groups:
-        name = group.lstrip("/")
-        if name in names and name not in found:
+        name = names.pop(_group_key(group), None)
+        if name is not None:
             found.append(name)
     return found
 
@@ -1433,6 +1447,80 @@ def _extract_approver(claims: Any, settings: Settings) -> bool:
     return False
 
 
+#: The claim that marks a login that may only import knowledge (#5728).
+KB_IMPORT_ONLY_CLAIM: str = "kb_import_only"
+#: The claim that marks a login that may only export knowledge (#5730).
+KB_EXPORT_ONLY_CLAIM: str = "kb_export_only"
+
+
+def _extract_kb_import_only(claims: Any) -> bool:
+    """Return whether the token may only import knowledge (#5728).
+
+    See :func:`_extract_limiting_flag` for how the value is read.
+    """
+    return _extract_limiting_flag(claims, KB_IMPORT_ONLY_CLAIM)
+
+
+def _extract_kb_export_only(claims: Any) -> bool:
+    """Return whether the token may only export knowledge (#5730).
+
+    See :func:`_extract_limiting_flag` for how the value is read.
+    """
+    return _extract_limiting_flag(claims, KB_EXPORT_ONLY_CLAIM)
+
+
+def _extract_limiting_flag(claims: Any, claim_name: str) -> bool:
+    """Read a claim that limits the login to one route.
+
+    The claim comes from a hardcoded claim mapper on the client.
+    No claim, ``false`` or ``"false"`` gives ``False``. ``true`` or
+    ``"true"`` gives ``True``. Any other value also gives ``True``: the
+    flag takes rights away, so a value MEHO cannot read must keep the
+    login limited, not free it. Such a value is logged under
+    ``malformed_<claim_name>_claim``.
+    """
+    raw = claims.get(claim_name)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
+        return raw.strip().lower() == "true"
+    structlog.get_logger(__name__).warning(
+        f"malformed_{claim_name}_claim",
+        claim_name=claim_name,
+        reason="not_a_boolean",
+    )
+    return True
+
+
+#: The claim that marks a login that may only run the conventions drift check.
+CONVENTIONS_DRIFT_ONLY_CLAIM: str = "conventions_drift_only"
+
+
+def _extract_conventions_drift_only(claims: Any) -> bool:
+    """Return whether the token may only run the conventions drift check.
+
+    Read like ``kb_import_only``: no claim, ``false`` or ``"false"`` gives
+    ``False``; ``true`` or ``"true"`` gives ``True``. Any other value also
+    gives ``True``, because the flag takes rights away. Such a value is
+    logged under ``malformed_conventions_drift_only_claim``.
+    """
+    raw = claims.get(CONVENTIONS_DRIFT_ONLY_CLAIM)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
+        return raw.strip().lower() == "true"
+    structlog.get_logger(__name__).warning(
+        "malformed_conventions_drift_only_claim",
+        claim_name=CONVENTIONS_DRIFT_ONLY_CLAIM,
+        reason="not_a_boolean",
+    )
+    return True
+
+
 def _tenants_claim_malformed(claims: Any, settings: Settings) -> bool:
     """Return ``True`` when the ``meho_tenants`` claim is there but not all good.
 
@@ -1495,8 +1583,8 @@ def _extract_self_approver(
     * The token has no ``meho_tenants`` claim (a site with one tenant
       and the older mappers): the flag is on when the ``groups`` claim
       names the group ``JWT_SELF_APPROVER_GROUP`` (default
-      ``MEHO-SA-Operators``). A leading ``/`` is ignored on both sides,
-      the same as in the one-group check. A ``groups`` claim that is not
+      ``MEHO-SA-Operators``). A leading ``/`` and upper or lower case do
+      not count, the same as in the one-group check. A ``groups`` claim that is not
       a list, or has an entry that is not a string, gives ``False`` and
       logs ``malformed_groups_claim``.
 
@@ -1521,8 +1609,8 @@ def _extract_self_approver(
             "malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="entry_not_a_string"
         )
         return False
-    names = {item.lstrip("/") for item in raw}
-    return settings.jwt_self_approver_group.lstrip("/") in names
+    names = {_group_key(item) for item in raw}
+    return _group_key(settings.jwt_self_approver_group) in names
 
 
 def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
@@ -1777,6 +1865,9 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             scopes=scopes,
             platform_admin=platform_admin,
             approver=approver,
+            kb_import_only=_extract_kb_import_only(claims),
+            kb_export_only=_extract_kb_export_only(claims),
+            conventions_drift_only=_extract_conventions_drift_only(claims),
             runner_id=runner_id,
             tenants=tenants,
             self_approver=self_approver,

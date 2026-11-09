@@ -20,14 +20,14 @@ The default agent surface. No elevation required.
 
 | Tool | Maturity | Extra gate | Summary |
 | --- | --- | --- | --- |
-| `add_to_knowledge` | ga | — | Add a new entry to the tenant's knowledge base. |
+| `add_to_knowledge` | ga | — | Add a new entry to the tenant's knowledge base, or update one. |
 | `add_to_memory` | ga | — | Save a memory: something worth keeping after this session, such as an operator preference, a tenant convention or a gotcha for one target. |
 | `ask_docs` | experimental | capability `meho-docs` | Answer a vendor-reference question with one composed answer and the chunks it cites, from one vendor-document collection (manuals, KB articles, guides), e.g. 'NSX 9.0 config maximums for logical switches?'. |
 | `call_operation` | ga | — | Run an operation. |
 | `list_doc_collections` | experimental | capability `meho-docs` | List the documentation collections you are entitled to search — the catalogue an agent reads to learn WHICH `collection` to pass to `search_docs` / `ask_docs` before searching. |
 | `list_operation_groups` | ga | — | List enabled operation groups for a connector. |
 | `list_targets` | ga | — | List the operator's accessible infrastructure targets, optionally filtered by connector. |
-| `meho_broadcast_announce` | beta | — | Post a short note to your tenant's broadcast feed so other operators and agents see what you are doing. |
+| `meho_broadcast_announce` | beta | — | Agents only: post a short note to your tenant's broadcast feed so others see what you are doing. |
 | `meho_broadcast_recent` | beta | — | Read the agent announcements in your tenant: what other agents said they are starting, doing or have finished. |
 | `meho_broadcast_watch` | beta | — | Wait for new agent announcements in your tenant after 'cursor'. |
 | `meho_connector_list` | ga | — | List ingested connectors visible to the operator's tenant (plus built-in / global). |
@@ -37,14 +37,14 @@ The default agent surface. No elevation required.
 | `meho_runbook_next` | beta | — | Advance one step in an in-progress runbook run. |
 | `meho_runbook_show_template` | beta | — | Read the full body of a runbook template, including step contents. |
 | `meho_runbook_start` | beta | — | Start a new runbook run. |
-| `meho_status` | — | — | Returns the operator's identity (sub, name, email, tenant_id, tenant_role) plus the MEHO backplane's dependency status: Vault federation chain (reachable + KV read OK?), DB migration state with the database's revision and the revision this build expects, the readiness checks /ready reports (name, ok, detail), the approval settings in force (approval key state, whether a second person must approve), the gated features and the setting names they still need, the OAuth scopes this session holds, and which working-surface tools it should see versus the ones it lists. |
+| `meho_status` | — | — | Returns the operator's identity (sub, name, email, tenant_id, tenant_role) and MEHO's dependency status: Vault (reachable + KV read OK?), the database's revision and the one this build expects, the /ready checks (name, ok, detail), the approval settings (approval key state, whether a second person must approve), the gated features and the settings they still need, this session's OAuth scopes, the working-surface tools it should see versus the ones it lists, and the server's time in UTC (server_time; use it when you must write down the time). |
 | `preview_operation` | ga | — | Preview an operation WITHOUT running it. |
-| `query_topology` | beta | — | Read the topology graph: what depends on what. |
+| `query_topology` | beta | — | Read the topology graph: what depends on what, in your tenant. |
 | `read_docs` | experimental | capability `meho-docs` | Read more around a vendor-document hit: the text before and after it, the whole page, or the section it sits in. |
 | `result_query` | ga | — | Read the full data behind a result handle. |
 | `search_docs` | experimental | capability `meho-docs` | Search a vendor-document collection (manuals, KB articles, guides) for a vendor fact, e.g. 'NSX config maximums for 9.0' or 'vSphere 8.0 supported snapshot depth'. |
-| `search_knowledge` | ga | — | Search the tenant's knowledge base for distilled operator knowledge: vendor API patterns, lab conventions, known-good runbooks, post-incident learnings. |
-| `search_memory` | ga | — | Search the operator's accessible memories (own user-scoped entries + tenant-shared + target-shared entries visible to this operator). |
+| `search_knowledge` | ga | — | Search the tenant's knowledge base: vendor API patterns, lab conventions, known-good runbooks, post-incident learnings. |
+| `search_memory` | ga | — | Search the memories this operator can read. |
 | `search_operations` | ga | — | Hybrid BM25 + cosine retrieval over a connector's enabled operations. |
 
 ### Add-on working tools
@@ -108,6 +108,7 @@ Connector lifecycle, principals and grants, scheduler, sensors, topology mutatio
 | `meho_sensor_list` | beta | — | List sensors for the operator's tenant. |
 | `meho_sensor_results` | beta | — | Per-tick evidence trend query for one sensor. |
 | `meho_targets_register` | ga | — | Register a new target in the operator's tenant (tenant_admin only). |
+| `meho_targets_update` | ga | — | Change fields of one target in the operator's tenant (tenant_admin only). |
 | `meho_topology_annotate` | beta | — | Assert a curated `graph_edge` that auto-discovery cannot infer (tenant_admin only). |
 | `meho_topology_bulk_import` | beta | — | Batch-assert curated `graph_edge` rows in one atomic pass (tenant_admin only). |
 | `meho_topology_create_node` | beta | — | Manually seed a `graph_node` row in the operator's tenant (tenant_admin only). |
@@ -122,6 +123,6 @@ Approving or rejecting a parked operation, and granting an agent a privilege ele
 
 | Tool | Where the decision is made |
 | --- | --- |
-| `meho_agents_grant_elevate` | operator console approvals queue, or the `meho` CLI |
-| `meho_approvals_approve` | operator console approvals queue, or the `meho` CLI |
-| `meho_approvals_reject` | operator console approvals queue, or the `meho` CLI |
+| `meho_agents_grant_elevate` | operator console, or `meho agent grant elevate` |
+| `meho_approvals_approve` | operator console approvals queue, or `meho approvals approve` |
+| `meho_approvals_reject` | operator console approvals queue, or `meho approvals reject` |

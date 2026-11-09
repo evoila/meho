@@ -10,17 +10,21 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/migrate"
 	"github.com/evoila/meho/cli/internal/version"
@@ -647,7 +651,9 @@ func TestLoginWithCAFileTrustsASelfSignedInstall(t *testing.T) {
 	// bring the trust back from the config.
 	http.DefaultTransport = originalTransport
 	var warning bytes.Buffer
-	trustSavedCA(&warning)
+	later := &cobra.Command{Use: "status"}
+	later.SetErr(&warning)
+	trustSavedCA(later, nil)
 	if warning.Len() != 0 {
 		t.Errorf("warning: %s", warning.String())
 	}
@@ -694,8 +700,99 @@ func TestSavedCAFileThatIsGoneOnlyWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 	var warning bytes.Buffer
-	trustSavedCA(&warning)
+	cmd := &cobra.Command{Use: "status"}
+	cmd.SetErr(&warning)
+	trustSavedCA(cmd, nil)
 	if !strings.Contains(warning.String(), "CA file") {
 		t.Errorf("warning = %q", warning.String())
+	}
+}
+
+// Two backplanes: httptest gives every TLS server the same certificate,
+// so the CA saved for backplane A would vouch for backplane B. Only a
+// command against A may use it.
+func TestSavedCAStaysWithItsBackplane(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	xdg := withTempXDG(t)
+	t.Setenv(api.TenantEnv, "")
+
+	var hitsA, hitsB atomic.Int32
+	handler := func(hits *atomic.Int32) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.Header().Set("Content-Type", "application/yaml")
+			_, _ = io.WriteString(w, "spec:\n  tenants: []\n")
+		})
+	}
+	a := httptest.NewTLSServer(handler(&hitsA))
+	t.Cleanup(a.Close)
+	b := httptest.NewTLSServer(handler(&hitsB))
+	t.Cleanup(b.Close)
+	a.Config.ErrorLog = log.New(io.Discard, "", 0)
+	b.Config.ErrorLog = log.New(io.Discard, "", 0)
+
+	caPath := filepath.Join(t.TempDir(), "ca.crt")
+	block := &pem.Block{Type: "CERTIFICATE", Bytes: a.Certificate().Raw}
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stored := func(url string) auth.StoredToken {
+		return auth.StoredToken{
+			BackplaneURL: url, AccessToken: "eyJ.test.token", TokenType: "Bearer",
+			Expiry: time.Now().Add(time.Hour),
+		}
+	}
+	seedCreds(t, xdg, b.URL, stored(b.URL))
+	seedCreds(t, xdg, a.URL, stored(a.URL))
+	if err := auth.SaveConfig(auth.Config{BackplaneURL: a.URL, CAFile: caPath}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, args := range map[string][]string{
+		"--backplane": {"settings", "export", "--backplane", b.URL},
+		"login":       {"login", b.URL},
+	} {
+		http.DefaultTransport = originalTransport
+		_, _, err := runMeho(t, args...)
+		if err == nil {
+			t.Errorf("%s against backplane B must fail on the certificate", name)
+		}
+		if got := hitsB.Load(); got != 0 {
+			t.Fatalf("%s: backplane B got %d requests through A's CA", name, got)
+		}
+	}
+
+	http.DefaultTransport = originalTransport
+	if _, stderr, err := runMeho(t, "settings", "export"); err != nil {
+		t.Fatalf("the saved backplane must stay trusted: %v (%s)", err, stderr)
+	}
+	http.DefaultTransport = originalTransport
+	if _, stderr, err := runMeho(t, "settings", "export", "--backplane", a.URL+"/"); err != nil {
+		t.Fatalf("--backplane naming the saved backplane must stay trusted: %v (%s)", err, stderr)
+	}
+	if hitsA.Load() != 2 {
+		t.Errorf("backplane A got %d requests, want 2", hitsA.Load())
+	}
+}
+
+func TestDiscoveryClientUsesTheSavedCAWithoutTheProcess(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(srv.Close)
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	caPath := filepath.Join(t.TempDir(), "ca.crt")
+	block := &pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := discoveryClient(auth.Config{BackplaneURL: srv.URL, CAFile: caPath}).Get(srv.URL) //nolint:noctx
+	if err != nil {
+		t.Fatalf("discovery client: %v", err)
+	}
+	_ = resp.Body.Close()
+	if http.DefaultTransport != originalTransport {
+		t.Error("the discovery client must not change the process-wide transport")
 	}
 }

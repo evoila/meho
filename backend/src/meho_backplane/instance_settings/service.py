@@ -25,6 +25,7 @@ their product, impl-id, ``secret_ref`` scope and TLS checks) for targets.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import re
@@ -51,7 +52,7 @@ from meho_backplane.api.v1.targets import (
     update_target,
 )
 from meho_backplane.audit import bind_preallocated_audit_id
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.conventions._internal import OverBudgetError, enforce_budget
 from meho_backplane.conventions.schemas import ConventionCreate, ConventionKind, ConventionUpdate
@@ -81,7 +82,9 @@ from meho_backplane.tenancy.ensure import ensure_tenant
 from meho_backplane.tenancy.policies import (
     set_announce_gate_enabled,
     set_flight_recorder_policy,
+    set_knowledge_wiki_collection,
     set_mail_recipient_allowlist,
+    set_run_approval_target_kinds,
 )
 from meho_backplane.version import deployed_version_label
 
@@ -157,6 +160,8 @@ def _policies_block(tenant: Tenant) -> dict[str, Any]:
             "agent_readable": tenant.flight_recorder_agent_readable,
         },
         "mail_recipient_allowlist": tenant.mail_recipient_allowlist,
+        "run_approval_target_kinds": tenant.run_approval_target_kinds_enabled,
+        "knowledge_wiki_collection": tenant.knowledge_wiki_collection,
     }
 
 
@@ -302,11 +307,23 @@ async def export_settings(session: AsyncSession, tenant_ids: list[uuid.UUID]) ->
     }
 
 
+class _NoAliasDumper(yaml.SafeDumper):  # type: ignore[misc]  # yaml has no stubs here
+    """``SafeDumper`` that writes a value out each time it appears.
+
+    The import refuses anchors and aliases, so the export never writes one,
+    even when one object appears twice in the document.
+    """
+
+    def ignore_aliases(self, data: Any) -> bool:
+        return True
+
+
 def dump_settings_yaml(document: dict[str, Any]) -> str:
     """Render *document* as YAML; stable for equal input (key order kept)."""
     return str(
-        yaml.safe_dump(
+        yaml.dump(
             document,
+            Dumper=_NoAliasDumper,
             sort_keys=False,
             allow_unicode=True,
             default_flow_style=False,
@@ -433,6 +450,10 @@ def _plan_policies(
                 desired["flight_recorder"][key] = bool(value) if key == "enabled" else value
     if "mail_recipient_allowlist" in sent:
         desired["mail_recipient_allowlist"] = policies.mail_recipient_allowlist
+    if "run_approval_target_kinds" in sent:
+        desired["run_approval_target_kinds"] = bool(policies.run_approval_target_kinds)
+    if "knowledge_wiki_collection" in sent:
+        desired["knowledge_wiki_collection"] = policies.knowledge_wiki_collection
     return desired, desired
 
 
@@ -615,7 +636,8 @@ async def build_plan(
     tenants the file names (the preview has the same rules as the apply).
     """
     plan = ImportPlan(file_sha256=hashlib.sha256(content).hexdigest())
-    parsed = parse_settings_file(content)
+    # In a worker thread: parsing a large file must not hold up other requests.
+    parsed = await asyncio.to_thread(parse_settings_file, content)
     plan.mistakes.extend(parsed.mistakes)
     model = parsed.model
     if model is None:
@@ -768,6 +790,8 @@ async def _apply_policies(
                 },
             )
             set_mail_recipient_allowlist(tenant, policies["mail_recipient_allowlist"])
+            set_run_approval_target_kinds(tenant, policies["run_approval_target_kinds"])
+            set_knowledge_wiki_collection(tenant, policies["knowledge_wiki_collection"])
     except Exception as exc:
         _log.warning(
             "settings_import_policies_failed", tenant_id=str(tenant_plan.tenant_id), error=str(exc)
@@ -936,10 +960,13 @@ async def list_history(
 ) -> list[dict[str, Any]]:
     """The revisions the caller may see, newest first, each with its diff.
 
-    A platform_admin sees every revision. A tenant_admin sees the revisions
-    that touched only their own tenant (a revision's spec holds every tenant it
-    touched, so a multi-tenant one would show other tenants' settings).
+    A platform_admin who is a person sees every revision. Everyone else, also
+    a machine principal whose token carries the platform-admin claim, sees the
+    revisions that touched only their own tenant (a revision's spec holds every
+    tenant it touched, so a multi-tenant one would show other tenants'
+    settings).
     """
+    every_tenant = operator.platform_admin and is_human_principal(operator)
     rows = (
         await session.execute(
             select(InstanceSettingsRevision).order_by(
@@ -951,7 +978,7 @@ async def list_history(
     out: list[dict[str, Any]] = []
     for row in rows:
         before, after = _view(row.spec_before), _view(row.spec_after)
-        if not operator.platform_admin and set(before) | set(after) != {own}:
+        if not every_tenant and set(before) | set(after) != {own}:
             continue
         out.append(
             {

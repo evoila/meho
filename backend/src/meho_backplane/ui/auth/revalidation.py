@@ -85,6 +85,7 @@ from fastapi import HTTPException
 
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.refresh import verify_access_token_with_refresh
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.tenant import TenantRemovedError
 
 if TYPE_CHECKING:
@@ -195,7 +196,7 @@ async def revalidate_read_session(
         # No token material -- only the classifier's detail code.
         log.warning(
             "ui_read_session_revalidation_failed",
-            session_id=str(decrypted.id),
+            session_ref=session_ref(decrypted.id),
             status_code=exc.status_code,
             detail=str(exc.detail),
         )

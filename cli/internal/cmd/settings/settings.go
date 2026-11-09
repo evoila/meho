@@ -145,6 +145,9 @@ func classify(backplaneURL string, err error) *output.StructuredError {
 	case errors.Is(err, errNoAccessToken), api.IsTokenNotFound(err), api.IsNoRefreshToken(err):
 		return output.AuthExpired(fmt.Sprintf(
 			"no usable stored credentials for %s; run `meho login %s`", backplaneURL, backplaneURL))
+	case api.IsRefreshRejected(err):
+		return output.AuthExpired(fmt.Sprintf(
+			"your session for %s has expired or was revoked; run `meho login %s`", backplaneURL, backplaneURL))
 	default:
 		return output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err))
 	}

@@ -47,7 +47,7 @@ from fastapi import APIRouter, Depends, Form, Query, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.agents.forms import (
     IDENTITY_REF_MAX,
     NAME_MAX,
@@ -63,6 +63,7 @@ from meho_backplane.ui.routes.agents.forms import (
 )
 from meho_backplane.ui.routes.agents.operator import (
     OperatorRoleProbe,
+    resolve_human_admin_or_403,
     resolve_operator_or_403,
     resolve_role_probe,
     resolve_run_operator_or_403,
@@ -96,15 +97,16 @@ __all__ = ["build_agents_router"]
 #: Module-level :class:`Depends` closures -- ruff B008 idiom mirroring
 #: the chassis memory / connectors routes (no calls in default argument
 #: positions).
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 _role_probe_dep = Depends(resolve_role_probe)
 _require_admin_dep = Depends(resolve_operator_or_403)
+_require_human_admin_dep = Depends(resolve_human_admin_or_403)
 _require_run_operator_dep = Depends(resolve_run_operator_or_403)
 
 
 async def _list_handler(
     request: Request,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     role_probe: OperatorRoleProbe = _role_probe_dep,
 ) -> HTMLResponse:
     """``GET /ui/agents`` -- list page or HTMX card-list fragment."""
@@ -114,7 +116,7 @@ async def _list_handler(
 async def _detail_handler(
     request: Request,
     name: str,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     role_probe: OperatorRoleProbe = _role_probe_dep,
 ) -> HTMLResponse:
     """``GET /ui/agents/{name}`` -- detail page or HTMX body fragment."""
@@ -127,11 +129,11 @@ async def _detail_handler(
 async def _run_console_handler(
     request: Request,
     name: str,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     role_probe: OperatorRoleProbe = _role_probe_dep,
 ) -> HTMLResponse:
     """``GET /ui/agents/{name}/run`` -- the run console page (operator read)."""
-    del role_probe  # the page is reachable by any authenticated session.
+    del role_probe  # the operator role floor is checked by the session dependency.
     validate_name(name)
     return await render_run_console(request, session_ctx, name=name)
 
@@ -141,7 +143,7 @@ async def _run_submit_handler(
     name: str,
     input_: str = Form(default="", alias="input", max_length=INPUT_MAX),
     work_ref: str | None = Form(default=None, max_length=WORK_REF_MAX),
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_run_operator_dep,
 ) -> HTMLResponse:
     """``POST /ui/agents/{name}/run`` -- authorise a run (CSRF-gated, operator)."""
@@ -160,7 +162,7 @@ async def _run_stream_handler(
     request: Request,
     name: str,
     token: str = Query(default="", max_length=4096),
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_run_operator_dep,
 ) -> StreamingResponse:
     """``GET /ui/agents/{name}/run/stream`` -- cookie-authed SSE bridge."""
@@ -178,7 +180,7 @@ async def _run_cancel_handler(
     request: Request,
     name: str,
     handle: uuid.UUID,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_run_operator_dep,
 ) -> Response:
     """``POST /ui/agents/{name}/run/{handle}/cancel`` -- cancel a live run."""
@@ -194,7 +196,7 @@ async def _run_cancel_handler(
 
 async def _create_modal_handler(
     request: Request,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``GET /ui/agents/create`` -- HTMX-loaded create modal fragment."""
@@ -214,7 +216,7 @@ async def _create_submit_handler(
     system_prompt: str = Form(default="", max_length=SYSTEM_PROMPT_MAX),
     turn_budget: str | None = Form(default=None, max_length=TURN_BUDGET_MAX_LEN),
     enabled: bool = Form(default=False),
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``POST /ui/agents/create`` -- create one agent definition.
@@ -240,7 +242,7 @@ async def _create_submit_handler(
 async def _edit_modal_handler(
     request: Request,
     name: str,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``GET /ui/agents/{name}/edit`` -- pre-populated edit modal fragment."""
@@ -257,7 +259,7 @@ async def _edit_submit_handler(
     system_prompt: str = Form(default="", max_length=SYSTEM_PROMPT_MAX),
     turn_budget: str | None = Form(default=None, max_length=TURN_BUDGET_MAX_LEN),
     enabled: bool = Form(default=False),
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``PATCH /ui/agents/{name}`` -- update one agent definition."""
@@ -278,7 +280,7 @@ async def _edit_submit_handler(
 async def _toggle_handler(
     name: str,
     enabled: bool = Form(default=False),
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``POST /ui/agents/{name}/toggle`` -- enable / disable the agent."""
@@ -289,7 +291,7 @@ async def _toggle_handler(
 async def _delete_modal_handler(
     request: Request,
     name: str,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``GET /ui/agents/{name}/delete`` -- HTMX-loaded delete-confirm modal."""
@@ -300,7 +302,7 @@ async def _delete_modal_handler(
 
 async def _delete_submit_handler(
     name: str,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``POST /ui/agents/{name}/delete`` -- delete one agent definition."""
@@ -310,7 +312,7 @@ async def _delete_submit_handler(
 
 async def _principals_list_handler(
     request: Request,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     role_probe: OperatorRoleProbe = _role_probe_dep,
     include_revoked: bool = Query(default=False),
 ) -> HTMLResponse:
@@ -325,7 +327,7 @@ async def _principals_list_handler(
 
 async def _principals_register_modal_handler(
     request: Request,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``GET /ui/agents/principals/register`` -- HTMX-loaded register modal."""
@@ -341,8 +343,8 @@ async def _principals_register_submit_handler(
     # raw-422 boundary.
     name: str = Form(default="", max_length=PRINCIPAL_NAME_MAX),
     owner_sub: str | None = Form(default=None, max_length=OWNER_SUB_MAX),
-    session_ctx: UISessionContext = _require_session_dep,
-    operator: Operator = _require_admin_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
+    operator: Operator = _require_human_admin_dep,
 ) -> HTMLResponse:
     """``POST /ui/agents/principals/register`` -- register a new principal."""
     return await submit_register(
@@ -357,7 +359,7 @@ async def _principals_register_submit_handler(
 async def _principals_revoke_modal_handler(
     request: Request,
     name: str,
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``GET /ui/agents/principals/{name}/revoke`` -- kill-switch confirm modal."""
@@ -370,7 +372,7 @@ async def _principals_revoke_submit_handler(
     request: Request,
     name: str,
     confirm_name: str = Form(default="", max_length=PRINCIPAL_NAME_MAX),
-    session_ctx: UISessionContext = _require_session_dep,
+    session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
     """``POST /ui/agents/principals/{name}/revoke`` -- revoke (kill switch)."""

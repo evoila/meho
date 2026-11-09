@@ -121,6 +121,9 @@ class GenericRestConnector(HttpConnector):
     # shim_kind() without an issubclass check. See base.ShimKind.
     _shim_kind: ShimKind = "bare"
 
+    # The shim exists only to carry the operations of an ingested catalog.
+    accepts_ingested_operations: bool = True
+
     #: Default base URL the auto-shim uses when the target carries
     #: no explicit base URL of its own. Set by the class factory
     #: from the ``base_url`` arg to
@@ -328,8 +331,8 @@ def _profiled_class_name(product: str, version: str) -> str:
 
     The shape ``ProfiledRestConnector_<product>_<version>`` mirrors the
     ``requires_connector_class`` placeholder the profile-backed catalog rows
-    document (``ProfiledRestConnector_fixture_1_0`` for the ``fixture/1.0``
-    row). Non-alnum characters in *product* / *version* are replaced with
+    document (``ProfiledRestConnector_mehoauto_0_1_0`` for the
+    ``mehoauto/0.1.0`` row). Non-alnum characters in *product* / *version* are replaced with
     underscores so the result is a valid Python identifier even when the
     inputs carry dots or dashes.
     """

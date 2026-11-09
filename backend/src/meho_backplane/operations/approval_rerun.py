@@ -26,7 +26,9 @@ The rules, checked in this order:
    result is a failure and ``rerun_count`` is still the value the caller
    read. Two re-runs sent at the same time: one wins, the other is refused,
    also when the first one already ran and failed again before the second
-   claims. ``resumed_at`` stays the one-way latch of the first run.
+   claims. ``resumed_at`` stays the one-way latch of the first run. The
+   same ``UPDATE`` sets ``rerun_started_at``, the start of the latest run,
+   which the "outcome unknown" list counts its minutes from (#5026).
 
 Every re-run writes an ``approval.rerun`` audit row that names the request
 and the attempt, in the same transaction as the claim. A refused re-run
@@ -72,6 +74,7 @@ from meho_backplane.operations.approval_queue import (
     rehydrate_resume_target,
 )
 from meho_backplane.operations.approval_resume_checks import preview_changed_since_request
+from meho_backplane.operations.grant_approval import grant_changed_since_request
 
 __all__ = [
     "RERUN_AUDIT_PATH",
@@ -208,6 +211,15 @@ def _static_refusal(request: ApprovalRequest, params: dict[str, Any]) -> RerunRe
     return None
 
 
+async def _object_changed(
+    operator: Operator, request: ApprovalRequest, target: Any, params: dict[str, Any]
+) -> bool:
+    """The object of the call, or the login or group a change of rights is for, moved."""
+    if await object_changed_since_request(operator, request, target, params) is not None:
+        return True
+    return await grant_changed_since_request(operator, request, target, params) is not None
+
+
 def _target_refusal(denied: OperationResult) -> RerunRefusal:
     """Map the target refusal of :func:`rehydrate_resume_target` to a reason."""
     extras = denied.extras or {}
@@ -288,7 +300,11 @@ async def _claim_rerun(operator: Operator, request: ApprovalRequest) -> int | No
                 ApprovalRequest.resume_result.is_not(None),
                 func.coalesce(result_status, "") != "ok",
             )
-            .values(resume_result=null(), rerun_count=ApprovalRequest.rerun_count + 1)
+            .values(
+                resume_result=null(),
+                rerun_count=ApprovalRequest.rerun_count + 1,
+                rerun_started_at=_now(),
+            )
             .returning(ApprovalRequest.rerun_count)
             .execution_options(synchronize_session=False)
         )
@@ -343,7 +359,7 @@ async def _check_rerun(
             reason = _target_refusal(denied)
         elif await preview_changed_since_request(operator, request, target, effective):
             reason = RerunRefusal.PREVIEW_CHANGED
-        elif await object_changed_since_request(operator, request, target, effective) is not None:
+        elif await _object_changed(operator, request, target, effective):
             reason = RerunRefusal.OBJECT_CHANGED
     if reason is not None:
         raise await _refuse(

@@ -82,7 +82,15 @@ from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.corpus.routes import _cited_chunks
 from meho_backplane.ui.templating import get_templates, reset_templating_for_testing
+from tests._ui_role_helpers import allow_ui_operator_role
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
 
 # ---------------------------------------------------------------------------
 # Constants

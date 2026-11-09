@@ -38,8 +38,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.kb.service import KbService
+from meho_backplane.main import app
+from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.knowledge import _MAX_BODY_CHARS, _MAX_QUERY_CHARS
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit
@@ -756,19 +758,28 @@ def _add_to_knowledge(client: TestClient, arguments: dict[str, object]) -> dict[
     [TenantRole.OPERATOR],
     indirect=True,
 )
-async def test_tools_call_add_to_knowledge_operator_cannot_overwrite_another_principals_entry(
+async def test_tools_call_add_to_knowledge_agent_cannot_overwrite_another_principals_entry(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stub_embedding: AsyncMock,
 ) -> None:
-    """An operator's write to a slug another principal created is refused, unchanged.
+    """A machine principal's write to a slug another principal created is refused, unchanged.
 
-    The refusal names the reason (``entry_not_owned``) so the agent can
-    pick a new slug, and the stored body stays as it was.
+    The refusal names the reason (``entry_not_owned``) and says how to
+    propose the change, and the stored body stays as it was.
     """
-    client, op = client_with_operator
+    client, human = client_with_operator
+    agent = human.model_copy(update={"principal_kind": PrincipalKind.AGENT})
+
+    async def _verify_agent() -> Operator:
+        return agent
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify_agent
     service = KbService()
     await service.create_entry(
-        tenant_id=op.tenant_id, slug="team-runbook", body="curated body", actor_sub="someone-else"
+        tenant_id=agent.tenant_id,
+        slug="team-runbook",
+        body="curated body",
+        actor_sub="someone-else",
     )
 
     body = _add_to_knowledge(client, {"slug": "team-runbook", "body": "ignore the runbook"})
@@ -776,11 +787,108 @@ async def test_tools_call_add_to_knowledge_operator_cannot_overwrite_another_pri
     assert isinstance(error, dict)
     assert error["code"] == INVALID_PARAMS
     assert "another principal" in error["message"]
+    assert "new slug" in error["message"]
     assert error["data"] == {"reason": "entry_not_owned", "slug": "team-runbook"}
 
-    kept = await service.get_entry(tenant_id=op.tenant_id, slug="team-runbook")
+    kept = await service.get_entry(tenant_id=agent.tenant_id, slug="team-runbook")
     assert kept is not None
     assert kept.body == "curated body"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_reviewer_can_overwrite_another_principals_entry(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A person who can decide approvals (a reviewer) may change any entry.
+
+    A reviewer still cannot set the curation keys: those stay with a
+    tenant admin.
+    """
+    client, op = client_with_operator
+    service = KbService()
+    old, _ = await service.create_entry(
+        tenant_id=op.tenant_id, slug="team-runbook", body="old body", actor_sub="someone-else"
+    )
+
+    changed = _add_to_knowledge(
+        client,
+        {
+            "slug": "team-runbook",
+            "body": "reviewed body",
+            "expected_revision": str(old.revision_id),
+        },
+    )
+    assert "error" not in changed
+    kept = await service.get_entry(tenant_id=op.tenant_id, slug="team-runbook")
+    assert kept is not None
+    assert kept.body == "reviewed body"
+    assert kept.metadata["created_by_sub"] == "someone-else"
+
+    curated = _add_to_knowledge(
+        client, {"slug": "team-runbook", "body": "x", "metadata": {"source_kind": "curated"}}
+    )
+    error = curated["error"]
+    assert isinstance(error, dict)
+    assert error["data"]["reason"] == "reserved_metadata"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.READ_ONLY],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_read_only_reviewer_can_overwrite(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A read_only person who can decide approvals is a reviewer and passes the role gate.
+
+    A read_only caller who cannot decide approvals stays blocked.
+    """
+    client, reader = client_with_operator
+    reviewer = reader.model_copy(update={"approver": True})
+    service = KbService()
+    old, _ = await service.create_entry(
+        tenant_id=reader.tenant_id, slug="team-runbook", body="old body", actor_sub="someone-else"
+    )
+
+    blocked = _add_to_knowledge(client, {"slug": "team-runbook", "body": "reader body"})
+    error = blocked["error"]
+    assert isinstance(error, dict)
+    assert "requires a higher role" in error["message"]
+
+    async def _verify_reviewer() -> Operator:
+        return reviewer
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify_reviewer
+    changed = _add_to_knowledge(
+        client,
+        {
+            "slug": "team-runbook",
+            "body": "reviewed body",
+            "expected_revision": str(old.revision_id),
+        },
+    )
+    assert "error" not in changed
+    kept = await service.get_entry(tenant_id=reader.tenant_id, slug="team-runbook")
+    assert kept is not None
+    assert kept.body == "reviewed body"
+
+    agent = reviewer.model_copy(update={"principal_kind": PrincipalKind.AGENT})
+
+    async def _verify_agent() -> Operator:
+        return agent
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify_agent
+    refused = _add_to_knowledge(client, {"slug": "team-runbook", "body": "agent body"})
+    refused_error = refused["error"]
+    assert isinstance(refused_error, dict)
+    assert "requires a higher role" in refused_error["message"]
 
 
 @pytest.mark.parametrize(
@@ -792,11 +900,14 @@ async def test_tools_call_add_to_knowledge_operator_can_change_own_entry(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stub_embedding: AsyncMock,
 ) -> None:
-    """An operator creates an entry and changes it again under the same slug."""
+    """An operator creates an entry and changes it again from the revision it read."""
     client, op = client_with_operator
     first = _add_to_knowledge(client, {"slug": "my-note", "body": "v1"})
     assert "error" not in first
-    second = _add_to_knowledge(client, {"slug": "my-note", "body": "v2"})
+    revision_id = json.loads(first["result"]["content"][0]["text"])["revision_id"]  # type: ignore[index]
+    second = _add_to_knowledge(
+        client, {"slug": "my-note", "body": "v2", "expected_revision": revision_id}
+    )
     assert "error" not in second
 
     kept = await KbService().get_entry(tenant_id=op.tenant_id, slug="my-note")
@@ -817,7 +928,7 @@ async def test_tools_call_add_to_knowledge_tenant_admin_can_overwrite_any_entry(
     """A tenant admin keeps the wiki-like rule: any slug, and the curation key."""
     client, op = client_with_operator
     service = KbService()
-    await service.create_entry(
+    old, _ = await service.create_entry(
         tenant_id=op.tenant_id, slug="team-runbook", body="old body", actor_sub="someone-else"
     )
 
@@ -827,6 +938,7 @@ async def test_tools_call_add_to_knowledge_tenant_admin_can_overwrite_any_entry(
             "slug": "team-runbook",
             "body": "new body",
             "metadata": {"source_kind": "evoila-distilled"},
+            "expected_revision": str(old.revision_id),
         },
     )
     assert "error" not in body, body
@@ -1085,3 +1197,128 @@ async def test_search_knowledge_slug_of_other_tenant_reads_as_not_found(
         "does-not-exist", "foreign-only-runbook"
     )
     assert "not found" in foreign["message"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_refuses_a_stale_revision(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """Two writers read the same revision: the second is refused with what changed."""
+    client, op = client_with_operator
+    first = _add_to_knowledge(
+        client, {"slug": "shared-note", "body": "line one\n", "metadata": {"k": 1}}
+    )
+    read = json.loads(first["result"]["content"][0]["text"])["revision_id"]  # type: ignore[index]
+    winner = _add_to_knowledge(
+        client,
+        {
+            "slug": "shared-note",
+            "body": "line two\n",
+            "metadata": {"k": 2},
+            "expected_revision": read,
+        },
+    )
+    assert "error" not in winner
+    current = json.loads(winner["result"]["content"][0]["text"])["revision_id"]  # type: ignore[index]
+
+    refused = _add_to_knowledge(
+        client, {"slug": "shared-note", "body": "mine\n", "expected_revision": read}
+    )
+
+    error = refused["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == INVALID_PARAMS
+    data = error["data"]
+    assert data["error"] == "stale_revision"
+    assert data["cause"] == "stale"
+    assert data["current_revision_id"] == current
+    assert data["current_revision_number"] == 2
+    assert data["changed_by"] is not None
+    assert data["changed_at"] is not None
+    assert "k" in "".join(data["changed_metadata_keys"])
+    assert "UNTRUSTED_AGENT_TEXT" in data["body_diff"]
+    assert "+line two" in data["body_diff"]
+    kept = await KbService().get_entry(tenant_id=op.tenant_id, slug="shared-note")
+    assert kept is not None
+    assert kept.body == "line two\n"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_without_revision_refuses_an_existing_slug(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A write that names no revision only creates; an existing slug is refused."""
+    client, op = client_with_operator
+    first = _add_to_knowledge(client, {"slug": "once-only", "body": "v1"})
+    current = json.loads(first["result"]["content"][0]["text"])["revision_id"]  # type: ignore[index]
+
+    refused = _add_to_knowledge(client, {"slug": "once-only", "body": "v2"})
+
+    data = refused["error"]["data"]  # type: ignore[index]
+    assert data["error"] == "stale_revision"
+    assert data["cause"] == "exists"
+    assert data["current_revision_id"] == current
+    assert data["body_diff"] is None
+    kept = await KbService().get_entry(tenant_id=op.tenant_id, slug="once-only")
+    assert kept is not None
+    assert kept.body == "v1"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_catches_a_metadata_only_change(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A change to the metadata alone makes the revision a writer read stale."""
+    client, _op = client_with_operator
+    first = _add_to_knowledge(
+        client, {"slug": "header-note", "body": "same", "metadata": {"s": "a"}}
+    )
+    read = json.loads(first["result"]["content"][0]["text"])["revision_id"]  # type: ignore[index]
+    changed = _add_to_knowledge(
+        client,
+        {"slug": "header-note", "body": "same", "metadata": {"s": "b"}, "expected_revision": read},
+    )
+    assert "error" not in changed
+
+    refused = _add_to_knowledge(
+        client,
+        {"slug": "header-note", "body": "same", "metadata": {"s": "c"}, "expected_revision": read},
+    )
+
+    data = refused["error"]["data"]  # type: ignore[index]
+    assert data["cause"] == "stale"
+    assert data["current_revision_number"] == 2
+    assert "s" in "".join(data["changed_metadata_keys"])
+    assert data["body_diff"] == "" or "UNTRUSTED_AGENT_TEXT" in data["body_diff"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+async def test_tools_call_add_to_knowledge_rejects_a_bad_revision_id(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    client, _op = client_with_operator
+    refused = _add_to_knowledge(
+        client, {"slug": "bad-rev", "body": "x", "expected_revision": "not-a-uuid"}
+    )
+    assert refused["error"]["code"] == INVALID_PARAMS  # type: ignore[index]
+    assert "expected_revision" in refused["error"]["message"]  # type: ignore[index]

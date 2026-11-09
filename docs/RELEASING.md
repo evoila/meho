@@ -12,7 +12,7 @@ The `/release` skill walks these same steps interactively.
 ## What a release is
 
 A release is **a `v*` git tag**. The tag is the single source of truth
-for the version — five artefacts derive from it, all published
+for the version — seven artefacts derive from it, all published
 automatically on the tag push:
 
 | Artefact | Where | Workflow | Version source |
@@ -22,11 +22,15 @@ automatically on the tag push:
 | CLI tarballs + GitHub Release | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | GoReleaser bakes `{{.Tag}}` into `version.Version` |
 | Claude Desktop `.mcpb` bundle | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | `clients/claude-desktop-mcpb/build.sh` stamps the tag version |
 | Form-2 download `meho-linux-X.Y.Z-amd64.tar` (Linux server, no internet), with `SHA256SUMS-linux` and its `.cosign.bundle` | [releases](https://github.com/evoila/meho/releases) | [`linux-download.yml`](../.github/workflows/linux-download.yml), called by `cli-release.yml` | `deploy/linux-server/build-download.sh` takes the tag's chart, image and CLI, and writes `VERSION` |
-| Docs site version | <https://evoila.github.io/meho/> | [`docs-site.yml`](../.github/workflows/docs-site.yml) | mike publishes the tag's `MAJOR.MINOR` + moves `latest` |
+| Operation catalog `operation-catalog.json` and `operation-catalog-changes.json`, each with its `.cosign.bundle` | [releases](https://github.com/evoila/meho/releases) | [`operation-catalog.yml`](../.github/workflows/operation-catalog.yml), called by `cli-release.yml` | `backend/scripts/operation_catalog.py` writes the tag into the file |
+| Docs site version | <https://evoila.github.io/meho/> | [`docs-site.yml`](../.github/workflows/docs-site.yml) | mike publishes the tag's `MAJOR.MINOR` + moves `latest`; a docs merge on main publishes the newest release's version again |
 
 The Desktop `.mcpb` bundle rides `cli-release.yml`, attached to the same
-GitHub Release as the CLI tarballs (four workflows, five artefacts). All
-four workflows fire on `tags: ['v*']` (image/chart have **no** path filter
+GitHub Release as the CLI tarballs. Four workflows fire on the tag
+(`image.yml`, `chart.yml`, `cli-release.yml`, `docs-site.yml`), and
+`cli-release.yml` calls two more, `linux-download.yml` and
+`operation-catalog.yml`. All
+four fire on `tags: ['v*']` (image/chart have **no** path filter
 on tags — a tag always publishes). `cli-release.yml` is **tag-only**: a
 main push never cuts a release. Docs versions are cut **per minor** — a
 patch tag republishes its minor's docs in place.
@@ -37,6 +41,21 @@ The form-2 download is the sixth artefact. After its `release` job,
 image of the tag (at most 60 minutes). Then it builds the download, checks
 it, and attaches it to the same Release
 ([`docs/codebase/linux-server-download.md`](codebase/linux-server-download.md)).
+
+The operation catalog is the seventh artefact. After its `release` job,
+`cli-release.yml` also calls `operation-catalog.yml`. It writes the list of
+every built-in operation and the list of changes since the previous release
+tag, signs both and attaches them to the same Release
+([`docs/codebase/operation-catalog-file.md`](codebase/operation-catalog-file.md)).
+
+Last, `cli-release.yml` calls `security-sheet.yml`. It checks the
+signature of the image, the chart and each checksum file, scans every
+image of the release (the MEHO image and the images the install brings),
+and attaches three files to the Release: the security sheet
+`meho-security-sheet-vX.Y.Z.md` (one short file for the customer's
+security team), the SBOM `meho-sbom-vX.Y.Z.spdx.json` and the full scan
+reports `meho-vulnerability-scan-vX.Y.Z.json`
+([`docs/codebase/release-security-sheet.md`](codebase/release-security-sheet.md)).
 
 ## Supply-chain and CI baseline
 
@@ -79,7 +98,9 @@ do not hand-edit version files:
 - `backend/pyproject.toml` stays `0.1.0-dev` (the image is tagged from the
   git tag, not from pyproject).
 - `deploy/charts/meho/Chart.yaml` `version`/`appVersion` are
-  **calver-bumped by `chart.yml`** at publish time.
+  **set by `chart.yml`** at publish time: on a tag, `version` is the tag
+  without the leading `v`; on a `main` push it is a calver
+  (`0.1.<date>-<sha>`). `appVersion` is the git SHA.
 - The CLI version is baked from `{{.Tag}}` by GoReleaser
   ([`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml)).
 
@@ -180,7 +201,7 @@ How users get the new version is in the
   of the "protect main" ruleset that is open for minutes, not days.
   The steps are in decision record 0010
   (`docs/decisions/0010-who-approves-pull-requests.md` in the private
-  maintainer repo `evoila-bosnia/meho-internal`). Every other pull
+  maintainer repo). Every other pull
   request keeps the normal path.
 
 - [ ] **The appliance's CIS exception list is approved (every release
@@ -231,7 +252,13 @@ lines. The **Backfill** item below adds the lines for them.
 3. **Roll.** Move every `[Unreleased]` bullet that ships in this release
    under a new `## [X.Y.Z] - YYYY-MM-DD` heading; leave a fresh empty
    `## [Unreleased]`. **Leave behind** any bullet whose commit is *not*
-   in this tag (post-tag work stays in `[Unreleased]`).
+   in this tag (post-tag work stays in `[Unreleased]`). End the new
+   section with this line, so the Release text says what the Linux
+   download is:
+
+   ```markdown
+   - `meho-linux-*.tar`: the install on a plain Linux server, available and in testing. Ask evoila before you use it in production. See [Ways to install MEHO](https://evoila.github.io/meho/latest/install/ways-to-install/).
+   ```
 
 4. **Update the public "What's new" page.** In the same release-cutting
    PR, add a `## [vX.Y.Z](release-link) — YYYY-MM-DD` section to
@@ -324,12 +351,23 @@ git checkout main && git pull
 # exists to prevent). Substitute the PR number:
 REL_SHA=$(gh pr view <phase2-pr#> --repo evoila/meho --json mergeCommit --jq .mergeCommit.oid)
 git merge-base --is-ancestor "$REL_SHA" main || { echo "merge commit not on main — abort"; exit 1; }
-git tag vX.Y.Z "$REL_SHA"   # tag the release-cutting merge commit by SHA, not HEAD
+git tag -a vX.Y.Z -m "MEHO X.Y.Z: <short summary>" "$REL_SHA"   # tag the release-cutting merge commit by SHA, not HEAD
 git push origin vX.Y.Z
 ```
 
-The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
-`cli-release.yml` then calls `linux-download.yml` for the form-2 download.
+**The tag has a message** (git calls this an annotated tag). Always use
+`git tag -a` with `-m`, never a plain `git tag vX.Y.Z`:
+
+- The message is one line: `MEHO X.Y.Z: <short summary>`. The summary
+  names the main changes in a few words.
+- Why: the git manual says tags with a message are meant for releases.
+  The tag also stores who made it and when.
+- Nothing in the release reads the message. The GitHub Release text
+  still comes from `CHANGELOG.md`.
+
+The push fans out to `cli-release.yml`, `image.yml`, `chart.yml` and
+`docs-site.yml`. `cli-release.yml` then calls `linux-download.yml` for the
+form-2 download and `operation-catalog.yml` for the operation catalog.
 
 **Release tags are protected.** A tag ruleset refuses to create, move or delete any `v*` tag, final or rc. Only members of the evoila team `release-cutters` may push one. GitHub logs each of their pushes as a bypass in the ruleset's Rule insights.
 
@@ -369,6 +407,58 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
   If the job failed, read its `[FAIL]` line. The most likely one is the
   size limit (1.9 GiB): the design's answer is to split the download into
   two release files.
+- [ ] The operation catalog `operation-catalog.json`,
+  `operation-catalog-changes.json` and their two `.cosign.bundle` files are
+  attached (job `operation-catalog` of `cli-release.yml` green). The
+  signature names `operation-catalog.yml`. Check it:
+
+  ```bash
+  TAG=vX.Y.Z
+  BASE=https://github.com/evoila/meho/releases/download/$TAG
+  for FILE in operation-catalog.json operation-catalog-changes.json; do
+    curl -fLO "$BASE/$FILE"
+    curl -fLO "$BASE/$FILE.cosign.bundle"
+    cosign verify-blob \
+      --certificate-identity "https://github.com/evoila/meho/.github/workflows/operation-catalog.yml@refs/tags/$TAG" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --bundle "$FILE.cosign.bundle" "$FILE"
+  done
+  ```
+- [ ] The security sheet `meho-security-sheet-vX.Y.Z.md`, the SBOM
+  `meho-sbom-vX.Y.Z.spdx.json` and the scan report
+  `meho-vulnerability-scan-vX.Y.Z.json` are attached (job `security-sheet`
+  of `cli-release.yml` green). Read the sheet. If the job failed, fix the
+  cause and run the workflow `security-sheet` by hand with the tag:
+  `gh workflow run security-sheet.yml --repo evoila/meho -f tag=vX.Y.Z`.
+- [ ] **Add the test-install results to the security sheet.** Three parts
+  of the sheet come from a test install: a port scan of a form-2 install,
+  RKE2's CIS result on it, and the appliance's CIS scan. Until the release
+  tests add them by themselves, they say "Not measured for this release
+  yet". A final release (not an rc) ships with all three filled. Put the
+  results into a folder, as plain text:
+  - `lab/ports.txt`: a port scan of the form-2 install from another
+    machine (for example `nmap -sS -sU -p 22,80,443,6443,8472 <address>`);
+  - `lab/rke2-cis.txt`: what shows that RKE2's CIS profile is on and every
+    pod is ready (for example the output of `meho-host check`);
+  - `lab/ubuntu-cis.txt`: the file `meho-appliance-X.Y.Z-cis.txt` of the
+    `appliance-build` run of this tag.
+
+  Remove host names from the files first: the sheet is public. The script
+  replaces IPv4 addresses with `<address>` by itself. Then write the sheet
+  again from the data of the release job and replace it on the Release:
+
+  ```bash
+  TAG=vX.Y.Z
+  # <run-id>: the cli-release run of the tag, or the last security-sheet run.
+  gh run download <run-id> --repo evoila/meho --name security-sheet-data --dir data
+  python3 scripts/release/security_sheet.py --data data --lab lab \
+    --out "meho-security-sheet-$TAG.md"
+  # Read the sheet. Then:
+  gh release upload "$TAG" "meho-security-sheet-$TAG.md" --repo evoila/meho --clobber
+  ```
+
+  A later run of the workflow `security-sheet` keeps these three parts: it
+  takes them from the sheet that is on the Release.
 
 #### Maintainer one-time setup — GHCR package visibility
 
@@ -394,7 +484,22 @@ docker logout ghcr.io && docker pull ghcr.io/evoila/meho:main    # -> succeeds
 
 ### 6. Deploy + smoke
 
-- [ ] Deploy to `rke2-infra`.
+- [ ] Before the deploy, check the SSH host-key pins on the release
+  that runs now. It must end with exit code 0:
+
+  ```bash
+  MEHO_ACCESS_TOKEN=... bash scripts/acceptance/ssh-host-key-pins.sh \
+    --backplane <backplane-url>
+  ```
+
+  Since v0.34.0, an SSH target with no `known_hosts` entry and no
+  `known_hosts_insecure` setting in its secret stops working. A
+  `[FAIL]` line names such a target. Fix it before the deploy (see the
+  v0.34.0 row in
+  [`deploying.md`](deploying.md#version-specific-upgrade-notes)). The
+  script needs `curl`, `jq` and the `vault` CLI with a Vault login that
+  can read the target secrets.
+- [ ] Deploy to the lab cluster.
 - [ ] Run smoke; confirm **smoke-green** (same pattern as
   v0.2.0 / v0.3.0 / v0.3.1).
 - [ ] Audit replay (G8.2) auto-lights-up: the backplane **issues** an
@@ -415,17 +520,16 @@ docker logout ghcr.io && docker pull ghcr.io/evoila/meho:main    # -> succeeds
 
 ### 6a. Post-deploy enablement — gated features
 
-As of v0.6.0 the backplane ships four feature surfaces that **the
-image alone does not light up** — each needs additional deploy
-configuration that the smoke pass at step 6 does *not* exercise
-(`claude-rdc-hetzner-dc#697` signals 16 + 17). An operator who
-expects "smoke green = everything works" hits a 503 (best case)
-or a silent NULL column (audit replay, pre-G0.14-T6) the first
-time they reach for one of these surfaces.
+Some feature surfaces are **not lit up by the image alone**. Each needs
+deploy configuration that the smoke pass at step 6 does *not* exercise.
+An operator who expects "smoke green = everything works" gets a 503 the
+first time they reach for one of these surfaces.
 
-The state of each gate is visible on `GET /ready`'s `features`
-block (G0.14-T7 #1148) — one structured GET answers "which
-features will work out of the box?":
+The state of each gate is visible in the `features` block of
+`GET /ready`. One GET answers "which features will work out of the
+box?". The chart sets a metrics token by default (`metricsAuth.enabled`),
+and then `/ready` shows the `features` block only to a caller that sends
+that token as a bearer (see the verify command below):
 
 ```json
 {
@@ -440,13 +544,13 @@ features will work out of the box?":
 }
 ```
 
-Walk the four gates in the order an operator hits them:
+Walk the gates in the order an operator hits them:
 
-- [ ] **UI surface** (Helm `ui.*` values; affects every `/ui/auth/*`
-  request). Set `UI_KEYCLOAK_CLIENT_ID` and `UI_KEYCLOAK_CLIENT_SECRET`
-  in the backplane pod's environment — the secret renders from Vault
-  via the deploy's existing render-into-env chain (the same one that
-  lands `DATABASE_URL` / `UI_SESSION_ENCRYPTION_KEY`). Provision the
+- [ ] **UI surface** (Helm `config.uiKeycloakClientId` and `uiConsole.*`;
+  affects every `/ui/auth/*` request). Set `UI_KEYCLOAK_CLIENT_ID`,
+  `UI_KEYCLOAK_CLIENT_SECRET` and `UI_SESSION_ENCRYPTION_KEY` in the
+  backplane pod's environment. The two secrets come from the Secret that
+  `uiConsole.secretName` names. Provision the
   confidential `meho-web` Keycloak client per
   [`docs/cross-repo/keycloak-web-client.md`](cross-repo/keycloak-web-client.md).
   Without these, `GET /ui/auth/login` returns 503 `ui_oauth_not_configured`
@@ -455,7 +559,8 @@ Walk the four gates in the order an operator hits them:
 - [ ] **Agent runtime** (`POST /api/v1/agent-principals` lifecycle;
   affects everything downstream that needs an agent identity). Set
   `KEYCLOAK_ADMIN_URL`, `KEYCLOAK_ADMIN_CLIENT_ID`, and
-  `KEYCLOAK_ADMIN_CLIENT_SECRET`. Provision the confidential
+  `KEYCLOAK_ADMIN_CLIENT_SECRET` (Helm `keycloakAdmin.*`; with the
+  built-in Keycloak, the chart sets them itself). Provision the confidential
   admin Keycloak client (with `manage-clients` service-account role
   on the realm) per
   [`docs/cross-repo/keycloak-agent-client.md`](cross-repo/keycloak-agent-client.md).
@@ -465,21 +570,12 @@ Walk the four gates in the order an operator hits them:
   exactly the three to set.
 
 - [ ] **Audit replay** (MCP session-id capture for the audit log's
-  `agent_session_id` column). No env var required for capture once
-  G0.14-T6 (#1147) lands — capture is unconditional, no operator
-  knob. Until T6 lands, capture is gated on `MCP_REQUIRE_SESSION_ID=true`
-  (which also flips a missing header into a `-32600` reject before
-  dispatch). The `/ready` `features.audit_replay.capture_mode` field
-  exposes the current state — `"enforced"` pre-T6,
-  `"when_negotiated"` post-T6. Operators tracking the audit-replay readiness
-  signal off `/ready` get a stable contract across the T6 transition.
-  G0.15-T4 (#1213) added the **issuance** half — the server now
-  emits `Mcp-Session-Id` on `initialize` per MCP 2025-06-18
-  §"Session Management" rule 1, so clients have something to echo
-  back on the capture side. Without issuance (≤ v0.7.0), spec-
-  conforming MCP clients never sent the header and every row landed
-  with `agent_session_id: null` despite `capture_mode` advertising
-  `"when_negotiated"`; v0.7.1+ closes the inert-promise regression.
+  `agent_session_id` column). No env var is needed. MEHO issues an
+  `Mcp-Session-Id` on every `initialize` and stores the id that a client
+  sends back. The entry is always `"configured": true`. Its
+  `capture_mode` reads `"when_negotiated"` by default, and `"enforced"`
+  when `MCP_REQUIRE_SESSION_ID=true`; then MEHO rejects an MCP request
+  without the header (`-32600`) before it runs.
 
 - [ ] **Approval queue** (agent-grant approval surface;
   `POST /api/v1/agents/grants` and the agent grant lifecycle). No
@@ -494,28 +590,37 @@ Walk the four gates in the order an operator hits them:
   single-operator answer is an agent-requester, not the flag).
 
 - [ ] **Approval custody** (required wherever a credential-write
-  operation may wait for approval, #3712). Set
+  operation may wait for approval). Set
   `APPROVAL_HANDOFF_ENCRYPTION_KEY` to a Fernet key through the Helm
-  `approvalHandoff` Secret reference. Without it, MEHO denies every
+  `approvalHandoff` Secret reference. With a built-in core part, the
+  install makes this key itself. Without it, MEHO denies every
   credential-write operation that must wait for approval. The `/ready`
   entry `approval_custody.custody` reads `configured`, `missing` or
   `malformed`. Steps: [`docs/codebase/approvals.md`](codebase/approvals.md).
 
+- [ ] **Vault tenant scope** (the per-tenant path check on every
+  `vault.kv.*` call). On by default: `VAULT_KV_TENANT_SCOPE_PREFIX` has a
+  default value. The entry reads `"configured": false` only when a
+  deploy clears it. Steps:
+  [`docs/codebase/connectors-vault-tenant-scope.md`](codebase/connectors-vault-tenant-scope.md).
+
 - [ ] **GitHub `gh-rest-3` connector credential** (optional;
-  enables the `gh/3` typed connector landed by Initiative
-  [#1220](https://github.com/evoila/meho/issues/1220); the catalog
-  ``version`` field was canonicalised from ``v3`` to ``3`` by
-  G3.11-T8 #1242 so the dispatcher's tuple lookup resolves cleanly).
-  No backplane
+  enables the `gh/3` typed connector, registered as product `gh`,
+  version `3`). No backplane
   env vars — the credential lives per-target in Vault. Provision a
   GitHub App (preferred) or fine-grained PAT (fallback) per
   [`docs/cross-repo/github-app-credential.md`](cross-repo/github-app-credential.md),
-  write `app_id` + `private_key` (App) or `pat` (PAT) to
-  `secret/<tenant>/<target>/github-app`, and register the target
-  row with `product: gh`, `secret_ref: <vault-path>`,
-  `auth_model: shared_service_account`. Without these, `meho
-  targets probe <gh-target>` returns 503 `github_app_not_installed`
-  or `github_jwt_mint_failed` and no `gh.*` op can dispatch. Once
+  write `app_id` + `installation_id` + `private_key` (App) or `token`
+  (PAT) to `secret/tenants/<tenant_id>/<target>/github-app`, and
+  register the target row with `product: gh`,
+  `secret_ref: tenants/<tenant_id>/<target>/github-app` (the path
+  without the `secret/` mount, inside the tenant scope),
+  `auth_model: shared_service_account`. MEHO picks App or PAT by the
+  fields it finds in the secret. Without these, `meho targets probe
+  <gh-target>` answers `reachable: false` with the reason in
+  `extras.error` and the code in `extras.error_code` (for example
+  `github_app_not_installed` or `github_jwt_mint_failed`), and no `gh.*`
+  op can dispatch. Once
   the credential side is green, follow
   [`docs/cross-repo/github-connector.md`](cross-repo/github-connector.md)
   for the end-to-end first-day on-ramp (target probe → catalog
@@ -540,19 +645,23 @@ Verify the gates by re-hitting `GET /ready` after each provisioning
 step and reading the `features` block:
 
 ```bash
-curl -s "https://<your-meho-host>/ready" | jq '.features'
+TOKEN=$(kubectl get secret <release>-metrics-auth -n <namespace> -o jsonpath='{.data.token}' | base64 -d)
+curl -s -H "Authorization: Bearer $TOKEN" "https://<your-meho-host>/ready" | jq '.features'
 ```
 
-Every gate should read `"configured": true` (or
-`"capture_mode": "when_negotiated"` for `audit_replay` post-T6) when fully
-enabled. Any `"configured": false` with a non-empty `missing_env`
+With `metricsAuth.enabled: false`, leave out the header. With your own
+Secret (`metricsAuth.existingSecret`), read the token from it.
+
+Every gate should read `"configured": true` when fully enabled
+(`audit_replay` always does). Any `"configured": false` with a non-empty `missing_env`
 list is an unfinished provisioning step — name the listed env vars
 into the pod's environment and re-deploy.
 
 ### 6b. Rollback drill — the migration ↔ rollback contract
 
 **Contract** (#1607, hardened after the 2026-06-08 outage):
-`helm rollback` / `--atomic` reverts **manifests only** — the
+`helm rollback` / `--rollback-on-failure` (Helm 4's name for the
+deprecated `--atomic`) reverts **manifests only** — the
 migration's schema commit survives the rollback. The migration runs in
 the `pre-install,pre-upgrade` hook Job when the install brings its own
 PostgreSQL, and in the `migrate` init container of each new backplane
@@ -584,57 +693,81 @@ tolerance lives in the image being rolled back **to** — rolling back
 to a pre-tolerance release (strict `current == head` probe) across a
 migration still bricks readiness; recover those by rolling forward.
 
-**Failure-injection drill** — run on a sandbox (kind/minikube or the
-staging namespace, never prod) when the release carries a migration,
-and whenever the migration Job, the `migrate` init container, the
-migration runner or the `db` probe changes. Run it in the mode the
-release targets; with the built-in PostgreSQL, also delete one
-rolled-back pod after step 4 and check that the new pod's `migrate`
-init container logs `migration_skipped` and the pod gets Ready:
+**Failure-injection drill** — run it when the release carries a
+migration, and whenever the migration Job, the `migrate` init container,
+the migration runner or the `db` probe changes.
 
-- [ ] 1. Install the prior release `v(n)` (DB at migration `00NN`);
-  wait Ready. Per the caveat above, `v(n)` must already carry the
-  db-ahead-tolerant probe (#1607) — the drill proves the safety net
-  of the release being rolled back *to*.
+**In CI (the normal way).** Start the `rollback-drill` job: GitHub
+Actions → workflow `chart` → **Run workflow**. Pick the commit to test
+(the release-cutting commit on `main`, or the candidate tag) and enter
+the prior release in `prior` (for example `v0.44.0`; `v0.39.0` or later).
+
+```bash
+gh workflow run chart.yml --repo evoila/meho --ref <branch-or-tag> -f prior=v<n>
+```
+
+The job runs steps 1 to 5 below on a kind cluster, with a
+bring-your-own PostgreSQL (the migration runs in the hook Job). It uses
+the prior release's published chart and image, and the chart and image
+of the chosen commit. The run summary says whether the way back works.
+It fails when the database did not move, because then there is no new
+migration and the drill proves nothing. There is no login server and no
+Vault in the job, so logins are not tested.
+
+**By hand.** Run the same steps on a sandbox (kind/minikube or the
+staging namespace, never prod) when you need the built-in PostgreSQL or
+your own values. Use Helm 4. Run it in the mode the release targets:
+
+- [ ] 1. Install the prior release `v(n)` (DB at migration `00NN`) with
+  your values file; wait Ready. Per the caveat above, `v(n)` must already
+  carry the db-ahead-tolerant probe (#1607) — the drill proves the
+  safety net of the release being rolled back *to*.
 - [ ] 2. Upgrade to the candidate `v(n+1)` (carrying `00NN+1`) with
   readiness deliberately broken, so the rollout must fail and
-  auto-roll-back:
+  auto-roll-back. Pass the same values file as a normal install. Do not
+  use `--reuse-values`: it keeps the old chart's defaults, so the upgrade
+  can fail for another reason than the broken probe.
 
   ```bash
   helm upgrade meho oci://ghcr.io/evoila/meho-chart \
-    --version <candidate> --reuse-values --atomic --timeout 5m \
+    --version <candidate> --values <your-values-file> \
+    --rollback-on-failure --timeout 5m \
     --set probes.readiness.httpGet.path=/definitely-404
   ```
 
 - [ ] 3. Confirm the upgrade fails and Helm auto-rolls-back:
-  `helm history meho` shows a rollback revision; pods run the `v(n)`
-  image again.
-- [ ] 4. Assert the rolled-back pods reach `READY 1/1` **without any
-  manual `alembic` command**, and `GET /ready` returns 200 with the
-  `db` check `ok=true`, detail `current=00NN+1 head=00NN
-  db_ahead=true`.
+  `helm history meho` shows a failed revision and then a deployed
+  rollback revision; the Deployment runs the `v(n)` image again.
+- [ ] 4. Delete the backplane pod, every time. A failed upgrade can leave
+  the old pod running, so the rollback alone may start nothing. The
+  proof is a brand new `v(n)` pod. Assert it reaches `READY 1/1`
+  **without any manual `alembic` command**, and that the `db` check of
+  `GET /ready` is `ok=true` with detail `current=00NN+1 head=00NN
+  db_ahead=true`. With the built-in PostgreSQL, also check that the new
+  pod's `migrate` init container logs `migration_skipped`.
 - [ ] 5. Clean up by rolling **forward**: re-run the upgrade with
   readiness intact. The DB is already at `00NN+1`; the migration Job
   (or the new pods' `migrate` init container) re-runs as a no-op
-  (`alembic upgrade head` is idempotent).
+  (`alembic upgrade head` is idempotent). The `db` check of the new
+  version shows `revision=00NN+1`.
 
 ### 7. Post-release
 
 - [ ] Close the release Initiative; update the board / MVP roadmap.
-- [ ] Announce to consumers (e.g. `evoila-bosnia/claude-rdc-hetzner-dc`).
+- [ ] Announce to consumers.
 
 ## Release candidates — the rc series
 
 The road to v1.0.0 ([#2661](https://github.com/evoila/meho/issues/2661),
 milestone "v0.29 — contract freeze (rc series)") is the first time MEHO
 ships release candidates. An rc is a **real release** — the same `v*`
-tag, the same four publish workflows, the same five artefacts — whose
+tag, the same publish workflows, the same seven artefacts — whose
 version carries a SemVer pre-release identifier. Everything in steps
 1–7 applies; this section carries only the deltas. No rc tag has ever
-been pushed (`git tag -l 'v*-rc.*'` is empty as of v0.35.12), so every
-workflow behaviour below is read from the YAML, cited by file and line,
-and must be confirmed on the first rc — the unconfirmed points are
-collected under [Known gaps](#r9--known-gaps-rc-tags-in-the-pipeline).
+been pushed (`git tag -l 'v*-rc.*'` is empty as of v0.45.0), so every
+workflow behaviour below is read from the YAML and must be confirmed on
+the first rc. The gaps that are left are listed under
+[Known gaps](#r9--known-gaps-rc-tags-in-the-pipeline).
 
 ### R1 — Version scheme
 
@@ -645,7 +778,7 @@ dot-separated numeric counter (`v1.0.0-rc.1`, `v1.0.0-rc.2`, …):
   `v1.0.0-rc.N` promotes to `v1.0.0`, never to `v1.0.1`.
 - `N` only increments. A re-cut is always `rc.N+1`, never a moved tag:
   `cli-release.yml` tolerates a re-pushed tag (concurrency group,
-  L65–71), but a moved tag leaves the image alias, chart version and
+  L73–78), but a moved tag leaves the image alias, chart version and
   Release assets pointing at bytes no tag describes any more.
 - No other identifiers (`-beta`, `-alpha`, `-rc1`). Every
   tag-consuming workflow derives the version by stripping the leading
@@ -704,12 +837,14 @@ Run step 1 as written (Tasks closed; **real** `success` on the
 
 - [ ] **Contract gates green on the candidate commit.** Gate 4 of
   #2661 — "contract snapshots + compat gates green across the rc
-  series" — is what the gates #2662 left in CI can check today. Confirm
-  each on the run you are about to tag:
+  series". Confirm each on the run you are about to tag:
   - `CLI API snapshot freshness` (`ci.yml` job
-    `cli-api-snapshot-freshness`, L1791–1875): `cli/api/openapi.json`,
+    `cli-api-snapshot-freshness`): `cli/api/openapi.json`,
     `cli/internal/api/client.gen.go` and `docs-site/reference/cli.md`
     regenerate to a clean tree.
+  - `backend/tests/test_mcp_tools_snapshot_drift.py` in the Python
+    lanes: the committed MCP tools snapshot
+    `backend/contracts/mcp-tools-list.json` matches the tool registry.
   - The contract test modules in the Python lanes:
     `backend/tests/test_api_v1_list_envelope_contract.py` (the
     `{items, next_cursor}` envelope over the governed list registry
@@ -723,12 +858,27 @@ Run step 1 as written (Tasks closed; **real** `success` on the
   - `migration-compat.yml` (additive-only `upgrade()`). It is
     PR-triggered, so check it on the PRs that carried migrations since
     the previous tag rather than on the `main` run.
-- [ ] **Contract diff since the previous tag is classified.** There is
-  no automated breaking-vs-additive gate yet (Known gap 3), so do it by
-  hand and record the classification on #2661:
+- [ ] **Contract diff since the previous tag is classified.** Each pull
+  request already ran the `compat-gates` workflow (job `REST API and MCP
+  tools compatibility`), which fails on a breaking change to the public
+  REST API (`/api/v1/`) or the MCP tools unless the pull request has the
+  `breaking-change` label and a `## Breaking changes` section
+  ([`docs/codebase/compat-gates.md`](codebase/compat-gates.md)). Run it
+  once more over the whole range, on the candidate commit:
 
   ```bash
-  git diff "${RC_PREV}".."${RC_SHA}" -- cli/api/openapi.json docs-site/reference/cli.md docs-site/reference/maturity.md
+  gh workflow run compat-gates.yml --repo evoila/meho --ref main \
+    -f base="${RC_PREV}" -f head="${RC_SHA}"
+  gh run list --repo evoila/meho --workflow compat-gates.yml --limit 1   # wait for it, then read the log
+  ```
+
+  A manual run has no label, so it fails on every break it finds; each
+  one must have a `### Breaking changes` bullet. The gate does not cover
+  the CLI, the Helm values or the environment variables yet (Known
+  gap 2), so classify those by hand and record the result on #2661:
+
+  ```bash
+  git diff "${RC_PREV}".."${RC_SHA}" -- docs-site/reference/cli.md docs-site/reference/maturity.md deploy/charts/meho/values.yaml
   ```
 
   Anything that is not additive — removed path / operation / field,
@@ -779,37 +929,38 @@ git merge-base --is-ancestor "$RC_SHA" origin/main \
   || { echo "$RC_SHA is no longer on main (force-push or revert) — repeat R3 for the current tip"; exit 1; }
 [ "$(git rev-parse origin/main)" = "$RC_SHA" ] \
   || echo "main moved past the verified candidate: tag $RC_SHA as verified, or repeat R3 for the new tip"
-git tag v1.0.0-rc.N "$RC_SHA"
+git tag -a v1.0.0-rc.N -m "MEHO 1.0.0-rc.N: <short summary>" "$RC_SHA"   # a tag with a message, as in step 4
 git push origin v1.0.0-rc.N
 ```
 
 The push fans out to the same four workflows as a final tag (all four
-match `tags: ['v*']`: `cli-release.yml` L56, `image.yml` L96,
+match `tags: ['v*']`: `cli-release.yml` L64, `image.yml` L116,
 `chart.yml` L70, `docs-site.yml` L66). What each one does with a
 pre-release identifier, read from the YAML:
 
 | Artefact | What `v1.0.0-rc.N` produces | Where |
 |---|---|---|
-| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. `[Unreleased]` must therefore be audited and non-empty; an empty body here is the step-2 failure mode, not a quirk of rcs. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) L264–269; [`cli-release.yml`](../.github/workflows/cli-release.yml) L167–175, L207–211 |
-| CLI tarballs | `meho_1.0.0-rc.N_<os>_<arch>.tar.gz` (`{{ .Version }}` strips the `v`); `meho version` prints `v1.0.0-rc.N` (`{{.Tag}}` keeps it). The cosign identity regex `refs/tags/v.+` covers rc tags, so the step-5 verify recipe is unchanged. | `.goreleaser.yaml` L104, L117, L157; `cli-release.yml` L396 |
-| `.mcpb` bundle | `meho-claude-desktop-1.0.0-rc.N.mcpb`, attached as the fifth asset. `mcpb pack` accepts a pre-release semver — the PR dry-run already packs `0.0.0-pr<N>` on every bundle PR. | `cli-release.yml` L283–295; [`mcpb-bundle.yml`](../.github/workflows/mcpb-bundle.yml) L74–78 |
+| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. The body starts with a one-line header: "**Release candidate.** `v1.0.0-rc.N` is a test version before `v1.0.0`. The notes below list all changes since `<last final tag>`." When both sections are empty (or hold only blank lines), the step **fails** and no Release is made: fill `[Unreleased]` and cut `rc.N+1`. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) `prerelease: auto`; [`cli-release.yml`](../.github/workflows/cli-release.yml) step "Extract release notes from CHANGELOG.md" |
+| CLI tarballs | `meho_1.0.0-rc.N_<os>_<arch>.tar.gz` (`{{ .Version }}` strips the `v`); `meho version` prints `v1.0.0-rc.N` (`{{.Tag}}` keeps it). The cosign identity regex `refs/tags/v.+` covers rc tags, so the step-5 verify recipe is unchanged. | `.goreleaser.yaml` L104, L117, L157; `cli-release.yml` L421 |
+| `.mcpb` bundle | `meho-claude-desktop-1.0.0-rc.N.mcpb`, attached as the fifth asset. `mcpb pack` accepts a pre-release semver — the PR dry-run already packs `0.0.0-pr<N>` on every bundle PR. | `cli-release.yml` L308–320; [`mcpb-bundle.yml`](../.github/workflows/mcpb-bundle.yml) L90–94 |
 | Form-2 download | `meho-linux-1.0.0-rc.N-amd64.tar`, `SHA256SUMS-linux` and `SHA256SUMS-linux.cosign.bundle` on the pre-release. The build waits for the rc's chart `1.0.0-rc.N` and image `:v1.0.0-rc.N`. The cosign identity is `linux-download.yml@refs/tags/v1.0.0-rc.N`, so the step-5 recipe works with `TAG=v1.0.0-rc.N`. | [`linux-download.yml`](../.github/workflows/linux-download.yml); `cli-release.yml` job `linux-download` |
-| Backplane image | Alias `ghcr.io/evoila/meho:v1.0.0-rc.N` — `type=semver,pattern={{raw}}` is the only tag-push pattern; `:main` is not emitted on a tag (`enable={{is_default_branch}}`). Quarantine build → trivy gate → promote → cosign sign → SBOM attest run unchanged, so the rc's promoted **digest** is what the lab deploy pins (R5). | [`image.yml`](../.github/workflows/image.yml) L160–163, L235–269, L305–335 |
-| Helm chart | Version `1.0.0-rc.N` (`VERSION="${REF#refs/tags/v}"`), `appVersion` = the git SHA; pushed to `oci://ghcr.io/evoila/meho-chart:1.0.0-rc.N` and anonymously pulled back by exact version. Hyphenated chart versions are already the norm for `main` pushes (`0.1.<date>-<sha>`), so the push path is proven. Always pass the exact `--version 1.0.0-rc.N` when installing. | [`chart.yml`](../.github/workflows/chart.yml) L1247–1265, L1309, L1440 |
-| Docs site | Publishes under **`1.0`** and **moves `latest` + the site default to it**: the `v[0-9]*.[0-9]*` case matches, `sed` truncates to MAJOR.MINOR, then `mike deploy --push --update-aliases 1.0 latest` and `mike set-default --push latest`. Deploying under the minor is intended ("the rc docs are that minor's docs in progress"); moving `latest` before GA is **Known gap 1**. | [`docs-site.yml`](../.github/workflows/docs-site.yml) L60–66, L156–173 |
+| Backplane image | Alias `ghcr.io/evoila/meho:v1.0.0-rc.N` — `type=semver,pattern={{raw}}` is the only tag-push pattern, and `{{raw}}` keeps the pre-release part; `:main` is not emitted on a tag (`enable={{is_default_branch}}`). The step "Check the release tag is in the image tags" fails the run before the build when the tags do not include `:<tag name>`. Quarantine build → trivy gate → promote → cosign sign → SBOM attest run unchanged, so the rc's promoted **digest** is what the lab deploy pins (R5). | [`image.yml`](../.github/workflows/image.yml) L190–193, L200–307, L342–466 |
+| Helm chart | Version `1.0.0-rc.N` (`VERSION="${REF#refs/tags/v}"`), `appVersion` = the git SHA; pushed to `oci://ghcr.io/evoila/meho-chart:1.0.0-rc.N` and anonymously pulled back by exact version. Hyphenated chart versions are already the norm for `main` pushes (`0.1.<date>-<sha>`), so the push path is proven. Always pass the exact `--version 1.0.0-rc.N` when installing. | [`chart.yml`](../.github/workflows/chart.yml) L1805–1823, L1867, L1998 |
+| Docs site | **Never moves `latest` or the site default**, so the public site keeps showing the last final release. While the minor has no final tag (`v1.0.0-rc.N` before `v1.0.0`), the rc publishes under **`1.0`**: the rc docs are that minor's docs in progress. Once the minor has a final tag (`v1.0.1-rc.1` after `v1.0.0`), the rc publishes under its own name (`1.0.1-rc.1`), because `latest` serves the `1.0` folder. A maintainer can remove an old rc entry with `mike delete --push <name>`. | [`docs-site.yml`](../.github/workflows/docs-site.yml) step "Deploy versioned docs"; [`scripts/ci/docs_deploy.sh`](../scripts/ci/docs_deploy.sh) |
 
 Verify per step 5, with these substitutions: the Release **is** marked
 pre-release; `meho version` → `v1.0.0-rc.N`; image alias
 `:v1.0.0-rc.N`; chart `1.0.0-rc.N`; bundle
 `meho-claude-desktop-1.0.0-rc.N.mcpb`; docs at
-`https://evoila.github.io/meho/1.0/`. Do **not** add a `whats-new.md`
+`https://evoila.github.io/meho/1.0/` (the deploy step prints the
+version it published). Do **not** add a `whats-new.md`
 section for an rc — the single `[v1.0.0]` section at promotion covers
 the series (the rc docs publish whatever `whats-new.md` holds at the
 tagged commit, which is fine).
 
 ### R5 — Deploy the rc to the lab
 
-Step 6 as written, against `rke2-infra`, with the rc pins:
+Step 6 as written, against the lab cluster, with the rc pins:
 
 - [ ] `helm upgrade … oci://ghcr.io/evoila/meho-chart --version 1.0.0-rc.N`
   (exact version) with `image.digest` set to the digest the rc's
@@ -833,8 +984,8 @@ Only after R5 is smoke-green. Round 2 is the release-candidate
 regression run of the self-run acceptance evaluation:
 
 - [ ] The operator re-runs the round-1 scenario set (S0–S14, rubric
-  unchanged, `evoila-bosnia/meho-internal#184` execution kit reused
-  as-is) against the R5 deploy.
+  unchanged, the same execution kit reused as-is) against the R5
+  deploy.
 - [ ] Deliverable: the round-2-vs-round-1 matrix diff — per-feature
   usefulness / correctness deltas, new friction events, every
   regression tagged **blocker / major / minor**.
@@ -909,59 +1060,38 @@ Steps 2–7 as written, with `PREV` = the last **final** tag (R1
   every upgrade-relevant change since `PREV`.
 - [ ] Tag `v1.0.0` on `REL_SHA` per step 4. Verify per step 5 — the
   Release is **not** marked pre-release; `meho version` → `v1.0.0`;
-  chart `1.0.0`; docs republish `1.0` in place (`latest` already points
-  there since `rc.1`).
+  chart `1.0.0`; docs republish `1.0` in place, and this final tag
+  moves `latest` and the site default to `1.0` (the rc tags did not).
+- [ ] The security sheet of `v1.0.0` is on the Release, and every
+  measured part is filled from this release's data: the three
+  test-install parts too (step 5).
 - [ ] #2661 definition of done: all five gates recorded as holding on
   the promoted rc; the rc tags stay (they are the audit trail of what
   was measured).
 
 ### R9 — Known gaps: rc tags in the pipeline
 
-Read from the YAML; nothing here is fixed by this document. Each is a
-follow-up task.
+The tag-driven workflows now handle rc tags (#3860): the docs site
+keeps `latest` on the last final release, the rc Release has an rc
+header and fails when its notes are empty, the image workflow checks
+the `:v1.0.0-rc.N` tag, and the README guard skips rc tags. Two gaps
+are left. Each is a follow-up task.
 
-1. **Docs site moves `latest` to the rc's minor.**
-   `.github/workflows/docs-site.yml` L162–163: `mike deploy --push
-   --update-aliases "${VERSION}" latest` then `mike set-default --push
-   latest` run for any `v*` tag, so `v1.0.0-rc.1` re-points the public
-   site root at the `1.0` docs before GA. The header (L63–65) intends
-   the minor publish; it does not intend the alias move. Suggested
-   fix: when `GITHUB_REF_NAME` contains `-`, deploy the version without
-   the `latest` alias and skip `set-default`.
-2. **`git describe --tags --abbrev=0` returns the rc.** Used by this
-   runbook's step 2.1 (`PREV`) and step 3, the `/release` skill's
-   Phase 0, and `.github/workflows/readme-version-check.yml` L103. This
-   section fixes the runbook (R1 `--exclude`); the skill needs the same
-   edit. The README guard is harmless today — `README.md` L11 carries
-   no `vX.Y` token and the self-updating badge (L6) short-circuits the
-   check at L93–97 — but reintroducing a `**Status:** vX.Y` token while
-   an rc is the latest tag would fail it on every merge-queue admission.
-3. **No automated compatibility-diff gate.** #2662 closed 2026-08-30
-   ("All children shipped; contract-freeze gates live in CI"), but the
-   mechanisms its body lists — an oasdiff-class compat gate on the
-   public OpenAPI snapshot, a committed `tools/list` snapshot, an
-   env-var registry snapshot, Helm golden renders, an
-   upgrade-from-previous-tag job, and a `breaking-change` label (no such
-   label exists in `evoila/meho`) — are not in the tree; the CI gates
-   that exist are the ones R3 lists, and
-   `docs-site/project/index.md` L30–33 still says the promise "will be
-   documented here when it lands". Until they exist, gate 4 is the R3
-   hand-classification plus those gates. Suggested fix: file the
-   missing children (at minimum the compat-diff gate) before `rc.1`.
-4. **Image alias for a pre-release tag is not asserted in the YAML.**
-   `.github/workflows/image.yml` L160–163 configures
-   `type=semver,pattern={{raw}}`; the header (L9, L153) documents only
-   the `v<x.y.z>` shape. The expected alias is `:v1.0.0-rc.N`; confirm
-   it on `rc.1`'s run and, if `docker/metadata-action` drops
-   pre-releases from the `semver` type, add `type=raw,value={{ref}}`
-   (or equivalent) for tag pushes.
-5. **The rc Release body is the raw `[Unreleased]` block.**
-   `.github/workflows/cli-release.yml` L207–211 — by design, but
-   nothing labels it as cumulative rc notes, and the GoReleaser git-log
-   fallback (L219) kicks in silently if `[Unreleased]` is empty.
-   Suggested fix: prepend a one-line "Release candidate `rc.N` for
-   1.0.0 — cumulative notes since `PREV`" header when the tag contains
-   a hyphen, and fail the step (not warn) when both sections are empty.
+1. **The `/release` skill still uses `git describe --tags --abbrev=0`
+   without `--exclude`.** Once an rc exists, that returns the rc.
+   This runbook already excludes rcs where it derives `PREV` (R1); the
+   skill needs the same edit (tracked separately).
+2. **The compatibility gate covers only the REST API and the MCP
+   tools.** The `compat-gates` workflow
+   ([`docs/codebase/compat-gates.md`](codebase/compat-gates.md)) checks
+   the public OpenAPI snapshot with oasdiff and the committed MCP
+   `tools/list` snapshot (`backend/contracts/mcp-tools-list.json`), and
+   a break needs the `breaking-change` label. Still missing: Helm golden
+   renders, an update-from-previous-tag job, an env-var registry
+   snapshot, and a check of the CLI verbs and flags. Until they exist,
+   R3 classifies those by hand. The workflow also does not run in the
+   merge queue (labels are not visible there), so it is not a required
+   check yet.
 
 ## Checklist
 
@@ -984,14 +1114,17 @@ follow-up task.
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published; form-2 download + SHA256SUMS-linux
-       attached, signature and checksum checked
-[ ] 6. Deployed to rke2-infra; smoke-green
+       attached, signature and checksum checked; operation catalog and
+       change file attached, signatures checked; security sheet, SBOM
+       and scan report attached, test-install results added (final
+       release)
+[ ] 6. Deployed to the lab cluster; smoke-green
 [ ] 6a. Post-deploy enablement — for each gate in /ready features:
-        configure the env vars per the cited Vault doc; verify gate
-        flips to configured (or capture_mode=when_negotiated for audit_replay
-        post-T6)
-[ ] 6b. Rollback drill (releases carrying a migration): broken-readiness
-        upgrade auto-rolls-back; rolled-back pods reach Ready with
+        configure the env vars per the cited doc; verify gate
+        flips to configured (read features with the metrics token)
+[ ] 6b. Rollback drill (releases carrying a migration): run the
+        `rollback-drill` job of chart.yml; broken-readiness upgrade
+        auto-rolls-back; a new rolled-back pod reaches Ready with
         db_ahead=true and no manual alembic (#1607)
 [ ] 7. Initiative closed; board/roadmap updated; consumers notified
 

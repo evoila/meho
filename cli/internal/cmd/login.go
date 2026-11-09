@@ -261,7 +261,7 @@ func newLoginCmd() *cobra.Command {
 			"credential — never log it or paste it into shared channels")
 	cmd.Flags().StringVar(&caFile, "ca-file", "",
 		"PEM file with the CA to trust for this backplane, next to the system roots: ca.crt of the "+
-			"<release>-core-tls Secret on a fresh install, or the customer's CA. Later commands keep using it")
+			"<release>-core-tls Secret on a fresh install, or the customer's CA. Later commands against this backplane keep using it")
 	return cmd
 }
 

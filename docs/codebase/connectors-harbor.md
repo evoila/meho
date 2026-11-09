@@ -44,11 +44,12 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
   `repository_list` / `repository_info` / `artifact_list` / `artifact_info`
   / `robot_list`, each delegating to a `typed_reads` body), the two robot
   writes (`robot_create` / `robot_delete`), the standalone
-  `artifact_vulnerabilities` CVE-detail read (#2857), and the two standalone
-  storage-quota reads (`project_summary` / `quota_list`, #2858).
+  per-artifact CVE detail read, and the two standalone
+  storage-quota reads (`project_summary` / `quota_list`).
 - **`HarborTargetLike`** (`session.py`) — runtime-checkable Protocol capturing
-  the minimum target shape the connector reads: `name`, `host`, `port`,
-  `secret_ref`, and `auth_model`. No `sso_realm` field — Harbor sends
+  the minimum target shape the connector reads: `id`, `tenant_id`, `name`,
+  `host`, `port`, `secret_ref`, and `auth_model`. `id` and `tenant_id` form
+  the cache key for credentials and HTTP clients. No `sso_realm` field — Harbor sends
   `username:password` as-is; no realm suffix is appended.
 - **`HarborCredentialsLoader`** (`session.py`) — async callable type resolving
   a `(target, operator)` pair to `{"username": ..., "password": ...}`. The
@@ -87,8 +88,8 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
 - **`typed_reads.py`** — the read op bodies
   (`harbor_about_impl` … `harbor_robot_list_impl`), each an
   `async def f(connector, operator, target, params)` that builds the path
-  (percent-encoding each `{var}` segment with `_seg`, mirroring the retired
-  generic dispatch), forwards optional query params (`_query`, presence-based
+  from a `_paths.py` template with `fill_path` (each `{var}` segment is
+  percent-encoded with `encode_segment`), forwards optional query params (`_query`, presence-based
   so a `public=false` is not dropped), and calls `connector._get_json`. Also
   holds `HARBOR_READ_LLM_INSTRUCTIONS` — the per-op `llm_instructions` blobs
   co-located here (for the connector's file-length budget) and consumed by
@@ -117,11 +118,17 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
    `connectors/<product>/` subpackage in name-sorted order.
 2. Importing `meho_backplane.connectors.harbor` triggers the module-level
    `register_connector_v2(product="harbor", version="2.x", impl_id="harbor-rest", cls=HarborConnector)`
-   call (plus a `("harbor", "", "")` wildcard fallback, #1215), and queues both
-   typed-op registrars (`register_harbor_typed_operations` and
-   `register_harbor_robot_operations`) via `register_typed_op_registrar`.
+   call (plus a `("harbor", "", "")` wildcard fallback), and queues four
+   typed-op registrars via `register_typed_op_registrar`:
+   `register_harbor_typed_operations`, `register_harbor_robot_operations`,
+   `register_harbor_artifact_operations`, and
+   `register_harbor_project_quota_operations`.
+   The import also loads `op_classes.py`, which declares
+   `harbor.robot.create` as `credential_mint` for the broadcast classifier,
+   and `ops_robot_delete_preview.py`, which registers the preview builder
+   for `harbor.robot.delete`.
 3. At lifespan startup `run_typed_op_registrars` invokes the queued registrars,
-   landing the 9 read + 2 write descriptor rows before the first dispatch. No
+   landing the 12 read + 2 write descriptor rows before the first dispatch. No
    `meho connector ingest` is required — the read core dispatches on a fresh
    boot with zero catalog state.
 
@@ -152,8 +159,12 @@ connector passes the stored username through unchanged in the Basic auth header.
    `operator: Operator` is the dispatched identity threaded down from the op
    handler (the operator-context Vault read).
 2. `_load_credentials(target, operator)` acquires the per-instance
-   `asyncio.Lock`, checks the `_creds_cache` dict (keyed on `target.name`),
-   and calls the loader with `(target, operator)` on miss.
+   `asyncio.Lock` and checks the `_creds_cache` dict. The key is
+   `(tenant_id, id)` from `target_cache_key`. A cached entry is used only
+   when this caller's own Vault read of the target's secret already passed
+   once in this process (`SecretReaders`). Otherwise it calls the loader
+   with `(target, operator)`. The synthesised system operator always runs
+   the loader.
 3. The loader (default: `load_credentials_from_vault`; injectable in tests)
    returns `{"username": ..., "password": ...}`.
 4. The result is cached and a `harbor_credentials_loaded` log event is emitted.
@@ -179,37 +190,37 @@ and `harbor.health` expose these same two reads as operator-callable typed ops.
 
 ### robot_create / robot_delete
 
-`robot_create` (op `harbor.robot.create`) is classified `credential_mint` by
-`classify_op` in `broadcast/events.py` — the broadcast collapses to
-aggregate-only so the minted secret never appears in the SSE stream, and the
-audit row's raw copy has the `secret` value replaced — and is
-registered `requires_approval=True` (#147): minting a robot credential is
-privilege issuance, so a human `tenant_admin` dispatch **parks** at
-`awaiting_approval` and a second operator must approve it before the mint
-executes. `robot_delete` (op `harbor.robot.delete`) was promoted to the
-governed **destructive** tier by the #3288 operator ruling (superseding the
-#147 "left ungated" posture): `safety_level="destructive"` +
-`requires_approval=True`, tagged `write`/`destructive`. Permanently removing a
-credential-bearing principal is not transparently reversible — re-creating the
-robot mints a BRAND-NEW secret, so every consumer still using the old
-credential breaks silently (the lab signal
-`bind9-harbor-dangerous-writes-bypass-approval-gate.yaml`). So the delete now
-runs only through preview → park (preview-hash-bound, blast-radius statement) →
-distinct-human approval → audited resume; a bare dispatch is refused
-`preview_binding_required`. The park-time blast radius
+Both robot writes register in the `robot` group (not `harbor-robots`).
+
+`robot_create` (op `harbor.robot.create`) is classified `credential_mint`.
+The connector declares this class in `op_classes.py` with
+`declare_op_classes`, and `classify_op` in `broadcast/events.py` reads it
+first. The broadcast collapses to aggregate-only so the minted secret never
+appears in the SSE stream, and the audit row's raw copy has the `secret`
+value replaced. It registers `safety_level="caution"`, tagged
+`write`/`credential-mint`, with `requires_approval=True`: minting a robot
+credential gives out new access, so a human `tenant_admin` dispatch waits at
+`awaiting_approval` until a second person approves it.
+
+`robot_delete` (op `harbor.robot.delete`) registers
+`safety_level="destructive"` + `requires_approval=True`, tagged
+`write`/`destructive`. Re-creating a deleted robot mints a new secret, so
+every consumer that still uses the old credential breaks. So the delete runs
+only through preview → wait for approval (bound to the preview hash, with a
+blast-radius statement) → approval by a different person → audited resume. A
+bare dispatch is refused with `preview_binding_required`. The park-time blast radius
 (`ops_robot_delete_preview._harbor_robot_delete_preview`, params-derived — no
 live call) names the robot `{id, project, level}` + its project association,
-with `irreversibility="recreatable_new_secret"`. `classify_op` is unchanged —
-`robot.delete` stays `write` (full-detail broadcast), the deliberate contrast
-with `credential_mint` `robot.create` — so the tier change is orthogonal to the
-broadcast redaction. Both forward the dispatched `operator`
+with `irreversibility="recreatable_new_secret"`. `classify_op` puts
+`robot.delete` in `write` (full-detail broadcast), unlike the `credential_mint`
+`robot.create`; the risk level does not change the broadcast redaction. Both forward the dispatched `operator`
 through `auth_headers` → `_load_credentials` for the operator-context Vault
 read and use non-retried HTTP calls (Harbor write endpoints are non-idempotent).
 
 ### artifact_vulnerabilities(operator, target, params)
 
 Typed op handler for `harbor.artifact.vulnerabilities` (#2857) — the per-CVE
-vulnerability list behind `harbor.artifact.info`'s `scan_overview` (which
+list behind `harbor.artifact.info`'s `scan_overview` (which
 carries severity **counts** only). Classified `read` (`classify_op`;
 `.vulnerabilities` is a `_READ_SUFFIXES` entry, so the broadcast sensitivity
 matches its `harbor.artifact.info` sibling rather than falling through to the
@@ -223,7 +234,7 @@ dispatched operator threads in and is forwarded to `auth_headers` →
    `quote(value, safe="")` — the OpenAPI simple-style encoding the generic
    dispatcher uses for `harbor.artifact.info`, so a nested `repository_name`
    slash (`team/nginx` → `team%2Fnginx`) and a `sha256:` reference colon
-   (`→ %3A`) never leak path structure.
+   (`→ %3A`) never change the path structure.
 2. Calls `_request_json(target, "GET", path, operator=operator,
    extra_headers={"X-Accept-Vulnerabilities": "application/vnd.security.vulnerability.report; version=1.1"})`.
    `_request_json` (not `_get_json`) is used because `_get_json` does not
@@ -251,9 +262,7 @@ Typed op handler for `harbor.project.summary` (#2858) — a project's
 storage-quota occupancy. Classified `read` (`classify_op`; `.summary` is a
 `_READ_SUFFIXES` entry, so its broadcast sensitivity matches the
 `harbor.project.info` sibling rather than falling through to the full-detail
-`other` class — the same edit also reclassifies
-`vmware.composite.performance.summary` `other`→`read`, a correctness
-improvement; neither class is sensitive, so redaction is unchanged).
+`other` class).
 `safety_level=safe`, no approval. Like the robot handlers, the `operator`
 signature threads the dispatched operator to `auth_headers` →
 `_load_credentials` for the operator-context Vault read.
@@ -298,7 +307,7 @@ suffix), `safety_level=safe`, no approval. `operator` threads the same way.
 `execute()` synthesises a system `Operator` and delegates to
 `meho_backplane.operations.dispatch(connector_id="harbor-rest-2.x", ...)`.
 Post-G0.6 callers (CLI verbs, MCP `call_operation`, `/api/v1/operations/call`)
-construct a real `Operator` and call `dispatch` directly — they bypass this shim.
+construct a real `Operator` and call `dispatch` directly — they do not use this shim.
 
 ## Dependencies
 
@@ -308,7 +317,7 @@ construct a real `Operator` and call `dispatch` directly — they bypass this sh
   `robot_delete`.
 - **tenacity 9.1.4** — retry logic for idempotent GET requests (3 retries,
   exponential backoff, 5xx + connection errors only). Robot lifecycle writes
-  bypass tenacity intentionally — those endpoints are non-idempotent.
+  do not use tenacity on purpose — those endpoints are not safe to run twice.
 - **structlog** — structured logging for credential load + registrar events.
 - **`meho_backplane.connectors.adapters.http.HttpConnector`** — base class
   providing `_get_json`, `_post_json`, `_http_client`, and `aclose`.
@@ -316,10 +325,10 @@ construct a real `Operator` and call `dispatch` directly — they bypass this sh
   `OperationResult`, `AuthModel`.
 - **`meho_backplane.operations.typed_register`** — `register_typed_operation`,
   `register_typed_op_registrar`, `run_typed_op_registrars`, `derive_handler_ref`.
-- **`meho_backplane.broadcast.events`** — `classify_op` returns `read` for the
-  9 read-core ops and `harbor.artifact.vulnerabilities` (via the `.about` /
-  `.health` / `.list` / `.info` read suffixes plus `.vulnerabilities`, #2857)
-  and `credential_mint` for `harbor.robot.create`.
+- **`meho_backplane.broadcast.events`** — `classify_op` returns `read` for
+  all 12 reads (via the `.about` / `.health` / `.list` / `.info` /
+  `.summary` read suffixes, plus the suffix of the artifact CVE read) and
+  `credential_mint` for `harbor.robot.create` (declared in `op_classes.py`).
 
 ## The read-only core ops
 
@@ -382,6 +391,32 @@ sub-tree, `{robot_id}` on robot-delete). All 14 were served on the first armed
 run — no repoints, no exclusions. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
+## CLI verbs
+
+`cli/internal/cmd/harbor/` holds the `meho harbor …` verb tree. Every verb
+calls `POST /api/v1/operations/call` with `connector_id="harbor-rest-2.x"`
+already set. These verbs are for operators only; they are not MCP tools.
+
+| Verb | Op id |
+|---|---|
+| `meho harbor about` | `harbor.about` |
+| `meho harbor health` | `harbor.health` |
+| `meho harbor project list` / `info <project_name>` | `harbor.project.list` / `harbor.project.info` |
+| `meho harbor repository list <project_name>` / `info <project_name> <repository_name>` | `harbor.repository.list` / `harbor.repository.info` |
+| `meho harbor artifact list <project_name> <repository_name>` / `info <project_name> <repository_name> <reference>` | `harbor.artifact.list` / `harbor.artifact.info` |
+| `meho harbor robot list` | `harbor.robot.list` |
+| `meho harbor robot create --name --project [--duration]` | `harbor.robot.create` |
+| `meho harbor robot delete --project --id` | `harbor.robot.delete` |
+| `meho harbor operation search <query>` / `call <op_id>` | any op of the connector |
+
+All verbs take `--target`, `--json`, and `--backplane`.
+`robot create` defaults `--duration` to `-1` (never expires).
+`robot delete` asks for a preview first and sends its hash, so the request
+waits until a second person approves. `operation call` takes `--params`
+(inline JSON or `@<file>`) and `--preview-hash`. The three standalone reads
+(the artifact CVE read, `harbor.project.summary` and
+`harbor.quota.list`) have no own verb; use `meho harbor operation call`.
+
 ## Tests
 
 - `tests/test_connectors_harbor_typed_reads.py` — unit tests (SQLite): each read
@@ -414,6 +449,16 @@ run — no repoints, no exclusions. Standard:
   `-used.storage` default query, `dispatch_typed` operator threading, `read`
   classification, and the `harbor.project.info` overpromise fix (no `quota` /
   `chart_count` in the op's `llm_instructions` or the `Project` fixtures).
+- `tests/test_connectors_harbor_auth.py` — HTTP Basic auth with admin and
+  robot username forms, per-target credential isolation, the `auth_model`
+  check, and the fingerprint / probe shapes.
+- `tests/test_connectors_harbor_credread.py` — the full dispatch chain with
+  the default (not injected) Vault loader, against an in-process fake Vault.
+- `tests/test_connectors_harbor_robot.py` — `harbor.robot.create` /
+  `harbor.robot.delete` handlers, operator threading into the Vault read,
+  their broadcast classes, and the aggregate-only `credential_mint` payload.
+- `tests/test_connectors_harbor_robot_delete.py` — the `destructive` +
+  approval rules of `harbor.robot.delete` and its park-time blast radius.
 - `tests/integration/test_connectors_harbor_container.py` — env-gated real
   Harbor `v2.11.0` stack E2E: `harbor.about` + `harbor.robot.list` reads and
   the robot create/delete four-eyes flow, all `source_kind="typed"`.
@@ -433,7 +478,7 @@ run — no repoints, no exclusions. Standard:
 - Issues: #619 (G3.5-T7 skeleton), #621 (G3.5-T9 robot lifecycle +
   credential_mint classifier), #622 (G3.5-T10 CLI verbs + real-container E2E +
   harbor-onboarding.md), **#2856 (typed read-core conversion)**,
-  #2857 (wave-2 CVE-detail read `harbor.artifact.vulnerabilities`),
+  the wave-2 per-artifact CVE detail read,
   #2858 (wave-2 storage-quota reads `harbor.project.summary` /
   `harbor.quota.list` + `harbor.project.info` overpromise fix)
 - Precedent: Task #2358 / Goal #2247 — the NSX (#2302) and SDDC Manager (#2306)

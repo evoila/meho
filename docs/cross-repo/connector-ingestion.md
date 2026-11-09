@@ -17,13 +17,13 @@ You want operators on a tenant to dispatch operations against a vendor API that 
 - The spec is published but materially incomplete (legacy `pyvmomi`-only ops).
 - A higher-level composite is the right agent UX (e.g. "create a VM end-to-end with networking attached").
 
-Typed connectors and ingested connectors are both first-class ([CLAUDE.md](../../CLAUDE.md) postulate 1) — same `endpoint_descriptor` table, same dispatcher, same agent meta-tools. The choice between them is driven by spec availability, not by preference.
+Typed connectors and ingested connectors are both first-class — same `endpoint_descriptor` table, same dispatcher, same agent meta-tools. The choice between them is driven by spec availability, not by preference.
 
 ## Prerequisites
 
-- **Role.** Write verbs (`ingest`, `edit-group`, `edit-op`, `enable`, `disable`) require `tenant_admin`. Read verbs (`list`, `review`) require `operator`. The backplane returns HTTP 403 with the CLI exit code 5 if the wrong role tries a write verb.
+- **Role.** Write verbs (`ingest`, `edit-group`, `edit-op`, `enable`, `disable`, `delete`) require `tenant_admin`. Read verbs (`list`, `review`, `catalog list`) require `operator`. The backplane returns HTTP 403 with the CLI exit code 5 if the wrong role tries a write verb. An ingest without `--tenant-id` writes to the built-in scope that every tenant shares, and needs the `platform_admin` flag. Pass `--tenant-id <your tenant UUID>` to ingest a copy into your own tenant.
 - **A running backplane.** `meho login <backplane-url>` writes a session token the CLI reuses across every verb. Override per-call with `--backplane <url>` when needed.
-- **The OpenAPI spec.** A path to a local file (`file:///abs/path/spec.yaml`) or an HTTPS URL the backplane can fetch (`https://vendor.example.com/openapi.yaml`). The CLI also accepts the `docs:<product>-<version>/<spec>.yaml` shorthand that resolves against `$CLAUDE_RDC_DOCS` when set; otherwise the shorthand is passed through for the backplane to resolve against its own checked-in docs corpus.
+- **The OpenAPI spec.** A path to a local file (`file:///abs/path/spec.yaml`) or an HTTPS URL the backplane can fetch (`https://vendor.example.com/openapi.yaml`). The backplane fetches `https://` only. The CLI also accepts the `docs:<product>-<version>/<spec>.yaml` shorthand. The CLI resolves it against the local folder in `$CLAUDE_RDC_DOCS`, reads the file, and uploads it like `file://`. When the variable is not set, the CLI refuses the shorthand: the backplane does not resolve `docs:` URIs.
 - **`ANTHROPIC_API_KEY` set for the grouping pass.** As of #1386 the chassis wires a production `LlmClient` at FastAPI lifespan startup: [`build_anthropic_ingest_llm_client`](../../backend/src/meho_backplane/operations/ingest/anthropic_client.py) is installed via [`set_llm_client_factory`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py) and reuses `settings.anthropic_api_key` (the same key the agent runtime reads), talking to the Anthropic Messages API directly. So a deploy with the key set groups non-dry-run ingests for real across all three surfaces (REST route, CLI, and the `meho_connector_ingest` MCP tool — they all read the lifespan-wired factory). A deploy that configured **no key** keeps the fail-closed posture: the ingest REST route returns HTTP 503 `LlmClientUnavailable` and the CLI prints the structured error. (Tests inject a deterministic stub via the constructor's `llm_client_factory=` argument.) See [`ingest-llm-key.md`](ingest-llm-key.md) for the deployed-backplane on-ramp — where the key goes in the Helm chart (it renders only under `agent.enabled: true`), how to verify on a live deploy, and the no-key 503 symptom — and [`docs/codebase/spec-ingestion.md` §"LLM-client wiring"](../codebase/spec-ingestion.md#llm-client-wiring) for the symbol-level framing, including the air-gapped/resolver-routing follow-up.
 - **Postgres with pgvector + FTS extensions.** v0.2 ships the `pgvector/pgvector:pg16`-derived chart image; local development uses the testcontainers fixture.
 
@@ -40,7 +40,7 @@ The workflow walks the [five-step pipeline](../architecture/spec-ingestion.md#th
 
 Vendor specs live in one of three places, in priority order:
 
-1. **The consumer's checked-in docs corpus** (e.g. `claude-rdc-hetzner-dc/docs/<product>-<version>/`). The maintainer's local clone is the conventional source. Use the `docs:<product>-<version>/<spec>.yaml` shorthand when this applies.
+1. **The consumer's checked-in docs corpus** (e.g. `<consumer repo>/docs/<product>-<version>/`). The maintainer's local clone is the conventional source. Use the `docs:<product>-<version>/<spec>.yaml` shorthand when this applies.
 2. **The vendor's published URL** (e.g. `https://developer.vmware.com/.../vcenter-rest-9.0.yaml`). Use a full `https://` URL.
 3. **A local download.** Use a full `file:///` path.
 
@@ -152,7 +152,7 @@ consumes (`parameters[in=body]` → `requestBody`, `definitions` →
 `components.schemas`); the converted document goes through the same
 `--dry-run` → ingest → review → enable pipeline as a native 3.x spec.
 
-Worked example — **VCF Automation** (the live 2.0-only case, #2090):
+Worked example — **VCF Automation** (a product that ships only Swagger 2.0):
 VMware ships no OpenAPI-3.x appliance spec for the VCFA
 tenant/consumption plane; the only machine-readable surface is the
 8 Swagger 2.0 fragments vendored under
@@ -167,14 +167,12 @@ meho connector ingest \
   --dry-run
 ```
 
-Note this only **widens** VCF Automation's surface: the connector's
-curated 11-op read core is sourced from OpenAPI-3.x documents
-(`cloudapi.yaml` + `iaas.yaml`) and works without any 2.0
-conversion — see
-`connectors-vcf-automation.md`.
-The other shipped exemplar is Harbor 2.x, whose product-specific
-conversion runbook lives in
-[`harbor-onboarding.md`](harbor-onboarding.md#spec-ingest-swagger-20--openapi-3x-conversion).
+Note this only **widens** VCF Automation's surface. The VCF Automation
+connector comes with the VMware connector package, not with the public
+image.
+Harbor 2.x needs no spec conversion: its ops ship as typed ops in the
+code (see
+[`harbor-onboarding.md`](harbor-onboarding.md#no-spec-ingest-or-curation-needed)).
 
 Validate the spec before committing to a tenant-wide ingestion:
 
@@ -192,9 +190,10 @@ meho connector ingest \
 ```bash
 meho connector ingest \
   --product vmware --version 9.0 --impl vmware-rest \
-  --spec docs:vcenter-9.0/vcenter.yaml \
-  --json
+  --spec docs:vcenter-9.0/vcenter.yaml
 ```
+
+The backplane answers 202 with a job handle and runs the ingest in the background. The CLI polls the job, prints a line each time the step changes (`parse`, `register`, `grouping`), and then prints the summary. Pass `--no-wait` to get the job handle at once, and check it later with `meho connector ingest-status`. `--json` prints the result as JSON.
 
 The connector lands `review_status='staged'` with every operation `is_enabled=false`. The expected human-readable output:
 
@@ -226,7 +225,7 @@ meho connector ingest \
 
 Every row from the first spec carries a `spec:vcenter.yaml` tag; every row from the second carries `spec:vi-json.yaml`. The review payload (Step 4) renders the source tag so you can audit per spec.
 
-> **Caveat — vi-json blocked on a T1 parser extension.** The T1 parser currently rejects `$ref: "#/components/parameters/moId"`, which appears on every `vi-json.yaml` operation. The vSphere canary ([#408](https://github.com/evoila/meho/issues/408)) ships with `vcenter.yaml` only. Multi-spec ingest works end-to-end the moment the parser gains a `#/components/parameters/*` resolver (see [Known gaps](#known-gaps) below). Until then, run the second spec only against a parser branch that resolves non-schema component refs.
+The parser resolves `$ref: "#/components/parameters/*"` (the shared `moId` path parameter on every `vi-json.yaml` operation), as well as `#/components/schemas/*`, `#/components/responses/*` and `#/components/requestBodies/*`, so both specs ingest under one connector.
 
 ### Step 4 — review the LLM-summarised groups
 
@@ -264,10 +263,10 @@ Most operators polish 2–4 groups per ingest; the LLM's output is usable for th
 
 ### Step 6 — mark per-op safety overrides
 
-The parser sets `DELETE` verbs to `safety_level='dangerous'` with `requires_approval=true`, so a delete waits for approval on every seat (#3827). The VMware floor raises the vCenter tag and category deletes, the tag detach actions, and the content-library item delete to `destructive`. Rows stored by an earlier ingest keep their old posture until you ingest again; `meho connector review` lists every stored delete below `destructive` and flags the rows that need correction. Flip `requires_approval` on any other op whose execution should block on the approval queue:
+The parser sets `DELETE` verbs to `safety_level='dangerous'` with `requires_approval=true`, so a delete waits for approval on every seat. A read whose answer holds credentials gets at least `caution` and waits for approval, and an ingested read whose path names licences stays off. The VMware floor (it comes with the VMware connector package) raises the vCenter tag and category deletes, the tag detach actions, and the content-library item delete to `destructive`. Rows stored by an earlier ingest keep their old posture until you ingest again; `meho connector review` lists every stored delete below `destructive` and flags the rows that need correction. Flip `requires_approval` on any other op whose execution should block on the approval queue:
 
 ```bash
-meho connector edit-op vmware-rest-9.0 'DELETE:/vcenter/vm/{vm}' \
+meho connector edit-op vmware-rest-9.0 'POST:/vcenter/vm' \
   --safety dangerous --requires-approval
 ```
 
@@ -285,7 +284,7 @@ meho connector edit-op vmware-rest-9.0 'GET:/vcenter/cluster' --enable
 meho connector edit-op vmware-rest-9.0 'POST:/vcenter/legacy/deprecated-thing' --disable
 ```
 
-`edit-op` requires at least one of `--custom-description`, `--safety`, `--requires-approval`, `--no-requires-approval`, `--enable`, `--disable`. An empty PATCH yields HTTP 400.
+`edit-op` requires at least one of `--custom-description`, `--safety`, `--requires-approval`, `--no-requires-approval`, `--enable`, `--disable`. An empty PATCH yields HTTP 400. `--safety` can only raise the level. Turning approval off with `--no-requires-approval` on an op whose code requires approval needs `platform_admin`, a `--reason`, and a fresh `meho login`.
 
 Each edit writes a single `meho_connector_edit_op` audit row.
 
@@ -297,7 +296,7 @@ meho connector enable vmware-rest-9.0 --confirm
 
 `enable` cascades every group to `review_status='enabled'` and every op to `is_enabled=true`. After this step:
 
-- The connector appears in `search_connectors` for every operator in the tenant.
+- The connector appears in `meho_connector_list` for every operator in the tenant.
 - Operations become dispatchable through `call_operation`.
 - The agent's `search_operations(connector_id="vmware-rest-9.0", query=...)` returns ranked results from the enabled rows.
 
@@ -310,13 +309,13 @@ meho operation groups vmware-rest-9.0
 meho operation search vmware-rest-9.0 "list virtual machines" --limit 10
 ```
 
-The first command returns the 8–15 enabled groups with their `when_to_use` hints. The second returns ranked hits — the load-bearing acceptance bar from the vSphere canary is "the canonical operation appears in the top-3". See the canary's 10 (query, canonical-op) pairs for the working examples.
+The first command returns the 8–15 enabled groups with their `when_to_use` hints. The second returns ranked hits. A good check: the operation you expect appears in the top 3.
 
 To verify dispatch end-to-end against a real target:
 
 ```bash
 meho operation call vmware-rest-9.0 'GET:/vcenter/cluster' \
-  --target rdc-vcenter --json
+  --target my-vcenter --json
 ```
 
 The `--target` argument resolves against the tenant's [Target rows](targets-yaml.md); the call needs a reachable vCenter endpoint (a `vcsim` simulator suffices for read operations).
@@ -329,7 +328,9 @@ meho connector disable vmware-rest-9.0 --confirm
 
 `disable` flips every group to `review_status='disabled'` and every op to `is_enabled=false`. The agent meta-tools stop surfacing the connector immediately; no in-flight dispatches will route to it.
 
-**Per-op operator overrides are preserved** (`custom_description`, `safety_level`, `requires_approval`) so a future `enable` resurfaces them verbatim. There is no `delete` verb — the rollback is reversible without losing operator work.
+**Per-op operator overrides are preserved** (`custom_description`, `safety_level`, `requires_approval`) so a future `enable` resurfaces them verbatim. `disable` is reversible and keeps operator work.
+
+To remove a connector from your tenant, run `meho connector delete <connector_id> --confirm`. It removes the tenant's operation and group rows and writes one audit row. The built-in copy stays. The backplane answers 409 `connector_in_use` while something still uses the connector, and the CLI prints each user. Deleting built-in rows needs `platform_admin`.
 
 The audit trail (`meho_connector_disable` row + the prior `meho_connector_enable` row) is sufficient to reconstruct what happened.
 
@@ -375,7 +376,7 @@ Always pass `--dry-run` on the first ingest of a new spec. It surfaces parser-re
 
 ### Tenant scope is JWT-derived
 
-There is no `--tenant` flag. The tenant the connector lands under derives from the JWT's `tenant_id` claim; cross-tenant probes surface as HTTP 404 `ConnectorNotFoundError`, not 403. Use a different login (different tenant_admin operator) to drive ingestion in a different tenant.
+`ingest --tenant-id` picks the write scope. Omit it to ingest into the built-in scope (needs `platform_admin`). Pass your own tenant UUID to ingest a tenant copy; another tenant's UUID gets HTTP 403 unless you hold `platform_admin`. The other verbs act on the tenant in the JWT's `tenant_id` claim; cross-tenant probes surface as HTTP 404 `ConnectorNotFoundError`, not 403.
 
 ### `--confirm` is required for `enable` and `disable`
 
@@ -396,7 +397,7 @@ The pipeline ships two roles. Both are realm roles on the Keycloak side; the cha
 | Role | Sees | Can do |
 |---|---|---|
 | `operator` | `list_connectors`, `review_payload` for connectors in their tenant | Read-only. Cannot ingest, edit, enable, or disable. |
-| `tenant_admin` | Everything `operator` sees, plus every administrative MCP tool under `meho.connector.*` | Full ingest → review → enable → disable workflow. |
+| `tenant_admin` | Everything `operator` sees, plus the administrative MCP tools such as `meho_connector_ingest`, `meho_connector_review` and `meho_connector_edit_op` (listed only for a session that asked for the `mcp:admin` scope) | Full ingest → review → enable → disable workflow. |
 
 Read paths require `operator`; write paths require `tenant_admin`. The REST router enforces this via FastAPI's `Depends(require_role(...))`; the admin MCP tools enforce it via the registry's `required_role` filter on `tools/list` plus a second-pass check in `handle_tools_call` so a client that guesses a hidden tool name is still rejected.
 
@@ -404,15 +405,13 @@ Read paths require `operator`; write paths require `tenant_admin`. The REST rout
 
 ## Known gaps
 
-Documented inline pending formal Task filing. The vSphere canary (see g07-vsphere-canary.md) is the test bed that surfaced each.
+Documented inline pending formal Task filing. The vSphere canary surfaced each. The canary test comes with the VMware connector package; it is not in the public tree.
 
 ### Gap 1 — T1 `$ref` extension for `vi-json.yaml`
 
-**Status:** documented; no Task filed yet.
+**Status:** closed.
 
-The T1 parser rejects `$ref: "#/components/parameters/<name>"`. vSphere's `vi-json.yaml` references `#/components/parameters/moId` on every operation (~2,195 operations). The fix is small (~40 LoC in [`refs.py::_resolve_shallow_ref`](../../backend/src/meho_backplane/operations/ingest/refs.py) plus tests for the three additional ref shapes: `parameters`, `requestBodies`, `headers`) but the work belongs in T1's scope, not in T9's docs work.
-
-**File a Task** when an early operator needs vi-json coverage — e.g. when a govc-style workflow that fundamentally needs Performance Manager (`govc events`), snapshot revert (`govc snapshot.revert`), or host network atomic mutation (`govc host.evac`) becomes a blocker.
+[`refs.py`](../../backend/src/meho_backplane/operations/ingest/refs.py) resolves `$ref` to `#/components/schemas/*`, `#/components/parameters/*`, `#/components/responses/*` and `#/components/requestBodies/*`. So `vi-json.yaml` ingests. Refs to other component buckets (for example `headers`) are still refused.
 
 ### Gap 2 — T3 per-op `llm_instructions` enhancement
 
@@ -436,7 +435,7 @@ Resolution path: extend T3 with a per-op `llm_instructions` generation pass that
 
 The canary's acceptance test ships a deterministic stub-LLM that classifies ops by URL-path prefix. The stub keeps the test reproducible and fast but doesn't exercise a live Anthropic adapter's prompt-engineering or retry-policy edges.
 
-A live-LLM variant exists at `MEHO_G07_CANARY_LIVE_LLM=1`. It skips only when `ANTHROPIC_API_KEY` is absent; with the key set the lifespan-wired `build_anthropic_ingest_llm_client` (#1386) drives the real grouping pass. To exercise it:
+A live-LLM variant exists at `MEHO_G07_CANARY_LIVE_LLM=1` (in the canary test of the VMware connector package). It skips only when `ANTHROPIC_API_KEY` is absent; with the key set the lifespan-wired `build_anthropic_ingest_llm_client` drives the real grouping pass. To exercise it:
 
 1. Re-run the canary with the env var set (and `ANTHROPIC_API_KEY` present).
 2. Pick harder queries the path-prefix stub can't trivially classify — snapshot revert, performance-metrics query, host-network atomic mutation.
@@ -448,7 +447,6 @@ Routing the grouping pass through the G11.5 per-tenant model resolver (so air-ga
 
 - **Architecture doc:** [`docs/architecture/spec-ingestion.md`](../architecture/spec-ingestion.md) — the canonical reference for the pipeline's design.
 - **Sister architecture doc:** [`docs/architecture/operations-substrate.md`](../architecture/operations-substrate.md) — G0.6's substrate this pipeline writes into.
-- **vSphere canary runbook:** `g07-vsphere-canary.md` — the worked example operators reproduce locally.
 - **Internal codebase map:** [`docs/codebase/spec-ingestion.md`](../codebase/spec-ingestion.md) — symbol-level map of `backend/src/meho_backplane/operations/ingest/`.
 - **CLAUDE.md postulates:** postulate 1 (two connector kinds, both first-class); postulate 4 (operation grouping + LLM hints, operator-reviewable); postulate 5 (agent surface is meta-tools).
 - **Parent Initiative:** [#389 G0.7 Spec ingestion pipeline](https://github.com/evoila/meho/issues/389).

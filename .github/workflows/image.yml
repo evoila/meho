@@ -6,8 +6,11 @@
 # Locked tag scheme (Goal #11 — artefact-distribution principle):
 #   PR (branch -> main)   : build only, do NOT push (verifies Dockerfile + deps),
 #                           plus a trivy scan of backend/uv.lock (see below).
+#                           Both jobs run on GitHub-hosted runners.
 #   push to main          : publish :<git-sha> (immutable) + :main (moving target).
 #   push tag v*           : publish :v<x.y.z> (alongside :<sha> + :main from main push).
+#                           A pre-release tag keeps its full name: v1.0.0-rc.1 ->
+#                           :v1.0.0-rc.1. A step checks this before the build.
 #
 # Goal #11 explicitly forbids :latest as a deploy target — operators MUST pin
 # to :<git-sha> (immutable), :v<x.y.z> (semver, immutable), or the manifest
@@ -149,8 +152,14 @@ jobs:
     #   - fork PRs -> head.repo.full_name != github.repository -> skip entirely.
     # The OR short-circuits on push events, so the missing pull_request context
     # on push is irrelevant. Job-level (not step-level) so no step ever starts.
+    # The guard stays now that pull requests build on a hosted runner (below):
+    # #4626 keeps every fork guard as it is.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    # Pull requests build on a GitHub-hosted runner (#4626, step 3). A pull
+    # request build never logs in, pushes or signs, so it needs nothing from
+    # our network, and it no longer waits for a free slot on our own pool.
+    # Pushes to main and v* tags publish and sign, so they stay on our pool.
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 45  # arm64 emulation under QEMU is 3-5x slower than native
     steps:
       - name: Checkout
@@ -166,7 +175,7 @@ jobs:
         # PRs build only; no login needed and no GHCR credential available
         # to the workflow on PRs from forks anyway.
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -196,6 +205,28 @@ jobs:
           # labels so `docker inspect` shows provenance.
           flavor: |
             latest=false
+
+      - name: Check the release tag is in the image tags
+        # A v* tag push must publish the image under the exact tag name,
+        # also for a pre-release tag: v1.0.0-rc.1 -> :v1.0.0-rc.1.
+        # `type=semver,pattern={{raw}}` gives that today, but a tag that
+        # is not valid semver gives no tag at all, and nothing else
+        # would notice. Fail here, before the long build (#3860).
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          want="ghcr.io/evoila/meho:${GITHUB_REF_NAME}"
+          if ! jq -e --arg want "${want}" '.tags | index($want)' <<< "${DOCKER_METADATA_OUTPUT_JSON}" >/dev/null; then
+            echo "::error::The image tags do not include ${want}. Tags: $(jq -c '.tags' <<< "${DOCKER_METADATA_OUTPUT_JSON}")" >&2
+            exit 1
+          fi
+          echo "OK: the image will be published as ${want}."
+
+      - name: Stage the Tailwind CLI for the image build
+        uses: ./.github/actions/stage-tailwind
+        with:
+          archs: amd64 arm64
 
       - name: Build image to quarantine digest (no release tag)
         id: build
@@ -241,6 +272,13 @@ jobs:
           # carbon-copy preserves them under every release alias.
           provenance: true
           sbom: true
+
+      - name: Show free disk space
+        # A hosted runner has less disk than our own machines. This line in
+        # the log shows how close a two-platform pull request build comes to
+        # the limit (#4626, step 3).
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        run: df -h /
 
       - name: Echo and guard the quarantine digest
         # Surfaces the immutable manifest-list digest in workflow logs and

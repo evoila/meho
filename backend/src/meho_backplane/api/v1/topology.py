@@ -60,6 +60,14 @@ the gate sits at the same level as ``POST /api/v1/targets`` — the
 canonical G0.3 ``tenant_admin`` precedent. ``GET /edges`` remains
 ``operator`` (a tenant inventory view, no mutation).
 
+The four graph writes (``POST /edges``, ``POST /edges/bulk``,
+``DELETE /edges/{edge_id}`` and ``DELETE /nodes/{node_id}``) are for
+people only. A service or runner login with ``tenant_admin`` gets 403
+``human_principal_required``; an agent login, capped at ``operator``,
+gets 403 ``insufficient_role``. A machine login writes the graph with
+the ``topology.*`` operations of ``topology-graph-1.x``, which go
+through the approval check (:mod:`meho_backplane.connectors.topology.ops`).
+
 Tenant scoping
 --------------
 
@@ -110,7 +118,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.api.v1._envelope import ENVELOPE_QUERY, EnvelopeVersion
 from meho_backplane.audit_cutover import note_preview
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors import (
     AmbiguousConnectorResolution,
     NoMatchingConnector,
@@ -181,6 +189,31 @@ router = APIRouter(prefix="/api/v1/topology", tags=["topology"])
 #: ``operator``.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: The 403 text a machine login gets on a graph write.
+MACHINE_TOPOLOGY_WRITE_REMEDIATION: Final[str] = (
+    "topology graph writes on REST are for people. A machine login (agent, "
+    "service or runner) writes the graph with call_operation(connector_id="
+    "'topology-graph-1.x', op_id='topology.annotate'), and with op_id="
+    "'topology.unannotate', 'topology.delete_node' or 'topology.bulk_import'; "
+    "MEHO checks them against the approval rules. A person changes the graph "
+    "in the operator console or with the meho CLI."
+)
+
+
+def _require_admin_person(operator: Operator = _require_admin) -> Operator:
+    """The gate of the four graph writes: ``tenant_admin``, then a person.
+
+    The role check runs first, so a login with a lower role (also an
+    agent, whose role MEHO caps at ``operator``) gets ``insufficient_role``.
+    A machine login with ``tenant_admin`` then gets 403
+    ``human_principal_required``.
+    """
+    ensure_human_principal(operator, remediation=MACHINE_TOPOLOGY_WRITE_REMEDIATION)
+    return operator
+
+
+_require_admin_person_dep = Depends(_require_admin_person)
 
 #: Canonical op identifiers bound into ``audit_op_id`` per route.
 #: Pinned as module constants so the contract is greppable from tests +
@@ -825,7 +858,7 @@ class _AnnotateEdgeRequest(BaseModel):
 )
 async def annotate_edge_route(
     body: _AnnotateEdgeRequest,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_raw_session),
 ) -> TopologyEdge:
     """Create or upsert a curated edge.
@@ -898,7 +931,7 @@ async def annotate_edge_route(
 )
 async def unannotate_edge_route(
     edge_id: uuid.UUID,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_raw_session),
 ) -> None:
     """Hard-delete a curated edge by id and clear its reciprocal markers.
@@ -970,7 +1003,7 @@ async def unannotate_edge_route(
 )
 async def delete_node_route(
     node_id: uuid.UUID,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_raw_session),
 ) -> None:
     """Hard-delete a manually-seeded ``graph_node`` by id.
@@ -1200,7 +1233,7 @@ class _BulkImportResponse(BaseModel):
 )
 async def bulk_import_edges_route(
     body: _BulkImportRequest,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_raw_session),
 ) -> _BulkImportResponse:
     """Batch-annotate edges from a single body in one transaction.

@@ -497,3 +497,57 @@ func readJSON(t *testing.T, path string, into any) {
 		t.Fatal(err)
 	}
 }
+
+// A refresh token the login server refuses is a login problem: exit 2,
+// not "unreachable".
+func TestRevokedRefreshTokenAsksForALogin(t *testing.T) {
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/settings/export", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/realms/meho/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"issuer":                        srv.URL + "/realms/meho",
+			"device_authorization_endpoint": srv.URL + "/device",
+			"token_endpoint":                srv.URL + "/token",
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"Session not active"}`))
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MEHO_KEYRING_DISABLE", "1")
+	store, err := auth.NewFileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, user := auth.KeyForBackplane(srv.URL)
+	if err := store.Save(service, user, auth.StoredToken{
+		BackplaneURL: srv.URL, Issuer: srv.URL + "/realms/meho", ClientID: "meho-cli",
+		AccessToken: "eyJ.test.token", RefreshToken: "revoked", TokenType: "Bearer",
+		Expiry: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"export", "--backplane", srv.URL})
+	err = cmd.Execute()
+	var coded output.ExitCoder
+	if !errors.As(err, &coded) || coded.ExitCode() != 2 {
+		t.Fatalf("err = %v; want exit code 2 (stderr %q)", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "meho login") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}

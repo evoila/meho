@@ -66,7 +66,9 @@
   hx-include="[name='work_ref']"
 >
   {# ---------- Status tabs ---------- #}
-  <div role="tablist" class="tabs tabs-boxed w-fit" aria-label="Filter by status">
+  {#- ``tabs`` wraps its tabs (flex-wrap), so on a phone (#6000) the six
+      status tabs take two lines instead of pushing the page sideways. -#}
+  <div role="tablist" class="tabs tabs-boxed w-fit max-w-full" aria-label="Filter by status">
     {% for tab in tabs %}
       <button
         type="button"
@@ -79,7 +81,7 @@
         hx-include="[name='work_ref']"
         hx-push-url="/ui/approvals?tab={{ tab }}{% if work_ref %}&work_ref={{ work_ref | urlencode }}{% endif %}"
       >
-        {{ tab | capitalize }}
+        {{ "Outcome unknown" if tab == "outcome_unknown" else tab | capitalize }}
       </button>
     {% endfor %}
   </div>
@@ -171,6 +173,11 @@
           <p class="text-base opacity-60">No pending approvals</p>
           <p class="text-sm opacity-40">
             New requests appear here the moment an agent action needs your sign-off.
+          </p>
+        {% elif active_tab == "outcome_unknown" %}
+          <p class="text-base opacity-60">No approved changes with an unknown outcome</p>
+          <p class="text-sm opacity-40">
+            An approved change shows here when MEHO does not know if it happened. Someone then checks the target.
           </p>
         {% elif active_tab == "all" %}
           <p class="text-base opacity-60">No approval requests yet</p>

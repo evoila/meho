@@ -71,6 +71,7 @@ from structlog.testing import capture_logs
 import meho_backplane.agent.toolset as toolset_mod
 import meho_backplane.agent.toolset_discovery as toolset_discovery
 from meho_backplane.agent import AgentDefinition, PydanticAgentRun
+from meho_backplane.agent import run as agent_run_module
 from meho_backplane.agent.hosted_context import (
     CONTEXT_BLOCK_END,
     CONTEXT_BLOCK_START,
@@ -119,6 +120,7 @@ def _make_operator(
     *,
     role: TenantRole = TenantRole.OPERATOR,
     sub: str = "op-agent",
+    capabilities: frozenset[str] = frozenset(),
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -127,7 +129,13 @@ def _make_operator(
         raw_jwt="<test-raw-jwt>",
         tenant_id=_TENANT_A,
         tenant_role=role,
+        capabilities=capabilities,
     )
+
+
+#: The capability the docs tools need (#5852): with it, every catalog tool
+#: can register.
+_DOCS_CAPABILITY = frozenset({"meho-docs"})
 
 
 def _tool_names(tools: list[Any]) -> set[str]:
@@ -201,7 +209,7 @@ def test_read_only_role_excludes_operator_floor_tools(
 
     # An OPERATOR identity, same spec -> full surface (the tools ARE callable
     # for a role that meets the floor).
-    operator_tools = resolve_agent_tools(spec, _make_operator())
+    operator_tools = resolve_agent_tools(spec, _make_operator(capabilities=_DOCS_CAPABILITY))
     assert _tool_names(operator_tools) == set(META_TOOL_NAMES)
 
     # Drop one tool's floor to READ_ONLY and confirm it now registers for the
@@ -225,7 +233,9 @@ def test_read_only_role_excludes_operator_floor_tools(
 
 def test_tenant_admin_sees_all_operator_floor_tools() -> None:
     """A higher role (tenant_admin) admits every operator-floored tool."""
-    admin = _make_operator(role=TenantRole.TENANT_ADMIN, sub="op-admin")
+    admin = _make_operator(
+        role=TenantRole.TENANT_ADMIN, sub="op-admin", capabilities=_DOCS_CAPABILITY
+    )
     tools = resolve_agent_tools({"meta_tools": sorted(META_TOOL_NAMES)}, admin)
     assert _tool_names(tools) == set(META_TOOL_NAMES)
 
@@ -669,6 +679,17 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_run_logger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the run module a fresh logger proxy for each test.
+
+    Its module-level ``_log`` may already have cached its bound methods
+    (``cache_logger_on_first_use=True``) in an earlier test on this worker,
+    and a cached logger does not reach ``capture_logs``.
+    """
+    monkeypatch.setattr(agent_run_module, "_log", structlog.get_logger(agent_run_module.__name__))
+
+
 @pytest.fixture
 def _stub_embedding() -> Iterator[None]:
     with patch(
@@ -701,7 +722,7 @@ def _tool(name: str, operator: Operator | None = None) -> Any:
 
 def test_context_tools_are_opt_in() -> None:
     """The four context tools register only when ``meta_tools`` names them."""
-    assert frozenset(_CONTEXT_TOOLS) == OPT_IN_META_TOOL_NAMES
+    assert frozenset(_CONTEXT_TOOLS) <= OPT_IN_META_TOOL_NAMES
     resolution = resolve_agent_toolset({}, _make_operator())
     assert not (_tool_names(resolution.tools) & OPT_IN_META_TOOL_NAMES)
     for name in _CONTEXT_TOOLS:

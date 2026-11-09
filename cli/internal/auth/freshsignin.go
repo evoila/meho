@@ -78,6 +78,11 @@ func RunFreshSignIn(ctx context.Context, doc *DiscoveryDocument, clientID string
 	if doc.AuthorizationEndpoint == "" {
 		return nil, errors.New("meho: the identity provider has no authorization_endpoint")
 	}
+	// The link goes to the system opener, which starts whatever app
+	// handles its scheme. Only a web link may reach it.
+	if err := checkEndpointURL("authorization_endpoint", doc.AuthorizationEndpoint); err != nil {
+		return nil, fmt.Errorf("meho: %w", err)
+	}
 	timeout := opts.Timeout
 	if timeout == 0 {
 		timeout = FreshSignInTimeout
@@ -86,10 +91,9 @@ func RunFreshSignIn(ctx context.Context, doc *DiscoveryDocument, clientID string
 	if open == nil {
 		open = OpenSystemBrowser
 	}
-	httpClient := opts.HTTPClient
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	// The code exchange follows a redirect only to https (or http on
+	// this machine), like every other request to the identity provider.
+	httpClient := WithRedirectCheck(opts.HTTPClient)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -159,10 +163,7 @@ func FreshSignInTokenSource(ctx context.Context, doc *DiscoveryDocument, clientI
 	if tok.RefreshToken == "" {
 		return noRenewalSource{tok: tok}
 	}
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, WithRedirectCheck(httpClient))
 	return freshSignInConfig(doc, clientID, "").TokenSource(ctx, tok)
 }
 

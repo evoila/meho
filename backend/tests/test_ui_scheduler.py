@@ -306,6 +306,8 @@ def _client_with_role(
     role: TenantRole,
 ) -> tuple[TestClient, respx.MockRouter, str]:
     """Return a TestClient + respx mock + csrf token for the role-gated routes."""
+    # Each call mints a new key pair, so drop the JWKS cached by an earlier client.
+    clear_jwks_cache()
     keypair, jwks = _make_keypair_and_jwks()
     access_token = _mint_token(
         keypair,

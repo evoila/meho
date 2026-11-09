@@ -343,6 +343,9 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 "meho_backplane.main.get_settings",
                 return_value=MagicMock(
                     memory_expiry_enabled=False,
+                    # Weekly knowledge upkeep (lessons/upkeep.py), default on:
+                    # a bare MagicMock attribute is truthy, so pin it off.
+                    knowledge_upkeep_enabled=False,
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
                     # #2322 (G0.31 #2364) added an approval-TTL sweeper to
@@ -440,6 +443,8 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 "meho_backplane.main",
                 start_scheduler=MagicMock(),
                 stop_scheduler=AsyncMock(),
+                start_knowledge_upkeep=MagicMock(),
+                stop_knowledge_upkeep=AsyncMock(),
                 # #2505 — sensor check-runner. Defensive patch (the gate above
                 # is pinned off) so a future default flip can't smuggle the
                 # real runner (and its get_settings() tick read) back in.
@@ -488,6 +493,11 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 # yield its task creation triggers) back into this env-free test.
                 start_audit_raw_payload_reaper=MagicMock(),
                 stop_audit_raw_payload_reaper=AsyncMock(),
+                # #4901 agent session store cleanup -- on by default, so the
+                # real loop (and the topology scheduler yield its task
+                # creation triggers) must stay out of this env-free test.
+                start_session_store_cleanup=MagicMock(),
+                stop_session_store_cleanup=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
@@ -552,6 +562,9 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 "meho_backplane.main.get_settings",
                 return_value=MagicMock(
                     memory_expiry_enabled=False,
+                    # Weekly knowledge upkeep (lessons/upkeep.py), default on:
+                    # a bare MagicMock attribute is truthy, so pin it off.
+                    knowledge_upkeep_enabled=False,
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
                     # #2322 — pin the approval-TTL sweeper off; see the
@@ -624,6 +637,8 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 "meho_backplane.main",
                 start_scheduler=MagicMock(),
                 stop_scheduler=AsyncMock(),
+                start_knowledge_upkeep=MagicMock(),
+                stop_knowledge_upkeep=AsyncMock(),
                 # #2505 sensor check-runner — defensive patch (see the sibling
                 # lifespan test) so the real runner can never start here.
                 start_sensor_runner=MagicMock(),
@@ -670,6 +685,11 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 # yield its task creation triggers) back into this env-free test.
                 start_audit_raw_payload_reaper=MagicMock(),
                 stop_audit_raw_payload_reaper=AsyncMock(),
+                # #4901 agent session store cleanup -- on by default, so the
+                # real loop (and the topology scheduler yield its task
+                # creation triggers) must stay out of this env-free test.
+                start_session_store_cleanup=MagicMock(),
+                stop_session_store_cleanup=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),

@@ -43,7 +43,7 @@ from meho_backplane.connectors.vault.tenant_scope import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
 from meho_backplane.operations.approval_queue import (
-    SelfApprovalForbiddenError,
+    ApprovalRule,
     _check_self_approval,
 )
 from meho_backplane.settings import get_settings
@@ -393,14 +393,16 @@ async def test_platform_admin_unknown_tenant_is_refused_and_makes_no_row() -> No
     assert await _tenant_count() == before
 
 
-async def test_platform_admin_cannot_approve_own_change() -> None:
+async def test_platform_admin_approves_own_change_as_an_admin() -> None:
+    """There the person has the ``tenant_admin`` role, and admins may self-approve (#5969)."""
     await _seed_tenant(_TENANT_C, "team3")
     picked = await select_current_tenant(
         _operator(platform_admin=True, meho_tenants=[_ENTRY_A_READERS]), "team3"
     )
+    assert picked.self_approver is False
     request = SimpleNamespace(id=uuid.uuid4(), principal_sub=picked.sub, proposed_effect={})
-    with pytest.raises(SelfApprovalForbiddenError):
-        _check_self_approval(picked, request)  # type: ignore[arg-type]
+    rule = _check_self_approval(picked, request)  # type: ignore[arg-type]
+    assert rule == ApprovalRule.SA_OPERATOR_SELF_APPROVAL
 
 
 async def test_platform_admin_role_is_noted_on_audit_rows() -> None:

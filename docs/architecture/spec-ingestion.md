@@ -12,7 +12,7 @@ The pipeline operationalises [CLAUDE.md](../../CLAUDE.md) postulate 4 (operation
 
 ### Supported spec formats
 
-**v0.2 ships OpenAPI 3.0/3.1 only.** The parser ([`ingest/openapi.py`](../../backend/src/meho_backplane/operations/ingest/openapi.py)) accepts either YAML or JSON, sniffed at decode time. Both `3.0.x` and `3.1.x` are first-class; the parser rejects every other spec version with `UnsupportedSpecError`.
+**MEHO ingests OpenAPI 3.0/3.1 only.** The parser ([`ingest/openapi.py`](../../backend/src/meho_backplane/operations/ingest/openapi.py)) accepts either YAML or JSON, sniffed at decode time. Both `3.0.x` and `3.1.x` are first-class; the parser rejects every other spec version with `UnsupportedSpecError`. A Swagger 2.0 file is refused with a fix in the message: pass it to `meho connector ingest` as `file://`, and the CLI converts it to OpenAPI 3 on the operator's machine before the upload (#5028).
 
 Deferred to v0.2.next:
 
@@ -42,7 +42,7 @@ The five-step labels:
 - **Register** — T2 ([`ingest/register_ingested.py`](../../backend/src/meho_backplane/operations/ingest/register_ingested.py)) — DB upsert + embedding compute + multi-spec merge + auto-registration of a `GenericRestConnector` shim against the v2 connector registry + body-hash skip-re-embed. Issue [#403](https://github.com/evoila/meho/issues/403).
 - **Group** — T3 ([`ingest/llm_groups.py`](../../backend/src/meho_backplane/operations/ingest/llm_groups.py)) — two-pass LLM (propose groups, then assign each op to a group). Issue [#404](https://github.com/evoila/meho/issues/404).
 - **Review** — T4 ([`ingest/service.py`](../../backend/src/meho_backplane/operations/ingest/service.py)) — `staged → enabled → disabled` state machine + per-op overrides + audit emission per transition. Issue [#402](https://github.com/evoila/meho/issues/402).
-- **Verify** — T8 + G3.1-T3 ([`tests/acceptance/test_g07_vsphere_canary.py`](../../backend/tests/acceptance/test_g07_vsphere_canary.py)) — the govc-parity benchmark: ingest the two-spec vSphere corpus (`vcenter.yaml` + `vi-json.yaml`, ~3,470 operations), enable, then assert 13 representative queries (10 vcenter + 3 vi-json) return the canonical operation in the top-3 hits of `search_operations`. Issues [#408](https://github.com/evoila/meho/issues/408) and [#503](https://github.com/evoila/meho/issues/503). Operator-facing runbook: g07-vsphere-canary.md.
+- **Verify** — T8 + G3.1-T3 (`tests/acceptance/test_g07_vsphere_canary.py`, which ships with the VMware connectors in evoila's enterprise pack, not in this repository; see [The vSphere canary](#the-vsphere-canary-t8--g31-t3)) — the govc-parity benchmark: ingest the two-spec vSphere corpus (`vcenter.yaml` + `vi-json.yaml`, ~3,470 operations), enable, then assert 13 representative queries (10 vcenter + 3 vi-json) return the canonical operation in the top-3 hits of `search_operations`. Issues [#408](https://github.com/evoila/meho/issues/408) and [#503](https://github.com/evoila/meho/issues/503). Operator-facing runbook: g07-vsphere-canary.md.
 
 Operator-facing surfaces — CLI (T5, [#405](https://github.com/evoila/meho/issues/405)), REST (T6, [#406](https://github.com/evoila/meho/issues/406)), admin MCP (T7, [#407](https://github.com/evoila/meho/issues/407)) — all wrap the same `IngestionPipelineService` + `ReviewService` so the wire contract is defined once. See [Operator surfaces](#operator-surfaces) below.
 
@@ -68,7 +68,7 @@ One `EndpointDescriptorProto` per `(method, path)` entry under `paths`:
 | `tags` | OpenAPI `tags[]` + `spec:<source>` | Spec tags plus the per-spec marker. |
 | `parameter_schema` | Merged path + query + header + body | Flattened JSON Schema 2020-12; properties carry an `x-meho-param-loc` extension (`"path"` / `"query"` / `"header"` / `"body"`) the dispatcher reads to split incoming `params` into four buckets. |
 | `response_schema` | Success-response schema | Picks `200 > 201 > 202 > ... > 2XX`. |
-| `safety_level` | HTTP-verb heuristic | `safe` for GET/HEAD/OPTIONS; `caution` for POST/PUT/PATCH; `dangerous` with `requires_approval=true` for DELETE (#3827). A connector floor can raise an op to `destructive` when it ships the preview builder that tier needs (the vCenter tagging removals and the content-library item delete). Operator overrides at review time. |
+| `safety_level` | HTTP-verb heuristic | `safe` for GET/HEAD/OPTIONS; `caution` for POST/PUT/PATCH; `dangerous` with `requires_approval=true` for DELETE (#3827). A connector floor can raise an op to `destructive` when it ships the preview builder that tier needs. More floors only raise the level ([`ingest/safety_floors.py`](../../backend/src/meho_backplane/operations/ingest/safety_floors.py)): a credential read, or an op with a parameter that holds an address MEHO connects to, is at least `caution` and waits for a person's approval (#5700). Operator overrides at review time. |
 | `requires_approval` | `True` for every `DELETE` and for destructive action hints; `False` otherwise (#3827) | Operator flips for other known-destructive ops via `edit-op`. |
 
 ### `$ref` resolution — intentionally shallow
@@ -110,7 +110,7 @@ A single `IngestionPipelineService.ingest(...)` call processes a list of `SpecSo
 
 The same-`spec_source` re-ingest of an unchanged spec stays on the skip-re-embed path — the cross-call check only fires on a true mismatch. The operationally critical scenario this protects: an unchanged 3,000-op vCenter spec must not re-embed 3,000 operations on every re-ingest.
 
-The vSphere canary at [`tests/acceptance/test_g07_vsphere_canary.py`](../../backend/tests/acceptance/test_g07_vsphere_canary.py) is the operator-visible proof of the merge contract: it drives two sequential `ingest()` calls (vcenter.yaml then vi-json.yaml) under the same `(product, version, impl_id)` triple, asserts per-spec `inserted_count` floors (≥1,200 vcenter, ≥2,000 vi-json), asserts non-overlapping `op_id`s between the two spec sources, and asserts the per-call `connector_registered` flag flips `True → False` across the two calls (auto-shim idempotency). See [#503 G3.1-T3 vi-json.yaml full ingestion](https://github.com/evoila/meho/issues/503) for the acceptance-test extension that locked this contract.
+The vSphere canary (`tests/acceptance/test_g07_vsphere_canary.py`, in evoila's enterprise pack) is the operator-visible proof of the merge contract: it drives two sequential `ingest()` calls (vcenter.yaml then vi-json.yaml) under the same `(product, version, impl_id)` triple, asserts per-spec `inserted_count` floors (≥1,200 vcenter, ≥2,000 vi-json), asserts non-overlapping `op_id`s between the two spec sources, and asserts the per-call `connector_registered` flag flips `True → False` across the two calls (auto-shim idempotency). See [#503 G3.1-T3 vi-json.yaml full ingestion](https://github.com/evoila/meho/issues/503) for the acceptance-test extension that locked this contract.
 
 ## T3 — LLM-summarised grouping
 
@@ -173,7 +173,7 @@ The LLM client is injected as a `Protocol` with one async method, `generate_json
                                    (back to enabled)
 ```
 
-- **`staged`** — fresh out of ingest. Every group rendered to the operator for review; every op `is_enabled=False`. Connector does NOT show up in `search_connectors`; operations are NOT dispatchable.
+- **`staged`** — fresh out of ingest. Every group rendered to the operator for review; every op `is_enabled=False`. Operations are NOT dispatchable.
 - **`enabled`** — `enable_connector` cascade: every group → `enabled`, every op the operator approved → `is_enabled=True`. Operations become dispatchable; connector surfaces through the agent meta-tools.
 - **`disabled`** — `disable_connector` rollback: every group → `disabled`, every op → `is_enabled=False`. Per-op operator overrides (`custom_description`, `safety_level`, `requires_approval`) are **preserved** so a future `enable` resurfaces them verbatim.
 
@@ -184,7 +184,7 @@ Operator edits routed through `ReviewService.edit_op(...)` set columns the parse
 | Column | Operator intent |
 |---|---|
 | `custom_description` | Replacement agent-facing description that masks the vendor's spec wording. The retrieval text recomposes from this when set. |
-| `safety_level` | Override the HTTP-verb heuristic. Bounded enum `safe` / `caution` / `dangerous`. |
+| `safety_level` | Override the HTTP-verb heuristic. Bounded enum `safe` / `caution` / `dangerous` / `destructive`. |
 | `requires_approval` | Forces `status='pending'` on dispatch + an explicit operator approval before execution. Orthogonal to `safety_level`. |
 | `is_enabled` | Re-enable / disable a single op without flipping the whole connector. |
 
@@ -227,15 +227,17 @@ Cobra verb tree at [`cli/internal/cmd/connector/`](../../cli/internal/cmd/connec
 | `meho connector enable <connector_id> [--confirm]` | `tenant_admin` | `POST /api/v1/connectors/{id}/enable` |
 | `meho connector disable <connector_id> [--confirm]` | `tenant_admin` | `POST /api/v1/connectors/{id}/disable` |
 
+The tree has more verbs than this table: `ingest-status`, `enable-reads`, `overrides`, `remove-override`, `delete`, `catalog` and `tenant-setting` (see `meho connector --help` and [`docs-site/reference/cli.md`](../../docs-site/reference/cli.md)).
+
 Enable / disable are gated on an interactive confirmation prompt by default; `--confirm` skips it for CI / scripted use. `--json` on every read verb emits machine-readable JSON. The `@<file>` suffix on `--when-to-use` and `--custom-description` reads the value from a file so longer prose stays out of shell history.
 
 ### T6 — REST routes (`/api/v1/connectors*`)
 
-Defined in [`api/v1/connectors_ingest.py`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py). Seven endpoints; RBAC enforced by FastAPI dependency injection via [`auth.rbac.require_role`](../../backend/src/meho_backplane/auth/rbac.py).
+Defined in [`api/v1/connectors_ingest.py`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py). The seven core endpoints are below; RBAC enforced by FastAPI dependencies via [`auth.rbac.require_role`](../../backend/src/meho_backplane/auth/rbac.py).
 
 | Route | Method | Role | Returns |
 |---|---|---|---|
-| `/api/v1/connectors/ingest` | `POST` | `tenant_admin` | `IngestResponse` (200) |
+| `/api/v1/connectors/ingest` | `POST` | `tenant_admin` | `IngestJobHandle` (202, the default async job) or `IngestResponse` (200, sync) |
 | `/api/v1/connectors` | `GET` | `operator` | `ConnectorListResponse` (200) |
 | `/api/v1/connectors/{id}/review` | `GET` | `operator` | `ConnectorReviewPayload` (200) |
 | `/api/v1/connectors/{id}/groups/{group_key}` | `PATCH` | `tenant_admin` | 204 No Content |
@@ -243,13 +245,17 @@ Defined in [`api/v1/connectors_ingest.py`](../../backend/src/meho_backplane/api/
 | `/api/v1/connectors/{id}/enable` | `POST` | `tenant_admin` | 204 No Content |
 | `/api/v1/connectors/{id}/disable` | `POST` | `tenant_admin` | 204 No Content |
 
+The same router also serves `GET /api/v1/connectors/ingest/jobs/{job_id}` (job status), `GET /api/v1/connectors/catalog`, `POST /api/v1/connectors/{id}/enable-reads`, `DELETE /api/v1/connectors/{id}/operation-overrides/{op_id:path}` and `DELETE /api/v1/connectors/{id}`.
+
+Ingesting into the built-in scope (no tenant id) and deleting a built-in connector's rows also need the `platform_admin` flag (#5607). A running ingest job reports its step (`phase`: `parse`, `register` or `grouping`, with `phase_started_at`) in the job status route and in `meho_connector_ingest_status` (#5789).
+
 **Tenant scoping** derives from the JWT; there is no body or query parameter that can override the operator's tenant. Cross-tenant probes surface as 404 `ConnectorNotFoundError`, not 403 — same conflation [`operations-substrate.md`](operations-substrate.md#tenant-scoping-rules) uses to keep the operator-facing failure surface uniform.
 
 **The `op_id:path` converter** on `edit_op` is load-bearing: operation natural keys carry colons and slashes (`"GET:/api/vcenter/cluster"`) and the default FastAPI path converter would split on them. The `:path` converter preserves the full segment.
 
 ### T7 — admin MCP tools (`meho.connector.*`)
 
-Defined in [`mcp/tools/connector_admin.py`](../../backend/src/meho_backplane/mcp/tools/connector_admin.py). Seven tools registered at module import:
+Defined in [`mcp/tools/connector_admin.py`](../../backend/src/meho_backplane/mcp/tools/connector_admin.py) and [`mcp/tools/connector_ingest.py`](../../backend/src/meho_backplane/mcp/tools/connector_ingest.py). The seven original tools:
 
 | Tool | `required_role` | Wraps |
 |---|---|---|
@@ -261,13 +267,13 @@ Defined in [`mcp/tools/connector_admin.py`](../../backend/src/meho_backplane/mcp
 | `meho_connector_enable` | `tenant_admin` | `ReviewService.enable_connector()` |
 | `meho_connector_disable` | `tenant_admin` | `ReviewService.disable_connector()` |
 
-These are **administrative** MCP tools per [CLAUDE.md](../../CLAUDE.md)'s "What MEHO is NOT" note — distinct from the agent-surface meta-tools. The registry's `all_tools_for(operator)` filter hides them from `tools/list` for operators whose role doesn't meet `required_role`, and the `handle_tools_call` dispatcher re-checks the rank at invocation so a client that guesses a hidden tool name is still rejected.
+Three more ship with them: `meho_connector_ingest_status` (`operator`), `meho_connector_enable_reads` and `meho_connector_delete` (`tenant_admin`). `meho_connector_list` is on the default working surface. The others are **operator-plane** tools, listed only for a session with the `mcp:admin` scope ([`docs/codebase/mcp.md`](../codebase/mcp.md)). The registry's `all_tools_for(operator)` filter hides them from `tools/list` for operators whose role doesn't meet `required_role`, and the `handle_tools_call` dispatcher re-checks the rank at invocation so a client that guesses a hidden tool name is still rejected.
 
 There is **no parallel admin service class**; each handler converts the JSON-Schema-validated `arguments` dict into the canonical Pydantic model from `api_schemas` and calls the service directly. Responses are `model_dump(mode="json")`-ed onto the wire.
 
 ## The vSphere canary (T8 + G3.1-T3)
 
-End-to-end verification that the pipeline produces an agent-usable connector against the **full** v0.2 vSphere spec corpus (~3,470 operations across `vcenter.yaml` and `vi-json.yaml`). Acceptance test at [`tests/acceptance/test_g07_vsphere_canary.py`](../../backend/tests/acceptance/test_g07_vsphere_canary.py); operator-facing runbook at g07-vsphere-canary.md. Two-spec ingestion landed via [#503](https://github.com/evoila/meho/issues/503) after [#501](https://github.com/evoila/meho/issues/501) extended the parser to resolve `$ref: '#/components/parameters/*'` (the shape every vi-json operation uses for the shared `moId` path parameter).
+End-to-end verification that the pipeline produces an agent-usable connector against the **full** v0.2 vSphere spec corpus (~3,470 operations across `vcenter.yaml` and `vi-json.yaml`). The acceptance test (`tests/acceptance/test_g07_vsphere_canary.py`) and its runbook (`g07-vsphere-canary.md`) ship with the VMware connectors in evoila's enterprise pack, not in this repository ([decision record](../decisions/2026-10-28-own-connectors-leave-the-public-tree.md)). This section describes what that canary checks. Two-spec ingestion landed via [#503](https://github.com/evoila/meho/issues/503) after [#501](https://github.com/evoila/meho/issues/501) extended the parser to resolve `$ref: '#/components/parameters/*'` (the shape every vi-json operation uses for the shared `moId` path parameter).
 
 ### The 13-query govc-parity benchmark
 
@@ -286,7 +292,7 @@ After fix → re-run `meho connector ingest`. Body-hash idempotence on T2 means 
 The pipeline operationalises load-bearing CLAUDE.md postulates. The patterns below are **NOT** acceptable in post-G0.7 code:
 
 - **Wholesale auto-enable without operator review** — violates postulate 4 (operator-reviewable). An ingest pass that lands `review_status='enabled'` directly defeats the gate's purpose. The only legitimate path from `staged` to `enabled` is `enable_connector(...)` after the operator has reviewed groups + per-op overrides.
-- **Adding to the agent meta-tool surface** — violates postulate 5. The agent surface is the ~17 meta-tools in [CLAUDE.md](../../CLAUDE.md). T7 ships seven *administrative* MCP tools under `meho.connector.*` for operators with `tenant_admin` role — never visible to the agent's daily `tools/list`.
+- **Adding to the agent meta-tool surface** — violates postulate 5. The default agent surface is the 26 working-surface meta-tools pinned in [`docs/codebase/mcp.md`](../codebase/mcp.md). Of the connector tools, only `meho_connector_list` is on it; the others are operator-plane tools, listed only for a session with the `mcp:admin` scope.
 - **Hand-coding per-op MCP tools per ingested connector** — also violates postulate 5. A vCenter `vsphere.vm.list` tool registered as its own MCP tool is wrong; vendor operations reach the agent through `search_operations` + `call_operation` against the ingested rows.
 - **Embedding LLM prompts inline instead of as reviewable templates** — the two prompts live at [`ingest/prompts/propose_groups.md.j2`](../../backend/src/meho_backplane/operations/ingest/prompts/propose_groups.md.j2) and [`ingest/prompts/assign_op_to_group.md.j2`](../../backend/src/meho_backplane/operations/ingest/prompts/assign_op_to_group.md.j2) so prompt iterations are reviewable diffs. Inline string literals defeat that discipline.
 - **Bypassing the review-queue audit trail** — direct UPDATEs to `operation_group.review_status` or `endpoint_descriptor.is_enabled` outside `ReviewService` lose the `meho.connector.*` audit emission and break G8 replay.
@@ -327,10 +333,9 @@ The G0.7 canary is currently stub-LLM-only — the acceptance test ships a deter
 - **Prerequisite tasks (all merged on `main`):** [#401 T1 parser](https://github.com/evoila/meho/issues/401); [#403 T2 register_ingested_operations](https://github.com/evoila/meho/issues/403); [#404 T3 LLM grouping](https://github.com/evoila/meho/issues/404); [#402 T4 review-queue state machine](https://github.com/evoila/meho/issues/402); [#405 T5 CLI verbs](https://github.com/evoila/meho/issues/405); [#406 T6 REST routes](https://github.com/evoila/meho/issues/406); [#407 T7 admin MCP tools](https://github.com/evoila/meho/issues/407); [#408 T8 vSphere canary](https://github.com/evoila/meho/issues/408).
 - **Companion Initiative:** [#388 G0.6 Operation registry + dispatcher](https://github.com/evoila/meho/issues/388) — the substrate this pipeline populates. See [operations-substrate.md](operations-substrate.md).
 - **Operator runbook:** [connector-ingestion.md](../cross-repo/connector-ingestion.md) — how to drive the pipeline end-to-end against a new vendor surface.
-- **vSphere canary runbook:** g07-vsphere-canary.md — the worked example operators reproduce locally.
+- **vSphere canary runbook:** g07-vsphere-canary.md — ships with the VMware connectors in evoila's enterprise pack.
 - **Codebase doc:** [docs/codebase/spec-ingestion.md](../codebase/spec-ingestion.md) — internal symbol-level map; updated in lock-step with code changes.
 - **CLAUDE.md postulates:** postulate 1 (two connector kinds, both first-class); postulate 4 (operation grouping + LLM hints, operator-reviewable); postulate 5 (agent surface is meta-tools).
 - **v0.1-spec anchors** (the original design spec; internal): §3 Operations L289–313 (auto-derive primary); §4 JSONFlux (set-shaped result discipline the dispatcher applies after this pipeline produces the operation; public design: [jsonflux.md](jsonflux.md)).
 - **ADR:** [locked-decisions.md](../decisions/locked-decisions.md) — locked architecture decisions.
 - **OpenAPI specifications:** [OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3.html); [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html).
-- **Best-practices anchors:** `.claude/skills/implement-issue/ai_engineering_best_practices.md` (LLM prompt discipline, output-schema validation, operator-review gate before LLM-summarised content reaches agents); `.claude/skills/implement-issue/devops_best_practices.md` (architecture docs reflect shipped code; mermaid diagrams for control flow).

@@ -61,6 +61,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.audit_query.query import is_withdraw_row
+from meho_backplane.auth.operator import MACHINE_PRINCIPAL_KINDS
 from meho_backplane.db.models import (
     AuditLog,
     EndpointDescriptor,
@@ -91,6 +92,9 @@ __all__ = [
 #: The single external-reference shape the backplane's own runbook + work_ref
 #: tooling emits; anything else stays raw (never guessed into a URL).
 _GH_WORK_REF = re.compile(r"^gh:(?P<owner>[^/]+)/(?P<repo>[^#]+)#(?P<number>\d+)$")
+
+#: The stored ``principal_kind`` values of a machine login (#3885).
+_MACHINE_KIND_VALUES: frozenset[str] = frozenset(kind.value for kind in MACHINE_PRINCIPAL_KINDS)
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,9 @@ class SubjectRef:
 
     sub: str
     name: str | None
+    #: The principal kind saved with the name (``user`` / ``agent`` /
+    #: ``service`` / ``runner``), or ``None`` when the row has none (#3885).
+    kind: str | None = None
 
     @property
     def resolved(self) -> bool:
@@ -144,12 +151,19 @@ class SubjectRef:
         return bool(self.name)
 
     @property
+    def machine_kind(self) -> str | None:
+        """The kind when a machine login (not a person) acted, else ``None``."""
+        if self.kind in _MACHINE_KIND_VALUES:
+            return self.kind
+        return None
+
+    @property
     def display(self) -> str:
         """The best human label available (the name, else the raw ``sub``)."""
         return self.name or self.sub
 
 
-def subject_ref(sub: str | None, name: str | None) -> SubjectRef | None:
+def subject_ref(sub: str | None, name: str | None, kind: str | None = None) -> SubjectRef | None:
     """Build a :class:`SubjectRef` for *sub*, or ``None`` when there is no sub.
 
     The shared entry point every operator surface uses to render an identity
@@ -161,7 +175,7 @@ def subject_ref(sub: str | None, name: str | None) -> SubjectRef | None:
     """
     if not sub:
         return None
-    return SubjectRef(sub=sub, name=name or None)
+    return SubjectRef(sub=sub, name=name or None, kind=kind or None)
 
 
 @dataclass(frozen=True)

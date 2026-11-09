@@ -98,6 +98,7 @@ from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.models import AuditEventClass
 from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.human_only import human_only_remediation
+from meho_backplane.mcp.profiles import profile_admits
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     ToolDefinition,
@@ -112,6 +113,8 @@ from meho_backplane.mcp.registry import (
     redacted_audit_uri,
     role_at_least,
     surface_visible,
+    tool_role_gate_met,
+    tool_surface,
 )
 from meho_backplane.mcp.server import (
     McpExecutionFailedError,
@@ -497,16 +500,34 @@ async def handle_tools_call(
         # role-forbidden call still reports the role reason — so the
         # listing filter is enforced, not cosmetic: knowing the name of an
         # operator-plane tool can't bypass the mcp:admin elevation gate.
-        if not surface_visible(operator, defn.surface):
+        surface = tool_surface(defn)
+        if not surface_visible(operator, surface):
             _log.warning(
                 "mcp_tool_call_surface_forbidden",
                 tool=name,
-                surface=defn.surface,
+                surface=surface,
             )
             status_code = 403
             raise McpInvalidParamsError(
                 f"forbidden: {name!r} is on the operator surface and requires "
                 "an elevated (mcp:admin) MCP session",
+            )
+
+        # Tool profile (#4172): a session that named a profile lists only
+        # that profile's tools, and a call to another tool is refused, so
+        # the smaller list is the real list.
+        if not profile_admits(operator.mcp_tool_profile, name):
+            _log.warning(
+                "mcp_tool_call_profile_forbidden",
+                tool=name,
+                profile=operator.mcp_tool_profile,
+            )
+            status_code = 403
+            raise McpInvalidParamsError(
+                f"forbidden: {name!r} is not in the {operator.mcp_tool_profile!r} "
+                "tool profile. Use a tool from your tool list, or connect "
+                "without the profile to get the full list.",
+                data={"reason": "not_in_profile", "profile": operator.mcp_tool_profile},
             )
 
         # Add-on family gate (Initiative #2900, Task #3029): a tool bound to a
@@ -547,6 +568,12 @@ async def handle_tools_call(
         # on "" silently matches nothing. Required fields keep the check.
         if defn.op_class == "read":
             arguments = _drop_empty_optional_text(arguments, defn.inputSchema)
+
+        # Who-calls check (#5770): a tool that always refuses some callers
+        # says so before the input check, so the caller gets the refusal on
+        # the first try instead of an input error first.
+        if defn.caller_check is not None:
+            defn.caller_check(operator)
 
         # Validate arguments against the tool's inputSchema. ``cls`` is
         # pinned to :class:`jsonschema.Draft202012Validator` to make the
@@ -847,6 +874,8 @@ def _operator_meets_required_role(
     the list-time RBAC filter. The shared rule lives in the registry
     module; this helper is a thin re-application at the call site.
     """
+    if isinstance(defn, ToolDefinition):
+        return tool_role_gate_met(operator, defn)
     return role_at_least(operator.tenant_role, defn.required_role)
 
 

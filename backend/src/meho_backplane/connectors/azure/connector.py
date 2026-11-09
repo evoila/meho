@@ -206,6 +206,10 @@ class AzureConnector(
     product = "azure"
     version = "2026.10"
     impl_id = "azure-arm"
+    summary = (
+        "Reads Azure subscriptions (VMs, Kubernetes clusters, networks, storage, costs, security "
+        "and policy), changes tags and starts patch checks."
+    )
     supported_version_range: str | None = None
     priority = 1
     #: No redirect is followed: every subscription shares one host, so even a

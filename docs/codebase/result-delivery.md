@@ -5,7 +5,7 @@ inside a size limit. This doc covers three parts that were added
 together (#3639, #3640, #3641) and the numbers that size them (#3642):
 
 - a **dedicated result cache**: its own Valkey with `noeviction`, apart
-  from the governance store;
+  from the governance store. It is off by default;
 - a **bounded worker pool** for result reads: a read is refused before it
   touches the store when the pool is full, and one deadline covers the
   whole read;
@@ -23,8 +23,12 @@ numbers and the telemetry rules.
 ## Dedicated result cache
 
 **What it is.** Result handles hold the full rows of a large result for
-one TTL (default 3600 s). They now live in their own Valkey 9.x instance,
-the chart subchart `result-cache` (Valkey 9.x is the store chosen in
+one TTL (default 3600 s). They can live in their own Valkey 9.x instance,
+the chart subchart `result-cache`. This store is off by default
+(`resultCache.enabled: false` and `resultCache.writerEnabled: false` in
+`deploy/charts/meho/values.yaml`). While the writer is off, new handles go
+to the broadcast Valkey; reads check the result cache first, then the
+broadcast Valkey (Valkey 9.x is the store chosen in
 ADR 0005; see [`devops.md`](devops.md) and [`broadcast.md`](broadcast.md)).
 Its `valkey.conf` sets an explicit `maxmemory` (chart
 `resultCache.maxmemory`, default `768mb`) and
@@ -57,7 +61,7 @@ read checks the same cap **before** it decodes anything
 old record can be larger. Such a record is a miss: the caller gets the
 typed "handle not readable" result (`handle_not_found`, "re-run the
 operation"), and the backplane logs `result_handle_record_over_cap` with
-the byte counts only. The record is never decoded and its rows are never
+the handle id, the tenant id and the byte counts. The record is never decoded and its rows are never
 returned.
 
 ## Bounded executor for result reads
@@ -102,7 +106,7 @@ and cut the work down. Wire ceilings run last, on the encoded response.
 |---|---|---|---|
 | Inline sample budget | `JSONFLUX_SAMPLE_BYTE_BUDGET` (4096) | Sample rows on a reduced response | Fewer sample rows |
 | Rows budget | `RESULT_QUERY_MAX_OUTPUT_ROWS` (500), `RESULT_QUERY_MAX_OUTPUT_BYTES` (256 KiB) | `rows` of a read | `output_too_large` error |
-| Completed-call wire ceiling | `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (256 KiB, at least 2048) | A finished `call_operation`; a `search_memory` response | `delivery="partial"` or `"unavailable"` |
+| Completed-call wire ceiling | `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (256 KiB, at least 2048) | A finished `call_operation` (also the stored result of an async run); a `search_memory` response; a `query_topology` answer (it names `delivery_cap` in its `completeness`) | `delivery="partial"` or `"unavailable"` |
 | Knowledge search wire ceiling | `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (same value) | A `search_knowledge` response | lowest-ranked hits left out, `delivery="partial"`, `omitted_hits` |
 | Read wire ceiling | `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` (2 MiB) | A `result_query` response; a Memory selected read (`meho://memory/id/{document_uuid}`) | `output_too_large` with `delivery=unavailable` |
 
@@ -175,7 +179,7 @@ How each value is derived (the rules are pinned by
   This is an upper estimate: check the live value with
   `result_cache_memory_bytes{kind="used"}`.
 - **Decoded bytes and nodes (reducer work guard):** the guard should not
-  refuse a payload the store could still keep whole. Each profile's work
+  refuse a payload that the store can keep whole. Each profile's work
   per stored byte is scaled to a record that fills the 16 MiB cap, then
   multiplied by `--headroom` (default 1.25).
 - **Wire ceilings:** the largest measured response times `--headroom`.
@@ -265,7 +269,7 @@ labels.
 | Cache occupancy | metric `result_cache_memory_bytes` | `kind` (`used`, `max`) |
 | Where a read found its record | metric `result_cache_reads_total` | `source` (`v2`, `legacy`, `miss`) |
 | Retained prefix length | log `result_handle_spilled` | `stored_rows`, `total_rows`, `namespace` |
-| Record over the cap | logs `result_handle_document_over_record_cap`, `result_handle_record_over_cap` | `record_bytes`, `max_record_bytes` |
+| Record over the cap | logs `result_handle_document_over_record_cap`, `result_handle_record_over_cap` | `record_bytes`, `max_record_bytes`, plus handle id and tenant id (and `op_id` on the document log) |
 | Executor admission rejection | log `result_read_rejected` | `reason`, `scope` |
 | Output encoded size | error fields on `output_too_large`; `extras.delivered_bytes` on a trimmed call | byte counts only |
 | Delivery-partial reason | `delivery` and `extras` on the response; log `delivery_receipt_over_ceiling` | state, byte counts |
@@ -294,7 +298,7 @@ Prefer metrics over parsing logs.
 - The benchmark profiles are built from fixed row shapes, not from
   captured customer data. Re-run it when a much wider vendor row shows
   up, and compare with the live `result_cache_memory_bytes` values.
-- Five of the signals in the telemetry table are not emitted yet.
+- Four of the signals in the telemetry table are not emitted yet.
 
 ## References
 

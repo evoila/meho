@@ -34,11 +34,14 @@ Two write paths with two different rules:
   reported as conflicts and not written, so an existing entry with a
   conflicting slug stays unchanged. Filesystem listing order can no
   longer decide which file wins.
-* **Direct create** (:meth:`create_entry`) is an explicit replace:
-  the caller names one slug and the newest write wins. The route
-  records ``audit_created`` so a replace is visible in the audit log.
-  There is no expected-revision check; that waits for a real
-  multi-writer workflow.
+* **Direct write** (:meth:`create_entry`) names one slug and the
+  revision the writer read (``expected_revision``). A write without it
+  only creates: when the slug exists, the write is refused. A write
+  that names an older revision is refused too. Both raise
+  :class:`~meho_backplane.kb.stale_revision.KbStaleRevisionError` with
+  the current revision and what changed. So two writers never
+  overwrite each other without seeing it. The route records
+  ``audit_created`` so a create is visible in the audit log.
 
 Both paths stamp a provenance block (source kind, relative path,
 write time) through :mod:`meho_backplane.kb.provenance`. No absolute
@@ -91,7 +94,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 
@@ -103,6 +106,7 @@ from meho_backplane.kb.directory_ingest import ingest_directory as _ingest_direc
 from meho_backplane.kb.passages import revision_uri
 from meho_backplane.kb.provenance import read_provenance, stamp_provenance
 from meho_backplane.kb.revisions import (
+    ExpectedRevision,
     current_revision_id,
     delete_entry_rows,
     get_revision,
@@ -114,6 +118,7 @@ from meho_backplane.kb.schemas import (
     KB_SOURCE,
     META_CREATED_BY_SUB,
     META_KB_PASSAGE,
+    META_SHARED,
     KbEntry,
     KbEntryNotOwnedError,
     KbEntryRevision,
@@ -124,9 +129,29 @@ from meho_backplane.kb.schemas import (
     KbReservedMetadataError,
     validate_slug,
 )
+from meho_backplane.kb.shared import (
+    check_may_share,
+    refuse_shared_slug,
+    shared_owner_tenants,
+    visible_to,
+)
+from meho_backplane.lesson_header import add_candidate_expiry, normalise_lesson_header
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
+from meho_backplane.retrieval.time_window import TimeWindow
 
-__all__ = ["KbIngestRootError", "KbService"]
+__all__ = ["KbIngestRootError", "KbListOrder", "KbSearchScope", "KbService", "add_shared_hits"]
+
+#: Row order of :meth:`KbService.list_entries`. ``"slug"`` (the default)
+#: sorts A to Z by slug; ``"newest"`` puts the most recently updated
+#: entry first, like the memory list (#5679).
+KbListOrder = Literal["slug", "newest"]
+
+#: Where :meth:`KbService.search_entries` looks (#5726). ``"all"`` (the
+#: default): the caller's tenant and the shared scope of the instance.
+#: ``"tenant"``: only the entries the caller's tenant owns. ``"shared"``:
+#: only the entries in the shared scope, the caller's own shared entries
+#: included.
+KbSearchScope = Literal["all", "tenant", "shared"]
 
 
 #: First-N characters of a body returned in :class:`KbEntrySearchHit.snippet`
@@ -188,12 +213,15 @@ class KbService:
         filter_pattern: str | None = None,
         limit: int = DEFAULT_LIST_LIMIT,
         offset: int = 0,
+        order: KbListOrder = "slug",
     ) -> list[KbEntry]:
-        """Return up to *limit* kb entries for *tenant_id*, slug-sorted.
+        """Return up to *limit* kb entries for *tenant_id*, slug-sorted by default.
 
         Pure list, no retrieval -- this is the ``meho kb list`` (T4)
         and ``GET /api/v1/kb`` (T2) backend. Sorted by slug so a
-        casual ``meho kb list`` output is predictable across runs.
+        casual ``meho kb list`` output is predictable across runs;
+        ``order="newest"`` sorts by ``updated_at``, newest first, with
+        the slug as tie-breaker so pages stay stable.
 
         ``filter_pattern`` is a SQL ``LIKE`` pattern matched against
         the slug; pass ``"vcenter-%"`` to narrow to vcenter entries.
@@ -217,6 +245,8 @@ class KbService:
         offset
             Pagination offset. ``0`` (default) returns from the top.
             Negative offset raises :class:`ValueError`.
+        order
+            ``"slug"`` (default) or ``"newest"``; see :data:`KbListOrder`.
         """
         if limit < 0:
             raise ValueError(f"limit must be >= 0; got {limit}")
@@ -230,10 +260,16 @@ class KbService:
             stmt = (
                 select(Document, current_revision_id())
                 .where(
-                    Document.tenant_id == tenant_id,
+                    visible_to(tenant_id),
                     Document.source == KB_SOURCE,
                 )
-                .order_by(Document.source_id)
+                .order_by(
+                    *(
+                        (Document.updated_at.desc(), Document.source_id)
+                        if order == "newest"
+                        else (Document.source_id,)
+                    )
+                )
                 .limit(limit)
                 .offset(offset)
             )
@@ -249,6 +285,9 @@ class KbService:
         """Return the full :class:`KbEntry` for *(tenant_id, slug)*; ``None`` if absent.
 
         Backs ``meho kb show`` (T4) and ``GET /api/v1/kb/{slug}`` (T2).
+        An entry of the shared scope (see :mod:`meho_backplane.kb.shared`)
+        is returned too, with the owner tenant's id.
+
         Slug is NOT re-validated here -- a caller passing an
         out-of-shape slug just gets ``None`` (no row will match the
         natural key) rather than a 422. The route / CLI layer does the
@@ -257,17 +296,19 @@ class KbService:
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            result = await session.execute(
-                select(Document, current_revision_id()).where(
-                    Document.tenant_id == tenant_id,
-                    Document.source == KB_SOURCE,
-                    Document.source_id == slug,
+            rows = (
+                await session.execute(
+                    select(Document, current_revision_id()).where(
+                        visible_to(tenant_id),
+                        Document.source == KB_SOURCE,
+                        Document.source_id == slug,
+                    )
                 )
-            )
-            row = result.one_or_none()
-        if row is None:
+            ).all()
+        if not rows:
             return None
-        doc, revision_id = row
+        # The tenant's own entry wins over a shared one with the same slug.
+        doc, revision_id = next((r for r in rows if r[0].tenant_id == tenant_id), rows[0])
         return _doc_to_entry(doc, revision_id)
 
     async def get_revision(
@@ -295,27 +336,33 @@ class KbService:
         *,
         actor_sub: str | None = None,
         own_entries_only: bool = False,
+        may_set_curation_keys: bool | None = None,
+        expected_revision: uuid.UUID | None = None,
     ) -> tuple[KbEntry, bool]:
-        """Insert (or re-index) one kb entry; return ``(entry, created)``.
+        """Create one kb entry, or update it from the revision the writer read.
 
-        Validates *slug* before touching the substrate. Delegates to
-        :func:`~meho_backplane.retrieval.indexer.index_document` so
-        the body-hash short-circuit applies -- callers writing an
-        already-present entry with the same body pay zero embedding
-        cost, just an ``updated_at`` bump.
+        Validates *slug* before touching the substrate. A write that
+        changes neither body nor metadata pays zero embedding cost,
+        just an ``updated_at`` bump; a change to the metadata alone adds
+        a revision but keeps the passages.
+
+        *expected_revision* is the ``revision_id`` a read of the entry
+        returned. ``None`` means the writer read no entry, so the write
+        only creates. When the slug exists and it does not name the
+        current revision, nothing is written and
+        :class:`~meho_backplane.kb.stale_revision.KbStaleRevisionError`
+        is raised, with the current revision and what changed since.
 
         Used by ``POST /api/v1/kb`` (T2) and the MCP
         ``add_to_knowledge`` meta-tool (T3). RBAC (``tenant_admin``)
         enforced by the route layer.
 
-        This is the explicit replace path: last write wins. A second
-        create for the same slug replaces body and metadata with no
-        expected-revision check; the route maps ``created=False`` to
-        HTTP 200 and records ``audit_created`` so the replace is
-        auditable. Directory ingest follows a different rule (see
-        :meth:`ingest_directory`). Every write stamps a provenance
-        block with ``source_kind="direct"`` and no relative path,
-        replacing any ``provenance`` key the caller sent.
+        An update replaces body and metadata; the route maps
+        ``created=False`` to HTTP 200 and records ``audit_created`` so
+        the update is auditable. Directory ingest follows a different
+        rule (see :meth:`ingest_directory`). Every write stamps a
+        provenance block with ``source_kind="direct"`` and no relative
+        path, replacing any ``provenance`` key the caller sent.
 
         Cross-principal writes are wiki-like for a ``tenant_admin`` (any
         ``tenant_admin`` may overwrite any other principal's slug
@@ -328,7 +375,16 @@ class KbService:
         :data:`~meho_backplane.kb.schemas.CURATION_METADATA_KEYS` raises
         :class:`~meho_backplane.kb.schemas.KbReservedMetadataError`. So
         an operator can create entries and change only its own, and
-        cannot make an entry look curated. Attribution comes from
+        cannot make an entry look curated. *may_set_curation_keys*
+        splits the two rules: it defaults to ``not own_entries_only``,
+        and the MCP tool passes ``False`` for a reviewer, who may change
+        any entry but still may not set those keys.
+
+        *metadata* is checked as a lesson header
+        (:mod:`meho_backplane.lesson_header`; a wrong value raises
+        ``LessonHeaderError``). A ``candidate`` with no ``expires_at``
+        gets six months after ``learned_at``. A slug that is a shared
+        entry of another tenant raises ``KbSharedSlugError``. Attribution comes from
         :func:`~meho_backplane.kb.attribution.merge_attribution`:
         ``created_by_sub`` set once and preserved across overwrites,
         ``last_updated_by_sub`` rewritten each write, both in
@@ -353,13 +409,20 @@ class KbService:
         :class:`~meho_backplane.kb.schemas.InvalidKbSlugError`).
         """
         validate_slug(slug)
-        if own_entries_only:
-            _refuse_reserved_metadata(metadata)
+        metadata = await _checked_direct_metadata(
+            tenant_id,
+            slug,
+            metadata,
+            may_set_curation_keys=not own_entries_only
+            if may_set_curation_keys is None
+            else may_set_curation_keys,
+        )
 
         doc, revision_id, created = await write_entry(
             tenant_id=tenant_id,
             slug=slug,
             body=body,
+            expected=ExpectedRevision(expected_revision),
             metadata_for=lambda existing: _direct_write_metadata(
                 existing,
                 slug=slug,
@@ -400,6 +463,8 @@ class KbService:
         *,
         filters: dict[str, Any] | None = None,
         limit: int = 10,
+        time_window: TimeWindow | None = None,
+        scope: KbSearchScope = "all",
     ) -> list[KbEntrySearchHit]:
         """Hybrid BM25 + cosine retrieval scoped to *tenant_id*'s kb corpus.
 
@@ -428,13 +493,20 @@ class KbService:
             predicate against ``documents.metadata`` (G4.4-T1 /
             #1177). Pass e.g. ``{"kind": "kb-entry", "source_kind":
             "evoila-distilled"}`` to scope hits to the curated
-            slice. Values must be JSON scalars -- the substrate's
-            ``@>`` containment is shape-flat-only by contract.
+            slice. A value may also be a list, such as ``{"tags":
+            ["vm", "snapshot"]}``: then the entry must hold every listed
+            item (``@>`` containment).
         limit
             Maximum entries to return. Default 10; capped at 50 by the
             API surface. Up to
             :data:`~meho_backplane.retrieval.retriever.CANDIDATE_LIMIT`
             passages are ranked to fill them.
+        time_window
+            Optional limits on ``confirmed_at`` and on the time of the
+            last write, checked in the candidate SQL (#5726).
+        scope
+            Where to look; see :data:`KbSearchScope`. Each hit carries
+            the ``tenant_id`` that owns it and whether it is ``shared``.
         """
         if limit < 0:
             raise ValueError(f"limit must be >= 0; got {limit}")
@@ -447,23 +519,119 @@ class KbService:
             if isinstance(kind, str):
                 kind_filter = kind
             # Everything other than ``kind`` flows to the substrate's
-            # ``metadata_filters`` -- the v0.2 "currently ignored"
-            # disclaimer in the MCP tool description goes away once
-            # this path lights up the substrate primitive (G4.4-T1 /
-            # #1177). An empty residual dict normalises to ``None``
-            # so the substrate skips the predicate.
+            # ``metadata_filters`` (G4.4-T1 / #1177). An empty residual
+            # dict normalises to ``None`` so the substrate skips the
+            # predicate.
             residual = {k: v for k, v in filters.items() if k != "kind"}
             metadata_filters = residual or None
 
-        ranked = await retrieve(
-            tenant_id=tenant_id,
+        own_filters = _own_scope_filters(tenant_id, metadata_filters, scope)
+        ranked: list[RetrievalHit] = []
+        if own_filters is not None:
+            ranked = await retrieve(
+                tenant_id=tenant_id,
+                query=query,
+                source=KB_SOURCE,
+                kind=kind_filter,
+                limit=CANDIDATE_LIMIT,
+                metadata_filters=own_filters or None,
+                time_window=time_window,
+            )
+        if scope != "tenant":
+            ranked = await add_shared_hits(
+                ranked,
+                tenant_id=tenant_id,
+                query=query,
+                kind=kind_filter,
+                limit=CANDIDATE_LIMIT,
+                metadata_filters=metadata_filters,
+                time_window=time_window,
+            )
+        return _group_by_entry(ranked, limit, shared_owner_tenants())
+
+
+def _own_scope_filters(
+    tenant_id: uuid.UUID,
+    metadata_filters: dict[str, Any] | None,
+    scope: KbSearchScope,
+) -> dict[str, Any] | None:
+    """Return the metadata filters of the search in the caller's own tenant.
+
+    ``None`` means: do not search the own tenant. That is the case for
+    ``scope="shared"`` when the tenant is not a listed owner (it has no
+    shared entries), or when the caller also asked for ``shared`` other
+    than true (nothing can match).
+    """
+    filters = dict(metadata_filters or {})
+    if scope != "shared":
+        return filters
+    if tenant_id not in shared_owner_tenants() or filters.get(META_SHARED, True) is not True:
+        return None
+    filters[META_SHARED] = True
+    return filters
+
+
+async def add_shared_hits(
+    own: list[RetrievalHit],
+    *,
+    tenant_id: uuid.UUID,
+    query: str,
+    kind: str | None,
+    limit: int,
+    metadata_filters: dict[str, Any] | None,
+    time_window: TimeWindow | None = None,
+) -> list[RetrievalHit]:
+    """Add the kb hits of the shared scope to *own*, best first, at most *limit*.
+
+    Each owner tenant is searched on its own, narrowed to its ``shared``
+    entries. A shared hit whose slug the tenant has itself is dropped, so
+    the tenant's own entry wins. A ``shared`` filter of the caller other
+    than ``true`` excludes every shared entry, so then *own* is returned
+    unchanged. Used by :meth:`KbService.search_entries` and by
+    ``POST /api/v1/retrieve`` with ``source="kb"`` (``meho kb search``).
+    """
+    owners = shared_owner_tenants() - {tenant_id}
+    filters = dict(metadata_filters or {})
+    if not owners or filters.get(META_SHARED, True) is not True:
+        return own
+    filters[META_SHARED] = True
+    own_slugs = {_hit_slug(hit) for hit in own}
+    merged = list(own)
+    for owner in sorted(owners):
+        shared_hits = await retrieve(
+            tenant_id=owner,
             query=query,
             source=KB_SOURCE,
-            kind=kind_filter,
-            limit=CANDIDATE_LIMIT,
-            metadata_filters=metadata_filters,
+            kind=kind,
+            limit=limit,
+            metadata_filters=filters,
+            time_window=time_window,
         )
-        return _group_by_entry(ranked, limit)
+        merged.extend(hit for hit in shared_hits if _hit_slug(hit) not in own_slugs)
+    merged.sort(key=lambda hit: hit.fused_score, reverse=True)
+    return merged[:limit]
+
+
+async def _checked_direct_metadata(
+    tenant_id: uuid.UUID,
+    slug: str,
+    metadata: dict[str, object] | None,
+    *,
+    may_set_curation_keys: bool,
+) -> dict[str, object] | None:
+    """Check the caller metadata of a direct create and return it with dates as text.
+
+    Raises for a curation key the caller may not set, a wrong lesson
+    header value, a ``shared`` the tenant may not set, and a slug that is
+    a shared entry of another tenant.
+    """
+    if not may_set_curation_keys:
+        _refuse_reserved_metadata(metadata)
+    if metadata is not None:
+        metadata = normalise_lesson_header(metadata, allowed_reserved=frozenset({"provenance"}))
+    check_may_share(tenant_id, metadata)
+    await refuse_shared_slug(tenant_id, slug)
+    return metadata
 
 
 def _refuse_reserved_metadata(metadata: dict[str, object] | None) -> None:
@@ -507,11 +675,12 @@ def _direct_write_metadata(
         # No caller metadata and no actor: keep the existing keys, but
         # still record this write's provenance.
         merged = dict(existing) if existing is not None else {}
+    now = datetime.now(UTC)
     return stamp_provenance(
-        merged,
+        add_candidate_expiry(merged, existing=existing, now=now),
         source_kind="direct",
         relative_path=None,
-        ingested_at=datetime.now(UTC),
+        ingested_at=now,
     )
 
 
@@ -527,7 +696,9 @@ def _refuse_if_not_own(slug: str, existing: dict[str, object], actor_sub: str | 
         raise KbEntryNotOwnedError(slug, creator if isinstance(creator, str) else None)
 
 
-def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearchHit]:
+def _group_by_entry(
+    ranked: list[RetrievalHit], limit: int, shared_owners: frozenset[uuid.UUID]
+) -> list[KbEntrySearchHit]:
     """Fold ranked passage rows into one hit per entry, best entry first.
 
     A hit takes its scores from its best passage and keeps up to
@@ -537,7 +708,7 @@ def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearc
     groups: dict[str, tuple[RetrievalHit, list[KbPassageEvidence]]] = {}
     for hit in ranked:
         locator = _locator(hit)
-        slug = hit.source_id if locator is None else str(hit.doc_metadata[META_KB_PASSAGE]["slug"])
+        slug = _hit_slug(hit)
         if slug not in groups:
             if len(groups) == limit:
                 continue
@@ -553,7 +724,16 @@ def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearc
                     cosine_rank=hit.cosine_rank,
                 )
             )
-    return [_entry_hit(slug, best, evidence) for slug, (best, evidence) in groups.items()]
+    return [
+        _entry_hit(slug, best, evidence, shared_owners) for slug, (best, evidence) in groups.items()
+    ]
+
+
+def _hit_slug(hit: RetrievalHit) -> str:
+    """Return the slug of the entry a ranked row belongs to."""
+    if _locator(hit) is None:
+        return hit.source_id
+    return str(hit.doc_metadata[META_KB_PASSAGE]["slug"])
 
 
 def _locator(hit: RetrievalHit) -> KbPassageLocator | None:
@@ -581,13 +761,22 @@ def _locator(hit: RetrievalHit) -> KbPassageLocator | None:
 
 
 def _entry_hit(
-    slug: str, best: RetrievalHit, evidence: list[KbPassageEvidence]
+    slug: str,
+    best: RetrievalHit,
+    evidence: list[KbPassageEvidence],
+    shared_owners: frozenset[uuid.UUID],
 ) -> KbEntrySearchHit:
-    """Build the hit for one entry from its best row and its passages."""
+    """Build the hit for one entry from its best row and its passages.
+
+    The entry is ``shared`` when its metadata says ``shared: true`` and
+    its owner tenant is listed in ``KB_SHARED_TENANT_IDS``.
+    """
     metadata = {k: v for k, v in best.doc_metadata.items() if k != META_KB_PASSAGE}
     complete = bool(evidence) and len(evidence) == evidence[0].locator.passage_count
     return KbEntrySearchHit(
         slug=slug,
+        tenant_id=best.tenant_id,
+        shared=metadata.get(META_SHARED) is True and best.tenant_id in shared_owners,
         snippet=_make_snippet(evidence[0].text if evidence else best.body),
         metadata=metadata,
         fused_score=best.fused_score,

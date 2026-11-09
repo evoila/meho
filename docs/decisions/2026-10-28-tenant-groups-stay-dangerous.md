@@ -1,6 +1,7 @@
 # Tenant groups stay at the dangerous risk level (decision)
 
 **Status:** decided by the product owner on 28 October 2026
+**Superseded in part by:** [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md), shipped in 0.44.0. A MEHO-SA-Operator may approve their own `dangerous` change, also for these four group operations. Everyone else still needs a second person. The risk level stays `dangerous`.
 **Date:** 2026-10-28
 **Task:** [#3872](https://github.com/evoila/meho/issues/3872)
 **Initiative:** [#3978](https://github.com/evoila/meho/issues/3978) (several tenants in one MEHO)

@@ -58,7 +58,7 @@ marketplace at a local checkout instead of `evoila/meho`.
   `meho:memory`, `meho:operations`, `meho:broadcast`.
 - **`hooks/`** — deterministic reflex hooks (`hooks/hooks.json` + scripts
   under `bin/`) that the harness runs without model initiative: a
-  session-start digest and advisory announce/report reminders. See
+  session-start digest and a one-time "read the feed first" reminder. See
   [Reflex hooks](#reflex-hooks).
 
 ## Configuration — no edits inside the installed plugin
@@ -280,18 +280,21 @@ Continue, CI bots); Claude Code consumers get the same discipline as skills:
 
 Skills and MCP descriptions are advisory — the model chooses whether to
 follow them. Hooks are deterministic: the Claude Code harness runs them, no
-model initiative required. `hooks/hooks.json` wires three reflexes, every one
+model initiative required. `hooks/hooks.json` wires two reflexes, every one
 **fail-open** (missing `meho` CLI, expired login, no VPN, or timeout ⇒ silent
 no-op, exit 0 — the session never breaks) and **warn-only** (no hook denies or
-blocks a tool call; enforcement with teeth is the server-side announce gate's
-job):
+blocks a tool call).
+
+People read the broadcast feed; only agents post. The plugin logs in as a
+person, and MEHO refuses an announcement from a person's login with
+`agent_identity_required`. So no hook asks the session to call
+`meho_broadcast_announce`; the reminder says to skip it. The person's
+operations are already recorded in the audit log.
 
 | Event | Script | Behaviour |
 |---|---|---|
 | `SessionStart` | `bin/session-start.sh` | Fetches a compact digest — recent tenant activity (the durable form of the broadcast window), scoped memory, and recent knowledge — via the `meho` CLI and prints it to stdout. Claude Code injects a SessionStart hook's stdout as session context, so read-before-start is automatic instead of a discipline the model must remember. |
-| `PreToolUse` on `call_operation` | `bin/pre-call-operation.sh` | If the session hasn't announced intent yet, emits a one-time advisory reminder naming `meho_broadcast_announce`, returned as `hookSpecificOutput.additionalContext` (no `permissionDecision`, so the normal permission flow proceeds). |
-| `PostToolUse` on `meho_broadcast_announce` | `bin/post-announce.sh` | Records that the session announced/reported, so the `PreToolUse` and `Stop` reminders fall silent. |
-| `Stop` | `bin/stop-report.sh` | If the session invoked `call_operation` but never announced/reported, emits a one-line report-on-completion reminder as `additionalContext`. This *continues* the turn once so Claude can act on it (Stop `additionalContext` does not let the turn end — it runs under the same loop protections as `decision: block`). It is bounded to a single nudge: the hook no-ops when `stop_hook_active` is `true` and writes a once-per-session marker, then lets the session stop. It never exits 2 (which would hard-block the stop). |
+| `PreToolUse` on `call_operation` | `bin/pre-call-operation.sh` | On the first `call_operation` of a session, emits a one-time advisory reminder: check `meho_broadcast_recent` for agents already working on the target, and skip `meho_broadcast_announce`. Returned as `hookSpecificOutput.additionalContext` (no `permissionDecision`, so the normal permission flow proceeds). |
 
 The digest reads `meho status` (gate), `meho audit recent`, `meho list`
 (memory), and `meho kb list`, each bounded by `timeout`/`gtimeout` when
@@ -323,12 +326,11 @@ Both the plugin and its bundled MCP server are named `meho`, so
 tool name, so the broadcast tools carry `meho_` twice). A bare
 `mcp__meho__call_operation` matcher **never fires** for a plugin-bundled
 server. Add a `.*` suffix (`mcp__plugin_meho_meho__.*`) when a server-wide
-match is wanted; the matchers here target the two exact tool names.
+match is wanted; the matcher here targets the one exact tool name.
 
-Session state (`used` / `announced` / `reminded` / `stop_reminded`) lives in
-per-session marker files under `${TMPDIR:-/tmp}/meho-plugin-hooks`, keyed by
-`session_id`, so the `PreToolUse` announce reminder (`reminded`) and the `Stop`
-report reminder (`stop_reminded`) each fire at most once per session.
+Session state (`reminded`) lives in a per-session marker file under
+`${TMPDIR:-/tmp}/meho-plugin-hooks`, keyed by `session_id`, so the
+`PreToolUse` reminder fires at most once per session.
 
 ## Out of scope
 

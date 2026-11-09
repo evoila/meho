@@ -5,7 +5,7 @@ Copyright (c) 2026 evoila Group
 
 # `smoke.sh` federation chain — acceptance contract
 
-> The producer-side specification of Goal #11 DoD bullet 2:
+> The producer-side specification of point 2 of the v0.1 "done" list:
 >
 > > `smoke.sh` passes (login + status + audit-row + Vault +
 > > DB-migration state) — the full federation chain works for a real
@@ -14,19 +14,9 @@ Copyright (c) 2026 evoila Group
 >
 > This document codifies **what "passing" looks like** for the
 > federation-chain end-to-end smoke. The actual smoke run executes on
-> the consumer side
-> (`evoila-bosnia/claude-rdc-hetzner-dc`);
+> the consumer side (the lab's deployment repo);
 > the producer (this repo) owns the acceptance bar + the verifier the
 > consumer's wrapper invokes as its last step.
-
-## Tracking issue
-
-This contract closes
-`evoila-bosnia/meho-internal#56`
-(parent Initiative
-#54,
-parent Goal
-#11).
 
 ## Why this lives in `evoila/meho`
 
@@ -41,18 +31,17 @@ consumer-owns-the-wrapper split as
 
 ## What the five legs prove
 
-The Goal #11 DoD bullet 2 phrasing — "login + status + audit-row +
+The "done" point's phrasing — "login + status + audit-row +
 Vault + DB-migration state" — maps to five discrete legs the verifier
-asserts in order. Each leg corresponds to a load-bearing Initiative
-the federation chain depends on:
+asserts. Each leg covers one part the federation chain depends on:
 
-| # | Leg | What it proves end-to-end | Predecessor task |
+| # | Leg | What it proves end-to-end | Code |
 | --- | --- | --- | --- |
-| 1 | **login** | `meho login <backplane>` (device-code flow) succeeds; the resulting access token is persisted in the OS keyring (or a 0600-mode file on headless hosts) and is usable by subsequent CLI calls. Verifies the Keycloak → CLI → token-store chain. | `#44` — `meho login` (G2.6-T2) / `#42` — CLI binary (G2.6) |
-| 2 | **status** | `meho status --json` (or the equivalent `curl -H "Authorization: Bearer ..." /api/v1/health`) returns 200 and the JSON response carries `operator.sub`, `vault.reachable=true`, `vault.read_ok=true`, `db.migrated=true`. Verifies the Status API + JWT middleware + the federation summary surface. | `#45` — `meho status` (G2.6-T3) |
-| 3 | **audit-row** | An authenticated `GET /api/v1/health` writes a synchronous row to `audit_log` (operator_sub, method=GET, path=/api/v1/health, status_code=200) before the response returns. Verifies the audit middleware's "row-before-response" contract end-to-end. | `#28` — audit middleware (G2.3-T2) |
-| 4 | **Vault** | The same `/api/v1/health` call exercises a Vault JWT/OIDC round-trip — the backplane forwards the operator's JWT to Vault, Vault verifies against the configured Keycloak trust, returns a Vault token bound to the operator, and the backplane reads `secret/meho/test/federation` under that token. Verifies the federation chain. | `#25` — Vault JWT federation (G2.2) |
-| 5 | **DB-migration state** | The chassis's `db_migration_probe()` reports `alembic_version == head`. Optional cluster-side cross-check: `kubectl get job -l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release>` shows `succeeded=1`, OR the helm release status is `deployed` (when the Job was GC'd by the hook-succeeded delete-policy). Verifies the migration-runner contract. | `#29` — migration runner + CI guard (G2.3-T3) |
+| 1 | **login** | `meho login <backplane>` (device-code flow) succeeds; the resulting access token is persisted in the OS keyring (or a 0600-mode file on headless hosts) and is usable by subsequent CLI calls. Verifies the Keycloak → CLI → token-store chain. | `cli/internal/cmd/login.go`, `cli/internal/auth/store.go` |
+| 2 | **status** | `meho status --json` (or the equivalent `curl -H "Authorization: Bearer ..." /api/v1/health`) returns 200 and the JSON response carries `operator.sub`, `vault.reachable=true`, `vault.read_ok=true`, `db.migrated=true`. Verifies the Status API + JWT middleware + the federation summary surface. | `cli/internal/cmd/status.go`, `backend/src/meho_backplane/api/v1/health.py` |
+| 3 | **audit-row** | An authenticated `GET /api/v1/health` writes a synchronous row to `audit_log` (operator_sub, method=GET, path=/api/v1/health, status_code=200) before the response returns. Verifies the audit middleware's "row-before-response" contract end-to-end. | `backend/src/meho_backplane/audit.py` |
+| 4 | **Vault** | The same `/api/v1/health` call exercises a Vault JWT/OIDC round-trip — the backplane forwards the operator's JWT to Vault, Vault verifies against the configured Keycloak trust, returns a Vault token bound to the operator, and the backplane reads `secret/meho/test/federation` under that token. Verifies the federation chain. | `backend/src/meho_backplane/api/v1/health.py`, `backend/src/meho_backplane/auth/vault.py` |
+| 5 | **DB-migration state** | The chassis's `db_migration_probe()` reports `alembic_version == head`. Optional cluster-side cross-check: `kubectl get job -l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release>` shows `succeeded=1`, OR the helm release status is `deployed` (when the Job was GC'd by the hook-succeeded delete-policy). Verifies the migration-runner contract. With the built-in PostgreSQL (the chart default) there is no Job: the migration runs in the pod's `migrate` init container, so the helm status check applies. | `backend/src/meho_backplane/db/migrations.py`, `backend/src/meho_backplane/db/migrate.py` |
 
 **Role requirement.** `GET /api/v1/health` is gated at
 `TenantRole.OPERATOR` (least-privilege hardening: every call
@@ -114,8 +103,8 @@ Leg #3 requires `psql` access to the live database. When the verifier
 runs from a host that does not have `DATABASE_URL` set (operator
 workstation without DB credentials), leg #3 becomes a `[note]` line
 emitting the exact `psql` command the operator should run, and the
-result is recorded in the closing-comment artefact on issue #56
-instead of in the verifier's exit code. Same posture as
+result is recorded in the closing-comment artefact of the tracking
+issue instead of in the verifier's exit code. Same posture as
 `install-verify.sh`'s authenticated audit-row check (#9) and
 `rollback-verify.sh`'s schema check (#2).
 
@@ -145,8 +134,8 @@ The budget does **not** cover:
 - Interactive `meho login` (device-code flow) — that runs in the
   consumer's wrapper before the verifier is invoked. Operator
   approval in the browser is unbounded.
-- Initial chart install / upgrade (covered by Task #55's
-  install-verify.sh's 5-minute budget)
+- Initial chart install / upgrade (covered by the 5-minute budget of
+  `install-verify.sh`, see [`install.md`](./install.md))
 
 ### Why 60 seconds is the right bar
 
@@ -168,18 +157,19 @@ chart / image / Vault role config — not in this document.
 
 ## What failure looks like
 
-The verifier exits non-zero on the first failed required leg and
-prints a diagnostic line. Common failure modes:
+The verifier runs every leg, prints one `[ok]`, `[FAIL]`, `[WARN]` or
+`[note]` line per check, and at the end exits 1 when any check failed
+(`smoke.sh: N passed, N failed, N warned`). Common failure modes:
 
 | Failure | Surface | First debug step |
 | --- | --- | --- |
 | Leg #1 fails — no token and no CLI | `[FAIL] login: no MEHO_ACCESS_TOKEN and meho CLI not on PATH` | The consumer's wrapper didn't run `meho login` or didn't export `MEHO_ACCESS_TOKEN`. Rerun the wrapper, OR run `meho login <backplane>` manually in the same shell |
 | Leg #2 fails — 401 | `[FAIL] status: GET .../api/v1/health failed` | Token is expired, the audience in the JWT doesn't match the backplane's configured audience, or the JWKS cache went stale and rejected a valid signature. Rerun `meho login <backplane>` to get a fresh token; if that still 401s, inspect `kubectl logs -n <ns> deployment/<release>` for JWT-validation errors |
-| Leg #2 fails — `operator.sub` missing | `[FAIL] status: response missing operator.sub` | The JWT validated but `verify_jwt_and_bind` didn't bind the sub into structlog — middleware regression. Inspect the route handler at `backend/src/meho_backplane/api/v1/health.py` |
+| Leg 2 fails — `operator.sub` missing | `[FAIL] status: response missing operator.sub` | The JWT validated but `verify_jwt_and_bind` (in `backend/src/meho_backplane/middleware.py`) didn't bind the sub — middleware regression. Inspect the route handler at `backend/src/meho_backplane/api/v1/health.py` |
 | Leg #3 fails — psql returns 0 rows | `[FAIL] audit-row: psql returned 0 rows` | Audit middleware did not write a row, OR the row didn't match the WHERE clause. Most often: path normalisation diverged (trailing slash, query string), the audit middleware's contextvar binding broke (operator_sub null in the row), or the request flow short-circuited before the middleware ran (e.g. a 401 from JWT validation — but then leg #2 would have failed first) |
 | Leg #4 fails — `vault.reachable=false` | `[FAIL] vault: not reachable from backplane` | Vault role JWKS URL drift (Keycloak realm renamed?), audience mismatch on the Vault role, network policy blocks egress to Vault, or Vault is sealed. `detail` field carries the exception class name |
 | Leg #4 fails — `vault.read_ok=false` | `[FAIL] vault: reachable but read failed` | JWT/OIDC login to Vault succeeded but the subsequent secret read failed. Either the operator's Vault policy doesn't permit reads on `secret/meho/test/federation`, OR the KV mount / path doesn't exist (consumer-side provisioning gap) |
-| Leg #5 fails — `db.migrated=false` | `[FAIL] db-migration: chassis reports .db.migrated=false` | DB unreachable from backplane, `alembic_version` table missing, or `alembic_version.version_num != head`. Inspect `kubectl logs -n <ns> deployment/<release>` for connection errors, or run `kubectl exec -n <ns> deployment/<release> -- python -m meho_backplane.db.migrations --check` (when the migration runner contract from Task #29 ships this entry-point) |
+| Leg 5 fails — `db.migrated=false` | `[FAIL] db-migration: chassis reports .db.migrated=false` | DB unreachable from backplane, `alembic_version` table missing, or `alembic_version.version_num != head`. Inspect `kubectl logs -n <ns> deployment/<release>` for connection errors, and the migration output: `kubectl logs -n <ns> <pod> -c migrate` (built-in PostgreSQL) or the logs of the migration Job. The runner (`python -m meho_backplane.db.migrate`) has no check-only mode |
 | Budget exceeded under `--enforce-budget` | `[FAIL] wall-clock Xs > budget 60s` | Inspect `kubectl get events -n <ns> --sort-by=.lastTimestamp` for slow legs. Most often: a Vault re-seal during the smoke window, a PG vacuum causing lock contention, or a Keycloak realm export running concurrently |
 
 The verifier never hides a failure behind a green check. Each
@@ -190,8 +180,8 @@ operator.sub, got null`).
 
 | Role | Action | Cadence |
 | --- | --- | --- |
-| **RDC operator** | Runs the consumer's `smoke.sh` wrapper from the operator workstation (with VPN + Vault session + a completed `meho login` in the same shell). Captures stdout + stderr + the optional `psql` output (when run from a host with DB access). | Per Goal #11 closing-criteria — once for the acceptance milestone; on every cold-deploy from then on |
-| **`evoila/meho` maintainer** | Reviews the captured run on issue #56 (or the linked artefact), confirms legs #1-#5 are green and (when the operator has DB access) the audit-row was found, ticks the DoD bullet on Goal #11 | Once per Goal-closing review |
+| **Lab operator** | Runs the consumer's `smoke.sh` wrapper from the operator workstation (with VPN + Vault session + a completed `meho login` in the same shell). Captures stdout + stderr + the optional `psql` output (when run from a host with DB access). | Once for the acceptance milestone; on every cold-deploy from then on |
+| **`evoila/meho` maintainer** | Reviews the captured run (or the linked artefact), confirms legs 1 to 5 are green and (when the operator has DB access) the audit-row was found, ticks the "done" point | Once per milestone review |
 | **CI (per-PR ephemeral smoke)** | Runs the unauthenticated subset of `install-verify.sh` against the per-PR `meho-ci-<n>` namespace via [`scripts/ci/pr-smoke.sh`](../../scripts/ci/pr-smoke.sh). The PR smoke does **not** run `smoke.sh` — it has no Keycloak token (the device-code flow needs a real browser). The federation chain smoke is a Goal-closing exercise, not a per-PR gate. | Federation-chain smoke does NOT run per-PR; per-PR smoke covers the unauthenticated surface only |
 
 The per-PR smoke and the closing-criteria federation smoke intentionally
@@ -199,15 +189,13 @@ do not overlap: the per-PR smoke catches regressions in the
 unauthenticated surface fast; this contract closes the federation
 chain's behaviour against a real operator + real Vault + real PG at
 the closing milestone. Together they're the two sides of the
-"every code path closes the real-target feedback loop" discipline
-Goal #11 makes non-negotiable.
+"every code path closes the real-target feedback loop" discipline.
 
 ## What the consumer-side `smoke.sh` wrapper needs to do
 
 For the producer-side verifier to be invocable end-to-end, the
-consumer's wrapper (lives at
-`evoila-bosnia/claude-rdc-hetzner-dc/manifests/meho/smoke.sh` per
-Goal #11 cross-repo deps) MUST:
+consumer's wrapper (`manifests/meho/smoke.sh` in the lab's deployment
+repo) MUST:
 
 1. **Record the start timestamp** as the first action:
 
@@ -219,28 +207,28 @@ Goal #11 cross-repo deps) MUST:
 2. **Run `meho login` interactively**:
 
    ```bash
-   meho login https://meho.evba.lab
+   meho login https://meho.example.com
    ```
 
    The operator completes the device-code flow in their browser. On
    success the CLI persists the token to the keyring (or 0600 file).
 
-3. **Export the access token** for the verifier:
+3. **Give the verifier the token.** The CLI has no command that
+   prints the token. Either leave `MEHO_ACCESS_TOKEN` unset (the
+   verifier then calls `meho status --json` for the status leg, and
+   the CLI uses its stored login), or export a token you got from
+   Keycloak another way:
 
    ```bash
-   export MEHO_ACCESS_TOKEN="$(meho token)"
+   export MEHO_ACCESS_TOKEN="<access-token>"   # optional
    ```
-
-   When `meho token` is not yet implemented (v0.2 surface), the
-   wrapper falls back to extracting the token from the CLI's
-   credentials file or asking the operator to paste it.
 
 4. **Invoke the verifier** as the last step:
 
    ```bash
    export DATABASE_URL='postgresql://meho:...@.../meho'   # optional
    bash scripts/acceptance/smoke.sh \
-     --backplane https://meho.evba.lab \
+     --backplane https://meho.example.com \
      --namespace meho \
      --release meho \
      --enforce-budget
@@ -259,7 +247,7 @@ operator has already completed `meho login` in a prior shell — the
 verifier then trusts the keyring-stored token without re-running
 the interactive flow.
 
-## Sensitive-data discipline (Goal #11 / Task #25)
+## Sensitive-data discipline
 
 The verifier holds itself to the same JWT-handling discipline the
 backplane enforces:
@@ -287,25 +275,24 @@ backplane enforces:
   shape can't open a SQL injection path through this verifier.
 
 The verifier's stdout / stderr is safe to capture verbatim into the
-closing-comment artefact on issue #56.
+closing-comment artefact of the tracking issue.
 
 ## Acceptance-criteria status
 
-The full set of acceptance criteria on
-issue #56
-and where each lands:
+The full set of acceptance criteria of this contract and where each
+lands:
 
 | AC | Status at PR-time | Evidence path |
 | --- | --- | --- |
-| AC1 — `meho login https://meho.evba.lab` succeeds; token stored; `meho status` no longer 401s | **deferred-to-consumer-side** | Interactive login requires a real Keycloak realm and a real browser. The producer-side verifier confirms a usable token is available (leg #1) and proves it works (leg #2) but cannot drive the device-code flow itself. Consumer's wrapper drives the login; verifier consumes the resulting token |
+| AC1 — `meho login https://<host>` succeeds; token stored; `meho status` stops returning 401 | **deferred-to-consumer-side** | Interactive login requires a real Keycloak realm and a real browser. The producer-side verifier confirms a usable token is available (leg 1) and proves it works (leg 2) but cannot drive the device-code flow itself. Consumer's wrapper drives the login; verifier consumes the resulting token |
 | AC2 — `meho status --json` returns JSON with `.operator.sub`, `.operator.email`, `.vault.reachable=true`, `.vault.read_ok=true`, `.db.migrated=true` | **verifier-asserted** (leg #2 + leg #4 + leg #5) | `jq -e` on each field of the `/api/v1/health` response. `.operator.email` is NOT asserted by the verifier (email is PII the verifier deliberately doesn't echo); the consumer's wrapper can run `meho status --json \| jq .operator.email` separately if needed |
-| AC3 — PG audit-row check: query against the lab's PG returns a row matching the `meho status` call | **verifier-asserted** (leg #3, when `DATABASE_URL` set) / **deferred-to-operator-side** (otherwise) | `psql` with the parameterised query above. When `DATABASE_URL` is unset on the verifier host, the verifier emits the exact `psql` command for the operator to run, and the operator pastes the output into the closing comment |
-| AC4 — Vault audit log shows successful OIDC login + secret read attributed to the operator's identity | **deferred-to-consumer-side** | The producer-side verifier asserts the federation chain WORKED (leg #4) but does not have access to Vault's own audit log (consumer-side Vault deployment; the operator inspects Vault's audit log per the consumer's runbook). Recorded in the closing-comment artefact on #56 |
-| AC5 — Test run captured with timestamps, command transcripts, and assertion results | **deferred-to-consumer-side** | The captured artefact lands in the closing comment on #56. The verifier's `[ok]` / `[FAIL]` / `[note]` lines are stable and grep-able for inclusion |
+| AC3 — PG audit-row check: query against the deployment's PG returns a row matching the `meho status` call | **verifier-asserted** (leg 3, when `DATABASE_URL` set) / **deferred-to-operator-side** (otherwise) | `psql` with the parameterised query above. When `DATABASE_URL` is unset on the verifier host, the verifier emits the exact `psql` command for the operator to run, and the operator pastes the output into the closing comment |
+| AC4 — Vault audit log shows successful OIDC login + secret read attributed to the operator's identity | **deferred-to-consumer-side** | The producer-side verifier asserts the federation chain WORKED (leg 4) but does not have access to Vault's own audit log (consumer-side Vault deployment; the operator inspects Vault's audit log per the consumer's runbook). Recorded in the closing-comment artefact of the tracking issue |
+| AC5 — Test run captured with timestamps, command transcripts, and assertion results | **deferred-to-consumer-side** | The captured artefact lands in the closing comment of the tracking issue. The verifier's `[ok]` / `[FAIL]` / `[note]` lines are stable and grep-able for inclusion |
 | AC6 — No JWT bytes appear in any captured output (sensitive-data discipline) | **verifier-asserted (by construction)** | The verifier never echoes the token — see "Sensitive-data discipline" above. The captured artefact from the verifier's stdout/stderr is safe to publish verbatim |
 
 The "deferred-to-consumer-side" status is **expected and correct** —
-the producer-side worker for #56 cannot drive the interactive
+the producer-side worker cannot drive the interactive
 `meho login` (no real Keycloak realm, no operator browser), cannot
 inspect Vault's own audit log (consumer-side deployment), and cannot
 run the smoke against the live lab (no VPN, no kubeconfig, no DB
@@ -326,37 +313,21 @@ verifier itself is well-formed:
 | Unknown-flag exit 2 | `bash scripts/acceptance/smoke.sh --bogus` returns exit code 2 | The CLI-usage-error path works (matches `install-verify.sh` / `rollback-verify.sh`) |
 | Missing-token failure mode | `bash scripts/acceptance/smoke.sh --enforce-budget` (with no token, no DB, no cluster) exits 1 with `[FAIL] login: ...` | Fail-loud on the precondition; budget hard-fail on missing `SMOKE_START_TS` |
 
-These checks run inside the PR's CI on the linter / shell-static-check
-job (`scripts/ci/check-scripts.sh` or the equivalent — TBD as part of
-Task #29's CI guard expansion). They do **not** prove the smoke
-passes against the live deployment; they prove the verifier won't
-explode under the operator's hand.
+No CI job runs these checks today (there is no
+`scripts/ci/check-scripts.sh`); run them by hand when you change the
+verifier. They do **not** prove the smoke passes against the live
+deployment; they prove the verifier won't explode under the
+operator's hand.
 
 ## References
 
-- Parent Goal:
-  #11 — Deployable v0.1
-  (DoD bullet 2)
-- Parent Initiative:
-  #54 — G2.8 Acceptance / dogfood proof
-- This task:
-  #56 — `smoke.sh` passes (login + status + audit-row + Vault + DB-migration state)
-- Predecessors:
-  - Task #42 — CLI binary (G2.6)
-  - Task #44 — `meho login` device-code flow (G2.6-T2)
-  - Task #45 — `meho status` (G2.6-T3)
-  - Task #25 — Vault JWT federation (G2.2)
-  - Task #28 — audit middleware (G2.3-T2)
-  - Task #29 — migration runner entrypoint (G2.3-T3)
-  - Task #55 (closed) — `install.sh` cold-deploy contract
-- Sibling acceptance tasks:
-  #55 (closed),
-  #57 (closed),
-  #58
+- Sibling acceptance contracts:
+  [`install.md`](./install.md),
+  [`rollback.md`](./rollback.md),
+  [`green-counter.md`](./green-counter.md)
 - Producer artefacts the smoke uses:
   - CLI: [`https://github.com/evoila/meho/releases`](https://github.com/evoila/meho/releases) (`meho login`, `meho status`)
   - Authenticated health: [`backend/src/meho_backplane/api/v1/health.py`](../../backend/src/meho_backplane/api/v1/health.py)
   - Audit middleware: [`backend/src/meho_backplane/audit.py`](../../backend/src/meho_backplane/audit.py)
   - DB-migration probe: [`backend/src/meho_backplane/db/migrations.py`](../../backend/src/meho_backplane/db/migrations.py)
-- Cross-repo handshake: [`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
 - Deploy surface deep-dive: [`docs/codebase/devops.md`](../codebase/devops.md)

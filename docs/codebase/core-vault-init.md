@@ -199,10 +199,8 @@ API). With the subcharts' NetworkPolicies on:
   server nobody can unseal. The window is two API calls. Fix: delete the
   OpenBao data disk (PVC `data-<release>-vault-0`) and the pod, then run
   the Job again.
-- **Helm runs the Job only once per setup.** The install still needs two
-  Helm runs today (the first with `--no-hooks`, #4047). If the second run
-  comes after the Job gave up waiting for Keycloak (4 tries of 10 minutes),
-  run the Job again (above).
+- **Helm runs the Job only once per setup.** If the Job gave up waiting
+  for Keycloak (4 tries of 10 minutes), run the Job again (above).
 - **Vault image (`coreVault.binary: vault`, tests only):** the Job does not
   turn on an audit device for it.
 

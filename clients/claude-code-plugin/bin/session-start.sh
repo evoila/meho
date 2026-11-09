@@ -74,8 +74,12 @@ activity="$(meho_read 3 audit recent --limit 100 | grep -vF '__sensor__' | head 
 # Scoped memory recall — the operator's own notes/preferences in scope.
 memory="$(meho_read 3 list --limit 8 | head -n 10)"
 
-# Knowledge recall — the tenant's most recent knowledge-base entries.
-knowledge="$(meho_read 3 kb list --limit 8 | head -n 10)"
+# Knowledge recall — the tenant's most recently updated knowledge-base
+# entries. `kb list` sorts by slug unless asked, so `--order newest` is
+# what makes this section "recent" (#5679). A CLI older than that flag
+# rejects it, the read comes back empty, and the section is left out —
+# better than an A-to-Z list under a "Recent" heading.
+knowledge="$(meho_read 3 kb list --order newest --limit 8 | head -n 10)"
 
 body=""
 if [ -n "$activity" ]; then

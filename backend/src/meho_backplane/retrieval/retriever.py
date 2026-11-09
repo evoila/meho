@@ -110,6 +110,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.retrieval.time_window import TimeWindow
 
 __all__ = [
     "CANDIDATE_LIMIT",
@@ -246,6 +247,8 @@ async def retrieve(
     metadata_filters: dict[str, Any] | None = None,
     principal_sub: str | None = None,
     memory_eligibility: MemoryEligibility | None = None,
+    all_principals: bool = False,
+    time_window: TimeWindow | None = None,
 ) -> list[RetrievalHit]:
     """Hybrid BM25 + cosine retrieval with RRF fusion. Tenant-scoped.
 
@@ -299,8 +302,9 @@ async def retrieve(
         -- the predicate is ANDed in unconditionally, so a client value
         can only narrow, never widen, the visible set. Tenant-broadcast
         kinds and non-memory sources are unaffected. ``None`` (default)
-        disables it for callers that scope by ``user_sub`` themselves or
-        query non-principal sources.
+        is allowed only when no Memory row can be a candidate (a
+        ``source`` other than ``"memory"``), when *memory_eligibility* is
+        set, or when *all_principals* is ``True``.
     memory_eligibility
         The Memory service's typed eligibility for this caller (#3741).
         When set, ``source='memory'`` candidates are limited to its
@@ -310,6 +314,19 @@ async def retrieve(
         *tenant_id*, and *principal_sub* must be ``None`` or the same
         value; a mismatch raises :class:`ValueError`. Memory expiry is
         always enforced in SQL, even when this is ``None``.
+    all_principals
+        Say on purpose that a Memory search may rank the user memories of
+        every principal in the tenant. Default ``False``: a call whose
+        ``source`` is ``"memory"`` or ``None`` (so Memory rows can be
+        candidates) with neither *principal_sub* nor *memory_eligibility*
+        raises :class:`ValueError`, so no caller can drop the
+        per-principal rule by leaving the argument out.
+    time_window
+        Optional :class:`~meho_backplane.retrieval.time_window.TimeWindow`
+        (#5726): limits on the header's ``confirmed_at`` and on the row's
+        ``updated_at``, checked in both candidate SQL statements before
+        their ``LIMIT`` (:data:`_TIME_WINDOW_PREDICATE_SQL`). ``None`` or
+        an empty window checks nothing.
 
     Returns
     -------
@@ -359,6 +376,7 @@ async def retrieve(
     """
     if limit < 0:
         raise ValueError(f"limit must be >= 0; got {limit}")
+    _require_memory_principal(source, principal_sub, memory_eligibility, all_principals)
     if limit == 0:
         return []
     # Empty-dict early-normalise: ``@> '{}'::jsonb`` matches every row,
@@ -380,6 +398,7 @@ async def retrieve(
             metadata_filters,
             principal_sub,
             memory_kinds,
+            time_window,
         )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as owned_session:
@@ -393,6 +412,28 @@ async def retrieve(
             metadata_filters,
             principal_sub,
             memory_kinds,
+            time_window,
+        )
+
+
+def _require_memory_principal(
+    source: str | None,
+    principal_sub: str | None,
+    memory_eligibility: MemoryEligibility | None,
+    all_principals: bool,
+) -> None:
+    """Refuse a Memory search that names no principal, unless the caller asks for all.
+
+    Memory rows are candidates when *source* is ``"memory"`` or ``None``.
+    Such a call must carry *principal_sub* or *memory_eligibility* (the
+    per-principal rule on user memories), or set *all_principals*.
+    """
+    if source not in (None, _MEMORY_SOURCE) or all_principals:
+        return
+    if principal_sub is None and memory_eligibility is None:
+        raise ValueError(
+            "a memory search needs principal_sub or memory_eligibility; "
+            "pass all_principals=True to rank every principal's memories"
         )
 
 
@@ -426,6 +467,7 @@ async def _retrieve_in_session(
     metadata_filters: dict[str, Any] | None,
     principal_sub: str | None,
     memory_kinds: list[str] | None,
+    time_window: TimeWindow | None = None,
 ) -> list[RetrievalHit]:
     """Inner implementation -- runs the two candidate queries + RRF fusion.
 
@@ -453,7 +495,15 @@ async def _retrieve_in_session(
     )
 
     bm25_rows = await _bm25_candidates(
-        session, tenant_id, query, source, kind, metadata_filters_json, principal_sub, memory_kinds
+        session,
+        tenant_id,
+        query,
+        source,
+        kind,
+        metadata_filters_json,
+        principal_sub,
+        memory_kinds,
+        time_window=time_window,
     )
     cosine_rows = await _cosine_candidates(
         session,
@@ -464,6 +514,7 @@ async def _retrieve_in_session(
         metadata_filters_json,
         principal_sub,
         memory_kinds,
+        time_window=time_window,
     )
     if memory_kinds is not None and source in (None, _MEMORY_SOURCE):
         await _log_unreadable_memory_expiry(session, tenant_id, principal_sub, memory_kinds)
@@ -645,6 +696,45 @@ _KB_PASSAGE_MAPPING_SQL: str = """
         )
       )"""
 
+#: Time window predicate (#5726), inlined verbatim into both candidate
+#: queries so it runs before each signal's ``LIMIT``, like the predicates
+#: above. See :class:`~meho_backplane.retrieval.time_window.TimeWindow`.
+#:
+#: * ``updated_at`` is the row column: the time of the last write.
+#: * ``confirmed_at`` is the lesson header date in the metadata. It is
+#:   read with the same guards as the Memory expiry: the ISO 8601 shape
+#:   regex, then ``pg_input_is_valid``, so a malformed value cannot abort
+#:   the query. A missing or unreadable value gives ``NULL``, so the row
+#:   never matches a confirmed limit. A value without an offset is read
+#:   as UTC.
+#:
+#: Every bind ``NULL`` (no window) makes each arm true. Both ends are
+#: inclusive. Pinned to both statements by :func:`_assert_predicate_inlined`.
+_TIME_WINDOW_PREDICATE_SQL: str = r"""
+      AND (
+        CAST(:updated_after AS timestamptz) IS NULL
+        OR updated_at >= CAST(:updated_after AS timestamptz)
+      )
+      AND (
+        CAST(:updated_before AS timestamptz) IS NULL
+        OR updated_at <= CAST(:updated_before AS timestamptz)
+      )
+      AND (
+        (CAST(:confirmed_after AS timestamptz) IS NULL
+         AND CAST(:confirmed_before AS timestamptz) IS NULL)
+        OR CASE
+          WHEN metadata ->> 'confirmed_at' IS NULL THEN NULL
+          WHEN metadata ->> 'confirmed_at'
+               !~ '^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'
+            THEN NULL
+          WHEN NOT pg_input_is_valid(metadata ->> 'confirmed_at', 'timestamptz') THEN NULL
+          WHEN metadata ->> 'confirmed_at' ~ '(Z|[+-]\d\d(:?\d\d)?)$'
+            THEN CAST(metadata ->> 'confirmed_at' AS timestamptz)
+          ELSE CAST(metadata ->> 'confirmed_at' AS timestamp) AT TIME ZONE 'UTC'
+        END BETWEEN COALESCE(CAST(:confirmed_after AS timestamptz), '-infinity')
+                AND COALESCE(CAST(:confirmed_before AS timestamptz), 'infinity')
+      )"""
+
 # BM25 candidate query. Fully-literal ``text("...")`` (no f-string) so the
 # ``avoid-sqlalchemy-text`` SAST rule stays clean; the per-principal
 # predicate is inlined verbatim from :data:`_PRINCIPAL_PREDICATE_SQL` and
@@ -680,6 +770,29 @@ _BM25_CANDIDATES_SQL = text(
       )
       AND (CAST(:metadata_filters AS text) IS NULL
            OR metadata @> CAST(:metadata_filters AS jsonb))
+      AND (
+        CAST(:updated_after AS timestamptz) IS NULL
+        OR updated_at >= CAST(:updated_after AS timestamptz)
+      )
+      AND (
+        CAST(:updated_before AS timestamptz) IS NULL
+        OR updated_at <= CAST(:updated_before AS timestamptz)
+      )
+      AND (
+        (CAST(:confirmed_after AS timestamptz) IS NULL
+         AND CAST(:confirmed_before AS timestamptz) IS NULL)
+        OR CASE
+          WHEN metadata ->> 'confirmed_at' IS NULL THEN NULL
+          WHEN metadata ->> 'confirmed_at'
+               !~ '^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'
+            THEN NULL
+          WHEN NOT pg_input_is_valid(metadata ->> 'confirmed_at', 'timestamptz') THEN NULL
+          WHEN metadata ->> 'confirmed_at' ~ '(Z|[+-]\d\d(:?\d\d)?)$'
+            THEN CAST(metadata ->> 'confirmed_at' AS timestamptz)
+          ELSE CAST(metadata ->> 'confirmed_at' AS timestamp) AT TIME ZONE 'UTC'
+        END BETWEEN COALESCE(CAST(:confirmed_after AS timestamptz), '-infinity')
+                AND COALESCE(CAST(:confirmed_before AS timestamptz), 'infinity')
+      )
       AND (
         CAST(:principal_sub AS text) IS NULL
         OR source <> 'memory'
@@ -739,6 +852,29 @@ _COSINE_CANDIDATES_SQL = text(
       )
       AND (CAST(:metadata_filters AS text) IS NULL
            OR metadata @> CAST(:metadata_filters AS jsonb))
+      AND (
+        CAST(:updated_after AS timestamptz) IS NULL
+        OR updated_at >= CAST(:updated_after AS timestamptz)
+      )
+      AND (
+        CAST(:updated_before AS timestamptz) IS NULL
+        OR updated_at <= CAST(:updated_before AS timestamptz)
+      )
+      AND (
+        (CAST(:confirmed_after AS timestamptz) IS NULL
+         AND CAST(:confirmed_before AS timestamptz) IS NULL)
+        OR CASE
+          WHEN metadata ->> 'confirmed_at' IS NULL THEN NULL
+          WHEN metadata ->> 'confirmed_at'
+               !~ '^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'
+            THEN NULL
+          WHEN NOT pg_input_is_valid(metadata ->> 'confirmed_at', 'timestamptz') THEN NULL
+          WHEN metadata ->> 'confirmed_at' ~ '(Z|[+-]\d\d(:?\d\d)?)$'
+            THEN CAST(metadata ->> 'confirmed_at' AS timestamptz)
+          ELSE CAST(metadata ->> 'confirmed_at' AS timestamp) AT TIME ZONE 'UTC'
+        END BETWEEN COALESCE(CAST(:confirmed_after AS timestamptz), '-infinity')
+                AND COALESCE(CAST(:confirmed_before AS timestamptz), 'infinity')
+      )
       AND (
         CAST(:principal_sub AS text) IS NULL
         OR source <> 'memory'
@@ -817,22 +953,25 @@ def _assert_predicate_inlined() -> None:
     principal = " ".join(_PRINCIPAL_PREDICATE_SQL.split())
     eligibility = " ".join(_MEMORY_ELIGIBILITY_PREDICATE_SQL.split())
     kb_mapping = " ".join(_KB_PASSAGE_MAPPING_SQL.split())
+    time_window = " ".join(_TIME_WINDOW_PREDICATE_SQL.split())
     for name, statement in (
         ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
         ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
     ):
         haystack = " ".join(str(statement.text).split())
-        if principal not in haystack or eligibility not in haystack or kb_mapping not in haystack:
+        predicates = (principal, eligibility, kb_mapping, time_window)
+        if not all(predicate in haystack for predicate in predicates):
             raise AssertionError(
                 f"{name} no longer contains the per-principal, Memory "
-                "eligibility and KB passage predicates verbatim; they must "
-                "stay byte-equivalent to _PRINCIPAL_PREDICATE_SQL, "
-                "_MEMORY_ELIGIBILITY_PREDICATE_SQL and _KB_PASSAGE_MAPPING_SQL "
-                "(see retriever.py)."
+                "eligibility, KB passage and time window predicates verbatim; "
+                "they must stay byte-equivalent to _PRINCIPAL_PREDICATE_SQL, "
+                "_MEMORY_ELIGIBILITY_PREDICATE_SQL, _KB_PASSAGE_MAPPING_SQL "
+                "and _TIME_WINDOW_PREDICATE_SQL (see retriever.py)."
             )
     for name, sql in (
         ("_MEMORY_ELIGIBILITY_PREDICATE_SQL", _MEMORY_ELIGIBILITY_PREDICATE_SQL),
         ("_UNREADABLE_EXPIRY_COUNT_SQL", str(_UNREADABLE_EXPIRY_COUNT_SQL.text)),
+        ("_TIME_WINDOW_PREDICATE_SQL", _TIME_WINDOW_PREDICATE_SQL),
     ):
         if _MEMORY_EXPIRY_SHAPE_SQL not in sql:
             raise AssertionError(f"{name} no longer contains _MEMORY_EXPIRY_SHAPE_SQL verbatim.")
@@ -850,6 +989,8 @@ async def _bm25_candidates(
     metadata_filters_json: str | None,
     principal_sub: str | None,
     memory_kinds: list[str] | None = None,
+    *,
+    time_window: TimeWindow | None = None,
 ) -> Sequence[Any]:
     """Top :data:`CANDIDATE_LIMIT` BM25 candidates by ``ts_rank_cd``.
 
@@ -880,6 +1021,7 @@ async def _bm25_candidates(
             "principal_sub": principal_sub,
             "memory_kinds": memory_kinds,
             "limit": CANDIDATE_LIMIT,
+            **_time_window_binds(time_window),
         },
     )
     return result.all()
@@ -894,6 +1036,8 @@ async def _cosine_candidates(
     metadata_filters_json: str | None,
     principal_sub: str | None,
     memory_kinds: list[str] | None = None,
+    *,
+    time_window: TimeWindow | None = None,
 ) -> Sequence[Any]:
     """Top :data:`CANDIDATE_LIMIT` cosine candidates by pgvector distance.
 
@@ -921,9 +1065,15 @@ async def _cosine_candidates(
             "principal_sub": principal_sub,
             "memory_kinds": memory_kinds,
             "limit": CANDIDATE_LIMIT,
+            **_time_window_binds(time_window),
         },
     )
     return result.all()
+
+
+def _time_window_binds(time_window: TimeWindow | None) -> dict[str, datetime | None]:
+    """Return the four time window binds; every one ``None`` when there is no window."""
+    return (time_window or TimeWindow()).binds()
 
 
 async def _log_unreadable_memory_expiry(

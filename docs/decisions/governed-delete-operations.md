@@ -1,9 +1,10 @@
 # Delete-shaped operations get a governed path behind a dedicated destructive safety tier (decision)
 
 **Status:** decided — operator determination of record; **reverses** the standing
-"delete-shaped operations are deliberately ungoverned" posture
+"delete-shaped operations are deliberately ungoverned" posture. Shipped in 0.32.0.
+**Superseded in part by:** [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md). A MEHO-SA-Operator may approve their own `destructive` change. An agent's `destructive` request waits for a person's approval instead of DENY.
 **Date:** 2026-08-29
-**Goal:** management-plane lockdown (evoila-bosnia/meho-internal#234) — the driver;
+**Goal:** management-plane lockdown — the driver;
 its enforcement stages cannot deny operator-direct reach to appliances until
 delete-shaped work is *governed* rather than *impossible*
 **Issue:** [#3183](https://github.com/evoila/meho/issues/3183) — `policy`-labelled
@@ -44,7 +45,7 @@ was making the *constructive* surface safe.
 ## Why now — the management-plane-lockdown driver
 
 The operator direction is now stated: **management-plane lockdown**
-(evoila-bosnia/meho-internal#234) makes the backplane (central instance + satellite
+makes the backplane (central instance + satellite
 runners) the sole management-plane ingress, with operator-direct network reach to
 appliances eliminated in steady state. In that end-state "drop to a local tool"
 ceases to exist as a path. Delete-shaped work is then either **governed or
@@ -235,8 +236,8 @@ render path.
 - Standing posture reversed: #3183 (this issue), #2907 (backplane-first coverage —
   the one op class it deliberately excludes today).
 - Compose boundary: the satellite write-path decision (#2901 / #3187, file
-  `docs/decisions/satellite-write-path.md`); driver Goal
-  evoila-bosnia/meho-internal#234.
+  `docs/decisions/satellite-write-path.md`); driver: the
+  management-plane lockdown Goal.
 - v0.1-spec §7 (approval is a human decision) — the human-only line this tier
   reuses.
 
@@ -291,13 +292,14 @@ destroy, with the destructive / delete-shaped spans' bodies excluded as above.
 ## Amendment (2026-09-02) — preview parity + a builder-coverage CI sweep (#3312)
 
 Two coupled follow-ups from the 2026-09-02 through-backplane canary of the
-governed `vault.kv.delete` chain (lab evoila-bosnia/claude-rdc-hetzner-dc#2814):
+governed `vault.kv.delete` chain in a lab:
 the park → human-approve → execute chain held, but `preview_operation` answered
 `preview_unavailable` for the op even though the park-time apparatus built a rich
 `proposed_effect`. Both extend — do not revise — requirements 2 and 3 above.
 
 **1. Preview parity for approval-requiring typed ops.** Requirement 2's
-previewability gate (`_resolve_previewable_descriptor` → `_is_previewable`)
+previewability gate (`_gate_and_validate` → `_is_previewable`; the first
+was named `_resolve_previewable_descriptor` when this was written)
 admitted the `destructive` tier only. It now also admits any **non-credential-class**
 `requires_approval` op (the `dangerous`-tier typed ops, canonical case
 `vault.kv.delete`), and the synthetic preview (now

@@ -30,10 +30,12 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import OperationRun, OperationRunOrigin, OperationRunStatus
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.operations.operation_run_reaper import OPERATION_RUN_REAPER_UNCERTAIN_REASON
 from meho_backplane.operations.operation_run_service import (
     MAX_RUN_WAIT_SECONDS,
     OperationRunService,
 )
+from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -101,7 +103,11 @@ async def _insert_run(
     identity_sub: str = "op-test",
 ) -> uuid.UUID:
     now = datetime.now(UTC)
-    ended = status in (OperationRunStatus.FAILED, OperationRunStatus.SUCCEEDED)
+    ended = status in (
+        OperationRunStatus.FAILED,
+        OperationRunStatus.SUCCEEDED,
+        OperationRunStatus.UNCERTAIN,
+    )
     async with get_sessionmaker()() as session:
         run = OperationRun(
             id=uuid.uuid4(),
@@ -263,6 +269,32 @@ async def test_failed_run_reports_an_error(
     assert payload["status"] == "error"
     assert payload["extras"]["error_code"] == "run_failed"
     assert "worker lost its lease" in payload["error"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_uncertain_run_says_do_not_run_it_again(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A reaped run of a change answers ``uncertain`` with the target-check advice (#5025)."""
+    client, _op = client_with_operator
+    run_id = await _insert_run(
+        status=OperationRunStatus.UNCERTAIN, error=OPERATION_RUN_REAPER_UNCERTAIN_REASON
+    )
+    payload = _structured(
+        _call(client, {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(run_id)}),
+        is_error=True,
+    )
+    assert payload["status"] == "error"
+    assert payload["error"].startswith("run_uncertain: ")
+    assert UNCERTAIN_ADVICE in payload["error"]
+    assert "start it again" not in payload["error"]
+    extras = payload["extras"]
+    assert extras["error_code"] == "run_uncertain"
+    assert extras["execution_outcome"] == "uncertain"
+    assert extras["retry"] is False
+    assert extras["remediation"] == UNCERTAIN_ADVICE
+    assert extras["run_status"] == "uncertain"
+    assert extras["ended_at"] is not None
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

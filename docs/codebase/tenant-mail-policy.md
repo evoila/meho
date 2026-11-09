@@ -6,10 +6,11 @@ The `mail.*` connector's recipient floor (`MAIL_RECIPIENT_ALLOWLIST`,
 `connectors/mail/allowlist.py`) is deployment-level: one MTA, one allowlist for
 the whole instance. On a **shared** instance that single floor cannot be
 narrowed per tenant, so an approved `mail.send` in one tenant could deliver to
-the recipients another tenant configured (the Envision-stand threat,
-meho-internal#320). #3499 adds a **per-tenant narrowing** override —
-`tenant.mail_recipient_allowlist` — and this surface is its operator-plane write
-path.
+the recipients another tenant configured. #3499 adds a **per-tenant
+narrowing** override — `tenant.mail_recipient_allowlist` — and this surface is
+its operator-plane write path. The settings import (`POST
+/api/v1/settings/import`, see [settings.md](settings.md)) also sets this
+column, through the same `set_mail_recipient_allowlist` helper.
 
 It is an **operator-plane** surface: REST + CLI only, gated at the
 `tenant_admin` tier. It is deliberately **not** on the agent working

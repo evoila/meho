@@ -85,6 +85,11 @@ from meho_backplane.operations._errors import (
     result_unqualified_target_version,
 )
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._ingested_owner import (
+    INGESTED_OPS_NOT_ACCEPTED,
+    accepts_ingested_operations,
+    ingested_ops_refusal_message,
+)
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
@@ -93,6 +98,7 @@ from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
 from meho_backplane.operations._preview_steps import preview_step_verdict
+from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     params_check_errors,
@@ -291,7 +297,11 @@ async def _resolve_descriptor(
     picks the code and names other connectors that have the op (#4031).
     Returns the ``target_required`` envelope when the op needs a target
     and got none (#4139); like ``dispatch``, this comes before the
-    catalog choice.
+    catalog choice. Returns the ``target_connector_mismatch`` envelope
+    when the target's connector cannot run the op (#5948); like
+    ``dispatch``, this comes right after the target check, so it is never
+    hidden by the catalog choice or by the op's check before the wait for
+    approval.
     """
     product, version, impl_id = parse_connector_id(connector_id)
 
@@ -340,7 +350,34 @@ async def _resolve_descriptor(
             missing, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
         )
 
-    # --- Catalog choice (mirrors dispatch Step 3, no audit row) ------------
+    # #5948: same answer and same order as ``dispatch`` -- right after the
+    # target check, before the catalog choice (and so before the version
+    # check of a composite) and before the check before the wait for
+    # approval. No audit row.
+    mismatch = mismatch_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if mismatch is not None:
+        return mismatch
+
+    return await _catalog_choice(
+        operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
+    )
+
+
+async def _catalog_choice(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    target: Any,
+) -> tuple[EndpointDescriptor, str] | dict[str, Any]:
+    """The catalog choice of dispatch Step 3, with no audit row.
+
+    Returns the descriptor and connector id that would run (the sibling's
+    when a sibling catalog serves the target, #3600), or the
+    ``unqualified_target_version`` envelope when no catalog does (#4984).
+    """
     choice = await choose_catalog_for_target(
         operator=operator,
         descriptor=descriptor,
@@ -349,14 +386,17 @@ async def _resolve_descriptor(
     )
     if isinstance(choice, CatalogRefusal):
         refused = result_unqualified_target_version(
-            op_id,
+            descriptor.op_id,
             reason=choice.reason,
             target_product=choice.target_product,
             target_version=choice.target_version,
             duration_ms=0.0,
         )
         return _refused_envelope(
-            refused, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+            refused,
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            source_kind=descriptor.source_kind,
         )
     return choice.descriptor, choice.connector_id
 
@@ -592,9 +632,11 @@ async def _build_ingested_preview(
     resolve (shared with :func:`dispatch_ingested`) and body redaction.
     Returns the ``status="ok"`` envelope, a structured ``no_connector`` /
     ``ambiguous_connector`` error envelope when the target resolves no
-    connector, or a ``dispatch_error`` envelope when the request can't be
-    resolved (an unsubstituted path var or a descriptor missing its
-    method/path -- the two faults :func:`resolve_ingested_request` raises).
+    connector, an ``ingested_ops_not_accepted`` error envelope when the
+    target's class does not accept ingested operations, or a
+    ``dispatch_error`` envelope when the request can't be resolved (an
+    unsubstituted path var or a descriptor missing its method/path -- the
+    two faults :func:`resolve_ingested_request` raises).
     Never sends the request; never raises for those faults.
     """
     cls, label, exc_message = resolve_connector_or_label(target)
@@ -609,6 +651,15 @@ async def _build_ingested_preview(
         }
     # ``label is None`` ⇔ ``cls`` is set (resolver contract).
     assert cls is not None
+    if not accepts_ingested_operations(cls):
+        return {
+            "status": "error",
+            "op_id": op_id,
+            "connector_id": connector_id,
+            "source_kind": descriptor.source_kind,
+            "error": f"{INGESTED_OPS_NOT_ACCEPTED}: {ingested_ops_refusal_message(cls)}",
+            "extras": {"error_code": INGESTED_OPS_NOT_ACCEPTED},
+        }
     connector_instance = get_or_create_connector_instance(cls)
 
     # The literal request, resolved through the SAME code path
@@ -730,7 +781,8 @@ async def preview_dispatch(
 
     Returns a JSON-shaped envelope: ``status`` ``"ok"`` (request/synthetic
     preview resolved), ``"error"`` (structured ``unknown_op`` /
-    ``target_required`` / ``unqualified_target_version`` / ``invalid_params`` /
+    ``target_required`` / ``target_connector_mismatch`` /
+    ``unqualified_target_version`` / ``invalid_params`` /
     ``no_connector`` / ``ambiguous_connector`` / ``dispatch_error`` /
     ``refused_before_approval`` -- the op's check before the wait for
     approval refused the call, see :func:`_park_check_envelope`), or
@@ -738,7 +790,8 @@ async def preview_dispatch(
     ``connector_id`` / ``source_kind`` echo for correlation. Every envelope
     whose op resolved (every status except ``unknown_op`` /
     ``unknown_connector`` / ``target_required`` /
-    ``unqualified_target_version``) carries ``safety_level``,
+    ``target_connector_mismatch`` / ``unqualified_target_version``) carries
+    ``safety_level``,
     ``requires_approval``, ``policy_verdict`` and ``policy_reason`` (#4923).
     On ``ok``: ``method``, ``resolved_path``, ``query``, ``redacted_body``,
     ``preview_hash`` (#3197 — the binding a caller presents on the governed

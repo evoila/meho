@@ -12,7 +12,7 @@ Copyright (c) 2026 evoila Group
 > [`backend/src/meho_backplane/connectors/bind9/`](../../backend/src/meho_backplane/connectors/bind9/);
 > the engineering-facing companion is
 > [`docs/codebase/connectors-bind9.md`](../codebase/connectors-bind9.md).
-> This doc is the cookbook every RDC operator reads when retiring the
+> This doc is the cookbook an operator reads when retiring the
 > bash wrapper in favour of `meho bind9 …`.
 
 ## What this surface is
@@ -37,13 +37,12 @@ the consumer's `bind9-dns.sh` wrapper exercises daily:
 | --- | --- | --- |
 | `identity` | `bind9.about` | read-only fingerprint |
 | `zone` | `bind9.zone.list`, `bind9.zone.read` | read-only |
-| `record` | `bind9.record.get`, `bind9.record.add`, `bind9.record.remove` | 1 read + 1 caution write (`add`) + 1 governed destructive write (`remove` — approval-gated whole-name clear since #3247) |
+| `record` | `bind9.record.get`, `bind9.record.add`, `bind9.record.remove`, `bind9.record.delete` | 1 read + 1 caution write (`add`) + 2 destructive writes that wait for a second person to approve (`remove` clears a whole name, `delete` removes one record) |
 | `config` | `bind9.config.show`, `bind9.config.apply_file`, `bind9.config.apply_views`, `bind9.config.backup`, `bind9.config.reload` | 1 read + 4 writes |
 
-Eleven ops total. Every op dispatches through the same
+Twelve ops total. Every op dispatches through the same
 `POST /api/v1/operations/call` route the agent surface uses — auth,
-policy, audit, broadcast, and JSONFlux all run as documented in
-[CLAUDE.md](../../CLAUDE.md) §6. The CLI verb tree is operator
+policy, audit, broadcast, and JSONFlux all run on every call. The CLI verb tree is operator
 ergonomics over that one route; it is **not** a separate data path and
 is **not** mirrored on the MCP surface (CLAUDE.md postulate 5 — the
 agent reaches every bind9 op via the narrow-waist meta-tools, see the
@@ -62,24 +61,24 @@ agent reaches every bind9 op via the narrow-waist meta-tools, see the
   `_remote_bash_with_sudo()` primitive (see the
   [Credential-leak postmortem](#credential-leak-postmortem) section —
   this is load-bearing). The SSH user must have `sudo` rights to
-  manage `/etc/bind/` and run `rndc`; the operator-facing recipe is a
-  `NOPASSWD: ALL` rule for the dedicated `meho-bind9` user, kept
-  separate from the operator's personal account.
+  manage `/etc/bind/` and run `rndc`. Use a dedicated `meho-bind9`
+  user, kept separate from the operator's personal account. The write
+  ops always send a sudo password, so the Vault secret must carry
+  `sudo_password` (or `password`); without it they refuse to start.
 - **`python3` on the target.** The atomic-apply primitive's snapshot
   / rollback step stages files through a Python one-liner that walks
   `/etc/bind/` and computes a SOA-normalised checksum. Standard-library
   Python 3.x suffices — no third-party packages.
 - **A registered bind9 target.** The CLI verbs take `--target <slug>`
-  (e.g. `--target vcf-router-bind9`); the slug resolves server-side to
+  (e.g. `--target dns-01`); the slug resolves server-side to
   a row in the `targets` table. The target carries `product="bind9"`,
   `host`, `port` (optional, defaults to 22), `secret_ref`
-  (SSH credential dict), and `auth_model="shared_service_account"`.
+  (the Vault KV-v2 path of the SSH credential), and
+  `auth_model="shared_service_account"`.
 - **`auth_model = shared_service_account`** — the only auth model
-  v0.2 ships. The connector reads the SSH credential out of
-  `secret_ref` directly (no Vault-fetch yet); the federation chain
-  setup that lets a Vault-managed `secret_ref` resolve through
-  [`vault-onboarding.md`](./vault-onboarding.md) lands in a future
-  Initiative.
+  v0.2 ships. The connector reads the SSH credential from Vault at
+  the `secret_ref` path, under the calling operator's identity (see
+  [`vault-onboarding.md`](./vault-onboarding.md)).
 - **An operator session.** `meho login <backplane-url>` writes the
   session token the CLI reuses across every verb. `meho bind9 …`
   needs `operator` role minimum (same gate as every dispatch verb);
@@ -89,31 +88,38 @@ agent reaches every bind9 op via the narrow-waist meta-tools, see the
 
 The shipped connector's auth model is `shared_service_account` over
 SSH. The SSH credential is stored in **Vault** at a per-host path
-under the operator tenant's KV-v2 mount, then materialised onto the
-target row's `secret_ref` column. Two SSH credential shapes are
+under the operator tenant's KV-v2 mount. The target row's `secret_ref`
+column holds that path, and MEHO reads the secret at dispatch time.
+Two SSH credential shapes are
 supported (in order of preference):
 
 | Shape | `secret_ref` fields | When to use |
 | --- | --- | --- |
-| **Key auth (preferred)** | `username`, `ssh_private_key` (PEM-encoded text) | Production. Key auth means no sudo password is exposed to the operator's account. |
+| **Key auth (preferred)** | `username`, `ssh_private_key` (PEM-encoded text; `private_key` is accepted too), plus `sudo_password` for the write ops | Production. |
 | **Password auth (fallback)** | `username`, `password` | Bootstrap / lab targets only; the password lives in Vault but every successful auth surfaces in the host's `auth.log`. |
 
 The connector's
 [`SshConnector._auth_config`](../../backend/src/meho_backplane/connectors/adapters/ssh.py)
-reads `secret_ref` in that order; missing both fields raises
-`ValueError` at dispatch time (fail-fast — never an opaque asyncssh
-auth error).
+reads the secret in that order; a secret with neither a key nor a
+password raises `ValueError` at dispatch time (fail-fast — never an
+opaque asyncssh auth error).
+
+Every secret must also pin the host key. Put the target's OpenSSH
+`known_hosts` line(s) in a `known_hosts` field. For a lab target only,
+`known_hosts_insecure: true` turns the check off (MEHO logs a warning on
+every connect). A secret with neither field fails with
+`SshHostKeyUnpinnedError` before MEHO sends any credential.
 
 ### Storing the SSH credential in Vault
 
-Use the tenant's KV-v2 path convention:
-`secret/<tenant>/bind9/<host>`. The credential blob is the
-`secret_ref` dict the target row will carry. Example via the v0.2
+Use the tenant's KV-v2 path convention: `<tenant>/bind9/<host>` under
+the `secret` mount. The target's `secret_ref` is that path without the
+mount name. Example via the v0.2
 `meho vault kv put` (replaces `vault.sh PUT`):
 
 ```console
-$ meho vault kv put --target rdc-vault secret \
-    rdc-hetzner-dc/bind9/vcf-router-01 \
+$ meho vault kv put --target my-vault secret \
+    my-lab/bind9/dns-01 \
     --data @secret_ref.json
 ```
 
@@ -122,7 +128,9 @@ $ meho vault kv put --target rdc-vault secret \
 ```json
 {
   "username": "meho-bind9",
-  "ssh_private_key": "<PEM-encoded OpenSSH private key, one literal newline-escaped string from the host headers through the footers>"
+  "ssh_private_key": "<PEM-encoded OpenSSH private key, one literal newline-escaped string from the host headers through the footers>",
+  "sudo_password": "<one-line-sudo-password>",
+  "known_hosts": "dns-01.example.lab ssh-ed25519 <base64-host-key>"
 }
 ```
 
@@ -138,11 +146,12 @@ Or, for password fallback:
 ```json
 {
   "username": "meho-bind9",
-  "password": "<one-line-password>"
+  "password": "<one-line-password>",
+  "known_hosts": "dns-01.example.lab ssh-ed25519 <base64-host-key>"
 }
 ```
 
-The `password` field is single-line by contract — `_remote_bash_with_sudo`
+The sudo password (`sudo_password`, else `password`) is single-line by contract — `_remote_bash_with_sudo`
 refuses a password containing `\n`, `\r`, or `\x00` (the failure mode
 the 2026-05-04 leak chain exposed, see
 [Credential-leak postmortem](#credential-leak-postmortem)).
@@ -152,10 +161,10 @@ the 2026-05-04 leak chain exposed, see
 ```yaml
 # targets.yaml
 targets:
-  - name: vcf-router-bind9
+  - name: dns-01
     product: bind9
-    host: bind9.lab.evba
-    secret_ref: secret/rdc-hetzner-dc/bind9/vcf-router-01
+    host: dns-01.example.lab
+    secret_ref: my-lab/bind9/dns-01
     auth_model: shared_service_account
 ```
 
@@ -166,9 +175,9 @@ $ meho targets import targets.yaml
 Verify the target round-trips:
 
 ```console
-$ meho targets probe vcf-router-bind9
+$ meho targets probe dns-01
 ok — bind9 9.18.24 reachable; named-checkconf -p clean
-$ meho bind9 about --target vcf-router-bind9
+$ meho bind9 about --target dns-01
 bind9-ssh-9.x bind9.about — status=ok (47ms)
   vendor:           isc
   product:          bind9
@@ -197,8 +206,8 @@ for ops that resolve a bind9 target), `--json` (emit the full
 ### Identity — `meho bind9 about`
 
 ```console
-$ meho bind9 about --target vcf-router-bind9
-$ meho bind9 about --target vcf-router-bind9 --json | jq .result
+$ meho bind9 about --target dns-01
+$ meho bind9 about --target dns-01 --json | jq .result
 ```
 
 `about` returns vendor / product / version (parsed BIND triple) /
@@ -209,9 +218,9 @@ version-flavoured doc page.
 ### Zone browse — `meho bind9 zone …`
 
 ```console
-$ meho bind9 zone list --target vcf-router-bind9
-$ meho bind9 zone read evba.lab --target vcf-router-bind9
-$ meho bind9 zone read evba.lab. --target vcf-router-bind9 --json
+$ meho bind9 zone list --target dns-01
+$ meho bind9 zone read example.lab --target dns-01
+$ meho bind9 zone read example.lab. --target dns-01 --json
 ```
 
 | Verb | op_id | Result |
@@ -227,19 +236,24 @@ diffing.
 ### Record ops — `meho bind9 record …`
 
 ```console
-$ meho bind9 record get www.evba.lab --target vcf-router-bind9
-$ meho bind9 record get mail.evba.lab --type AAAA --target vcf-router-bind9
-$ meho bind9 record add esx-dc6.evba.lab 10.5.50.25 \
-    --zone evba.lab --target vcf-router-bind9
-$ meho bind9 record remove esx-dc6.evba.lab \
-    --zone evba.lab --target vcf-router-bind9
+$ meho bind9 record get www.example.lab --target dns-01
+$ meho bind9 record get mail.example.lab --type AAAA --target dns-01
+$ meho bind9 record add host-01.example.lab 192.0.2.25 \
+    --zone example.lab --target dns-01
+$ meho bind9 record remove host-01.example.lab \
+    --zone example.lab --target dns-01
 ```
 
 | Verb | op_id | Notes |
 | --- | --- | --- |
 | `record get <fqdn>` | `bind9.record.get` | `--type` defaults to `A`; supported: `A` / `AAAA` / `CNAME` / `MX` / `TXT`. Resolution is via `dig @localhost`, so views + cache hits behave as the rest of the world sees them. |
-| `record add <fqdn> <ip>` | `bind9.record.add` | `safety_level=caution`, `op_class=write`. Routes through the atomic-apply primitive. `--zone` is optional; the handler resolves the owning zone via longest-suffix match. `--type` accepts `A` or `AAAA` only — CNAME / MX / TXT writes are out of scope for v0.2. |
+| `record add <fqdn> <ip>` | `bind9.record.add` | `safety_level=caution`, `op_class=write`. Routes through the atomic-apply primitive. `--zone` is optional; the handler resolves the owning zone via longest-suffix match. `--view` picks the copy of a zone that is declared in more than one view (`record remove` takes it too). `--type` accepts `A` or `AAAA` only — CNAME / MX / TXT writes are out of scope for v0.2. |
 | `record remove <fqdn>` | `bind9.record.remove` | `safety_level=destructive`, `requires_approval=True`, `op_class=write` (governed since #3247). Clears **every** A + AAAA rdataset at `<fqdn>` — a whole-name clear. A second person must approve it. `meho bind9 record remove` previews first and sends the call with the `preview_hash`, so the result is `status=awaiting_approval`; the removal runs once a second person approves. If the preview fails, the command stops and sends nothing. A bare `call_operation` without the hash is refused `preview_binding_required`. To retire a single record instead, use `bind9.record.delete`. |
+
+`bind9.record.delete` removes exactly one record (zone, name, type, and
+`rdata` when the name has more than one value). It has no `meho bind9`
+verb; run it with `meho operation call` or through the agent path. It
+waits for a second person to approve, like `record remove`.
 
 `record add` is the **1:1 replacement** for the consumer's
 `bind9-dns.sh --add-a-record …` invocation. The wrapper composed a
@@ -250,27 +264,27 @@ routes the same flow through the atomic-apply primitive (see
 ### Config browse + write — `meho bind9 config …`
 
 ```console
-$ meho bind9 config show named.conf --target vcf-router-bind9
-$ meho bind9 config show /etc/bind/named.conf.local --target vcf-router-bind9
+$ meho bind9 config show named.conf --target dns-01
+$ meho bind9 config show /etc/bind/named.conf.local --target dns-01
 
 $ meho bind9 config apply-file named.conf.options \
-    ./local/named.conf.options --target vcf-router-bind9
+    ./local/named.conf.options --target dns-01
 
 $ meho bind9 config apply-views ./views/external.conf ./zones \
-    --target vcf-router-bind9 \
-    --verify-fqdn www.evba.lab \
+    --target dns-01 \
+    --verify-fqdn www.example.lab \
     --primary-path named.conf.local
 
-$ meho bind9 config backup --tag pre-migration --target vcf-router-bind9
-$ meho bind9 config reload --target vcf-router-bind9
+$ meho bind9 config backup --tag pre-migration --target dns-01
+$ meho bind9 config reload --target dns-01
 ```
 
 | Verb | op_id | Notes |
 | --- | --- | --- |
 | `config show <file>` | `bind9.config.show` | `<file>` may be absolute (must be under the bind config root) or relative (resolved against it). Reads only `named.conf`, `named.conf.*` and `*.conf` files, without approval; key secrets come back hidden. Key files, zone files, traversal and outside-root paths are refused with no content. |
-| `config apply-file <name> <local-src>` | `bind9.config.apply_file` | `safety_level=dangerous`, `op_class=write`. CLI reads `<local-src>` locally and stages it as the replacement for `<name>` on the target. |
-| `config apply-views <local-views.conf> <zones-dir>` | `bind9.config.apply_views` | `safety_level=dangerous`, `op_class=write`. CLI reads `<local-views.conf>` (lands at `named.conf.local`) and every regular file under `<zones-dir>` (each lands at its relative path under `/etc/bind/`). `--verify-fqdn` adds a dig-verify post-reload; `--primary-path` selects which staged key drives the audit row's pre/post-op capture. |
-| `config backup [--tag T]` | `bind9.config.backup` | `safety_level=safe`. Creates a UTC-timestamped tar.gz under `/var/backups/meho-bind9/`. `--tag` (optional) embeds a `[A-Za-z0-9._-]{1,64}` friendly tag in the filename. |
+| `config apply-file <name> <local-src>` | `bind9.config.apply_file` | `safety_level=dangerous`, `requires_approval=True`, `op_class=write`. CLI reads `<local-src>` locally and stages it as the replacement for `<name>` on the target. |
+| `config apply-views <local-views.conf> <zones-dir>` | `bind9.config.apply_views` | `safety_level=dangerous`, `requires_approval=True`, `op_class=write`. CLI reads `<local-views.conf>` (lands at `named.conf.local`) and every regular file under `<zones-dir>` (each lands at its relative path under `/etc/bind/`). `--verify-fqdn` adds a dig-verify post-reload; `--primary-path` selects which staged key drives the audit row's pre/post-op capture. |
+| `config backup [--tag T]` | `bind9.config.backup` | `safety_level=caution`, `op_class=write`. Creates a UTC-timestamped tar.gz under `/var/backups/meho-bind9/`. `--tag` (optional) embeds a `[A-Za-z0-9._-]{1,64}` friendly tag in the filename. |
 | `config reload` | `bind9.config.reload` | `safety_level=caution`, `op_class=write`. `rndc reload`. Use only when you needed to bypass the apply ops' automatic reload (rare). |
 
 ## The atomic-apply contract
@@ -311,11 +325,11 @@ load-bearing reason `bind9-dns.sh` retires in favour of this connector.
 ## The agent meta-tool path
 
 Agents never see `meho bind9 …` — those are operator-only CLI
-ergonomics. Per [CLAUDE.md](../../CLAUDE.md) postulate 5, an agent
+ergonomics. An agent
 reaches every bind9 op through the narrow-waist meta-tools:
 
 ```text
-search_connectors(query="bind9 dns")            → finds bind9-ssh-9.x
+meho_connector_list()                           → finds bind9-ssh-9.x
 list_operation_groups(connector_id="bind9-ssh-9.x")
                                                 → identity / zone / record / config
 search_operations(
@@ -325,12 +339,12 @@ search_operations(
 )                                                → top hit: bind9.record.add
 call_operation(
     connector_id="bind9-ssh-9.x",
-    operation_id="bind9.record.add",
-    target={"name": "vcf-router-bind9"},
-    params={"fqdn": "esx-dc6.evba.lab",
-            "ip": "10.5.50.25",
+    op_id="bind9.record.add",
+    target={"name": "dns-01"},
+    params={"fqdn": "host-01.example.lab",
+            "ip": "192.0.2.25",
             "type": "A",
-            "zone": "evba.lab"},
+            "zone": "example.lab"},
 )
 ```
 
@@ -345,11 +359,11 @@ surfaces to rank and guide the agent; it is reviewable in
 [`backend/src/meho_backplane/connectors/bind9/ops_zone.py`](../../backend/src/meho_backplane/connectors/bind9/ops_zone.py)
 / `ops_record.py` / `ops_config.py`.
 
-**Why no per-op MCP tools?** Eleven ops × per-tool registration adds
-eleven entries to the agent's tool surface, fans out into more
+**Why no per-op MCP tools?** Twelve ops × per-tool registration adds
+twelve entries to the agent's tool surface, fans out into more
 duplicated parameter schemas, and re-implements the
 search-then-dispatch flow the meta-tools already cover. The agent
-surface stays the same five meta-tools across every connector —
+surface stays the same small set of meta-tools across every connector —
 CLAUDE.md postulate 5's narrow-waist invariant.
 
 ## Migrating off `bind9-dns.sh`
@@ -382,9 +396,6 @@ Initiative lands them):
 - TSIG / `rndc` admin beyond `reload` — out of scope; the wrapper's
   `--rndc-status` shape is covered by `meho bind9 config reload`'s
   `result_state_after` payload (the live rndc-status snapshot).
-- Host-key pinning — deferred. The SSH adapter sets `known_hosts=None`
-  for v0.2 (matches every other typed-SSH connector); a future
-  Vault-managed known-hosts store is the right shape.
 
 ## Credential-leak postmortem
 
@@ -406,19 +417,15 @@ PR that touches the connector's transport code.
   password moved off `argv` but the operator's bash history kept the
   `<<< '<password>'` here-string verbatim in `~/.bash_history` for
   every operator invocation.
-- **External coordination**:
-  evoila-bosnia/claude-rdc-hetzner-dc#86
-  tracks the rotation chain + the consumer-side `bind9-dns.sh`
-  retirement.
 
 **The encoded fix.** `_remote_bash_with_sudo()`:
 
-1. Fixes the remote argv as a **constant string** — `sudo -S -p ''
-   bash -s` — with no caller interpolation. A grep for `sudo` in the
-   `connectors/` tree finds exactly one match (the helper itself).
-2. Builds the stdin payload as `f"{sudo_password}\\n{script}\\n"`.
-   The password is the first stdin line; `sudo -S` consumes it; `bash
-   -s` reads the rest. The password never appears in `argv`, never
+1. Builds the remote argv from **constant text**. The only value it
+   adds is the byte length of the script, a number:
+   `set -e; umask 077; f=$(mktemp); trap "rm -f $f" EXIT; head -c <N> > "$f"; sudo -S -p "" bash "$f"`.
+2. Sends the script bytes first on stdin, then the password line.
+   `head -c <N>` copies the script into a temp file, `sudo -S` reads the
+   password, and `bash` runs the temp file. The password never appears in `argv`, never
    appears in any local shell history, never appears in the
    structured log event (the helper logs `cmd_len` + `exit_status`
    only).
@@ -428,14 +435,14 @@ PR that touches the connector's transport code.
 4. **Codebase-wide invariant.** The E2E acceptance harness in
    [`tests/integration/test_g3_4_bind9_e2e.py`](../../backend/tests/integration/test_g3_4_bind9_e2e.py)
    walks `backend/src/meho_backplane/connectors/` looking for any
-   `sudo` literal outside the bind9 package; a regression on a
-   sibling connector that hand-rolls a `sudo -S` invocation fails
-   the test with a pointer at the offending file. The mis-ordered-
+   `sudo` literal. It allows only three files: the bind9 helper and the
+   rke2 and linux SSH connectors' own `_sudo.py` helpers, which use the
+   same wire shape. Any other file that builds a `sudo -S` call fails
+   the test with a pointer at that file. The mis-ordered-
    payload shape is **unrepresentable** in the codebase.
 
-Every future bind9 op + every sibling typed-SSH connector that needs
-`sudo` must route through `_remote_bash_with_sudo()`. There is no
-escape hatch.
+Every bind9 op that needs `sudo` goes through
+`_remote_bash_with_sudo()`. There is no escape hatch.
 
 ## Troubleshooting
 
@@ -444,8 +451,8 @@ escape hatch.
 | `no backplane URL configured` (exit 2) | Never logged in / no `--backplane`. | `meho login <url>` or pass `--backplane <url>`. |
 | `auth_expired` / stored token rejected | Keycloak token expired; refresh failed. | `meho login <url>` again. |
 | `status=error … unknown_op` | Connector_id drift — typed it as `bind9-9.x` instead of `bind9-ssh-9.x`. | Use `bind9-ssh-9.x`; the `-ssh` impl_id discriminator is part of the connector_id grammar. The CLI bakes the right id in; the agent meta-tool path needs the full string. |
-| `status=error … operation not found` | The typed-op registrar didn't run (lifespan crash) or op_id drift. | Check the backplane started cleanly; verify `meho connector list` shows `bind9-ssh-9.x` with eleven enabled ops. |
-| `status=denied` on a write op | `read_only` role, or a policy gate denied. | Use an `operator`-role token; the policy gate on `safety_level=dangerous` ops can require approval. |
+| `status=error … operation not found` | The typed-op registrar didn't run (lifespan crash) or op_id drift. | Check the backplane started cleanly; verify `meho connector list` shows `bind9-ssh-9.x` with twelve enabled ops. |
+| `status=denied` on a write op | `read_only` role, or a policy gate denied. | Use an `operator`-role token. `config.apply_*`, `record.remove` and `record.delete` always wait for a second person to approve. |
 | `record.add` returns `connector_error … step=verify` | The write landed in the zonefile + reload succeeded but `dig @localhost <fqdn>` returned empty post-reload. | Confirm the zone view actually serves the new fqdn (split-horizon configs sometimes need the verify FQDN scoped via `--verify-fqdn`); the atomic-apply primitive rolled back, so `/etc/bind/` is byte-identical to before the call. |
 | `apply_views` returns `connector_error … step=checkconf` | Staged tree failed `named-checkconf -p`. | The error text carries the line + reason; fix the local file, re-run. The primitive's rollback already restored `/etc/bind/`. |
 | `config.backup` returns `path … invalid_params` | `--tag` contained a character outside `[A-Za-z0-9._-]`. | Tags are restricted to those characters so they can't inject shell metacharacters or path separators in the on-disk filename. |
@@ -459,6 +466,5 @@ escape hatch.
 - Op handlers: [`backend/src/meho_backplane/connectors/bind9/`](../../backend/src/meho_backplane/connectors/bind9/) (`connector.py` skeleton + safe-sudo, `ops_zone.py`, `ops_record.py`, `ops_config.py`, `_atomic.py`). CLI verbs: [`cli/internal/cmd/bind9/`](../../cli/internal/cmd/bind9/).
 - E2E acceptance harness: [`backend/tests/integration/test_g3_4_bind9_e2e.py`](../../backend/tests/integration/test_g3_4_bind9_e2e.py); containerised fixture: [`backend/tests/integration/test_connectors_bind9_container.py`](../../backend/tests/integration/test_connectors_bind9_container.py).
 - Consumer wrapper retired: `scripts/bind9-dns.sh`.
-- Credential-leak postmortems: evoila-bosnia/claude-rdc-hetzner-dc#86 tracks the 2026-05-04 / 2026-05-05 chain + the rotation history that motivated the `_remote_bash_with_sudo()` safe-by-construction design.
 - BIND 9 docs: <https://bind9.readthedocs.io/en/v9.18/> (9.18 — Debian bookworm default), <https://bind9.readthedocs.io/en/v9.20/> (9.20 — current Stable Release).
 - Agent meta-tool surface: G0.5 MCP server [#226](https://github.com/evoila/meho/issues/226); `search_operations` / `call_operation`. Onboarding-doc precedents: [`vault-onboarding.md`](./vault-onboarding.md), [`kubernetes-onboarding.md`](./kubernetes-onboarding.md), [`docs/cross-repo/README.md`](./README.md).

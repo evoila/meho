@@ -75,7 +75,7 @@ that should send ad-hoc mail does so through `call_operation` on the
   reason `NotifyMember` is one — importing `investigate` would be a
   cycle.
 
-## Configuration (per Dashboard, set at create only)
+## Configuration (per Dashboard)
 
 Two columns on `check_dashboards`, added by migration `0068`
 (`investigator_prompt`, migration `0069`, belongs to the briefing, not to
@@ -99,14 +99,22 @@ model, the wire `NotifyMinState` Literal, and the migration's frozen
 tuple are pinned against each other by drift guards in
 `tests/test_db_dashboard.py`.
 
-Both are set at Dashboard-create only — the same immutability posture as
-membership. There is no PATCH route; "edit" is delete + recreate.
+Both are set at Dashboard create and can be changed later with an edit.
 Surfaces: `POST /api/v1/checks/dashboards` (body fields; each
 comma-separated `notify_email` entry is `EmailStr`-validated → 422 naming
 a malformed one) and
 `meho dashboard create --notify-email --notify-min-state` (the CLI
 forwards the raw comma-separated string; the server splits and validates
-each entry).
+each entry). To change them: `PATCH /api/v1/checks/dashboards/{id}`
+(`checks/dashboard_edit.py`) or `meho dashboard edit --notify-email`,
+`--notify-off` (sends an empty `notify_email`, which turns mail off) and
+`--notify-min-state`. The edit checks the addresses the same way
+(`normalise_notify_email` in `checks/dashboard_schemas.py`).
+
+Each recipient must be a plain address: the part before the `@` may
+hold only letters, digits and `.`, `_`, `+` and `-`
+(`connectors/mail/allowlist.py`). MEHO refuses any other recipient
+before it connects to the mail server.
 
 ## The notify rule
 
@@ -163,6 +171,32 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    only the shown members, never one the `_MAX_MEMBER_LINES` cut dropped;
    a Dashboard mail that lost its claim mails its `member_changes` riders
    one by one as "new problem" notices instead (see below).
+   Since #4128 a warning (a notice whose state is `unknown`,
+   `degraded` or `critical`) is skipped before the flap window when every
+   Sensor it is about has an active acknowledgement: the member of a
+   "new problem" notice, or the non-green members of a Dashboard notice.
+   A notice with no member is never skipped. The log is
+   `checks_notify_skipped_acknowledged`. An all-clear is still sent. If
+   the acknowledgement read fails, the mail is sent
+   (`checks_notify_acknowledgement_read_failed`). The acknowledgement
+   ends when the Sensor gets worse, in the same transaction as that
+   result, before this check runs, so the worse state mails. When the
+   acknowledgement's time is up and the Sensor still fails, no memo
+   moves, so the runner tells the transition detector
+   (`investigate_on_transition(acknowledgement_expired=True)`), which
+   builds an "acknowledgement ended" change (`MemberChange` with
+   `acknowledgement_ended`, both states the member's counted state) for
+   each of the Sensor's Dashboards: its own notice when the Dashboard
+   state did not move, a rider on the Dashboard mail when it did. The
+   mail reads "acknowledgement ended, `<member>` still `<state>`" and
+   runs the same gates as a "new problem" notice, with one difference:
+   the flap window never holds it back. The warning that was
+   acknowledged claimed the member's window before the acknowledgement,
+   so a short acknowledgement would end inside it. The notice still
+   claims that window when it is free, but it is sent whether or not
+   the claim wins. The runner sends it once per ended acknowledgement.
+   A member that is green as the Dashboard counts it, or that also got
+   worse with that result, gets no such change.
 4. **Outcome logging.** `checks_notify_sent` (info, with
    `recipient_count`) on delivery; `checks_notify_failed` (warning, with
    the transport's stable reason code) on a `sent=False` result or an
@@ -303,9 +337,9 @@ state)` window:
   not retried by the next same-state crossing — the #2719
   one-attempt-per-claimed-transition contract, per window. The failure
   is warn-logged either way.
-- **Delivery only.** The memo compare-and-swap, the `checks.transition`
-  broadcast event (#2720), and the investigator's fire gate see every
-  edge, suppressed or not. Finding mail is not flap-suppressed — its
+- **Delivery only.** The memo compare-and-swap and the investigator's
+  fire gate see every edge, suppressed or not. Checks publish no
+  Broadcast event (see `checks-broadcast.md`). Finding mail is not flap-suppressed — its
   volume control is the investigator's fire gate.
 
 ## Three anti-flap layers (#2799 composition)
@@ -318,8 +352,8 @@ compose, none rediscovers another:
    commits a *sensor* state change only after consecutive confirming
    re-checks (soft/hard states, `docs/codebase/sensor.md`). An
    unconfirmed transition never reaches the projection, so the rollup
-   CAS, this notifier, the broadcaster, the investigator, and the
-   advisory are all gated for free — fewer, better edges arrive here.
+   CAS, this notifier, the investigator, and the advisory are all
+   gated for free — fewer, better edges arrive here.
    This is what suppresses the observed one-flaky-reading incident: the
    two nuisance mails were first crossings into *distinct* states,
    which the #2732 window deliberately never suppresses.
@@ -416,6 +450,67 @@ Fire-and-forget in two senses:
   broken MTA cannot cost the tenant the noise-suppression policy write
   the finding mail is ordered after.
 
+## When alert mails fail: where to look
+
+A failed alert mail is not only a log line. Check these, in order:
+
+1. **`meho dashboard show <dashboard>`**. The `last_mail:` line gives the
+   time of the last mail attempt, and either `sent` or
+   `not sent (<reason>)`. The console page of the Dashboard shows the same
+   line (`Last alert mail`). No line means the Dashboard never tried to
+   send a mail.
+2. **The audit log** keeps one row for every attempt, sent or failed, so
+   you can look back over a night. For example:
+
+   ```bash
+   meho audit query --op-id checks.alert_mail --since 12h
+   meho audit query --op-id checks.alert_mail --result-status error
+   ```
+
+   Each row has the time, and in its payload: `dashboard_id`,
+   `dashboard_name`, the Dashboard's `previous_state` and `current_state`,
+   `sent` and `result` (`sent`, or the reason below), `to` (the
+   recipients the mail went to, as plain addresses, the same way a
+   `mail.send` record shows them), `refused` (the recipients the allowlist
+   dropped) and `subject`. A "new problem" or "acknowledgement ended" mail
+   also has `sensor`: the Sensor's id, name and its own old and new state.
+   The mail body is never stored. The row's principal is
+   `system:checks-notify`. A sent mail has status `200` (result `ok`), a
+   failed one `502` (result `error`).
+3. **The metric `checks_alert_mail_total{result=...}`** on `/metrics`. It
+   counts every attempt: `result="sent"`, or the reason of the failure.
+   Alert on a rising count of any other result.
+4. **The log line `checks_notify_failed`**, which carries the same reason
+   and the Dashboard id.
+
+The Dashboard keeps the last attempt only: a later success replaces a
+failure there. The audit log keeps every attempt. Both are written in one
+transaction. When that write fails, MEHO logs
+`checks_mail_result_record_failed`; the metric still counts the attempt.
+The code is `checks/mail_result.py`; the columns are
+`check_dashboards.last_mail_at`, `last_mail_sent` and `last_mail_reason`.
+
+Reasons you can see:
+
+| Reason | What it means |
+|---|---|
+| `smtp_connect_error` | MEHO could not reach the mail server (refused, name not found, or timeout). A blocked mail port gives this. |
+| `smtp_auth_error` | The mail server refused the login. |
+| `smtp_auth_requires_tls` | A user name is set but the connection is not encrypted. |
+| `smtp_tls_error` | The mail server certificate was not accepted. |
+| `smtp_recipients_refused` | The mail server refused every recipient. |
+| `smtp_error` | Any other mail server error. |
+| `smtp_unconfigured` | The SMTP host or the sender address is not set. |
+| `not_in_recipient_allowlist` | The transport refused a recipient. |
+| `no_allowed_recipients` | Every recipient of the Dashboard is outside the allowlist, so nothing was sent. |
+| `unexpected_error` | An unexpected error in MEHO. See the log for the trace. |
+
+Only the Dashboard mail (including the "new problem" mail) is recorded.
+Mails that are skipped on purpose (no recipient, below the threshold, held
+back by the flap window, acknowledged) are not attempts and leave no row.
+The finding mail is not recorded yet; its failure is still only a log line
+(`checks_finding_email_failed`).
+
 Delivery and the claim are independent: the memo advances whether or not
 the mail lands. That is deliberate — re-deriving "did anyone get told"
 from the memo would mean re-mailing every unchanged evaluation.
@@ -456,18 +551,22 @@ from the memo would mean re-mailing every unchanged evaluation.
   still out of scope: routing rules, per-recipient `notify_min_state`,
   per-Sensor recipients, templating, and digests/batching — the flat
   closed list is deliberate (#2716 boundary). More when a consumer asks.
-- **Deployment-level SMTP.** One MTA and one allowlist for the whole
-  backplane; there is no per-tenant mail config. A tenant admin can
+- **Deployment-level SMTP.** One mail server and one deployment
+  allowlist cover all check mails. The per-tenant recipient allowlist
+  (`connectors/mail/tenant_policy.py`) applies only to a dispatched
+  `mail.send`; check mails do not use it. A tenant admin can
   therefore name a recipient the allowlist refuses. Since #2764 that
   refusal is per-entry: the offending recipient is dropped and
   warn-logged (`checks_notify_recipient_refused`) while the allowlisted
   recipients still receive the mail, and a Dashboard whose every
   recipient is refused logs `checks_notify_no_allowed_recipients`.
-- **No delivery record.** Nothing durable says a mail was sent; the
-  structlog event is the whole trace (`checks_notify_sent` /
-  `checks_finding_email_sent`). The `checks.transition` broadcast event
-  (#2720) is the queryable record of the edge itself, and the `agent_run`
-  row is the durable record of the finding.
+- **Delivery record for the Dashboard mail only.** Each Dashboard mail
+  attempt leaves an audit row (see "When alert mails fail: where to
+  look"). The finding mail leaves only the log line
+  (`checks_finding_email_sent` / `checks_finding_email_failed`); the
+  `agent_run` row is the durable record of the finding itself. The
+  Dashboard's `check_dashboards.last_rollup_state` memo holds only the
+  current state, not the edge history.
 - **Two mails per incident when both are configured.** A Dashboard with a
   `notify_email` and an enabled investigator mails the transition
   immediately and the finding minutes later, when the run terminates.

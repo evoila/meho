@@ -6,7 +6,7 @@
 An AI picks an operation from its summary, description, group text and
 safety level, and fills in the parameters from the field descriptions. This
 test checks every hand-written (typed and multi-step) operation that MEHO
-registers at start-up, of every connector, against thirteen rules:
+registers at start-up, of every connector, against fourteen rules:
 
 1. ``summary`` -- a one-line summary (at most 120 characters) and a short
    description (at most 300 characters).
@@ -46,17 +46,25 @@ registers at start-up, of every connector, against thirteen rules:
     caught. File names, field paths and API groups that only look like an
     operation id are in :data:`NOT_OPERATION_IDS`, each with a reason.
 13. ``caller_address`` -- a parameter field that looks like an address
-    (its name is ``url``, ``host``, ``resolver``, ends in ``_address``, ... or its ``format`` is
-    ``uri``, ``hostname``, ...) carries ``x-meho-caller-address: true``, so
+    (its name is ``url``, ``host``, ``fqdn``, ``server``, ``remote``, ``peer``,
+    ``endpoint``, ``resolver``, ends in ``_address``, ... or its ``format`` is
+    ``uri``, ``hostname``, ``ipv4``, ``ipv6``, ...) carries ``x-meho-caller-address: true``, so
     MEHO runs the operation at ``caution`` or higher with approval. A field
     that only looks like an address (MEHO and the target never connect to
     it, or MEHO connects only on the target's own host) is in
     :data:`tests._operation_contract_addresses.NOT_CALLER_ADDRESSES` with
     its reason. The field checks are in :mod:`tests._operation_contract_addresses`.
+14. ``stored_secret_address`` -- an operation that takes a reference to a
+    stored secret (``secret_ref``, ``password_ref``, ...) and an address the
+    caller gives runs at ``caution`` or higher and waits for approval,
+    because MEHO reads the secret and the call sends it to that address.
 
 Today's gaps live in ``tests/data/operation_contract_gaps.yaml``. The test
 fails on a gap that is not in that list (a new gap) and on a listed gap that
-is gone (remove the entry). So the list only shrinks.
+is gone (remove the entry). So the list only shrinks. The list never holds
+a ``stored_secret_address`` entry, and never a ``caller_address`` entry for
+an operation that takes a stored secret and an address the caller gives:
+the test refuses both.
 
 The check reads what MEHO registers at start-up. It calls no vendor system.
 A new connector is covered as soon as its registrar runs; nothing needs to
@@ -84,11 +92,14 @@ from meho_backplane.delete_names import write_word_in_op_id
 from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+from meho_backplane.operations.op_policy import SAFETY_RANK
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
 from tests._operation_contract_addresses import (
     NOT_CALLER_ADDRESSES,
     address_fields,
+    caller_address_fields,
+    stored_secret_fields,
     unmarked_address_fields,
 )
 from tests._operation_contract_placeholders import PLACEHOLDER, example_value_problems
@@ -109,6 +120,7 @@ RULES: Final[tuple[str, ...]] = (
     "example_placeholders",
     "named_operations_exist",
     "caller_address",
+    "stored_secret_address",
 )
 
 #: Real reads whose id holds a write word, with the reason. The live test
@@ -187,7 +199,7 @@ class OperationContract:
 
 
 # ---------------------------------------------------------------------------
-# The thirteen rules. Each returns a list of problems; an empty list means pass.
+# The fourteen rules. Each returns a list of problems; an empty list means pass.
 # ---------------------------------------------------------------------------
 
 
@@ -412,6 +424,28 @@ def check_caller_address(op: OperationContract) -> list[str]:
     ]
 
 
+def sends_stored_secret_to_caller_address(op: OperationContract) -> bool:
+    """Whether *op* takes a stored secret reference and an address the caller gives."""
+    return bool(stored_secret_fields(op.parameter_schema)) and bool(
+        caller_address_fields(op.op_id, op.parameter_schema)
+    )
+
+
+def check_stored_secret_address(op: OperationContract) -> list[str]:
+    if not sends_stored_secret_to_caller_address(op):
+        return []
+    if SAFETY_RANK.get(op.safety_level, 0) >= SAFETY_RANK["caution"] and op.requires_approval:
+        return []
+    secrets = ", ".join(repr(path) for path in stored_secret_fields(op.parameter_schema))
+    addresses = ", ".join(
+        repr(path) for path in caller_address_fields(op.op_id, op.parameter_schema)
+    )
+    return [
+        f"takes a stored secret ({secrets}) and an address the caller gives ({addresses}); "
+        "it must be 'caution' or higher with requires_approval: true"
+    ]
+
+
 CHECKS: Final[Mapping[str, Any]] = {
     "summary": check_summary,
     "field_descriptions": check_field_descriptions,
@@ -425,6 +459,7 @@ CHECKS: Final[Mapping[str, Any]] = {
     "write_name": check_write_name,
     "example_placeholders": check_example_placeholders,
     "caller_address": check_caller_address,
+    "stored_secret_address": check_stored_secret_address,
 }
 
 
@@ -482,6 +517,25 @@ def compare_with_gaps(
             f"no longer exists; remove this entry from {GAPS_FILE.name}"
         )
     return messages
+
+
+def refused_gaps(ops: list[OperationContract], known: set[Gap]) -> list[str]:
+    """Return one message per gap entry the list may never hold.
+
+    The list never holds a ``stored_secret_address`` gap, and never a
+    ``caller_address`` gap of an operation that takes a stored secret and an
+    address the caller gives.
+    """
+    secret_ops = {
+        (op.connector, op.op_id) for op in ops if sends_stored_secret_to_caller_address(op)
+    }
+    return [
+        f"REFUSED {connector} {op_id} rule {rule!r}: the operation takes a stored secret "
+        "and an address the caller gives; fix the operation, the gap list may not hold it"
+        for connector, op_id, rule in sorted(known)
+        if rule == "stored_secret_address"
+        or (rule == "caller_address" and (connector, op_id) in secret_ops)
+    ]
 
 
 def find_problems(ops: list[OperationContract]) -> dict[Gap, list[str]]:
@@ -556,7 +610,7 @@ async def _registered_operations() -> list[OperationContract]:
 
 @pytest.mark.asyncio
 async def test_operation_contracts_match_the_gap_list() -> None:
-    """Every hand-written operation meets the thirteen rules, or its gap is in the list."""
+    """Every hand-written operation meets the fourteen rules, or its gap is in the list."""
     ops = await _registered_operations()
     assert ops, "no typed or multi-step operation was registered"
 
@@ -565,7 +619,7 @@ async def test_operation_contracts_match_the_gap_list() -> None:
     unknown = {connector for connector, _, _ in gaps} - seen_connectors
     assert not unknown, f"the gap list names connectors that registered nothing: {sorted(unknown)}"
 
-    messages = compare_with_gaps(find_problems(ops), gaps)
+    messages = refused_gaps(ops, gaps) + compare_with_gaps(find_problems(ops), gaps)
     assert not messages, (
         "operation contracts do not match "
         f"tests/data/{GAPS_FILE.name}. Fix a new gap in the operation; "

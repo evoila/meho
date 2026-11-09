@@ -345,3 +345,64 @@ func TestTokenBox_Refresh_InvalidGrant_SendsOneRequest(t *testing.T) {
 		t.Errorf("client_id in form body: %q, want meho-cli", clientID)
 	}
 }
+
+// redirectingTransport answers the request to from with a 307 to target
+// and records every address it sees. The token request of a refresh
+// must stop at the redirect when target uses plain http on a routed
+// host.
+type redirectingTransport struct {
+	from, target string
+	seen         []string
+}
+
+func (t *redirectingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	addr := r.URL.Scheme + "://" + r.URL.Host + r.URL.Path
+	t.seen = append(t.seen, addr)
+	if addr != t.from {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"access_token":"a","token_type":"Bearer","expires_in":300}`)),
+			Request:    r,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusTemporaryRedirect,
+		Header:     http.Header{"Location": []string{t.target}},
+		Body:       http.NoBody,
+		Request:    r,
+	}, nil
+}
+
+func TestTokenBox_Refresh_RefusesARedirectToHTTP(t *testing.T) {
+	transport := &redirectingTransport{
+		from:   "https://kc.example.test/realms/meho/token",
+		target: "http://kc.example.test/realms/meho/token",
+	}
+	box := &tokenBox{
+		current: auth.StoredToken{
+			AccessToken:  "stale-access",
+			RefreshToken: "stale-refresh",
+			TokenType:    "Bearer",
+			ClientID:     "meho-cli",
+			Issuer:       "https://kc.example.test/realms/meho",
+			Expiry:       time.Now().Add(-time.Hour),
+		},
+		httpClient: &http.Client{Transport: transport},
+		refreshDiscoverer: func(_ context.Context, _ *http.Client, _ string) (*auth.DiscoveryDocument, error) {
+			return &auth.DiscoveryDocument{TokenEndpoint: transport.from}, nil
+		},
+	}
+	err := box.refresh(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("refresh: err = %v, want an https error", err)
+	}
+	for _, addr := range transport.seen {
+		if addr == transport.target {
+			t.Errorf("the http address received a request: %v", transport.seen)
+		}
+	}
+	if got := box.snapshot(); got != "stale-access" {
+		t.Errorf("access token after the failed refresh = %q, want the stored one", got)
+	}
+}

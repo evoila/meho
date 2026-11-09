@@ -20,6 +20,13 @@ on a `(tenant, principal, window-kind, window-start)` tuple. Task #1079
   cost on every successful run, stamps it on `agent_run.cost`, and
   increments the three active budget buckets (daily + weekly + monthly)
   atomically in the same transaction as the `succeed_run` transition.
+  This holds for a run that is not streamed (`_run_loop_to_completion`)
+  and for a streamed run (`_stream_delegated_run`, used by the REST
+  route `POST /api/v1/agents/{name}/run/events` and by the console's
+  agent run page). A streamed run gets its usage from the `final`
+  event: `AgentRunEvent.usage` and `AgentRunEvent.request_usages`. These
+  two fields are not part of the event's `data`, so the SSE frame does
+  not send them to the client.
 
 Enforcement (the *"refuse at the cap, downgrade at the threshold"*
 half) is Task #1080 (G11.5-T6 / C3-b) — see "Enforcement" below.
@@ -65,7 +72,7 @@ agent_run loop ─►│ AgentRun.start / .result    │
             │  (success path)                         │
             │                                         │
             │  1. provider:model = _full_model_id(.)  │
-            │  2. cost = compute_cost(usage, full_id) │
+            │  2. cost = compute_run_cost(usages, id) │
             │  3. succeed_run(session, row, cost=...) │
             │  4. apply_consumption(session, ...)     │
             │  5. commit                              │
@@ -80,10 +87,34 @@ agent_run loop ─►│ AgentRun.start / .result    │
                └─────────────────────────────────────┘
 ```
 
-A **failed** run skips steps 1-4 entirely; `agent_run.cost` stays NULL
-and no budget rows materialise. Future enforcement may opt to charge
-best-effort partial usage on failure, but the v0.2 contract is
-"failed runs cost nothing".
+A **failed** or **cancelled** run is charged for the model requests it
+finished: the runtime keeps the per-request usage current while the loop
+runs (`AgentRunHandle.request_usages`, the `usage_sink` of
+`stream_events`), and `_finalize_run` runs steps 1-4 with it. A run
+that made no model request costs nothing. When the row is already
+terminal (cancelled), the status is left alone and the charge is still
+applied.
+
+A run that has started and not ended is not charged yet. The pre-run
+gate counts each such run of the person as one request, and
+`_create_run_row` takes a per-person lock (`pg_advisory_xact_lock` on
+PostgreSQL) around that count and the insert of the new run row. So
+with a cap of one request, a second start while the first run is still
+going is refused.
+
+A cancelled run also counts as one request until its charge is saved.
+Its loop may still be making a call on another worker, which stops at
+its next heartbeat. The charge writes a cost on the row (zero when the
+run made no model call), and then the run stops counting. A cancelled
+row with no cost stops counting after the lease time
+(`AGENT_RUN_LEASE_TTL_SECONDS`), so a worker that died does not block
+the person.
+
+The final charge runs in its own task (`_finish_despite_cancel`). A
+cancel of the loop task while the charge is being saved does not stop
+it, so the charge commits once. A caller that waits on a run (the REST
+call and the scheduler) gets the stored `cancelled` outcome when the
+run is cancelled during the wait.
 
 ## The pricing table
 
@@ -91,7 +122,7 @@ best-effort partial usage on failure, but the v0.2 contract is
 import time. The keys are the **resolved** provider-prefixed ids the
 runtime emits via `AgentRunAuditMeta.model` (e.g.
 `anthropic:claude-sonnet-5-5`, the default of `AGENT_DEFAULT_MODEL`).
-The runtime calls `compute_cost(usage, model_id)` with the *resolved*
+The runtime calls `compute_run_cost(request_usages, model_id)` with the *resolved*
 id, not the operator-facing logical tier, so the table keys directly
 on what the provider was actually billed for.
 
@@ -104,10 +135,14 @@ Why in code and not the DB:
 - A DB-row pricing table invites drift between published rates and
   the live row, plus adds a join to every cost computation.
 
-An unknown model id (lookup miss) yields `Decimal(0)` and logs a
-single `warning` per process — the "known unknown" contract. The gate
-that prevents a run from *starting* against an un-priced model lives
-in the multi-provider resolver (G11.5-C4).
+A tenant can still price a model that is *not* in the table (see "Prices a
+tenant sets" below). That is a fallback only, never a change of a price in
+the table.
+
+An unknown model id (lookup miss) yields `Decimal(0)` and logs one
+`identity_budget_pricing_miss` warning per model id per process — the
+"known unknown" contract. No gate stops a run on a model with no price:
+MEHO warns at start and shows `spend_counted: false` in the status read.
 
 The table has a row for each current Claude model: `claude-opus-5-5`,
 `claude-sonnet-5-5` and `claude-haiku-5-5`. `cache_write` is the price
@@ -150,6 +185,40 @@ A default model with no row is made visible in two places (#5771,
 
 `is_model_priced` reads a bare model id (no `provider:` part) as an
 Anthropic id, the same way the runtime stores it.
+
+### Prices a tenant sets
+
+A tenant admin can give an agent model that is not in `MODEL_PRICING` a
+price: input and output, in USD per million tokens (#5853). This is for a
+model MEHO cannot know, such as an open model on a model server the tenant
+runs itself.
+
+- **Where.** The prices are in `tenant.agent_model_prices` (JSON, migration
+  `0138`): `{"<model>": {"input": "0.40", "output": "1.60"}}`. Prices are
+  decimal strings, so no float rounding gets in. The code is
+  `operations/tenant_model_prices.py`.
+- **How to set them.** `GET` and `PATCH /api/v1/tenants/model-prices`, or
+  `meho tenants model-prices list|set|remove`. Only a `tenant_admin` of the
+  tenant may call them; an agent token is never `tenant_admin`. A change is
+  named in the request's audit row (`agent_model_price_*`). Prices are 0 to
+  100,000 with at most six decimals; a tenant can price at most 200 models.
+- **Which price a run uses.** `MODEL_PRICING` first: a model there always
+  keeps MEHO's price, and `PATCH` refuses to price it. Else the tenant price
+  for the full id (`openai:my-model`), then for the model name alone
+  (`my-model`). The run's tenant is the only tenant read.
+- **What it changes.** `_finalize_run` passes the tenant price to
+  `compute_run_cost(..., fallback=...)`. The run gets a cost, and
+  `apply_consumption` adds it to the person's daily, weekly and monthly
+  buckets like any other run. The setting has one input price, so cached
+  input tokens (read or written) cost the same as other input tokens.
+- **No price.** The run costs 0, and `compute_cost` logs the same
+  `identity_budget_pricing_miss` warning as before. A stored entry that is
+  not readable counts as no price and logs `tenant_model_price_unreadable`.
+- **Not changed.** The start warning and the `agent_model_spend` status field
+  above read `MODEL_PRICING` only. They are about the install's default model,
+  not one tenant.
+- **Not in the settings file.** `meho-settings.yaml` (`settings.md`) does not
+  carry the prices yet.
 
 ## Window truncation
 
@@ -326,4 +395,4 @@ fires only at the hard refusal.
   - `backend/tests/test_agent_run_consumption.py`
 - Initiative #806 §C3; Task #1079; sibling Task #1080 (C3-b
   enforcement gate).
-- Anthropic published pricing (as of 2026-05-27).
+- Anthropic published pricing (5.5 rows as of 2026-11-05).

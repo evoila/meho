@@ -47,6 +47,7 @@ from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.checks.schemas import SensorCreate, SensorRead, SensorResultsQuery
 from meho_backplane.checks.service import (
     SensorAdminService,
+    SensorConnectorMismatchError,
     SensorIdentitySubForbiddenError,
     SensorNameConflictError,
     SensorOperationNotFoundError,
@@ -126,7 +127,9 @@ register_mcp_tool(
             "Operator-level read. Returns {sensors: [sensor, ...]} sorted "
             "newest-first; each sensor carries the latest-result projection "
             "(last_state, last_value, last_evidence, last_evaluated_at, "
-            "state_since) so the list is also the status view. Optional "
+            "state_since) so the list is also the status view, and "
+            "connector_fit (the target's product and version, and a warning "
+            "when the sensor's connector does not fit them). Optional "
             "filters: status ('active'|'paused'), cadence_kind "
             "('interval'|'cron'). Tenant-scoped via the JWT; cross-tenant "
             "listing is not exposed on the MCP transport."
@@ -219,6 +222,8 @@ async def _create_handler(
         raise McpInvalidParamsError(exc.error_code) from exc
     except SensorRequiresSafeOperationError as exc:
         raise McpInvalidParamsError(exc.error_code) from exc
+    except SensorConnectorMismatchError as exc:
+        raise McpInvalidParamsError(f"{exc.error_code}: {exc}") from exc
     except SensorNameConflictError as exc:
         raise McpInvalidParamsError(exc.error_code) from exc
     structlog.contextvars.bind_contextvars(audit_sensor_id=str(entry.id))
@@ -255,12 +260,17 @@ register_mcp_tool(
             "'sensor_identity_sub_forbidden'), tenant_id (platform-admin-only "
             "cross-tenant target; a non-platform tenant-admin naming "
             "another tenant is refused with "
-            "'cross_tenant_requires_platform_admin'). A duplicate name -> "
+            "'cross_tenant_requires_platform_admin'), force (create even "
+            "when the connector does not fit the target's product and "
+            "version; without it such a create is refused with "
+            "'sensor_connector_mismatch' and a warning that names the "
+            "connector that fits). A duplicate name -> "
             "'sensor_name_conflict'. "
             "There is no update/pause path -- status is server-initialized "
             "to 'active' at create (clients cannot supply it) and "
             "set to 'paused' only by the check runner. "
-            "Response: {sensor_id, sensor: {...}}."
+            "Response: {sensor_id, sensor: {...}}; sensor.connector_fit "
+            "holds the target's product, version and any warning."
         ),
         inputSchema={
             "type": "object",
@@ -356,6 +366,13 @@ register_mcp_tool(
                         "different tenant is refused with "
                         "'cross_tenant_requires_platform_admin'). When omitted "
                         "or null, the sensor is created under the caller's tenant."
+                    ),
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": (
+                        "Create the sensor even when its connector does not "
+                        "fit the target's product and version (default false)."
                     ),
                 },
             },

@@ -291,7 +291,10 @@ from meho_backplane.connectors import (
     resolve_connector_or_label,
     resolve_target_version,
 )
-from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
+from meho_backplane.connectors._shared.vault_creds import (
+    SecretRefReadError,
+    TargetSecretNotFoundError,
+)
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
@@ -350,6 +353,7 @@ from meho_backplane.operations._errors import (
     result_write_capability_denied,
     wrap_ok_result,
 )
+from meho_backplane.operations._errors_target_secret import result_target_secret_not_found
 from meho_backplane.operations._handler_resolve import (
     forget_target_if_changed,
     get_or_create_connector_instance,
@@ -1935,6 +1939,22 @@ async def _run_branch_with_error_handling(
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
             result_vault_credentials_read_error(op_id, ref_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    except TargetSecretNotFoundError as missing_exc:
+        # Vault has no secret at the target's own secret_ref. Name the target,
+        # the ref and the fix, never the hvac text.
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_target_secret_not_found(
+                op_id, missing_exc, tenant_id=operator.tenant_id, duration_ms=duration_ms
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,

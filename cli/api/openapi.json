@@ -39885,6 +39885,12 @@
             "nullable": true,
             "title": "Secret Ref"
           },
+          "secret_ref_derived": {
+            "type": "boolean",
+            "title": "Secret Ref Derived",
+            "description": "True when secret_ref is the path MEHO builds from the target name (tenants/<tenant_id>/<name>), as it does for a target added without a secret_ref.",
+            "default": false
+          },
           "auth_model": {
             "$ref": "#/components/schemas/AuthModel"
           },
@@ -40206,6 +40212,12 @@
             "type": "string",
             "nullable": true,
             "title": "Secret Ref"
+          },
+          "secret_ref_derived": {
+            "type": "boolean",
+            "title": "Secret Ref Derived",
+            "description": "True when secret_ref is the path MEHO builds from the target name (tenants/<tenant_id>/<name>), as it does for a target added without a secret_ref.",
+            "default": false
           },
           "auth_model": {
             "$ref": "#/components/schemas/AuthModel"

@@ -275,6 +275,27 @@ End-to-end call time (warm median of 7 calls each, same setup) was
 about the same in both versions: about 6–8 ms for an 89-row page and
 about 12 ms for a 500-row page.
 
+## The stored `secret_ref`, and a missing secret
+
+A target added without `secret_ref` gets the path
+`tenants/<tenant_id>/<name>` (`tenant_secret_ref` in
+`connectors/vault/tenant_paths.py`). MEHO reads the target's credential
+from Vault there.
+
+- **The answers show it.** `POST /api/v1/targets`, `GET
+  /api/v1/targets/{name}`, the REST list rows, `meho targets add` and
+  `meho_targets_register` return the stored `secret_ref` and
+  `secret_ref_derived`. `secret_ref_derived` is `true` when the ref is
+  the path MEHO builds from the target name (`is_derived_secret_ref`).
+  `meho targets add` then adds a note after the ref.
+- **A missing secret has its own error.** When Vault has no secret at
+  the ref, a dispatch answers `target_secret_not_found`. The error
+  names the target and the ref, says whether MEHO built the ref from
+  the target name, and says how to fix it: store the credential at
+  that path, or run `meho targets update <name> --secret-ref <path>`.
+  It never shows the hvac text or the Vault URL. The builder is
+  `operations/_errors_target_secret.py`.
+
 ## Name and host rules for new and changed targets
 
 `TargetCreate` and `TargetUpdate` (`targets/schemas.py`) check the name,

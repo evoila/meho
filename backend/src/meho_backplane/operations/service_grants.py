@@ -93,6 +93,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditEventClass,
@@ -118,6 +119,7 @@ __all__ = [
     "classify_orphaned_grants",
     "consult_and_record_grant",
     "count_live_grants_for_principal",
+    "credential_read_grant_reason",
     "delete_grant_reason",
     "delete_shaped_refusal_reason",
     "find_live_grant",
@@ -312,6 +314,21 @@ def delete_grant_reason(
     if reason is None and descriptor is not None:
         reason = _delete_shaped_reason_by_descriptor(descriptor)
     return reason
+
+
+def credential_read_grant_reason(op_id: str) -> str | None:
+    """Return why a grant cannot cover *op_id*, or ``None`` when it can.
+
+    An operation that shows a secret (``classify_op`` says
+    ``credential_read``) always waits for a person. Grant create refuses it
+    and :func:`consult_and_record_grant` never lets a grant row clear it.
+    """
+    if classify_op(op_id) != "credential_read":
+        return None
+    return (
+        f"A standing grant cannot cover {op_id}: it shows a secret, "
+        "so a person always approves it."
+    )
 
 
 def caller_address_grant_reason(descriptor: EndpointDescriptor | None) -> str | None:
@@ -654,6 +671,9 @@ class ServicePrincipalGrantService:
         from meho_backplane.settings import get_settings
 
         _reject_wildcards(payload)
+        secret_reason = credential_read_grant_reason(payload.op_id)
+        if secret_reason is not None:
+            raise GrantValidationError(secret_reason)
         floor_denial = role_floor_denial(payload.op_id, creator_role)
         if floor_denial is not None:
             raise GrantRoleFloorError(
@@ -1333,6 +1353,9 @@ async def consult_and_record_grant(
     declared level only — no method, no tags — so for it the op id is the
     only sign, and both id signs are checked.
 
+    An op that shows a secret (``credential_read``) is refused first, before
+    any lookup: a grant row never clears it, so a person always approves it.
+
     An op with a parameter marked ``x-meho-caller-address: true`` is refused
     before any lookup too (:func:`caller_address_grant_reason`), also before
     a delete grant. A grant row stored before the marker never auto-approves
@@ -1361,6 +1384,18 @@ async def consult_and_record_grant(
     real call sends, and the real call checks the hash and the blast
     radius before it uses the grant.
     """
+    secret_reason = credential_read_grant_reason(descriptor.op_id)
+    if secret_reason is not None:
+        _log.info(
+            "service_grant_refused_credential_read",
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            principal_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            reason=secret_reason,
+        )
+        return None
+
     address_reason = caller_address_grant_reason(descriptor)
     if address_reason is not None:
         _log.info(

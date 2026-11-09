@@ -55,9 +55,9 @@ the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
 
 - A person with `tenant_admin` writes at once (the CLI, scripts).
 - A service login with `tenant_admin` gets 403 `human_principal_required`.
-  The text names `targets.register` and `targets.remove`, the operations
-  a machine login uses. Both go through the approval check above. No
-  operation changes a target, so a machine login cannot change one.
+  The text names `targets.register`, `targets.update` and
+  `targets.remove`, the operations a machine login uses. All three go
+  through the approval check above.
 - An agent login gets 403 `insufficient_role`: MEHO caps its role at
   `operator`.
 - Reads (`GET`, `probe`) keep the `operator` role and stay open to
@@ -530,6 +530,45 @@ and each register path says so and names the probe:
 - **Audit.** Every call writes an audit row with op id `targets.probe`.
 - Code: `connectors/targets/probe.py` (schemas, handler, registration).
   Tests: `tests/test_targets_probe_op.py`.
+
+## Changing a target from an agent (`targets.update`)
+
+An agent or a person changes fields of one target with
+`call_operation(connector_id="targets-registry-1.x", op_id="targets.update",
+params={"target_id": "<target-uuid>", "secret_ref": "<vault-path>"})`, or
+with the operator-plane MCP tool `meho_targets_update`. People also have
+`meho targets update` on the CLI, which calls `PATCH`.
+
+- **One code path.** The handler finds the target by id in the caller's
+  tenant (`resolve_target_by_id` with `for_update=True`, which locks the
+  row until the change commits) and hands that row to
+  `apply_target_update`, the code that `PATCH` runs after its own lookup.
+  MEHO does not look the target up again by name, so a target deleted
+  before the lock gives an error, and no other target with that name or
+  alias is changed. So every check of
+  `PATCH` applies (product, `secret_ref` tenant path, host, TLS,
+  `secret_field_map` merge, Vault login keys in `extras`), and the change
+  drops kept logins like a `PATCH` does.
+- **By id, not by name.** An approved call changes the target the
+  approver saw. The preview names that target and the fields the call
+  sends.
+- **Fields.** Every field of `TargetUpdate` except `name`. Only the sent
+  fields change; an explicit `null` clears a nullable field. A call with
+  no field besides `target_id` is refused, and nothing changes.
+- **Role.** The role floor is `tenant_admin`, like `PATCH`. A person with
+  the `operator` role is refused on every path, also through
+  `call_operation`; the audit row says `denied`.
+- **Risk level.** `caution` with `requires_approval`: every call waits
+  until a person with `tenant_admin` approves it. `host` and `fqdn` are
+  marked as addresses MEHO connects to (`x-meho-caller-address: true`), and
+  the call can change `secret_ref`. People who change a target at once use
+  `PATCH` (`meho targets update`, the web console).
+- **Result.** `{target_id, name, product, version, host, updated_fields}`.
+- **Errors.** An unknown id, a target of another tenant, or a failed check
+  give an error that names the cause; nothing changes.
+- Code: `connectors/targets/update.py` (schemas, handler, preview,
+  registration), `mcp/tools/targets_update.py`. Tests:
+  `tests/test_targets_update_op.py`.
 
 ## Dependencies
 

@@ -177,6 +177,7 @@ _OPERATOR_SURFACE: frozenset[str] = frozenset(
         "meho_sensor_list",
         "meho_sensor_results",
         "meho_targets_register",
+        "meho_targets_update",
         "meho_topology_annotate",
         "meho_topology_bulk_import",
         "meho_topology_create_node",

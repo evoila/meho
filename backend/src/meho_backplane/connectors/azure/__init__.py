@@ -22,6 +22,9 @@ ingested from a spec.
 
 from typing import Final
 
+from meho_backplane.connectors.azure import (
+    op_classes,  # noqa: F401 -- declares the op classes
+)
 from meho_backplane.connectors.azure.connector import AzureConnector
 from meho_backplane.connectors.azure.session import (
     AzureCredentials,

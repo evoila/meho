@@ -39,9 +39,19 @@
   so an op_class/principal/target change never carries op_id to the
   server (it is not a server filter); op_id rides the page URL only via
   the controller, not the fragment route.
+
+  Phone layout (#6000)
+  --------------------
+  Below the ``md`` width the four fields fold away behind a "Filters"
+  button, so the newest events sit at the top of the screen. The button
+  opens and closes them (Alpine ``filtersOpen``). From ``md`` up the
+  button is hidden and the fields always show, as before. Without
+  JavaScript the fields stay visible.
 -#}
+{% from "_icons.html" import icon %}
 <form
   class="card bg-base-100 border-base-300 border shadow-sm"
+  x-data="{ filtersOpen: false }"
   hx-get="/ui/broadcast/feed"
   hx-target="#broadcast-feed"
   hx-swap="outerHTML"
@@ -52,7 +62,22 @@
   aria-label="Filter broadcast events"
   onsubmit="return false;"
 >
-  <div class="card-body grid gap-3 md:grid-cols-4">
+  <button
+    type="button"
+    class="btn btn-ghost btn-md justify-between md:hidden"
+    aria-controls="broadcast-filter-fields"
+    aria-expanded="false"
+    :aria-expanded="filtersOpen.toString()"
+    x-on:click="filtersOpen = !filtersOpen"
+  >
+    Filters
+    {{ icon("chevron-down", class="size-4") }}
+  </button>
+  <div
+    id="broadcast-filter-fields"
+    class="card-body grid gap-3 md:grid-cols-4"
+    :class="filtersOpen ? '' : 'max-md:hidden'"
+  >
     {# ---------- op_class ---------- #}
     <label class="form-control">
       <span class="label-text">Op class</span>

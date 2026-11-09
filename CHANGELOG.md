@@ -94,6 +94,16 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.45.1] - 2026-11-09
+
+### Fixed
+- An approved change whose settings hold hidden secret values
+  (`[REDACTED:...]` markers sent by the requester) now runs. When MEHO
+  does not have the settings it needs, the approved request does not
+  run: it ends as failed, and the console, the command line and the API
+  show the reason, so the requester can run it again with the settings
+  (#6064 / #6066).
+
 ## [0.45.0] - 2026-11-06
 
 **Calls made with a token now run only `safe` operations at once.** This

@@ -9,6 +9,15 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.45.1](https://github.com/evoila/meho/releases/tag/v0.45.1) — 2026-11-09
+
+- **Approved changes with hidden secret values now run.** Some changes
+  carry settings where a secret value is hidden behind a marker. After
+  approval, MEHO now runs them. When MEHO does not have the settings it
+  needs, the change does not run. It ends as failed and shows the
+  reason, so the requester can run it again with the settings. This
+  update has no database migration.
+
 ## [v0.45.0](https://github.com/evoila/meho/releases/tag/v0.45.0) — 2026-11-06
 
 - **Token calls run only safe operations at once.** MCP, the command

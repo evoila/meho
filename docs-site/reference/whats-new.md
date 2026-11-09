@@ -32,9 +32,8 @@ notes.
 - **Sensors.** Acknowledge a red sensor until a set time, edit a sensor
   or a dashboard in place, and move a dashboard with its sensors to
   another site as one file. Each alert mail writes an audit row.
-- **Knowledge.** Search filters, a check for similar entries before a
-  new entry, a weekly clean-up, and a search of your own wiki. MEHO
-  never sends knowledge anywhere by itself.
+- **Knowledge.** Search filters, a weekly clean-up, and a search of
+  your own wiki. MEHO never sends knowledge anywhere by itself.
 - **More operations.** Kubernetes node disk and image reads, removal of
   one stuck finalizer, a Linux firewall change that undoes itself unless
   you confirm it, and `net.fingerprint` for an unknown address. pfSense,
@@ -47,7 +46,8 @@ notes.
   over REST, and a standing grant never covers a credential read.
 - **Switches, off by default.** Several changes for agents wait behind
   switches until model tests show that they help: shorter list answers,
-  `query_topology` off the default tool list, and more.
+  `query_topology` off the default tool list, team knowledge before an
+  operation, the check for similar knowledge entries, and more.
 - **Before you upgrade.** Back up the database: the upgrade runs fifteen
   migrations. With the built-in Keycloak, check four chart values. The
   retrieval quality check is removed from the product. Update your

@@ -112,7 +112,7 @@ in the web interface answers at once**, and the page follows the run
 MEHO 0.46.0 also brings a list of approved changes whose outcome MEHO
 does not know, one approval for the operation list of an automation
 run, sensor acknowledgements and dashboard files, more knowledge tools
-(filters, a check for similar entries, the tenant's own wiki), the web interface
+(filters, the tenant's own wiki), the web interface
 as an app on phones and laptops, and a signed operation catalog and a
 security sheet on every release.
 
@@ -300,6 +300,20 @@ after model tests show that it helps.
   set (#6058).
 - `OPERATION_SEARCH_STORE_QUERY_TEXT`: the records of operation searches
   also keep the query text, not only its hash (#5984).
+- `TEAM_KNOWLEDGE_RECALL` (Helm `config.teamKnowledgeRecall`): team
+  knowledge before an operation, and the Memory notes at the start
+  (#5957). On, `preview_operation` and `call_operation` show the newest
+  team knowledge and Memory notes for a known target in a
+  `team_knowledge` block, and the MCP start text and hosted runs carry
+  the caller's newest Memory notes. Off, these answers have no
+  `team_knowledge` block, and MEHO does not read Memory notes for the
+  start. It stays off until model tests show that it helps (#6076).
+- `KB_SIMILAR_CHECK` (Helm `config.kbSimilarCheck`): the check for
+  similar entries on a new knowledge entry (#5952). On, MEHO lists
+  entries that say something similar and writes nothing; the writer
+  updates one of them, or sends `create_anyway: true`. Off, MEHO does
+  not search, and a new entry is written at once. It stays off until
+  model tests show that it helps (#6076).
 
 ### Security
 - A tenant in a request body or query follows the `Meho-Tenant` header
@@ -436,9 +450,6 @@ after model tests show that it helps.
 - `search_knowledge` and `search_memory` filter on product, version,
   status, tags and dates inside the search, and each knowledge hit says
   which tenant owns it (#5951).
-- Before MEHO writes a new knowledge entry, it lists entries that say
-  something similar and writes nothing. The writer updates one of them,
-  or sends `create_anyway: true` (#5952).
 - A weekly upkeep job merges knowledge entries with the same text,
   retires expired entries and lists used candidates for a reviewer
   (`KNOWLEDGE_UPKEEP_ENABLED`, on by default). Only a reviewer marks an
@@ -458,9 +469,6 @@ after model tests show that it helps.
 - `POST /api/v1/settings/conventions-drift` says how a tenant's
   conventions differ from a rules file that the tenant sends, and saves
   nothing (#5960).
-- `preview_operation` and `call_operation` show the newest team
-  knowledge and memory notes for a known target, in a `team_knowledge`
-  block (#5957).
 - `meho kb list --order newest` lists the newest knowledge first. The
   Claude Code plugin's session start uses it (#5801).
 - `targets.update` and the operator MCP tool `meho_targets_update`
@@ -603,6 +611,9 @@ after model tests show that it helps.
 - Docs merges on `main` publish the docs site again (#5975).
 - Pinned CI tools come from the runner or a cache, and downloads retry
   (#5974).
+- The image build in CI takes the pinned Tailwind tool from a cache, and
+  downloads it, with long retries and a checksum check, only when the
+  cache does not have it (#6072).
 - Small workflows, the chart `validate` job and pull request image
   builds run on GitHub-hosted runners (#5902, #5929, #5922). The kind
   jobs load images for one platform (#5905).

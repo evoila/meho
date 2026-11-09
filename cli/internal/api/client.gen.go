@@ -86,6 +86,13 @@ const (
 	AuthModelSharedServiceAccount AuthModel = "shared_service_account"
 )
 
+// Defines values for BodyUploadAgentSessionApiV1SessionsPostState.
+const (
+	BodyUploadAgentSessionApiV1SessionsPostStateEnded      BodyUploadAgentSessionApiV1SessionsPostState = "ended"
+	BodyUploadAgentSessionApiV1SessionsPostStateOpen       BodyUploadAgentSessionApiV1SessionsPostState = "open"
+	BodyUploadAgentSessionApiV1SessionsPostStateUnfinished BodyUploadAgentSessionApiV1SessionsPostState = "unfinished"
+)
+
 // Defines values for BroadcastAnnounceRequestPhase.
 const (
 	BroadcastAnnounceRequestPhaseCompletion BroadcastAnnounceRequestPhase = "completion"
@@ -732,6 +739,41 @@ const (
 	SensorStatusPaused SensorStatus = "paused"
 )
 
+// Defines values for SessionDetailState.
+const (
+	SessionDetailStateEnded      SessionDetailState = "ended"
+	SessionDetailStateOpen       SessionDetailState = "open"
+	SessionDetailStateUnfinished SessionDetailState = "unfinished"
+)
+
+// Defines values for SessionRetentionSource.
+const (
+	SessionRetentionSourceDefault SessionRetentionSource = "default"
+	SessionRetentionSourceTenant  SessionRetentionSource = "tenant"
+)
+
+// Defines values for SessionSummaryState.
+const (
+	SessionSummaryStateEnded      SessionSummaryState = "ended"
+	SessionSummaryStateOpen       SessionSummaryState = "open"
+	SessionSummaryStateUnfinished SessionSummaryState = "unfinished"
+)
+
+// Defines values for SessionUploadResultOutcome.
+const (
+	SessionUploadResultOutcomeAppended     SessionUploadResultOutcome = "appended"
+	SessionUploadResultOutcomeCreated      SessionUploadResultOutcome = "created"
+	SessionUploadResultOutcomeStateChanged SessionUploadResultOutcome = "state_changed"
+	SessionUploadResultOutcomeUnchanged    SessionUploadResultOutcome = "unchanged"
+)
+
+// Defines values for SessionUploadResultState.
+const (
+	SessionUploadResultStateEnded      SessionUploadResultState = "ended"
+	SessionUploadResultStateOpen       SessionUploadResultState = "open"
+	SessionUploadResultStateUnfinished SessionUploadResultState = "unfinished"
+)
+
 // Defines values for ShowTemplateResponseStatus.
 const (
 	ShowTemplateResponseStatusDeprecated ShowTemplateResponseStatus = "deprecated"
@@ -1044,6 +1086,13 @@ const (
 	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatusExpired  ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus = "expired"
 	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatusPending  ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus = "pending"
 	ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatusRevoked  ListRunApprovalsApiV1ServicePrincipalsRunApprovalsGetParamsStatus = "revoked"
+)
+
+// Defines values for ListAgentSessionsApiV1SessionsGetParamsState.
+const (
+	ListAgentSessionsApiV1SessionsGetParamsStateEnded      ListAgentSessionsApiV1SessionsGetParamsState = "ended"
+	ListAgentSessionsApiV1SessionsGetParamsStateOpen       ListAgentSessionsApiV1SessionsGetParamsState = "open"
+	ListAgentSessionsApiV1SessionsGetParamsStateUnfinished ListAgentSessionsApiV1SessionsGetParamsState = "unfinished"
 )
 
 // Defines values for UiConnectorsOverridesUiConnectorsOverridesGetParamsShow.
@@ -3648,6 +3697,24 @@ type BodyUiSchedulerValidateCronUiSchedulerValidateCronPost struct {
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Timezone   *string           `json:"timezone,omitempty"`
 }
+
+// BodyUploadAgentSessionApiV1SessionsPost defines model for Body_upload_agent_session_api_v1_sessions_post.
+type BodyUploadAgentSessionApiV1SessionsPost struct {
+	App        string  `json:"app"`
+	AppVersion *string `json:"app_version"`
+
+	// Archive The session as one gzip tar archive.
+	Archive   string                                        `json:"archive"`
+	EndedAt   *time.Time                                    `json:"ended_at"`
+	Outcome   *string                                       `json:"outcome"`
+	Project   string                                        `json:"project"`
+	SessionId string                                        `json:"session_id"`
+	StartedAt *time.Time                                    `json:"started_at"`
+	State     *BodyUploadAgentSessionApiV1SessionsPostState `json:"state,omitempty"`
+}
+
+// BodyUploadAgentSessionApiV1SessionsPostState defines model for BodyUploadAgentSessionApiV1SessionsPost.State.
+type BodyUploadAgentSessionApiV1SessionsPostState string
 
 // BodyVaultDeleteUiVaultDeletePost defines model for Body_vault_delete_ui_vault_delete_post.
 type BodyVaultDeleteUiVaultDeletePost struct {
@@ -10436,6 +10503,122 @@ type ServiceReadScopeSet struct {
 	Entries []ReadScopeEntry `json:"entries"`
 }
 
+// SessionDetail One session with its file hashes and its uploads.
+type SessionDetail struct {
+	App        string                      `json:"app"`
+	AppVersion *string                     `json:"app_version"`
+	CreatedAt  time.Time                   `json:"created_at"`
+	EndedAt    *time.Time                  `json:"ended_at"`
+	Files      map[string]SessionFileState `json:"files"`
+
+	// LastSeenAt When MEHO last got an upload for this session.
+	LastSeenAt    time.Time           `json:"last_seen_at"`
+	Outcome       *string             `json:"outcome"`
+	Project       string              `json:"project"`
+	SessionId     string              `json:"session_id"`
+	StartedAt     *time.Time          `json:"started_at"`
+	State         SessionDetailState  `json:"state"`
+	UploadCount   int                 `json:"upload_count"`
+	UploadedBySub string              `json:"uploaded_by_sub"`
+	Uploads       []SessionUploadPart `json:"uploads"`
+}
+
+// SessionDetailState defines model for SessionDetail.State.
+type SessionDetailState string
+
+// SessionFileState The size and the SHA-256 hash of one uploaded file (before the secret check).
+type SessionFileState struct {
+	Sha256 string `json:"sha256"`
+	Size   int    `json:"size"`
+}
+
+// SessionListResponse A page of sessions, newest upload first.
+type SessionListResponse struct {
+	Items      []SessionSummary `json:"items"`
+	NextCursor *string          `json:"next_cursor"`
+}
+
+// SessionRetention The retention period of the caller's tenant.
+type SessionRetention struct {
+	RetentionDays int                    `json:"retention_days"`
+	Source        SessionRetentionSource `json:"source"`
+}
+
+// SessionRetentionSource defines model for SessionRetention.Source.
+type SessionRetentionSource string
+
+// SessionRetentionUpdate Set the tenant's retention period, or “null“ to use the default.
+type SessionRetentionUpdate struct {
+	RetentionDays *int `json:"retention_days"`
+}
+
+// SessionSummary The index row of one session.
+type SessionSummary struct {
+	App        string     `json:"app"`
+	AppVersion *string    `json:"app_version"`
+	CreatedAt  time.Time  `json:"created_at"`
+	EndedAt    *time.Time `json:"ended_at"`
+
+	// LastSeenAt When MEHO last got an upload for this session.
+	LastSeenAt    time.Time           `json:"last_seen_at"`
+	Outcome       *string             `json:"outcome"`
+	Project       string              `json:"project"`
+	SessionId     string              `json:"session_id"`
+	StartedAt     *time.Time          `json:"started_at"`
+	State         SessionSummaryState `json:"state"`
+	UploadCount   int                 `json:"upload_count"`
+	UploadedBySub string              `json:"uploaded_by_sub"`
+}
+
+// SessionSummaryState defines model for SessionSummary.State.
+type SessionSummaryState string
+
+// SessionUploadFile One file of one upload: where its stored tail starts and how many bytes it adds.
+//
+// “size“ and “sha256“ are those of the whole file after this upload.
+type SessionUploadFile struct {
+	Added  int    `json:"added"`
+	Offset int    `json:"offset"`
+	Sha256 string `json:"sha256"`
+	Size   int    `json:"size"`
+}
+
+// SessionUploadPart One stored upload of a session.
+type SessionUploadPart struct {
+	ArchiveBytes  int                          `json:"archive_bytes"`
+	ArchiveSha256 string                       `json:"archive_sha256"`
+	Files         map[string]SessionUploadFile `json:"files"`
+
+	// Quarantined Only an admin can open a quarantined upload.
+	Quarantined bool `json:"quarantined"`
+
+	// Redactions How many known secrets the check replaced.
+	Redactions int       `json:"redactions"`
+	Seq        int       `json:"seq"`
+	UploadedAt time.Time `json:"uploaded_at"`
+}
+
+// SessionUploadResult What one upload did.
+type SessionUploadResult struct {
+	NewBytes int `json:"new_bytes"`
+
+	// Outcome created: a new session. appended: new bytes were added. state_changed: no new bytes, but the state changed. unchanged: nothing changed.
+	Outcome     SessionUploadResultOutcome `json:"outcome"`
+	Quarantined bool                       `json:"quarantined"`
+	Redactions  int                        `json:"redactions"`
+
+	// Seq The number of the stored upload, or null when none.
+	Seq       *int                     `json:"seq"`
+	SessionId string                   `json:"session_id"`
+	State     SessionUploadResultState `json:"state"`
+}
+
+// SessionUploadResultOutcome created: a new session. appended: new bytes were added. state_changed: no new bytes, but the state changed. unchanged: nothing changed.
+type SessionUploadResultOutcome string
+
+// SessionUploadResultState defines model for SessionUploadResult.State.
+type SessionUploadResultState string
+
 // SettingsImportResponse The preview and the apply answer: plain JSON, the mistakes and the diff.
 //
 // “diff“ has one entry per section (“tenants“, “policies“,
@@ -13152,6 +13335,48 @@ type RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostP
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListAgentSessionsApiV1SessionsGetParams defines parameters for ListAgentSessionsApiV1SessionsGet.
+type ListAgentSessionsApiV1SessionsGetParams struct {
+	Project       *string                                       `form:"project,omitempty" json:"project,omitempty"`
+	State         *ListAgentSessionsApiV1SessionsGetParamsState `form:"state,omitempty" json:"state,omitempty"`
+	Limit         *int                                          `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor        *string                                       `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Authorization *string                                       `json:"authorization,omitempty"`
+}
+
+// ListAgentSessionsApiV1SessionsGetParamsState defines parameters for ListAgentSessionsApiV1SessionsGet.
+type ListAgentSessionsApiV1SessionsGetParamsState string
+
+// UploadAgentSessionApiV1SessionsPostParams defines parameters for UploadAgentSessionApiV1SessionsPost.
+type UploadAgentSessionApiV1SessionsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetSessionRetentionApiV1SessionsRetentionGetParams defines parameters for GetSessionRetentionApiV1SessionsRetentionGet.
+type GetSessionRetentionApiV1SessionsRetentionGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PutSessionRetentionApiV1SessionsRetentionPutParams defines parameters for PutSessionRetentionApiV1SessionsRetentionPut.
+type PutSessionRetentionApiV1SessionsRetentionPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteAgentSessionApiV1SessionsSessionIdDeleteParams defines parameters for DeleteAgentSessionApiV1SessionsSessionIdDelete.
+type DeleteAgentSessionApiV1SessionsSessionIdDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowAgentSessionApiV1SessionsSessionIdGetParams defines parameters for ShowAgentSessionApiV1SessionsSessionIdGet.
+type ShowAgentSessionApiV1SessionsSessionIdGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetParams defines parameters for DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGet.
+type DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ConventionsDriftApiV1SettingsConventionsDriftPostParams defines parameters for ConventionsDriftApiV1SettingsConventionsDriftPost.
 type ConventionsDriftApiV1SettingsConventionsDriftPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -13952,6 +14177,12 @@ type RequestRunApprovalApiV1ServicePrincipalsRunApprovalsPostJSONRequestBody = R
 
 // RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody defines body for RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost for application/json ContentType.
 type RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody = RunApprovalRevoke
+
+// UploadAgentSessionApiV1SessionsPostMultipartRequestBody defines body for UploadAgentSessionApiV1SessionsPost for multipart/form-data ContentType.
+type UploadAgentSessionApiV1SessionsPostMultipartRequestBody = BodyUploadAgentSessionApiV1SessionsPost
+
+// PutSessionRetentionApiV1SessionsRetentionPutJSONRequestBody defines body for PutSessionRetentionApiV1SessionsRetentionPut for application/json ContentType.
+type PutSessionRetentionApiV1SessionsRetentionPutJSONRequestBody = SessionRetentionUpdate
 
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
@@ -16777,6 +17008,29 @@ type ClientInterface interface {
 	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithBody(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListAgentSessionsApiV1SessionsGet request
+	ListAgentSessionsApiV1SessionsGet(ctx context.Context, params *ListAgentSessionsApiV1SessionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UploadAgentSessionApiV1SessionsPostWithBody request with any body
+	UploadAgentSessionApiV1SessionsPostWithBody(ctx context.Context, params *UploadAgentSessionApiV1SessionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetSessionRetentionApiV1SessionsRetentionGet request
+	GetSessionRetentionApiV1SessionsRetentionGet(ctx context.Context, params *GetSessionRetentionApiV1SessionsRetentionGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutSessionRetentionApiV1SessionsRetentionPutWithBody request with any body
+	PutSessionRetentionApiV1SessionsRetentionPutWithBody(ctx context.Context, params *PutSessionRetentionApiV1SessionsRetentionPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PutSessionRetentionApiV1SessionsRetentionPut(ctx context.Context, params *PutSessionRetentionApiV1SessionsRetentionPutParams, body PutSessionRetentionApiV1SessionsRetentionPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteAgentSessionApiV1SessionsSessionIdDelete request
+	DeleteAgentSessionApiV1SessionsSessionIdDelete(ctx context.Context, sessionId string, params *DeleteAgentSessionApiV1SessionsSessionIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowAgentSessionApiV1SessionsSessionIdGet request
+	ShowAgentSessionApiV1SessionsSessionIdGet(ctx context.Context, sessionId string, params *ShowAgentSessionApiV1SessionsSessionIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGet request
+	DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGet(ctx context.Context, sessionId string, seq int, params *DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ConventionsDriftApiV1SettingsConventionsDriftPostWithBody request with any body
 	ConventionsDriftApiV1SettingsConventionsDriftPostWithBody(ctx context.Context, params *ConventionsDriftApiV1SettingsConventionsDriftPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20750,6 +21004,102 @@ func (c *Client) RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalI
 
 func (c *Client) RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePost(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostRequest(c.Server, runApprovalId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListAgentSessionsApiV1SessionsGet(ctx context.Context, params *ListAgentSessionsApiV1SessionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListAgentSessionsApiV1SessionsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UploadAgentSessionApiV1SessionsPostWithBody(ctx context.Context, params *UploadAgentSessionApiV1SessionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUploadAgentSessionApiV1SessionsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetSessionRetentionApiV1SessionsRetentionGet(ctx context.Context, params *GetSessionRetentionApiV1SessionsRetentionGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetSessionRetentionApiV1SessionsRetentionGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutSessionRetentionApiV1SessionsRetentionPutWithBody(ctx context.Context, params *PutSessionRetentionApiV1SessionsRetentionPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutSessionRetentionApiV1SessionsRetentionPutRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutSessionRetentionApiV1SessionsRetentionPut(ctx context.Context, params *PutSessionRetentionApiV1SessionsRetentionPutParams, body PutSessionRetentionApiV1SessionsRetentionPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutSessionRetentionApiV1SessionsRetentionPutRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteAgentSessionApiV1SessionsSessionIdDelete(ctx context.Context, sessionId string, params *DeleteAgentSessionApiV1SessionsSessionIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteAgentSessionApiV1SessionsSessionIdDeleteRequest(c.Server, sessionId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowAgentSessionApiV1SessionsSessionIdGet(ctx context.Context, sessionId string, params *ShowAgentSessionApiV1SessionsSessionIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowAgentSessionApiV1SessionsSessionIdGetRequest(c.Server, sessionId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGet(ctx context.Context, sessionId string, seq int, params *DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetRequest(c.Server, sessionId, seq, params)
 	if err != nil {
 		return nil, err
 	}
@@ -37186,6 +37536,413 @@ func NewRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePo
 	return req, nil
 }
 
+// NewListAgentSessionsApiV1SessionsGetRequest generates requests for ListAgentSessionsApiV1SessionsGet
+func NewListAgentSessionsApiV1SessionsGetRequest(server string, params *ListAgentSessionsApiV1SessionsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sessions")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Project != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "project", runtime.ParamLocationQuery, *params.Project); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "state", runtime.ParamLocationQuery, *params.State); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUploadAgentSessionApiV1SessionsPostRequestWithBody generates requests for UploadAgentSessionApiV1SessionsPost with any type of body
+func NewUploadAgentSessionApiV1SessionsPostRequestWithBody(server string, params *UploadAgentSessionApiV1SessionsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sessions")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetSessionRetentionApiV1SessionsRetentionGetRequest generates requests for GetSessionRetentionApiV1SessionsRetentionGet
+func NewGetSessionRetentionApiV1SessionsRetentionGetRequest(server string, params *GetSessionRetentionApiV1SessionsRetentionGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sessions/retention")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPutSessionRetentionApiV1SessionsRetentionPutRequest calls the generic PutSessionRetentionApiV1SessionsRetentionPut builder with application/json body
+func NewPutSessionRetentionApiV1SessionsRetentionPutRequest(server string, params *PutSessionRetentionApiV1SessionsRetentionPutParams, body PutSessionRetentionApiV1SessionsRetentionPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutSessionRetentionApiV1SessionsRetentionPutRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPutSessionRetentionApiV1SessionsRetentionPutRequestWithBody generates requests for PutSessionRetentionApiV1SessionsRetentionPut with any type of body
+func NewPutSessionRetentionApiV1SessionsRetentionPutRequestWithBody(server string, params *PutSessionRetentionApiV1SessionsRetentionPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sessions/retention")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteAgentSessionApiV1SessionsSessionIdDeleteRequest generates requests for DeleteAgentSessionApiV1SessionsSessionIdDelete
+func NewDeleteAgentSessionApiV1SessionsSessionIdDeleteRequest(server string, sessionId string, params *DeleteAgentSessionApiV1SessionsSessionIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "session_id", runtime.ParamLocationPath, sessionId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sessions/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowAgentSessionApiV1SessionsSessionIdGetRequest generates requests for ShowAgentSessionApiV1SessionsSessionIdGet
+func NewShowAgentSessionApiV1SessionsSessionIdGetRequest(server string, sessionId string, params *ShowAgentSessionApiV1SessionsSessionIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "session_id", runtime.ParamLocationPath, sessionId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sessions/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetRequest generates requests for DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGet
+func NewDownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetRequest(server string, sessionId string, seq int, params *DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "session_id", runtime.ParamLocationPath, sessionId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "seq", runtime.ParamLocationPath, seq)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sessions/%s/uploads/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewConventionsDriftApiV1SettingsConventionsDriftPostRequestWithBody generates requests for ConventionsDriftApiV1SettingsConventionsDriftPost with any type of body
 func NewConventionsDriftApiV1SettingsConventionsDriftPostRequestWithBody(server string, params *ConventionsDriftApiV1SettingsConventionsDriftPostParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
@@ -51310,6 +52067,29 @@ type ClientWithResponsesInterface interface {
 
 	RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostWithResponse(ctx context.Context, runApprovalId openapi_types.UUID, params *RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostParams, body RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse, error)
 
+	// ListAgentSessionsApiV1SessionsGetWithResponse request
+	ListAgentSessionsApiV1SessionsGetWithResponse(ctx context.Context, params *ListAgentSessionsApiV1SessionsGetParams, reqEditors ...RequestEditorFn) (*ListAgentSessionsApiV1SessionsGetResponse, error)
+
+	// UploadAgentSessionApiV1SessionsPostWithBodyWithResponse request with any body
+	UploadAgentSessionApiV1SessionsPostWithBodyWithResponse(ctx context.Context, params *UploadAgentSessionApiV1SessionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UploadAgentSessionApiV1SessionsPostResponse, error)
+
+	// GetSessionRetentionApiV1SessionsRetentionGetWithResponse request
+	GetSessionRetentionApiV1SessionsRetentionGetWithResponse(ctx context.Context, params *GetSessionRetentionApiV1SessionsRetentionGetParams, reqEditors ...RequestEditorFn) (*GetSessionRetentionApiV1SessionsRetentionGetResponse, error)
+
+	// PutSessionRetentionApiV1SessionsRetentionPutWithBodyWithResponse request with any body
+	PutSessionRetentionApiV1SessionsRetentionPutWithBodyWithResponse(ctx context.Context, params *PutSessionRetentionApiV1SessionsRetentionPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutSessionRetentionApiV1SessionsRetentionPutResponse, error)
+
+	PutSessionRetentionApiV1SessionsRetentionPutWithResponse(ctx context.Context, params *PutSessionRetentionApiV1SessionsRetentionPutParams, body PutSessionRetentionApiV1SessionsRetentionPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutSessionRetentionApiV1SessionsRetentionPutResponse, error)
+
+	// DeleteAgentSessionApiV1SessionsSessionIdDeleteWithResponse request
+	DeleteAgentSessionApiV1SessionsSessionIdDeleteWithResponse(ctx context.Context, sessionId string, params *DeleteAgentSessionApiV1SessionsSessionIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteAgentSessionApiV1SessionsSessionIdDeleteResponse, error)
+
+	// ShowAgentSessionApiV1SessionsSessionIdGetWithResponse request
+	ShowAgentSessionApiV1SessionsSessionIdGetWithResponse(ctx context.Context, sessionId string, params *ShowAgentSessionApiV1SessionsSessionIdGetParams, reqEditors ...RequestEditorFn) (*ShowAgentSessionApiV1SessionsSessionIdGetResponse, error)
+
+	// DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetWithResponse request
+	DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetWithResponse(ctx context.Context, sessionId string, seq int, params *DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetParams, reqEditors ...RequestEditorFn) (*DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse, error)
+
 	// ConventionsDriftApiV1SettingsConventionsDriftPostWithBodyWithResponse request with any body
 	ConventionsDriftApiV1SettingsConventionsDriftPostWithBodyWithResponse(ctx context.Context, params *ConventionsDriftApiV1SettingsConventionsDriftPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ConventionsDriftApiV1SettingsConventionsDriftPostResponse, error)
 
@@ -56368,6 +57148,165 @@ func (r RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePo
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListAgentSessionsApiV1SessionsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SessionListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListAgentSessionsApiV1SessionsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListAgentSessionsApiV1SessionsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UploadAgentSessionApiV1SessionsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SessionUploadResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UploadAgentSessionApiV1SessionsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UploadAgentSessionApiV1SessionsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetSessionRetentionApiV1SessionsRetentionGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SessionRetention
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetSessionRetentionApiV1SessionsRetentionGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetSessionRetentionApiV1SessionsRetentionGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PutSessionRetentionApiV1SessionsRetentionPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SessionRetention
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PutSessionRetentionApiV1SessionsRetentionPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutSessionRetentionApiV1SessionsRetentionPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteAgentSessionApiV1SessionsSessionIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteAgentSessionApiV1SessionsSessionIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteAgentSessionApiV1SessionsSessionIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowAgentSessionApiV1SessionsSessionIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SessionDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowAgentSessionApiV1SessionsSessionIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowAgentSessionApiV1SessionsSessionIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -64253,6 +65192,77 @@ func (c *ClientWithResponses) RevokeRunApprovalApiV1ServicePrincipalsRunApproval
 		return nil, err
 	}
 	return ParseRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostResponse(rsp)
+}
+
+// ListAgentSessionsApiV1SessionsGetWithResponse request returning *ListAgentSessionsApiV1SessionsGetResponse
+func (c *ClientWithResponses) ListAgentSessionsApiV1SessionsGetWithResponse(ctx context.Context, params *ListAgentSessionsApiV1SessionsGetParams, reqEditors ...RequestEditorFn) (*ListAgentSessionsApiV1SessionsGetResponse, error) {
+	rsp, err := c.ListAgentSessionsApiV1SessionsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListAgentSessionsApiV1SessionsGetResponse(rsp)
+}
+
+// UploadAgentSessionApiV1SessionsPostWithBodyWithResponse request with arbitrary body returning *UploadAgentSessionApiV1SessionsPostResponse
+func (c *ClientWithResponses) UploadAgentSessionApiV1SessionsPostWithBodyWithResponse(ctx context.Context, params *UploadAgentSessionApiV1SessionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UploadAgentSessionApiV1SessionsPostResponse, error) {
+	rsp, err := c.UploadAgentSessionApiV1SessionsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUploadAgentSessionApiV1SessionsPostResponse(rsp)
+}
+
+// GetSessionRetentionApiV1SessionsRetentionGetWithResponse request returning *GetSessionRetentionApiV1SessionsRetentionGetResponse
+func (c *ClientWithResponses) GetSessionRetentionApiV1SessionsRetentionGetWithResponse(ctx context.Context, params *GetSessionRetentionApiV1SessionsRetentionGetParams, reqEditors ...RequestEditorFn) (*GetSessionRetentionApiV1SessionsRetentionGetResponse, error) {
+	rsp, err := c.GetSessionRetentionApiV1SessionsRetentionGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetSessionRetentionApiV1SessionsRetentionGetResponse(rsp)
+}
+
+// PutSessionRetentionApiV1SessionsRetentionPutWithBodyWithResponse request with arbitrary body returning *PutSessionRetentionApiV1SessionsRetentionPutResponse
+func (c *ClientWithResponses) PutSessionRetentionApiV1SessionsRetentionPutWithBodyWithResponse(ctx context.Context, params *PutSessionRetentionApiV1SessionsRetentionPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutSessionRetentionApiV1SessionsRetentionPutResponse, error) {
+	rsp, err := c.PutSessionRetentionApiV1SessionsRetentionPutWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutSessionRetentionApiV1SessionsRetentionPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) PutSessionRetentionApiV1SessionsRetentionPutWithResponse(ctx context.Context, params *PutSessionRetentionApiV1SessionsRetentionPutParams, body PutSessionRetentionApiV1SessionsRetentionPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutSessionRetentionApiV1SessionsRetentionPutResponse, error) {
+	rsp, err := c.PutSessionRetentionApiV1SessionsRetentionPut(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutSessionRetentionApiV1SessionsRetentionPutResponse(rsp)
+}
+
+// DeleteAgentSessionApiV1SessionsSessionIdDeleteWithResponse request returning *DeleteAgentSessionApiV1SessionsSessionIdDeleteResponse
+func (c *ClientWithResponses) DeleteAgentSessionApiV1SessionsSessionIdDeleteWithResponse(ctx context.Context, sessionId string, params *DeleteAgentSessionApiV1SessionsSessionIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteAgentSessionApiV1SessionsSessionIdDeleteResponse, error) {
+	rsp, err := c.DeleteAgentSessionApiV1SessionsSessionIdDelete(ctx, sessionId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteAgentSessionApiV1SessionsSessionIdDeleteResponse(rsp)
+}
+
+// ShowAgentSessionApiV1SessionsSessionIdGetWithResponse request returning *ShowAgentSessionApiV1SessionsSessionIdGetResponse
+func (c *ClientWithResponses) ShowAgentSessionApiV1SessionsSessionIdGetWithResponse(ctx context.Context, sessionId string, params *ShowAgentSessionApiV1SessionsSessionIdGetParams, reqEditors ...RequestEditorFn) (*ShowAgentSessionApiV1SessionsSessionIdGetResponse, error) {
+	rsp, err := c.ShowAgentSessionApiV1SessionsSessionIdGet(ctx, sessionId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowAgentSessionApiV1SessionsSessionIdGetResponse(rsp)
+}
+
+// DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetWithResponse request returning *DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse
+func (c *ClientWithResponses) DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetWithResponse(ctx context.Context, sessionId string, seq int, params *DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetParams, reqEditors ...RequestEditorFn) (*DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse, error) {
+	rsp, err := c.DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGet(ctx, sessionId, seq, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse(rsp)
 }
 
 // ConventionsDriftApiV1SettingsConventionsDriftPostWithBodyWithResponse request with arbitrary body returning *ConventionsDriftApiV1SettingsConventionsDriftPostResponse
@@ -73263,6 +74273,223 @@ func ParseRevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevoke
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListAgentSessionsApiV1SessionsGetResponse parses an HTTP response from a ListAgentSessionsApiV1SessionsGetWithResponse call
+func ParseListAgentSessionsApiV1SessionsGetResponse(rsp *http.Response) (*ListAgentSessionsApiV1SessionsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListAgentSessionsApiV1SessionsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUploadAgentSessionApiV1SessionsPostResponse parses an HTTP response from a UploadAgentSessionApiV1SessionsPostWithResponse call
+func ParseUploadAgentSessionApiV1SessionsPostResponse(rsp *http.Response) (*UploadAgentSessionApiV1SessionsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UploadAgentSessionApiV1SessionsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionUploadResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetSessionRetentionApiV1SessionsRetentionGetResponse parses an HTTP response from a GetSessionRetentionApiV1SessionsRetentionGetWithResponse call
+func ParseGetSessionRetentionApiV1SessionsRetentionGetResponse(rsp *http.Response) (*GetSessionRetentionApiV1SessionsRetentionGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetSessionRetentionApiV1SessionsRetentionGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionRetention
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutSessionRetentionApiV1SessionsRetentionPutResponse parses an HTTP response from a PutSessionRetentionApiV1SessionsRetentionPutWithResponse call
+func ParsePutSessionRetentionApiV1SessionsRetentionPutResponse(rsp *http.Response) (*PutSessionRetentionApiV1SessionsRetentionPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutSessionRetentionApiV1SessionsRetentionPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionRetention
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteAgentSessionApiV1SessionsSessionIdDeleteResponse parses an HTTP response from a DeleteAgentSessionApiV1SessionsSessionIdDeleteWithResponse call
+func ParseDeleteAgentSessionApiV1SessionsSessionIdDeleteResponse(rsp *http.Response) (*DeleteAgentSessionApiV1SessionsSessionIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteAgentSessionApiV1SessionsSessionIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowAgentSessionApiV1SessionsSessionIdGetResponse parses an HTTP response from a ShowAgentSessionApiV1SessionsSessionIdGetWithResponse call
+func ParseShowAgentSessionApiV1SessionsSessionIdGetResponse(rsp *http.Response) (*ShowAgentSessionApiV1SessionsSessionIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowAgentSessionApiV1SessionsSessionIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse parses an HTTP response from a DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetWithResponse call
+func ParseDownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse(rsp *http.Response) (*DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DownloadAgentSessionUploadApiV1SessionsSessionIdUploadsSeqGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

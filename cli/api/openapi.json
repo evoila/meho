@@ -9873,6 +9873,406 @@
         }
       }
     },
+    "/api/v1/sessions/retention": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get Session Retention",
+        "description": "Return the retention period of the caller's tenant.",
+        "operationId": "get_session_retention_api_v1_sessions_retention_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRetention"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Put Session Retention",
+        "description": "Set the retention period of the caller's tenant; ``null`` uses the default.",
+        "operationId": "put_session_retention_api_v1_sessions_retention_put",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionRetentionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRetention"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Upload Agent Session",
+        "description": "Upload one session, or its new tail. A retry of the same bytes changes nothing.",
+        "operationId": "upload_agent_session_api_v1_sessions_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_agent_session_api_v1_sessions_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionUploadResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "List Agent Sessions",
+        "description": "List the tenant's sessions, newest upload first.",
+        "operationId": "list_agent_sessions_api_v1_sessions_get",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "nullable": true,
+              "title": "Project"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "open",
+                "ended",
+                "unfinished"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "State"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,9}$",
+              "nullable": true,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Show Agent Session",
+        "description": "Return one session with its file hashes and uploads.",
+        "operationId": "show_agent_session_api_v1_sessions__session_id__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Delete Agent Session",
+        "description": "Delete one session and its files.",
+        "operationId": "delete_agent_session_api_v1_sessions__session_id__delete",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{session_id}/uploads/{seq}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Download Agent Session Upload",
+        "description": "Return the stored (checked) archive of one upload.",
+        "operationId": "download_agent_session_upload_api_v1_sessions__session_id__uploads__seq__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "seq",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "title": "Seq"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/gzip": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/gateway/{runner}/next": {
       "get": {
         "tags": [
@@ -28665,6 +29065,75 @@
         "type": "object",
         "title": "Body_ui_scheduler_validate_cron_ui_scheduler_validate_cron_post"
       },
+      "Body_upload_agent_session_api_v1_sessions_post": {
+        "properties": {
+          "archive": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "Archive",
+            "description": "The session as one gzip tar archive."
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "title": "Session Id"
+          },
+          "project": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Project"
+          },
+          "app": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "App"
+          },
+          "app_version": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "App Version"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Started At"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ended At"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "ended",
+              "unfinished"
+            ],
+            "title": "State",
+            "default": "open"
+          },
+          "outcome": {
+            "type": "string",
+            "maxLength": 200,
+            "nullable": true,
+            "title": "Outcome"
+          }
+        },
+        "type": "object",
+        "required": [
+          "archive",
+          "session_id",
+          "project",
+          "app"
+        ],
+        "title": "Body_upload_agent_session_api_v1_sessions_post"
+      },
       "Body_vault_delete_ui_vault_delete_post": {
         "properties": {
           "target": {
@@ -39786,6 +40255,408 @@
         "title": "ServiceReadScopeSet",
         "description": "Body for ``PUT /api/v1/service-principals/read-scopes/{principal_sub}``.\n\nReplaces the whole scope. At least one entry: a scope with no entry\nwould refuse every read, which is a job for revoking the principal."
       },
+      "SessionDetail": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "project": {
+            "type": "string",
+            "title": "Project"
+          },
+          "app": {
+            "type": "string",
+            "title": "App"
+          },
+          "app_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "App Version"
+          },
+          "uploaded_by_sub": {
+            "type": "string",
+            "title": "Uploaded By Sub"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Started At"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ended At"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "ended",
+              "unfinished"
+            ],
+            "title": "State"
+          },
+          "outcome": {
+            "type": "string",
+            "nullable": true,
+            "title": "Outcome"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Last Seen At",
+            "description": "When MEHO last got an upload for this session."
+          },
+          "upload_count": {
+            "type": "integer",
+            "title": "Upload Count"
+          },
+          "files": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SessionFileState"
+            },
+            "type": "object",
+            "title": "Files"
+          },
+          "uploads": {
+            "items": {
+              "$ref": "#/components/schemas/SessionUploadPart"
+            },
+            "type": "array",
+            "title": "Uploads"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "project",
+          "app",
+          "app_version",
+          "uploaded_by_sub",
+          "started_at",
+          "ended_at",
+          "state",
+          "outcome",
+          "created_at",
+          "last_seen_at",
+          "upload_count",
+          "files",
+          "uploads"
+        ],
+        "title": "SessionDetail",
+        "description": "One session with its file hashes and its uploads."
+      },
+      "SessionFileState": {
+        "properties": {
+          "size": {
+            "type": "integer",
+            "title": "Size"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          }
+        },
+        "type": "object",
+        "required": [
+          "size",
+          "sha256"
+        ],
+        "title": "SessionFileState",
+        "description": "The size and the SHA-256 hash of one uploaded file (before the secret check)."
+      },
+      "SessionListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionSummary"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "SessionListResponse",
+        "description": "A page of sessions, newest upload first."
+      },
+      "SessionRetention": {
+        "properties": {
+          "retention_days": {
+            "type": "integer",
+            "title": "Retention Days"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "tenant",
+              "default"
+            ],
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "retention_days",
+          "source"
+        ],
+        "title": "SessionRetention",
+        "description": "The retention period of the caller's tenant."
+      },
+      "SessionRetentionUpdate": {
+        "properties": {
+          "retention_days": {
+            "type": "integer",
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "nullable": true,
+            "title": "Retention Days"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "retention_days"
+        ],
+        "title": "SessionRetentionUpdate",
+        "description": "Set the tenant's retention period, or ``null`` to use the default."
+      },
+      "SessionSummary": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "project": {
+            "type": "string",
+            "title": "Project"
+          },
+          "app": {
+            "type": "string",
+            "title": "App"
+          },
+          "app_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "App Version"
+          },
+          "uploaded_by_sub": {
+            "type": "string",
+            "title": "Uploaded By Sub"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Started At"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ended At"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "ended",
+              "unfinished"
+            ],
+            "title": "State"
+          },
+          "outcome": {
+            "type": "string",
+            "nullable": true,
+            "title": "Outcome"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Last Seen At",
+            "description": "When MEHO last got an upload for this session."
+          },
+          "upload_count": {
+            "type": "integer",
+            "title": "Upload Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "project",
+          "app",
+          "app_version",
+          "uploaded_by_sub",
+          "started_at",
+          "ended_at",
+          "state",
+          "outcome",
+          "created_at",
+          "last_seen_at",
+          "upload_count"
+        ],
+        "title": "SessionSummary",
+        "description": "The index row of one session."
+      },
+      "SessionUploadFile": {
+        "properties": {
+          "size": {
+            "type": "integer",
+            "title": "Size"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          },
+          "added": {
+            "type": "integer",
+            "title": "Added"
+          }
+        },
+        "type": "object",
+        "required": [
+          "size",
+          "sha256",
+          "offset",
+          "added"
+        ],
+        "title": "SessionUploadFile",
+        "description": "One file of one upload: where its stored tail starts and how many bytes it adds.\n\n``size`` and ``sha256`` are those of the whole file after this upload."
+      },
+      "SessionUploadPart": {
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Uploaded At"
+          },
+          "archive_bytes": {
+            "type": "integer",
+            "title": "Archive Bytes"
+          },
+          "archive_sha256": {
+            "type": "string",
+            "title": "Archive Sha256"
+          },
+          "quarantined": {
+            "type": "boolean",
+            "title": "Quarantined",
+            "description": "Only an admin can open a quarantined upload."
+          },
+          "redactions": {
+            "type": "integer",
+            "title": "Redactions",
+            "description": "How many known secrets the check replaced."
+          },
+          "files": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SessionUploadFile"
+            },
+            "type": "object",
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "seq",
+          "uploaded_at",
+          "archive_bytes",
+          "archive_sha256",
+          "quarantined",
+          "redactions",
+          "files"
+        ],
+        "title": "SessionUploadPart",
+        "description": "One stored upload of a session."
+      },
+      "SessionUploadResult": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "ended",
+              "unfinished"
+            ],
+            "title": "State"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "created",
+              "appended",
+              "state_changed",
+              "unchanged"
+            ],
+            "title": "Outcome",
+            "description": "created: a new session. appended: new bytes were added. state_changed: no new bytes, but the state changed. unchanged: nothing changed."
+          },
+          "seq": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Seq",
+            "description": "The number of the stored upload, or null when none."
+          },
+          "new_bytes": {
+            "type": "integer",
+            "title": "New Bytes"
+          },
+          "quarantined": {
+            "type": "boolean",
+            "title": "Quarantined"
+          },
+          "redactions": {
+            "type": "integer",
+            "title": "Redactions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "state",
+          "outcome",
+          "seq",
+          "new_bytes",
+          "quarantined",
+          "redactions"
+        ],
+        "title": "SessionUploadResult",
+        "description": "What one upload did."
+      },
       "SettingsImportResponse": {
         "properties": {
           "preview": {
@@ -42714,6 +43585,10 @@
     {
       "name": "service-principal-run-approvals",
       "x-maturity": "ga"
+    },
+    {
+      "name": "sessions",
+      "x-maturity": "beta"
     },
     {
       "name": "settings",

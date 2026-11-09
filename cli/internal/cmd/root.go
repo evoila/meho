@@ -51,6 +51,7 @@ import (
 	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
 	"github.com/evoila/meho/cli/internal/cmd/secret"
 	"github.com/evoila/meho/cli/internal/cmd/sensor"
+	"github.com/evoila/meho/cli/internal/cmd/sessions"
 	serviceprincipal "github.com/evoila/meho/cli/internal/cmd/service-principal"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/tenants"
@@ -173,6 +174,9 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// (`meho tenants flight-recorder-policy set`). Wraps PATCH
 	// /api/v1/tenants/flight-recorder-policy; tenant-scoped, tenant_admin.
 	root.AddCommand(tenants.NewRootCmd())
+	// #4901 -- agent session store admin verbs (list / show / delete).
+	// Wraps /api/v1/sessions; operator to read, tenant_admin to delete.
+	root.AddCommand(sessions.NewRootCmd())
 	// T3 (#2880) -- event_source registry admin verbs (add / list /
 	// describe / update / delete). Wraps /api/v1/event-sources/*.
 	root.AddCommand(eventsource.NewRootCmd())

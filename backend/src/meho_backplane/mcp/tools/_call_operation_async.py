@@ -36,9 +36,11 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.delivery_budget import bound_complete_response
 from meho_backplane.operations.operation_run import OperationRunNotFoundError
 from meho_backplane.operations.operation_run_service import (
+    DispatchWrapper,
     get_operation_run_service,
     run_result_visible_to,
 )
+from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 from meho_backplane.settings import get_settings
 
 __all__ = ["poll_call", "submit_async_call"]
@@ -118,10 +120,18 @@ def _stored_result_with_run_details(
     return bounded.model_dump(mode="json")
 
 
-async def submit_async_call(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Start the call in the background and return a ``pending`` answer."""
+async def submit_async_call(
+    operator: Operator,
+    arguments: dict[str, Any],
+    *,
+    wrap: DispatchWrapper | None = None,
+) -> dict[str, Any]:
+    """Start the call in the background and return a ``pending`` answer.
+
+    ``wrap`` is passed to :meth:`OperationRunService.submit_call`.
+    """
     started = time.monotonic()
-    run_id = await get_operation_run_service().submit_call(operator, arguments)
+    run_id = await get_operation_run_service().submit_call(operator, arguments, wrap=wrap)
     return _envelope(
         str(arguments["op_id"]),
         status="pending",
@@ -192,6 +202,19 @@ async def poll_call(
     # of its work, so the caller must check the audit log before a retry.
     extras["error_code"] = f"run_{row.status}"
     reason = row.error or f"the run was {row.status}"
+    if row.status == OperationRunStatus.UNCERTAIN:
+        # #5025: the worker died while a change was running. Say it in the
+        # words of the other views, and never invite a second start.
+        extras["execution_outcome"] = UNCERTAIN_OUTCOME
+        extras["retry"] = False
+        extras["remediation"] = UNCERTAIN_ADVICE
+        return _envelope(
+            op_id,
+            status="error",
+            duration_ms=elapsed_ms,
+            extras=extras,
+            error=f"run_uncertain: {reason}",
+        )
     return _envelope(
         op_id,
         status="error",

@@ -93,6 +93,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.profile import AuthSchemeName, ExecutionProfile
 from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations._ingested_owner import assert_ingest_target_accepts
 from meho_backplane.operations.ingest._internals import (
     OP_CROSS_TENANT_INGEST,
     write_audit_row,
@@ -741,7 +742,10 @@ class IngestionPipelineService:
         :class:`ProductImplIdMismatch` when the supplied ``product``
         does not round-trip its ``connector_id`` (checked here, at the
         single chokepoint every entry point traverses, before any DB
-        write or spec fetch — see :meth:`_assert_product_round_trips`).
+        write or spec fetch — see :meth:`_assert_product_round_trips`),
+        and :class:`~meho_backplane.operations._ingested_owner.IngestedOperationsNotAccepted`
+        when the name belongs to a connector class that does not accept
+        ingested operations (checked right after, also before any write).
         The parser, registrar, and grouping pass propagate their own
         domain exceptions verbatim — the router catches them at the HTTP
         boundary.
@@ -772,6 +776,9 @@ class IngestionPipelineService:
         # rejected before any spec I/O or DB write, on every entry point
         # that reaches this method (REST / MCP / CLI).
         self._assert_product_round_trips(product=product, version=version, impl_id=impl_id)
+        # The rows would run on the class that serves this name; refuse when
+        # that class runs only its own hand-written operations.
+        assert_ingest_target_accepts(product=product, version=version, impl_id=impl_id)
         connector_id = build_connector_id(product, version, impl_id)
         log = _log.bind(
             connector_id=connector_id,

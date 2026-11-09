@@ -17,6 +17,23 @@ Copyright (c) 2026 evoila Group
 > lives here is the recipe the operator follows and the verification
 > commands either side can run to prove the contract holds.
 
+**Built-in Keycloak.** With the built-in Keycloak
+(`coreKeycloak.enabled: true`, the chart default since 0.45.0), skip the
+recipe below. The realm file already has the `meho-web` client, with the
+callback and logout URLs of your host and PKCE `S256`, and the install
+makes its secret and the session key in the Secret
+`<release>-core-ui-auth`. To turn the console on, set:
+
+```yaml
+uiConsole:
+  enabled: true
+  secretName: <release>-core-ui-auth
+config:
+  uiKeycloakClientId: meho-web
+```
+
+The recipe below is for a Keycloak you bring yourself.
+
 ## Why this doc exists
 
 The v0.2 operator-console (Initiative
@@ -39,7 +56,7 @@ The BFF flow needs its own client because:
 1. The authorization-code grant runs server-side and carries a
    `client_secret` on the token-endpoint POST. Confidential client.
 2. The redirect URI is exact-match
-   (`https://meho.evba.lab/ui/auth/callback`) and Keycloak enforces
+   (`https://meho.example.com/ui/auth/callback`) and Keycloak enforces
    this; the CLI client cannot share the redirect URI.
 3. The PKCE flow is enforced (OAuth 2.1 mandates PKCE on every
    authorization-code grant). The CLI client runs device-code, a
@@ -92,16 +109,16 @@ In the Admin Console (logged in as a realm admin):
      grants on the same client widens the attack surface for no
      gain.
 6. **Next** → **Login settings**:
-   - **Root URL:** `https://meho.evba.lab` (the deploy's public
+   - **Root URL:** `https://meho.example.com` (the deploy's public
      URL).
-   - **Home URL:** `https://meho.evba.lab/ui/`.
+   - **Home URL:** `https://meho.example.com/ui/`.
    - **Valid redirect URIs:**
-     `https://meho.evba.lab/ui/auth/callback` — **exact match
+     `https://meho.example.com/ui/auth/callback` — **exact match
      only**, no wildcards. Keycloak enforces exact match on the
      token-endpoint exchange; a mismatch surfaces as
      `invalid_grant` on the callback.
    - **Valid post-logout redirect URIs:**
-     `https://meho.evba.lab/ui/auth/login` (the BFF logout flow
+     `https://meho.example.com/ui/auth/login` (the BFF logout flow
      bounces the operator back to this URL after the IdP-side
      end-session hop).
    - **Web origins:** leave blank — CORS is not needed (the BFF
@@ -165,8 +182,7 @@ authorization URL, so the realm must accept this shape:
      client_secret='<paste-value-here>'
    ```
 
-   For the dogfooding lab the path is
-   `secret/meho/evba-lab/ui/keycloak/web-client`; update the
+   Then update the
    Helm values `extraEnv` block (or the `ExternalSecret` /
    `VaultSecret` CRD the deploy already uses for
    `DATABASE_URL`) so the pod environment carries:
@@ -228,12 +244,13 @@ the end-to-end contract.
 ### Check 1 — `meho-web` client is configured correctly
 
 ```bash
-# Replace REALM / ADMIN_TOKEN with values from your environment.
+# Replace the realm name / ADMIN_TOKEN with values from your environment.
 ISSUER="https://keycloak.example.org/realms/<realm-name>"
+ADMIN_API="https://keycloak.example.org/admin/realms/<realm-name>"
 ADMIN_TOKEN="<a token from kcadm.sh config credentials>"
 
 curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "$ISSUER/clients?clientId=meho-web" \
+  "$ADMIN_API/clients?clientId=meho-web" \
   | jq '.[0] | {
       clientId,
       publicClient,
@@ -252,7 +269,7 @@ Expected:
   "publicClient": false,
   "standardFlowEnabled": true,
   "directAccessGrantsEnabled": false,
-  "redirectUris": ["https://meho.evba.lab/ui/auth/callback"],
+  "redirectUris": ["https://meho.example.com/ui/auth/callback"],
   "pkceMethod": "S256"
 }
 ```
@@ -289,13 +306,13 @@ After the backplane is deployed with `UI_KEYCLOAK_CLIENT_ID=meho-web`
 
 ```bash
 # Visit the dashboard in a browser:
-open https://meho.evba.lab/ui/
+open https://meho.example.com/ui/
 
 # Expected:
 # 1. 302 → /ui/auth/login?return_to=/ui/
 # 2. 302 → https://keycloak.example.org/realms/<realm>/protocol/openid-connect/auth
 #    Query string carries code_challenge + code_challenge_method=S256 +
-#    resource=https://meho.evba.lab/api + state=<random>.
+#    resource=https://meho.example.com/api + state=<random>.
 # 3. Operator authenticates at Keycloak.
 # 4. 302 → /ui/auth/callback?code=...&state=...
 # 5. Backplane sets the meho_session cookie (HttpOnly + Secure +
@@ -354,11 +371,10 @@ audit / disable / rate-limit independently.
 
 | Item | Side | State |
 | --- | --- | --- |
-| Recipe (this doc) | producer | landed in this PR ([`./keycloak-web-client.md`](./keycloak-web-client.md)) |
-| BFF reads `UI_KEYCLOAK_CLIENT_ID` / `UI_KEYCLOAK_CLIENT_SECRET` | producer | tracked at [#865](https://github.com/evoila/meho/issues/865) |
-| `meho-web` client provisioned on `evba.lab` realm | consumer | pending — applied by the dogfooding lab operator before deploying v0.2 operator-console |
-| Vault path `secret/meho/evba-lab/ui/keycloak/web-client` populated | consumer | pending — same operator step |
-| End-to-end browser login against the v0.2 BFF returns 200 on `/ui/` | consumer | pending — the closing-comment artefact on Initiative #337 |
+| Recipe (this doc) | producer | landed ([`./keycloak-web-client.md`](./keycloak-web-client.md)) |
+| BFF reads `UI_KEYCLOAK_CLIENT_ID` / `UI_KEYCLOAK_CLIENT_SECRET` | producer | landed ([#865](https://github.com/evoila/meho/issues/865)) |
+| `meho-web` client and its secret | consumer | the built-in Keycloak makes both; with your own Keycloak, apply Steps 1–3 |
+| End-to-end browser login returns 200 on `/ui/` | consumer | Check 3 above, per install |
 
 ## References
 
@@ -368,6 +384,7 @@ audit / disable / rate-limit independently.
 - Sibling handshake: [`./mcp-client-setup.md`](./mcp-client-setup.md) — `meho-cli` / `meho-mcp` client recipes (this `meho-web` doc mirrors the same shape)
 - Backend codebase walkthrough: [`../codebase/ui.md`](../codebase/ui.md) — BFF auth flow + middleware + session storage
 - Settings: [`Settings.ui_keycloak_client_id`](../codebase/backend.md), [`Settings.ui_keycloak_client_secret`](../codebase/backend.md)
+- Built-in realm file (the `meho-web` client): [`deploy/charts/meho/charts/keycloak/files/meho-realm.json`](../../deploy/charts/meho/charts/keycloak/files/meho-realm.json)
 - OAuth 2.0 Authorization Code grant — [RFC 6749 §4.1](https://www.rfc-editor.org/rfc/rfc6749)
 - PKCE — [RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)
 - Resource indicators — [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)
@@ -375,4 +392,3 @@ audit / disable / rate-limit independently.
 - OAuth 2.0 for Browser-Based Apps BCP — [draft-ietf-oauth-browser-based-apps](https://datatracker.ietf.org/doc/draft-ietf-oauth-browser-based-apps/)
 - Keycloak Server Admin Guide — [Client configuration](https://www.keycloak.org/docs/latest/server_admin/index.html#_client-configuration)
 - Keycloak OIDC layers — [OIDC endpoints](https://www.keycloak.org/securing-apps/oidc-layers)
-- Consumer's Keycloak realm: see `evoila-bosnia/claude-rdc-hetzner-dc/rdc-hetzner-dc/INVENTORY.md` Keycloak section

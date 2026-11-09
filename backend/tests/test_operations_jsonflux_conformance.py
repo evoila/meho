@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -104,10 +105,12 @@ def stub_embedding_service() -> AsyncMock:
 
 
 @pytest.fixture(autouse=True)
-def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Provide the settings the real registrar path reads during the sweep."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    get_settings.cache_clear()
+    yield
     get_settings.cache_clear()
 
 
@@ -434,13 +437,22 @@ async def test_list_without_hint_reports_native_pagination_unavailable() -> None
 
 
 @pytest.mark.asyncio
-async def test_reduced_page_is_never_labeled_source_complete() -> None:
-    """A hint says how to page; it does not make the stored page source-complete."""
+@pytest.mark.parametrize("answer_ready", ["false", "true"])
+async def test_reduced_page_is_never_labeled_source_complete(
+    answer_ready: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hint says how to page; it does not make the stored page source-complete.
+
+    Checked with the short answer-ready reply off and on
+    (``JSONFLUX_ANSWER_READY``): both must say the vendor may hold more rows.
+    """
     import msgspec
 
     from meho_backplane.connectors.github.pagination_hints import GH_ISSUE_LIST_PAGINATION_HINT
     from meho_backplane.connectors.result_handle_store import _StoredPayload
 
+    monkeypatch.setenv("JSONFLUX_ANSWER_READY", answer_ready)
+    get_settings.cache_clear()
     handle, valkey = await _reduce_issue_page({"pagination_hint": GH_ISSUE_LIST_PAGINATION_HINT})
 
     (raw,) = valkey.values.values()
@@ -450,6 +462,7 @@ async def test_reduced_page_is_never_labeled_source_complete() -> None:
     rationale = handle.fetch_more.drill_in.rationale
     assert handle.fetch_more.drill_in.available is True
     assert "full result set" not in rationale
+    assert "complete" not in rationale
     assert "may hold more rows" in rationale
 
 

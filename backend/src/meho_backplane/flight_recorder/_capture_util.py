@@ -13,6 +13,7 @@ per-trace and span-count caps live on the scope in :mod:`.capture`.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -45,6 +46,8 @@ __all__ = [
 #: Per-span body cap (F3). A request/response body larger than this truncates
 #: (marker + forced redaction-uncertainty); it never errors a dispatch.
 MAX_SPAN_BODY_BYTES: Final[int] = 64 * 1024
+
+_AUTHORITY_END: Final = re.compile(r"[/?#]")
 
 #: Timeout class -> phase name. Same labels as the ``connector_timeout``
 #: error result (``operations._errors.result_connector_timeout``), so the
@@ -123,9 +126,9 @@ def as_mapping(headers: Any) -> Any:
 def safe_url(url: Any) -> str:
     """Return ``scheme://host[:port]/path`` -- no query, userinfo, or fragment.
 
-    Query strings and userinfo can carry tokens / signed-URL material, and the
-    redaction engine has no URL redactor, so the capture seam strips them here:
-    only the non-secret request line survives.
+    Query strings and userinfo can carry tokens / signed-URL material, so the
+    capture seam strips them here, for a parsed URL and for a plain string
+    alike: only the non-secret request line survives.
     """
     try:
         scheme = getattr(url, "scheme", None)
@@ -135,7 +138,18 @@ def safe_url(url: Any) -> str:
             port = getattr(url, "port", None)
             netloc = host if port in (None, 80, 443) else f"{host}:{port}"
             return f"{scheme}://{netloc}{path or ''}"
-        return str(url).split("?", 1)[0].split("#", 1)[0]
+        text = str(url)
+        scheme_end = text.find("://")
+        if scheme_end == -1:
+            return text.split("?", 1)[0].split("#", 1)[0]
+        # The host part ends at the first ``/``, ``?`` or ``#`` (RFC 3986);
+        # only what follows its last ``@`` is the host.
+        rest = text[scheme_end + 3 :]
+        end_mark = _AUTHORITY_END.search(rest)
+        authority_end = len(rest) if end_mark is None else end_mark.start()
+        host = rest[:authority_end].rpartition("@")[2]
+        path = rest[authority_end:].split("?", 1)[0].split("#", 1)[0]
+        return f"{text[:scheme_end]}://{host}{path}"
     except Exception:
         return "?"
 

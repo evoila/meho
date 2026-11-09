@@ -62,7 +62,7 @@ from meho_backplane.operations.ingest import (
     list_ingested_connectors,
 )
 from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
@@ -124,7 +124,7 @@ class _KindFilter(StrEnum):
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 idiom
 #: matching the list / detail / corpus routes (no calls in default
 #: argument positions).
-_require_ui_session_dep = Depends(require_ui_session)
+_require_ui_operator_dep = Depends(require_ui_operator)
 _role_probe_dep = Depends(resolve_role_probe)
 
 
@@ -337,7 +337,7 @@ def build_registry_list_router() -> APIRouter:
         status: _StatusFilter = Query(default=_StatusFilter.ALL),
         product: str | None = Query(default=None, max_length=100),
         kind: _KindFilter = Query(default=_KindFilter.ALL),
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
         """Serve ``GET /ui/connectors/registry``. See the module docstring."""

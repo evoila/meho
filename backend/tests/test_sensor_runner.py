@@ -66,6 +66,7 @@ from meho_backplane.checks.runner import (
     stop_sensor_runner,
 )
 from meho_backplane.checks.schemas import SensorCreate
+from meho_backplane.checks.sensor_edit import SensorUpdate, edit_sensor
 from meho_backplane.checks.service import (
     SensorAdminService,
     SensorIdentitySubForbiddenError,
@@ -918,17 +919,30 @@ async def test_non_ok_dispatch_persists_unknown(
 
 
 @pytest.mark.asyncio
-async def test_netdiag_sensor_reads_unknown_because_the_op_waits_for_approval(
+async def test_netdiag_allowlist_refusal_persists_unknown_not_critical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``net.tcp_check`` sensor reads ``unknown``, never a false ``critical``.
+    """A probe the allowlist refuses reads ``unknown``, never a false ``critical``.
 
-    ``net.tcp_check`` connects to an address from its parameters, so it runs
-    at risk level ``caution`` and waits for a person's approval. A sensor
-    runs only ``safe`` operations, so the runner stops at the descriptor
-    check: the sensor reads ``unknown`` with the reason
-    ``op_not_safe_at_dispatch`` and nothing is dialed.
+    The #2784 regression, end to end through the **real** dispatcher (no
+    monkeypatched ``dispatch``): a ``net.tcp_check`` sensor asserting on
+    ``$.connected`` against a host outside ``MEHO_NETDIAG_PROBE_ALLOWLIST``.
+
+    Before the fix the refusal came back ``status="ok"`` carrying
+    ``{"connected": false, "reason": "not_in_probe_allowlist"}``, the
+    ``BoolCompare`` mapped ``false`` to ``critical``, and the ``reason``
+    was dropped at the assertion select — so a reverted allowlist was
+    indistinguishable from a genuine outage. The refusal is now a
+    ``connector_probe_refused`` dispatch error, so the runner's existing
+    non-``ok`` mapping persists ``unknown`` with the allowlist named in
+    the stored evidence.
+
+    Uses TEST-NET-1 (RFC 5737 ``192.0.2.1``, the address from the incident
+    report). Nothing is dialed: the guard refuses before any socket opens.
     """
+    # Unset ⇒ deny-all (the allowlist's inverted semantics). Pinned
+    # explicitly so an ambient value in the developer's shell cannot turn
+    # this into a real dial against TEST-NET-1.
     monkeypatch.delenv(PROBE_ALLOWLIST_ENV, raising=False)
     embedding = AsyncMock()
     embedding.encode_one.return_value = [0.1] * 384
@@ -956,9 +970,15 @@ async def test_netdiag_sensor_reads_unknown_because_the_op_waits_for_approval(
 
     row = await _get_sensor(sensor_id)
     assert row.last_state == "unknown"
+    assert row.last_state != "critical"
     assert row.last_evidence is not None
-    assert row.last_evidence["reason"] == "op_not_safe_at_dispatch"
-    assert row.last_evidence["safety_level"] == "caution"
+    assert row.last_evidence["reason"] == "dispatch_not_ok"
+    assert row.last_evidence["dispatch_status"] == "error"
+    # The stored evidence names the allowlist, so the dashboard answers
+    # "why" in one glance instead of showing a phantom down host.
+    dispatch_error = row.last_evidence["dispatch_error"]
+    assert "connector_probe_refused" in dispatch_error
+    assert PROBE_ALLOWLIST_ENV in dispatch_error
 
 
 @pytest.mark.asyncio
@@ -1042,8 +1062,9 @@ async def test_overlap_guard_skips_second_dispatch_and_logs(
         await _wait_until(lambda: calls == 1)
 
         # Force it due again; the second tick must skip the still-in-flight
-        # sensor and log the overlap.
-        await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+        # sensor, log the overlap, and leave the row due for a later tick.
+        due_again = datetime.now(UTC) - timedelta(seconds=1)
+        await _force_due(sensor_id, due_again)
         with structlog.testing.capture_logs() as logs:
             dispatched = await run_one_sensor_tick()
 
@@ -1051,6 +1072,64 @@ async def test_overlap_guard_skips_second_dispatch_and_logs(
         assert calls == 1
         events = [entry.get("event") for entry in logs]
         assert "sensor_evaluation_overlap_skipped" in events
+        row = await _get_sensor(sensor_id)
+        assert _aware(row.next_fire_at) == due_again
+    finally:
+        gate.set()
+        await _drain_in_flight()
+
+
+@pytest.mark.asyncio
+async def test_edit_during_evaluation_runs_new_settings_on_next_free_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit while the old settings are still being checked is not lost.
+
+    The edit makes the sensor due at once. The next tick sees the running
+    evaluation and leaves the row due instead of advancing it; the first tick
+    after that evaluation ends runs the new settings. Without this, an hourly
+    sensor edited mid-check would wait a whole hour.
+    """
+    gate = asyncio.Event()
+    seen_params: list[dict[str, object]] = []
+
+    async def _blocked_dispatch(**kwargs: Any) -> OperationResult:
+        seen_params.append(dict(kwargs["params"]))
+        if len(seen_params) == 1:
+            await gate.wait()
+        return _ok_result({"count": 3})
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _blocked_dispatch)
+
+    sensor_id = await _create_interval_sensor(interval_seconds=3600)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    try:
+        assert await run_one_sensor_tick() == 1
+        await _wait_until(lambda: len(seen_params) == 1)
+
+        edited_at = datetime.now(UTC).replace(microsecond=0)
+        result = await edit_sensor(
+            _TENANT, sensor_id, SensorUpdate(params={"limit": 5}), now=edited_at
+        )
+        assert result is not None
+        assert result.after == {"params": {"limit": 5}}
+
+        # The old check is still running: this tick must not advance the row.
+        assert await run_one_sensor_tick() == 0
+        assert len(seen_params) == 1
+        row = await _get_sensor(sensor_id)
+        assert _aware(row.next_fire_at) == edited_at
+
+        gate.set()
+        await _drain_in_flight()
+
+        # The first free tick runs the new settings and advances the cadence.
+        assert await run_one_sensor_tick() == 1
+        await _wait_until(lambda: len(seen_params) == 2)
+        assert seen_params[1] == {"limit": 5}
+        row = await _get_sensor(sensor_id)
+        assert _aware(row.next_fire_at) > edited_at + timedelta(minutes=59)
     finally:
         gate.set()
         await _drain_in_flight()

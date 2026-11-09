@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/evoila/meho/cli/internal/api"
 )
@@ -78,6 +79,10 @@ const (
 	// ExitInsufficientRole (both are "tenant_admin must act");
 	// callers branch on the error code string, not the integer.
 	ExitInsufficientBudget = 5
+	// ExitFirstStartFailed indicates `meho status --first-start`
+	// got the list and at least one line is red. The fix is on the
+	// site (DNS, certificate, clock or a system), not in the CLI.
+	ExitFirstStartFailed = 6
 )
 
 // Error codes (the "error" field in the JSON error envelope). The
@@ -111,6 +116,9 @@ const (
 	// splits an entry. Surfaced by `meho conventions list` per
 	// G7.1-T7 #1094.
 	ErrCodeInsufficientBudget = "insufficient_budget"
+	// ErrCodeFirstStartFailed pairs with ExitFirstStartFailed. At
+	// least one line of the first-start list is red.
+	ErrCodeFirstStartFailed = "first_start_failed"
 )
 
 // StructuredError is the error shape produced by every meho
@@ -283,7 +291,9 @@ func RenderError(stderrW io.Writer, err *StructuredError, jsonOut bool) error {
 	// rendering to stderr ourselves so we don't depend on cobra's
 	// default printer (status.go runs with SilenceErrors=true so
 	// the JSON envelope on the --json path stays uncontaminated).
-	fmt.Fprintln(stderrW, err.Error())
+	// The detail often carries text from the server; SafeLines shows its
+	// control characters as visible escapes and keeps the line breaks.
+	fmt.Fprintln(stderrW, SafeLines(err.Error()))
 	return &silentError{exit: err.Exit}
 }
 
@@ -339,6 +349,7 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 	if tenantNotChosen(resp.Operator) {
 		fmt.Fprintln(stdoutW, "  No tenant chosen. Choose one with `meho tenants use <name>`.")
 		fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+		fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
 		return nil
 	}
 
@@ -347,6 +358,10 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 
 	// DB subsystem. migrated is a tri-state (true, false, nil/unknown).
 	fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+
+	// The server's time in UTC (#5504). An older backplane sends no
+	// field; the line is skipped then.
+	fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
 
 	// Readiness checks, approval settings and gated features (#4830).
 	// An older backplane sends none of these; the lines are skipped
@@ -382,7 +397,36 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 	if line := formatOperationCatalog(resp.OperationCatalog); line != "" {
 		fmt.Fprintln(stdoutW, line)
 	}
+
+	// Agent model spend (#5771): one line when MEHO has no price for the
+	// default agent model, nothing otherwise. Older backplanes send no
+	// field.
+	if line := formatAgentModelSpend(resp.AgentModelSpend); line != "" {
+		fmt.Fprintln(stdoutW, line)
+	}
 	return nil
+}
+
+// formatAgentModelSpend renders the one warning line for a default agent
+// model that has no price: runs on it cost 0, so the spend limits do not
+// count them. Empty when the spend is counted or the field is missing.
+func formatAgentModelSpend(s *api.AgentModelSpend) string {
+	if s == nil || s.SpendCounted {
+		return ""
+	}
+	return fmt.Sprintf(
+		"  Agent model: %s has no price in MEHO, so spend limits do not count its runs",
+		s.Model,
+	)
+}
+
+// formatServerTime renders the server's time line in UTC, to the
+// second. Empty when the backplane sends no time.
+func formatServerTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return fmt.Sprintf("  Server time: %s\n", t.UTC().Format(time.RFC3339))
 }
 
 // tenantNotChosen reports a status answer for a login with several

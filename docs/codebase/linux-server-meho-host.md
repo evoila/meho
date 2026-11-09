@@ -8,8 +8,8 @@ step 2, with the two files of `lib/` it sources in
 `/usr/local/lib/meho-host/`, and every later run installs the version of
 its download. The
 customer never needs kubectl: that is ADR 0007 decision 2 (the support rule)
-and the form-2 design, section 5, the `meho-host` table (meho-internal
-`docs/design/2026-10-10-install-forms/form-2-linux-server.md`).
+and the form-2 design, section 5, the `meho-host` table (the internal
+form-2 design note).
 
 This version has five commands:
 
@@ -126,9 +126,9 @@ because `meho doctor` gives the whole check 60 seconds. It never reads
 
 Points 1 to 3 make a red line, which names every problem it finds. Point 4
 alone makes a warning. Every time check uses one "now", `date -u +%s`, so
-the tests can fix it. The first-start list (#4042) checks the console
-certificate in the backplane, in Python. It must use the same rule, with
-the same 30 days, so the two lists never disagree. `meho-host certificate`
+the tests can fix it. The first-start list (#4042, not built yet) will
+check the console certificate in the backplane, in Python. It must use the
+same rule, with the same 30 days, so the two lists never disagree. `meho-host certificate`
 (#4738) can call `certificate_state` to check a new certificate before it
 writes the Secret.
 
@@ -550,8 +550,8 @@ packages later.
   `ingress.tls.secretName` needs a change of `CONSOLE_TLS_SECRET`.
 - **The certificate line checks the Secret, not the connection.** It does
   not connect to port 443, so it does not prove that Traefik serves this
-  Secret. The first-start list (#4042) fetches the certificate through the
-  console address.
+  Secret. The first-start list (#4042, not built yet) is planned to fetch
+  the certificate through the console address.
 
 - **The Traefik pods are found by name.** The bundle takes the `kube-system`
   pods whose name starts with `rke2-traefik-`, which is how RKE2's
@@ -626,11 +626,10 @@ packages later.
   https://www.freedesktop.org/software/systemd/man/latest/systemd.time.html
 - The kubelet's eviction thresholds:
   https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/
-- ADR 0007 decision 2 (the support rule), meho-internal
-  `docs/decisions/0007-kubernetes-inside-and-ha-path.md`.
+- ADR 0007 decision 2 (the support rule), an internal decision record.
 - ADR 0009 (closed by default; "Work": how the customer sets the admin
-  network after the install), meho-internal
-  `docs/decisions/0009-closed-by-default.md`; the form-2 design, section 5
+  network after the install), an internal decision record; the form-2
+  design, section 5
   (`admin-network`, `uninstall`) and section 11 (SSH and the admin network).
 - The MEHO firewall file and its unit: `docs/codebase/linux-server-install.md`, "The host firewall"
   (#4635), `lib/firewall.sh`.

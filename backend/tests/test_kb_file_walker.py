@@ -20,6 +20,10 @@ Coverage matrix:
 * Invalid slug from front-matter override surfaces as InvalidKbSlugError.
 * Malformed YAML in front-matter surfaces as KbFileParseError chained
   from the underlying yaml.YAMLError.
+* Dates and decimal numbers in a YAML header stay as text. The
+  text-keeping loader is used only for a YAML header at the start:
+  a JSON header is still read, and a plain note keeps its ``---``
+  separator lines as body.
 * Only regular files inside the root are read: a linked file, a linked
   folder, a pipe and a socket are skipped, and so is a file whose real
   location is outside the root. A linked ``.kb-ignore`` is not read.
@@ -196,6 +200,33 @@ def test_strict_mode_propagates_yaml_parse_error(tmp_path: Path) -> None:
     )
     with pytest.raises(KbFileParseError):
         list(walk_kb_directory(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("header", "reason"),
+    [
+        ("content: extra", None),
+        ("handler: extra", None),
+        ("on: push", "key(s) True in odd.md are not text"),
+    ],
+)
+def test_a_header_field_the_parser_chokes_on_fails_only_that_file(
+    tmp_path: Path, header: str, reason: str | None
+) -> None:
+    """A field named like a parser argument, or a key that is not text, never stops the walk."""
+    _write(tmp_path / "odd.md", f"---\n{header}\n---\nBody.\n")
+    _write(tmp_path / "good.md", "Good.")
+    errors: list[str] = []
+    records = {record.slug: record for record in walk_kb_directory(tmp_path, errors=errors)}
+    assert "good" in records
+    if reason is None:
+        assert records["odd"].metadata == {header.split(":")[0]: "extra"}
+        assert errors == []
+    else:
+        assert "odd" not in records
+        assert len(errors) == 1 and reason in errors[0]
+        with pytest.raises(KbFileParseError, match="not text"):
+            list(walk_kb_directory(tmp_path))
 
 
 def test_best_effort_mode_continues_past_bad_files(tmp_path: Path) -> None:
@@ -381,3 +412,81 @@ def test_file_path_root_raises_not_a_directory(tmp_path: Path) -> None:
     file_path.write_text("body", encoding="utf-8")
     with pytest.raises(NotADirectoryError):
         list(walk_kb_directory(file_path))
+
+
+# ---------------------------------------------------------------------------
+# Header dates and decimal numbers stay as text
+# ---------------------------------------------------------------------------
+
+
+def test_header_date_and_version_are_kept_as_text(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "dated.md",
+        "---\nlearned_at: 2026-11-03\nconfirmed_at: 2026-11-03T10:00:00Z\n"
+        "version: 3.10\nratio: 0.5\ncount: 3\nflag: true\n---\nBody.",
+    )
+    (record,) = walk_kb_directory(tmp_path)
+    # learned_at and confirmed_at are lesson header dates, so they come
+    # back in full ISO form.
+    assert record.metadata == {
+        "learned_at": "2026-11-03T00:00:00+00:00",
+        "confirmed_at": "2026-11-03T10:00:00+00:00",
+        "version": "3.10",
+        "ratio": "0.5",
+        "count": 3,
+        "flag": True,
+    }
+
+
+def test_quoted_header_values_are_unchanged(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "quoted.md",
+        '---\nlearned_at: "2026-11-03"\nversion: "3.10"\n---\nBody.',
+    )
+    (record,) = walk_kb_directory(tmp_path)
+    assert record.metadata == {"learned_at": "2026-11-03T00:00:00+00:00", "version": "3.10"}
+
+
+def test_dates_in_nested_header_values_and_keys_are_text(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "nested.md",
+        "---\nreviews:\n  - 2026-11-03\n  - when: 2026-11-04\n2026-11-05: note\n---\nBody.",
+    )
+    (record,) = walk_kb_directory(tmp_path)
+    assert record.metadata == {
+        "reviews": ["2026-11-03", {"when": "2026-11-04"}],
+        "2026-11-05": "note",
+    }
+
+
+def test_header_value_that_is_not_json_names_file_and_field(tmp_path: Path) -> None:
+    _write(tmp_path / "bin.md", "---\nok: 1\nblob: !!binary aGk=\n---\nBody.")
+    errors: list[str] = []
+    assert _slugs(tmp_path, errors=errors) == []
+    assert len(errors) == 1
+    assert errors[0].startswith("bin.md: front-matter field 'blob' in bin.md")
+    assert len(errors[0]) < 200
+    with pytest.raises(KbFileParseError, match="'blob'"):
+        list(walk_kb_directory(tmp_path))
+
+
+def test_plain_note_with_separator_lines_keeps_the_whole_body(tmp_path: Path) -> None:
+    """A note without a header keeps every line, also past ``---`` separators."""
+    text = "Intro.\n\n---\n\nMiddle.\n\n---\n\nEnd.\n"
+    _write(tmp_path / "plain.md", text)
+    (record,) = walk_kb_directory(tmp_path)
+    assert record.metadata == {}
+    assert record.body == text.strip()
+    assert record.slug == "plain"
+
+
+def test_json_header_is_still_read(tmp_path: Path) -> None:
+    """A JSON header gives the metadata and the slug override, as before."""
+    _write(
+        tmp_path / "json-note.md",
+        '{\n"slug": "from-json",\n"version": "3.10"\n}\nBody.\n',
+    )
+    (record,) = walk_kb_directory(tmp_path)
+    assert record.metadata == {"slug": "from-json", "version": "3.10"}
+    assert record.slug == "from-json"
+    assert record.body == "Body."

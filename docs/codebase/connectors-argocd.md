@@ -33,9 +33,9 @@ Source: `backend/src/meho_backplane/connectors/argocd/`.
   a future `GenericRestConnector` auto-shim (priority=0) defensively if both
   somehow register for the same triple.
 - **`ArgoCdTargetLike`** (`session.py`) — runtime-checkable Protocol capturing
-  the minimum target shape the connector reads: `name`, `host`, `port`,
-  `secret_ref`, and `auth_model`. Replaced by the concrete `Target` model once
-  G0.3 (#224) lands.
+  the minimum target shape the connector reads: `id`, `tenant_id`, `name`,
+  `host`, `port`, `secret_ref`, and `auth_model`. The registered `Target`
+  row satisfies it unchanged.
 - **`ArgoCdCredentialsLoader`** (`session.py`) — async callable type resolving
   a `(target, operator)` pair to `{"token": ...}`. The `operator: Operator`
   carries the dispatched identity so the live loader reads the per-target
@@ -107,18 +107,22 @@ opaque string.
    `operator: Operator` is the dispatched identity threaded down from the op
    handler (the operator-context Vault read).
 2. `_load_credentials(target, operator)` acquires the per-instance
-   `asyncio.Lock`, checks the `_creds_cache` dict (keyed on `target.name`),
-   and calls the loader with `(target, operator)` on miss.
-3. The loader (default: `load_credentials_from_vault`, which reads the secret
+   `asyncio.Lock` and checks the `_creds_cache` dict. The cache key is the
+   tenant-unique `(tenant_id, target.id)` pair from `target_cache_key`, so
+   two targets with the same name in different tenants never share a token.
+3. A cached token is handed to a caller only after that caller's own Vault
+   read of the target's secret passed once in this process
+   (`SecretReaders`). Otherwise the connector calls the loader with
+   `(target, operator)`.
+4. The loader (default: `load_credentials_from_vault`, which reads the secret
    under the operator's identity; injectable in tests) returns `{"token": ...}`.
-4. The result is cached under `target.name` and an `argocd_credentials_loaded`
-   log event is emitted (no secret value).
-5. `auth_headers` returns `{"Authorization": "Bearer <token>"}`.
+5. The result is cached, the caller is recorded as a reader, and an
+   `argocd_credentials_loaded` log event is emitted (no secret value).
+6. `auth_headers` returns `{"Authorization": "Bearer <token>"}`.
 
-The cache fast-path is closed to the synthesised system operator
-(`is_system_operator`): a system/operator-less caller always re-runs the loader
-so its fail-closed guard applies and can never be served a warm token a real
-operator primed (#1008).
+The synthesised system operator is never recorded as a reader. So a
+system/operator-less caller always re-runs the loader, its fail-closed guard
+applies, and it is never served a warm token a real operator loaded.
 
 ### fingerprint()
 
@@ -136,8 +140,7 @@ extras={"error": "<ExcType>: <message>"})`.
 
 ### probe()
 
-`probe()` delegates to `fingerprint()` — the same precedent the SDDC Manager
-and NSX connectors established. A reachable fingerprint maps to
+`probe()` delegates to `fingerprint()`. A reachable fingerprint maps to
 `ProbeResult(ok=True)`; an unreachable one carries the fingerprint's
 structured `error` string as `reason`. ArgoCD exposes no dedicated composite
 health endpoint comparable to Harbor's `/api/v2.0/health`, so the
@@ -206,8 +209,8 @@ manage and is each reachable?". It takes no query params (lists every cluster
 the credential can see). ArgoCD's `Cluster.config` carries the destination
 cluster's own credentials (bearer token, TLS client cert/key, basic-auth,
 AWS/exec provider); the handler strips the whole `config` object from every
-item before returning — defense in depth, so no destination credential leaks
-even if a broad-RBAC token makes argocd-server include it.
+item before returning — defense in depth, so no destination credential is
+returned even if a broad-RBAC token makes argocd-server include it.
 
 `argocd.repo.list` (#3501) gets the complementary treatment for **repository**
 credentials. A `Repository` object can echo the credentials configured for a
@@ -245,7 +248,7 @@ resolves `handler_attr` against.
 | `argocd.appproject.create` | dangerous | `POST /api/v1/projects` | `{project, upsert}` — tenancy boundary |
 | `argocd.appproject.update` | dangerous | `PUT /api/v1/projects/{name}` | snapshots project spec before/after into `proposed_effect` |
 
-**Approval routing (no hard-deny, no bypass).** The connector only sets the
+**Approval routing (no hard-deny, no skip).** The connector only sets the
 `requires_approval=True` descriptor flag; the dispatcher's `policy_gate`
 (`_validate.py`) does the rest. Since G11.7-T1 (#1401) a `USER`-principal
 dispatch of a `requires_approval` op routes to the human approve-queue
@@ -256,8 +259,7 @@ the `_approved=True` resume path the approvals API sets after a human
 approves.
 
 **operationState polling.** `app.sync` / `app.rollback` POST a SyncOperation
-that ArgoCD runs asynchronously, so the handlers mirror
-`vmware.composite.vm.clone`'s task-poll: after the POST they poll
+that ArgoCD runs asynchronously, so after the POST the handlers poll
 `GET .../applications/{name}` until `status.operationState.phase` reaches a
 terminal value (the `TERMINAL_OPERATION_PHASES` set = Succeeded ∪ Failed ∪
 Error, matching gitops-engine's `OperationPhase.Completed()`), or a bounded
@@ -288,6 +290,12 @@ post-approval. The ops with no natural read-only preview (`app.sync` /
 and park with the identifier-only default `create_pending_request` computes
 from params.
 
+**Op classes.** `op_classes.py` declares `argocd.app.set`, `app.sync`,
+`app.rollback` and `app.refresh` as `write` operations, so the broadcast
+and the approval and audit records treat them as writes. `app.refresh` is
+an HTTP GET, but it makes ArgoCD reconcile the app. `app.delete` and the
+two `appproject` writes are classed `write` by their op-id suffix.
+
 Writes go through the connector's `_write_json` helper (POST/PUT/DELETE,
 **not** retried — a side-effecting verb must not silently re-fire on a 5xx),
 which the base `HttpConnector._request_json` deliberately refuses for
@@ -299,8 +307,22 @@ non-idempotent methods.
 `sub="system:argocd-api-connector-shim"` and delegates to
 `meho_backplane.operations.dispatch(connector_id="argocd-api-3.x", ...)`.
 Post-G0.6 callers (CLI verbs, MCP `call_operation`, `/api/v1/operations/call`)
-construct a real `Operator` and call `dispatch` directly — they bypass this
-shim.
+construct a real `Operator` and call `dispatch` directly — they do not use
+this shim.
+
+### CLI verbs
+
+`cli/internal/cmd/argocd/` holds the `meho argocd` verbs. Each one calls
+the op through the backplane with `connector_id="argocd-api-3.x"`.
+
+- Reads: `meho argocd app list|get|diff|resource-tree`,
+  `meho argocd appproject list`, `meho argocd repo list`.
+- Writes (each waits for a person's approval): `meho argocd app
+  sync|rollback|set|refresh|delete`, `meho argocd appproject create|update`
+  (`write.go`).
+- `argocd.cluster.list` has no `meho argocd` verb. Run it with
+  `meho operation call argocd-api-3.x argocd.cluster.list` or with
+  `call_operation`.
 
 ## Dependencies
 
@@ -321,13 +343,15 @@ shim.
 ## Tests
 
 - `tests/test_connectors_argocd_auth.py` — unit tests for bearer-token auth,
-  caching, per-target isolation, the system-operator cache bypass, the
+  caching, per-target isolation, the system operator always re-running the
+  loader, the
   auth_model boundary gate, and the fingerprint/probe shapes against mocked
   `argocd-server` endpoints.
 - `tests/test_connectors_argocd_credread.py` — recorded-fixture E2E proving
   the full `dispatch -> loader -> ArgoCD` chain returns `status="ok"` with the
   live (non-injected) default loader against the in-process Vault fake +
-  respx-mocked ArgoCD, plus the canary-token leak assertions.
+  respx-mocked ArgoCD, plus canary-token checks that the token never appears
+  in the answer.
 - `tests/test_connectors_registry_v2.py::test_argocd_connector_registered_under_v2_triple_and_wildcard`
   — asserts the dual registration resolves.
 - `tests/test_connectors_argocd_reads.py` — the read-core suite: each
@@ -344,7 +368,7 @@ shim.
   verb reach) against a respx-mocked `argocd-server`, resolving a real
   DB-seeded `targets` row through `resolve_target` and a stub bearer-token
   loader preseeded into the dispatcher instance cache; asserts the Vault-sourced
-  bearer rides every request, the token never leaks into the envelope,
+  bearer rides every request, the token never appears in the envelope,
   `cluster.list` strips the destination cluster's own `config` credentials end
   to end, and all seven ops are visible to `search_operations`.
 - `tests/test_connectors_argocd_write_e2e.py` — the G3.12-T4 write-op suite:
@@ -352,7 +376,11 @@ shim.
   invariants, the approve-queue routing of an un-approved `USER` dispatch
   (`awaiting_approval`, handler never fires), the `app.sync`/`rollback`
   operationState poll to a terminal phase, the `app.set`/`delete`/`appproject.update`
-  `proposed_effect` snapshots, and the bearer-rides-never-leaks guarantee.
+  `proposed_effect` snapshots, and that the bearer token rides every
+  request but never appears in a result.
+- `tests/test_connectors_argocd_redaction.py` — unit tests for
+  `redact_argocd_credentials`: the repository credential fields are blanked
+  at every depth, with no event loop and no HTTP.
 - `tests/test_connectors_argocd_spec_reconcile.py` — the real-spec
   reconcile lane (#2987, the #2980 harness): sweeps the live `*_ROUTE`
   constants of `routes.py` and asserts every hand-coded `METHOD:/path`
@@ -387,5 +415,5 @@ shim.
 - ArgoCD API: https://argo-cd.readthedocs.io/en/stable/developer-guide/api-docs/
 - `VersionMessage` proto: `argoproj/argo-cd` `server/version/version.proto`
 - Precedents: `connectors/harbor/` (bearer-vs-Basic single-vendor-REST shape,
-  cred loader + cache + system-operator bypass), `connectors/bind9/` (dual
-  registration), `connectors/nsx/` (probe delegates to fingerprint).
+  cred loader + cache + the system operator always re-reading the secret),
+  `connectors/bind9/` (dual registration).

@@ -1,11 +1,11 @@
 # Add-on step-event push contract
 
 The durable outbound event subscription a paired add-on rides for its own
-orchestration needs (Initiative #2900, Task #3027). It gives a paired
+orchestration needs. It gives a paired
 add-on a **durable, resumable** stream of the step events that belong to
-its own work — approval outcomes and dispatch completions — replacing the
-at-most-once, count-trimmed Valkey SSE feed (`api/v1/feed.py`) that a
-restart silently loses events across.
+its own work — approval outcomes and dispatch completions. The broadcast
+feed (`api/v1/feed.py`) does not carry these events: it carries agent
+announcements only.
 
 Two acceptance properties define it, and both are structural rather than
 best-effort:
@@ -25,19 +25,18 @@ best-effort:
 Two substrates already carry these events, and neither is a durable
 per-add-on subscription:
 
-- **Broadcast** (`BroadcastEvent` on a Valkey stream, `api/v1/feed.py`) is
-  at-most-once and count-trimmed. It is the operator-awareness feed; a
-  subscriber that reconnects after the trim window has passed silently
-  misses events. Resume is `Last-Event-Id` against the live stream, not a
-  durable log.
+- **Broadcast** (`api/v1/feed.py`) carries deliberate agent announcements
+  only, read from the `agent_announcement` archive. Dispatches and
+  approvals are not on it. The audit log is the record of that activity,
+  and it is not a per-subscriber stream.
 - **`event_outbox`** (`events/outbox.py`) is durable but single-consumer:
   the drain claims rows and stamps `processed_at`. It carries
   `agent_run.completed`, not approval outcomes, and its cursor is the
   drain's, not a per-subscriber one.
 
 Approval outcomes and dispatch completions are the events the add-on needs,
-they carry the principal and `work_ref` in their lineage, and the durable
-gap is exactly that they are at-most-once on the wire. So the contract adds
+and they carry the principal and `work_ref` in their lineage. No existing
+feed gives one add-on a durable cursor over them. So the contract adds
 a small, cohesive **durable projection**: one append-only row per step
 event attributed to a paired add-on, with its own `BIGSERIAL` cursor. This
 is the transactional-outbox discipline (`docs/codebase/events.md`) applied
@@ -102,14 +101,13 @@ re-pairs.
    transition, in the **same transaction** as the run's status write (a
    run-transition rollback discards the step event too). Owner =
    `agent_run.identity_sub`; kind `agent_run.completed`.
-2. **Approval outcomes** — `operations/approval_queue.publish_approval_event`,
-   the single choke point for `pending` / `approved` / `rejected` /
-   `expired`. Owner = `approval_request.principal_sub` (the requester —
+2. **Approval outcomes** — `operations/approval_queue.record_approval_step_event`,
+   called for `pending` / `approved` / `rejected` / `expired` /
+   `withdrawn`. Owner = `approval_request.principal_sub` (the requester —
    constant across the request's lifecycle, so every decision routes to the
    same add-on regardless of who decided it); kind `approval.<decision>`.
-   Recorded via the fail-open committed variant, matching the surrounding
-   approval-broadcast posture: a step-event write never blocks the durable
-   decision, and the add-on re-reads forward by `seq`.
+   Recorded via the fail-open committed variant: a step-event write never
+   blocks the durable decision, and the add-on re-reads forward by `seq`.
 
 **Read (subscription side).** `GET /api/v1/addons/pairings/{name}/events`:
 
@@ -127,8 +125,8 @@ The acceptance test (`tests/test_addon_step_events.py`) records events for
 two paired add-ons in the same tenant that carry the **same** `work_ref`,
 then asserts each pairing's subscription returns only its own event. The
 isolation is total because attribution happened at write time by identity:
-the cross-pairing containment is not a read-time filter that could be
-bypassed but a property of which rows exist in which pairing's log.
+the cross-pairing containment is not a read-time filter but a property of
+which rows exist in which pairing's log.
 
 ## Ordering under concurrent writers
 
@@ -174,9 +172,9 @@ the checks dashboard-transition claim uses
 - The **dispatch-completion** record is in the producer's transaction —
   fully durable with the state change (transactional outbox).
 - The **approval-outcome** record is a self-contained committed write at
-  the fail-open notification choke point. A backplane crash in the narrow
-  window between the decision commit and the step-event commit is the same
-  window the existing approval broadcast already accepts; the acceptance
+  the fail-open notification point. A backplane crash in the narrow
+  window between the decision commit and the step-event commit loses that
+  one step event; the stored approval row stays correct. The acceptance
   criterion — no missed events across the **add-on's** restarts — holds for
   every committed row, which is what the `seq` cursor resumes over.
 
@@ -192,10 +190,10 @@ the checks dashboard-transition claim uses
   the async governed-dispatch run handle, #3079). A direct, non-agent-run
   governed dispatch that completes synchronously is audited but not yet
   projected into the step-event log; adding that seam is additive.
-- **Heartbeat binding.** `service_account_sub` also enables the finer
-  heartbeat principal binding flagged in `addon-pairing.md` (verify
-  `operator.sub == pairing.service_account_sub`); that hardening is not
-  changed here.
+- **Heartbeat binding.** `service_account_sub` also binds the heartbeat
+  and the capability declaration to the caller's own pairing
+  (`resolve_owned_pairing`; see `addon-pairing.md`, "Object-level write
+  authorization").
 - **Retention.** The log grows append-only; a retention sweep (mirroring
   the announcement-retention job) is a future operational refinement.
 

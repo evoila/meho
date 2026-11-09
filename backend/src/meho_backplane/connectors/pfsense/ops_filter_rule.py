@@ -57,6 +57,12 @@ Guards (fail closed)
   (add) or exactly one rule was removed (delete). The read-back then checks
   the rule count moved by exactly one, and (add) that the stored rule is
   the requested rule, field by field.
+* **A refusal is an error.** Every refusal above (and ``conflict``,
+  ``ambiguous``, ``unknown_interface``, ``nat_associated``) raises
+  :exc:`PfSenseFilterRuleRefusedError` and changes nothing, so the call,
+  its audit record and its approval say "failed" (#5136). Only the "safe
+  to run twice" answers are results: ``already_present`` (add) and
+  ``not_found`` (delete).
 * **Invalid config reads fail.** An empty, truncated or wrong-root
   ``config.xml`` is an error, never "zero rules", so a bad read-back can
   never pass as a verified delete of the last rule.
@@ -108,6 +114,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "FILTER_RULE_OPS",
+    "PfSenseFilterRuleRefusedError",
     "parse_filter_rules_xml",
     "parse_ssh_connection",
     "pfsense_filter_rule_add",
@@ -131,6 +138,9 @@ _DIRECTIONS = ("any", "in", "out")
 _POSITIONS = ("top", "bottom")
 
 _MGMT_FLOW_COMMAND = 'echo "$SSH_CONNECTION"'
+
+_ADD_OP_ID = "pfsense.filter.rule.add"
+_DELETE_OP_ID = "pfsense.filter.rule.delete"
 
 # The fields that define what a rule does. Two rules with equal values here
 # behave the same; the add compares them for its idempotency check.
@@ -180,6 +190,31 @@ _EXTRA_VALUE_TAGS = (
 )
 # Values the GUI stores for "no special setting"; they are not an extra.
 _EXTRA_DEFAULTS = {"statetype": "keep state", "icmptype": "any"}
+
+# Rule interfaces pfSense has without an ``<interfaces>`` or ``<ifgroups>``
+# entry: the OpenVPN, IPsec, L2TP VPN and PPPoE Server tabs of its firewall
+# rule pages (``firewall_rules.php``). Rules on those tabs store these names
+# in ``<interface>`` (#5136).
+_BUILTIN_RULE_INTERFACES = frozenset({"openvpn", "enc0", "l2tp", "pppoe"})
+
+
+class PfSenseFilterRuleRefusedError(RuntimeError):
+    """A filter-rule add or delete was refused and changed nothing (#5136).
+
+    Raised, not returned, so the call, its audit record and its approval
+    say "failed": an approver must never read "ran OK" for a rule that is
+    not there. ``code`` is the short, stable reason (``unknown_interface``,
+    ``conflict``, ``ambiguous``, ``nat_associated``, ``mgmt_path``,
+    ``mgmt_path_unknown``); ``guidance`` says why and what to do.
+
+    The "safe to run twice" answers are not refusals and stay results:
+    ``already_present`` on add and ``not_found`` on delete.
+    """
+
+    def __init__(self, op_id: str, code: str, guidance: str) -> None:
+        super().__init__(f"{op_id} refused ({code}): {guidance}")
+        self.code = code
+        self.guidance = guidance
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +307,8 @@ def _validate_placement(params: dict[str, Any], rule_type: str) -> dict[str, Any
     if not isinstance(interface, str) or not _INTERFACE_RE.fullmatch(interface):
         raise ValueError(
             "interface must be a pfSense logical interface handle ('wan', 'lan', "
-            f"'opt1'; or 'any' for a floating rule); got {interface!r}"
+            "'opt1'), an interface group, a built-in rule tab ('openvpn', 'enc0', "
+            f"'l2tp', 'pppoe'), or 'any' for a floating rule; got {interface!r}"
         )
     quick = params.get("quick", True)
     if not isinstance(quick, bool):
@@ -468,7 +504,9 @@ def parse_filter_rules_xml(xml_text: str) -> list[dict[str, Any]]:
 
 
 def _interface_known(xml_text: str, interface: str) -> bool:
-    """Whether *interface* is an ``<interfaces>`` handle or an interface group."""
+    """Whether *interface* is a built-in rule tab, an ``<interfaces>`` handle or a group."""
+    if interface in _BUILTIN_RULE_INTERFACES:
+        return True
     try:
         root = fromstring(xml_text)
     except ParseError:
@@ -846,9 +884,12 @@ async def pfsense_filter_rule_add(
     Sequence (under the appliance's config-write lock): validate -> read
     ``config.xml`` -> by ``ridentifier``: 1 match with the same rule ->
     ``already_present`` (no change); 1 match that differs in any setting ->
-    ``conflict``; >1 -> ``ambiguous`` -> unknown interface ->
+    refuse ``conflict``; >1 -> refuse ``ambiguous`` -> an interface that is
+    not in ``<interfaces>``, ``<ifgroups>`` or the built-in rule tabs
+    (``openvpn``, ``enc0``, ``l2tp``, ``pppoe``) -> refuse
     ``unknown_interface`` -> a ``block`` rule that could match MEHO's own
-    SSH path -> ``mgmt_path`` / ``mgmt_path_unknown`` -> otherwise stage the
+    SSH path -> refuse ``mgmt_path`` / ``mgmt_path_unknown``. Each refusal
+    raises :exc:`PfSenseFilterRuleRefusedError` -> otherwise stage the
     insert, then read back and check the rule is there exactly once, is the
     requested rule field by field, and the rule count grew by exactly one.
     Then the full read-back checks nothing else changed, except the separator
@@ -877,41 +918,35 @@ async def pfsense_filter_rule_add(
         "guidance": None,
     }
     if len(matches) > 1:
-        return {
-            **result,
-            "status": "ambiguous",
-            "guidance": (
-                f"{len(matches)} filter rules share ridentifier {ridentifier!r} "
-                "(corrupt config); refusing -- an operator must fix the duplicates first"
-            ),
-        }
+        raise PfSenseFilterRuleRefusedError(
+            _ADD_OP_ID,
+            "ambiguous",
+            f"{len(matches)} filter rules share ridentifier {ridentifier!r} "
+            "(corrupt config); nothing changed -- an operator must fix the duplicates first",
+        )
     if matches:
         differences = _stored_rule_differences(matches[0], spec)
-        return {
-            **result,
-            "status": "conflict" if differences else "already_present",
-            "existing": matches[0],
-            "guidance": (
+        if differences:
+            raise PfSenseFilterRuleRefusedError(
+                _ADD_OP_ID,
+                "conflict",
                 f"a different filter rule already uses ridentifier {ridentifier!r} "
                 f"(differs in: {', '.join(differences)}); nothing changed -- pick "
-                "another ridentifier or delete that rule first"
+                "another ridentifier or delete that rule first",
             )
-            if differences
-            else None,
-        }
+        return {**result, "status": "already_present", "existing": matches[0]}
     if spec["interface"] != "any" and not _interface_known(before, spec["interface"]):
-        return {
-            **result,
-            "status": "unknown_interface",
-            "guidance": (
-                f"interface {spec['interface']!r} is not in config.xml <interfaces> "
-                "or <ifgroups>; nothing changed"
-            ),
-        }
+        raise PfSenseFilterRuleRefusedError(
+            _ADD_OP_ID,
+            "unknown_interface",
+            f"interface {spec['interface']!r} is not in config.xml <interfaces> or "
+            "<ifgroups> and is not a built-in rule tab (openvpn, enc0, l2tp, pppoe); "
+            "nothing changed",
+        )
     if spec["type"] == "block":
         refusal = await _mgmt_guard(self, target, operator, spec)
         if refusal is not None:
-            return {**result, "status": refusal[0], "guidance": refusal[1]}
+            raise PfSenseFilterRuleRefusedError(_ADD_OP_ID, *refusal)
 
     await _apply_playback(
         self,
@@ -976,10 +1011,11 @@ async def pfsense_filter_rule_delete(
     """Handler for ``pfsense.filter.rule.delete`` -- governed single-rule delete.
 
     Sequence (under the appliance's config-write lock): validate -> read
-    ``config.xml`` -> by ``ridentifier``: 0 -> ``not_found``, >1 ->
-    ``ambiguous`` -> a NAT-linked rule ->
+    ``config.xml`` -> by ``ridentifier``: 0 -> ``not_found`` (no change), >1
+    -> refuse ``ambiguous`` -> a NAT-linked rule -> refuse
     ``nat_associated`` -> an enabled ``pass`` rule that could carry MEHO's
-    own SSH path -> ``mgmt_path`` / ``mgmt_path_unknown`` -> otherwise stage
+    own SSH path -> refuse ``mgmt_path`` / ``mgmt_path_unknown``. Each
+    refusal raises :exc:`PfSenseFilterRuleRefusedError` -> otherwise stage
     the delete, then read back and check the rule is gone and the count
     dropped by exactly one. Then the full read-back checks nothing else
     changed, except the separator rows below the rule, which move up by one.
@@ -1008,28 +1044,24 @@ async def pfsense_filter_rule_delete(
             "guidance": f"no filter rule with ridentifier {ridentifier!r}; nothing deleted",
         }
     if len(matches) > 1:
-        return {
-            **result,
-            "status": "ambiguous",
-            "guidance": (
-                f"{len(matches)} filter rules share ridentifier {ridentifier!r} "
-                "(corrupt config); refusing to delete"
-            ),
-        }
+        raise PfSenseFilterRuleRefusedError(
+            _DELETE_OP_ID,
+            "ambiguous",
+            f"{len(matches)} filter rules share ridentifier {ridentifier!r} "
+            "(corrupt config); nothing deleted",
+        )
     rule = matches[0]
     if rule.get("associated_rule_id"):
-        return {
-            **result,
-            "status": "nat_associated",
-            "guidance": (
-                "this filter rule belongs to a NAT port forward "
-                f"({rule['associated_rule_id']}); refusing -- remove it with the NAT rule"
-            ),
-        }
+        raise PfSenseFilterRuleRefusedError(
+            _DELETE_OP_ID,
+            "nat_associated",
+            "this filter rule belongs to a NAT port forward "
+            f"({rule['associated_rule_id']}); nothing deleted -- remove it with the NAT rule",
+        )
     if rule.get("type") == "pass" and not rule.get("disabled"):
         refusal = await _mgmt_guard(self, target, operator, rule)
         if refusal is not None:
-            return {**result, "status": refusal[0], "guidance": refusal[1]}
+            raise PfSenseFilterRuleRefusedError(_DELETE_OP_ID, *refusal)
 
     await _apply_playback(
         self,
@@ -1166,8 +1198,10 @@ _RULE_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "pattern": "^[A-Za-z0-9_]{1,32}$",
             "description": (
-                "pfSense logical interface handle (``lan``, ``opt1``) or interface "
-                "group. A floating rule may use ``any``."
+                "pfSense logical interface handle (``lan``, ``opt1``), an interface "
+                "group, or a built-in rule tab: ``openvpn`` (OpenVPN), ``enc0`` "
+                "(IPsec), ``l2tp`` (L2TP VPN), ``pppoe`` (PPPoE Server). A floating "
+                "rule may use ``any``."
             ),
         },
         "floating": {"type": "boolean", "default": False},
@@ -1218,15 +1252,11 @@ _RULE_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
         "resource": {"type": "string", "enum": ["filter_rule"]},
         "status": {
             "type": "string",
-            "enum": [
-                "added",
-                "already_present",
-                "conflict",
-                "ambiguous",
-                "unknown_interface",
-                "mgmt_path",
-                "mgmt_path_unknown",
-            ],
+            "enum": ["added", "already_present"],
+            "description": (
+                "A refusal is not a result: it fails the call (see "
+                "``llm_instructions.output_shape``)."
+            ),
         },
         "ridentifier": {"type": "string"},
         "rule": {"type": "object"},
@@ -1252,14 +1282,20 @@ _RULE_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
         "re-running the same add is a no-op (``already_present``), and "
         "``pfsense.filter.rule.delete`` removes the rule by that id. A ``block`` "
         "rule that could match the SSH path MEHO uses to manage the firewall is "
-        "refused (``mgmt_path``). The first matching rule wins, so a block rule "
+        "refused (``mgmt_path``). For a rule on pfSense's OpenVPN, IPsec, L2TP or "
+        "PPPoE tab, use ``interface`` ``openvpn``, ``enc0``, ``l2tp`` or ``pppoe``. "
+        "The first matching rule wins, so a block rule "
         "usually needs ``position: top``. Read the current rules first with "
         "``pfsense.firewall.rules``."
     ),
     "parameter_hints": {
         "ridentifier": "Required. 9-digit id, 100000000-999999999.",
         "type": "Required. ``block``, ``pass`` or ``match`` (``match`` is floating only).",
-        "interface": "Required. Logical interface (``lan``, ``opt1``); ``any`` if floating.",
+        "interface": (
+            "Required. Logical interface (``lan``, ``opt1``), interface group, or "
+            "built-in tab ``openvpn`` / ``enc0`` (IPsec) / ``l2tp`` / ``pppoe``; "
+            "``any`` if floating."
+        ),
         "source": "Optional. ``any`` (default), an IP or a CIDR.",
         "destination": "Optional. ``any`` (default), an IP or a CIDR.",
         "destination_port": "Optional. ``N`` or ``A-B``; needs protocol tcp/udp/tcp/udp.",
@@ -1268,10 +1304,12 @@ _RULE_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "``{op_class: 'write', resource: 'filter_rule', status, ridentifier, rule, "
         "position, applied, existing, rules_before, rules_after, verified, "
-        "guidance}``. ``status`` is ``added`` (``applied`` and ``verified`` true), "
-        "``already_present`` (same rule exists, no change), or a refusal: "
-        "``conflict`` / ``ambiguous`` / ``unknown_interface`` / ``mgmt_path`` / "
-        "``mgmt_path_unknown`` (no change, ``guidance`` says why)."
+        "guidance}``. ``status`` is ``added`` (``applied`` and ``verified`` true) "
+        "or ``already_present`` (same rule exists, no change). A refusal changes "
+        "nothing and FAILS the call (``status: error``, audit and approval "
+        "failed); its message reads ``pfsense.filter.rule.add refused (<code>): "
+        "<why>`` with code ``conflict`` / ``ambiguous`` / ``unknown_interface`` / "
+        "``mgmt_path`` / ``mgmt_path_unknown``."
     ),
 }
 
@@ -1289,14 +1327,11 @@ _RULE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
         "resource": {"type": "string", "enum": ["filter_rule"]},
         "status": {
             "type": "string",
-            "enum": [
-                "deleted",
-                "not_found",
-                "ambiguous",
-                "nat_associated",
-                "mgmt_path",
-                "mgmt_path_unknown",
-            ],
+            "enum": ["deleted", "not_found"],
+            "description": (
+                "A refusal is not a result: it fails the call (see "
+                "``llm_instructions.output_shape``)."
+            ),
         },
         "ridentifier": {"type": "string"},
         "matched": {"type": "integer"},
@@ -1325,7 +1360,12 @@ _RULE_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "``{op_class: 'delete', resource: 'filter_rule', status, ridentifier, "
         "matched, removed, rules_before, rules_after, verified, guidance}``. On "
-        "``deleted``, ``removed`` is the deleted rule and ``verified`` is true."
+        "``deleted``, ``removed`` is the deleted rule and ``verified`` is true; "
+        "``not_found`` means the rule is already gone (no change). A refusal "
+        "changes nothing and FAILS the call (``status: error``, audit and "
+        "approval failed); its message reads ``pfsense.filter.rule.delete "
+        "refused (<code>): <why>`` with code ``ambiguous`` / ``nat_associated`` / "
+        "``mgmt_path`` / ``mgmt_path_unknown``."
     ),
 }
 
@@ -1333,7 +1373,7 @@ _RULE_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
 #: delete is on the governed-delete tier like ``pfsense.nat.delete``.
 FILTER_RULE_OPS: tuple[PfSenseOp, ...] = (
     PfSenseOp(
-        op_id="pfsense.filter.rule.add",
+        op_id=_ADD_OP_ID,
         handler_attr="filter_rule_add",
         summary="Add ONE firewall filter rule with a stable ridentifier (approval required).",
         description=(
@@ -1342,7 +1382,8 @@ FILTER_RULE_OPS: tuple[PfSenseOp, ...] = (
             "source / destination as any / IP / CIDR with optional ports, quick "
             "(floating), optional log. The caller-chosen ``ridentifier`` is stored "
             "as the rule's ``<tracker>`` (pf ``ridentifier``). Re-adding the same "
-            "rule is a no-op; a different rule with that id is refused. A block "
+            "rule is a no-op; a different rule with that id is refused. Accepts "
+            "pfSense's built-in OpenVPN / IPsec / L2TP / PPPoE rule tabs. A block "
             "rule that could match MEHO's own SSH management path is refused. "
             "Placed at the top (default) or bottom of its interface's rules, then "
             "``write_config()`` + ``filter_configure()`` and a read-back check. "
@@ -1358,7 +1399,7 @@ FILTER_RULE_OPS: tuple[PfSenseOp, ...] = (
         llm_instructions=_RULE_ADD_LLM_INSTRUCTIONS,
     ),
     PfSenseOp(
-        op_id="pfsense.filter.rule.delete",
+        op_id=_DELETE_OP_ID,
         handler_attr="filter_rule_delete",
         summary="Permanently delete ONE firewall filter rule by ridentifier (governed).",
         description=(
@@ -1367,9 +1408,10 @@ FILTER_RULE_OPS: tuple[PfSenseOp, ...] = (
             "``pfsense.filter.rule.add``. safety_level=destructive (same tier and "
             "gate as ``pfsense.nat.delete``): mandatory human approval, a "
             "preview-hash binding, and a blast-radius statement naming the rule. "
-            "Fail-closed: ``not_found``, ``ambiguous``, ``nat_associated`` (a rule "
-            "owned by a NAT port forward), and ``mgmt_path`` (an enabled pass rule "
-            "that could carry MEHO's own SSH management path). Deletes exactly one "
+            "``not_found`` is a no-op. Fail-closed, and each refusal fails the "
+            "call: ``ambiguous``, ``nat_associated`` (a rule owned by a NAT port "
+            "forward), and ``mgmt_path`` (an enabled pass rule that could carry "
+            "MEHO's own SSH management path). Deletes exactly one "
             "rule via ``pfSsh.php playback`` (``write_config`` + "
             "``filter_configure``) and checks it is gone and the count dropped by one."
         ),

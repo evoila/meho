@@ -100,6 +100,7 @@ import structlog
 from fastapi import Depends, HTTPException, Request, status
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from meho_backplane.auth.conventions_drift_login import reject_conventions_drift_only_elsewhere
 from meho_backplane.auth.current_tenant import bind_tenant_role_source
 from meho_backplane.auth.jwt import verify_jwt
 from meho_backplane.auth.operator import Operator, PrincipalKind
@@ -108,6 +109,10 @@ from meho_backplane.metrics import HTTP_REQUEST_DURATION_SECONDS, HTTP_REQUESTS_
 from meho_backplane.tenancy import ensure_tenant
 
 __all__ = [
+    "KB_EXPORT_PATH",
+    "KB_EXPORT_ROUTE",
+    "KB_IMPORT_PATH",
+    "KB_IMPORT_ROUTE",
     "RUNNER_ALLOWED_PATH_PREFIXES",
     "SENSITIVE_HEADERS",
     "UNMATCHED_ROUTE_LABEL",
@@ -129,6 +134,18 @@ RUNNER_ALLOWED_PATH_PREFIXES: Final[tuple[str, ...]] = (
     "/api/v1/gateway/",
     "/api/v1/checks/",
 )
+
+#: The one REST route a ``kb_import_only`` login may reach (#5728): ``POST``
+#: on this path. Every other method and route answers 403
+#: ``kb_import_only_scope_violation``.
+KB_IMPORT_PATH: Final[str] = "/api/v1/kb/import"
+KB_IMPORT_ROUTE: Final[tuple[str, str]] = ("POST", KB_IMPORT_PATH)
+
+#: The one REST route a ``kb_export_only`` login may reach (#5730): ``POST``
+#: on this path. Every other method and route answers 403
+#: ``kb_export_only_scope_violation``.
+KB_EXPORT_PATH: Final[str] = "/api/v1/kb/export"
+KB_EXPORT_ROUTE: Final[tuple[str, str]] = ("POST", KB_EXPORT_PATH)
 
 #: Lower-cased header names whose values must never appear in logs or
 #: metrics. The set is intentionally tiny — every entry is paid for in
@@ -441,6 +458,39 @@ def _reject_runner_outside_gateway(operator: Operator, request: Request) -> None
         )
 
 
+def _reject_kb_limited_login_elsewhere(operator: Operator, request: Request) -> None:
+    """Refuse a login limited to one knowledge route on every other route.
+
+    Two such logins exist, each a program in a CI job of the team wiki:
+
+    * ``kb_import_only`` (#5728) may only import pages: ``POST`` on
+      :data:`KB_IMPORT_PATH`.
+    * ``kb_export_only`` (#5730) may only export pages: ``POST`` on
+      :data:`KB_EXPORT_PATH`.
+
+    Any other method or path gets HTTP 403 ``<claim>_scope_violation``,
+    whatever role the token names. A token with both claims reaches no
+    route. A no-op for every other login.
+    """
+    route = (request.method, request.url.path)
+    for limited, claim, allowed in (
+        (operator.kb_import_only, "kb_import_only", KB_IMPORT_ROUTE),
+        (operator.kb_export_only, "kb_export_only", KB_EXPORT_ROUTE),
+    ):
+        if limited and route != allowed:
+            structlog.get_logger(__name__).warning(
+                f"{claim}_scope_violation",
+                operator_sub=operator.sub,
+                method=request.method,
+                path=request.url.path,
+                surface="rest",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"{claim}_scope_violation",
+            )
+
+
 async def verify_jwt_and_bind(
     request: Request,
     operator: Operator = Depends(verify_jwt),
@@ -527,6 +577,8 @@ async def verify_jwt_and_bind(
     # attributable in the audit trail, and before tenant seeding so a caged
     # request does no DB write. See :func:`_reject_runner_outside_gateway`.
     _reject_runner_outside_gateway(operator, request)
+    _reject_kb_limited_login_elsewhere(operator, request)
+    reject_conventions_drift_only_elsewhere(operator, request)
     async with get_sessionmaker()() as session, session.begin():
         await ensure_tenant(operator.tenant_id, session)
     return operator

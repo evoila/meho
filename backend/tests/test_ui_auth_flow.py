@@ -45,11 +45,13 @@ import respx
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import WebSession
+from meho_backplane.db.models import Tenant, WebSession
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -78,6 +80,7 @@ from meho_backplane.ui.auth.routes import (
     login_binding_cookie_name,
     login_location,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     create_session,
     load_session,
@@ -460,9 +463,10 @@ def test_callback_creates_session_and_sets_cookie(monkeypatch: pytest.MonkeyPatc
         login_location = login_response.headers["location"]
         state = parse_qs(urlparse(login_location).query)["state"][0]
         # Step 2: simulate Keycloak's redirect back to the callback.
-        callback_response = client.get(
-            f"/ui/auth/callback?code=test-code&state={state}",
-        )
+        with capture_logs() as captured:
+            callback_response = client.get(
+                f"/ui/auth/callback?code=test-code&state={state}",
+            )
 
     assert token_calls
     # Verify the token request body shape -- code, code_verifier,
@@ -537,6 +541,90 @@ def test_callback_creates_session_and_sets_cookie(monkeypatch: pytest.MonkeyPatc
     # Step 5: creating the row seeded the read-path revalidation
     # anchor, so the first reads of the new session skip the token check.
     assert session_id in _last_validated
+    # Step 6: the sign-in log names the session by its ref; no log line
+    # holds the session id (the cookie value).
+    created = [e for e in captured if e["event"] == "ui_auth_session_created"]
+    assert len(created) == 1
+    assert created[0]["session_ref"] == session_ref(session_id)
+    assert cookie_value not in repr(captured)
+
+
+def _console_login(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, key: Any = None
+) -> httpx.Response:
+    """Run login then callback with a valid token; return the callback response.
+
+    Pass the same ``key`` to log in twice: the key is cached by its key id.
+    """
+    key = key or make_rsa_keypair("test-kid")
+    access_token, jwks = mint_token(key, sub="op-42", audience=DEFAULT_AUDIENCE), public_jwks(key)
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
+        _patch_oauth_token_transport(
+            monkeypatch,
+            httpx2.Response(
+                200,
+                json={
+                    "access_token": access_token,
+                    "refresh_token": "refresh-token-value",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                },
+            ),
+        )
+        login = client.get("/ui/auth/login?return_to=/ui/sentinel")
+        state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+        return client.get(f"/ui/auth/callback?code=test-code&state={state}")
+
+
+async def _tenant_rows() -> list[tuple[str, str]]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = await session.execute(
+            select(Tenant.slug, Tenant.name).where(Tenant.id == uuid.UUID(DEFAULT_TENANT_ID))
+        )
+        return [(r.slug, r.name) for r in rows]
+
+
+def test_first_console_login_creates_the_tenant_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh install has no tenant row; the login creates it, so no warning."""
+    assert asyncio.run(_tenant_rows()) == []
+    client = _https_client()
+    callback = _console_login(client, monkeypatch)
+    assert callback.status_code == 302
+    assert SESSION_COOKIE_NAME in callback.cookies
+
+    assert asyncio.run(_tenant_rows()) == [
+        (f"tenant-{DEFAULT_TENANT_ID}", f"tenant-{DEFAULT_TENANT_ID}")
+    ]
+    with capture_logs() as captured:
+        page = client.get("/ui/sentinel")
+    assert page.status_code == 200
+    assert not [e for e in captured if e["event"] == "ui_session_tenant_row_missing"]
+
+
+def test_console_login_twice_keeps_one_tenant_row_and_its_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second login leaves exactly one row and does not rename it."""
+    key = make_rsa_keypair("test-kid")
+    first = _console_login(_https_client(), monkeypatch, key)
+    assert first.status_code == 302
+    assert SESSION_COOKIE_NAME in first.cookies
+
+    async def _rename() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            row = await session.get(Tenant, uuid.UUID(DEFAULT_TENANT_ID))
+            assert row is not None
+            row.name = "Chosen Name"
+
+    asyncio.run(_rename())
+    second = _console_login(_https_client(), monkeypatch, key)
+    assert second.status_code == 302
+    assert SESSION_COOKIE_NAME in second.cookies
+
+    assert asyncio.run(_tenant_rows()) == [(f"tenant-{DEFAULT_TENANT_ID}", "Chosen Name")]
 
 
 # Non-HTML ``Accept`` -- a scripted probe / htmx fragment fetch. The
@@ -1301,7 +1389,6 @@ def test_read_path_revoked_grant_bounces_to_login_after_token_expiry(
     previous behaviour -- authorized renders until the 12 h absolute
     session lifetime.
     """
-    from structlog.testing import capture_logs
 
     _pin_revalidation_threshold(monkeypatch, "0")
     key = make_rsa_keypair("kid-reval-1")
@@ -1323,9 +1410,10 @@ def test_read_path_revoked_grant_bounces_to_login_after_token_expiry(
     assert len(token_calls) == 1
     failed = [e for e in captured if e["event"] == "ui_read_session_revalidation_failed"]
     assert len(failed) == 1
-    assert failed[0]["session_id"] == str(session_id)
-    # No token material in any captured event.
+    assert failed[0]["session_ref"] == session_ref(session_id)
+    # No token material and no session id in any captured event.
     assert expired not in repr(captured)
+    assert str(session_id) not in repr(captured)
 
 
 def test_read_path_expired_token_refreshes_silently_and_serves(

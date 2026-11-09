@@ -58,7 +58,6 @@ from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
 from meho_backplane.main import app
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.approval_queue import (
-    SelfApprovalForbiddenError,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -358,7 +357,8 @@ async def test_the_target_goes_when_a_tenant_admin_approves() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_a_person_waits_and_cannot_approve_the_own_request() -> None:
+async def test_a_person_waits_and_an_admin_may_approve_the_own_request() -> None:
+    """The change waits; an admin then approves their own request on purpose (#5969)."""
     row = await _seed("person-asks")
     asker = _operator("op-asker")
 
@@ -368,11 +368,7 @@ async def test_a_person_waits_and_cannot_approve_the_own_request() -> None:
     request_id = uuid.UUID(str(call["extras"]["approval_request_id"]))
 
     async with get_sessionmaker()() as session:
-        with pytest.raises(SelfApprovalForbiddenError):
-            await approve_request(session, request_id, operator=asker)
-
-    async with get_sessionmaker()() as session:
-        approved = await approve_request(session, request_id, operator=_operator("op-other"))
+        approved = await approve_request(session, request_id, operator=asker)
         await session.commit()
     assert approved.status == "approved"
     assert await _audit_rows()

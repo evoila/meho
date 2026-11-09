@@ -6,10 +6,10 @@ verifies TLS against your operating system's trust store, and
 authenticates with the OAuth 2.0 device-code flow — so it works on
 private networks with no browser redirect back to the client.
 
-Install it and log in before wiring any MCP client: registering targets
-and secrets happens only through the CLI (and the operator console /
-REST), never through MCP tools, so a useful agent session depends on
-this step having happened first.
+Install it and log in before wiring any MCP client. You register
+targets and secrets with the CLI, the operator console or REST. The
+default agent surface has no tool for this, so a useful agent session
+depends on this step having happened first.
 
 ## Install the signed binary
 
@@ -164,9 +164,16 @@ meho status
 `meho status` calls `/api/v1/health` with the stored token, so a clean
 result confirms CLI, token, ingress, and backplane all agree.
 
+If your login has several tenants, choose the one you work in with
+`meho tenants use <name>`. Without a name, `meho tenants use` lists your
+tenants. See [Current tenant](../reference/cli.md#current-tenant).
+
 ## Known walls
 
-Two workstation-side issues account for most first-login failures:
+`meho doctor` checks this machine and names the layer that fails. See
+[Start with `meho doctor`](troubleshooting.md#start-with-meho-doctor).
+
+These issues account for most first-login failures:
 
 - **Internal-CA trust.** `meho login` dying at its discovery probe with
   `x509: certificate signed by unknown authority` means the
@@ -178,7 +185,18 @@ Two workstation-side issues account for most first-login failures:
   during a VPN-idle DNS flap) can blackhole the first lookup. Confirm
   the host resolves to its internal address from the machine you are
   logging in from; a temporary `/etc/hosts` pin to the internal VIP is
-  a reliable workaround while you sort DNS out.
+  a reliable workaround while you sort DNS out. When only the Keycloak
+  host does not resolve, `meho login --resolve <host>:<port>:<ip>` pins
+  it for the login alone. TLS still checks the real host name.
+- **Identity provider address.** `meho login` uses the identity
+  provider only over `https://` (plain `http://` only on `localhost`).
+  This also holds when the identity provider answers with a redirect:
+  the CLI follows it only to an `https://` address. The `issuer` in
+  its discovery document must be the realm address
+  MEHO gave, for example `https://<keycloak-host>/realms/<realm>`. If
+  `meho login` says the issuer is not the realm, set
+  `KEYCLOAK_ISSUER_URL` (or `config.keycloakIssuerUrl` in the chart)
+  to the exact `issuer` value of the realm.
 
 For realm-side login failures (`unauthorized_client`,
 `invalid_audience`, the `missing_sub` / `basic`-scope trap), the
@@ -189,11 +207,21 @@ and the deeper cross-wall walk is the
 
 ## Reading the raw token
 
-There is **no `meho ... --print-token` verb** — the CLI never prints
-the bearer token to stdout. When you genuinely need the raw JWT (to
-decode its claims, or to bake it into a shim — see
-[Other MCP clients](mcp-remote-shim.md)), force the file backend and
-read it from `credentials.json`:
+`meho status` never prints the bearer token. When you need the raw JWT
+(to decode its claims, or to give it to a shim — see
+[Other MCP clients](mcp-remote-shim.md)), log in with `--print-token`.
+The CLI then writes only the access token to standard output, and every
+other line to standard error:
+
+```bash
+TOKEN=$(meho login --print-token https://meho.example.com)
+```
+
+The value is a live bearer token. Never log it or paste it into a shared
+channel.
+
+To read the token of an existing login without a new login, force the
+file backend at login and read the token from `credentials.json`:
 
 ```bash
 MEHO_KEYRING_DISABLE=1 meho login https://meho.example.com

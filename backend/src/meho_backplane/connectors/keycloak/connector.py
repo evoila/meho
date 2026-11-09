@@ -682,6 +682,7 @@ class KeycloakConnector(HttpConnector):
         *,
         operator: Operator,
         params: dict[str, Any] | None = None,
+        strict: bool = False,
     ) -> list[Any]:
         """Retried admin-auth GET for an **array** response.
 
@@ -693,14 +694,20 @@ class KeycloakConnector(HttpConnector):
         :meth:`~meho_backplane.connectors.adapters.http.HttpConnector._request_json`
         — but returns the parsed list. A non-list body (an error envelope
         Keycloak occasionally returns as an object) yields an empty list
-        so a handler never iterates a dict.
+        so a handler never iterates a dict. With *strict*, a non-list body
+        raises :exc:`ValueError` instead, for a caller that must tell an
+        empty list from a list it could not read.
         """
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         resp = await client.request("GET", path, params=params, headers=headers)
         resp.raise_for_status()
         payload = resp.json()
-        return payload if isinstance(payload, list) else []
+        if isinstance(payload, list):
+            return payload
+        if strict:
+            raise ValueError(f"expected a JSON array from {path}, got {type(payload).__name__}")
+        return []
 
     # -- admin-auth write helpers (G3.13-T4 #1406) ----------------------
 
@@ -832,7 +839,9 @@ class KeycloakConnector(HttpConnector):
         try:
             role = await self._get_admin_json(
                 target,
-                fill_path(_ROLE_PATH, {"realm": managed_realm, "role-name": role_name}),
+                fill_path(
+                    _ROLE_PATH, {"realm": managed_realm, "role-name": quote_segment(role_name)}
+                ),
                 operator=operator,
             )
         except httpx.HTTPStatusError as exc:

@@ -68,7 +68,7 @@ jobs:
           GOVC_VER=v0.56.2
           GOVC_SHA=12889f30e42e868487041f6628e9789606c80e13a194fb37c099abffc92d5a59
           GOVC_TAR="${RUNNER_TEMP}/govc.tar.gz"
-          curl -fsSL -o "${GOVC_TAR}" \
+          curl -fsSL --retry 3 --retry-all-errors -o "${GOVC_TAR}" \
             "https://github.com/vmware/govmomi/releases/download/${GOVC_VER}/govc_Linux_x86_64.tar.gz"
           echo "${GOVC_SHA}  ${GOVC_TAR}" | sha256sum -c -
           tar -xzf "${GOVC_TAR}" -C "${RUNNER_TEMP}" govc

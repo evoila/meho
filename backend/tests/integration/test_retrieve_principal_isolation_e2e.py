@@ -238,7 +238,9 @@ async def test_substrate_leaks_without_principal_sub_baseline(
     """
     fake = seeded_memories["fake"]
     with patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake):
-        hits = await retrieve(uuid.UUID(TENANT_ID), PROBE_QUERY, source="memory", limit=50)
+        hits = await retrieve(
+            uuid.UUID(TENANT_ID), PROBE_QUERY, source="memory", limit=50, all_principals=True
+        )
 
     # Without the predicate, BOTH principals' user-scoped canaries surface.
     assert len(_owned_by(hits, "A")) == 3, _bodies(hits)

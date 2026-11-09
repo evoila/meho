@@ -48,6 +48,11 @@ from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.operations.deny_reasons import READ_SCOPE_DENIED, deny_reason_code
+from meho_backplane.operations.uncertain_outcome import (
+    UNCERTAIN_ADVICE,
+    UNCERTAIN_OUTCOME,
+    request_may_have_reached_vendor,
+)
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
@@ -88,10 +93,12 @@ __all__ = [
     "result_no_connector",
     "result_no_target",
     "result_object_changed_since_approval",
+    "result_park_check_refused",
     "result_preview_changed_since_approval",
     "result_rate_limited",
     "result_receipt_too_large",
     "result_release_changed_while_waiting",
+    "result_resume_params_unavailable",
     "result_target_changed_since_approval",
     "result_target_gone_since_approval",
     "result_target_invalid_type",
@@ -425,8 +432,10 @@ def result_license_read_off(op_id: str, duration_ms: float) -> OperationResult:
     operator turned the row on by hand (see
     :mod:`meho_backplane.operations.license_reads`). The message names the
     way to read licences: the connector's hand-written licence read, which
-    shows each key masked. Same envelope as ``target_required``: no audit
-    row, because nothing ran.
+    shows each key masked. Same envelope as ``target_required``. A refused
+    call writes one ``policy_decision`` audit row with the op id and this
+    code (#5791, :mod:`meho_backplane.operations._license_refusal`); a
+    refused preview writes none.
     """
     return OperationResult(
         status="error",
@@ -1035,6 +1044,31 @@ def result_preview_binding_required(op_id: str, reason: str, duration_ms: float)
     )
 
 
+def result_park_check_refused(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+    """The op's check before the wait for approval refused the call.
+
+    The op needs approval, and its registered check
+    (:func:`~meho_backplane.operations._preview.run_park_check`) found a
+    param that must not be stored in an approval request, for example a
+    secret given as a plain value. MEHO stores no approval request and
+    sends nothing to the vendor; the caller fixes the call and sends it
+    again. Preview returns the same text. ``status`` is ``"denied"`` with a
+    distinct ``error_code``. *reason* comes from the check and can name an
+    exception class, so it goes through :func:`_sanitize_free_text`.
+    """
+    reason = _sanitize_free_text(reason)
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=(
+            f"denied: {reason}. MEHO does not store this call for approval; "
+            "fix the call and send it again"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "refused_before_approval", "reason": reason},
+    )
+
+
 def result_preview_hash_mismatch(op_id: str, duration_ms: float) -> OperationResult:
     """Destructive-tier park refused: presented preview hash did not match (#3197).
 
@@ -1224,6 +1258,36 @@ def result_release_changed_while_waiting(
             "approval_request_id": str(approval_request_id),
             "request_release": request_release,
             "running_release": running_release,
+        },
+    )
+
+
+def result_resume_params_unavailable(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+) -> OperationResult:
+    """An approved request did not run: MEHO does not have its params (#6064).
+
+    The approval surface sent no params, and the request row holds none
+    MEHO can run with: there are none, or MEHO already replaced the secret
+    values with a marker. Nothing was sent. The request ends as a failed
+    run, so the requester can run it again and send the params with it.
+    """
+    reason = (
+        "The request was approved, but MEHO does not have the settings it needs "
+        "to run it. The operation did not run. The requester can run it again "
+        "and send the settings with it, or ask again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"approval_resume_params_unavailable: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "approval_resume_params_unavailable",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
         },
     )
 
@@ -1521,8 +1585,17 @@ def result_connector_timeout(
     op_id: str,
     exc: httpx.TransportError,
     duration_ms: float,
+    *,
+    changes_target: bool = False,
 ) -> OperationResult:
     """Return a structured timeout or other HTTP transport-fault result.
+
+    *changes_target* is ``True`` for an operation that may change the target.
+    When the request may already have reached the vendor (a read timeout, or
+    a dropped connection after MEHO wrote the request), the result then
+    carries ``execution_outcome: uncertain`` and ``retry: False``, the same
+    as :func:`result_audit_commit_failed`. A connect timeout, and any fault
+    of a read operation, stay a plain error.
 
     ``httpx`` exposes a per-request timeout map through the request extension.
     A non-timeout transport failure has no truthful phase, so it is labelled
@@ -1558,10 +1631,16 @@ def result_connector_timeout(
         "configured_timeout": configured_timeout,
         "exception_message": _sanitize_free_text(str(exc)),
     }
+    error = f"connector_timeout: {type(exc).__name__}"
+    if changes_target and request_may_have_reached_vendor(exc):
+        extras["execution_outcome"] = UNCERTAIN_OUTCOME
+        extras["retry"] = False
+        extras["remediation"] = UNCERTAIN_ADVICE
+        error += f". {UNCERTAIN_ADVICE}"
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"connector_timeout: {type(exc).__name__}",
+        error=error,
         duration_ms=duration_ms,
         extras=extras,
     )

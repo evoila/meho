@@ -55,6 +55,12 @@ One sentence per level:
   stores no approval request (#3197). Who may approve it follows the
   group rules (for example a MEHO-SA-Operator). Agents never approve.
 
+So an agent's `caution`, `dangerous` and `destructive` requests all wait
+for a person's approval (#3980). Agents never approve, on any path: not
+their own requests and not anyone else's. Who may approve follows the
+approval groups
+([approvals.md](approvals.md#the-approval-groups-and-how-a-person-approves-3325)).
+
 An op marked `requires_approval` also waits for approval, for every kind of
 login. There are two exceptions. A refusal for an agent login stays a
 refusal. A service account's standing grant can still let the op run, but
@@ -131,8 +137,10 @@ One row = one permission grant for a principal.
 G11.2-T1):
 
 - **Every kind that is not `agent`** (`user`, `service`, `runner`) —
-  `_non_agent_verdict` (`_validate.py`). It returns `deny` in one case
-  only: a service account with a read scope, on a read that would run at
+  `_non_agent_verdict` (`_validate.py`). It returns `deny` in two cases
+  only: a person whose role is below the op's role floor (see
+  [Per-op role floor](#per-op-role-floor-operationsrole_floorspy)), and a
+  service account with a read scope, on a read that would run at
   once but whose target is outside the scope (#4992,
   `_service_read_scope_denial`). It returns `needs-approval` in these
   cases, in this order (`_non_agent_park_reason`):
@@ -328,8 +336,8 @@ which runs under the requester, also a service login with the `operator`
 role. The dispatcher tells the two apart by the requester the resume
 helper binds (`secondary_target_policy.approved_requester_sub`).
 
-`policy_gate` (`_validate.py`) opens its own DB session (same
-`get_sessionmaker()` pattern as `audit_and_broadcast_safe`) and calls
+`policy_gate` (`_validate.py`) opens its own DB session
+(`get_sessionmaker()`) and calls
 `resolve_verdict` for agent principals.
 
 ### Audit-query agreement
@@ -351,10 +359,6 @@ a `result_status="pending"` filter, so a waiting call is not counted as `ok`.
 
 ## Known issues
 
-- **Rules for agents will change.** #3980 plans that only `safe` runs at
-  once for agents and token calls, and everything else waits for approval.
-  This page describes the code that runs today. Update it when that change
-  lands.
 - **Soft FK to principal.** `principal_sub` has no database FK to the
   agent-principal table (`agent_principal`, G11.2-T1); a tightening migration
   can add it later. `AgentGrantService.grant` now enforces the reference at the

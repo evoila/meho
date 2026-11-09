@@ -61,9 +61,26 @@
     the modal opens (bell, history row, or a deep link), so the extra confirm
     cannot be skipped by the link the approver used.
 
+  Phone layout (#6000)
+    Below the ``sm`` width the dialog opens as a sheet from the bottom of
+    the screen (``modal-bottom``), full width; from ``sm`` up it is the
+    centred dialog as before (``sm:modal-middle``). The decision bar
+    (Deny / Approve and their confirm steps) sticks to the bottom of the
+    dialog while the request detail scrolls, so the buttons are in reach
+    of one thumb without scrolling. The reason field sits above the bar,
+    not in it, so the bar stays small; the confirm forms still read it
+    by id (``hx-include``). On a phone the buttons are larger and share
+    the row width.
+
+  Hidden values (``request.reveal_secret``)
+    When the requester asked for the hidden values of the answer, the detail
+    list says so (``data-approval-reveal-secret``), on every status, and the
+    consequence banner of a pending row says that approving returns them to
+    the requester (``data-approval-gate-reveal-secret``).
+
   Context:
     request               -- dict: id / op_id / connector_id / principal_sub /
-                             principal_act / proposed_effect / status /
+                             principal_act / proposed_effect / reveal_secret / status /
                              reviewed_by / work_ref / created_at /
                              decided_at / expires_at / chain (#3596:
                              {work_ref, step, total} or None)
@@ -150,7 +167,7 @@
       Approvals &amp; break-glass guide &rarr;</a>
   </p>
 {%- endmacro -%}
-<dialog id="meho-approvals-modal" class="modal" aria-label="Review approval request">
+<dialog id="meho-approvals-modal" class="modal modal-bottom sm:modal-middle" aria-label="Review approval request">
   <div class="modal-box max-w-2xl">
     <div class="flex items-start justify-between gap-4">
       <h3 class="text-lg font-semibold" id="meho-approval-detail-title">
@@ -222,6 +239,10 @@
         {#- Approved, but the run failed (#3543): not a success banner. -#}
         {% set decision_alert = "alert-error" %}
         {% set decision_verb = "Approved" %}
+      {% elif request.status == "approved" and request.result_state == "uncertain" %}
+        {#- Approved, but MEHO does not know if the change happened (#5025). -#}
+        {% set decision_alert = "alert-warning" %}
+        {% set decision_verb = "Approved" %}
       {% elif request.status == "approved" %}
         {% set decision_alert = "alert-success" %}
         {% set decision_verb = "Approved" %}
@@ -278,17 +299,21 @@
             <p class="text-sm font-semibold" data-testid="approval-run-refused" data-error-code="{{ request.outcome.error_code }}">{{ request.outcome.refused_message }}</p>
           {% elif request.result_state == "failed" %}
             <p class="text-sm font-semibold">The approved operation ran, but it did not succeed. Open the audit row to see why.</p>
+          {% elif request.result_state == "uncertain" %}
+            <p class="text-sm font-semibold" data-testid="approval-run-uncertain">MEHO does not know if the approved change happened. Do not run it again. Check the target first.</p>
           {% endif %}
           {% if request.result_state %}
             {% set run_label, run_class = result_state_pill.get(request.result_state, (request.result_state, "badge-ghost")) %}
             <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
               <dt class="opacity-70">Run</dt>
               <dd><span class="badge badge-sm {{ run_class }}" data-result-state="{{ request.result_state }}">{{ run_label }}</span></dd>
+              {#- The start of the latest run (#5026): a re-run after a
+                  failed run shows its own start, not the first attempt's. -#}
+              {% if request.run_started_at %}
+                <dt class="opacity-70">Run started</dt>
+                <dd><time datetime="{{ request.run_started_at }}" class="font-mono text-xs" data-testid="approval-run-started-at">{{ request.run_started_at }}</time></dd>
+              {% endif %}
               {% if request.outcome %}
-                {% if request.outcome.resumed_at %}
-                  <dt class="opacity-70">Run started</dt>
-                  <dd><time datetime="{{ request.outcome.resumed_at }}" class="font-mono text-xs">{{ request.outcome.resumed_at }}</time></dd>
-                {% endif %}
                 {% if request.outcome.result_status %}
                   <dt class="opacity-70">Result status</dt>
                   <dd class="font-mono">{{ request.outcome.result_status }}</dd>
@@ -297,7 +322,9 @@
                   <dt class="opacity-70">Error code</dt>
                   <dd class="font-mono [overflow-wrap:anywhere]">{{ request.outcome.error_code }}</dd>
                 {% endif %}
-                {% if request.outcome.guidance %}
+                {#- The guidance of an uncertain run is the advice the banner
+                    above already gives (#5025). -#}
+                {% if request.outcome.guidance and request.result_state != "uncertain" %}
                   <dt class="opacity-70">Next step</dt>
                   <dd class="[overflow-wrap:anywhere]" data-testid="approval-guidance">{{ request.outcome.guidance }}</dd>
                 {% endif %}
@@ -307,6 +334,59 @@
                 {% endif %}
               {% endif %}
             </dl>
+          {% endif %}
+          {#- Outcome unknown (#5026). A run that started long ago with no
+              result gets the same advice as an uncertain one. A person checks
+              the target and records what they found; nothing runs. -#}
+          {% if request.outcome_unknown and request.outcome_unknown.reason == "started_no_result" %}
+            <p class="mt-2 text-sm font-semibold" data-testid="approval-outcome-unknown">{{ request.outcome_unknown.advice }}</p>
+          {% endif %}
+          {#- A check covers one reason and one run. When the request is back
+              on the list (a re-run, or a new reason), the stored check is an
+              earlier check: show it as such and offer the form again. -#}
+          {% if request.outcome_check %}
+            <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome-check" data-verdict="{{ request.outcome_check.verdict }}" data-earlier="{{ 'true' if request.outcome_unknown else 'false' }}">
+              <dt class="opacity-70">{{ "Earlier check" if request.outcome_unknown else "Checked" }}</dt>
+              <dd>{{ "It happened" if request.outcome_check.verdict == "happened" else "It did not happen" }}</dd>
+              <dt class="opacity-70">Note</dt>
+              <dd class="[overflow-wrap:anywhere]">{{ request.outcome_check.note }}</dd>
+              <dt class="opacity-70">Checked by</dt>
+              <dd>{{ subject(request.outcome_check.checker) }}</dd>
+              <dt class="opacity-70">Checked at</dt>
+              <dd><time datetime="{{ request.outcome_check.checked_at }}" class="font-mono text-xs">{{ request.outcome_check.checked_at }}</time></dd>
+            </dl>
+          {% endif %}
+          {% if request.outcome_unknown %}
+            <form
+              class="mt-3 flex flex-col gap-2"
+              data-testid="approval-outcome-check-form"
+              hx-post="/ui/approvals/{{ request.id }}/outcome-check"
+              hx-target="#meho-approvals-modal-container"
+              hx-swap="innerHTML"
+              hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+              hx-disabled-elt="find button"
+            >
+              <p class="text-sm">Mark as checked: what did you find on the target? This only records your answer. MEHO runs nothing.</p>
+              <label class="flex items-center gap-2 text-sm">
+                <input type="radio" name="verdict" value="happened" class="radio radio-sm" required />
+                It happened
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input type="radio" name="verdict" value="did_not_happen" class="radio radio-sm" required />
+                It did not happen
+              </label>
+              <textarea
+                name="note"
+                class="textarea textarea-bordered textarea-sm w-full"
+                maxlength="2000"
+                required
+                placeholder="What did you check?"
+                aria-label="Note: what did you check?"
+              ></textarea>
+              <div class="flex justify-end">
+                <button type="submit" class="btn btn-sm" data-confirm="outcome-check">Mark as checked</button>
+              </div>
+            </form>
           {% endif %}
           {#- Delegated decision (#3692): the approver acted on another human's
               written instruction. Read off the decision audit row; absent for an
@@ -345,6 +425,12 @@
         <dt class="shrink-0 text-base-content/55">Operation</dt>
         <dd class="font-mono [overflow-wrap:anywhere] text-right">{{ request.op_id }}</dd>
       </div>
+      {% if request.reveal_secret %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-reveal-secret>
+          <dt class="shrink-0 text-base-content/55">Hidden values</dt>
+          <dd class="text-right font-semibold text-error">Returned to the requester</dd>
+        </div>
+      {% endif %}
       {#- Resolved subject of a path-variable op (#3353): the concrete entity
           (VM name + moid) recovered from the caller's identity params, so the
           reviewer reads ``web-01 (vm-1042)`` instead of the unresolved
@@ -577,10 +663,13 @@
           values pretty-printed per row. -#}
       {% set fields = effect.get("params_echo") or effect.get("preview") %}
       {% if fields is mapping and fields %}
+        {% include "approvals/_script.html" %}
+        {#- The script block above shows every script_* field, so the table skips them. -#}
+        {% set shows_script = fields.get("script") is string or fields.get("script_unavailable") %}
         <div class="mt-2 overflow-auto rounded-box border border-base-300">
           <table class="table table-xs" aria-label="Proposed effect fields">
             <tbody>
-              {% for key, value in fields | dictsort %}
+              {% for key, value in fields | dictsort if not (shows_script and key.startswith("script")) %}
                 <tr>
                   <th class="align-top font-mono font-normal text-base-content/55">{{ key }}</th>
                   <td class="font-mono [overflow-wrap:anywhere]">
@@ -672,6 +761,12 @@
           immediately &mdash; there is no un-approve. Denying is terminal; the
           requester must re-file.
         </p>
+        {% if request.reveal_secret %}
+          <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-approval-gate-reveal-secret>
+            Approving returns the hidden values to the requester: the answer
+            shows the secret values in clear text.
+          </p>
+        {% endif %}
         {% if out_of_order %}
           <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-approval-out-of-order>
             This is step {{ request.chain.step }} of {{ request.chain.total }}.
@@ -695,24 +790,29 @@
         no modal-in-modal. The Confirm form carries the CSRF header echo, pulls
         the shared reason via ``hx-include``, and disables itself during dispatch
         exactly as the single-click form did before (#1693 / #1754). -#}
-    <div class="modal-action mt-4 flex-col items-stretch gap-3" x-data="{ armed: '' }">
-      <label class="form-control w-full max-w-md self-start">
-        <span class="label-text text-xs">Reason <span class="opacity-60">(optional)</span></span>
-        {# Single shared reason field; each confirm form pulls it via
-           hx-include so the operator types it once. A textarea, not a text
-           input: the delegated-decision trailer (``Instructed-by:`` /
-           ``Instruction:`` / ``Refs:``) is one line per field
-           and a text input drops the line breaks on paste. #}
-        <textarea
-          id="meho-approval-reason"
-          name="reason"
-          rows="3"
-          maxlength="2000"
-          class="textarea textarea-bordered textarea-sm"
-          placeholder="Recorded on the decision audit row"
-          aria-label="Decision reason"
-        ></textarea>
-      </label>
+    <label class="mt-4 flex w-full max-w-md flex-col gap-1">
+      <span class="text-xs">Reason <span class="opacity-60">(optional)</span></span>
+      {# Single shared reason field; each confirm form pulls it via
+         hx-include so the operator types it once. A textarea, not a text
+         input: the delegated-decision trailer (``Instructed-by:`` /
+         ``Instruction:`` / ``Refs:``) is one line per field
+         and a text input drops the line breaks on paste. #}
+      <textarea
+        id="meho-approval-reason"
+        name="reason"
+        rows="3"
+        maxlength="2000"
+        class="textarea textarea-sm w-full"
+        placeholder="Recorded on the decision audit row"
+        aria-label="Decision reason"
+      ></textarea>
+    </label>
+
+    <div
+      class="modal-action sticky -bottom-6 z-10 -mx-6 -mb-6 mt-3 flex-col items-stretch gap-3 border-t border-base-300 bg-base-100 px-6 pt-3 pb-6"
+      data-approval-decision-bar
+      x-data="{ armed: '' }"
+    >
 
       {# Phase 1 -- resting armers. ``type="button"``: the first click only sets
          the Alpine ``armed`` flag; it never posts. A blocked self-approval
@@ -721,7 +821,7 @@
       <div class="flex items-end justify-end gap-2" x-show="armed === ''">
         <button
           type="button"
-          class="btn btn-sm btn-error btn-outline gap-1"
+          class="btn btn-md btn-error btn-outline flex-1 gap-1 sm:btn-sm sm:flex-none"
           data-action="reject"
           x-on:click="armed = 'reject'"
         >
@@ -732,7 +832,7 @@
         {# The sign-in is too old for an approval: the Approve button is the
            link to a new sign-in. The POST checks the sign-in again anyway. #}
         <a
-          class="btn btn-sm btn-primary gap-1"
+          class="btn btn-md btn-primary flex-1 gap-1 sm:btn-sm sm:flex-none"
           href="{{ sign_in_url }}"
           data-action="sign-in-to-approve"
         >
@@ -742,7 +842,7 @@
         {% else %}
         <button
           type="button"
-          class="btn btn-sm btn-primary gap-1"
+          class="btn btn-md btn-primary flex-1 gap-1 sm:btn-sm sm:flex-none"
           data-action="approve"
           {% if approve_blocked %}disabled aria-disabled="true" aria-label="Approve disabled: {{ approve_right.message }}"{% elif out_of_order %}x-on:click="armed = 'approve-early'"{% else %}x-on:click="armed = 'approve'"{% endif %}
         >

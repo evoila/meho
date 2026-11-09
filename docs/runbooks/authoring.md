@@ -52,6 +52,18 @@ same time.
   [#1198](https://github.com/evoila/meho/issues/1198)). Authoring and running
   are different audiences, which is why this doc is separate from the run docs.
 
+**Where the authoring tools are.** Over MCP, the five authoring tools
+(`meho_runbook_draft_template`, `_edit_template`, `_publish_template`,
+`_deprecate_template` and `_discard_template`) are on the admin list. A
+session sees them only when it asked for the `mcp:admin` scope (see
+[`docs/codebase/mcp.md`](../codebase/mcp.md), "Dual-surface tool
+inventory"). `meho_runbook_list_templates` and `meho_runbook_show_template`
+are on the default list. Without MCP, a tenant admin can author with the
+CLI (`meho runbook draft-template`, `edit-template`, `publish-template`,
+`deprecate-template`, see [`docs/cli/runbook.md`](../cli/runbook.md)) or
+in the operator console at `/ui/runbooks/<slug>`, which can also discard
+a draft.
+
 ## The multi-session drafting pattern
 
 Authoring a real procedure is rarely one sitting. A senior walks Claude
@@ -322,6 +334,10 @@ the appliance the run is pointed at, and `${run.params.new_thumbprint}` for a
 run parameter the operator supplies at start. Anything outside that allowlist
 would be rejected at publish.
 
+`vmware.cert.get_thumbprint` is a made-up op id for this example. Find the
+real op id of your connector with `search_operations` before you write the
+step.
+
 ## Cross-references
 
 - [Goal #1195](https://github.com/evoila/meho/issues/1195) — G12 Runbooks
@@ -341,6 +357,8 @@ would be rejected at publish.
   [`backend/src/meho_backplane/runbooks/schemas.py`](../../backend/src/meho_backplane/runbooks/schemas.py).
 - Versioning algebra (in-place edit vs fork-from-published):
   [`backend/src/meho_backplane/runbooks/service.py`](../../backend/src/meho_backplane/runbooks/service.py).
-- The architecture doc (`docs/architecture/runbooks.md`, storage shape +
-  dispatcher correlation + opacity contract) and the CLI usage doc
-  (`docs/cli/runbook.md`, G12.5) land separately.
+- The architecture doc (storage shape, dispatcher correlation, opacity
+  contract): [`docs/architecture/runbooks.md`](../architecture/runbooks.md).
+- The CLI usage doc: [`docs/cli/runbook.md`](../cli/runbook.md).
+- The task guide on the docs site:
+  [`docs-site/guides/runbooks.md`](../../docs-site/guides/runbooks.md).

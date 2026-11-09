@@ -176,6 +176,8 @@ async def resolve_subscription_set(
     read that fails later still records which names were checked.
     """
     # A block from an earlier call in the same context must not reach this row.
+    # The dispatcher already removes a handler's ``audit_*`` binds when its
+    # dispatch ends (#5211); this also covers a call made outside dispatch().
     structlog.contextvars.unbind_contextvars(_AUDIT_KEY)
     config = resolve_target_config(target)
     others = list(dict.fromkeys(name for name in names if name != target.name))

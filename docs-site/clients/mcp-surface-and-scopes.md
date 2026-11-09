@@ -37,6 +37,10 @@ Four of the 26 — the grounded-documentation add-on tools `ask_docs`,
 has provisioned the `meho-docs` capability. A session without that
 capability lists the other 22.
 
+One more working-surface tool, `meho_automation_list`, is listed only
+while an automation add-on is paired with MEHO and healthy. It is not
+one of the 26.
+
 The working surface is the same across every connector. An agent picks a
 connector, lists its operation groups, searches for the operation it
 needs, previews it, and calls it — the vendor's own identifiers stay in
@@ -56,13 +60,39 @@ A useful session almost always walks the same rungs:
 5. `result_query` — page a large, set-shaped result back from its
    handle.
 
+## A smaller tool list for small models (tool profiles)
+
+A small model has a small context window. The 26 tools use a large part
+of it before the user asks anything. So a client can ask for a
+**tool profile**: add `?profile=<name>` to the MEHO MCP URL.
+
+| Profile | What the session can do | Tools |
+|---|---|---|
+| `investigate` | Find and read: connectors, targets, operations, results, knowledge and memory. | `meho_status`, `meho_connector_list`, `list_targets`, `list_operation_groups`, `search_operations`, `call_operation`, `result_query`, `search_knowledge`, `search_memory` |
+| `operate` | Everything in `investigate`, plus preview a change and tell other agents about it. | the 9 above, plus `preview_operation`, `meho_broadcast_recent`, `meho_broadcast_announce`, `meho_broadcast_watch` |
+
+Example URL: `https://<meho-host>/mcp?profile=investigate`.
+
+- Without a profile, the session sees the full list, as before.
+- A profile only removes tools. It never gives a tool the session may
+  not use, and it ignores `mcp:admin`.
+- A tool outside the profile is also refused when called. The error
+  says it is not in the profile.
+- A wrong profile name is refused with HTTP 400, so a typo never gives
+  the full list by mistake.
+- The session-start instructions follow the profile. They do not name
+  a tool the session cannot see.
+- A profile does not change what the person may do. `call_operation`
+  still runs under the person's role, and changes still wait for
+  approval when the rules say so.
+
 ## The operator planes (behind `mcp:admin`)
 
 The governance and lifecycle tools — connector lifecycle and ingest,
 agents / principals / grants, scheduler, sensors, broadcast overrides,
 runbook **template authoring**, topology **mutations**, target
-registration, doc-collection create/delete, memory promotion, approvals
-**read**, and audit query — form a second tier of **53 operator-plane
+registration and change, doc-collection create/delete, memory promotion, approvals
+**read**, and audit query — form a second tier of **55 operator-plane
 tools**. They are absent from a default session's tool list and refused
 at call time, and they appear **only** for a session that explicitly
 requested the `mcp:admin` OAuth scope.
@@ -166,6 +196,6 @@ right saves a round of `-32602` errors:
 
 This page describes the tiering, not every row. The complete per-tool
 inventory — each tool, its surface tier, and the claim that gates it —
-is published as a generated MCP tool reference in the
-[Reference](../reference/index.md) section, generated from the live
-`tools/list` snapshot so it cannot drift from the product.
+is the generated [MCP tool reference](../reference/mcp-tools.md). It is
+generated from the backplane's tool registry, and a CI check fails when
+the page and the registry disagree.

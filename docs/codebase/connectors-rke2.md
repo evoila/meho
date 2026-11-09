@@ -7,15 +7,14 @@ operator-facing RKE2 **node-OS-lifecycle** operations over plain SSH. It is
 registered under the `(product="rke2", version="1.x", impl_id="rke2-ssh")`
 registry triple and is a child of the shared `SshConnector` adapter
 (`connectors/adapters/ssh.py`), the same transport base as `Bind9Connector`
-(G3.4) and `HolodeckConnector` (G3.8/G3.18).
+(G3.4) and the `linux` connector.
 
 RKE2 cluster nodes expose **no MEHO REST API**; the only operator surface is
-SSH to the node OS. The `kubernetes` connector is Kubernetes-API-only (~25
-ops) and cannot reach a node at the OS level. Initiative #2172 adds a
+SSH to the node OS. The `kubernetes` connector is Kubernetes-API-only and
+cannot reach a node at the OS level. This connector adds a
 governed, typed, path-bounded SSH node-OS-lifecycle op surface so cluster-node
 maintenance (RKE2 join-token rotation, service restarts, config edits) runs
-through one identity + audit plane instead of an untracked local SSH wrapper
-(the field case: `claude-rdc-hetzner-dc#615`).
+through one identity + audit plane instead of an untracked local SSH wrapper.
 
 T1 (#2221) ships the **connector scaffold + the read-only posture tier only**:
 
@@ -30,12 +29,12 @@ T1 (#2221) ships the **connector scaffold + the read-only posture tier only**:
 
 A later read op (#2854) reads config **content** rather than modes:
 
-- `rke2.node.config.get` — the redacted **config-content** read. `cat`s the
+- `rke2.node.config.get` (group `rke2-config-read`) — the redacted
+  **config-content** read. `cat`s the
   RKE2 server `config.yaml` (or a `config.yaml.d/*.yaml` drop-in) over SSH —
   the same read + `yaml.safe_load` step `rke2.node.config.update` runs — and
   returns the parsed top-level mapping so an operator can verify `tls-san` /
-  `datastore-endpoint` / `node-taint` before or after a patch (the
-  `claude-rdc-hetzner-dc#615` re-confirm-config step). Secret-bearing keys are
+  `datastore-endpoint` / `node-taint` before or after a patch. Secret-bearing keys are
   **redacted, not withheld**: `token` / `agent-token` and the etcd S3
   credentials (`etcd-s3-access-key` / `etcd-s3-secret-key` /
   `etcd-s3-session-token`) become `***redacted***`, and `datastore-endpoint`
@@ -65,8 +64,7 @@ T2 (#2429) adds the **first approval-gated write op** (in the
   would land on argv), read back over the SSH channel, and written to Vault —
   only a **pointer** to the Vault location plus non-secret metadata (`rotated`
   / `node` / `exit_status`) is returned. Neither token value ever reaches the
-  world-readable `/proc/<pid>/cmdline` of the rke2 process (S12,
-  meho-internal#300). A read-only fingerprint gate refuses a non-server node,
+  world-readable `/proc/<pid>/cmdline` of the rke2 process. A read-only fingerprint gate refuses a non-server node,
   an inactive `rke2-server`, or a below-floor / known-bad (`v1.27.10+rke2r1`)
   RKE2 version before any mutation.
 
@@ -108,8 +106,8 @@ guard:
   created_at}, …]}` — a genuine read (it enumerates, mutating nothing), so it
   DOES carry the `read-only` tag. It is the read counterpart `.save` lacked:
   the way to **confirm a fresh snapshot landed after a token rotation** (a
-  snapshot taken before the rotation was made with the retired token — the
-  `claude-rdc-hetzner-dc#615` runbook step). The set-shaped result is
+  snapshot taken before the rotation was made with the retired token). The
+  set-shaped result is
   materialised into a JSONFlux result handle by the central reducer above its
   row/byte threshold. See [List output parsing](#list-output-parsing-2853).
 
@@ -129,8 +127,8 @@ read-only op** alongside the posture tier, in a new `rke2-service-read` group:
   when the Kubernetes API server itself is down and `kubernetes.*` ops cannot
   help. `safety_level="safe"` / `requires_approval=false`, no params, and the
   probed unit set is the fixed `("rke2-server", "rke2-agent")` pair — there is
-  **no** operator-supplied unit, so no arbitrary-unit or shell-injection
-  surface. This is the read-only sibling of the approval-gated
+  **no** operator-supplied unit, so a caller cannot pick another unit or add
+  shell text. This is the read-only sibling of the approval-gated
   `rke2.node.service.restart`: `systemctl show` never restarts/starts/stops a
   unit. `--all` un-suppresses the `NRestarts=0` / empty-`ExecMainStartTimestamp`
   properties `systemctl show` drops by default, so a healthy unit reports
@@ -162,7 +160,9 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   Inherits the per-target asyncssh connection pool, `_auth_config`,
   `_run_command`, `_assert_reachable`, and `aclose()` from the adapter.
   Ships `fingerprint`, `probe`, `execute`, `about`, `posture_show`,
-  `service_status`, `config_get`, `register_operations`. Two module-level pure
+  `service_status`, `config_get`, the write and snapshot shims
+  (`token_rotate`, `service_restart`, `config_update`,
+  `etcd_snapshot_save`, `etcd_snapshot_list`), and `register_operations`. Two module-level pure
   parsers live here:
   `parse_rke2_version` (release string from `rke2 --version`) and
   `parse_os_pretty_name` (`PRETTY_NAME` from `/etc/os-release`).
@@ -174,7 +174,7 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   form), and `parse_posture` (composes the `{config_files, token}` envelope;
   the token entry always carries `redacted: true`). `POSTURE_CONFIG_PATHS`
   and `RKE2_TOKEN_PATH` are fixed code constants — there is **no** operator
-  path parameter, so no path-traversal / shell-injection surface.
+  path parameter, so a caller cannot change the path or add shell text.
   `Rke2PostureProbeError` fires when the probe itself could not run.
 
 - **Service-state handler + parsers** (`ops_read.py`, #2833 / #2852) —
@@ -201,7 +201,7 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   `bound_config_path` traversal/root/`.yaml` checks.
 
 - **Op metadata** (`ops.py`) — `Rke2Op` frozen dataclass (mirrors
-  `Bind9Op` / `HolodeckOp`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
+  `Bind9Op`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
   copied into every op's `when_to_use`), `_RKE2_ABOUT_OP`, and `RKE2_OPS`
   (`about` + the `READ_OPS` read tuple — posture + `.service.status` +
   `.config.get` — + the `WRITE_OPS` write tuple + the `SNAPSHOT_OPS` tuple,
@@ -212,7 +212,7 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   - `rke2.token.rotate` (#2429): `rke2_token_rotate` (the async handler, bound
     via the `token_rotate` shim), `rke2_version_rotate_verdict` /
     `parse_rke2_release` (the pure version-gate logic against the per-minor
-    CVE-fix floor + the `v1.27.10+rke2r1` deny). The OLD token rides the
+    minimum fixed version + the `v1.27.10+rke2r1` deny). The OLD token rides the
     `RKE2_TOKEN` env (its upstream `--token` `EnvVar` backing) and the new
     token is minted node-side by `rke2` (`--new-token` omitted), read back over
     the SSH channel via the `_parse_rotated_token` marker line, and stashed in
@@ -221,7 +221,9 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
     `/proc/<pid>/cmdline`. `_sudo.py` carries the family's own safe-`sudo -S`
     primitive
     (`run_remote_bash_with_sudo`) — the #697-hardened wire shape (script bytes
-    first, password last on stdin, never in argv / history / log).
+    first, password last on stdin, never in argv / history / log). It runs
+    the script through the adapter's `run_capped`, so output above the
+    16 MiB SSH output cap fails the call.
     `ops_write_preview.py` registers a non-secret park-time `proposed_effect`
     preview builder (`{node, service, semantics, new_token_minted}`).
   - `rke2.node.service.restart` / `rke2.node.config.update` (#2430): the
@@ -230,7 +232,7 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
     `ConfigPathRejectedError`; `apply_config_patch` / `changed_config_keys`
     backplane-owned merge), the `rke2_service_restart` / `rke2_config_update`
     handlers, and the two node-write approval-park preview builders (registered
-    at import via `register_rke2_write_previews`). Privilege model for these
+    at import via `register_rke2_write_previews`). Access model for these
     node ops: the connector operates as `root` over SSH (the posture tier
     already `stat`s `0600 root:root` token files), so they run via
     `_run_command` without a separate sudo-password stream — the sudo primitive
@@ -260,7 +262,7 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
     / `Rke2SnapshotError`. The `rke2` binary is invoked by absolute path in
     both handlers.
 
-- **Registration** (`__init__.py`) — two-phase, mirroring bind9/holodeck.
+- **Registration** (`__init__.py`) — two-phase, mirroring bind9.
   Synchronous `register_connector_v2` at import time (versioned triple +
   the `("rke2", "", "")` wildcard fallback); async
   `register_rke2_typed_operations` queued onto the lifespan registrar list.
@@ -289,15 +291,14 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
 
 `stat` exits non-zero for **both** a missing file (`ENOENT`) and a parent
 directory it cannot traverse (`EACCES`), and writes the distinction only to
-stderr. The original handler read stdout alone, so both collapsed to
+stderr. A handler that read stdout alone would collapse both to
 `present: false`. On a stock hardened server node — `0700 root:root` on
-`/var/lib/rancher/rke2/server/`, reached as a non-root SSH user — the op
-therefore reported the join token **absent on a node where it exists**,
-which is the unsafe direction for an op whose stated job is "confirm the
-server token exists before rotating". A rotation runbook pre-checking with
-it was told there was nothing to rotate.
+`/var/lib/rancher/rke2/server/`, reached as a non-root SSH user — it would
+report the join token **absent on a node where it exists**, which is the
+unsafe direction for an op whose stated job is "confirm the server token
+exists before rotating".
 
-The handler now issues one POSIX-`sh` probe that resolves each path
+So the handler issues one POSIX-`sh` probe that resolves each path
 individually and emits a marker line per path:
 
 | Marker | `status` | `present` | Meaning |
@@ -315,9 +316,8 @@ Two properties are load-bearing:
 - **Every real verdict exits 0**, so a non-zero exit is unambiguously an
   infrastructure failure (no `stat` on the node, broken shell) and raises
   `Rke2PostureProbeError` rather than being served as posture. This is the
-  same reasoning `ops_snapshot` applies to its precondition guard, now
-  extended to the read tier — previously the posture handler ignored
-  `exit_status` entirely.
+  same reasoning `ops_snapshot` applies to its precondition guard, applied
+  to the read tier too.
 
 `asyncssh` reports `exit_status` as `None` when the peer closed the channel
 without sending one at all (its documented third case, alongside an int and
@@ -329,7 +329,7 @@ verdicts with no exit status to vouch for the run raise — neither the run
 nor the unaccounted paths can be confirmed. Treating `None` as failure
 outright would break reads against SSH implementations that omit
 `exit-status` while still delivering full output; treating it as success
-outright would re-open the class this fix closes.
+outright would serve a cut-off read as a full one.
 
 A consumer must branch on `status`, not on the falsiness of `present`:
 `null` and `false` are both falsy but mean different things. Every entry
@@ -353,6 +353,11 @@ KV-v2 path string in `target.secret_ref` (the #2155 either/or shape:
 `load_vault_secret_data`, **not** `load_basic_credentials`, so a key-only or
 password-only secret resolves without demanding every field). The connector
 does not touch the pre-#2155 "bind9 anti-shape" (an embedded credential dict).
+
+The adapter checks the node's SSH host key. The Vault secret carries a
+`known_hosts` line that pins the key, or a `known_hosts_insecure` flag that
+turns the check off for that one target. A secret with neither fails with
+`SshHostKeyUnpinnedError` before the connection opens.
 
 ## Redaction guarantee
 
@@ -412,14 +417,14 @@ full detail) and its park-time preview carries no token value.
 - `connectors/registry.py` — the v2 registry + eager-import walk.
 - stdlib `re`, `shlex` (path quoting, defensive even though paths are fixed).
 
-## Privilege (etcd-snapshot.save)
+## Root access (etcd-snapshot.save)
 
 The snapshot op runs both remote commands (the precondition guard and the
 `rke2 etcd-snapshot save` itself) **as root over plain SSH** via
 `_run_command` — no `sudo` argv. The connector authenticates as root (the
 same posture the read tier relies on when it `stat`s `0600 root:root` token
 files, and the same model the T3 node-write ops use for `systemctl` and
-config-file writes), so no privilege elevation is constructed here. This
+config-file writes), so no sudo elevation is constructed here. This
 deliberately avoids hand-rolling a `sudo` argv, which the repo-wide
 sudo-guard (`test_sudo_is_only_referenced_via_the_safe_primitive` + its
 integration twin `test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree`)
@@ -469,6 +474,9 @@ log line.
 - `rke2.node.service.restart` classifies plain `write` via the `.restart`
   write-suffix added to `broadcast/events.py::_WRITE_SUFFIXES`; its params
   (a single unit) carry no secret.
+- `rke2.etcd-snapshot.save` is declared `write` in `rke2/op_classes.py`:
+  it is `safe`, but it makes the node save a snapshot file, so the broadcast
+  treats it as a write, not a read.
 - `rke2.node.config.update` is declared `credential_write` in
   `rke2/op_classes.py` (its `patch` may carry a
   `token:` value), so the broadcast collapses to aggregate-only.
@@ -498,8 +506,6 @@ log line.
 - The rotate is a **single-node atomic op**: multi-node token-propagation /
   restart choreography is an operator-composed runbook of T2+T3 ops, not part
   of this op (per the Initiative DoD).
-- Host-key checking is disabled (`known_hosts=None`) at the adapter level for
-  v0.2, shared across the whole SSH family; pinning is deferred repo-wide.
 - The RKE2 version probe is best-effort: `version` is `null` when the `rke2`
   binary is not on the login shell PATH (agent nodes); reachability is not
   affected.
@@ -512,7 +518,4 @@ log line.
   #2833 connector read-op coverage). Vendor: `rke2 etcd-snapshot list` —
   `docs.rke2.io/datastore/backup_restore` (Name/Location/Size/Created table);
   JSON flag requested at `k3s-io/k3s#5130` (schema/availability undocumented).
-- Mold: holodeck-ssh (G3.18 #2145 / `docs/codebase/connectors-holodeck.md`),
-  bind9-ssh (`docs/codebase/connectors-bind9.md`).
-- Cross-repo coordination: `docs/cross-repo/rke2-infra-coordination.md`.
-- Field case: `claude-rdc-hetzner-dc#615` (RKE2 join-token rotation).
+- Mold: bind9-ssh (`docs/codebase/connectors-bind9.md`).

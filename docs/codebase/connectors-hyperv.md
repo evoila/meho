@@ -102,7 +102,7 @@ collects every VM in the common migration inventory shape. It lives in
 - `HypervConnector` (`connector.py`) — the `SshConnector` subclass. Sets
   `POWERSHELL_EXECUTABLE = "powershell"`, `POWERSHELL_SCRIPT_PREFIX`
   (`$ProgressPreference = 'SilentlyContinue'; `), and `POWERSHELL_LOG_EVENT =
-  "hyperv_pwsh_executed"`. Carries `fingerprint`, `probe`, `about`, the 17
+  "hyperv_pwsh_executed"`. Carries `fingerprint`, `probe`, `about`, the 18
   bound-method op shims, `register_operations`, and the operator-less `execute`
   dispatcher shim.
 - `HypervOp` (`ops.py`) — a frozen dataclass mirroring the
@@ -134,7 +134,7 @@ stringify those fields with `Select-Object` calculated properties / `"$(...)"`
 (e.g. `@{N='State';E={"$($_.State)"}}`) so the assessment surface is readable and
 stable.
 
-### Injection safety
+### Quoting operator input
 
 Operator-supplied strings — `vm_name`, `checkpoint_name`, VHD `path`, export
 `path` — are interpolated only inside single-quoted PowerShell literals via
@@ -179,8 +179,11 @@ unhandled exception).
 
 Inherits the base `SshConnector._auth_config` unchanged (password-default +
 key-fallback; the credential resolves from the target's Vault secret in operator
-context). Windows Server / Hyper-V hosts ship an OpenSSH server that must be
-enabled and pointed at Windows PowerShell:
+context). The base SSH pool keeps one login per caller and target: a caller
+gets a connection only after their own Vault read of the target's secret
+passed, and reuses only the connections they opened (`adapters/ssh.py`,
+`_pool_key`). Windows Server / Hyper-V hosts ship an OpenSSH server that must
+be enabled and pointed at Windows PowerShell:
 
 ```powershell
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
@@ -229,7 +232,7 @@ connector" — for the full checklist the estate connectors share.
 convention for SSH-typed connectors). It uses the winsrv harness (a `_StubTarget`
 + a mocked `_run_command`) and decodes the `-EncodedCommand` base64 back to the
 script to assert the cmdlet + escaped arguments the handler built. Coverage:
-every op group, the injection-safety escape on every parameterized script, the
+every op group, the quote escape on every parameterized script, the
 `{rows, total}` envelope + single-row collapse, the export timeout validation +
 forwarding, the power `mode` switch mapping, the secret-hygiene schema invariant,
 `about` fingerprint mapping, and all six probe reasons.
@@ -243,21 +246,17 @@ shared seam.
 
 No dedicated `meho hyperv` verb package (the windows_dns / winsrv / wsfc / msad /
 rke2 precedent for SSH-typed connectors). CLI parity is the generic dispatch path
-— `meho operation call hyperv-ssh-2022.x <op_id> --params-json '{...}'` — plus the
+— `meho operation call hyperv-ssh-2022.x <op_id> --target <name> --params '{...}'` — plus the
 `hyperv` product token added to the OpenAPI `TargetCreate.product` enum
-(regenerated from the live registry, so `meho targets create --product hyperv ...`
+(regenerated from the live registry, so `meho targets add --product hyperv ...`
 validates and the generated Go client knows the token). The CLI OpenAPI snapshot
 (`cli/api/openapi.json` + the generated `cli/internal/api/client.gen.go`) is
 regenerated in this PR via `cd cli && make snapshot-openapi && make generate`.
 
 ## Known issues / scope
 
-- **Live-consumer proof is open.** The dev/test target is the lab's nested
-  Hyper-V cluster **c1hv1**
-  (`evoila-bosnia/claude-rdc-hetzner-dc#2802`), which is in this lane's own build
-  queue. Per the estate precedent (winsrv / msad / mssql all shipped with the
-  same honest open AC), the connector ships now with the live-probe / inventory /
-  export proof recorded on the issue once c1hv1 is reachable.
+- **No live host in CI.** The unit suite runs against a mocked SSH
+  transport. It does not reach a live Hyper-V host.
 - **Blocking export.** `export.vm` blocks for the export duration (see above); a
   background-job path is a documented follow-up.
 - **`Get-VHD` on shared storage.** When a VHD is attached to a running VM on
@@ -269,7 +268,6 @@ regenerated in this PR via `cd cli && make snapshot-openapi && make generate`.
 
 - Initiative #3259 (Microsoft estate connectors) — design rules.
 - Task #3265; depends-on #3261 (estate mold); #3263 (cluster views stay in wsfc).
-- `evoila-bosnia/claude-rdc-hetzner-dc#2802` — the c1hv1 consumer target.
 - Hyper-V PowerShell module reference:
   <https://learn.microsoft.com/en-us/powershell/module/hyper-v/>
   (`Get-VMHost`, `Get-VM`, `Get-VHD`, `Get-VMSnapshot`, `Checkpoint-VM`,

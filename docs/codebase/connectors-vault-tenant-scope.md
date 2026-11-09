@@ -34,12 +34,14 @@ straight through.
 
 [`connectors/vault/tenant_scope.py`](../../backend/src/meho_backplane/connectors/vault/tenant_scope.py)
 adds `enforce_tenant_scope(operator, mount=..., path=..., read_only=...)`,
-called by **every** KV-v2 handler (`read`, `list`, `versions`, `put`,
-`patch`, `delete`) immediately after it extracts `mount`/`path` and
-**before** the `vault_client_for_operator(...)` login. `read_only` is
-`True` for the read/list/versions handlers and `False` for
-put/patch/delete; it gates the platform-path exemption (below) to
-read-only verbs.
+called by **every** KV-v2 handler (`read`, `list`, `versions`,
+`compare`, `put`, `patch`, `delete`, `metadata.delete`,
+`folder.delete`) immediately after it extracts `mount`/`path` and
+**before** the `vault_client_for_target(...)` login. `read_only` is
+`True` for the read/list/versions/compare handlers and `False` for the
+writes and deletes; it gates the platform-path exemption (below) to
+read-only verbs. `vault.token.create_and_store` runs the same check
+(`read_only=False`) on its KV destination before it makes the token.
 
 The secret broker's vault-kv adapter
 ([`connectors/secret/vault_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_endpoint.py),
@@ -413,11 +415,14 @@ invited widening the deploy-owned policy (the wrong fix). See
   Keep the `meho-mcp` policy correct (`connector-vault-policy.md` §2/§6);
   this guard is the backstop for the day it is mis-provisioned.
 - The **park-time write-capability preflight**
-  (`vault_kv_write_capability_preflight`, #1504) is intentionally *not*
+  (`vault_kv_write_capability_preflight`) is intentionally *not*
   guarded here: it is a non-authoritative early signal that probes
   capability *names* (no secret material) and already fails soft. The
   authoritative tenant check lives in the write handlers (`put`/`patch`/
-  `delete`), which a parked write re-dispatches through on approval.
+  `delete`/`metadata.delete`), which a parked write re-dispatches through on approval.
+  The `vault.kv.folder.delete` preflight is different: it runs the
+  tenant check first, so its folder walk never lists a folder of another
+  tenant (`_folder_delete_preflight` in `ops_kv_folder.py`).
 
 ## Tests
 

@@ -33,6 +33,7 @@ from meho_backplane.db.models import SensorCadenceKind, SensorSeverity, SensorSt
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
 
 __all__ = [
+    "SensorConnectorFit",
     "SensorCreate",
     "SensorListResponse",
     "SensorRead",
@@ -137,6 +138,10 @@ class SensorCreate(BaseModel):
     ] = 15
     identity_sub: Annotated[str, Field(max_length=_IDENTITY_SUB_MAX_LENGTH)] = "__sensor__"
     tenant_id: uuid.UUID | None = None
+    #: Create the Sensor even when its connector does not fit the target's
+    #: product and version. Without it such a create is refused with
+    #: ``sensor_connector_mismatch``. Not stored on the row.
+    force: bool = False
 
     @model_validator(mode="after")
     def _validate_cadence_and_assertion(self) -> SensorCreate:
@@ -172,6 +177,27 @@ class SensorCreate(BaseModel):
                 f"assertion exceeds the {_ASSERTION_MAX_SERIALIZED_BYTES}-byte serialized cap",
             )
         return self
+
+
+class SensorConnectorFit(BaseModel):
+    """How a Sensor's connector fits its target, checked each time it is read.
+
+    MEHO reads the target's detected product and version (the last probe,
+    else the version an operator set) and checks it against the version
+    range the connector declares, with the same match the dispatcher uses
+    to pick a connector for a target. ``warning`` is ``None`` when the
+    connector fits, or when MEHO cannot tell (no known product or version,
+    or a connector MEHO does not know). Otherwise it says in plain words
+    what does not match, and ``matching_connector_id`` names the connector
+    that fits the target, when there is one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    target_product: str | None
+    target_version: str | None
+    warning: str | None = None
+    matching_connector_id: str | None = None
 
 
 class SensorRead(BaseModel):
@@ -223,6 +249,11 @@ class SensorRead(BaseModel):
     created_by_sub: str
     created_at: datetime
     updated_at: datetime
+    # Not a column: filled by the service on list and create from the
+    # target's current product and version, so a new probe shows at once.
+    # ``None`` for a Sensor without a target, or one whose target MEHO
+    # cannot find.
+    connector_fit: SensorConnectorFit | None = None
 
 
 class SensorListResponse(BaseModel):

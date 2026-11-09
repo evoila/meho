@@ -113,6 +113,7 @@ from meho_backplane.ui.auth.flow import (
     refresh_access_token,
 )
 from meho_backplane.ui.auth.routes import SESSION_TTL_MARGIN_SECONDS
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     DecryptedSession,
     RefreshReplayError,
@@ -281,7 +282,7 @@ async def refresh_session_tokens(
             # the same either way.
             log.info(
                 "ui_auth_token_refresh_skipped_session_gone",
-                session_id=str(session_id),
+                session_ref=session_ref(session_id),
             )
             _raise_session_expired()
         if locked.access_token != stale_access_token:
@@ -291,7 +292,7 @@ async def refresh_session_tokens(
             # defences for no reason.
             log.info(
                 "ui_auth_token_refresh_skipped_concurrent_winner",
-                session_id=str(session_id),
+                session_ref=session_ref(session_id),
             )
             return locked
         old_expires_at = locked.expires_at
@@ -304,7 +305,7 @@ async def refresh_session_tokens(
     elapsed_ms = (time.monotonic() - started) * 1000.0
     log.info(
         "ui_auth_token_refresh_succeeded",
-        session_id=str(session_id),
+        session_ref=session_ref(session_id),
         old_expires_at=old_expires_at.isoformat(),
         new_expires_at=rotated.expires_at.isoformat(),
         time_cost_ms=round(elapsed_ms, 2),
@@ -338,7 +339,7 @@ async def _refresh_via_idp(
         reason, extra = _classify_refresh_failure(exc)
         log.warning(
             "ui_auth_token_refresh_failed",
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             reason=reason,
             **extra,
         )
@@ -373,7 +374,7 @@ async def _rotate_or_fail(
         # round-trip.
         log.warning(
             "ui_auth_token_refresh_failed",
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             reason="session_expired_during_refresh",
         )
         _raise_session_expired()
@@ -398,7 +399,7 @@ async def _rotate_or_fail(
         # closed as a 401 instead of a 500.
         log.warning(
             "ui_auth_token_refresh_failed",
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             reason="rotation_replay",
             audit_id=str(exc.audit_id),
         )
@@ -459,7 +460,7 @@ def _assert_same_tenant(decrypted: DecryptedSession, request_tenant: uuid.UUID |
         return
     structlog.get_logger(__name__).info(
         "ui_session_tenant_changed_during_request",
-        session_id=str(decrypted.id),
+        session_ref=session_ref(decrypted.id),
         request_tenant_id=str(request_tenant),
         session_tenant_id=str(decrypted.tenant_id) if decrypted.tenant_chosen else None,
     )
@@ -583,7 +584,7 @@ async def verify_access_token_with_refresh(
         if exc.status_code == status.HTTP_401_UNAUTHORIZED and exc.detail == _TOKEN_EXPIRED_DETAIL:
             log.warning(
                 "ui_auth_token_refresh_stale_after_rotation",
-                session_id=str(refreshed.id),
+                session_ref=session_ref(refreshed.id),
             )
             _raise_session_expired(exc)
         raise

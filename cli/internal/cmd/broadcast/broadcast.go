@@ -55,7 +55,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "broadcast",
-		Short:        "Manage broadcast-detail overrides (overrides list / set / remove)",
+		Short:        "Read, announce and watch agent announcements, and manage broadcast-detail overrides (recent / announce / watch / overrides)",
 		Long:         broadcastLongHelp,
 		SilenceUsage: true,
 	}

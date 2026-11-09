@@ -60,7 +60,7 @@ _BASE_OVERRIDES = [
 ]
 
 # The Keycloak subchart (#4040) needs its host name and first tenant id
-# whenever coreKeycloak is on, and the schema needs corePostgres with it.
+# whenever coreKeycloak is on.
 # The chart then derives the issuer, so the hand-set one is cleared (#4591).
 _CORE_ON = [
     "--set",
@@ -92,6 +92,8 @@ _CORE_NAMES = [
         "ui-auth",
         "check-runner",
         "approval-handoff",
+        "params-hash",
+        "web-push",
         "broadcast-auth",
         "tls",
         "first-login",
@@ -218,6 +220,7 @@ def test_postgres_plan_makes_the_four_database_secrets() -> None:
         f"{_RELEASE}-core-postgres-meho-app": "postgres-meho-app",
         f"{_RELEASE}-core-postgres-keycloak": "postgres-keycloak",
         f"{_RELEASE}-core-approval-handoff": "approval-handoff",
+        f"{_RELEASE}-core-params-hash": "params-hash",
         f"{_RELEASE}-core-broadcast-auth": "broadcast-auth",
     }
     for kind in ("postgres-meho", "postgres-meho-app"):
@@ -246,6 +249,7 @@ def test_keycloak_plan_makes_the_bootstrap_and_three_client_secrets() -> None:
         "ui-auth",
         "check-runner",
         "approval-handoff",
+        "params-hash",
         "broadcast-auth",
     }
 
@@ -261,6 +265,8 @@ def test_operator_named_secrets_are_checked_with_the_keys_meho_reads() -> None:
             "--set",
             "approvalHandoff.secretName=my-handoff",
             "--set",
+            "paramsHashKey.secretName=my-hash-key",
+            "--set",
             "broadcast.auth.existingSecret=my-valkey",
         )
     )
@@ -269,6 +275,7 @@ def test_operator_named_secrets_are_checked_with_the_keys_meho_reads() -> None:
         "my-su": ("corePostgres.existingSecrets.superuser", ("password",)),
         "my-boot": ("coreKeycloak.existingSecrets.bootstrap", ("client_id", "client_secret")),
         "my-handoff": ("approvalHandoff.secretName", ("approval_handoff_encryption_key",)),
+        "my-hash-key": ("paramsHashKey.secretName", ("params_hash_key",)),
         "my-valkey": ("broadcast.auth.existingSecret", ("requirepass",)),
     }
     made = set(_made(plan).values())
@@ -276,7 +283,7 @@ def test_operator_named_secrets_are_checked_with_the_keys_meho_reads() -> None:
     # `postgres.credentialsSecret` cannot name another one.
     assert "postgres-meho" in made
     assert made.isdisjoint({"postgres-superuser", "keycloak-bootstrap"})
-    assert made.isdisjoint({"approval-handoff", "broadcast-auth", "tls"})
+    assert made.isdisjoint({"approval-handoff", "params-hash", "broadcast-auth", "tls"})
 
 
 def test_tls_secret_is_made_only_when_the_core_name_is_used() -> None:
@@ -328,3 +335,63 @@ def test_schema_rejects_an_unknown_core_key() -> None:
     )
     assert result.returncode != 0
     assert "admin" in result.stderr
+
+
+def test_web_push_key_is_made_only_with_web_push_on() -> None:
+    assert "web-push" not in _made(_plan(_render(*_CORE_ON))).values()
+    plan = _plan(_render(*_CORE_ON, "--set", "webPush.enabled=true"))
+    assert _made(plan)[f"{_RELEASE}-core-web-push"] == "web-push"
+
+
+def test_web_push_named_secret_is_checked_for_its_key() -> None:
+    plan = _plan(
+        _render(*_CORE_ON, "--set", "webPush.enabled=true", "--set", "webPush.secretName=my-push")
+    )
+    checks = {entry.name: (entry.values_key, entry.keys) for entry in plan.check}
+    assert checks["my-push"] == ("webPush.secretName", ("vapid_private_key",))
+    assert "web-push" not in _made(plan).values()
+
+
+def _backplane_env(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    deployment = next(
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == f"{_RELEASE}-meho"
+    )
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    return {entry["name"]: entry for entry in container.get("env", [])}
+
+
+def test_web_push_is_off_by_default() -> None:
+    env = _backplane_env(_render(*_CORE_ON))
+    assert "WEB_PUSH_ENABLED" not in env
+    assert "WEB_PUSH_VAPID_PRIVATE_KEY" not in env
+
+
+def test_web_push_on_reads_the_key_from_the_made_secret() -> None:
+    env = _backplane_env(_render(*_CORE_ON, "--set", "webPush.enabled=true"))
+    assert env["WEB_PUSH_ENABLED"]["value"] == "true"
+    ref = env["WEB_PUSH_VAPID_PRIVATE_KEY"]["valueFrom"]["secretKeyRef"]
+    assert (ref["name"], ref["key"]) == (f"{_RELEASE}-core-web-push", "vapid_private_key")
+
+
+def test_web_push_without_core_needs_a_named_secret() -> None:
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            _RELEASE,
+            str(_CHART_DIR),
+            *_BASE_OVERRIDES,
+            "--set",
+            "webPush.enabled=true",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "webPush.secretName is empty" in result.stderr
+    env = _backplane_env(
+        _render("--set", "webPush.enabled=true", "--set", "webPush.secretName=my-push")
+    )
+    ref = env["WEB_PUSH_VAPID_PRIVATE_KEY"]["valueFrom"]["secretKeyRef"]
+    assert (ref["name"], ref["key"]) == ("my-push", "vapid_private_key")

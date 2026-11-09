@@ -35,8 +35,9 @@ Two independent pressures point the same way:
   legacy `/lcm/*` answers on 9.0 only as back-compat and is not where the vendor
   is investing. New targets should land on the modern impl.
 
-This is not a new architectural idea — it is [postulate 2 in
-`CLAUDE.md`](../../CLAUDE.md) ("connectors are versioned and can have multiple
+This is not a new architectural idea — it is postulate 2 in
+`CLAUDE.md` (the project guide for coding sessions; it is not committed to
+this repository) ("connectors are versioned and can have multiple
 implementations against the same product … the resolver picks one per target per
 dispatch") made into standing policy, with the explicit refinement: **adding the
 modern impl never removes the legacy one.**
@@ -50,7 +51,7 @@ to actually using it.
   table is keyed on the 3-tuple `(product, version, impl_id)`; classes
   self-register at import via `register_connector_v2(...)`.
 - **Per-impl advertisement** — the class attrs on
-  `backend/src/meho_backplane/connectors/base.py:82-97`: `product`, `version`,
+  `backend/src/meho_backplane/connectors/base.py:125-131`: `product`, `version`,
   `impl_id`, **`supported_version_range`** (a PEP 440 `SpecifierSet`, e.g.
   `">=9.0,<10.0"` — this is where an impl declares which target versions it
   serves), and `priority`.

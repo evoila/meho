@@ -28,6 +28,11 @@ Anything else raises :class:`AgentIdentityRequiredError`, whose ``code``
 is the stable machine error ``agent_identity_required``. MEHO never
 guesses an agent from the transport, the OAuth client of a person's
 login, a CLI login, a boolean flag, or a ``run_id`` the caller sent.
+
+:func:`require_agent_caller` is the first, cheap part of the check: it
+needs no database, so the MCP dispatcher runs it before the input check
+(#5770). A person's login then gets the clear refusal on the first try,
+with :data:`NOT_AN_AGENT_REMEDIATION`, which tells them to skip the step.
 """
 
 from __future__ import annotations
@@ -48,8 +53,11 @@ from meho_backplane.db.models import AgentPrincipal, AgentRun, AgentRunStatus
 __all__ = [
     "AGENT_IDENTITY_REMEDIATION",
     "AGENT_IDENTITY_REQUIRED",
+    "NOT_AN_AGENT_REMEDIATION",
     "AgentAdmission",
     "AgentIdentityRequiredError",
+    "is_agent_caller",
+    "require_agent_caller",
     "resolve_agent_admission",
 ]
 
@@ -58,7 +66,8 @@ _log = structlog.get_logger(__name__)
 #: Stable machine error code for a publish without a trusted agent identity.
 AGENT_IDENTITY_REQUIRED: Final[str] = "agent_identity_required"
 
-#: What the caller must do instead. Returned on every refusal.
+#: What an agent must do instead. Returned when the caller is an agent
+#: token or a hosted run that MEHO could not admit.
 AGENT_IDENTITY_REMEDIATION: Final[str] = (
     "Only a trusted agent can publish an announcement. Use one of two ways: "
     "(1) run the work as a MEHO-hosted agent run, or "
@@ -66,6 +75,14 @@ AGENT_IDENTITY_REMEDIATION: Final[str] = (
     "and call MEHO with that agent's client-credentials token. "
     "People can still read the feed with meho_broadcast_recent. "
     "See docs/codebase/broadcast.md, section 'Who can publish'."
+)
+
+#: What a caller that is not an agent must do instead (#5770). Returned to
+#: a person's login, or any other login outside a hosted agent run.
+NOT_AN_AGENT_REMEDIATION: Final[str] = (
+    "A person's login cannot post announcements. Only agents can post. "
+    "Skip this step: your operations are already recorded in the audit log. "
+    "You can still read the feed with meho_broadcast_recent."
 )
 
 #: Run states in which a hosted run may still publish.
@@ -88,9 +105,9 @@ class AgentIdentityRequiredError(Exception):
 
     code: Final[str] = AGENT_IDENTITY_REQUIRED
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, remediation: str = AGENT_IDENTITY_REMEDIATION) -> None:
         self.reason = reason
-        self.remediation = AGENT_IDENTITY_REMEDIATION
+        self.remediation = remediation
         super().__init__(f"{AGENT_IDENTITY_REQUIRED}: {reason}")
 
 
@@ -170,6 +187,50 @@ async def _admit_agent_principal(operator: Operator) -> AgentAdmission:
     )
 
 
+def _log_refusal(operator: Operator, exc: AgentIdentityRequiredError) -> None:
+    _log.info(
+        "broadcast_announce_identity_refused",
+        tenant_id=str(operator.tenant_id),
+        principal_kind=operator.principal_kind.value,
+        reason=exc.reason,
+    )
+
+
+def is_agent_caller(operator: Operator) -> bool:
+    """Return True when *operator* may try to publish (#5770).
+
+    True inside a hosted agent run or for an agent token. This is only the
+    first check: :func:`resolve_agent_admission` still checks the run row or
+    the agent principal row. False means MEHO refuses the caller for sure.
+    """
+    # Imported here: ``meho_backplane.agent`` imports the broadcast MCP
+    # tools, which import this module.
+    from meho_backplane.agent.invoke import current_agent_run_id_var
+
+    if current_agent_run_id_var.get() is not None:
+        return True
+    return operator.principal_kind is PrincipalKind.AGENT
+
+
+def require_agent_caller(operator: Operator) -> None:
+    """Refuse a caller that is not an agent, without a database read (#5770).
+
+    Raises:
+        AgentIdentityRequiredError: the caller is neither inside a hosted
+            agent run nor an agent token. The remediation is
+            :data:`NOT_AN_AGENT_REMEDIATION`.
+    """
+    if is_agent_caller(operator):
+        return
+    exc = AgentIdentityRequiredError(
+        f"a {operator.principal_kind.value} token outside a hosted agent run "
+        "cannot publish announcements",
+        remediation=NOT_AN_AGENT_REMEDIATION,
+    )
+    _log_refusal(operator, exc)
+    raise exc
+
+
 async def resolve_agent_admission(operator: Operator) -> AgentAdmission:
     """Return the checked agent identity of *operator*, or refuse.
 
@@ -177,25 +238,14 @@ async def resolve_agent_admission(operator: Operator) -> AgentAdmission:
         AgentIdentityRequiredError: the caller is neither inside a live
             hosted agent run nor a registered agent principal.
     """
-    # Imported here: ``meho_backplane.agent`` imports the broadcast MCP
-    # tools, which import this module.
+    require_agent_caller(operator)
     from meho_backplane.agent.invoke import current_agent_run_id_var
 
     run_id = current_agent_run_id_var.get()
     try:
         if run_id is not None:
             return await _admit_hosted_run(operator, run_id)
-        if operator.principal_kind is PrincipalKind.AGENT:
-            return await _admit_agent_principal(operator)
-        raise AgentIdentityRequiredError(
-            f"a {operator.principal_kind.value} token outside a hosted agent run "
-            "cannot publish announcements"
-        )
+        return await _admit_agent_principal(operator)
     except AgentIdentityRequiredError as exc:
-        _log.info(
-            "broadcast_announce_identity_refused",
-            tenant_id=str(operator.tenant_id),
-            principal_kind=operator.principal_kind.value,
-            reason=exc.reason,
-        )
+        _log_refusal(operator, exc)
         raise

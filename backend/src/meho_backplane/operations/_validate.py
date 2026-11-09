@@ -66,6 +66,7 @@ __all__ = [
     "compute_audit_params_hash",
     "compute_params_hash",
     "compute_value_fingerprint",
+    "derive_install_key",
     "ingested_schema_for_validation",
     "params_check_errors",
     "params_hash_candidates",
@@ -138,18 +139,43 @@ def _canonical_params(params: Any) -> bytes:
     return json.dumps(params, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
 
 
-def _params_hash_key() -> bytes:
-    """Return the server key for the params hashes.
+def _derive_key(source: str) -> bytes:
+    return hmac.new(_PARAMS_HASH_KEY_LABEL, source.encode("utf-8"), hashlib.sha256).digest()
 
-    The key is derived from ``DATABASE_URL``, the one secret every install
-    has: HMAC-SHA256 of it under :data:`_PARAMS_HASH_KEY_LABEL`. It is never
-    stored or sent anywhere. Every pod of an install gets the same key, so
-    hashes stay comparable inside the install. When ``DATABASE_URL`` changes
-    (for example a new database password), the key changes too, and new
-    hashes no longer match the older ones.
+
+def _params_hash_key() -> bytes:
+    """Return the server key for the params hashes and value fingerprints.
+
+    The key is HMAC-SHA256 of ``PARAMS_HASH_KEY`` under
+    :data:`_PARAMS_HASH_KEY_LABEL`. ``PARAMS_HASH_KEY`` is a secret of its
+    own (the Helm chart makes it once, in ``<release>-core-params-hash``), so
+    a new database password leaves the key, and every hash and fingerprint,
+    as it is. Every pod of an install gets the same key, so hashes stay
+    comparable inside the install. The key is never stored or sent anywhere.
+
+    Without ``PARAMS_HASH_KEY`` the key comes from ``DATABASE_URL`` instead
+    (:func:`_database_url_key`), and it changes when ``DATABASE_URL`` changes.
     """
-    source = get_settings().database_url.encode("utf-8")
-    return hmac.new(_PARAMS_HASH_KEY_LABEL, source, hashlib.sha256).digest()
+    own_key = get_settings().params_hash_key
+    if own_key:
+        return _derive_key(own_key)
+    return _database_url_key()
+
+
+def _database_url_key() -> bytes:
+    """The key made from ``DATABASE_URL``: the key without ``PARAMS_HASH_KEY``."""
+    return _derive_key(get_settings().database_url)
+
+
+def derive_install_key(label: bytes) -> bytes:
+    """Return a key of this install for one purpose, named by *label*.
+
+    The key is HMAC-SHA256 of *label* under the server key of
+    :func:`_params_hash_key`, so every pod of an install gets the same key
+    and no two labels share one. The first-start destination check uses it
+    (:mod:`meho_backplane.first_start`).
+    """
+    return hmac.new(_params_hash_key(), label, hashlib.sha256).digest()
 
 
 def _keyed_params_hash(params: Any) -> str:
@@ -233,22 +259,28 @@ def _unkeyed_params_hash(params: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_params(params)).hexdigest()
 
 
-def params_hash_candidates(params: dict[str, Any]) -> tuple[str, str]:
+def params_hash_candidates(params: dict[str, Any]) -> tuple[str, ...]:
     """Return the hashes an approval request for *params* can carry.
 
-    The keyed :func:`compute_params_hash` first, then the plain SHA-256 that
-    earlier versions stored. A request that was already waiting for
-    approval when MEHO was upgraded carries the plain one; accepting it
-    keeps that request usable. Both cover every value, so the check is as
-    strict as before.
+    The keyed :func:`compute_params_hash` first. With ``PARAMS_HASH_KEY`` set,
+    then the keyed hash under the key made from ``DATABASE_URL``: a request
+    made before ``PARAMS_HASH_KEY`` was set carries that one. Last the plain
+    SHA-256 that earlier versions stored. Accepting these keeps such a
+    request usable. All of them cover every value, so the check is as strict
+    as with the first one alone.
     """
-    return compute_params_hash(params), _unkeyed_params_hash(params)
+    candidates = [compute_params_hash(params)]
+    if get_settings().params_hash_key:
+        older = hmac.new(_database_url_key(), _canonical_params(params), hashlib.sha256)
+        candidates.append(older.hexdigest())
+    candidates.append(_unkeyed_params_hash(params))
+    return tuple(candidates)
 
 
 def params_hash_matches(params: dict[str, Any], stored: str) -> bool:
     """True when *stored* (an approval request's ``params_hash``) is a hash of *params*.
 
-    Accepts either value from :func:`params_hash_candidates`.
+    Accepts any value from :func:`params_hash_candidates`.
     """
     stored_bytes = stored.encode("utf-8")
     return any(
@@ -577,6 +609,19 @@ async def _service_grant_verdict(
         )
     if grant_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
+
+    # #4126: a person approved the operation list of this run once.
+    from meho_backplane.operations.run_approval_gate import consult_and_record_run_approval
+
+    run_approval_id = await consult_and_record_run_approval(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        record=not decide_only,
+    )
+    if run_approval_id is not None:
+        return PermissionVerdict.AUTO_EXECUTE, f"auto-approved by run approval {run_approval_id}"
 
     if has_caller_address(descriptor.parameter_schema):
         note = (

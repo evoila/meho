@@ -14,6 +14,15 @@ Copyright (c) 2026 evoila Group
 > MCP subscriber side is covered by
 > [`broadcast-onboarding.md`](./broadcast-onboarding.md).
 
+> **Note.** Broadcast carries agent announcements only. No operation
+> event reaches the feed, so the header and the rules on this page do
+> not change what the feed shows. MEHO still decides a detail level
+> (`full` or `aggregate`) for every call and records it on the call's
+> audit row (`broadcast_detail_effective`). The operator console's
+> audit drawer hides the request parameters of a row recorded as
+> `aggregate`. Read the sections below with that in mind: where they
+> say "broadcast event", the recorded level is what changes today.
+
 ## What this is
 
 G6.1 ([#228](https://github.com/evoila/meho/issues/228)) ships an
@@ -77,7 +86,7 @@ $ curl -sS -X POST https://meho.example.com/api/v1/operations/call \
     -d '{
       "connector_id": "vault",
       "op_id": "vault.kv.list",
-      "target": {"name": "rdc-vault"},
+      "target": {"name": "vault-prod"},
       "params": {"path": "secret/prod/svc-payments"}
     }'
 
@@ -88,26 +97,14 @@ $ curl -sS -X POST https://meho.example.com/api/v1/operations/call \
     -d '{
       "connector_id": "vault",
       "op_id": "vault.kv.read",
-      "target": {"name": "rdc-vault"},
+      "target": {"name": "vault-prod"},
       "params": {"path": "secret/prod/svc-payments/db-password"}
     }'
 ```
 
-The SSE feed for the tenant now shows:
-
-```text
-[14:23:01] ok       op-alice   vault.kv.list   path=secret/prod/svc-payments
-[14:23:04] ok       op-alice   vault.kv.read   path=secret/prod/svc-payments/db-password
-```
-
-instead of the default aggregate-only shape:
-
-```text
-[14:23:01] ok       op-alice   vault.kv.list   (credential read — aggregate-only)
-[14:23:04] ok       op-alice   vault.kv.read   (credential read — aggregate-only)
-```
-
-The audit row records the operator-side decision verbatim:
+The console's audit drawer now shows the request parameters of these
+two calls (the Vault path included), not the aggregate-only
+placeholder. The audit row records the operator-side decision verbatim:
 
 ```jsonc
 // SELECT payload FROM audit_log WHERE id = '<row-id>';
@@ -131,6 +128,8 @@ Header rules (load-bearing):
   `vsphere.vm.list` (which already broadcasts full) is a no-op; the
   audit row keeps `broadcast_detail_origin = "default"`. Sensitive
   classes are `credential_read` + `audit_query` per decision #3.
+  `credential_mint` and `credential_write` always stay `aggregate`:
+  neither the header nor a tenant rule upgrades them.
 * **MCP equivalent.** The MCP transport equivalent is
   `_meta.broadcast_detail = "full"` in the `tools/call` params per
   the MCP `_meta` envelope spec
@@ -154,8 +153,8 @@ Two recurring shapes the consumer-needs doc explicitly calls out:
 
 Glob `op_id_pattern` matching uses
 [`fnmatch.fnmatchcase`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatchcase)
-— literal characters plus `*` only. Regex characters (`[`, `(`,
-`\`, `+`, `?`, `|`, `^`, `$`) are rejected at the API layer with
+— literal characters plus `*` only. Regex characters (`[`, `]`, `(`,
+`)`, `{`, `}`, `\`, `+`, `?`, `|`, `^`, `$`) are rejected at the API layer with
 422. The resolver applies most-specific-wins (a scoped rule beats
 an op-wide rule); ties between equally-specific rules break on the
 rule UUID's lexicographic order.
@@ -191,22 +190,25 @@ $ curl -sS -X POST https://meho.example.com/api/v1/operations/call \
     -d '{
       "connector_id": "vault",
       "op_id": "vault.kv.read",
-      "target": {"name": "rdc-vault"},
+      "target": {"name": "vault-prod"},
       "params": {"path": "secret/prod/svc-payments/db-password"}
     }'
 ```
 
 Verifying the header landed: after the call, the row's audit
 payload carries `broadcast_detail_origin = "request_override"`
-(see [Forensics](#forensics) below) and the published broadcast
-event payload includes the `params` field instead of the default
-aggregate-only `{op_class, result_status}` shape.
+and `broadcast_detail_effective = "full"` (see
+[Forensics](#forensics) below), and the console's audit drawer shows
+the request parameters.
 
 ## Admin-side recipes — CLI, REST, MCP
 
 Tenant-admin role required (`TenantRole.TENANT_ADMIN` claim on the
 Keycloak JWT). Operators and read-only tokens get 403
-`insufficient_role` from every CRUD verb on every transport.
+`insufficient_role` from every CRUD verb on REST and the CLI. On MCP
+the three tools are operator-plane tools: they are listed only on a
+session that asked for the `mcp:admin` scope, and a call without the
+role returns JSON-RPC `-32602` `forbidden`.
 
 ### Create a downgrade rule (op-wide)
 
@@ -227,7 +229,7 @@ $ curl -sS -X POST https://meho.example.com/api/v1/broadcast/overrides \
     -d '{"op_id_pattern":"vsphere.vm.*","detail":"aggregate"}'
 ```
 
-MCP (admin meta-tool, `tenant_admin` namespace):
+MCP (operator-plane tool: `tenant_admin` role and an `mcp:admin` session):
 
 ```jsonc
 // JSON-RPC POST to /mcp
@@ -442,8 +444,8 @@ invocation. Two commands prove the admin tools are reachable +
 gated:
 
 ```console
-# Discover the admin tool surface (tenant_admin token required to
-# see meho_broadcast_overrides_* in the list).
+# Discover the admin tool surface (a tenant_admin token on a session
+# with the mcp:admin scope is needed to see meho_broadcast_overrides_*).
 $ npx -y @modelcontextprotocol/inspector \
     --cli https://meho.example.com/mcp \
     --transport http \
@@ -464,8 +466,8 @@ $ npx -y @modelcontextprotocol/inspector \
 ```
 
 A non-admin token (`operator` / `read_only` claim) running the
-same `tools/list` call sees only the agent-surface tools
-(`broadcast_recent` / `_announce` / `_watch`) — the
+same `tools/list` call sees only the working-surface tools (for
+example `meho_broadcast_recent` / `_announce` / `_watch`) — the
 `meho_broadcast_overrides_*` namespace is hidden by the
 registry-filter layer and the dispatcher rejects a direct call
 with JSON-RPC `-32602` `forbidden:`.

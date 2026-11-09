@@ -120,6 +120,10 @@ from meho_backplane.mcp.tools._connector_shared import (
     _model_dump_json_safe,
     raise_invalid_params_for_spec_error,
 )
+from meho_backplane.operations._ingested_owner import (
+    IngestedOperationsNotAccepted,
+    build_ingested_ops_not_accepted_detail,
+)
 from meho_backplane.operations.ingest import (
     IngestionPipelineResult,
     IngestionPipelineService,
@@ -340,6 +344,10 @@ async def _run_inline_ingest(
                 else None
             ),
         )
+    except IngestedOperationsNotAccepted as exc:
+        raise McpInvalidParamsError(
+            str(exc), data=build_ingested_ops_not_accepted_detail(exc)
+        ) from exc
     except SPEC_ERROR_TYPES as exc:
         # The whole typed SpecError sibling set maps onto JSON-RPC -32602
         # with the shared structured ``data`` envelope; the dispatch table

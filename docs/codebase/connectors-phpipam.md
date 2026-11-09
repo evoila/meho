@@ -75,8 +75,11 @@ The secret at `secret_ref` holds one of:
 - `{"username": "...", "password": "..."}` for an app with "SSL with User token".
 
 When both are present, the app code wins. MEHO reads the secret under the
-operator's identity. A wrong shape fails with an error that names the field
-names it found, never a value.
+operator's identity. MEHO keeps the secret and the login token per target.
+Each caller reads the secret once under their own login before MEHO hands
+them the kept secret or token (`SecretReaders` in
+`connectors/_shared/secret_readers.py`). A wrong shape fails with an error
+that names the field names it found, never a value.
 
 ## Login and token
 
@@ -105,9 +108,9 @@ planted values for both secret shapes.
 
 | Operation | What it does | Risk | Approval |
 |---|---|---|---|
-| `phpipam.subnet.list` | Subnets with id, CIDR, description, section and how full each is. Filter with `cidr`. | `safe` | no |
-| `phpipam.subnet.free_addresses` | The first free addresses of one subnet (`limit`, default 20) and the count of all free ones. | `safe` | no |
-| `phpipam.address.reserve` | Reserve one address with a host name, a description and a note. Name the address with `ip`, or set `first_free: true`. | `caution` | yes |
+| `phpipam.subnet.list` | Subnets with id, CIDR, description, section and how full each is. Filter with `cidr`; `limit` (default 100, at most 1000). | `safe` | no |
+| `phpipam.subnet.free_addresses` | The first free addresses of one subnet (`limit`, default 20, at most 1000) and the count of all free ones. | `safe` | no |
+| `phpipam.address.reserve` | Reserve one address with a host name, a description (at most 64 characters) and a note (at most 1000). Name the address with `ip`, or set `first_free: true`. | `caution` | yes |
 | `phpipam.address.release` | Release one reserved address. DNS records stay. | `dangerous` | yes |
 
 A list with more than 50 rows comes back as a link to the stored result (a
@@ -219,6 +222,12 @@ its `{code, success, message}` shape (usually 401 or 403). Such an answer
 means the API is reachable. `extras.api_code` and `extras.api_message` show
 what phpIPAM said, for example "Invalid application id" for a wrong
 `extras.app_id`.
+
+## Broadcast class
+
+`op_classes.py` declares `phpipam.address.reserve` and
+`phpipam.address.release` as `write`, so the broadcast classifier treats
+them as writes (their names do not end in a write word it knows).
 
 ## Key types
 

@@ -13,17 +13,6 @@ module-level functions the dispatcher routes to with
 `connector_instance=None` / `target=None`; the probe destination is a
 **param**, not a registered `Target`.
 
-**Every `net.*` op waits for approval.** The address field of each op
-(`host`, `url`, or the `resolver` of `net.dns_lookup`) carries the schema
-keyword `x-meho-caller-address: true`. So each op runs at risk level
-`caution` and waits until a person approves the call (the caller-address
-floor, `docs/codebase/spec-ingestion.md`, "Caller-address floor"). A
-sensor runs only `safe` operations, so a sensor cannot use a `net.*` op:
-a new one is refused, and the runner reports an existing one as `unknown`
-with the reason `op_not_safe_at_dispatch`. The sensor sections below
-describe the assertion shapes for a `net.*` answer; they apply to an
-approved call, not to a scheduled sensor.
-
 This page describes the keystone (#2406, Initiative #2405 T1):
 `net.tcp_check` plus the three foundations every sibling op reuses, and
 the sibling ops `net.tls_inspect` (#2407, T2), `net.http_probe` (#2408,
@@ -36,8 +25,10 @@ Each op queues a registrar in `__init__.py` via
 `ops.register_net_typed_operations`; `net.tls_inspect` →
 `tls.register_net_tls_inspect_operation`; `net.http_probe` →
 `http_probe.register_net_http_probe_operations`; `net.ntp_check` →
-`ntp.register_net_ntp_check_operation`; `net.ssh_keyscan` →
-`ssh_keyscan.register_net_ssh_keyscan_operation`). Siblings therefore extend the
+`ntp.register_net_ntp_check_operation`; `net.ping` / `net.trace` /
+`net.path_mtu` share `icmp.register_net_icmp_operations`; `net.ssh_keyscan` →
+`ssh_keyscan.register_net_ssh_keyscan_operation`; `net.fingerprint` →
+`fingerprint.register_net_fingerprint_operation`). Siblings therefore extend the
 package by adding (at most) a module and one registrar-queue line rather
 than contending for a single registrar function — which also keeps
 parallel task branches from colliding on one shared file.
@@ -59,8 +50,17 @@ The op is registered under the natural key
 `(product="net", version="1.x", impl_id="net-probe")`, so the wire
 `connector_id` is `net-probe-1.x`, which round-trips through
 `parse_connector_id` back to `("net", "1.x", "net-probe")`.
-`safety_level="caution"` + `requires_approval=True`: each call waits for
-a person's approval.
+`safety_level="safe"` + `requires_approval=False` make it
+agent-auto-runnable and ungated.
+
+**The `net.*` ops need no approval.** Their address fields (`host`,
+`url`, and the `resolver` of `net.dns_lookup`) carry no
+`x-meho-caller-address` marker, so the caller-address floor
+(`docs/codebase/spec-ingestion.md`, "Caller-address floor") does not
+apply to them. The probe allowlist below is their guard. So a Sensor can
+run them. The contract check lists these fields in
+`NOT_CALLER_ADDRESSES` (`tests/_operation_contract_addresses.py`) with
+this reason.
 
 ## `net.dns_lookup` — full `dig` parity (#2409)
 
@@ -122,9 +122,9 @@ system resolver config with no chosen resolver maps to
 
 That opposite default is why the two do not share a parser: reusing the
 SSRF guard verbatim would carry its permissive-when-unset default into a
-surface where unset must mean closed. Each `net.*` call waits for a
-person's approval; this allowlist bounds where an approved call may
-connect.
+surface where unset must mean closed. The `net.*` network checks are
+`safety_level="safe"` (an agent can run them), so the allow-list limits
+where checks can connect.
 
 Matching:
 
@@ -144,9 +144,10 @@ if an operator needs one (#1177: one closed-set config, no DSL).
 #### Per-tenant bound — `MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS` (#3498)
 
 Every `net.*` op is **targetless** (the destination is a param,
-`target=None`), so the per-target tenant boundary does not apply to it:
-it is the one op family that can reach an address no target in the
-caller's tenant resolves to. Each call waits for a person's approval. The
+`target=None`) and `safety_level="safe"` + `requires_approval=False`, so
+for an **agent** principal it auto-executes with no grant and **bypasses
+the per-target tenant boundary entirely** — it is the one op family that
+can reach an address no target in the caller's tenant resolves to. The
 instance-wide `MEHO_NETDIAG_PROBE_ALLOWLIST` is a **single** knob: on a
 shared instance it cannot be narrowed for one (untrusted) tenant without
 also removing the probe scope other tenants' production sensors depend
@@ -290,8 +291,9 @@ It reuses the same three foundations plus two probe-specific rules:
    it is followed**. A redirect to a non-allowlisted host (e.g. a
    cloud-metadata / credential host) halts the walk with
    `{"reachable": true, "reason": "blocked_redirect",
-   "blocked_redirect": "<host>"}` and is **never dialed** — the concern
-   noted at `adapters/http.py:260`. The redirect count is bounded
+   "blocked_redirect": "<host>"}` and is **never dialed** — the same
+   concern `_SameOriginRedirectClient` in `connectors/adapters/http.py`
+   handles for target-coupled dispatch. The redirect count is bounded
    (`_MAX_REDIRECTS`) and the whole walk runs under one
    `asyncio.wait_for(timeout)` ceiling. This mid-chain refusal stays a
    `status="ok"` observation — the #2784 carve-out; only the **initial**
@@ -466,7 +468,7 @@ whose Vault secret pins no `known_hosts` value refuses to connect at all
 this op the only way to obtain that pin was to run `ssh-keyscan` on an
 operator shell with direct reach to the target — an out-of-band,
 ungoverned step, and the operator-helper gap #3532 tracks. This op mints
-the pin **through the backplane**, on the same policy / audit / broadcast
+the pin **through the backplane**, on the same policy / audit
 dispatch path every operation uses, so bootstrapping a target's host-key
 trust never leaves the governed path.
 
@@ -532,9 +534,72 @@ dialed, so it fails the dispatch with `connector_probe_refused` — the same
 shape as `net.tls_inspect`. `host`/`port` in the return dict are
 audit-visible via `raw_payload`.
 
-It shares the `net-probe-1.x` identity, and is `safety_level="caution"` +
-`requires_approval=True`: a read-only handshake that offers no credential
-and sends no application data, to an address the caller gives.
+It shares the `net-probe-1.x` identity, and is `safety_level="safe"` +
+`requires_approval=False`: a read-only handshake that offers no credential
+and sends no application data; the allow-list limits where checks can connect.
+
+## `net.fingerprint` — identify one unknown address (#4133)
+
+`net.fingerprint(host, timeout_seconds?)` says which product likely runs
+at one address, without a login and without adding a target. It returns
+the likely product (`vcenter`, `esxi`, `nsx` or `sddc`), the likely
+version, how sure it is (`high` / `medium` / `low` / `none`), the rules
+that matched, and the evidence.
+
+It runs four read-only checks at the same time:
+
+- **TLS certificate** on port 443. It calls `net_tls_inspect` and keeps
+  the leaf's subject, issuer and SAN.
+- **Page title** of `https://<host>/`. It follows up to three redirects,
+  and only when they stay on the same host over https. It reads at most
+  64 KiB and returns only the title, the status, the `Server` header and
+  the path. Never the body.
+- **vSphere "about" answer.** A `RetrieveServiceContent` call on
+  `https://<host>/sdk` (the same call the nmap `vmware-version` script
+  sends). vCenter and ESXi answer it without a login with their name,
+  version, build and `apiType` (`VirtualCenter` or `HostAgent`). The XML
+  is read with `defusedxml`.
+- **SSH banner** on port 22: the first line the server sends. MEHO sends
+  nothing.
+
+Both HTTP reads (`_read_bounded`) take the bytes as they come off the
+wire, before any decompression, and stop at 64 KiB. MEHO asks for an
+uncompressed answer (`Accept-Encoding: identity`). A server that still
+compresses (gzip or deflate) gets its answer expanded to at most the same
+64 KiB with a bounded `zlib` call, so a small compressed body cannot grow
+large in memory. Any other encoding, or a body that does not expand, is
+no answer (`reason: unsupported_encoding` or `bad_encoding`).
+
+The decision is in `fingerprint_rules.py`, with no network code. Each
+rule looks at one field and names one product, with a weight: the "about"
+answer 3, a page title 2, a certificate field 1. The weights add up per
+product. The highest sum wins: 3 or more is `high`, 2 is `medium`, 1 is
+`low`. No match, or two products with the same sum, gives
+`product: "unknown"` and `confidence: "none"` — MEHO does not guess. Only
+the "about" answer gives a version; NSX Manager and SDDC Manager do not
+state their version without a login, so `version` is `null` for them.
+`reachable: false` means no check got an answer.
+
+Limits:
+
+- **One address only.** The allowlist check runs first, as in every
+  `net.*` op. A range like `192.0.2.0/24` is not an IP address, so it is
+  matched as a host name and refused. There is no port parameter and no
+  scan.
+- An address outside the tenant's probe allowlist fails the call with
+  `connector_probe_refused`; the dispatcher writes the error audit row.
+- The registered-target probe (`targets.probe`) is not reused: it picks
+  a connector by the target's known product and logs in with the
+  target's credentials. This op has neither.
+- The rules are tested with recorded answers. A check against real
+  appliances is still open, so a rule may need a change after it.
+- The `product` in the result names the system. It is not always the
+  product token `targets.register` needs: a vCenter is detected as
+  `vcenter`, but its connector is registered under `vmware`. The
+  guidance tells the agent to take the token from the `product` field
+  of `meho_connector_list`. `targets.register` refuses a wrong token with
+  `unknown_product` and the list of valid tokens
+  (`test_detected_product_is_not_the_token_targets_register_needs`).
 
 ## `net.tls_inspect` — full presented certificate chain (T2, #2407)
 
@@ -545,9 +610,12 @@ inspects; it never verifies (self-signed appliances are the point), so a
 self-signed / expired / hostname-mismatched cert is **reported**, never
 rejected.
 
-Why pyOpenSSL and not stdlib `ssl`: on the `requires-python` floor (3.12)
-`ssl.SSLSocket.getpeercert` returns only the **leaf**; the full-chain
-`ssl.SSLSocket.get_unverified_chain` is 3.13+. pyOpenSSL's
+Why pyOpenSSL and not stdlib `ssl`: the op was built when the
+`requires-python` floor was 3.12, where `ssl.SSLSocket.getpeercert`
+returns only the **leaf**; the full-chain
+`ssl.SSLSocket.get_unverified_chain` is 3.13+. The floor is now 3.14
+(`backend/pyproject.toml`), so the stdlib call is always there, but the op
+still uses pyOpenSSL (a note next to the `pyopenssl` pin says so). pyOpenSSL's
 `Connection.get_peer_cert_chain(as_cryptography=True)` (the
 `as_cryptography` kwarg landed in pyOpenSSL 24.3) returns the whole
 presented chain as `cryptography.x509.Certificate` objects directly, so
@@ -569,7 +637,8 @@ Control flow (`connectors/net/tls.py`):
    clamped timeout, so a stalled peer cannot pin the worker thread.
 4. Each presented cert is flattened to
    `{subject, issuer, san, not_before, not_after, days_to_expiry, serial,
-   self_signed, pem}` (leaf-first). `serial` is stringified (a serial is a
+   self_signed, fingerprint_sha256, pem}` (leaf-first). `fingerprint_sha256`
+   is the hex SHA-256 of the certificate. `serial` is stringified (a serial is a
    large integer a JSON number consumer would truncate); timestamps use
    the tz-aware `not_valid_*_utc` accessors. `days_to_expiry` is
    `(not_valid_after_utc - now) / 86400` as a float (negative once
@@ -604,7 +673,7 @@ timed-out / DNS-failed / non-TLS endpoint returns `handshake=false` with
 a reason code — `timeout` / `refused` / `dns_failure` / `unreachable` /
 `tls_error` — and `status="ok"`; an allowlist refusal instead fails the
 dispatch), and is
-`safety_level="caution"` + `requires_approval=True`. A completed handshake
+`safety_level="safe"` + `requires_approval=False`. A completed handshake
 sends **no** application bytes.
 
 ### Cert-expiry early-warning sensor (#2772)
@@ -785,19 +854,27 @@ the whole family classified `read` without polluting `_READ_SUFFIXES`
 with underscore-bearing entries that would over-match unrelated
 connectors' ops.
 
+The dispatcher stores this class on the audit row as `op_class`
+(`operations/_audit.py`, `descriptor_op_class`). A dispatch publishes no
+broadcast event; the class feeds the audit row, the announce gate, and the
+target activity warning.
+
 ## Key types / control flow
 
 - `connectors/net/__init__.py` — queues each op registrar
   (`register_net_typed_operations`, `register_net_tls_inspect_operation`,
-  `register_net_http_probe_operations`) onto the lifespan registrar list
+  `register_net_http_probe_operations`, `register_net_ntp_check_operation`,
+  `register_net_icmp_operations`, `register_net_ssh_keyscan_operation`)
+  onto the lifespan registrar list
   via `register_typed_op_registrar` (auto-imported by the
   `_eager_import_connectors` package walk).
 - `connectors/net/ops.py` — the `net_tcp_check` and `net_dns_lookup`
   handlers, their parameter / response schemas, the shared registrar
   (`register_net_typed_operations` upserts both ops), and the shared
   timeout bounds/clamp (`_DEFAULT_TIMEOUT_SECONDS` /
-  `_MAX_TIMEOUT_SECONDS` / `_clamp_timeout`) reused by `tls.py`
-  (package-internal import; `ops` never imports `tls`, so no cycle).
+  `_MAX_TIMEOUT_SECONDS` / `_clamp_timeout`) reused by `tls.py`, `ntp.py`,
+  and `ssh_keyscan.py` (package-internal import; `ops` imports none of
+  them, so no cycle). `http_probe.py` and `icmp.py` keep their own bounds.
 - `connectors/net/tls.py` — `net_tls_inspect` handler, its schemas, the
   cert-flattening / hostname-match / chain helpers, and its registrar.
 - `connectors/net/http_probe.py` — `net_http_probe` handler, its
@@ -815,6 +892,11 @@ connectors' ops.
   (`_known_hosts_line`), and the registrar. Uses
   `asyncssh.get_server_host_key` (the house SSH transport) for a no-auth
   handshake per requested key type.
+- `connectors/net/fingerprint.py` — `net_fingerprint` handler, its
+  schemas, the four checks (`_check_tls`, `_check_http`,
+  `_check_vsphere_about`, `_check_ssh`) and the registrar.
+  `connectors/net/fingerprint_rules.py` — the rules, the "about" and
+  title parsers, and `classify`.
 - `connectors/net/icmp.py` — the `net_ping` / `net_trace` /
   `net_path_mtu` handlers, their schemas, the low-level errqueue / ICMP
   primitives (`_checksum`, `_build_echo_request`, `_parse_extended_err`,
@@ -838,7 +920,8 @@ connectors' ops.
 Dispatch path: `dispatch(connector_id="net-probe-1.x",
 op_id="net.tcp_check", target=None, params=...)` → param-schema
 validation → module-level handler (`connector_instance=None`) → redact →
-audit (`raw_payload` = handler return) → broadcast (`read` class). A
+audit (`raw_payload` = handler return, `op_class` = `read`). No broadcast
+event is published. A
 handler that raises `ProbeNotAllowedError` short-circuits into the
 dispatcher's `connector_probe_refused` arm instead, which writes an error
 audit row carrying the structured envelope in `payload.error`.
@@ -872,6 +955,10 @@ audit row carrying the structured envelope in `payload.error`.
   (`asyncio`, `socket`, `select`, `struct`, `errno`, `os`, `time`) — no
   new runtime dependency. The Linux socket ABI constants the stdlib does
   not surface are pinned as module-level integers.
+- `net.fingerprint`: no new dependency. It uses `httpx` for the two
+  HTTPS reads, `defusedxml` (already a dependency) for the vSphere
+  answer, the `net.tls_inspect` handler for the certificate, and
+  `asyncio` streams for the SSH banner.
 - `net.ssh_keyscan`: **asyncssh** (already the backplane's SSH transport
   dependency, used by every SSH connector via `SshConnector`) — used via
   `asyncssh.get_server_host_key` for the no-auth handshake and the
@@ -910,9 +997,9 @@ audit row carrying the structured envelope in `payload.error`.
   escalation path, not implemented (#2411). `net.path_mtu` reports the
   converged next-hop MTU from the kernel PMTU cache; a full per-hop MTU
   walk (tracepath's `+mtu` detail) is out of scope.
-- `safety_level="caution"` + `requires_approval=True` is the posture of
-  every `net.*` op: its address field carries the caller-address marker,
-  so MEHO raises it to this level also when the registration says less.
+- `safety_level="safe"` (agent-auto-runnable) is the chosen posture; the
+  reviewed alternative `"caution"` (operators auto-run, agents do not)
+  is a one-line change if a security review prefers it.
 - **Read-surface projection (#2496):** because `net.*` registers
   module-level `source_kind='typed'` ops with **no** backing connector
   class, `resolve_authoring_kind`'s resolver replay misses. It keys on

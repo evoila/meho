@@ -5,7 +5,7 @@
 
 Initiative #340 (G10.3 Connectors + Targets UI), Task #875 (T3) work
 item #5. The operator pastes or uploads a ``targets.yaml`` file; the
-server parses it (:func:`yaml.safe_load`), classifies every entry as
+server parses it (a safe YAML loader without aliases), classifies every entry as
 CREATE or UPDATE against the caller's tenant, and renders a preview
 table. On confirm the route applies the plan **in-process** via the
 existing target CRUD handlers
@@ -77,6 +77,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.safe_yaml import load_yaml_no_alias
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
@@ -98,6 +99,7 @@ _KNOWN_TOP_LEVEL: frozenset[str] = frozenset(
         "aliases",
         "auth_model",
         "extras",
+        "flight_recorder_capture",
         "fqdn",
         "host",
         "name",
@@ -105,7 +107,12 @@ _KNOWN_TOP_LEVEL: frozenset[str] = frozenset(
         "port",
         "preferred_impl_id",
         "product",
+        "secret_field_map",
         "secret_ref",
+        "tls_ca_pin",
+        "tls_server_name",
+        "verify_tls",
+        "version",
         "vpn_required",
     }
 )
@@ -207,13 +214,13 @@ class ImportParseError(Exception):
 def _parse_targets_yaml(raw: str) -> list[dict[str, Any]]:
     """Parse the ``targets.yaml`` text into a list of per-entry maps.
 
-    Mirrors ``parseTargetsYAML`` in ``import.go``: ``yaml.safe_load`` so
-    no arbitrary Python objects can be constructed from operator input;
+    Mirrors ``parseTargetsYAML`` in ``import.go``: a safe loader that
+    builds no arbitrary Python objects and refuses YAML aliases;
     require a ``targets:`` list; validate ``name`` / ``product`` /
     ``host`` per entry so a malformed file fails before any CRUD call.
     """
     try:
-        doc = yaml.safe_load(raw)
+        doc = load_yaml_no_alias(raw)
     except yaml.YAMLError as exc:
         raise ImportParseError(f"parse YAML: {exc}") from exc
 

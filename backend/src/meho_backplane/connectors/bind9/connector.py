@@ -79,6 +79,7 @@ from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
+    TopologyHints,
 )
 
 __all__ = ["Bind9Connector"]
@@ -667,6 +668,28 @@ class Bind9Connector(SshConnector):
             "os": result.extras.get("os"),
             "named_conf_path": result.extras.get("named_conf_path"),
         }
+
+    async def discover_topology(
+        self,
+        target: Target,
+        *,
+        operator: Operator | None = None,
+    ) -> TopologyHints:
+        """Put the server's A, AAAA and CNAME records on the topology map.
+
+        The refresh service calls this and forwards the acting operator.
+        Without one (a direct call), the system operator reads the
+        credentials, as for Kubernetes. See
+        :mod:`meho_backplane.connectors.bind9.topology` for the reads and
+        the zones that are skipped.
+        """
+        from meho_backplane.connectors._shared.system_operator import (
+            synthesise_system_operator,
+        )
+        from meho_backplane.connectors.bind9.topology import discover_bind9_topology
+
+        eff_operator = operator if operator is not None else synthesise_system_operator()
+        return await discover_bind9_topology(self, target, eff_operator)
 
     async def bind9_zone_list(
         self,

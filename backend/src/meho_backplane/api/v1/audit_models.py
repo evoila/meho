@@ -137,7 +137,7 @@ class AuditClassCounts(BaseModel):
 
     ``counts`` has one key per event class (``operation_execution``,
     ``policy_decision``, ``approval_decision``, ``security_event``,
-    ``legacy_request``), ``0`` when a class has no rows. Old rows count
+    ``config_change``, ``legacy_request``), ``0`` when a class has no rows. Old rows count
     as ``legacy_request``; they are never reclassified. ``total`` is the
     sum. ``since`` is the start of the counted window: the request's
     ``since``, or 24 hours ago when the request set none.

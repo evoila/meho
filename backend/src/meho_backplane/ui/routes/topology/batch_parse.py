@@ -31,6 +31,7 @@ from fastapi import UploadFile
 
 from meho_backplane.topology.annotate import NodeRef
 from meho_backplane.topology.bulk_import import BulkImportRow
+from meho_backplane.ui.safe_yaml import load_yaml_no_alias
 
 __all__ = [
     "BULK_MAX_UPLOAD_BYTES",
@@ -166,7 +167,7 @@ def parse_bulk_rows(text: str) -> list[BulkImportRow]:
     if not text.strip():
         raise BulkParseError("paste or upload at least one edge row")
     try:
-        doc = yaml.safe_load(text)
+        doc = load_yaml_no_alias(text)
     except yaml.YAMLError as exc:
         # ``yaml`` exposes a problem mark on parse errors; keep the
         # operator-facing message terse and drop the multi-line dump.

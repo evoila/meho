@@ -4,9 +4,9 @@
 
 Install form 2 puts MEHO on a plain Linux server that has no internet. The
 customer copies one download onto the machine and runs one script as root:
-`install.sh`. The design is in meho-internal
-`docs/design/2026-10-10-install-forms/form-2-linux-server.md`. Section 4
-gives the layout of the download, and section 5 gives the steps.
+`install.sh`. The design is in the internal form-2 design note. Section 4
+gives the layout of the download, and section 5 gives the steps. The
+Linux server install is not released for customers yet.
 
 Before step 1 the script finds out whether MEHO is installed already (see
 [The update](#the-update)). On a machine without MEHO it runs the six steps
@@ -80,7 +80,7 @@ update, read with `meho status --first-start`.
 | `lib/update.sh` | The update: finding the install, reading `install.json`, the refused options, the version step, the backup question, the OS packages of the appliance, the result lines. |
 | `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the install record, the result lines. |
 | `values-single-node.yaml` | The Helm values for one node. The download ships it as `chart/values-single-node.yaml`. |
-| `meho-host` | The host command: `check` (with the hardening lines), `support-bundle`, `admin-network` and `uninstall`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
+| `meho-host` | The host command: `check` (with the hardening lines), `support-bundle`, `admin-network`, `log-server` (only on the appliance) and `uninstall`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
 | `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with five changes. |
 | `tests/` | Python `unittest` suites that run `install.sh` against a fake machine. |
 | `.shellcheckrc` | Lets shellcheck follow the `source` lines of `install.sh`. |
@@ -228,9 +228,9 @@ own messages are dropped, so a failure shows only the script's line.
 The first-login Secret must exist; the script stops otherwise. The unseal
 Secret may be missing: without it OpenBao is in keyholder mode (a person
 unseals it after every restart), so the script prints one `[WARN]` line,
-writes no key file and goes on. This is a shortcut until the OpenBao setup
-Job lands (#4044): the Secret then always exists after a fresh install,
-and a missing one becomes a `[FAIL]`.
+writes no key file and goes on. The OpenBao setup Job (#4044) makes this
+Secret on every fresh install, but `install.sh` still treats a missing one
+as a warning, not a `[FAIL]` (`lib/core.sh`).
 
 ### Step 6: the `meho` command, the install record and the result
 
@@ -495,19 +495,20 @@ default, empty, so the volumes use the default class. The chart points
 MEHO at the built-in parts itself (#4047), so the file names no database
 Secret and no OpenBao address.
 
-It also turns on the web console (`uiConsole`) and the approval hand-off
-key (`approvalHandoff`), with the Secrets that the chart's secrets Job
-makes: `meho-core-ui-auth` and `meho-core-approval-handoff`. The Job makes
-a Secret when its values key is empty or holds the Job's own name, so
-naming them changes nothing on a fresh install. The schema requires a
+It also turns on the web console (`uiConsole`), with the Secret
+`meho-core-ui-auth` that the chart's secrets Job makes. The Job makes a
+Secret when its values key is empty or holds the Job's own name, so naming
+it changes nothing on a fresh install. The approval hand-off key needs no
+line: with the built-in core the chart turns it on by itself (#4047). The schema requires a
 console client when `uiConsole` is on, so the file sets
 `config.uiKeycloakClientId: meho-web`, the client the chart uses with the
 built-in Keycloak. Without these keys, `/ui/auth/login` answered 503
 (`ui_oauth_not_configured`) after the week-4 install, and MEHO refused
 every credential write that must wait for an approval (#5630). When #4766
-lets the chart fill in the names for the built-in Keycloak, only the two
-`enabled: true` lines stay. The update passes the new download's file to
-the same Helm call (`install_core`), so an update turns both on too.
+lets the chart fill in the names for the built-in Keycloak, only the
+`uiConsole.enabled: true` line stays. The update passes the new download's
+file to the same Helm call (`install_core`), so an update turns the
+console on too.
 
 `/etc/meho/values-place.yaml` is written by step 4 (above). The download
 build renders the chart with `packaging/render-values.yaml`, which holds
@@ -1062,7 +1063,8 @@ shellcheck deploy/linux-server/install.sh deploy/linux-server/lib/*.sh
 ```
 
 CI: `.github/workflows/linux-server-test.yml` runs on every pull request
-that changes `deploy/linux-server/` or the chart. It installs shellcheck
+that changes `deploy/linux-server/`, `deploy/appliance/`, the chart or the
+workflow itself. It installs shellcheck
 v0.11.0 and Helm v3.16.4 (both pinned with a checksum) and nftables, runs
 shellcheck on every `*.sh` file and every file with a shell shebang there,
 checks the local-path fixture against upstream, checks the two RKE2

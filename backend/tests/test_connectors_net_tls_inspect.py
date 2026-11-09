@@ -116,8 +116,6 @@ async def _dispatch_inspect(params: dict[str, Any]) -> OperationResult:
         op_id=_OP_ID,
         target=None,
         params=params,
-        # Each net.* call waits for approval; this runs the approved call.
-        _approved=True,
     )
 
 
@@ -443,9 +441,9 @@ async def test_empty_allowlist_refuses_before_any_socket_opens(
     """Empty allowlist ⇒ structured refusal, no socket opened."""
 
     def _boom(*_a: object, **_kw: object) -> object:
-        raise AssertionError("create_connection must not run when the probe is refused")
+        raise AssertionError("no socket may open when the probe is refused")
 
-    monkeypatch.setattr(net_tls.socket, "create_connection", _boom)
+    monkeypatch.setattr(net_tls.socket, "socket", _boom)
     result = await _dispatch_inspect({"host": "10.1.2.3", "port": 8443})
     # #2784: no socket opened, so the refusal fails the dispatch rather than
     # reporting an (unfounded) failed handshake.
@@ -567,7 +565,7 @@ async def test_handler_maps_connect_exceptions_to_reason_codes(
     def _raise(*_a: object, **_kw: object) -> object:
         raise exc
 
-    monkeypatch.setattr(net_tls.socket, "create_connection", _raise)
+    monkeypatch.setattr(net_tls.socket, "socket", _raise)
     result = await net_tls_inspect(_make_operator(), None, {"host": "203.0.113.5", "port": 8443})
     assert result["handshake"] is False
     assert result["reason"] == expected_reason
@@ -581,7 +579,7 @@ async def test_handler_maps_connect_exceptions_to_reason_codes(
 # ---------------------------------------------------------------------------
 
 
-async def test_tls_inspect_registered_as_caution_with_approval_typed_op(
+async def test_tls_inspect_registered_as_safe_ungated_typed_op(
     _registered_tls_inspect_op: None,
 ) -> None:
     sessionmaker = get_sessionmaker()
@@ -597,8 +595,8 @@ async def test_tls_inspect_registered_as_caution_with_approval_typed_op(
             )
         ).scalar_one()
     assert row.source_kind == "typed"
-    assert row.safety_level == "caution"
-    assert row.requires_approval is True
+    assert row.safety_level == "safe"
+    assert row.requires_approval is False
     assert row.llm_instructions["result_scalars"]["keys"] == [
         "handshake",
         "reason",

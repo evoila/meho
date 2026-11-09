@@ -30,7 +30,9 @@ Route inventory
   201 on success; 422 on a wildcard, a delete-shaped op, a past expiry, or
   a duplicate active grant. Role: ``operator`` + human principal; a delete
   grant (sandbox mode with ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` on)
-  needs ``tenant_admin``.
+  needs ``tenant_admin``, and so does a grant for an op with a role floor
+  (``targets.register``, the ``topology.*`` writes): 403
+  ``role_floor_required``.
 * ``DELETE /api/v1/service-principals/grants/{grant_id}`` — revoke
   (soft-delete). Query: optional ``reason``, stored on the grant row and
   on the audit row. 204 on success; 404 when absent / already revoked /
@@ -68,6 +70,7 @@ from meho_backplane.operations.service_grant_schemas import (
 from meho_backplane.operations.service_grants import (
     DeleteGrantConsoleOnlyError,
     DeleteGrantNeedsTenantAdminError,
+    GrantRoleFloorError,
     GrantValidationError,
     ServicePrincipalGrantService,
 )
@@ -169,7 +172,11 @@ async def create_grant(
     ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting
     on, a tenant admin may create it here, with the same checks as the
     console; an ``operator`` without ``tenant_admin`` gets 403
-    ``grants_require_tenant_admin``. Audited via the audit middleware; the
+    ``grants_require_tenant_admin``. A grant lets the service principal run
+    the op with no approval, so the caller needs the op's role floor
+    (``targets.register`` and the ``topology.*`` writes need
+    ``tenant_admin``); below it the answer is 403 ``role_floor_required``.
+    Audited via the audit middleware; the
     payload's ``created_via`` is ``api``.
     """
     structlog.contextvars.bind_contextvars(
@@ -184,12 +191,17 @@ async def create_grant(
             operator.tenant_id,
             operator.sub,
             payload,
-            by_tenant_admin=operator.tenant_role == TenantRole.TENANT_ADMIN,
+            creator_role=operator.tenant_role,
         )
     except DeleteGrantConsoleOnlyError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=f"delete_grant_console_only: {exc.message}",
+        ) from exc
+    except GrantRoleFloorError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"role_floor_required: {exc.message}",
         ) from exc
     except DeleteGrantNeedsTenantAdminError as exc:
         raise HTTPException(

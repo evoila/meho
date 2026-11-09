@@ -2,6 +2,7 @@
 
 **Status:** decided by the product owner on 25 October 2026; this record
 needs the project owner's approval of its pull request
+**Shipped:** in 0.44.0.
 **Date:** 2026-11-02
 **Task:** [#4930](https://github.com/evoila/meho/issues/4930)
 **Initiative:** [#5382](https://github.com/evoila/meho/issues/5382) (GitHub connector: typed issue operations and safe ticket writes)

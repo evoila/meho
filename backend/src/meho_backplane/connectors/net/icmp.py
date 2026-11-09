@@ -47,14 +47,13 @@ non-Linux host or a kernel that rejects the socket options every op
 returns its structured ``available=false`` / ``completed=false`` result
 rather than raising.
 
-Read-only path probes. ``host`` carries the caller-address marker, so
-each op runs at risk level ``caution`` and waits for a person's approval
-(same as the rest of the cohort).
+``safety_level="safe"`` + ``requires_approval=False`` (same posture as
+the rest of the cohort): read-only path probes; the allow-list limits
+where checks can connect.
 """
 
 from __future__ import annotations
 
-import asyncio
 import errno
 import os
 import select
@@ -64,7 +63,7 @@ import time
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.net.allowlist import assert_probe_allowed
-from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
+from meho_backplane.connectors.net.probe_pool import run_blocking_probe
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -489,7 +488,7 @@ async def net_ping(operator: Operator, target: Any, params: dict[str, Any]) -> d
 
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
-    return await asyncio.to_thread(_blocking_ping, host, count, timeout)
+    return await run_blocking_probe(_blocking_ping, host, count, timeout)
 
 
 async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -511,7 +510,7 @@ async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> 
 
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
-    return await asyncio.to_thread(_blocking_trace, host, port, max_hops, hop_timeout)
+    return await run_blocking_probe(_blocking_trace, host, port, max_hops, hop_timeout)
 
 
 async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -529,7 +528,7 @@ async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) 
 
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
-    return await asyncio.to_thread(_blocking_path_mtu, host, port, timeout)
+    return await run_blocking_probe(_blocking_path_mtu, host, port, timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +537,6 @@ async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) 
 
 _HOST_PROPERTY: dict[str, Any] = {
     "type": "string",
-    CALLER_ADDRESS_MARKER: True,
     "minLength": 1,
     "description": (
         "Hostname or IP literal to probe. Must be covered by "
@@ -751,7 +749,6 @@ _NET_PATH_MTU_RESPONSE_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
-# code-quality-allow: one registrar with the three inline op definitions of the cohort.
 async def register_net_icmp_operations(
     *,
     embedding_service: EmbeddingService | None = None,
@@ -763,8 +760,8 @@ async def register_net_icmp_operations(
     after the connector eager-import pass. All three register under the
     shared synthetic natural key
     (``product="net", version="1.x", impl_id="net-probe"``) so they carry
-    the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``caution`` +
-    ``requires_approval=True``: ``host`` carries the caller-address marker.
+    the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``safe`` +
+    ``requires_approval=False`` — the allow-list limits where checks can connect.
     """
     await register_typed_operation(
         product="net",
@@ -799,8 +796,8 @@ async def register_net_icmp_operations(
         parameter_schema=NET_PING_PARAMETER_SCHEMA,
         response_schema=_NET_PING_RESPONSE_SCHEMA,
         tags=["net", "probe", "read", "diagnostics", "icmp", "ping"],
-        safety_level="caution",
-        requires_approval=True,
+        safety_level="safe",
+        requires_approval=False,
         llm_instructions={
             "when_to_use": (
                 "Use to confirm ICMP reachability and latency to a host. "
@@ -857,8 +854,8 @@ async def register_net_icmp_operations(
         parameter_schema=NET_TRACE_PARAMETER_SCHEMA,
         response_schema=_NET_TRACE_RESPONSE_SCHEMA,
         tags=["net", "probe", "read", "diagnostics", "icmp", "traceroute"],
-        safety_level="caution",
-        requires_approval=True,
+        safety_level="safe",
+        requires_approval=False,
         llm_instructions={
             "when_to_use": (
                 "Use to see the router path to a host and locate where "
@@ -913,8 +910,8 @@ async def register_net_icmp_operations(
         parameter_schema=NET_PATH_MTU_PARAMETER_SCHEMA,
         response_schema=_NET_PATH_MTU_RESPONSE_SCHEMA,
         tags=["net", "probe", "read", "diagnostics", "icmp", "mtu"],
-        safety_level="caution",
-        requires_approval=True,
+        safety_level="safe",
+        requires_approval=False,
         llm_instructions={
             "when_to_use": (
                 "Use to diagnose MTU black-holes breaking large transfers to "

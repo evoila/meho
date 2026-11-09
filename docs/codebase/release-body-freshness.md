@@ -94,10 +94,7 @@ have produced too many false positives to keep the gate on.
 
 - **Release runbook (`docs/RELEASING.md` §3)** — operator runs it
   on the candidate release body before merging the release-cutting
-  PR. The `/release` skill (`evoila-bosnia/meho-internal`) drives
-  the runbook end-to-end; the skill update tracking the new step
-  lands as a separate meho-internal PR per the
-  `project_claude_dir_symlink` discipline.
+  PR.
 - **Author's local loop** — the script accepts any release-body
   markdown file, so authors can run it against draft prose before
   cutting the PR. Recommended when amending an existing release
@@ -143,5 +140,3 @@ out-of-snapshot citation, not for "make the gate stop complaining."
 - **Release runbook:** `docs/RELEASING.md` §3.
 - **Originating Task:** #1136 (G0.13-T6).
 - **Originating Initiative:** #1130 (G0.13 v0.6.0 dogfood hardening).
-- **Project memory:** `project_release_runbook`,
-  `project_ci_openapi_snapshot_freshness`.

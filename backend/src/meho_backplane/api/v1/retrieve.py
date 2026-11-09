@@ -58,8 +58,15 @@ Tenant scoping
 
 The route passes ``operator.tenant_id`` to ``retrieve``; the JWT
 verifier (G0.1-T2) is what made it a UUID. There is no API surface
-that accepts a different tenant_id from the body / query string --
-cross-tenant retrieval is impossible by construction.
+that accepts a different tenant_id from the body / query string.
+One exception, set by the instance and not by the caller: with
+``source="kb"`` the hits also include the shared knowledge entries of
+the tenants listed in ``KB_SHARED_TENANT_IDS``
+(:func:`meho_backplane.kb.service.add_shared_hits`). And when the tenant
+keeps its lessons in a team wiki (``tenant.knowledge_wiki_collection``),
+``source="kb"`` also searches that docs collection and returns its hits in
+``wiki`` (:func:`meho_backplane.kb.wiki_search.search_wiki`), the same as
+the ``search_knowledge`` tool.
 
 Out of scope (deferred per Initiative body)
 -------------------------------------------
@@ -88,6 +95,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.kb.schemas import KB_SOURCE
+from meho_backplane.kb.service import add_shared_hits
+from meho_backplane.kb.wiki_search import KbWikiSearch, search_wiki
 from meho_backplane.memory.rbac import MemoryRbacResolver
 from meho_backplane.retrieval.retriever import MemoryEligibility, RetrievalHit, retrieve
 
@@ -214,6 +224,13 @@ class RetrieveResponse(BaseModel):
 
     hits: list[RetrievalHit]
     query_duration_ms: float
+    wiki: KbWikiSearch | None = Field(
+        default=None,
+        description=(
+            "Only with source='kb' on a tenant that keeps its lessons in a team "
+            "wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
+        ),
+    )
 
 
 def _compute_query_hash(query: str) -> str:
@@ -302,6 +319,25 @@ async def retrieve_endpoint(
         principal_sub=operator.sub,
         memory_eligibility=_memory_eligibility(operator, body.source),
     )
+    wiki: KbWikiSearch | None = None
+    if body.source == KB_SOURCE:
+        # ``meho kb search`` reads here: add the shared knowledge scope,
+        # the same as the knowledge search tool does.
+        hits = await add_shared_hits(
+            hits,
+            tenant_id=operator.tenant_id,
+            query=body.query,
+            kind=body.kind,
+            limit=body.limit,
+            metadata_filters=body.metadata_filters,
+        )
+        wiki = await search_wiki(
+            operator,
+            body.query,
+            limit=body.limit,
+            stored=[(hit.tenant_id, hit.source_id, hit.doc_metadata) for hit in hits],
+            filtered=body.kind is not None or bool(body.metadata_filters),
+        )
 
     structlog.contextvars.bind_contextvars(audit_hit_count=len(hits))
     duration_ms = round((time.monotonic() - start) * 1000, 2)
@@ -315,4 +351,4 @@ async def retrieve_endpoint(
         hit_count=len(hits),
         duration_ms=duration_ms,
     )
-    return RetrieveResponse(hits=hits, query_duration_ms=duration_ms)
+    return RetrieveResponse(hits=hits, query_duration_ms=duration_ms, wiki=wiki)

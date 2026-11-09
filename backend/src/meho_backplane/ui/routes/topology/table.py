@@ -90,7 +90,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import WELL_KNOWN_NODE_KINDS
 from meho_backplane.topology.query import list_nodes
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
@@ -195,7 +195,7 @@ async def _render_table(
     name_contains: str | None = None,
     limit: int = _LIMIT_DEFAULT,
     selected_id: uuid.UUID | None = None,
-    session_ctx: UISessionContext = Depends(require_ui_session),
+    session_ctx: UISessionContext = Depends(require_ui_operator),
     db_session: AsyncSession = Depends(get_raw_session),
 ) -> HTMLResponse:
     """Render ``GET /ui/topology[?view=table]``.
@@ -336,7 +336,7 @@ def _node_kind_options() -> list[str]:
 #: ruff B008 (a function call in a default argument position is
 #: disallowed in this codebase except for the FastAPI-blessed call sites
 #: enumerated in ``flake8-bugbear.extend-immutable-calls``).
-_require_ui_session_dep = Depends(require_ui_session)
+_require_ui_operator_dep = Depends(require_ui_operator)
 _get_raw_session_dep = Depends(get_raw_session)
 
 
@@ -492,7 +492,7 @@ def build_table_router() -> APIRouter:
         to_kind: str | None = Query(default=None, max_length=64),
         depth: int | None = Query(default=None, ge=1, le=MAX_OVERLAY_DEPTH),
         max_hops: int | None = Query(default=None, ge=1, le=MAX_PATH_MAX_HOPS),
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
         db_session: AsyncSession = _get_raw_session_dep,
     ) -> HTMLResponse:
         """Serve the topology UI, branching on ``?view=``. See module

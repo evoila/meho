@@ -113,8 +113,10 @@ func (b *tokenBox) refresh(ctx context.Context) error {
 	}
 
 	// Push httpClient into the oauth2 ctx so the refresh POST uses
-	// the same transport as everything else this CLI run does.
-	flowCtx := context.WithValue(ctx, oauth2.HTTPClient, b.httpClient)
+	// the same transport as everything else this CLI run does. The
+	// refresh follows a redirect only to https (or http on this
+	// machine), so the refresh token goes to no other kind of address.
+	flowCtx := context.WithValue(ctx, oauth2.HTTPClient, auth.WithRedirectCheck(b.httpClient))
 	stale := &oauth2.Token{
 		AccessToken:  b.current.AccessToken,
 		RefreshToken: b.current.RefreshToken,

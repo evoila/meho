@@ -119,7 +119,7 @@ from meho_backplane.docs_search import (
     read_docs,
     resolve_readable_collection,
 )
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.corpus.routes import _resolve_operator, internal_chunk_ref
 from meho_backplane.ui.templating import get_templates
@@ -154,7 +154,7 @@ _READ_UNAVAILABLE = "The text could not be loaded right now. Try again later."
 
 #: Module-level ``Depends`` closures — ruff B008 idiom matching the sibling
 #: corpus routes (no function calls in default argument positions).
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 _get_session_dep = Depends(get_session)
 
 
@@ -354,7 +354,7 @@ def build_corpus_chunk_detail_router() -> APIRouter:
         request: Request,
         collection_key: str,
         chunk_id: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
     ) -> HTMLResponse:
         """``GET /ui/corpus/chunks/{collection_key}/{chunk_id}`` — cited-source view."""
@@ -370,7 +370,7 @@ def build_corpus_chunk_detail_router() -> APIRouter:
         request: Request,
         collection_key: str,
         chunk_id: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         read_handle: str = Form(default="", max_length=_READ_TOKEN_MAX),
         cursor: str = Form(default="", max_length=_READ_TOKEN_MAX),

@@ -689,6 +689,7 @@ async def enforce_subop_policy(
         result_denied,
     )
     from meho_backplane.operations._lookup import parse_connector_id
+    from meho_backplane.operations._park_check import park_check_refusal
     from meho_backplane.operations._validate import (
         compute_audit_params_hash,
         compute_params_hash,
@@ -825,6 +826,30 @@ async def enforce_subop_policy(
                     composite_op_id=composite_op_id,
                     approved_op_id=approved_op_id,
                     blocked_op_id=op_id,
+                    duration_ms=duration_ms,
+                )
+
+            # The step's own check before the wait for approval, the same as
+            # at the dispatcher: a param that must not be stored (a secret
+            # given as a plain value) refuses the step before any approval
+            # row exists. Audited on the step's path like the refusals below.
+            refusal = await park_check_refusal(
+                op_id=op_id,
+                connector_id=connector_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                duration_ms=duration_ms,
+            )
+            if refusal is not None:
+                return await _audit_denied_and_return(
+                    refusal,
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
                     duration_ms=duration_ms,
                 )
 

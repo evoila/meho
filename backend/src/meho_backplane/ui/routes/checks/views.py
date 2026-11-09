@@ -104,6 +104,28 @@ def _project_member(member: DashboardMemberView) -> dict[str, object]:
         "last_evidence": member.last_evidence,
         "last_evaluated_at": coerce_utc_aware(member.last_evaluated_at),
         "next_fire_at": coerce_utc_aware(member.next_fire_at),
+        "acknowledgement": _project_acknowledgement(member),
+    }
+
+
+#: Plain words for each acknowledgement reason (#4128).
+_ACK_REASON_LABEL: Final[dict[str, str]] = {
+    "accepted_risk": "accepted risk",
+    "fix_planned": "fix planned",
+    "false_alarm": "false alarm",
+}
+
+
+def _project_acknowledgement(member: DashboardMemberView) -> dict[str, object] | None:
+    """Who acknowledged the member, until when and why; ``None`` when nobody did."""
+    ack = member.acknowledgement
+    if ack is None:
+        return None
+    return {
+        "by": ack.created_by_sub,
+        "until": coerce_utc_aware(ack.expires_at),
+        "reason": _ACK_REASON_LABEL.get(ack.reason, ack.reason),
+        "note": ack.note,
     }
 
 
@@ -116,6 +138,9 @@ def project_detail(detail: DashboardDetail) -> dict[str, object]:
         "member_count": detail.member_count,
         "state": detail.state,
         "state_badge": state_badge_class(detail.state),
+        "last_mail_at": coerce_utc_aware(detail.last_mail_at),
+        "last_mail_sent": detail.last_mail_sent,
+        "last_mail_reason": detail.last_mail_reason,
         "created_by_sub": detail.created_by_sub,
         "created_at": coerce_utc_aware(detail.created_at),
         "updated_at": coerce_utc_aware(detail.updated_at),

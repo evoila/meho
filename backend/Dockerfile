@@ -213,10 +213,21 @@ ARG TAILWIND_SHA_ARM64=8f48dcb72be3b351c10563c5329b4638ba8516820dc3b3a1609625a16
 # server keeps sending a few bytes every few seconds, so a second limit
 # covers each whole try: an alarm signal (`signal.alarm`) stops the try
 # after 120 seconds no matter what state it is in. A normal download takes
-# 2 to 12 seconds. Five tries with a short growing pause bound the worst
-# case to about 11 minutes; after the last failed try the build stops with
-# a clear error instead of hanging.
+# 2 to 12 seconds. Eight tries with a growing pause (15 s, 30 s, 45 s, then
+# 60 s) keep trying for at least 5 minutes of pauses, so a short GitHub
+# outage on release downloads does not fail the build. A file with a wrong
+# checksum counts as a failed try. After the last failed try the build
+# stops with a clear error instead of hanging.
 #
+# The download is the last choice. CI puts the binary in
+# `.tool-preseed/` of the build context first (runner cache, then
+# download; see .github/actions/stage-tailwind). When that file is there
+# and its checksum is right, the build uses it and makes no request. A
+# wrong file is ignored with a message, and the build downloads. A build
+# outside CI has only the `.gitkeep` file there and downloads as before.
+#
+COPY .tool-preseed/ /tmp/tool-preseed/
+
 # This step is a Dockerfile heredoc (not a `\`-continued one-liner) only so
 # the Python download script can be written as a plain multi-line script.
 RUN <<'EOF'
@@ -226,7 +237,14 @@ case "${TARGETPLATFORM:-linux/amd64}" in
   linux/arm64) TW_ARCH=linux-arm64; TW_SHA="${TAILWIND_SHA_ARM64}" ;;
   *) echo "Unsupported TARGETPLATFORM=${TARGETPLATFORM}" >&2; exit 1 ;;
 esac
-python - "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}" /tmp/tailwindcss <<'PY'
+if [ -f "/tmp/tool-preseed/tailwindcss-${TW_ARCH}" ] \
+   && echo "${TW_SHA}  /tmp/tool-preseed/tailwindcss-${TW_ARCH}" | sha256sum -c -; then
+  echo "tailwind: using the staged binary, no download"
+  cp "/tmp/tool-preseed/tailwindcss-${TW_ARCH}" /tmp/tailwindcss
+else
+  echo "tailwind: no usable staged binary, downloading"
+python - "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}" /tmp/tailwindcss "${TW_SHA}" <<'PY'
+import hashlib
 import shutil
 import signal
 import sys
@@ -234,8 +252,8 @@ import time
 import urllib.request
 from http.client import HTTPException
 
-url, dest = sys.argv[1], sys.argv[2]
-attempts = 5
+url, dest, want_sha = sys.argv[1], sys.argv[2], sys.argv[3]
+attempts = 8
 socket_timeout = 30  # seconds one connect or one read may wait for data
 try_limit = 120  # seconds one whole try may take, from connect to last byte
 
@@ -250,16 +268,20 @@ for attempt in range(1, attempts + 1):
     try:
         with urllib.request.urlopen(url, timeout=socket_timeout) as resp, open(dest, "wb") as out:
             shutil.copyfileobj(resp, out)
-    except (OSError, HTTPException) as exc:
+        with open(dest, "rb") as got:
+            if hashlib.sha256(got.read()).hexdigest() != want_sha:
+                raise ValueError("checksum does not match")
+    except (OSError, HTTPException, ValueError) as exc:
         signal.alarm(0)
         print(f"tailwind download try {attempt}/{attempts} failed: {exc!r}", file=sys.stderr)
         if attempt == attempts:
             sys.exit(1)
-        time.sleep(5 * attempt)
+        time.sleep(min(15 * attempt, 60))
     else:
         signal.alarm(0)
         break
 PY
+fi
 echo "${TW_SHA}  /tmp/tailwindcss" | sha256sum -c -
 install -m 0755 /tmp/tailwindcss /usr/local/bin/tailwindcss
 rm /tmp/tailwindcss
@@ -331,6 +353,9 @@ FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f713
 #   pcre2 (libpcre2-8-0)      >= 10.46-1~deb13u3    CVE-2026-86145, CVE-2026-89161,
 #                                                   CVE-2026-103111
 #   sqlite3 (libsqlite3-0)    >= 3.46.1-7+deb13u2   CVE-2026-11822, CVE-2026-11824
+#   apt (apt libapt-pkg7.0)   >= 3.0.4              CVE-2026-109518
+#   zlib (zlib1g)             >= 1:1.3.dfsg+really1.3.1-1+deb13u1
+#                                                   CVE-2026-85091, CVE-2026-76844
 # Drop a package from `pkgs` once a base-digest bump lands a rebuilt base
 # already carrying it at (or above) its floor, and drop a floor once no
 # package of its source is left.
@@ -338,7 +363,8 @@ RUN set -eu; \
     pkgs='util-linux libuuid1 libmount1 libblkid1 libsmartcols1 liblastlog2-2 \
           mount bsdutils login \
           openssl libssl3t64 openssl-provider-legacy \
-          perl-base gzip libpcre2-8-0 libsqlite3-0'; \
+          perl-base gzip libpcre2-8-0 libsqlite3-0 \
+          apt libapt-pkg7.0 zlib1g'; \
     apt-get update; \
     apt-get install -y --no-install-recommends --only-upgrade $pkgs; \
     rm -rf /var/lib/apt/lists/*; \
@@ -352,6 +378,8 @@ RUN set -eu; \
         gzip)       floor='1.13-1+deb13u1' ;; \
         pcre2)      floor='10.46-1~deb13u3' ;; \
         sqlite3)    floor='3.46.1-7+deb13u2' ;; \
+        apt)        floor='3.0.4' ;; \
+        zlib)       floor='1:1.3.dfsg+really1.3.1-1+deb13u1' ;; \
         *) echo "ERROR: ${pkg} (source ${src}) has no security floor in this layer -- add one to the case list" >&2; exit 1 ;; \
       esac; \
       if ! dpkg --compare-versions "${have}" ge "${floor}"; then \

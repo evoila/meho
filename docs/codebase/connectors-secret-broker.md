@@ -27,7 +27,7 @@ The secret value must **never** appear in:
 - the op response or a broadcast payload,
 - the audit row.
 
-Only the move **status**, the value's **SHA-256**, and its **byte
+Only the move **status**, the value's **keyed fingerprint**, and its **byte
 length** are surfaced. This holds **by construction**, not by relying on
 boundary redaction:
 
@@ -332,12 +332,12 @@ the posture and relies on the existing gate). The policy refinement
 - **Time-boxed scope.** The grant is the existing `AgentPermission`
   (`op_pattern`/`verdict`/`expires_at`) + the approval's `expires_at` —
   no bearer token. A grant whose `expires_at` has passed is excluded by
-  the resolver, so an agent reverts to baseline. Note the `dangerous`
-  safety lattice: an agent with **no live grant** is *denied* (not
-  parked), and a **live** `auto-execute` grant is *capped to
-  needs-approval* (the `dangerous` ceiling) — so an agent can never
-  auto-execute a credential move; a live grant only lifts the verdict
-  off the deny baseline to park. A parked row past its `expires_at` is
+  the resolver, so an agent reverts to baseline. For a `dangerous` op an
+  agent with no live grant waits for a person's approval, and a live
+  `auto-execute` grant is capped to needs-approval (`_SAFETY_DEFAULT` and
+  `_SAFETY_CEILING` in `auth/permissions.py`). So an agent never runs a
+  credential move at once. A grant can only make it stricter (`deny`).
+  A parked row past its `expires_at` is
   swept to `EXPIRED` and is no longer decidable (`/decide` → 409).
 
 ## Dependencies

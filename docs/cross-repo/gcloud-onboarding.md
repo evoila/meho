@@ -12,7 +12,7 @@ Copyright (c) 2026 evoila Group
 > [`backend/src/meho_backplane/connectors/gcloud/`](../../backend/src/meho_backplane/connectors/gcloud/);
 > the engineering-facing companion is
 > [`docs/codebase/connectors-gcloud.md`](../codebase/connectors-gcloud.md).
-> This doc is the cookbook every RDC operator reads when retiring the
+> This doc is the cookbook every operator reads when retiring the
 > bash wrapper in favour of `meho gcloud …`.
 
 ## What this surface is
@@ -30,9 +30,8 @@ auth that requires the `google-auth` library — not a plain OpenAPI
 `securitySchemes` fetch. Hand-coded typed ops give cleaner integration
 with the google-auth credential cache than wrapping a generated client.
 
-The v0.2 op surface (Initiative
-[#370](https://github.com/evoila/meho/issues/370)) covers the read
-operations an RDC operator uses for project auditing and IAM review:
+The op surface covers project auditing, IAM review, and workload
+identity setup:
 
 | Group | Op ID | Notes |
 | --- | --- | --- |
@@ -44,12 +43,25 @@ operations an RDC operator uses for project auditing and IAM review:
 | `compute` | `gcloud.compute.instances.list` | All zones (aggregatedList) or one `--zone` |
 | `compute` | `gcloud.compute.networks.list` | VPC network inventory |
 | `compute` | `gcloud.compute.subnetworks.list` | All regions (aggregatedList) or one `--region` |
+| `iam` | `gcloud.iam.service_account_keys.list` | Keys of one SA (type and expiry, never key material) |
+| `iam` | `gcloud.iam.service_accounts.policy.read` | IAM policy of one SA |
+| `iam` | `gcloud.iam.service_accounts.binding.add` | Add a role binding on one SA (a person must approve) |
+| `iam` | `gcloud.iam.service_accounts.binding.remove` | Remove a role binding from one SA (a person must approve) |
+| `workload_identity` | `gcloud.iam.workload_identity_pools.list` | Workload identity pools |
+| `workload_identity` | `gcloud.iam.workload_identity_pools.providers.list` | Providers of one pool |
+| `workload_identity` | `gcloud.iam.workload_identity_pools.create` | Create a pool (a person must approve) |
+| `workload_identity` | `gcloud.iam.workload_identity_pools.delete` | Delete a pool (a person must approve) |
+| `workload_identity` | `gcloud.iam.workload_identity_pools.providers.create` | Create an OIDC provider (a person must approve) |
+| `workload_identity` | `gcloud.iam.workload_identity_pools.providers.update_keys` | Update a provider's keys (a person must approve) |
 
-Eight ops total. All are `safety_level="safe"` and
-`requires_approval=False`. Every op dispatches through
+Eighteen ops total. The twelve read ops are `safety_level="safe"` and
+`requires_approval=False`. The six change ops have
+`requires_approval=True`: `gcloud.iam.workload_identity_pools.create`
+is `caution`, the other five are `dangerous`. The `meho gcloud …` CLI
+verbs below cover the first eight read ops; reach the others with
+`call_operation`. Every op dispatches through
 `POST /api/v1/operations/call` — auth, policy, audit, broadcast, and
-JSONFlux all run as documented in
-[CLAUDE.md](../../CLAUDE.md) §6.
+JSONFlux all run on every call.
 
 ## Auth model: ADC + impersonation (no SA JSON keys)
 
@@ -59,7 +71,7 @@ There are **no SA JSON keys** — the org-policy constraint
 creation on the consumer's GCP organization. The connector enforces
 this at the call boundary: any `secret_ref` payload containing SA JSON
 key material (fields `private_key`, `private_key_id`,
-`client_secret`, etc.) is rejected with a `ValueError` before any
+`client_email`, etc.) is rejected with a `ValueError` before any
 token is built. This is a hard fail — not a warning.
 
 ### How the credential chain works
@@ -138,6 +150,7 @@ The target SA (`target.gcp_impersonate_sa`) must have at minimum:
 | `gcloud.about`, `gcloud.project.describe` | `roles/resourcemanager.projectViewer` |
 | `gcloud.services.list` | `roles/serviceusage.serviceUsageViewer` |
 | `gcloud.iam.service_accounts.list` | `roles/iam.serviceAccountViewer` |
+| `gcloud.iam.service_account_keys.list` | `iam.serviceAccountKeys.list`, e.g. in `roles/iam.serviceAccountViewer` |
 | `gcloud.iam.policy.read` | `roles/resourcemanager.projectIamAdmin` (or `roles/viewer` for read-only; `getIamPolicy` requires `resourcemanager.projects.getIamPolicy` which is in `roles/viewer`) |
 | `gcloud.compute.instances.list` | `roles/compute.viewer` |
 | `gcloud.compute.networks.list` | `roles/compute.viewer` |
@@ -180,13 +193,13 @@ A gcloud target row carries:
 
 | Field | Example | Notes |
 | --- | --- | --- |
-| `name` | `rdc-gcp-dev` | Slug used with `--target` flag |
+| `name` | `my-gcp-dev` | Slug used with `--target` flag |
 | `product` | `gcloud` | Must be exactly `gcloud` |
 | `version` | `1.0` | Must be exactly `1.0` |
-| `impl_id` | `gcloud-rest` | Must be exactly `gcloud-rest` |
+| `preferred_impl_id` | `gcloud-rest` | Optional. `gcloud-rest` is the only implementation |
 | `host` | `cloudresourcemanager.googleapis.com` | Required by the target registry; the connector does not use it |
-| `gcp_project` | `rdc-dev-123456` | GCP project ID. Saved in the target's `extras` |
-| `gcp_impersonate_sa` | `meho-reader@rdc-dev-123456.iam.gserviceaccount.com` | SA the connector impersonates. Saved in the target's `extras` |
+| `gcp_project` | `my-project-123456` | GCP project ID. Saved in the target's `extras` |
+| `gcp_impersonate_sa` | `meho-reader@my-project-123456.iam.gserviceaccount.com` | SA the connector impersonates. Saved in the target's `extras` |
 | `secret_ref` | leave out, or a Vault path | Leave it out: all auth is ADC + impersonation. If set, the secret must hold **no SA JSON key fields** (see auth section) |
 | `auth_model` | `impersonation` | The only supported auth model |
 
@@ -194,13 +207,13 @@ A gcloud target row carries:
 
 ```yaml
 targets:
-  - name: rdc-gcp-dev
+  - name: my-gcp-dev
     product: gcloud
     version: "1.0"
-    impl_id: gcloud-rest
+    preferred_impl_id: gcloud-rest
     host: cloudresourcemanager.googleapis.com
-    gcp_project: rdc-dev-123456
-    gcp_impersonate_sa: meho-reader@rdc-dev-123456.iam.gserviceaccount.com
+    gcp_project: my-project-123456
+    gcp_impersonate_sa: meho-reader@my-project-123456.iam.gserviceaccount.com
     auth_model: impersonation
 ```
 
@@ -216,7 +229,7 @@ $ meho targets import targets.yaml
 Verify with:
 
 ```console
-$ meho targets probe rdc-gcp-dev
+$ meho targets probe my-gcp-dev
 ```
 
 A green probe confirms: ADC credentials valid, impersonation chain
@@ -226,38 +239,38 @@ works, Cloud Resource Manager API reachable, `projectId` matches.
 
 ```console
 # Verify the target is reachable
-$ meho gcloud about --target rdc-gcp-dev
+$ meho gcloud about --target my-gcp-dev
 
 # List all enabled GCP services
-$ meho gcloud services list --target rdc-gcp-dev
+$ meho gcloud services list --target my-gcp-dev
 
 # Describe the project in full
-$ meho gcloud project describe --target rdc-gcp-dev
+$ meho gcloud project describe --target my-gcp-dev
 
 # List IAM service accounts
-$ meho gcloud iam sa list --target rdc-gcp-dev
+$ meho gcloud iam sa list --target my-gcp-dev
 
 # Read the project IAM policy (all role→members bindings)
-$ meho gcloud iam policy read --target rdc-gcp-dev
+$ meho gcloud iam policy read --target my-gcp-dev
 
 # List all Compute instances (all zones)
-$ meho gcloud compute instances list --target rdc-gcp-dev
+$ meho gcloud compute instances list --target my-gcp-dev
 
 # List instances in a specific zone
-$ meho gcloud compute instances list --target rdc-gcp-dev --zone europe-west3-a
+$ meho gcloud compute instances list --target my-gcp-dev --zone europe-west3-a
 
 # List VPC networks
-$ meho gcloud compute networks list --target rdc-gcp-dev
+$ meho gcloud compute networks list --target my-gcp-dev
 
 # List subnets (all regions)
-$ meho gcloud compute subnets list --target rdc-gcp-dev
+$ meho gcloud compute subnets list --target my-gcp-dev
 
 # List subnets in one region
-$ meho gcloud compute subnets list --target rdc-gcp-dev --region europe-west3
+$ meho gcloud compute subnets list --target my-gcp-dev --region europe-west3
 
 # JSON output for piping to jq
-$ meho gcloud iam policy read --target rdc-gcp-dev --json | jq '.result.bindings'
-$ meho gcloud compute instances list --target rdc-gcp-dev --json | jq '.result.total'
+$ meho gcloud iam policy read --target my-gcp-dev --json | jq '.result.bindings'
+$ meho gcloud compute instances list --target my-gcp-dev --json | jq '.result.total'
 ```
 
 ## Verb reference
@@ -268,9 +281,9 @@ Maps to `gcloud.about`. Returns project identity summary: `project_id`,
 `project_number`, `lifecycle_state`, `organization`.
 
 ```console
-$ meho gcloud about --target rdc-gcp-dev
+$ meho gcloud about --target my-gcp-dev
 gcloud-rest-1.0 gcloud.about — status=ok (142ms)
-  project_id:      rdc-dev-123456
+  project_id:      my-project-123456
   project_number:  987654321012
   lifecycle_state: ACTIVE
   organization:    organizations/1234567890
@@ -288,10 +301,10 @@ resource: `projectId`, `projectNumber`, `name`, `lifecycleState`,
 `createTime`, `labels`, `parent`.
 
 ```console
-$ meho gcloud project describe --target rdc-gcp-dev
+$ meho gcloud project describe --target my-gcp-dev
 gcloud-rest-1.0 gcloud.project.describe — status=ok (98ms)
-  projectId:      rdc-dev-123456
-  name:           RDC Dev Project
+  projectId:      my-project-123456
+  name:           My Dev Project
   lifecycleState: ACTIVE
   createTime:     2024-03-15T09:22:44.123Z
   parent:         organization / 1234567890
@@ -303,7 +316,7 @@ Maps to `gcloud.services.list`. Lists enabled GCP services by default.
 Pass `--all` to include disabled services as well.
 
 ```console
-$ meho gcloud services list --target rdc-gcp-dev
+$ meho gcloud services list --target my-gcp-dev
 gcloud-rest-1.0 gcloud.services.list — status=ok (310ms)
   service                                           state    title
   compute.googleapis.com                            ENABLED  Compute Engine API
@@ -320,10 +333,10 @@ Maps to `gcloud.iam.service_accounts.list`. Lists all service accounts
 in the project.
 
 ```console
-$ meho gcloud iam sa list --target rdc-gcp-dev
+$ meho gcloud iam sa list --target my-gcp-dev
 gcloud-rest-1.0 gcloud.iam.service_accounts.list — status=ok (188ms)
   email                                                   disabled   display_name
-  meho-reader@rdc-dev-123456.iam.gserviceaccount.com     false      MEHO Reader
+  meho-reader@my-project-123456.iam.gserviceaccount.com     false      MEHO Reader
   …
 ```
 
@@ -335,7 +348,7 @@ which roles before investigating a permission-denied failure or before
 assigning new roles.
 
 ```console
-$ meho gcloud iam policy read --target rdc-gcp-dev
+$ meho gcloud iam policy read --target my-gcp-dev
 gcloud-rest-1.0 gcloud.iam.policy.read — status=ok (204ms)
   version: 1
   etag:    BwX...
@@ -353,10 +366,10 @@ Maps to `gcloud.compute.instances.list`. Calls Compute v1
 calls the per-zone `list` API when `--zone` is set.
 
 ```console
-$ meho gcloud compute instances list --target rdc-gcp-dev
+$ meho gcloud compute instances list --target my-gcp-dev
 gcloud-rest-1.0 gcloud.compute.instances.list — status=ok (521ms)
   zone                           name                      machine_type              status     internal_ips
-  europe-west3-a/instances       rdc-bastion-01            e2-standard-2             RUNNING    10.0.0.5
+  europe-west3-a/instances       bastion-01            e2-standard-2             RUNNING    192.0.2.5
   …
 ```
 
@@ -373,10 +386,10 @@ Maps to `gcloud.compute.networks.list`. Lists all VPC networks in the
 project.
 
 ```console
-$ meho gcloud compute networks list --target rdc-gcp-dev
+$ meho gcloud compute networks list --target my-gcp-dev
 gcloud-rest-1.0 gcloud.compute.networks.list — status=ok (112ms)
   name                           auto     routing_mode         mtu
-  rdc-vpc-prod                   false    REGIONAL             1460
+  vpc-prod                   false    REGIONAL             1460
   default                        true     REGIONAL             1460
 ```
 
@@ -387,10 +400,10 @@ all regions when `--region` is omitted; calls the per-region API when
 `--region` is set.
 
 ```console
-$ meho gcloud compute subnets list --target rdc-gcp-dev
+$ meho gcloud compute subnets list --target my-gcp-dev
 gcloud-rest-1.0 gcloud.compute.subnetworks.list — status=ok (198ms)
   region               name                           cidr_range           purpose
-  europe-west3         rdc-subnet-prod                10.0.0.0/24          PRIVATE
+  europe-west3         subnet-prod                192.0.2.0/24         PRIVATE
   …
 ```
 
@@ -399,15 +412,15 @@ Flags:
 
 ## The agent meta-tool path
 
-Per [CLAUDE.md](../../CLAUDE.md) postulate 5, the agent surface is the
-~17 meta-tools registered by G0.5 (#226). The CLI verbs are operator
+The agent surface is the small set of meta-tools listed in
+[`docs/codebase/mcp.md`](../codebase/mcp.md). The CLI verbs are operator
 ergonomics over `POST /api/v1/operations/call`; the agent reaches every
 gcloud op via:
 
 ```
 search_operations("gcloud-rest-1.0", "compute instances", group="compute")
 call_operation("gcloud-rest-1.0", "gcloud.compute.instances.list",
-               target="rdc-gcp-dev", params={"zone": "europe-west3-a"})
+               target="my-gcp-dev", params={"zone": "europe-west3-a"})
 ```
 
 The `llm_instructions.when_to_use` blurb on each op guides the agent.
@@ -429,8 +442,8 @@ policy:
 
 The connector encodes this constraint at the code level: if a Vault
 `secret_ref` payload contains any of the well-known SA JSON key fields
-(`private_key`, `private_key_id`, `client_secret`, `client_id`,
-`client_email` in the SA-key role, etc.), the connector raises
+(`private_key`, `private_key_id`, `client_email`, `client_id`,
+`token_uri`, etc.), the connector raises
 `ValueError` immediately and **no** token is built. This is not
 operator-configurable — it is a hard invariant that reflects the
 organization-wide policy.
@@ -451,7 +464,7 @@ pattern as the bind9 / vcf-automation migrations.
 For each ticket that currently runs a `gcloud.sh` command:
 
 1. **Identify the `gcloud` CLI command** used in the ticket workflow.
-   Example: `gcloud compute instances list --project rdc-dev-123456`.
+   Example: `gcloud compute instances list --project my-project-123456`.
 
 2. **Map to the MEHO verb:**
 
@@ -469,10 +482,10 @@ For each ticket that currently runs a `gcloud.sh` command:
 
    ```console
    # Before (wrapper)
-   ./scripts/gcloud.sh compute instances list --project rdc-dev-123456
+   ./scripts/gcloud.sh compute instances list --project my-project-123456
 
    # After (meho)
-   meho gcloud compute instances list --target rdc-gcp-dev
+   meho gcloud compute instances list --target my-gcp-dev
    ```
 
 4. **Update the ticket template** to reference `meho gcloud …` instead
@@ -493,7 +506,7 @@ that parsed raw `gcloud` CLI JSON output need a small adaptation:
 gcloud compute instances list --format=json | jq '.[].name'
 
 # After (meho JSON envelope)
-meho gcloud compute instances list --target rdc-gcp-dev --json \
+meho gcloud compute instances list --target my-gcp-dev --json \
   | jq '.result.rows[].name'
 ```
 
@@ -503,18 +516,17 @@ op's `response_schema`.
 ## Audit and broadcast
 
 Every `meho gcloud …` dispatch writes an audit row to the
-`operation_audit_log` table:
+`audit_log` table:
 
-- `connector_id = "gcloud-rest-1.0"`
-- `op_id` = the dispatched op (e.g. `gcloud.compute.instances.list`)
+- `payload.op_id` = the dispatched op (e.g. `gcloud.compute.instances.list`)
+- `payload.connector_product` / `connector_version` / `connector_impl_id` = `gcloud` / `1.0` / `gcloud-rest`
 - `target_id` = the resolved target row ID
-- `params_hash` = keyed hash of the input params, with secret-named values left out (for replay detection)
-- `status` = `ok` / `error` / `denied`
-- `duration_ms` = connector wall-clock time
+- `payload.params_hash` = keyed hash of the input params, with secret-named values left out (for replay detection)
+- `payload.result_status` = `ok` / `error` / `denied`
+- `duration_ms` = wall-clock time of the call
 
-Broadcast events follow the standard envelope (CLAUDE.md §6 §7). All
-8 ops are `safety_level="safe"` and broadcast with
-`risk_level=LOW` unless the agent's policy engine overrides.
+Broadcast events follow the standard envelope. The read ops broadcast
+as class `read`; the six change ops broadcast as class `write`.
 
 ## Troubleshooting
 
@@ -527,7 +539,7 @@ Broadcast events follow the standard envelope (CLAUDE.md §6 §7). All
 | `status=error connector_error: httpx.HTTPStatusError … 403` | Target SA cannot access the GCP API | Verify SA roles; check if the relevant GCP API is enabled (`gcloud services list`) |
 | `status=error connector_error: httpx.HTTPStatusError … 404 on cloudresourcemanager` | `gcp_project` ID is wrong or project does not exist | Verify `target.gcp_project` matches a real GCP project ID |
 | `status=denied` | `read_only` operator token | Use a token with `operator` role |
-| Probe fails: `projectId mismatch` | Target `gcp_project` does not match the project the SA belongs to | Correct `gcp_project` in `targets.yaml`; re-import |
+| Probe fails: `project_id mismatch` | Target `gcp_project` does not match the project the SA belongs to | Correct `gcp_project` in `targets.yaml`; re-import |
 | `meho gcloud compute instances list` returns `(0 instances)` for a project with instances | Wrong zone filter, or SA lacks `roles/compute.viewer` | Omit `--zone`; verify SA roles |
 
 ## Goal #214 G3.7 gcloud checklist

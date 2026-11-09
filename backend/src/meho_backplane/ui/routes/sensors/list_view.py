@@ -44,7 +44,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.checks.schemas import SensorCadenceFilter, SensorStatusFilter
 from meho_backplane.checks.service import SensorAdminService
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.sensors.views import project_sensor_to_row
 from meho_backplane.ui.templating import get_templates
 
@@ -63,7 +63,7 @@ _CADENCE_OPTIONS: Final[tuple[str, ...]] = get_args(SensorCadenceFilter)
 
 #: Module-level ``Depends`` closure -- ruff B008 idiom (no function calls in
 #: default argument positions), matching the checks / runners routes.
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 
 
 def _is_htmx_request(request: Request) -> bool:
@@ -135,7 +135,7 @@ def build_list_router() -> APIRouter:
         request: Request,
         status: str | None = Query(default=None, max_length=64),
         cadence_kind: str | None = Query(default=None, max_length=64),
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
     ) -> HTMLResponse:
         """Serve ``GET /ui/sensors[?status=&cadence_kind=]``. See module docstring."""
         return await _render(

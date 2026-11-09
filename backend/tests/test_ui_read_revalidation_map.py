@@ -22,6 +22,7 @@ import pytest
 from fastapi import HTTPException
 
 from meho_backplane.ui.auth import revalidation
+from meho_backplane.ui.auth import session_ref as session_ref_module
 from meho_backplane.ui.auth.session_store import DecryptedSession
 
 _WINDOW_SECONDS = 300
@@ -82,8 +83,11 @@ def window(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], None]:
         settings = SimpleNamespace(
             ui_session_read_revalidation_seconds=seconds,
             keycloak_audience="meho",
+            ui_session_encryption_key="made-up-key",
         )
         monkeypatch.setattr(revalidation, "get_settings", lambda: settings)
+        # The refusal log names the session by its ref, made with this key.
+        monkeypatch.setattr(session_ref_module, "get_settings", lambda: settings)
 
     _set(_WINDOW_SECONDS)
     return _set

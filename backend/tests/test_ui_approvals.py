@@ -48,7 +48,6 @@ import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -123,7 +122,7 @@ _RESOLVE_OPERATOR = "meho_backplane.ui.routes.approvals.routes._resolve_operator
 
 #: The route-module symbol the approve handler calls after committing the
 #: decision; mocked so the test does not drive the live dispatcher.
-_RESUME_DISPATCH = "meho_backplane.ui.routes.approvals.routes.resume_dispatch_after_approval"
+_RESUME_DISPATCH = "meho_backplane.operations.approval_queue.resume_dispatch_after_approval"
 
 
 # ---------------------------------------------------------------------------
@@ -345,9 +344,9 @@ def _operator(
     )
 
 
-def _dispatch_result() -> SimpleNamespace:
-    """A minimal stand-in for the dispatcher result the approve path logs."""
-    return SimpleNamespace(status="ok", op_id="vsphere.vm.create", result={}, error=None)
+def _dispatch_result() -> dict[str, object]:
+    """A minimal stand-in for the result of the approved run (its JSON form)."""
+    return {"status": "ok", "op_id": "vsphere.vm.create", "result": {}, "error": None}
 
 
 # ---------------------------------------------------------------------------
@@ -2902,12 +2901,12 @@ def test_approve_refused_by_release_change_says_nothing_ran() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    refused = SimpleNamespace(
-        status="denied",
-        op_id="vsphere.vm.create",
-        audit_id=uuid.UUID(_RUN_AUDIT_ID),
-        extras={"error_code": "release_changed_while_waiting"},
-    )
+    refused = {
+        "status": "denied",
+        "op_id": "vsphere.vm.create",
+        "audit_id": _RUN_AUDIT_ID,
+        "extras": {"error_code": "release_changed_while_waiting"},
+    }
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -2979,12 +2978,12 @@ def test_approve_refused_by_target_gone_says_nothing_ran() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    refused = SimpleNamespace(
-        status="denied",
-        op_id="vsphere.vm.create",
-        audit_id=uuid.UUID(_RUN_AUDIT_ID),
-        extras={"error_code": "target_gone_since_approval"},
-    )
+    refused = {
+        "status": "denied",
+        "op_id": "vsphere.vm.create",
+        "audit_id": _RUN_AUDIT_ID,
+        "extras": {"error_code": "target_gone_since_approval"},
+    }
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -3018,12 +3017,12 @@ def test_approve_whose_run_fails_shows_a_failed_card() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    failed = SimpleNamespace(
-        status="error",
-        op_id="vsphere.vm.create",
-        audit_id=uuid.UUID(_RUN_AUDIT_ID),
-        extras={"error_code": "connector_vault_forbidden"},
-    )
+    failed = {
+        "status": "error",
+        "op_id": "vsphere.vm.create",
+        "audit_id": _RUN_AUDIT_ID,
+        "extras": {"error_code": "connector_vault_forbidden"},
+    }
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -3248,13 +3247,13 @@ def test_approve_card_shows_the_next_step_of_a_failed_run() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    failed = SimpleNamespace(
-        status="error",
-        op_id=_CDROM_OP_ID,
-        audit_id=uuid.UUID(_RUN_AUDIT_ID),
-        extras={"error_code": "result_unknown"},
-        result=_RESULT_UNKNOWN_ENVELOPE["result"],
-    )
+    failed = {
+        "status": "error",
+        "op_id": _CDROM_OP_ID,
+        "audit_id": _RUN_AUDIT_ID,
+        "extras": {"error_code": "result_unknown"},
+        "result": _RESULT_UNKNOWN_ENVELOPE["result"],
+    }
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -3512,3 +3511,104 @@ def test_modal_step_numbers_move_up_once_an_earlier_step_is_decided() -> None:
     assert 'data-approval-chain-step="1"' in body
     assert "1 of 2" in body
     assert 'data-approval-confirm="out-of-order"' not in body
+
+
+# ---------------------------------------------------------------------------
+# Approved, but MEHO does not know if the change happened (#5025)
+# ---------------------------------------------------------------------------
+
+#: The stored envelope of a run whose audit write failed after the change ran.
+_UNCERTAIN_ENVELOPE: dict[str, object] = {
+    "status": "error",
+    "op_id": "vsphere.vm.create",
+    "error": "audit_commit_failed: the operation ran, but MEHO could not save its audit record.",
+    "duration_ms": 7.0,
+    "audit_id": None,
+    "extras": {
+        "error_code": "audit_commit_failed",
+        "execution_outcome": "uncertain",
+        "retry": False,
+    },
+}
+
+
+def test_history_shows_an_uncertain_run_not_a_failed_one() -> None:
+    """The Approved tab badge says the outcome is unknown, and a real error still says failed."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_ran_request(op_id="uncertain.op", resume_result=_UNCERTAIN_ENVELOPE)
+    _seed_ran_request(op_id="failed.op", resume_result=_FAILED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=approved", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-result-state="uncertain"' in body
+    assert "outcome unknown" in body
+    assert 'data-result-state="failed"' in body
+    assert "run failed" in body
+
+
+def test_detail_modal_renders_the_uncertain_run() -> None:
+    """The decided modal gives the advice, and never says the run failed."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="uncertain.op", resume_result=_UNCERTAIN_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-run-uncertain"' in body
+    assert body.count("Do not run it again. Check the target first.") == 1
+    assert 'data-testid="approval-guidance"' not in body
+    assert "alert-warning" in body
+    assert "did not succeed" not in body
+    assert "run failed" not in body
+    assert "alert-error" not in body
+
+
+def test_approve_whose_outcome_is_unknown_shows_an_uncertain_card() -> None:
+    """An approve whose audit write failed says the outcome is unknown, not failed."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    uncertain = {
+        "status": "error",
+        "op_id": "vsphere.vm.create",
+        "audit_id": None,
+        "extras": {
+            "error_code": "audit_commit_failed",
+            "execution_outcome": "uncertain",
+            "retry": False,
+        },
+    }
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=uncertain)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but the outcome is unknown" in body
+    assert "Do not run it again." in body
+    assert "Approved, but the run failed" not in body
+    assert "did not succeed" not in body
+    assert "Request approved" not in body

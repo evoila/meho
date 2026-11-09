@@ -47,7 +47,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.scheduler.service import SchedulerAdminService
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.scheduler.operator import (
@@ -73,7 +73,7 @@ _LIST_LIMIT = 200
 
 #: Module-level ``Depends`` closures -- ruff B008 idiom (no function calls
 #: in default argument positions), matching the connectors / memory routes.
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 _role_probe_dep = Depends(resolve_role_probe)
 
 
@@ -171,7 +171,7 @@ def build_list_router() -> APIRouter:
         kind: Annotated[KindFilterValue | None, EMPTY_STR_TO_NONE, Query()] = None,
         status: Annotated[StatusFilterValue | None, EMPTY_STR_TO_NONE, Query()] = None,
         work_ref: str | None = Query(default=None, max_length=256),
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
         """Serve ``GET /ui/scheduler``. See module docstring for the URL contract."""

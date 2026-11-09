@@ -37,6 +37,10 @@ Two dependencies:
   :class:`Operator` after asserting
   :class:`~meho_backplane.auth.operator.TenantRole.TENANT_ADMIN`; a
   non-admin caller raises 403.
+* :func:`resolve_human_admin_or_403` -- the gate of agent-principal
+  register: :func:`resolve_operator_or_403`, then
+  :func:`ensure_ui_human` (a console session of an agent, service or
+  runner login gets 403 ``human_principal_required``, as on REST).
 """
 
 from __future__ import annotations
@@ -46,17 +50,20 @@ from dataclasses import dataclass
 import structlog
 from fastapi import HTTPException, Request, status
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 
 __all__ = [
     "OperatorRoleProbe",
+    "ensure_ui_human",
+    "resolve_human_admin_or_403",
     "resolve_operator_or_403",
     "resolve_role_probe",
     "resolve_run_operator_or_403",
@@ -132,7 +139,7 @@ async def _lift_operator(session_ctx: UISessionContext) -> Operator:
     """
     decrypted = await load_fresh_session(session_ctx.session_id)
     if decrypted is None:
-        _log.info("ui_agents_session_gone", session_id=str(session_ctx.session_id))
+        _log.info("ui_agents_session_gone", session_ref=session_ref(session_ctx.session_id))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="ui_session_required",
@@ -169,7 +176,7 @@ async def resolve_role_probe(
     except Exception as exc:
         _log.info(
             "ui_agents_role_probe_unavailable",
-            session_id=str(session_ctx.session_id),
+            session_ref=session_ref(session_ctx.session_id),
             reason=type(exc).__name__,
         )
         return OperatorRoleProbe(is_tenant_admin=False, is_operator=False)
@@ -195,6 +202,40 @@ async def resolve_operator_or_403(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="agent_write_requires_tenant_admin",
         )
+    return operator
+
+
+def ensure_ui_human(operator: Operator) -> None:
+    """403 ``human_principal_required`` unless the console login is a person.
+
+    The console session holds the access token of its login. A token of an
+    agent, a service or a runner is refused, the same as on the REST
+    routes that carry ``require_human_principal``.
+    """
+    if is_human_principal(operator):
+        return
+    _log.info(
+        "ui_human_principal_required",
+        operator_sub=operator.sub,
+        principal_kind=operator.principal_kind.value,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="human_principal_required",
+    )
+
+
+async def resolve_human_admin_or_403(
+    request: Request,
+    session_ctx: UISessionContext | None = None,
+) -> Operator:
+    """FastAPI dependency: a tenant admin who is a person.
+
+    Used by ``POST /ui/agents/principals/register``: only a person
+    registers an agent principal.
+    """
+    operator = await resolve_operator_or_403(request, session_ctx)
+    ensure_ui_human(operator)
     return operator
 
 

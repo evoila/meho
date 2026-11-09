@@ -115,19 +115,17 @@ _ALL_ON = [
     "--set",
     "agent.secretName=agent",
     "--set",
+    "agent.openai.enabled=true",
+    "--set",
+    "agent.openai.secretName=agent-openai",
+    "--set",
     "keycloakAdmin.enabled=true",
-    "--set",
-    "keycloakAdmin.url=https://keycloak.test",
-    "--set",
-    "keycloakAdmin.clientId=admin",
     "--set",
     "keycloakAdmin.clientSecret.secretName=test-core-keycloak-admin",
     "--set",
     "uiConsole.enabled=true",
     "--set",
     "uiConsole.secretName=test-core-ui-auth",
-    "--set",
-    "config.uiKeycloakClientId=ui",
 ]
 
 # The pods that render with `_ALL_ON`, so a part that silently stops
@@ -146,6 +144,7 @@ _EXPECTED_PODS = {
     "Deployment/test-result-cache",
     "Pod/test-meho-test-pgvector",
     "Pod/test-meho-test-agent-runtime-config",
+    "Pod/test-meho-test-agent-openai-config",
     "Pod/test-meho-test-ui-console-config",
 }
 

@@ -40,9 +40,9 @@ This op inherits the three T1 foundations verbatim:
   ``status="ok"``. It never raises a ``connector_*`` error for a query
   that did not answer.
 
-A read-only single-shot query that sends one packet and changes nothing.
-``host`` carries the caller-address marker, so the op runs at risk level
-``caution`` and waits for a person's approval (same as ``net.tcp_check``).
+``safety_level="safe"`` + ``requires_approval=False``: a read-only
+single-shot query that sends one packet and changes nothing; the
+allow-list limits where checks can connect (same as ``net.tcp_check``).
 """
 
 from __future__ import annotations
@@ -65,7 +65,6 @@ from meho_backplane.connectors.net.ops import (
     _MAX_TIMEOUT_SECONDS,
     _clamp_timeout,
 )
-from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -108,7 +107,6 @@ NET_NTP_CHECK_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "host": {
             "type": "string",
-            CALLER_ADDRESS_MARKER: True,
             "minLength": 1,
             "description": (
                 "Hostname or IP literal of the NTP server to query. Must "
@@ -549,8 +547,8 @@ async def register_net_ntp_check_operation(
     the connector eager-import pass. Registered under the same synthetic
     natural key as the keystone
     (``product="net", version="1.x", impl_id="net-probe"``), so it shares
-    the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``caution`` +
-    ``requires_approval=True``: ``host`` carries the caller-address marker.
+    the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``safe`` +
+    ``requires_approval=False`` — the allow-list limits where checks can connect.
     """
     await register_typed_operation(
         product="net",
@@ -579,8 +577,8 @@ async def register_net_ntp_check_operation(
         parameter_schema=NET_NTP_CHECK_PARAMETER_SCHEMA,
         response_schema=_NET_NTP_CHECK_RESPONSE_SCHEMA,
         tags=["net", "probe", "read", "diagnostics", "ntp", "time"],
-        safety_level="caution",
-        requires_approval=True,
+        safety_level="safe",
+        requires_approval=False,
         llm_instructions=_NET_NTP_CHECK_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

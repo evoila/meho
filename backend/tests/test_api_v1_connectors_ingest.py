@@ -96,6 +96,11 @@ from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from .fixtures.catalog import (
+    FIXTURE_PROFILE_RESOURCE,
+    FIXTURE_SPEC_RESOURCE,
+    catalog_with_fixture_files,
+)
 
 # ---------------------------------------------------------------------------
 # Settings + JWKS cache + LLM-client fixtures
@@ -4241,8 +4246,13 @@ def _patch_catalog(
     monkeypatch: pytest.MonkeyPatch,
     *,
     entries: list[dict[str, Any]],
+    with_fixture_files: bool = False,
 ) -> None:
     """Install a fake packaged catalog for the route's resolver.
+
+    With *with_fixture_files*, the rows read their ``spec_resource`` and
+    ``profile_resource`` from the test catalog folder
+    (``tests/fixtures/catalog/``) instead of MEHO's own packages.
 
     The route handler calls :func:`load_catalog`, which is cached with
     ``functools.lru_cache``. The cleanest swap is to drop the cache and
@@ -4257,7 +4267,10 @@ def _patch_catalog(
         ConnectorSpecEntry,
     )
 
-    fake = ConnectorSpecCatalog(entries=tuple(ConnectorSpecEntry(**e) for e in entries))
+    if with_fixture_files:
+        fake = catalog_with_fixture_files(*entries)
+    else:
+        fake = ConnectorSpecCatalog(entries=tuple(ConnectorSpecEntry(**e) for e in entries))
     _catalog_mod.load_catalog.cache_clear()
     # The route imports ``load_catalog`` via the
     # ``meho_backplane.operations.ingest`` package; patching the
@@ -4362,10 +4375,11 @@ def test_ingest_catalog_entry_shipped_spec_loads_content_and_ingests(
                 # to ingest; class-presence is a boot-time validator concern.
                 "requires_connector_class": "ProfiledRestConnector_shippedt1",
                 "upstream": None,
-                "spec_resource": "_fixture_minimal.yaml",
-                "profile_resource": "_fixture_minimal.yaml",
+                "spec_resource": FIXTURE_SPEC_RESOURCE,
+                "profile_resource": FIXTURE_PROFILE_RESOURCE,
             },
         ],
+        with_fixture_files=True,
     )
     key, token = _admin_token()
     with respx.mock as mock_router:
@@ -4379,7 +4393,7 @@ def test_ingest_catalog_entry_shipped_spec_loads_content_and_ingests(
         )
     assert response.status_code == 200, response.text
     body = response.json()
-    # The _fixture_minimal.yaml spec carries exactly one operation.
+    # The test spec carries exactly one operation.
     assert body["ingestion"]["inserted_count"] == 1
     assert body["ingestion"]["connector_id"] == "shippedt1-rest-1.0"
 
@@ -4409,12 +4423,13 @@ def test_ingest_catalog_entry_shipped_spec_reingest_is_idempotent(
                 "impl_id": "shippedt1-rest",
                 "requires_connector_class": "ProfiledRestConnector_shippedt1",
                 "upstream": None,
-                "spec_resource": "_fixture_minimal.yaml",
-                "profile_resource": "_fixture_minimal.yaml",
+                "spec_resource": FIXTURE_SPEC_RESOURCE,
+                "profile_resource": FIXTURE_PROFILE_RESOURCE,
             },
         ],
+        with_fixture_files=True,
     )
-    # _fixture_minimal.yaml carries exactly one op (``GET /things``); the
+    # The test spec carries exactly one op (``GET /things``); the
     # deterministic grouping stub only needs to place that one op.
     set_llm_client_factory(
         lambda: _StubLlmClient(

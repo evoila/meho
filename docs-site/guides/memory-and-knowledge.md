@@ -17,9 +17,13 @@ fragmenting.
 
     - A running backplane and a connected client
       ([Connect clients](../clients/index.md)).
-    - Reading and personal writes need the **operator** role. Writing
-      to a **tenant-shared** scope (memory `tenant`, or any kb entry)
-      needs **tenant_admin**.
+    - Personal writes need the **operator** role. On MCP, reading
+      needs **operator** too. On REST and the CLI, a `read_only` login
+      can read memory.
+    - Writing memory in the `tenant` scope needs **tenant_admin**.
+    - `meho kb add` and `POST /api/v1/kb` need **tenant_admin**. Over
+      MCP, `add_to_knowledge` is open to an **operator**, who can add
+      kb entries and change only the ones they created.
     - Memory and knowledge are **GA** — the 1.0 stability promise
       applies (see the
       [feature-maturity index](../reference/maturity.md#ga-features)).
@@ -57,7 +61,7 @@ narrowest scope that captures intent:
 | `user-tenant` | you, within this tenant (the CLI default) | — |
 | `user-target` | you, for one target | `target_name` |
 | `tenant` | everyone in the tenant | **tenant_admin** to write |
-| `target` | everyone touching that target | `target_name` |
+| `target` | everyone in the tenant (tied to one target) | `target_name` |
 
 Write one with the CLI:
 
@@ -84,8 +88,9 @@ The write returns the full entry so you can confirm it landed:
 
 ## Memory: TTL
 
-Memory can **expire** — the difference from the durable kb. TTL is an
-ISO-8601 duration (`P7D` = 7 days, `PT1H` = 1 hour):
+Memory can **expire** — the difference from the durable kb. On MCP,
+`ttl` is an ISO-8601 duration (`P7D` = 7 days, `PT1H` = 1 hour). On the
+CLI, `--ttl` takes a short form such as `30m`, `24h` or `7d`:
 
 - A `user`-scope write with **no** `ttl` picks up the backend default
   (7 days, `MEMORY_USER_DEFAULT_TTL_DAYS`) — a personal note self-cleans.
@@ -94,7 +99,7 @@ ISO-8601 duration (`P7D` = 7 days, `PT1H` = 1 hour):
   conventions are meant to last.
 
 ```bash
-meho remember "debugging the flaky RKE2 upgrade" --scope user --ttl PT2H
+meho remember "debugging the flaky RKE2 upgrade" --scope user --ttl 2h
 meho remember "team convention: always --dry-run first" --scope tenant --persist
 ```
 
@@ -104,7 +109,7 @@ Retrieval fuses BM25 (lexical) and cosine (semantic) ranks. Search
 memory scoped or unscoped:
 
 ```bash
-meho recall --query "DRS automation" --scope target --target prod-vc-1
+meho recall --query "DRS automation" --scope target
 ```
 
 ```json
@@ -149,7 +154,7 @@ Omitting `scope` on `search_memory` searches every scope you can read;
 ## Write knowledge
 
 ```bash
-meho kb add vcenter-session-auth --body-file ./vcenter-session-auth.md
+meho kb add vcenter-session-auth --body @./vcenter-session-auth.md
 ```
 
 ```json
@@ -158,18 +163,85 @@ meho kb add vcenter-session-auth --body-file ./vcenter-session-auth.md
  "metadata": {}, "created_at": "…", "updated_at": "…"}
 ```
 
-Re-adding the same slug **updates in place** — a body-hash short-circuit
-means an unchanged body costs only an `updated_at` bump (no re-embed), so
-an agent can call it freely as "remember this."
+Every update names the revision it read. A read of an entry returns
+`revision_id`; send it as `expected_revision` (`meho kb add --expected-revision
+<id>`). A write without it only creates. If the slug exists, or the entry
+changed after the revision you named, MEHO writes nothing and answers
+`409 stale_revision` (MCP: the same reason in the error). The answer shows
+the current revision, who changed it and when, and what changed. Read the
+entry again, merge your change, and retry. A change to the header
+(metadata) counts as a change. A write that changes neither body nor
+metadata costs only an `updated_at` bump (no re-embed).
+
+## Lessons in your own wiki
+
+A team can keep its lessons as pages in its own wiki: a Git repo of
+Markdown pages the team owns. Then a lesson lives
+in two places: the wiki is the source of truth, and MEHO keeps a copy.
+
+To set it up:
+
+1. Load the wiki into a knowledge index and add it to MEHO as a docs
+   collection (see [Grounded docs search](#grounded-docs-search-add-on)).
+2. Give the tenant the capability `meho-docs:<collection>`.
+3. Set `knowledge_wiki_collection: <collection>` under the tenant's
+   `policies` in the [settings file](settings-file.md). Leave it out or
+   set it to `null` to keep lessons in MEHO only.
+
+What changes for the tenant:
+
+- `search_knowledge` and `meho kb search` also search the wiki. A wiki
+  hit has `source: wiki`, its `collection` and its `source_url` (the link
+  to the page). The answer's `wiki` says whether the wiki was searched.
+  When it was not, `wiki.message` says why: no docs add-on, no capability,
+  the collection is not ready, the knowledge index did not answer, or the
+  search used filters, a time window or scope `shared`, which the wiki
+  cannot apply. The knowledge hits still come back.
+- When MEHO holds an imported copy of a wiki page, the page is shown once,
+  as the knowledge hit. This happens only when the copy has the same path
+  and MEHO can read the whole wiki page and finds the same text. When the
+  wiki collection does not offer reading pages, or the read fails, the
+  page shows in both places.
+- `add_to_knowledge` still stores the lesson in MEHO. Its answer has a
+  `wiki` part: the collection, and whether the lesson also goes to the
+  wiki. A lesson with `applies_to: product-and-version`, a full lesson
+  header and status `candidate` reaches the wiki as a candidate page
+  through the knowledge export, and a person reviews it there. MEHO
+  does not send the lesson. Your own CI job calls the export and opens
+  a merge request in your wiki.
+- A person can also write the wiki page directly. The import brings it
+  into MEHO after the merge.
 
 ## The discipline: search before you write
 
 Both `add_*` tools say the same thing, and it is the single most
 important habit: **`search_*` first.** Re-adding a note under a new slug
 fragments the corpus and dilutes future retrieval. If a matching entry
-exists, extend it (read it, merge, re-add with the same slug) instead of
+exists, extend it (read it, merge, re-add with the same slug and the
+`revision_id` you read) instead of
 creating a near-duplicate. The mirror habit on the read side: `search_*`
 **before asking the operator** a question the corpus may already answer.
+
+For knowledge, MEHO can also check this itself. The check is off by
+default; an operator turns it on with the setting `KB_SIMILAR_CHECK=true`
+(Helm: `config.kbSimilarCheck: "true"`). Then, before it writes a **new**
+slug, it looks for entries that say something similar: first entries
+with the same `product` and `version` in the metadata, then entries
+close in meaning. When it finds some, it writes nothing and lists them
+(slug, summary, product, version, status, current revision, a short
+snippet, the score, and whether you may change the entry). Then you
+either update one of them, or create the new entry on purpose:
+
+```bash
+meho kb add vcenter-session-auth-2 --body @./note.md --dry-run        # write nothing, show similar entries
+meho kb add vcenter-session-auth-2 --body @./note.md --create-anyway  # create it anyway
+```
+
+On MCP the same inputs are `dry_run: true` and `create_anyway: true`;
+REST `POST /api/v1/kb` answers `409` when similar entries stop the
+create. The console editor and uploads have a "Create anyway" box.
+Directory ingest does not run this check. The score that counts as
+similar is the setting `KB_SIMILAR_MIN_SCORE` (default `0.85`).
 
 This is also how the checks **investigator** closes its loop — when it
 diagnoses a red dashboard it writes its structured finding into tenant

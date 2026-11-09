@@ -47,7 +47,8 @@ T3 routes (editor + mobile reflow):
   editor's debounced input listener via HTMX. Any authenticated
   operator can call this endpoint (preview is a read-only transform).
 
-* ``POST /ui/kb/new`` (editor save) — accepts ``slug``, ``body``, and
+* ``POST /ui/kb/new`` (editor save, create only: a slug that exists is
+  refused with the current revision and a link to the entry) — accepts ``slug``, ``body``, and
   ``tags`` as form fields, validates ``tenant_admin`` role by loading
   the full session and re-verifying the access token through
   :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`, then calls
@@ -93,7 +94,9 @@ RBAC
 ----
 
 ``operator`` role minimum for read + preview routes (enforced by
-:func:`~meho_backplane.ui.auth.middleware.require_ui_session`). The
+:func:`~meho_backplane.ui.auth.middleware.require_ui_operator`, the same floor
+as the REST ``GET /api/v1/kb``; a ``read_only`` session gets ``403
+operator_required``). The
 ``POST /ui/kb/new`` save route additionally requires ``tenant_admin``:
 it loads the full decrypted session via
 :func:`~meho_backplane.ui.auth.session_store.load_session`, re-verifies
@@ -103,7 +106,7 @@ the access token through
 mirrors the ``/api/v1/kb POST`` RBAC posture without adding a separate
 auth middleware layer.
 Read routes (T1): ``operator`` role minimum (enforced by
-:func:`~meho_backplane.ui.auth.middleware.require_ui_session`).
+:func:`~meho_backplane.ui.auth.middleware.require_ui_operator`).
 Upload routes (T2): ``tenant_admin`` required, enforced by
 :func:`~meho_backplane.ui.auth.middleware.require_ui_admin` which
 loads the session's access token and decodes the role claim.
@@ -148,18 +151,22 @@ from fastapi.responses import HTMLResponse, Response
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.kb import KbEntry, KbEntrySearchHit, KbService
-from meho_backplane.kb.schemas import InvalidKbSlugError
+from meho_backplane.kb.schemas import InvalidKbSlugError, KbSharedSlugError
+from meho_backplane.kb.similar import KbSimilarEntry, check_new_entry
+from meho_backplane.kb.stale_revision import KbStaleRevisionError
+from meho_backplane.lesson_header import header_rows
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_admin,
-    require_ui_session,
+    require_ui_operator,
 )
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.kb.exists import exists_message
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
 from meho_backplane.ui.templating import get_templates
 
@@ -196,9 +203,10 @@ _MAX_TAGS_LENGTH: Final[int] = 500
 #: the embedding path (the indexer holds the body in-process during
 #: embedding). Bulk uploads apply this limit per file.
 _MAX_UPLOAD_BYTES: Final[int] = 512 * 1024
-#: Module-level Depends closure for the require_ui_session gate.
-#: Matches the ruff B008 idiom the topology and dashboard routes use.
-_require_session = Depends(require_ui_session)
+#: Module-level Depends closure for the operator-role gate (``require_ui_operator``
+#: chains ``require_ui_session``). Matches the ruff B008 idiom the topology and
+#: dashboard routes use.
+_require_session = Depends(require_ui_operator)
 
 #: Module-level Depends closure for the require_ui_admin gate (T2 upload).
 #: Chains require_ui_admin which itself chains require_ui_session; callers
@@ -328,6 +336,35 @@ def _filename_to_slug(filename: str) -> str:
 # `/ui/kb*` route as a closure over shared deps. #1776 only *removes* three
 # `ready=False` literals from it (net smaller); splitting the factory is a
 # sibling-surface refactor out of scope. code-quality-allow: pre-existing oversize factory
+#: Banner of the editor modal when similar entries stop a save.
+_SIMILAR_EDITOR_MESSAGE: Final[str] = (
+    "Similar entries exist, so nothing was saved. Open one of them to update it, "
+    'or tick "Create anyway" and save again.'
+)
+
+
+def _similar_upload_row(
+    filename: str, slug: str, similar: list[KbSimilarEntry]
+) -> dict[str, object]:
+    """Return the upload result row of a file that similar entries stopped.
+
+    ``similar`` carries the entries, so the result shows each one in
+    full (``_similar_entries.html``) and the operator can choose.
+    """
+    return {
+        "filename": filename,
+        "slug": slug,
+        "status": "error",
+        "message": (
+            "Similar entries exist: "
+            + ", ".join(entry.slug for entry in similar)
+            + '. Nothing was saved. Tick "Create anyway" to upload it.'
+        ),
+        "entry": None,
+        "similar": similar,
+    }
+
+
 def build_kb_router() -> APIRouter:
     """Construct the ``/ui/kb*`` :class:`APIRouter`.
 
@@ -477,6 +514,7 @@ def build_kb_router() -> APIRouter:
             "csrf_token": csrf_token,
             "active_surface": "knowledge",
             "page_title": "Upload · Knowledge",
+            "similar_check": get_settings().kb_similar_check,
         }
         response = get_templates().TemplateResponse(request, "kb/upload.html", context)
         response.set_cookie(
@@ -530,6 +568,7 @@ def build_kb_router() -> APIRouter:
             "code_css": code_css,
             "source_path": source_path,
             "body_hash": body_hash,
+            "header_rows": header_rows(entry.metadata),
             "operator_sub": session.operator_sub,
             "csrf_token": csrf_token,
             "active_surface": "knowledge",
@@ -613,6 +652,7 @@ def build_kb_router() -> APIRouter:
         slug: str = Form(..., max_length=_MAX_SLUG_LENGTH),
         body: str = Form(..., max_length=_MAX_EDITOR_BODY_LENGTH),
         tags: str = Form(default="", max_length=_MAX_TAGS_LENGTH),
+        create_anyway: bool = Form(default=False),
     ) -> Response:
         """Save a new KB entry from the editor modal.
 
@@ -634,6 +674,9 @@ def build_kb_router() -> APIRouter:
         (``"tag-a, tag-b"``); individual values are stripped of
         whitespace and empty strings are dropped. Tags are stored as
         ``metadata["tags"]`` on the entry.
+
+        A new slug with similar entries is not saved: the modal comes back
+        with the list and a "Create anyway" box (``create_anyway``).
         """
         await _require_tenant_admin(session)
 
@@ -645,17 +688,35 @@ def build_kb_router() -> APIRouter:
             metadata["tags"] = tag_list
 
         error_message: str | None = None
+        existing_slug: str | None = None
         entry: KbEntry | None = None
+        similar: list[KbSimilarEntry] = []
         try:
-            entry, _created = await kb.create_entry(
-                tenant_id=session.tenant_id,
-                slug=slug.strip(),
-                body=body,
-                metadata=metadata if metadata else None,
+            check = await check_new_entry(
+                session.tenant_id,
+                slug.strip(),
+                body,
+                metadata or None,
                 actor_sub=session.operator_sub,
+                may_change_any=True,
+                create_anyway=create_anyway,
             )
-        except InvalidKbSlugError as exc:
+            if check is not None:
+                similar = check.similar
+                error_message = _SIMILAR_EDITOR_MESSAGE
+            else:
+                entry, _created = await kb.create_entry(
+                    tenant_id=session.tenant_id,
+                    slug=slug.strip(),
+                    body=body,
+                    metadata=metadata if metadata else None,
+                    actor_sub=session.operator_sub,
+                )
+        except (InvalidKbSlugError, KbSharedSlugError) as exc:
             error_message = str(exc)
+        except KbStaleRevisionError as exc:
+            error_message = exists_message(exc)
+            existing_slug = exc.detail.slug
         except Exception:
             log.exception("kb_editor_save_unexpected_error", slug=slug)
             error_message = "Unexpected error saving entry. Please try again."
@@ -676,9 +737,11 @@ def build_kb_router() -> APIRouter:
         csrf_token = mint_csrf_token(str(session.session_id))
         context = {
             "error_message": error_message,
+            "existing_slug": existing_slug,
             "slug": slug,
             "body": body,
             "tags": tags,
+            "similar": similar,
             "csrf_token": csrf_token,
         }
         # The fragment is returned as 200, not the semantically-matching 422:
@@ -716,6 +779,7 @@ def build_kb_router() -> APIRouter:
         session: UISessionContext = _require_admin,
         file: UploadFile = File(...),
         slug: str = Form(default=""),
+        create_anyway: bool = Form(default=False),
     ) -> HTMLResponse:
         """Single-file upload endpoint. Returns the ``_upload_progress.html`` partial.
 
@@ -732,6 +796,7 @@ def build_kb_router() -> APIRouter:
             [slug],
             tenant_id=session.tenant_id,
             actor_sub=session.operator_sub,
+            create_anyway=create_anyway,
         )
         context = {
             "rows": rows,
@@ -744,6 +809,7 @@ def build_kb_router() -> APIRouter:
         request: Request,
         session: UISessionContext = _require_admin,
         file: list[UploadFile] = File(...),
+        create_anyway: bool = Form(default=False),
     ) -> HTMLResponse:
         """Bulk upload endpoint. Returns the ``_upload_progress.html`` partial.
 
@@ -760,6 +826,7 @@ def build_kb_router() -> APIRouter:
             [""] * len(file),
             tenant_id=session.tenant_id,
             actor_sub=session.operator_sub,
+            create_anyway=create_anyway,
         )
         context = {
             "rows": rows,
@@ -773,6 +840,7 @@ def build_kb_router() -> APIRouter:
         *,
         tenant_id: object,
         actor_sub: str,
+        create_anyway: bool = False,
     ) -> list[dict[str, object]]:
         # code-quality-allow: function-size — pre-existing oversized helper;
         # #1845 only adds the actor_sub kwarg + threads it to create_entry.
@@ -781,7 +849,8 @@ def build_kb_router() -> APIRouter:
         Each entry in the returned list is a dict with:
         ``filename``, ``slug``, ``status`` (``"success"`` / ``"error"``),
         ``message`` (human-readable detail), and optionally ``entry``
-        (:class:`~meho_backplane.kb.KbEntry`) on success for the OOB swap.
+        (:class:`~meho_backplane.kb.KbEntry`) on success for the OOB swap,
+        or ``similar`` (the entries that stopped the file).
 
         Errors are caught per-file; the list length always equals
         ``len(files)`` so the template can render every row.
@@ -853,6 +922,18 @@ def build_kb_router() -> APIRouter:
                 audit_op_class="write",
             )
             try:
+                check = await check_new_entry(
+                    tenant_id,  # type: ignore[arg-type]
+                    effective_slug,
+                    body,
+                    None,
+                    actor_sub=actor_sub,
+                    may_change_any=True,
+                    create_anyway=create_anyway,
+                )
+                if check is not None:
+                    rows.append(_similar_upload_row(filename, effective_slug, check.similar))
+                    continue
                 entry, _created = await kb.create_entry(
                     tenant_id,  # type: ignore[arg-type]
                     effective_slug,
@@ -860,13 +941,25 @@ def build_kb_router() -> APIRouter:
                     metadata={"source_filename": filename},
                     actor_sub=actor_sub,
                 )
-            except InvalidKbSlugError as exc:
+            except (InvalidKbSlugError, KbSharedSlugError) as exc:
                 rows.append(
                     {
                         "filename": filename,
                         "slug": effective_slug,
                         "status": "error",
                         "message": str(exc),
+                        "entry": None,
+                    }
+                )
+                continue
+            except KbStaleRevisionError as exc:
+                rows.append(
+                    {
+                        "filename": filename,
+                        "slug": effective_slug,
+                        "status": "error",
+                        "message": exists_message(exc),
+                        "existing_slug": exc.detail.slug,
                         "entry": None,
                     }
                 )

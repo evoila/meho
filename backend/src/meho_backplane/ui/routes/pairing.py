@@ -39,7 +39,7 @@ from meho_backplane.operations.addon_pairing_contract import (
     is_contract_compatible,
 )
 from meho_backplane.operations.addon_pairing_schemas import PairedAddonRead
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.checks.views import coerce_utc_aware
 from meho_backplane.ui.templating import get_templates
 
@@ -52,7 +52,7 @@ _LIST_LIMIT = 200
 
 #: Module-level ``Depends`` closure — ruff B008 idiom, matching the sensors /
 #: runners routes.
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 
 
 def _is_htmx_request(request: Request) -> bool:
@@ -95,7 +95,7 @@ def build_pairing_router() -> APIRouter:
 
     async def _handler(
         request: Request,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
     ) -> HTMLResponse:
         """Serve ``GET /ui/pairing``. See module docstring."""
         pairings = await AddonPairingService().list_(

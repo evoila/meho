@@ -1,9 +1,10 @@
 # Delete-shaped operations get a governed path behind a dedicated destructive safety tier (decision)
 
 **Status:** decided — operator determination of record; **reverses** the standing
-"delete-shaped operations are deliberately ungoverned" posture
+"delete-shaped operations are deliberately ungoverned" posture. Shipped in 0.32.0.
+**Superseded in part by:** [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md). A MEHO-SA-Operator may approve their own `destructive` change. An agent's `destructive` request waits for a person's approval instead of DENY.
 **Date:** 2026-08-29
-**Goal:** management-plane lockdown (evoila-bosnia/meho-internal#234) — the driver;
+**Goal:** management-plane lockdown — the driver;
 its enforcement stages cannot deny operator-direct reach to appliances until
 delete-shaped work is *governed* rather than *impossible*
 **Issue:** [#3183](https://github.com/evoila/meho/issues/3183) — `policy`-labelled
@@ -44,7 +45,7 @@ was making the *constructive* surface safe.
 ## Why now — the management-plane-lockdown driver
 
 The operator direction is now stated: **management-plane lockdown**
-(evoila-bosnia/meho-internal#234) makes the backplane (central instance + satellite
+makes the backplane (central instance + satellite
 runners) the sole management-plane ingress, with operator-direct network reach to
 appliances eliminated in steady state. In that end-state "drop to a local tool"
 ceases to exist as a path. Delete-shaped work is then either **governed or
@@ -65,7 +66,9 @@ The four requirements each *tighten* an existing seam; none relaxes one:
   `_check_self_approval`) already refuses `operator.sub == request.principal_sub`
   unless the audited emergency break-glass switch is set. The destructive tier
   **removes even that escape**: for this tier self-approval is refused with no
-  break-glass, and no standing grant can pre-clear it.
+  break-glass, and no standing grant can pre-clear it. (Narrowed later by
+  [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md):
+  a MEHO-SA-Operator may approve their own destructive change.)
 - Standing grants already exclude deletes. `ServicePrincipalGrantService.create`
   refuses delete-shaped op-ids at creation
   (`operations/service_grants.py:136` `_delete_shaped_reason_by_pattern` +
@@ -136,7 +139,9 @@ Reuses the approvals substrate unchanged in mechanism: the dispatcher parks a
 `operations/approval_queue.py`), and a human clears it on a REST/CLI/console
 surface. The destructive tier's specialisation: the verdict is **always**
 `NEEDS_APPROVAL` for a human and **DENY** for an agent (no `requires_approval=False`
-fast path, no grant pre-clear, no self-approval even under break-glass).
+fast path, no grant pre-clear, no self-approval even under break-glass;
+[approval-groups-and-self-approval.md](approval-groups-and-self-approval.md)
+later let a MEHO-SA-Operator approve their own).
 
 ### Requirement 2 — mandatory preview + result-hash binding
 
@@ -189,7 +194,9 @@ render path.
   is required to expose a delete until it is modeled into this tier.
 - **The break-glass `APPROVAL_ALLOW_SELF_APPROVAL` switch does not reach this
   tier.** A single-operator tenant that must run a governed delete uses the
-  agent-requester pattern (`docs/codebase/approvals.md`), never self-approval.
+  agent-requester pattern (`docs/codebase/approvals.md`), or since
+  [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md)
+  a MEHO-SA-Operator who approves their own change.
 
 ## Implementation shape (for the follow-up Tasks)
 
@@ -229,8 +236,8 @@ render path.
 - Standing posture reversed: #3183 (this issue), #2907 (backplane-first coverage —
   the one op class it deliberately excludes today).
 - Compose boundary: the satellite write-path decision (#2901 / #3187, file
-  `docs/decisions/satellite-write-path.md`); driver Goal
-  evoila-bosnia/meho-internal#234.
+  `docs/decisions/satellite-write-path.md`); driver: the
+  management-plane lockdown Goal.
 - v0.1-spec §7 (approval is a human decision) — the human-only line this tier
   reuses.
 
@@ -285,13 +292,14 @@ destroy, with the destructive / delete-shaped spans' bodies excluded as above.
 ## Amendment (2026-09-02) — preview parity + a builder-coverage CI sweep (#3312)
 
 Two coupled follow-ups from the 2026-09-02 through-backplane canary of the
-governed `vault.kv.delete` chain (lab evoila-bosnia/claude-rdc-hetzner-dc#2814):
+governed `vault.kv.delete` chain in a lab:
 the park → human-approve → execute chain held, but `preview_operation` answered
 `preview_unavailable` for the op even though the park-time apparatus built a rich
 `proposed_effect`. Both extend — do not revise — requirements 2 and 3 above.
 
 **1. Preview parity for approval-requiring typed ops.** Requirement 2's
-previewability gate (`_resolve_previewable_descriptor` → `_is_previewable`)
+previewability gate (`_gate_and_validate` → `_is_previewable`; the first
+was named `_resolve_previewable_descriptor` when this was written)
 admitted the `destructive` tier only. It now also admits any **non-credential-class**
 `requires_approval` op (the `dangerous`-tier typed ops, canonical case
 `vault.kv.delete`), and the synthetic preview (now
@@ -335,11 +343,12 @@ That is only true for agent principals. A paired add-on that signs in as a
 
 - **Any principal may start a destructive op.** Starting it does not run it.
   The call waits for a human to approve.
-- **Agent principals** (`principal_kind=agent`) are the one exception. For
-  them the tier is DENY. The call does not wait for approval; it is refused
-  (`auth/permissions.py` `_SAFETY_DEFAULT` and `_SAFETY_CEILING` map
-  `destructive` to DENY, applied on the agent branch of
-  `operations/_validate.py::policy_gate`).
+- **Agent principals** (`principal_kind=agent`) were the one exception at
+  first: for them the tier was DENY. Since #3980 an agent's call waits for a
+  person's approval too (`auth/permissions.py` `_SAFETY_DEFAULT` and
+  `_SAFETY_CEILING` map `destructive` to NEEDS_APPROVAL, applied on the
+  agent branch of `operations/_validate.py::policy_gate`). It needs a
+  matching preview hash first, and an agent never approves.
 - **Service and user principals** always wait for approval
   (`NEEDS_APPROVAL`). They are never denied by the tier, and they never run
   without approval (`operations/_validate.py::_non_agent_verdict`, the
@@ -354,8 +363,11 @@ That is only true for agent principals. A paired add-on that signs in as a
   `operations/meta_tools.py`). The blast-radius statement is built when the
   call is parked and is stored on the parked row's `proposed_effect`. It is
   not part of the preview reply.
-- **Approval runs the op under the approver.** A different human approves
-  (no self-approval, not even with break-glass). The op then runs with the
+- **Approval runs the op under the approver.** A human approves: a
+  MEHO-SA-Operator may approve their own delete, everyone else needs a
+  MEHO-SA-Operator or an admin, and break-glass never covers this tier
+  ([approval-groups-and-self-approval.md](approval-groups-and-self-approval.md)).
+  The op then runs with the
   approver's identity
   (`operations/approval_queue.py::resume_dispatch_after_approval`), and the
   audit row names the approver.

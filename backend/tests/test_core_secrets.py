@@ -51,6 +51,7 @@ _FULL_PLAN: dict[str, Any] = {
         {"name": "rel-core-ui-auth", "kind": "ui-auth"},
         {"name": "rel-core-check-runner", "kind": "check-runner"},
         {"name": "rel-core-approval-handoff", "kind": "approval-handoff"},
+        {"name": "rel-core-params-hash", "kind": "params-hash"},
         {"name": "rel-core-broadcast-auth", "kind": "broadcast-auth"},
         {"name": "rel-core-tls", "kind": "tls", "host": "meho.example.org"},
     ],
@@ -67,6 +68,7 @@ _EXPECTED_KEYS = {
     "rel-core-ui-auth": {"session_encryption_key", "client_secret"},
     "rel-core-check-runner": {"client_secret"},
     "rel-core-approval-handoff": {"approval_handoff_encryption_key"},
+    "rel-core-params-hash": {"params_hash_key"},
     "rel-core-broadcast-auth": {"requirepass"},
     "rel-core-tls": {"tls.crt", "tls.key", "ca.crt"},
 }
@@ -143,6 +145,7 @@ async def test_passwords_are_32_alphanumeric_characters() -> None:
         store.secrets["rel-core-ui-auth"]["client_secret"],
         store.secrets["rel-core-check-runner"]["client_secret"],
         store.secrets["rel-core-broadcast-auth"]["requirepass"],
+        store.secrets["rel-core-params-hash"]["params_hash_key"],
     ]
     for password in passwords:
         assert _ALNUM_32.match(password)
@@ -475,3 +478,14 @@ async def test_kubernetes_store_create_conflict_and_error() -> None:
         await KubernetesSecretStore(_FakeCoreV1(create_status=422), "ns").create(
             "x", {"k": "v"}, "Opaque"
         )
+
+
+def test_web_push_key_is_a_p256_private_key() -> None:
+    from meho_backplane.core.secrets import MakeEntry, build_data
+    from meho_backplane.web_push.keys import public_key_for
+
+    first = build_data(MakeEntry(name="rel-core-web-push", kind="web-push"))
+    second = build_data(MakeEntry(name="rel-core-web-push", kind="web-push"))
+    assert set(first) == {"vapid_private_key"}
+    assert first != second
+    assert len(public_key_for(first["vapid_private_key"])) == 87

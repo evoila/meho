@@ -52,3 +52,35 @@ Name of a Secret the install's secrets Job creates: `<release>-core-<kind>`.
 {{- define "coreKeycloak.databaseHost" -}}
 {{- default (printf "%s-postgres" .Release.Name | trunc 63 | trimSuffix "-") .Values.database.host -}}
 {{- end }}
+
+{{/*
+The Secret that holds the password of Keycloak's database role: the one
+named in `database.passwordSecret.name`, else the core Secret the install's
+secrets Job makes.
+*/}}
+{{- define "coreKeycloak.databasePasswordSecret" -}}
+{{- .Values.database.passwordSecret.name | default (include "coreKeycloak.coreSecret" (dict "root" . "kind" "postgres-keycloak")) -}}
+{{- end }}
+
+{{/*
+Path of the CA certificate of your PostgreSQL inside a pod: `<dir>/<key>`.
+*/}}
+{{- define "coreKeycloak.databaseCaPath" -}}
+{{- printf "%s/%s" .dir .root.Values.database.caBundle.key -}}
+{{- end }}
+
+{{/*
+The JDBC URL properties for the database connection: the TLS mode, and with
+`verify-ca` or `verify-full` the CA file the driver checks the server
+against (`sslrootcert`; the driver's default factory reads a PEM file and
+does not use the Java truststore). Empty without a TLS mode.
+*/}}
+{{- define "coreKeycloak.databaseUrlProperties" -}}
+{{- with .Values.database.sslMode -}}
+{{- $props := printf "?sslmode=%s" . -}}
+{{- if $.Values.database.caBundle.configMapName -}}
+{{- $props = printf "%s&sslrootcert=%s" $props (include "coreKeycloak.databaseCaPath" (dict "root" $ "dir" "/opt/keycloak/conf/database-ca")) -}}
+{{- end -}}
+{{- $props -}}
+{{- end -}}
+{{- end }}

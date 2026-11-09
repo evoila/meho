@@ -16,9 +16,8 @@ Coverage (per Task #3362 acceptance criteria):
   that resolves to a curated operation group
   (:data:`~meho_backplane.connectors.linux.ops.LINUX_WHEN_TO_USE_BY_GROUP`).
 * The functional probe (step 7) references the ``net`` diagnostics
-  connector's ``net.dns_lookup`` / ``net.ntp_check`` -- real ``probe``-group
-  net ops that wait for a person's approval -- and is **not** a
-  (nonexistent) Linux verb.
+  connector's ``net.dns_lookup`` / ``net.ntp_check`` -- real, ``safe``,
+  ``probe``-group net ops -- and is **not** a (nonexistent) Linux verb.
 * Both docs cite every recipe op id, so the prose contract and the shipped
   surface cannot drift.
 """
@@ -91,8 +90,8 @@ def test_recipe_functional_probe_is_a_net_verb_not_a_linux_verb(op_id: str) -> N
     )
 
 
-async def test_recipe_functional_probe_ops_exist_and_probe_grouped() -> None:
-    """net.dns_lookup / net.ntp_check are shipped probe-group net ops that wait for approval.
+async def test_recipe_functional_probe_ops_exist_safe_and_probe_grouped() -> None:
+    """net.dns_lookup / net.ntp_check are shipped, safe, probe-group net ops.
 
     Capture what the net registrars pass to ``register_typed_operation``
     without touching the DB: patch the symbol in each registrar's module,
@@ -116,8 +115,8 @@ async def test_recipe_functional_probe_ops_exist_and_probe_grouped() -> None:
     for op_id in _DAY0_CROSS_CONNECTOR_STEPS:
         assert op_id in captured, f"{op_id!r} is not registered by the net connector"
         meta = captured[op_id]
-        assert meta["safety_level"] == "caution", f"{op_id!r} is not caution-tier"
-        assert meta["requires_approval"] is True, f"{op_id!r} does not wait for approval"
+        assert meta["safety_level"] == "safe", f"{op_id!r} is not safe-tier"
+        assert meta["requires_approval"] is False, f"{op_id!r} requires approval"
         assert meta["group_key"] == "probe", f"{op_id!r} is not in the probe group"
 
 

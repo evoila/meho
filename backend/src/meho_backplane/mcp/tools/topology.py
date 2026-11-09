@@ -101,7 +101,7 @@ from typing import Any, Final
 
 from sqlalchemy import select
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.connectors.topology.ops import (
     TOPOLOGY_ANNOTATE_OP_ID,
     TOPOLOGY_GRAPH_CONNECTOR_ID,
@@ -129,6 +129,7 @@ from meho_backplane.mcp.server import (
 )
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
 from meho_backplane.operations._lookup import connector_product_known, parse_connector_id
+from meho_backplane.operations.answer_ready import ANSWER_READY_OUTPUT_PROPERTIES
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import UnknownConnectorError
@@ -432,43 +433,28 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
 
 
 _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
-    "Read the topology graph: what depends on what. Scoped to your tenant.\n\n"
+    "Read the topology graph: what depends on what, in your tenant.\n\n"
     "WHEN TO CALL: call `kind=dependents` *before* recommending a destructive "
     "op (delete, shutdown, detach): `{kind: dependents, target: <name>}` "
-    "shows what would break. Also "
-    "for impact ('what does this VM run on?') and routes between two "
-    "resources.\n\n"
-    "KINDS (one tool; `kind` picks the shape):\n"
-    "- `dependents` / `dependencies`: what depends on `target` / what "
-    "`target` needs. Need `target`.\n"
-    "- `path`: shortest route from `from_name` to `to_name`. Needs both.\n"
-    "- `edges`: flat list of edges. Every filter is optional, e.g. "
-    "`source: curated`, or `conflicts: true` for annotations that "
-    "contradict discovered edges.\n"
-    "- `timeline`: graph changes in the tenant, in time order; bound "
-    "it with `since` / `until`. If `next_cursor` is not null, pass it as "
+    "shows what would break.\n\n"
+    "KINDS:\n"
+    "- `dependents` / `dependencies`: what needs `target` / what `target` "
+    "needs. Need `target`.\n"
+    "- `path`: route from `from_name` to `to_name`. Needs both.\n"
+    "- `edges`: flat list of edges; every filter is optional.\n"
+    "- `timeline`: graph changes in time order; pass `next_cursor` as "
     "`cursor` for the next page.\n"
-    "- `diff`: net change per resource between `ts1` (exclusive) and "
-    "`ts2` (inclusive). Needs both. If `truncated` is true, narrow the "
-    "window.\n"
-    "- `history`: every change of one node (`target`), with full before "
-    "and after snapshots; `include_edges: true` adds its edges.\n\n"
+    "- `diff`: net change between `ts1` and `ts2`. Needs both.\n"
+    "- `history`: every change of one node (`target`).\n\n"
     "RULES:\n"
-    "- If a name matches nodes of more than one kind, the call fails and "
-    "names the kinds; pass `node_kind` (and `to_node_kind` for `path`).\n"
+    "- A name that matches nodes of more than one kind fails; pass "
+    "`node_kind` (and `to_node_kind` for `path`).\n"
     '- `status: "node_untracked"` means MEHO has no graph data for that '
-    "name. It is NOT 'safe to delete': there is no impact answer.\n"
-    "- Closures follow every edge kind. `via_relation_class` on each row "
-    "says `containment`, `placement`, `dependency` or `unknown`; only "
-    "`dependency` is a service dependency. Pass `relation_class` to keep "
-    "one class.\n"
-    "- If `completeness.state` is not `complete`, the answer is cut short "
-    "or missing. Never read it as everything that is affected; "
-    "`completeness.guidance` says how to narrow.\n"
-    "- A large answer has a `handle` instead of rows; read every row with "
-    "`result_query`.\n"
-    "- Rows carry `freshness`; the `evidence` block explains each value "
-    "in your answer."
+    "name. It is NOT 'safe to delete'.\n"
+    "- If `completeness.state` is not `complete`, the answer is not the "
+    "full list of what is affected.\n"
+    "- A large answer has a `handle` instead of rows; read them with "
+    "`result_query`."
 )
 
 
@@ -1316,6 +1302,7 @@ register_mcp_tool(
                 "sample_rows_returned": {"type": "integer"},
                 "sample_bytes": {"type": "integer"},
                 "source_key": {"type": "string"},
+                **ANSWER_READY_OUTPUT_PROPERTIES,
                 "preview_omits": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1500,31 +1487,61 @@ _LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
 }
 
 
+_CROSS_TENANT_DENIED = (
+    "list_targets: the `tenant_id` argument (cross-tenant scope) "
+    "requires the platform_admin capability"
+)
+
+
+def _parse_tenant_uuid(tenant_arg: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(tenant_arg)
+    except ValueError:
+        return None
+
+
+async def _resolve_own_tenant(operator: Operator, tenant_arg: str) -> Any:
+    """Return the caller's own tenant id when *tenant_arg* names it, else refuse.
+
+    Reads only the caller's own tenant row, never the one *tenant_arg*
+    names. Every other value gets the same error, whether such a tenant
+    exists or not.
+    """
+    if _parse_tenant_uuid(tenant_arg) == operator.tenant_id:
+        return operator.tenant_id
+    async with get_sessionmaker()() as session:
+        own_slug = (
+            await session.execute(select(Tenant.slug).where(Tenant.id == operator.tenant_id))
+        ).scalar_one_or_none()
+    if own_slug is not None and own_slug == tenant_arg:
+        return operator.tenant_id
+    raise McpPermissionDeniedError(_CROSS_TENANT_DENIED)
+
+
 async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> Any:
     """Resolve the tenant id to scope the listing to, authorizing a cross-tenant claim.
 
     No ``tenant_id`` argument → the operator's own tenant (the common,
-    same-tenant path open to any role). A ``tenant_id`` argument is
-    resolved by slug first then UUID; an unknown tenant surfaces as
-    ``-32602`` (operator-actionable input problem) rather than silently
-    falling back to the own-tenant scope — a silent fallback would make
-    a typo'd cross-tenant query look like an empty tenant.
+    same-tenant path open to any role).
 
-    Authorization mirrors the REST ``authorize_tenant_scope`` helper
-    (#1640): resolving to the operator's *own* tenant is always allowed
-    (a caller may name their own tenant explicitly by slug or UUID);
-    resolving to a *different* tenant is the cross-tenant case and is
-    permitted **only** for a ``platform_admin`` (#1638). A non-platform-
-    admin naming a foreign tenant is denied with ``-32602``.
+    A caller who is not a platform admin may name only their own tenant
+    (by slug or UUID). Every other value gets one fixed ``-32602`` error,
+    whether such a tenant exists or not, and MEHO looks up no tenant but
+    the caller's own (:func:`_resolve_own_tenant`).
 
-    The gate moved off ``tenant_admin`` *rank*: tenant role governs what
-    an operator may do *within* their tenant, while crossing the tenant
-    boundary is a separate, platform-level capability — gating cross-
-    tenant enumeration on ``tenant_admin`` alone let a tenant-admin of A
-    enumerate B's targets (a cross-tenant IDOR, #1641).
+    A platform admin (``platform_admin``, the cross-tenant capability)
+    who is a person may name any tenant. MEHO resolves it by slug
+    first then UUID; an unknown tenant surfaces as ``-32602`` rather than
+    silently falling back to the own-tenant scope — a silent fallback
+    would make a typo'd cross-tenant query look like an empty tenant. A
+    machine login never crosses tenants, also when its token carries the
+    platform-admin claim. This matches the REST ``authorize_tenant_scope``
+    helper.
     """
     if tenant_arg is None:
         return operator.tenant_id
+    if not (operator.platform_admin and is_human_principal(operator)):
+        return await _resolve_own_tenant(operator, tenant_arg)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         by_slug = await session.execute(
@@ -1532,11 +1549,7 @@ async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> A
         )
         resolved = by_slug.scalar_one_or_none()
         if resolved is None:
-            # Slug miss — try the argument as a tenant UUID.
-            try:
-                candidate = uuid.UUID(tenant_arg)
-            except ValueError:
-                candidate = None
+            candidate = _parse_tenant_uuid(tenant_arg)
             if candidate is not None:
                 by_id = await session.execute(
                     select(Tenant.id).where(Tenant.id == candidate),
@@ -1545,13 +1558,6 @@ async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> A
     if resolved is None:
         raise McpInvalidParamsError(
             f"list_targets: no tenant matches {tenant_arg!r} (tried slug then UUID)",
-        )
-    if resolved == operator.tenant_id:
-        return resolved
-    if not operator.platform_admin:
-        raise McpPermissionDeniedError(
-            "list_targets: the `tenant_id` argument (cross-tenant scope) "
-            "requires the platform_admin capability",
         )
     return resolved
 
@@ -1750,6 +1756,7 @@ register_mcp_tool(
                 "sample_rows_returned": {"type": "integer"},
                 "sample_bytes": {"type": "integer"},
                 "source_key": {"type": "string"},
+                **ANSWER_READY_OUTPUT_PROPERTIES,
                 "handle": {
                     "type": "object",
                     "description": (

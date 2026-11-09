@@ -47,6 +47,11 @@ from meho_backplane.operations._validate import (
     policy_gate,
 )
 from meho_backplane.operations.composite import enforce_subop_policy
+from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
+from meho_backplane.operations.service_grants import (
+    GrantValidationError,
+    ServicePrincipalGrantService,
+)
 from meho_backplane.settings import get_settings
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000032a4")
@@ -669,3 +674,52 @@ async def test_selector_grant_parks_on_fingerprint_mismatch() -> None:
     assert result is not None
     assert result.status == "awaiting_approval"
     assert not await _grant_use_rows()
+
+
+# ---------------------------------------------------------------------------
+# a credential read is never covered by a standing grant
+# ---------------------------------------------------------------------------
+
+_SECRET_OP = "vault.kv.read"
+_SECRET_CONNECTOR = "vault-1.x"
+
+
+@pytest.mark.asyncio
+async def test_grant_create_refuses_a_credential_read_op() -> None:
+    with pytest.raises(GrantValidationError) as exc:
+        await ServicePrincipalGrantService().create(
+            _TENANT_ID,
+            "op-admin",
+            ServiceGrantCreate(
+                principal_sub=_PRINCIPAL,
+                op_id=_SECRET_OP,
+                connector_id=_SECRET_CONNECTOR,
+                reason="unattended build",
+            ),
+            creator_role=TenantRole.TENANT_ADMIN,
+        )
+    assert str(exc.value) == (
+        f"A standing grant cannot cover {_SECRET_OP}: it shows a secret, "
+        "so a person always approves it."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("safety_level, requires_approval", [("caution", False), ("safe", True)])
+async def test_stored_grant_never_clears_a_credential_read_wait(
+    safety_level: str, requires_approval: bool
+) -> None:
+    """A grant row that exists anyway (older than the rule) still waits for a person."""
+    grant_id = await _seed_grant(op_id=_SECRET_OP, connector_id=_SECRET_CONNECTOR)
+    result = await enforce_subop_policy(
+        operator=_operator(principal_kind=PrincipalKind.SERVICE),
+        connector_id=_SECRET_CONNECTOR,
+        op_id=_SECRET_OP,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+        target=None,
+        params={},
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    assert not await _grant_use_rows(grant_id)

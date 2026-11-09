@@ -81,6 +81,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.events.outbox import publish as publish_event
 from meho_backplane.operations.addon_step_events import AddonStepEventService
+from meho_backplane.operations.identity_budget import TokenUsage
 
 #: Event kind the agent-run terminal-transition emits onto the outbox.
 #: The event drain's subscription matcher (:mod:`meho_backplane.events.matcher`)
@@ -819,6 +820,7 @@ async def succeed_run(
     output: dict[str, object],
     cost: Decimal | None = None,
     turns: int | None = None,
+    usage: TokenUsage | None = None,
 ) -> AgentRun:
     """Transition a run to ``succeeded`` and record its output.
 
@@ -845,6 +847,8 @@ async def succeed_run(
         cost: Computed cost (G11.5/C3). ``None`` in v0.2.
         turns: Model-request turn total to persist. ``None`` leaves the
             column unchanged.
+        usage: The run's token totals (#5853), written to the four token
+            columns. ``None`` leaves them unchanged.
 
     Returns:
         The mutated, flushed row.
@@ -858,6 +862,11 @@ async def succeed_run(
         row.cost = cost
     if turns is not None:
         row.turns = turns
+    if usage is not None:
+        row.input_tokens = usage.input_tokens
+        row.output_tokens = usage.output_tokens
+        row.cache_read_tokens = usage.cache_read_tokens
+        row.cache_write_tokens = usage.cache_write_tokens
     return await transition(session, row, AgentRunStatus.SUCCEEDED)
 
 
@@ -866,6 +875,7 @@ async def fail_run(
     row: AgentRun,
     *,
     error: str,
+    cost: Decimal | None = None,
 ) -> AgentRun:
     """Transition a run to ``failed`` and record the failure reason.
 
@@ -877,6 +887,8 @@ async def fail_run(
         session: Open :class:`AsyncSession`; flushed, not committed.
         row: The non-terminal :class:`AgentRun`.
         error: Human-readable failure reason.
+        cost: Cost of the model calls the run made before it failed.
+            ``None`` when it made none.
 
     Returns:
         The mutated, flushed row.
@@ -886,6 +898,8 @@ async def fail_run(
             row's current status.
     """
     row.error = error
+    if cost is not None:
+        row.cost = cost
     return await transition(session, row, AgentRunStatus.FAILED)
 
 
@@ -905,11 +919,11 @@ async def cancel_run(
     (409), not a silent no-op.
 
     The actual interruption of the in-flight async loop is the
-    runtime's responsibility (the AgentRun seam, G11.1-T1): this
-    function records the *durable intent* (status + ``ended_at``); the
-    loop observes the cancelled status on its next turn boundary and
-    stops. Recording the intent durably first is what makes
-    cancellation survive a process restart.
+    invoker's job: this function records the durable cancel (status +
+    ``ended_at``); the invoker then cancels the loop task on its worker,
+    and a loop on another worker stops when its heartbeat finds the lease
+    gone. Recording the cancel durably first is what makes it survive a
+    process restart.
 
     Args:
         session: Open :class:`AsyncSession`; flushed, not committed.

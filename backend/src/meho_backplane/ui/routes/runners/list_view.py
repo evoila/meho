@@ -45,7 +45,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.gateway import repository
 from meho_backplane.gateway.queue import GATEWAY_LONGPOLL_MAX_WAIT_SECONDS
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.runners.views import project_runner_to_row
 from meho_backplane.ui.templating import get_templates
 
@@ -58,7 +58,7 @@ _LIST_LIMIT = 200
 
 #: Module-level ``Depends`` closure -- ruff B008 idiom (no function calls in
 #: default argument positions), matching the checks / scheduler routes.
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 
 
 def _is_htmx_request(request: Request) -> bool:
@@ -118,7 +118,7 @@ def build_list_router() -> APIRouter:
 
     async def _handler(
         request: Request,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
     ) -> HTMLResponse:
         """Serve ``GET /ui/runners``. See module docstring for the contract."""
         return await _render(request, session_ctx=session_ctx)

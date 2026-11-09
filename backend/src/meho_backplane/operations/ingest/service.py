@@ -83,6 +83,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_exclusive
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditEventClass
 from meho_backplane.operations.ingest._internals import (
     _UNSET,
     OP_DELETE_CONNECTOR,
@@ -1018,9 +1019,11 @@ class ReviewService:
         ``register_typed_operation`` time (see e.g.
         :mod:`meho_backplane.connectors.vault.ops` and
         :mod:`meho_backplane.connectors.bind9.ops_zone`); for ingested connectors the
-        operator-review pass writes the same shape via this method so
-        :func:`search_operations` and the agent's ``call_operation`` see populated
-        guidance once the op is enabled. The argument is a plain ``dict`` (the model's
+        operator-review pass writes the same shape via this method. An agent sees
+        the prose keys only in the exact-op contract of :func:`search_operations`,
+        and only while the ``OPERATION_CONTRACT_GUIDANCE`` switch is on (#4757).
+        Ranked hits never carry it, and ``call_operation`` reads only the machine
+        keys (``pagination_hint``, ``result_*``). The argument is a plain ``dict`` (the model's
         ``llm_instructions`` column is ``JSON``); the helper persists it as-is. Passing
         ``{}`` clears the column to an empty mapping rather than re-deleting it —
         operators wanting to un-author the field should disable the op instead.
@@ -1129,6 +1132,7 @@ class ReviewService:
                 operator_sub=self._operator.sub,
                 operator_tenant_id=self._operator.tenant_id,
                 op_id=OP_EDIT_OP,
+                event_class=AuditEventClass.CONFIG_CHANGE,
                 payload=payload,
             )
             await session.commit()
@@ -1227,6 +1231,7 @@ class ReviewService:
                 operator_sub=self._operator.sub,
                 operator_tenant_id=self._operator.tenant_id,
                 op_id=OP_EDIT_OP,
+                event_class=AuditEventClass.CONFIG_CHANGE,
                 payload={
                     "connector_id": connector_id,
                     "op_id": op_id,

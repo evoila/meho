@@ -16,6 +16,13 @@
   :mod:`meho_backplane.targets.vault_login_extras`.
 * ``DELETE /api/v1/targets/{name}``       — soft-delete. ``tenant_admin`` role.
 
+The three writes (``POST``, ``PATCH``, ``DELETE``) are for people only.
+A service or runner login with ``tenant_admin`` gets 403
+``human_principal_required``; an agent login, capped at ``operator``, gets
+403 ``insufficient_role``. A machine login registers and removes targets
+with the ``targets.register`` and ``targets.remove`` operations, which go
+through the approval check (:mod:`meho_backplane.connectors.targets.ops`).
+
 All routes are tenant-scoped via ``operator.tenant_id`` extracted from the
 JWT by :func:`~meho_backplane.middleware.verify_jwt_and_bind`. Cross-tenant
 reads are impossible — the WHERE clause always includes ``tenant_id``.
@@ -146,9 +153,10 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import object_session
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors._shared.gsm_creds import (
     ALLOWED_PROJECTS_SETTING,
@@ -163,8 +171,9 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
-from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+from meho_backplane.connectors.vault.tenant_paths import is_derived_secret_ref, tenant_secret_ref
 from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
+from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
@@ -209,6 +218,31 @@ router = APIRouter(prefix="/api/v1/targets", tags=["targets"])
 #: :mod:`meho_backplane.api.v1.retrieve`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: The 403 text a machine login gets on a target write.
+MACHINE_TARGET_WRITE_REMEDIATION: Final[str] = (
+    "target writes on REST are for people. A machine login (agent, service "
+    "or runner) registers a target with call_operation(connector_id="
+    "'targets-registry-1.x', op_id='targets.register'), changes one with "
+    "op_id='targets.update' and removes one with op_id='targets.remove'; "
+    "MEHO checks each against the approval rules. A "
+    "person changes a target in the operator console or with the meho CLI."
+)
+
+
+def _require_admin_person(operator: Operator = _require_admin) -> Operator:
+    """The gate of ``POST``, ``PATCH`` and ``DELETE``: ``tenant_admin``, then a person.
+
+    The role check runs first, so a login with a lower role (also an
+    agent, whose role MEHO caps at ``operator``) gets ``insufficient_role``.
+    A machine login with ``tenant_admin`` then gets 403
+    ``human_principal_required``.
+    """
+    ensure_human_principal(operator, remediation=MACHINE_TARGET_WRITE_REMEDIATION)
+    return operator
+
+
+_require_admin_person_dep = Depends(_require_admin_person)
 
 #: Canonical op id for the discover route's audit row + broadcast.
 #: ``.discover`` is not one of the broadcast classifier's read/write
@@ -413,6 +447,9 @@ def _to_full(t: TargetORM) -> Target:
         port=t.port,
         fqdn=t.fqdn,
         secret_ref=t.secret_ref,
+        secret_ref_derived=is_derived_secret_ref(
+            t.secret_ref, tenant_id=t.tenant_id, target_name=t.name
+        ),
         auth_model=AuthModel(t.auth_model),
         vpn_required=t.vpn_required,
         verify_tls=t.verify_tls,
@@ -687,8 +724,8 @@ def _audit_flight_recorder_capture_write(
     off *t* (``t.flight_recorder_capture``), folds the tri-state before/after
     into this request's ``audit_log`` payload (via ``audit_*`` contextvars the
     :class:`~meho_backplane.audit.AuditMiddleware` reads) + a WARN, and evicts
-    the resolver's per-target cache so the flip takes effect on the next
-    dispatch. Called by ``create_target`` (a non-inherit initial value) and
+    the resolver's per-target cache, now and after the commit, so the flip
+    takes effect on the next dispatch. Called by ``create_target`` (a non-inherit initial value) and
     ``update_target`` (the override sent AND changed).
     """
     after = t.flight_recorder_capture
@@ -707,9 +744,13 @@ def _audit_flight_recorder_capture_write(
         flight_recorder_capture_after=_fr_capture_audit_value(after),
     )
     # Evict the resolver's per-target override cache so the change is visible on
-    # the next dispatch instead of waiting out the 60s TTL. Harmless no-op on a
-    # freshly-created target id (not yet cached).
-    invalidate_target_override_cache(t.id)
+    # the next dispatch instead of waiting out the 60s TTL: now, and again after
+    # the request's session commits, so a read between the two cannot keep the
+    # old override. Harmless no-op on a freshly-created target id (not yet cached).
+    target_id = t.id
+    clear_now_and_after_commit(
+        object_session(t), lambda: invalidate_target_override_cache(target_id)
+    )
 
 
 def _registered_products() -> set[str]:
@@ -1522,7 +1563,7 @@ def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
 @router.post("", response_model=Target, status_code=201)
 async def create_target(
     body: TargetCreate,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
     """Create a new target in the requesting tenant.
@@ -1730,7 +1771,7 @@ def _validate_update_body_fields(
 async def update_target(
     name: str,
     body: TargetUpdate,
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
     """Partially update a target.
@@ -1750,9 +1791,22 @@ async def update_target(
     same write-time gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
     PATCH not sending the field are untouched; no-op when the guard is disabled. See
     :func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an
-    id (:func:`resolve_route_target`).
+    id (:func:`resolve_route_target`). The change itself is
+    :func:`apply_target_update`.
     """
     t = await resolve_route_target(session, operator.tenant_id, name)
+    return await apply_target_update(t, body, operator, session)
+
+
+async def apply_target_update(
+    t: TargetORM, body: TargetUpdate, operator: Operator, session: AsyncSession
+) -> Target:
+    """Apply the sent fields of *body* to the loaded row *t*, with every check of PATCH.
+
+    The caller finds the row. REST ``PATCH`` finds it by name, alias or id;
+    the ``targets.update`` op finds it by id only and locks it. Nothing is
+    looked up by name here, so the change lands on the row the caller found.
+    """
     updates = body.model_dump(exclude_unset=True)
     # T1 (#1780). Snapshot the pre-patch TLS-verification state *before*
     # the ``setattr`` loop below mutates the row, so the audit fold-in
@@ -1891,7 +1945,7 @@ async def update_target(
 async def delete_target(
     name: str,
     force: bool = Query(default=False),
-    operator: Operator = _require_admin,
+    operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """Soft-delete a target.

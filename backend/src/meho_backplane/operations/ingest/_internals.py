@@ -543,6 +543,7 @@ async def write_audit_row(
     operator_tenant_id: UUID,
     op_id: str,
     payload: dict[str, Any],
+    event_class: AuditEventClass = AuditEventClass.OPERATION_EXECUTION,
 ) -> uuid.UUID:
     """Append one :class:`AuditLog` row for a service-level action.
 
@@ -582,11 +583,17 @@ async def write_audit_row(
     not ``AUDIT_WRAPPER_ROWS_RETIRED`` is on (the cutover listener only
     fills lineage when that setting is on). ``None`` for a plain REST
     request without a session.
+
+    ``event_class`` is ``operation_execution`` for every action except a
+    settings change, which passes ``config_change``: an edit of one
+    operation (:data:`OP_EDIT_OP`, #5791) and a tenant's own on or off
+    switch (``meho_connector_tenant_setting``, #5864). No operation ran,
+    so a filter for operations that ran must not return these rows.
     """
     audit_id = uuid.uuid4()
     row = AuditLog(
         id=audit_id,
-        event_class=AuditEventClass.OPERATION_EXECUTION,
+        event_class=event_class,
         occurred_at=datetime.now(UTC),
         operator_sub=operator_sub,
         tenant_id=operator_tenant_id,

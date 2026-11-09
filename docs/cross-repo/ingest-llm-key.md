@@ -116,6 +116,12 @@ credentials) is consumer-owned and not rendered by the chart.
 > set `agent.enabled: true` to run agents, ingest grouping already has
 > its key and no extra wiring is needed.
 
+> **An OpenAI-compatible model endpoint is not enough.** The agent can
+> also use an OpenAI-compatible endpoint (`agent.openai.*`,
+> `OPENAI_API_KEY`). The grouping pass does not use it: it reads only
+> `ANTHROPIC_API_KEY`
+> ([`anthropic_client.py`](../../backend/src/meho_backplane/operations/ingest/anthropic_client.py)).
+
 ## Verify on a live deploy
 
 After deploying with the key set, confirm the grouping pass works

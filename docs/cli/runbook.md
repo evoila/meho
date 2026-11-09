@@ -198,6 +198,15 @@ insufficient_role.
 
 **REST route:** [`backend/src/meho_backplane/api/v1/runbook_templates.py`](../../backend/src/meho_backplane/api/v1/runbook_templates.py).
 
+### Discarding a draft
+
+There is no `meho runbook` verb that deletes a draft. A TENANT_ADMIN
+deletes an unpublished draft in the operator console
+(`/ui/runbooks/<slug>`), with the `meho_runbook_discard_template` MCP
+tool, or with `POST /api/v1/runbooks/templates/{slug}/discard`. Only a
+`draft` can be discarded. A published version is retired with
+`deprecate-template`.
+
 ### `list-templates`
 
 ```
@@ -294,7 +303,7 @@ the procedure is broken, reassign if the wrong person is driving.
 ### `start`
 
 ```
-meho runbook start <slug> --target <name> [--param k=v ...] [--json] [--backplane URL]
+meho runbook start <slug> --target <name> [--param k=v ...] [--work-ref <ref>] [--json] [--backplane URL]
 ```
 
 Begin a new run on the latest non-deprecated published version of
@@ -307,6 +316,10 @@ thumbprint…) substituted into the template body as `${run.target}`.
 `--param k=v` sets a value for `${run.params.k}`; repeat for
 multiple params. Every `${run.params.X}` the template references
 must be satisfied at start — a missing key surfaces as HTTP 422.
+
+`--work-ref <ref>` is optional. It names the change ticket the run
+belongs to (for example `CHG-123`). MEHO stores it on the run, and
+every `operation_call` step writes it to its audit row.
 
 The CLI renders **only step 1**: the run_id, the template
 coordinates, the step body with substitutions applied, and the
@@ -358,7 +371,7 @@ when the verify predicate matches. If not, the step transitions to
 - **`verify.type=confirm`** — the operator answers yes/no/escalate.
   Only `yes` advances.
   - Without `--verify-response`, the CLI calls the backend, sees
-    HTTP 422 `VerifyResponseRequiredError`, prompts on stdin
+    HTTP 422 with the error type `verify_response_required`, prompts on stdin
     (`Answer [yes/no/escalate]:`), and re-issues with the answer.
     This is the interactive path operators take by default.
   - With `--verify-response yes|no|escalate`, the CLI sends the
@@ -497,7 +510,7 @@ unreachable · `4` unexpected_response (incl. 400
 ### `runs`
 
 ```
-meho runbook runs [--assignee <sub>] [--status in_progress|completed|abandoned] [--template-slug <slug>] [--limit N] [--json] [--backplane URL]
+meho runbook runs [--assignee <sub>] [--status in_progress|completed|abandoned] [--template-slug <slug>] [--filter-work-ref <ref>] [--limit N] [--json] [--backplane URL]
 ```
 
 List runs in the operator's tenant. Role-based scoping is enforced
@@ -507,6 +520,9 @@ server-side:
   the backend (role floor — the backend forces `assignee=self`).
 - **TENANT_ADMIN** sees all tenant runs unless `--assignee`
   narrows.
+
+`--filter-work-ref <ref>` shows only the runs started with that
+change-ticket reference (exact match).
 
 The CLI sends what you pass and renders what the backend returns —
 no client-side double-checking.
@@ -912,11 +928,12 @@ verify shapes, why no Jinja, why no JSONPath) see
 
 Every verb accepts `--json`. With the flag, the CLI emits the raw
 response envelope from the underlying REST route — pipe-able to
-`jq` for scripted use.
+`jq` for scripted use. The two list verbs return
+`{"items": [...], "next_cursor": null}`.
 
 ```bash
-meho runbook list-templates --json | jq '.templates[] | {slug, version, status}'
-meho runbook runs --status in_progress --json | jq '.runs[].run_id'
+meho runbook list-templates --json | jq '.items[] | {slug, version, status}'
+meho runbook runs --status in_progress --json | jq '.items[].run_id'
 meho runbook start cert-rotation-vcenter --target prod-vc01 --json | jq -r '.run_id'
 ```
 

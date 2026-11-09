@@ -30,6 +30,13 @@ the operator follows.
 Without these settings every `register` and `revoke` call returns
 **`503 keycloak_admin_not_configured`**.
 
+**Built-in Keycloak.** With the built-in Keycloak
+(`coreKeycloak.enabled: true`, the chart default since 0.45.0), Steps 1–3
+are done for you. The realm file has the `meho-admin` client, the install
+makes its secret (`<release>-core-keycloak-admin`), and the chart sets the
+three `KEYCLOAK_ADMIN_*` env vars to it. Start at Step 4. Steps 1–3 are
+for a Keycloak you bring yourself.
+
 ## Concepts
 
 ### Agent principal
@@ -259,7 +266,9 @@ curl -H "Authorization: Bearer <admin-token>" \
 ## MCP surface
 
 The same lifecycle is also available via MCP tools for agents that
-manage their own sub-principals:
+manage their own sub-principals. They are operator tools: an MCP
+session lists them only when it asked for the `mcp:admin` scope
+([`../codebase/mcp.md`](../codebase/mcp.md)).
 
 | Tool | Role | Description |
 |------|------|-------------|
@@ -284,9 +293,9 @@ manage their own sub-principals:
 - [`mcp-client-setup.md`](mcp-client-setup.md) — MCP browser-flow client
   provisioning (for human-facing MCP sessions, not agent clients)
 - [`../codebase/approvals.md`](../codebase/approvals.md) §
-  "Single-operator tenants: use an agent-requester, not break-glass" —
-  why an `agent:<name>` principal (a distinct `sub`) is the four-eyes
-  answer for single-operator tenants, instead of the
+  "Single-operator tenants" — a single operator in MEHO-SA-Operators
+  approves their own change; an `agent:<name>` principal (a distinct
+  `sub`) as the requester is the other way, instead of the
   `APPROVAL_ALLOW_SELF_APPROVAL` break-glass
 - Issue [#815](https://github.com/evoila/meho/issues/815) — G11.2-T1
   implementation

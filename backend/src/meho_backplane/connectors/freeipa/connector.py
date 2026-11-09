@@ -147,6 +147,10 @@ class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
     product = "freeipa"
     version = "4.x"
     impl_id = "freeipa-jsonrpc"
+    summary = (
+        "Reads FreeIPA users, groups, hosts and access rules; creates host groups and rules, "
+        "deletes hosts and host groups, and sets the password policy."
+    )
     supported_version_range = ">=4.9,<5.0"
     priority = 1
 

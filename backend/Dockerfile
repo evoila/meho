@@ -332,6 +332,8 @@ FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f713
 #                                                   CVE-2026-103111
 #   sqlite3 (libsqlite3-0)    >= 3.46.1-7+deb13u2   CVE-2026-11822, CVE-2026-11824
 #   apt (apt libapt-pkg7.0)   >= 3.0.4              CVE-2026-109518
+#   zlib (zlib1g)             >= 1:1.3.dfsg+really1.3.1-1+deb13u1
+#                                                   CVE-2026-85091, CVE-2026-76844
 # Drop a package from `pkgs` once a base-digest bump lands a rebuilt base
 # already carrying it at (or above) its floor, and drop a floor once no
 # package of its source is left.
@@ -340,7 +342,7 @@ RUN set -eu; \
           mount bsdutils login \
           openssl libssl3t64 openssl-provider-legacy \
           perl-base gzip libpcre2-8-0 libsqlite3-0 \
-          apt libapt-pkg7.0'; \
+          apt libapt-pkg7.0 zlib1g'; \
     apt-get update; \
     apt-get install -y --no-install-recommends --only-upgrade $pkgs; \
     rm -rf /var/lib/apt/lists/*; \
@@ -355,6 +357,7 @@ RUN set -eu; \
         pcre2)      floor='10.46-1~deb13u3' ;; \
         sqlite3)    floor='3.46.1-7+deb13u2' ;; \
         apt)        floor='3.0.4' ;; \
+        zlib)       floor='1:1.3.dfsg+really1.3.1-1+deb13u1' ;; \
         *) echo "ERROR: ${pkg} (source ${src}) has no security floor in this layer -- add one to the case list" >&2; exit 1 ;; \
       esac; \
       if ! dpkg --compare-versions "${have}" ge "${floor}"; then \

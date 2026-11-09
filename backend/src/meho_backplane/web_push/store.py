@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import Insert, delete, select
+from sqlalchemy import Insert, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -26,10 +26,12 @@ __all__ = [
     "MAX_SUBSCRIPTIONS_PER_PERSON",
     "PushStoreError",
     "SubscriptionView",
+    "delete_gone",
     "delete_own_by_endpoint",
     "is_own_endpoint",
     "list_for_person",
     "list_for_tenant",
+    "refresh_approve_scope",
     "remove_subscription",
     "save_subscription",
 ]
@@ -74,8 +76,9 @@ async def save_subscription(
     operator_sub: str,
     tenant_id: uuid.UUID,
     subscription: CheckedSubscription,
+    approve_scope: str | None,
 ) -> None:
-    """Store *subscription* for this person, with the time.
+    """Store *subscription* for this person, with the time and *approve_scope*.
 
     The endpoint names one browser. When it is stored already (the same
     browser switched on again, or another person now uses it), the row is
@@ -89,7 +92,11 @@ async def save_subscription(
     try:
         async with db.begin_nested():
             await _upsert(
-                db, operator_sub=operator_sub, tenant_id=tenant_id, subscription=subscription
+                db,
+                operator_sub=operator_sub,
+                tenant_id=tenant_id,
+                subscription=subscription,
+                approve_scope=approve_scope,
             )
             await _drop_oldest(db, operator_sub=operator_sub)
     except SQLAlchemyError:
@@ -102,6 +109,7 @@ async def _upsert(
     operator_sub: str,
     tenant_id: uuid.UUID,
     subscription: CheckedSubscription,
+    approve_scope: str | None,
 ) -> None:
     values = {
         "id": uuid.uuid4(),
@@ -111,6 +119,7 @@ async def _upsert(
         "p256dh": subscription.p256dh,
         "auth": subscription.auth,
         "created_at": datetime.now(UTC),
+        "approve_scope": approve_scope,
     }
     replaced = {k: v for k, v in values.items() if k not in ("id", "endpoint")}
     conn = await db.connection()
@@ -171,6 +180,40 @@ async def is_own_endpoint(db: AsyncSession, *, operator_sub: str, endpoint: str)
     except SQLAlchemyError:
         raise PushStoreError("could not read the push subscription") from None
     return found.first() is not None
+
+
+async def refresh_approve_scope(
+    db: AsyncSession, *, operator_sub: str, tenant_id: uuid.UUID, approve_scope: str | None
+) -> None:
+    """Set *approve_scope* on this person's rows of *tenant_id*.
+
+    The login groups can change after the switch was turned on; the account
+    page calls this each time it opens. Rows of another tenant keep theirs.
+    Raises :class:`PushStoreError` when the database refuses the write.
+    """
+    try:
+        async with db.begin_nested():
+            await db.execute(
+                update(PushSubscription)
+                .where(PushSubscription.operator_sub == operator_sub)
+                .where(PushSubscription.tenant_id == tenant_id)
+                .where(
+                    or_(
+                        PushSubscription.approve_scope.is_(None),
+                        PushSubscription.approve_scope != approve_scope,
+                    )
+                    if approve_scope is not None
+                    else PushSubscription.approve_scope.is_not(None)
+                )
+                .values(approve_scope=approve_scope)
+            )
+    except SQLAlchemyError:
+        raise PushStoreError("could not update the push subscription") from None
+
+
+async def delete_gone(db: AsyncSession, *, subscription_id: uuid.UUID) -> None:
+    """Delete a subscription whose push service answered that it is gone."""
+    await db.execute(delete(PushSubscription).where(PushSubscription.id == subscription_id))
 
 
 async def list_for_person(db: AsyncSession, *, operator_sub: str) -> list[SubscriptionView]:

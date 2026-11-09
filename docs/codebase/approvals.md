@@ -3560,6 +3560,75 @@ the run worked. To learn that, read `result_state` / `resume_outcome` on
 the request, or the result on `/result` (see "Ordered and dependent
 approvals" above).
 
+## Notifications
+
+When a request waits for approval, MEHO sends a push message to the phones
+and laptops of the people who may approve it. When the request is decided,
+a second message with the result replaces the first. A person switches the
+messages on per browser on the account page
+([ui.md, "Approval notifications"](ui.md#approval-notifications)). The
+whole feature is off until an admin sets `WEB_PUSH_ENABLED`.
+
+**When.** `record_approval_step_event` calls
+`web_push.send.notify_approval_step`. Every caller runs that function only
+after the transaction with the audit row has committed (table in
+[Approval step events](#approval-step-events-no-broadcast-events)). So a
+message never goes out for a request whose audit row did not commit. The
+call only starts a background task and returns at once: the request never
+waits for a push service, and a failed send never changes the request.
+
+| Step | Message |
+|---|---|
+| `pending` | "An approval waits" |
+| `approved` / `rejected` / `expired` / `withdrawn` | "Approval approved" (and so on), with the same tag, so it replaces the first message on the device |
+
+**Who gets it.** The login groups are in the login token, not in the
+database. So each subscription keeps what its person may approve in its
+tenant (`push_subscription.approve_scope`), read from their login when they
+switch the messages on, and again each time they open the account page
+(`web_push/recipients.py`):
+
+- `all`: a `tenant_admin` or a MEHO-SA-Operator. They get every request of
+  the tenant, also their own.
+- `lower_risk`: a MEHO-Approver. They get another person's `safe` or
+  `caution` change. Never a `dangerous` or `destructive` one, and never
+  their own request.
+- none: everyone else, also MEHO-Operators and agents. No message.
+
+Only subscriptions of the request's tenant count. This is only the list of
+who gets a message: the approve itself checks the person again, as always.
+A person who lost a group keeps getting messages until they open the
+account page again or remove the browser; the message has no request
+content.
+
+**What the message holds.** A JSON object with `title`, `body` (the tenant
+name and the request id), `tag` (`approval-<request id>`) and `url`
+(`/ui/approvals`). Never the operation, the parameters or the target. It is
+encrypted for each browser (RFC 8291, `aes128gcm`; `web_push/encryption.py`),
+so the push service cannot read it. The request carries a token signed with
+the push key (RFC 8292, `Authorization: vapid t=..., k=...`), whose `sub` is
+`BACKPLANE_URL` when that is an `https://` address. Other headers: `TTL`
+(one day), `Urgency: high`, and `Topic` (the request id), so the result
+also replaces a first message that the push service has not delivered yet.
+The service worker shows the notification; a click opens the approvals page
+of this MEHO, never another address.
+
+**Rate limit.** A person gets at most one message per 30 seconds
+(`RATE_LIMIT_SECONDS`). The messages held back in that time become one
+summary at its end: "N more approval messages. Open the approvals page."
+(tag `approval-summary`). The limit is kept in memory, per process.
+
+**Where messages go.** Only to the browser makers' push services: the
+endpoint is checked again before each send, not only when it was stored.
+Redirects are not followed, and each send has a 10 second timeout. A push
+service that answers 404 or 410 (the browser dropped the subscription)
+gets the row deleted. Other errors are logged and the row stays. Logs name
+the row id, the person, the push service and the status or the error type.
+Never the endpoint or a key.
+
+Tests: `tests/test_web_push_send.py` (a fake push service that decrypts
+each message), `tests/test_web_push_service_worker.py`.
+
 ## Audit rows
 
 Two rows per request lifecycle (the synchronous-audit invariant). A

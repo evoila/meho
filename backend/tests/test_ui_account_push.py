@@ -334,7 +334,11 @@ def test_saving_the_same_browser_twice_in_one_transaction_keeps_one_row() -> Non
         async with get_sessionmaker()() as session, session.begin():
             for checked in (first, second):
                 await save_subscription(
-                    session, operator_sub=_ME, tenant_id=_TENANT_A, subscription=checked
+                    session,
+                    operator_sub=_ME,
+                    tenant_id=_TENANT_A,
+                    subscription=checked,
+                    approve_scope=None,
                 )
 
     asyncio.run(_do())
@@ -612,3 +616,86 @@ def test_a_failed_write_logs_no_endpoint_and_no_key(
         assert sub["p256dh"] not in text
         assert sub["auth"] not in text
     assert _rows() == []
+
+
+# ---------------------------------------------------------------------------
+# What the person may approve (approve_scope), read from the login
+# ---------------------------------------------------------------------------
+
+
+def test_switch_on_stores_what_a_tenant_admin_may_approve() -> None:
+    client, mock = _client(role=TenantRole.TENANT_ADMIN)
+    try:
+        assert client.post(_SUBSCRIBE, data=_subscription()).status_code == 200
+    finally:
+        mock.stop()
+    assert [row.approve_scope for row in _rows()] == ["all"]
+
+
+def test_switch_on_stores_no_scope_for_an_operator_or_an_unknown_login() -> None:
+    operator, mock_op = _client(role=TenantRole.OPERATOR)
+    unknown, mock_unknown = _client(sub=_OTHER)
+    try:
+        assert operator.post(_SUBSCRIBE, data=_subscription("op")).status_code == 200
+        assert unknown.post(_SUBSCRIBE, data=_subscription("unknown")).status_code == 200
+    finally:
+        mock_op.stop()
+        mock_unknown.stop()
+    assert sorted((row.operator_sub, row.approve_scope) for row in _rows()) == [
+        (_OTHER, None),
+        (_ME, None),
+    ]
+
+
+def _store_row(*, endpoint: str, tenant_id: uuid.UUID, scope: str | None) -> None:
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            await save_subscription(
+                session,
+                operator_sub=_ME,
+                tenant_id=tenant_id,
+                subscription=check_subscription(**{**_subscription(), "endpoint": endpoint}),
+                approve_scope=scope,
+            )
+
+    asyncio.run(_do())
+
+
+def test_status_reads_the_scope_again_from_the_login() -> None:
+    """A login group that changed counts from the next account page open,
+    for the rows of the current tenant only."""
+    here = "https://fcm.googleapis.com/fcm/send/here"
+    there = "https://fcm.googleapis.com/fcm/send/there"
+    _store_row(endpoint=here, tenant_id=_TENANT_A, scope="all")
+    _store_row(endpoint=there, tenant_id=_TENANT_B, scope="all")
+    client, mock = _client(role=TenantRole.OPERATOR)
+    try:
+        response = client.post(_STATUS, data={"endpoint": here})
+    finally:
+        mock.stop()
+    assert response.json() == {"on": True}
+    scopes = {row.endpoint: row.approve_scope for row in _rows()}
+    assert scopes == {here: None, there: "all"}
+
+    clear_jwks_cache()  # the next login is signed with a new key
+    admin, mock_admin = _client(role=TenantRole.TENANT_ADMIN)
+    try:
+        assert admin.post(_STATUS, data={"endpoint": here}).json() == {"on": True}
+    finally:
+        mock_admin.stop()
+    assert {row.endpoint: row.approve_scope for row in _rows()}[here] == "all"
+
+
+def test_status_off_writes_nothing() -> None:
+    _store_row(
+        endpoint="https://fcm.googleapis.com/fcm/send/mine", tenant_id=_TENANT_A, scope="all"
+    )
+    client, mock = _client(role=TenantRole.OPERATOR)
+    try:
+        response = client.post(
+            _STATUS, data={"endpoint": "https://fcm.googleapis.com/fcm/send/not-mine"}
+        )
+    finally:
+        mock.stop()
+    assert response.json() == {"on": False}
+    assert [row.approve_scope for row in _rows()] == ["all"]

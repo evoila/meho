@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The ``push_subscription`` table (migration ``0150``)."""
+"""The ``push_subscription`` table (migrations ``0151`` and ``0152``)."""
 
 from __future__ import annotations
 
@@ -39,3 +39,4 @@ class PushSubscription(Base):
     p256dh: Mapped[str] = mapped_column(Text, nullable=False)
     auth: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approve_scope: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)

@@ -15,6 +15,10 @@
 // * Shell files are loaded from MEHO first, so a new release shows at
 //   once; the cached copy is used only when MEHO cannot be reached.
 // * Every other request is left to the browser, untouched.
+// * A push message (web_push/send.py) shows a notification. Its data is
+//   only a title, a body, a tag and the approvals page address. A message
+//   with the same tag replaces the one before it. A click opens only an
+//   address on this MEHO.
 (function () {
   "use strict";
 
@@ -125,8 +129,53 @@
     else if (route === "shell") event.respondWith(loadShell(event.request));
   });
 
-  // Read by the unit test (backend/tests/test_ui_pwa.py).
+  var APPROVALS_URL = "/ui/approvals";
+  var ICON_URL = "/ui/static/src/brand/icon-192.png";
+
+  // Only a path on this MEHO; anything else opens the approvals page.
+  function safeUrl(value) {
+    if (typeof value !== "string" || value.charAt(0) !== "/" || value.charAt(1) === "/") {
+      return APPROVALS_URL;
+    }
+    return value;
+  }
+
+  // The notification for one push message. A message that cannot be read
+  // still shows a plain notification: the browser asks for one per push.
+  function notificationFor(data) {
+    var message = data && typeof data === "object" ? data : {};
+    return {
+      title: typeof message.title === "string" ? message.title : "MEHO",
+      options: {
+        body: typeof message.body === "string" ? message.body : "",
+        tag: typeof message.tag === "string" ? message.tag : "approval",
+        icon: ICON_URL,
+        data: { url: safeUrl(message.url) },
+      },
+    };
+  }
+
+  self.addEventListener("push", function (event) {
+    var data = null;
+    try {
+      data = event.data ? event.data.json() : null;
+    } catch (e) {
+      data = null;
+    }
+    var note = notificationFor(data);
+    event.waitUntil(self.registration.showNotification(note.title, note.options));
+  });
+
+  self.addEventListener("notificationclick", function (event) {
+    event.notification.close();
+    var url = safeUrl(event.notification.data && event.notification.data.url);
+    event.waitUntil(self.clients.openWindow(url));
+  });
+
+  // Read by the unit tests (backend/tests/test_ui_pwa.py, test_web_push_send.py).
   self.mehoServiceWorker = {
+    notificationFor: notificationFor,
+    safeUrl: safeUrl,
     CACHE_NAME: CACHE_NAME,
     OFFLINE_URL: OFFLINE_URL,
     SHELL_URLS: SHELL_URLS,

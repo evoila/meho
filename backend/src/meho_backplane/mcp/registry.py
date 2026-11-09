@@ -76,6 +76,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.features import FEATURE_MATURITY
+from meho_backplane.mcp.profiles import profile_admits
 
 __all__ = [
     "MCP_ADMIN_SCOPE",
@@ -780,6 +781,10 @@ def all_tools_for(
 
     All four are *absence* gates (true absence, not a greyed-out entry),
     so a tool a session may not use never appears in its ``tools/list``.
+
+    Last, the session's tool profile (#4172,
+    :attr:`Operator.mcp_tool_profile`) keeps only the tools of that
+    profile. It only removes tools; see :mod:`meho_backplane.mcp.profiles`.
     """
     return [
         defn
@@ -788,6 +793,7 @@ def all_tools_for(
         and capability_satisfied(operator, defn.required_capability)
         and surface_visible(operator, defn.surface)
         and addon_family_active(active_addon_families, defn.required_addon_family)
+        and profile_admits(operator.mcp_tool_profile, defn.name)
     ]
 
 

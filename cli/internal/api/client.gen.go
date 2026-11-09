@@ -10572,13 +10572,16 @@ type Target struct {
 	Product               string                  `json:"product"`
 	SecretFieldMap        *map[string]string      `json:"secret_field_map,omitempty"`
 	SecretRef             *string                 `json:"secret_ref"`
-	TenantId              openapi_types.UUID      `json:"tenant_id"`
-	TlsCaPin              *string                 `json:"tls_ca_pin"`
-	TlsServerName         *string                 `json:"tls_server_name"`
-	UpdatedAt             time.Time               `json:"updated_at"`
-	VerifyTls             *bool                   `json:"verify_tls,omitempty"`
-	Version               *string                 `json:"version"`
-	VpnRequired           bool                    `json:"vpn_required"`
+
+	// SecretRefDerived True when secret_ref is the path MEHO builds from the target name (tenants/<tenant_id>/<name>), as it does for a target added without a secret_ref.
+	SecretRefDerived *bool              `json:"secret_ref_derived,omitempty"`
+	TenantId         openapi_types.UUID `json:"tenant_id"`
+	TlsCaPin         *string            `json:"tls_ca_pin"`
+	TlsServerName    *string            `json:"tls_server_name"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	VerifyTls        *bool              `json:"verify_tls,omitempty"`
+	Version          *string            `json:"version"`
+	VpnRequired      bool               `json:"vpn_required"`
 }
 
 // TargetCreate POST /api/v1/targets body.
@@ -10692,13 +10695,16 @@ type TargetSummary struct {
 	Product               string                  `json:"product"`
 	SecretFieldMap        *map[string]string      `json:"secret_field_map,omitempty"`
 	SecretRef             *string                 `json:"secret_ref"`
-	TenantId              openapi_types.UUID      `json:"tenant_id"`
-	TlsCaPin              *string                 `json:"tls_ca_pin"`
-	TlsServerName         *string                 `json:"tls_server_name"`
-	UpdatedAt             time.Time               `json:"updated_at"`
-	VerifyTls             *bool                   `json:"verify_tls,omitempty"`
-	Version               *string                 `json:"version"`
-	VpnRequired           bool                    `json:"vpn_required"`
+
+	// SecretRefDerived True when secret_ref is the path MEHO builds from the target name (tenants/<tenant_id>/<name>), as it does for a target added without a secret_ref.
+	SecretRefDerived *bool              `json:"secret_ref_derived,omitempty"`
+	TenantId         openapi_types.UUID `json:"tenant_id"`
+	TlsCaPin         *string            `json:"tls_ca_pin"`
+	TlsServerName    *string            `json:"tls_server_name"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	VerifyTls        *bool              `json:"verify_tls,omitempty"`
+	Version          *string            `json:"version"`
+	VpnRequired      bool               `json:"vpn_required"`
 }
 
 // TargetUpdate PATCH /api/v1/targets/{name} body.

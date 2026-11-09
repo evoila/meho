@@ -224,6 +224,8 @@ async def targets_register(
         "product": created.product,
         "host": created.host,
         "tenant_id": str(created.tenant_id),
+        "secret_ref": created.secret_ref,
+        "secret_ref_derived": created.secret_ref_derived,
         "next_step": _probe_next_step(created.name),
     }
 

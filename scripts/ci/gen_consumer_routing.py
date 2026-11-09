@@ -183,11 +183,10 @@ _MEMORY_DESC = _wrap_description(
 )
 
 _BROADCAST_DESC = _wrap_description(
-    "Cross-operator awareness discipline for a MEHO-wired repo. Use before,\n"
-    "during, and after working on any target: check the live broadcast feed\n"
-    "for conflicting activity before starting, announce intent, check in\n"
-    "during long work, and report on completion so other operators watching\n"
-    "the feed see your work in real time."
+    "Cross-operator awareness for a MEHO-wired repo. Use before working on\n"
+    "any target: check the live broadcast feed for agents already working on\n"
+    "it. People read the feed; only agents post, so a person's session never\n"
+    "calls meho_broadcast_announce."
 )
 
 _CLAUDE_HEADER = f"""<!--
@@ -344,10 +343,10 @@ def _more_skill_vehicles() -> tuple[Vehicle, ...]:
                 "broadcast",
                 _BROADCAST_DESC,
                 "Broadcast — cross-operator awareness",
-                "MEHO carries a per-tenant live feed of operator activity; other "
-                "operators may be watching it and will see your work in real time. "
-                "Follow the discipline below on every session. See `meho:prefer-meho` "
-                "for the full route-by-evidence-need table.",
+                "MEHO carries a per-tenant live feed where agents announce their "
+                "work. People read the feed; only agents post. Read the feed before "
+                "you start work on a target. See `meho:prefer-meho` for the full "
+                "route-by-evidence-need table.",
             ),
             blocks=(
                 Block(fragment="bcast-discipline"),
@@ -383,6 +382,7 @@ def _vehicles() -> tuple[Vehicle, ...]:
                 Block(fragment="linux-day0", shift=1),
                 Block(fragment="ops-audit", shift=1),
                 Block(fragment="bcast-discipline", shift=1),
+                Block(fragment="bcast-agent-post", shift=1),
                 Block(fragment="bcast-read", shift=1),
                 Block(fragment="bcast-trust", shift=1),
                 Block(fragment="evidence-quality"),

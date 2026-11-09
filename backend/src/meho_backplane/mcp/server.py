@@ -428,6 +428,7 @@ async def _session_preamble(operator: Operator) -> PreambleAssembly:
     (#4113). Without a profile nothing changes.
     """
     # Imported here to break the import cycle (see _session_instructions).
+    from meho_backplane.auth.agent_admission import is_agent_caller
     from meho_backplane.conventions.preamble import assemble_preamble_detailed
 
     profile = operator.mcp_tool_profile
@@ -436,6 +437,7 @@ async def _session_preamble(operator: Operator) -> PreambleAssembly:
         operator.sub,
         capabilities=operator.capabilities if profile_admits(profile, DOCS_SEARCH_TOOL) else None,
         include_broadcast=_session_can_announce(operator),
+        broadcast_can_post=is_agent_caller(operator),
         include_runbook_priming=profile_admits(profile, RUNBOOK_NEXT_TOOL),
     )
 
@@ -478,6 +480,9 @@ async def _session_instructions(operator: Operator) -> str | None:
     session's tool list has ``meho_broadcast_announce`` (see
     :func:`_session_can_announce`). A ``read_only`` session cannot call
     the broadcast tools, so its instructions do not name them.
+
+    #5770: a session that is not an agent gets the reader form of that band
+    (read the feed, do not post), because MEHO refuses its announcements.
 
     #5729: the caller's newest Memory notes follow the preamble
     (:func:`meho_backplane.recall.memory_band`).

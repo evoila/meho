@@ -171,7 +171,7 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
-from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+from meho_backplane.connectors.vault.tenant_paths import is_derived_secret_ref, tenant_secret_ref
 from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
 from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
@@ -447,6 +447,9 @@ def _to_full(t: TargetORM) -> Target:
         port=t.port,
         fqdn=t.fqdn,
         secret_ref=t.secret_ref,
+        secret_ref_derived=is_derived_secret_ref(
+            t.secret_ref, tenant_id=t.tenant_id, target_name=t.name
+        ),
         auth_model=AuthModel(t.auth_model),
         vpn_required=t.vpn_required,
         verify_tls=t.verify_tls,

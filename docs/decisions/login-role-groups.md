@@ -2,6 +2,7 @@
 
 **Status:** decided — product owner, 2026-10-19
 **Self-approval for MEHO-SA-Operators:** shipped in 0.44.0. See [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md).
+**Superseded in part by:** [configurable policy](2026-11-09-configurable-policy.md) (proposed, waits for the owner's confirmation). It replaces rule 1 "One group per person": a login keeps exactly one base level (read-only, operator or admin), and may have any number of custom roles on top. The rest of this record stays.
 **Issue:** [#4590](https://github.com/evoila/meho/issues/4590)
 **Initiative:** [#3959](https://github.com/evoila/meho/issues/3959) — people log in with their company account, and their group decides their tenant and role
 **Used by:** `meho admin keycloak bootstrap-clients`, the built-in Keycloak setup ([#4040](https://github.com/evoila/meho/issues/4040)), the company login recipes under #3959 ([`docs-site/install/login/`](../../docs-site/install/login/index.md))

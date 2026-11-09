@@ -969,7 +969,8 @@ preview of the waiting request:
   admin group, or the roles include the platform admin role.
 - `members`: for a group attribute change in the login realm, the ids of
   the logins in the group (up to 1000, read page by page). `None` when
-  they could not be read, or when the group has more.
+  they could not be read, when Keycloak answers with something that is
+  not a list (an error object, `null`), or when the group has more.
 
 A value that could not be read is `None`, never a guess.
 

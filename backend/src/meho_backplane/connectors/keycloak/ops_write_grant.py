@@ -166,6 +166,7 @@ async def _members(ctx: PreviewContext, group_id: str) -> list[str] | None:
                     "max": str(_MEMBER_PAGE),
                     "briefRepresentation": "true",
                 },
+                strict=True,
             )
             ids = [row["id"] for row in rows if isinstance(row, dict) and _text(row.get("id"))]
             if len(ids) != len(rows):

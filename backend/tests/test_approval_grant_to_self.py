@@ -23,6 +23,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -708,7 +709,12 @@ def _connector_with(
         return (users or {}).get(username)
 
     async def _get_admin_list(
-        _t: Any, path: str, *, operator: Any, params: dict[str, Any] | None = None
+        _t: Any,
+        path: str,
+        *,
+        operator: Any,
+        params: dict[str, Any] | None = None,
+        strict: bool = False,
     ) -> list[Any]:
         assert params is not None
         reads.append(params)
@@ -924,3 +930,59 @@ async def test_members_are_not_read_outside_the_login_realm(
     assert block["login_realm"] is False
     assert block["members"] is None
     assert reads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [b'{"error": "unknown_error"}', b"null", b'"not a list"'])
+async def test_a_member_list_answer_that_is_not_a_list_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, body: bytes
+) -> None:
+    """A 200 answer with an error object, null or a string is not an empty group."""
+    monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    _groups_by_id(monkeypatch, {_GROUP: "role-x"})
+    connector = KeycloakConnector()
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, content=body, headers={"content-type": "application/json"}
+        )
+    )
+
+    async def _client(_t: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, base_url="https://keycloak.test.invalid")
+
+    async def _headers(_t: Any, _o: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(connector, "_http_client", _client)
+    monkeypatch.setattr(connector, "auth_headers", _headers)
+
+    block = await _grant_block(
+        _ctx(_ATTRS, {"id": _GROUP, "attributes": {"k": ["v"]}}, realm=_REALM, connector=connector)
+    )
+
+    assert block["members"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_member_list_answer_that_is_an_empty_list_is_an_empty_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    _groups_by_id(monkeypatch, {_GROUP: "role-x"})
+    connector = KeycloakConnector()
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, json=[]))
+
+    async def _client(_t: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, base_url="https://keycloak.test.invalid")
+
+    async def _headers(_t: Any, _o: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(connector, "_http_client", _client)
+    monkeypatch.setattr(connector, "auth_headers", _headers)
+
+    block = await _grant_block(
+        _ctx(_ATTRS, {"id": _GROUP, "attributes": {"k": ["v"]}}, realm=_REALM, connector=connector)
+    )
+
+    assert block["members"] == []

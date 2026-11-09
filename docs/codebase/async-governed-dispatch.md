@@ -183,6 +183,27 @@ comes as soon as the run ends, or after N seconds with the run still
 - **Other replicas.** When another process runs the task, the wait reads
   the row again every `wait_recheck_seconds` (2 seconds).
 
+## Approvals that answer at once (#5110)
+
+Three approve paths use `submit_approval_resume`:
+
+- REST `POST /api/v1/approvals/{id}/approve` with `"async": true` (#3079):
+  202 + `{run_id, status, async}`.
+- REST `POST /api/v1/approvals/{id}/decide` with `"async": true`: 202 +
+  `DecideAcceptedBody` (the decision fields of `DecideResponseBody` plus
+  `run_id`, `status: "pending"`, `async: true`). A rejection ignores the
+  switch. Without it, both routes run the operation before they answer,
+  as before. `meho approvals approve` sends it (`--wait` waits by reading
+  the request every few seconds).
+- The console approve always starts the run in the background, waits at
+  most one second, and the page then follows the run
+  ([`approvals.md`](approvals.md), "Operator console").
+
+The run row carries `approval_request_id`; the console finds the latest
+run of a request through it (index `operation_run_approval_request_id_idx`).
+`identity_sub` is the approver, so the "the run has ended" notice goes to
+the approver.
+
 ## Synchronous path: caller gone (#3696)
 
 Without `async: true`, the REST `/call` route and the MCP `POST /mcp` route

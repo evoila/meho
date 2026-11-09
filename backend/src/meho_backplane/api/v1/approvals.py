@@ -1574,7 +1574,7 @@ class DecideRequestBody(BaseModel):
     row the dispatcher stored at park time (#1503).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     decision: str = Field(
         description="One of 'approved' / 'rejected'.",
@@ -1588,6 +1588,42 @@ class DecideRequestBody(BaseModel):
             "human instructed this decision."
         ),
     )
+    async_: bool = Field(
+        default=False,
+        alias="async",
+        description=(
+            "Answer at once (#5110). When true and the decision is "
+            "'approved', MEHO saves the decision, starts the operation in "
+            "the background and answers HTTP 202 with a run id. Read the "
+            "request with GET /api/v1/approvals/{id} to see the run end "
+            "(result_state). Ignored on a rejection. Default false: the "
+            "answer comes after the operation ends, as before."
+        ),
+    )
+
+
+class DecideAcceptedBody(BaseModel):
+    """Answer of ``/decide`` with ``async: true`` on an approval (HTTP 202, #5110).
+
+    The decision is saved and audited. The operation runs in the
+    background: ``run_id`` names that run. Read the request with
+    ``GET /api/v1/approvals/{id}`` until ``result_state`` is no longer
+    ``started`` or ``not_started``. The decision fields mean the same as
+    in :class:`DecideResponseBody`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_request_id: uuid.UUID
+    decision: str
+    reason: str
+    decided_by: str | None = None
+    decided_by_name: str | None = None
+    self_approved: bool | None = None
+    approval_rule: str | None = None
+    run_id: uuid.UUID
+    status: str = "pending"
+    async_: bool = Field(default=True, alias="async")
 
 
 class DecideResponseBody(BaseModel):
@@ -1649,12 +1685,18 @@ class DecideResponseBody(BaseModel):
     "/{request_id}/decide",
     response_model=DecideResponseBody,
     dependencies=[_require_human],
+    responses={
+        http_status.HTTP_202_ACCEPTED: {
+            "model": DecideAcceptedBody,
+            "description": "Approved; the operation runs in the background (async: true).",
+        }
+    },
 )
 async def decide_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: DecideRequestBody,
     operator: Operator = _require_approvals_access,
-) -> DecideResponseBody:
+) -> DecideResponseBody | JSONResponse:
     """Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).
 
     Flips the request to ``approved`` or ``rejected``, writes the
@@ -1682,6 +1724,11 @@ async def decide_approval_request(
     ``WWW-Authenticate: Bearer error="insufficient_user_authentication"``
     and ``max_age`` (RFC 9470), and the request stays pending. A rejection
     needs no fresh sign-in.
+
+    With ``async: true`` an approval answers at once (#5110): the decision
+    is saved and audited as above, the operation starts in the background
+    through the same resume path (same run claim, same audit), and the
+    answer is HTTP 202 with the run id (:class:`DecideAcceptedBody`).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.decide",
@@ -1715,6 +1762,8 @@ async def decide_approval_request(
     # the claim is free (waiter gone), else it no-ops already_resumed —
     # so the run_id-is-not-None skip guard is gone: it was the source of
     # the silent-non-execution seam when the waiter had died.
+    if decision == "approved" and body.async_:
+        return await _decide_in_background(operator, request, body)
     if decision == "approved":
         dispatch_result = await _resume_dispatch_after_approval(
             operator=operator, request=request, params=None
@@ -1748,4 +1797,41 @@ async def decide_approval_request(
         reason=body.reason,
         decided_by=operator.sub,
         decided_by_name=operator.name,
+    )
+
+
+async def _decide_in_background(
+    operator: Operator, request: ApprovalRequest, body: DecideRequestBody
+) -> JSONResponse:
+    """Start the approved operation in the background; answer 202 (#5110).
+
+    The decision is already saved and audited. The run goes through
+    :meth:`~meho_backplane.operations.operation_run_service.OperationRunService.submit_approval_resume`,
+    the same path ``/approve`` uses with ``async: true``, so the run claim
+    and the audit stay the same.
+    """
+    run_id = await get_operation_run_service().submit_approval_resume(
+        operator, request, params=None
+    )
+    _log.info(
+        "approval_request_resume_dispatched_async",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        operation_run_id=str(run_id),
+        operator_sub=operator.sub,
+        via="decide",
+    )
+    accepted = DecideAcceptedBody(
+        approval_request_id=request.id,
+        decision="approved",
+        reason=body.reason,
+        decided_by=operator.sub,
+        decided_by_name=operator.name,
+        self_approved=request.principal_sub == operator.sub,
+        approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
+        run_id=run_id,
+    )
+    return JSONResponse(
+        content=accepted.model_dump(mode="json", by_alias=True),
+        status_code=http_status.HTTP_202_ACCEPTED,
     )

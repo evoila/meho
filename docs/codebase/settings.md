@@ -40,6 +40,7 @@ spec:
         flight_recorder: { enabled: true, retention_days: 14, agent_readable: null }
         mail_recipient_allowlist: "@example.com"
         run_approval_target_kinds: false
+        knowledge_wiki_collection: null
       conventions:
         - slug: change-window
           title: Change window
@@ -84,8 +85,11 @@ spec:
   `announce_gate_enabled`, `flight_recorder.{enabled, retention_days,
   agent_readable}`, `mail_recipient_allowlist`,
   `run_approval_target_kinds` (a run approval may list a target kind; see
-  [run-approvals.md](run-approvals.md)). `null` means "use the
-  instance default" (`false` for the switches, inherit for the others).
+  [run-approvals.md](run-approvals.md)), `knowledge_wiki_collection`
+  (the docs collection of the tenant's team wiki, at most 128 characters;
+  an empty value is `null`; see [kb.md](kb.md#team-wiki-search-5976)).
+  `null` means "use the instance default" (`false` for the switches,
+  inherit or none for the others).
   `policies: null` resets all of them.
 - `conventions[]` — keyed by `slug`. `title` and `kind` are needed when the
   convention is new. `kind` cannot change on import, the same as on

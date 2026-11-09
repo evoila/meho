@@ -1436,3 +1436,397 @@ func TestPrintDecisionOkRunHasNoGuidance(t *testing.T) {
 		t.Errorf("ok run printed a Next step line:\n%s", out)
 	}
 }
+
+// ---------- approve answers at once; --wait; a lost answer (#5110) ----------
+
+const stubRunID = "33333333-3333-3333-3333-333333333333"
+
+// runApprove runs `meho approvals approve <stubID>` against routes and
+// returns stdout, stderr and the error. --wait asks again every
+// millisecond here.
+func runApprove(t *testing.T, routes map[string]mockHandler, opts decisionOpts) (string, string, error) {
+	t.Helper()
+	old := waitPollInterval
+	waitPollInterval = time.Millisecond
+	t.Cleanup(func() { waitPollInterval = old })
+	srv := mockBackplane(t, routes)
+	t.Cleanup(srv.Close)
+	stubSignIn(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	store, err := auth.NewTokenStore()
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	service, user := auth.KeyForBackplane(srv.URL)
+	if err := store.Save(service, user, auth.StoredToken{AccessToken: "test-bearer", BackplaneURL: srv.URL}); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+	cmd := &cobra.Command{Use: "approve"}
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	opts.BackplaneOverride = srv.URL
+	err = runDecision(cmd, stubID, "approve", "", opts)
+	return stdout.String(), stderr.String(), err
+}
+
+// acceptedDecide answers the approve with HTTP 202: the operation runs
+// in the background. It fails the test when the CLI did not ask for that.
+func acceptedDecide(t *testing.T) mockHandler {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b := readJSONBody[api.DecideRequestBody](t, r)
+		if b.Async == nil || !*b.Async {
+			t.Errorf("approve must send async=true; got %+v", b.Async)
+		}
+		writeJSON(t, w, http.StatusAccepted, api.DecideAcceptedBody{
+			ApprovalRequestId: mustUUID(t, stubID),
+			Decision:          "approved",
+			RunId:             mustUUID(t, stubRunID),
+		})
+	}
+}
+
+// viewInState is an approved view whose run is in state.
+func viewInState(t *testing.T, state api.ApprovalResultState) api.ApprovalRequestView {
+	v := newApprovalView(t, "approved", "reviewed")
+	v.ResultState = &state
+	if state != api.ApprovalResultStateStarted {
+		status := "ok"
+		if state != api.ApprovalResultStateExecuted {
+			status = "error"
+		}
+		v.ResumeOutcome = &api.ApprovalResumeOutcomeView{ResultStatus: &status}
+	}
+	return v
+}
+
+// viewSequence answers GET with the views in order, then the last one.
+func viewSequence(t *testing.T, views ...api.ApprovalRequestView) (mockHandler, *int) {
+	calls := 0
+	return func(w http.ResponseWriter, _ *http.Request) {
+		v := views[min(calls, len(views)-1)]
+		calls++
+		writeJSON(t, w, http.StatusOK, v)
+	}, &calls
+}
+
+func TestApproveAnswersAtOnceAndNamesTheShowCommand(t *testing.T) {
+	get, gets := viewSequence(t, viewInState(t, api.ApprovalResultStateStarted))
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+	}, decisionOpts{})
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	want := "Approved. The operation is running. Check it with `meho approvals show " + stubID + "`."
+	if !strings.Contains(stdout, want) {
+		t.Errorf("stdout must name the show command; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "approval_request "+stubID+" → approved") {
+		t.Errorf("stdout must show the new status; got:\n%s", stdout)
+	}
+	if *gets != 1 {
+		t.Errorf("without --wait the request is read once; got %d reads", *gets)
+	}
+}
+
+func TestApproveWaitPrintsHowTheRunEnded(t *testing.T) {
+	get, gets := viewSequence(t,
+		viewInState(t, api.ApprovalResultStateStarted),
+		viewInState(t, api.ApprovalResultStateStarted),
+		viewInState(t, api.ApprovalResultStateExecuted),
+	)
+	stdout, stderr, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, map[string]any{"status": "running"})
+		},
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if !strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("--wait must print the run result lines; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Run result:   ok") {
+		t.Errorf("--wait must print the run result; got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "Check it with") {
+		t.Errorf("an ended run needs no show hint; got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "Waiting until it ends") {
+		t.Errorf("--wait says it waits; got stderr:\n%s", stderr)
+	}
+	if *gets != 3 {
+		t.Errorf("want 3 reads (after approve, then until executed); got %d", *gets)
+	}
+}
+
+func TestApproveWaitJSONPrintsTheEndedRequest(t *testing.T) {
+	get, _ := viewSequence(t,
+		viewInState(t, api.ApprovalResultStateStarted),
+		viewInState(t, api.ApprovalResultStateFailed),
+	)
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, map[string]any{"status": "running"})
+		},
+	}, decisionOpts{Wait: true, JSONOut: true})
+	if err != nil {
+		t.Fatalf("approve --wait --json: %v", err)
+	}
+	var view api.ApprovalRequestView
+	if err := json.Unmarshal([]byte(stdout), &view); err != nil {
+		t.Fatalf("--json prints the request view: %v\n%s", err, stdout)
+	}
+	if view.ResultState == nil || *view.ResultState != api.ApprovalResultStateFailed {
+		t.Errorf("--json --wait prints the request after the run ended; got %+v", view.ResultState)
+	}
+}
+
+func TestApproveWaitStopsWhenTheRunEndedWithoutAResult(t *testing.T) {
+	get, _ := viewSequence(t, viewInState(t, api.ApprovalResultStateStarted))
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, map[string]any{"status": "uncertain"})
+		},
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if !strings.Contains(stdout, runEndedNoResultNote) {
+		t.Errorf("a run that ended without a result must say so; got:\n%s", stdout)
+	}
+}
+
+func TestApproveWaitGoesOnWhenAnotherCallerRunsTheOperation(t *testing.T) {
+	started := viewInState(t, api.ApprovalResultStateStarted)
+	get, _ := viewSequence(t, started, started, started,
+		viewInState(t, api.ApprovalResultStateExecuted))
+	runReads := 0
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+		// The background run lost the run claim: the requester runs it.
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			runReads++
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"status": "succeeded",
+				"result": map[string]any{"status": "already_resumed"},
+			})
+		},
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if strings.Contains(stdout, runEndedNoResultNote) {
+		t.Errorf("an already_resumed run is not the real run; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("--wait must go on until the request has its result; got:\n%s", stdout)
+	}
+	if runReads != 1 {
+		t.Errorf("after an already_resumed run the wait must read only the request; run reads = %d", runReads)
+	}
+}
+
+func TestApproveWaitGoesOnWithoutTheRunCheckAndAfterAFailedRead(t *testing.T) {
+	reads := 0
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID: func(w http.ResponseWriter, _ *http.Request) {
+			reads++
+			switch reads {
+			case 1:
+				writeJSON(t, w, http.StatusOK, viewInState(t, api.ApprovalResultStateStarted))
+			case 2:
+				w.WriteHeader(http.StatusBadGateway)
+			default:
+				writeJSON(t, w, http.StatusOK, viewInState(t, api.ApprovalResultStateExecuted))
+			}
+		},
+		// An approver without the operator role may not read runs.
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		},
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if !strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("--wait must go on after a failed read; got:\n%s", stdout)
+	}
+}
+
+// startedTooLong is a started view that MEHO lists as "outcome unknown":
+// its run started longer ago than the age limit of that list.
+func startedTooLong(t *testing.T) api.ApprovalRequestView {
+	v := viewInState(t, api.ApprovalResultStateStarted)
+	v.OutcomeUnknown = &api.OutcomeUnknownView{
+		Advice: "Check the target.",
+		Reason: api.OutcomeUnknownReasonStartedNoResult,
+	}
+	return v
+}
+
+func TestApproveWaitGoesOnPastTheOutcomeUnknownAgeWhileTheRunGoesOn(t *testing.T) {
+	get, gets := viewSequence(t,
+		viewInState(t, api.ApprovalResultStateStarted),
+		startedTooLong(t),
+		startedTooLong(t),
+		viewInState(t, api.ApprovalResultStateExecuted),
+	)
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, map[string]any{"status": "running"})
+		},
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if !strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("--wait must go on while the run goes on; got:\n%s", stdout)
+	}
+	if *gets != 4 {
+		t.Errorf("want 4 reads (until executed); got %d", *gets)
+	}
+}
+
+func TestApproveWaitGoesOnPastTheOutcomeUnknownAgeWithoutTheRunCheck(t *testing.T) {
+	get, gets := viewSequence(t,
+		viewInState(t, api.ApprovalResultStateStarted),
+		startedTooLong(t),
+		startedTooLong(t),
+		viewInState(t, api.ApprovalResultStateExecuted),
+	)
+	stdout, stderr, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": acceptedDecide(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+		"GET /api/v1/operations/runs/" + stubRunID: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		},
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if !strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("--wait must go on until the run has a result; got:\n%s", stdout)
+	}
+	if *gets != 4 {
+		t.Errorf("want 4 reads (until executed); got %d", *gets)
+	}
+	if strings.Count(stderr, stillWaitingNote) != 1 {
+		t.Errorf("want the still-waiting note once; got:\n%s", stderr)
+	}
+}
+
+// closeConnection drops the connection without an answer: the request
+// reached MEHO, its answer is lost.
+func closeConnection(t *testing.T) mockHandler {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("the test server cannot drop a connection")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		_ = conn.Close()
+	}
+}
+
+func TestApproveWithALostAnswerReadsTheRequestAgain(t *testing.T) {
+	get, _ := viewSequence(t, viewInState(t, api.ApprovalResultStateStarted))
+	stdout, stderr, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": closeConnection(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+	}, decisionOpts{})
+	if err != nil {
+		t.Fatalf("a lost answer on a saved approval is no error: %v (stderr %s)", err, stderr)
+	}
+	if !strings.Contains(stdout, lostAnswerNote) {
+		t.Errorf("stdout must say the answer was lost; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "→ approved") || strings.Contains(stderr, "unreachable") {
+		t.Errorf("stdout must show the real state, not unreachable; got:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+}
+
+func TestApproveWithALostAnswerOnAPendingRequestIsUnreachable(t *testing.T) {
+	stdout, stderr, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": closeConnection(t),
+		"GET /api/v1/approvals/" + stubID: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, newApprovalView(t, "pending", ""))
+		},
+	}, decisionOpts{JSONOut: true})
+	if err == nil {
+		t.Fatalf("the approval was not saved: want an error; got stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, output.ErrCodeUnreachable) {
+		t.Errorf("want the unreachable error; got stderr:\n%s", stderr)
+	}
+}
+
+func TestApproveFallsBackForAServerWithoutTheAsyncField(t *testing.T) {
+	var bodies []api.DecideRequestBody
+	get, _ := viewSequence(t, viewInState(t, api.ApprovalResultStateExecuted))
+	stdout, _, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": func(w http.ResponseWriter, r *http.Request) {
+			b := readJSONBody[api.DecideRequestBody](t, r)
+			bodies = append(bodies, b)
+			if b.Async != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte(`{"detail":[{"type":"extra_forbidden","loc":["body","async"],"msg":"Extra inputs are not permitted"}]}`))
+				return
+			}
+			writeJSON(t, w, http.StatusOK, api.DecideResponseBody{
+				ApprovalRequestId: mustUUID(t, stubID),
+				Decision:          "approved",
+			})
+		},
+		"GET /api/v1/approvals/" + stubID: get,
+	}, decisionOpts{})
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if len(bodies) != 2 || bodies[1].Async != nil {
+		t.Fatalf("want a second approve without async; got %+v", bodies)
+	}
+	if !strings.Contains(stdout, "Run:          ok") {
+		t.Errorf("stdout must show the run as today; got:\n%s", stdout)
+	}
+}
+
+func TestRejectSendsNoAsyncField(t *testing.T) {
+	var raw []byte
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": func(w http.ResponseWriter, r *http.Request) {
+			raw, _ = io.ReadAll(r.Body)
+			writeJSON(t, w, http.StatusOK, api.DecideResponseBody{
+				ApprovalRequestId: mustUUID(t, stubID),
+				Decision:          "rejected",
+			})
+		},
+		"GET /api/v1/approvals/" + stubID: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, newApprovalView(t, "rejected", ""))
+		},
+	})
+	defer srv.Close()
+	if _, _, err := postDecision(context.Background(), newTestClient(t, srv), mustUUID(t, stubID), "reject", ""); err != nil {
+		t.Fatalf("postDecision: %v", err)
+	}
+	if strings.Contains(string(raw), `"async"`) {
+		t.Errorf("a reject runs nothing and sends no async field; got %s", raw)
+	}
+}

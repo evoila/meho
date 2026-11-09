@@ -14,7 +14,8 @@ transcript ``<session-id>.jsonl`` and the folder ``<session-id>/``.
 * a member that is not a regular file or a folder (links, devices);
 * a path that is absolute, has a ``..`` part, a backslash or a control
   character, or that comes twice;
-* more files or more unpacked bytes than the limits allow;
+* more entries (files, folders, any member) or more unpacked bytes than
+  the limits allow;
 * an archive with no file.
 """
 
@@ -60,7 +61,12 @@ def read_archive(data: bytes, *, max_files: int, max_unpacked_bytes: int) -> dic
     total = 0
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-            for member in archive:
+            for count, member in enumerate(archive, start=1):
+                # Every entry counts toward the limit, folders too.
+                if count > max_files:
+                    raise ArchiveError(
+                        "archive_too_large", f"the archive has more than {max_files} entries"
+                    )
                 if member.isdir():
                     continue
                 if not member.isreg():
@@ -71,10 +77,6 @@ def read_archive(data: bytes, *, max_files: int, max_unpacked_bytes: int) -> dic
                 path = _clean_path(member.name)
                 if path in files:
                     raise ArchiveError("archive_bad_path", f"the archive has {path!r} twice")
-                if len(files) >= max_files:
-                    raise ArchiveError(
-                        "archive_too_large", f"the archive has more than {max_files} files"
-                    )
                 total += member.size
                 if total > max_unpacked_bytes:
                     raise ArchiveError(

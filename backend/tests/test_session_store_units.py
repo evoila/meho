@@ -122,6 +122,18 @@ def test_archive_limits() -> None:
     assert exc.value.reason == "archive_too_large"
 
 
+def test_archive_counts_folders_toward_the_limit() -> None:
+    folders = []
+    for n in range(10):
+        folder = tarfile.TarInfo(f"d{n}")
+        folder.type = tarfile.DIRTYPE
+        folders.append(folder)
+    data = _tar([*folders, tarfile.TarInfo("a")], {"a": b"x"})
+    with pytest.raises(ArchiveError) as exc:
+        read_archive(data, **_LIMITS)
+    assert exc.value.reason == "archive_too_large"
+
+
 def test_archive_cut_off_is_unreadable() -> None:
     data = write_archive({"a": b"x" * 5000})
     with pytest.raises(ArchiveError) as exc:

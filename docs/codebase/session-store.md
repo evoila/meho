@@ -45,7 +45,7 @@ every session route answers `503 session_store_not_configured`.
 | `SESSION_STORE_RETENTION_DAYS_DEFAULT` | Retention period of a tenant that set none (default 90) |
 | `SESSION_STORE_MAX_UPLOAD_BYTES` | Largest compressed archive (default 25 MiB) |
 | `SESSION_STORE_MAX_UNPACKED_BYTES` | Largest unpacked archive (default 256 MiB) |
-| `SESSION_STORE_MAX_FILES` | Most files in one archive (default 2000) |
+| `SESSION_STORE_MAX_FILES` | Most entries (files and folders) in one archive (default 2000) |
 | `SESSION_STORE_CLEANUP_ENABLED` | Start the cleanup job (default `true`) |
 | `SESSION_STORE_CLEANUP_INTERVAL_SECONDS` | Time between cleanup runs (default 3600) |
 
@@ -99,8 +99,8 @@ gzip tar archive) and the fields `session_id`, `project`, `app`,
 
 1. **Unpack** (`archive.py`). Nothing goes to disk. MEHO refuses a link or
    device, a path with `..`, a leading `/`, a backslash or a control
-   character, a path that comes twice, too many files or bytes, a cut-off
-   archive and an empty one (`422 archive_*`).
+   character, a path that comes twice, too many entries (files and
+   folders) or bytes, a cut-off archive and an empty one (`422 archive_*`).
 2. **Compare** (`plan.py`). The laptop sends the whole current files every
    time. For each file MEHO compares the size and SHA-256 hash with what it
    stored before (the hashes are of the bytes before the secret check):

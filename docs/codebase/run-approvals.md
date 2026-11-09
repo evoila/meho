@@ -133,9 +133,13 @@ Marked today: the writes of `linux-ssh` that run through its sudo helper
 `linux.sysctl.write`, `linux.firewall.load`, `linux.firewall.confirm`),
 the record and config writes of `bind9-ssh`, and the writes of
 `rke2-ssh` (`rke2.token.rotate`, `rke2.node.service.restart`,
-`rke2.node.config.update`, `rke2.etcd-snapshot.save`). A read with a fixed
-command, for example `linux.firewall.show`, is not marked: it never waits
-for approval.
+`rke2.node.config.update`, `rke2.etcd-snapshot.save`), and the writes of
+`pfsense-ssh`. The pfSense SSH login `admin` is root, and each pfSense
+write runs a `pfSsh.php playback` script: the gateway and static route
+adds, the filter rule add and delete, the user enable and disable, and
+the gateway, static route, alias, alias member and NAT deletes. A read with
+a fixed command, for example `linux.firewall.show` or `pfsense.diag.ping`,
+is not marked: it does not change the host.
 
 ## REST
 

@@ -161,8 +161,21 @@ def test_ssh_connectors_mark_their_root_writes_at_import() -> None:
         "rke2.node.service.restart",
         "rke2.node.config.update",
         "rke2.etcd-snapshot.save",
+        "pfsense.gateway.add",
+        "pfsense.route.static.add",
+        "pfsense.filter.rule.add",
+        "pfsense.filter.rule.delete",
+        "pfsense.user.enable",
+        "pfsense.user.disable",
+        "pfsense.gateway.delete",
+        "pfsense.route.static.delete",
+        "pfsense.alias.delete",
+        "pfsense.alias.member.remove",
+        "pfsense.nat.delete",
     ):
         assert op_classes.is_root_shell(op_id), op_id
     # A read with a fixed command never waits for approval, so it has no mark.
     assert not op_classes.is_root_shell("linux.firewall.show")
     assert not op_classes.is_root_shell("linux.file.read")
+    assert not op_classes.is_root_shell("pfsense.config.show")
+    assert not op_classes.is_root_shell("pfsense.diag.ping")

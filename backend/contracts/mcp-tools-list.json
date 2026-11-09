@@ -2078,6 +2078,9 @@
               "all"
             ],
             "type": "string"
+          },
+          "target": {
+            "type": "string"
           }
         },
         "required": [],

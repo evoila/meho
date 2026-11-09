@@ -388,8 +388,8 @@ At boot the shipped row + profile clear, in order (`main.py` lifespan):
 ## References
 
 - Catalog / profile mechanism: `docs/codebase/connector-auth-coverage.md`
-  (auth catalog), and the shipped `_fixture/1.0` row in
-  `operations/ingest/catalog.yaml`.
+  (auth catalog), and the test catalog in
+  `backend/tests/fixtures/catalog/`.
 - `oauth2_mint` external issuer: public #3571.
 - Add-on pairing contract (identity / capability / event / audit planes):
   `docs/codebase/addon-contract.md`, `docs/codebase/addon-pairing.md`.

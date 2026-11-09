@@ -706,7 +706,8 @@ def test_list_sort_by_name_ascending_is_default() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         response = client.get("/ui/connectors")
-    body = response.text
+    # Only the page body: the head names "apple-touch-icon".
+    body = response.text.split("</head>", 1)[1]
     assert body.index("apple") < body.index("banana"), (
         "expected ascending name sort to place 'apple' before 'banana'"
     )
@@ -722,7 +723,8 @@ def test_list_sort_by_name_descending_inverts_order() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         response = client.get("/ui/connectors?sort=name&dir=desc")
-    body = response.text
+    # Only the page body: the head names "apple-touch-icon".
+    body = response.text.split("</head>", 1)[1]
     assert body.index("banana") < body.index("apple")
 
 

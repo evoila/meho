@@ -58,6 +58,7 @@ from meho_backplane.operations.ingest.catalog import (
     load_catalog,
 )
 from meho_backplane.settings import get_settings
+from tests.fixtures.catalog import load_fixture_catalog
 
 _LOADER_MODULE = "meho_backplane.operations.ingest.boot_stamp.load_entry_profile"
 
@@ -102,7 +103,7 @@ def _profile_entry(
 
 
 class _HandRolledFixture(Connector):
-    """A dispatchable hand-coded class occupying the fixture triple (T4 precedent)."""
+    """A dispatchable hand-coded class occupying the test fixture triple (T4 precedent)."""
 
     product = "fixture"
     version = "1.0"
@@ -128,16 +129,7 @@ class _HandRolledFixture(Connector):
 @pytest.mark.asyncio
 async def test_boot_stamp_registers_profiled_for_unoccupied_row() -> None:
     """An unoccupied profile-backed row registers a dispatchable profiled class."""
-    cat = ConnectorSpecCatalog(
-        entries=(
-            _profile_entry(
-                product="_fixture",
-                version="1.0",
-                impl_id="fixture-rest",
-                profile_resource="_fixture_minimal.yaml",
-            ),
-        )
-    )
+    cat = load_fixture_catalog()
 
     count = await stamp_catalog_profiled_connectors(cat)
 
@@ -161,16 +153,7 @@ async def test_boot_stamp_noops_on_triple_occupied_by_handrolled_class() -> None
     register_connector_v2(
         product="fixture", version="1.0", impl_id="fixture-rest", cls=_HandRolledFixture
     )
-    cat = ConnectorSpecCatalog(
-        entries=(
-            _profile_entry(
-                product="_fixture",
-                version="1.0",
-                impl_id="fixture-rest",
-                profile_resource="_fixture_minimal.yaml",
-            ),
-        )
-    )
+    cat = load_fixture_catalog()
 
     count = await stamp_catalog_profiled_connectors(cat)
 
@@ -184,9 +167,10 @@ async def test_boot_stamp_shipped_catalog_registers_every_profile_row() -> None:
     """Against the real shipped catalog every profile-backed row stamps cleanly.
 
     Runs the real ``load_entry_profile`` + ``ExecutionProfile`` parse +
-    class synthesis for the shipped fixture (``basic``) and meho-automation
-    profiles. With a cleared registry no triple is occupied, so every profile
-    row registers a profiled class.
+    class synthesis for the shipped meho-automation profile. With a cleared
+    registry no triple is occupied, so every profile row registers a profiled
+    class. The test catalog's ``fixture-rest`` row is not shipped, so a fresh
+    start registers no connector for it.
     """
     expected = sum(1 for e in load_catalog().entries if e.profile_resource is not None)
     assert expected >= 1  # guard the assertion against a catalog with zero profile rows
@@ -195,8 +179,8 @@ async def test_boot_stamp_shipped_catalog_registers_every_profile_row() -> None:
 
     assert count == expected
     registry = all_connectors_v2()
-    assert ("fixture", "1.0", "fixture-rest") in registry
     assert ("mehoauto", "0.1.0", "mehoauto-rest") in registry
+    assert ("fixture", "1.0", "fixture-rest") not in registry
     for cls in registry.values():
         assert shim_kind(cls) == "profiled"
 
@@ -204,16 +188,7 @@ async def test_boot_stamp_shipped_catalog_registers_every_profile_row() -> None:
 @pytest.mark.asyncio
 async def test_boot_stamp_is_idempotent_within_a_process() -> None:
     """A second run over an already-stamped catalog registers nothing new."""
-    cat = ConnectorSpecCatalog(
-        entries=(
-            _profile_entry(
-                product="_fixture",
-                version="1.0",
-                impl_id="fixture-rest",
-                profile_resource="_fixture_minimal.yaml",
-            ),
-        )
-    )
+    cat = load_fixture_catalog()
 
     assert await stamp_catalog_profiled_connectors(cat) == 1
     assert await stamp_catalog_profiled_connectors(cat) == 0
@@ -232,16 +207,7 @@ async def test_boot_stamp_makes_no_network_calls() -> None:
     ``respx.mock`` raises on any unmocked request; no routes are registered,
     so completing the stamp proves the path is network-free.
     """
-    cat = ConnectorSpecCatalog(
-        entries=(
-            _profile_entry(
-                product="_fixture",
-                version="1.0",
-                impl_id="fixture-rest",
-                profile_resource="_fixture_minimal.yaml",
-            ),
-        )
-    )
+    cat = load_fixture_catalog()
 
     assert await stamp_catalog_profiled_connectors(cat) == 1
 

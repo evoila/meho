@@ -5,7 +5,6 @@ package approvals
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -216,8 +215,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	printOutcomeCheck(w, d)
 	printResultHint(w, d)
 	if d.ProposedEffect != nil {
-		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")
-		fmt.Fprintf(w, "Effect:\n  %s\n", output.SafeLines(string(b)))
+		printEffect(w, "", "Effect:", d.ProposedEffect)
 	}
 }
 

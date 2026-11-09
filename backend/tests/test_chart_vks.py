@@ -6,8 +6,10 @@
 A VKS cluster brings no ingress controller, so the file names Traefik, and its
 network layer (Antrea) enforces network rules. The network rules of the
 built-in OpenBao and Keycloak are off by default; the file turns them on, and
-lets Traefik into Keycloak so logins work. This test keeps the file valid and
-those rules on.
+lets Traefik into Keycloak so logins work. It also turns on the web console
+(off by default) and keeps Traefik on HTTPS only: the lab Traefik served MEHO
+and the Keycloak login on plain HTTP too. This test keeps the file valid and
+those settings on.
 
 Skips where ``helm`` is absent unless ``MEHO_REQUIRE_HELM=1``.
 """
@@ -66,3 +68,11 @@ def test_values_vks_renders_the_built_in_core_behind_traefik() -> None:
     assert _FROM_TRAEFIK in docs["NetworkPolicy/meho"]["spec"]["ingress"][0]["from"]
     assert _FROM_TRAEFIK in docs["NetworkPolicy/meho-keycloak"]["spec"]["ingress"][0]["from"]
     assert _FROM_TRAEFIK not in docs["NetworkPolicy/meho-vault"]["spec"]["ingress"][0]["from"]
+    annotations = docs["Ingress/meho"]["metadata"]["annotations"]
+    assert annotations["traefik.ingress.kubernetes.io/router.entrypoints"] == "websecure"
+    env = {
+        e["name"]: e
+        for e in docs["Deployment/meho"]["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    for name in ("UI_KEYCLOAK_CLIENT_SECRET", "UI_SESSION_ENCRYPTION_KEY"):
+        assert env[name]["valueFrom"]["secretKeyRef"]["name"] == "meho-core-ui-auth"

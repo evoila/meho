@@ -26,9 +26,23 @@
 #     --wait --wait-for-jobs --timeout 20m
 ingress:
   className: traefik
+  annotations:
+    # HTTPS only. Without it, Traefik also serves MEHO and the Keycloak login
+    # on plain HTTP (port 80), with no redirect. `websecure` is the HTTPS entry
+    # point of Traefik's Helm chart; use your name if you changed it.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 networkPolicy:
   # Only Traefik may reach the backplane.
   ingressControllerNamespace: traefik
+# The web console at https://<host>/ui/. Off by default in the chart. The
+# install makes the Secret `<release>-core-ui-auth`: with a release name
+# other than `meho`, change the name below.
+uiConsole:
+  enabled: true
+  secretName: meho-core-ui-auth
+config:
+  # The schema asks for the console's Keycloak client when the console is on.
+  uiKeycloakClientId: meho-web
 corePostgres:
   persistence:
     # Empty = the cluster's default StorageClass.

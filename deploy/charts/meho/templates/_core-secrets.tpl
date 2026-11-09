@@ -28,7 +28,7 @@ per line: the Secrets this Job makes, then the ones the realm stage (#4043:
 `first-login`, `console-admin`, `ci-login`) makes.
 */}}
 {{- define "meho.core.secretNames" -}}
-{{- range list "postgres-superuser" "postgres-meho" "postgres-meho-app" "postgres-keycloak" "keycloak-bootstrap" "keycloak-admin" "ui-auth" "check-runner" "approval-handoff" "params-hash" "broadcast-auth" "tls" "first-login" "console-admin" "ci-login" }}
+{{- range list "postgres-superuser" "postgres-meho" "postgres-meho-app" "postgres-keycloak" "keycloak-bootstrap" "keycloak-admin" "ui-auth" "check-runner" "approval-handoff" "params-hash" "web-push" "broadcast-auth" "tls" "first-login" "console-admin" "ci-login" }}
 {{ printf "%s-core-%s" $.Release.Name . }}
 {{- end }}
 {{- end }}
@@ -66,6 +66,9 @@ the install.
 {{- end -}}
 {{- $want = append $want (dict "kind" "approval-handoff" "named" .Values.approvalHandoff.secretName "valuesKey" "approvalHandoff.secretName" "keys" (list .Values.approvalHandoff.secretKey)) -}}
 {{- $want = append $want (dict "kind" "params-hash" "named" .Values.paramsHashKey.secretName "valuesKey" "paramsHashKey.secretName" "keys" (list .Values.paramsHashKey.secretKey)) -}}
+{{- if .Values.webPush.enabled -}}
+{{- $want = append $want (dict "kind" "web-push" "named" .Values.webPush.secretName "valuesKey" "webPush.secretName" "keys" (list .Values.webPush.secretKey)) -}}
+{{- end -}}
 {{- if and .Values.broadcast.enabled .Values.broadcast.auth.enabled -}}
 {{- $want = append $want (dict "kind" "broadcast-auth" "named" .Values.broadcast.auth.existingSecret "valuesKey" "broadcast.auth.existingSecret" "keys" (list .Values.broadcast.auth.existingSecretPasswordKey)) -}}
 {{- end -}}

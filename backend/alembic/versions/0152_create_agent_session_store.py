@@ -3,8 +3,8 @@
 
 """Create the three tables of the agent session store.
 
-Revision ID: 0151
-Revises: 0150
+Revision ID: 0152
+Revises: 0151
 Create Date: 2026-11-09
 
 MEHO keeps a copy of the agent sessions that people upload. The files are
@@ -36,8 +36,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "0151"
-down_revision: str | None = "0150"
+revision: str = "0152"
+down_revision: str | None = "0151"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

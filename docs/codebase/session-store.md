@@ -86,7 +86,7 @@ is two separate sessions.
 | `UploadPlan` | `plan.py` | The new tail of each file, or the conflicts |
 | `CheckedPart` | `secret_check.py` | The checked bytes of one file part, and whether the check was sure |
 
-The tables come from migration `0151`.
+The tables come from migration `0152`.
 
 ## Control flow
 
@@ -235,6 +235,6 @@ configured.
   `cli/internal/cmd/sessions/`.
 - Tests: `backend/tests/test_session_store_api.py`,
   `backend/tests/test_session_store_units.py`,
-  `backend/tests/migrations/test_migration_0151_create_agent_session_store.py`.
+  `backend/tests/migrations/test_migration_0152_create_agent_session_store.py`.
 - boto3 S3 client: <https://docs.aws.amazon.com/boto3/latest/reference/services/s3.html>
 - botocore `Config`: <https://docs.aws.amazon.com/botocore/latest/reference/config.html>

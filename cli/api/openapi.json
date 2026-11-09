@@ -24467,6 +24467,190 @@
         }
       }
     },
+    "/ui/account/push/subscriptions": {
+      "get": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Subscriptions",
+        "operationId": "ui_account_push_subscriptions_ui_account_push_subscriptions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/push/subscribe": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Subscribe",
+        "operationId": "ui_account_push_subscribe_ui_account_push_subscribe_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_push_subscribe_ui_account_push_subscribe_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/push/unsubscribe": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Unsubscribe",
+        "operationId": "ui_account_push_unsubscribe_ui_account_push_unsubscribe_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_push_unsubscribe_ui_account_push_unsubscribe_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/push/status": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Status",
+        "operationId": "ui_account_push_status_ui_account_push_status_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_push_status_ui_account_push_status_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/push/remove": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Push Remove",
+        "operationId": "ui_account_push_remove_ui_account_push_remove_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_push_remove_ui_account_push_remove_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/first-start": {
       "get": {
         "tags": [
@@ -28054,6 +28238,60 @@
         },
         "type": "object",
         "title": "Body_runbooks_runs_start_ui_runbooks_runs_post"
+      },
+      "Body_ui_account_push_remove_ui_account_push_remove_post": {
+        "properties": {
+          "subscription_id": {
+            "type": "string",
+            "title": "Subscription Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_push_remove_ui_account_push_remove_post"
+      },
+      "Body_ui_account_push_status_ui_account_push_status_post": {
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_push_status_ui_account_push_status_post"
+      },
+      "Body_ui_account_push_subscribe_ui_account_push_subscribe_post": {
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "default": ""
+          },
+          "p256dh": {
+            "type": "string",
+            "title": "P256Dh",
+            "default": ""
+          },
+          "auth": {
+            "type": "string",
+            "title": "Auth",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_push_subscribe_ui_account_push_subscribe_post"
+      },
+      "Body_ui_account_push_unsubscribe_ui_account_push_unsubscribe_post": {
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_push_unsubscribe_ui_account_push_unsubscribe_post"
       },
       "Body_ui_account_revoke_session_ui_account_sessions_revoke_post": {
         "properties": {

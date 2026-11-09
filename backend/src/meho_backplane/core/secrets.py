@@ -36,7 +36,7 @@ import os
 import secrets
 import string
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, assert_never
 from urllib.parse import quote
@@ -47,6 +47,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from meho_backplane.core.tls import self_signed_tls
+from meho_backplane.web_push.keys import new_private_key
 
 __all__ = [
     "MANAGED_BY_LABELS",
@@ -88,6 +89,7 @@ Kind = Literal[
     "check-runner",
     "approval-handoff",
     "params-hash",
+    "web-push",
     "broadcast-auth",
     "tls",
 ]
@@ -111,6 +113,7 @@ _KINDS: Mapping[str, _KindSpec] = {
     "check-runner": _KindSpec(("client_secret",)),
     "approval-handoff": _KindSpec(("approval_handoff_encryption_key",)),
     "params-hash": _KindSpec(("params_hash_key",)),
+    "web-push": _KindSpec(("vapid_private_key",)),
     "broadcast-auth": _KindSpec(("requirepass",)),
     "tls": _KindSpec(("tls.crt", "tls.key", "ca.crt"), "kubernetes.io/tls", needs_host=True),
 }
@@ -182,6 +185,14 @@ def _new_fernet_key() -> str:
     return Fernet.generate_key().decode("ascii")
 
 
+# Kinds with one key, and the function that makes its value.
+_ONE_KEY_MAKERS: Mapping[str, Callable[[], str]] = {
+    "approval-handoff": _new_fernet_key,
+    "params-hash": new_password,
+    "web-push": new_private_key,
+}
+
+
 def build_data(entry: MakeEntry) -> dict[str, str]:
     """Return fresh values for every key of ``entry.kind``."""
     host = entry.host or ""
@@ -201,10 +212,9 @@ def build_data(entry: MakeEntry) -> dict[str, str]:
             return {"client_secret": new_password()}
         case "ui-auth":
             return {"session_encryption_key": _new_fernet_key(), "client_secret": new_password()}
-        case "approval-handoff":
-            return {"approval_handoff_encryption_key": _new_fernet_key()}
-        case "params-hash":
-            return {"params_hash_key": new_password()}
+        case "approval-handoff" | "params-hash" | "web-push":
+            (key,) = _KINDS[entry.kind].keys
+            return {key: _ONE_KEY_MAKERS[entry.kind]()}
         case "broadcast-auth":
             return {"requirepass": new_password()}
         case "tls":

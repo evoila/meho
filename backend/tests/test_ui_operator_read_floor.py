@@ -128,6 +128,7 @@ _OPERATOR_FLOOR_PAGES: tuple[tuple[str, str, str, str], ...] = (
 _READ_ONLY_PAGES: dict[str, tuple[str, str] | None] = {
     "/ui/": None,
     "/ui/account": None,
+    "/ui/account/push/subscriptions": None,
     "/ui/tenant": None,
     "/ui/approvals": ("GET", "/api/v1/approvals"),
     "/ui/approvals/badge": ("GET", "/api/v1/approvals"),

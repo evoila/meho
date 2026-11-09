@@ -340,6 +340,17 @@ spec:
                   name: {{ $hashKey.secretName | quote }}
                   key: {{ $hashKey.secretKey | quote }}
             {{- end }}
+            {{- /* Approval notifications in the browser: off unless webPush.enabled. */}}
+            {{- $push := include "meho.webPush" . | fromYaml }}
+            {{- if $push.enabled }}
+            - name: WEB_PUSH_ENABLED
+              value: "true"
+            - name: WEB_PUSH_VAPID_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $push.secretName | quote }}
+                  key: {{ $push.secretKey | quote }}
+            {{- end }}
             {{- if .Values.checkRunner.enabled }}
             {{- /* With the built-in Keycloak the client id and Secret name are filled in (#4766). */}}
             {{- $kc := include "meho.keycloakSettings" . | fromYaml }}

@@ -2699,6 +2699,28 @@ type BodyRunbooksRunsStartUiRunbooksRunsPost struct {
 	WorkRef      *string `json:"work_ref,omitempty"`
 }
 
+// BodyUiAccountPushRemoveUiAccountPushRemovePost defines model for Body_ui_account_push_remove_ui_account_push_remove_post.
+type BodyUiAccountPushRemoveUiAccountPushRemovePost struct {
+	SubscriptionId *string `json:"subscription_id,omitempty"`
+}
+
+// BodyUiAccountPushStatusUiAccountPushStatusPost defines model for Body_ui_account_push_status_ui_account_push_status_post.
+type BodyUiAccountPushStatusUiAccountPushStatusPost struct {
+	Endpoint *string `json:"endpoint,omitempty"`
+}
+
+// BodyUiAccountPushSubscribeUiAccountPushSubscribePost defines model for Body_ui_account_push_subscribe_ui_account_push_subscribe_post.
+type BodyUiAccountPushSubscribeUiAccountPushSubscribePost struct {
+	Auth     *string `json:"auth,omitempty"`
+	Endpoint *string `json:"endpoint,omitempty"`
+	P256dh   *string `json:"p256dh,omitempty"`
+}
+
+// BodyUiAccountPushUnsubscribeUiAccountPushUnsubscribePost defines model for Body_ui_account_push_unsubscribe_ui_account_push_unsubscribe_post.
+type BodyUiAccountPushUnsubscribeUiAccountPushUnsubscribePost struct {
+	Endpoint *string `json:"endpoint,omitempty"`
+}
+
 // BodyUiAccountRevokeSessionUiAccountSessionsRevokePost defines model for Body_ui_account_revoke_session_ui_account_sessions_revoke_post.
 type BodyUiAccountRevokeSessionUiAccountSessionsRevokePost struct {
 	SessionRef *string `json:"session_ref,omitempty"`
@@ -13936,6 +13958,18 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotate
 // BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody defines body for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost for application/json ContentType.
 type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody = UnderscoreBulkImportRequest
 
+// UiAccountPushRemoveUiAccountPushRemovePostFormdataRequestBody defines body for UiAccountPushRemoveUiAccountPushRemovePost for application/x-www-form-urlencoded ContentType.
+type UiAccountPushRemoveUiAccountPushRemovePostFormdataRequestBody = BodyUiAccountPushRemoveUiAccountPushRemovePost
+
+// UiAccountPushStatusUiAccountPushStatusPostFormdataRequestBody defines body for UiAccountPushStatusUiAccountPushStatusPost for application/x-www-form-urlencoded ContentType.
+type UiAccountPushStatusUiAccountPushStatusPostFormdataRequestBody = BodyUiAccountPushStatusUiAccountPushStatusPost
+
+// UiAccountPushSubscribeUiAccountPushSubscribePostFormdataRequestBody defines body for UiAccountPushSubscribeUiAccountPushSubscribePost for application/x-www-form-urlencoded ContentType.
+type UiAccountPushSubscribeUiAccountPushSubscribePostFormdataRequestBody = BodyUiAccountPushSubscribeUiAccountPushSubscribePost
+
+// UiAccountPushUnsubscribeUiAccountPushUnsubscribePostFormdataRequestBody defines body for UiAccountPushUnsubscribeUiAccountPushUnsubscribePost for application/x-www-form-urlencoded ContentType.
+type UiAccountPushUnsubscribeUiAccountPushUnsubscribePostFormdataRequestBody = BodyUiAccountPushUnsubscribeUiAccountPushUnsubscribePost
+
 // UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody defines body for UiAccountRevokeSessionUiAccountSessionsRevokePost for application/x-www-form-urlencoded ContentType.
 type UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody = BodyUiAccountRevokeSessionUiAccountSessionsRevokePost
 
@@ -16871,6 +16905,29 @@ type ClientInterface interface {
 
 	// UiAccountUiAccountGet request
 	UiAccountUiAccountGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountPushRemoveUiAccountPushRemovePostWithBody request with any body
+	UiAccountPushRemoveUiAccountPushRemovePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAccountPushRemoveUiAccountPushRemovePostWithFormdataBody(ctx context.Context, body UiAccountPushRemoveUiAccountPushRemovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountPushStatusUiAccountPushStatusPostWithBody request with any body
+	UiAccountPushStatusUiAccountPushStatusPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAccountPushStatusUiAccountPushStatusPostWithFormdataBody(ctx context.Context, body UiAccountPushStatusUiAccountPushStatusPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountPushSubscribeUiAccountPushSubscribePostWithBody request with any body
+	UiAccountPushSubscribeUiAccountPushSubscribePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAccountPushSubscribeUiAccountPushSubscribePostWithFormdataBody(ctx context.Context, body UiAccountPushSubscribeUiAccountPushSubscribePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountPushSubscriptionsUiAccountPushSubscriptionsGet request
+	UiAccountPushSubscriptionsUiAccountPushSubscriptionsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithBody request with any body
+	UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithFormdataBody(ctx context.Context, body UiAccountPushUnsubscribeUiAccountPushUnsubscribePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAccountRevokeSessionUiAccountSessionsRevokePostWithBody request with any body
 	UiAccountRevokeSessionUiAccountSessionsRevokePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -21287,6 +21344,114 @@ func (c *Client) UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEdit
 
 func (c *Client) UiAccountUiAccountGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAccountUiAccountGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountPushRemoveUiAccountPushRemovePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountPushRemoveUiAccountPushRemovePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountPushRemoveUiAccountPushRemovePostWithFormdataBody(ctx context.Context, body UiAccountPushRemoveUiAccountPushRemovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountPushRemoveUiAccountPushRemovePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountPushStatusUiAccountPushStatusPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountPushStatusUiAccountPushStatusPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountPushStatusUiAccountPushStatusPostWithFormdataBody(ctx context.Context, body UiAccountPushStatusUiAccountPushStatusPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountPushStatusUiAccountPushStatusPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountPushSubscribeUiAccountPushSubscribePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountPushSubscribeUiAccountPushSubscribePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountPushSubscribeUiAccountPushSubscribePostWithFormdataBody(ctx context.Context, body UiAccountPushSubscribeUiAccountPushSubscribePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountPushSubscribeUiAccountPushSubscribePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountPushSubscriptionsUiAccountPushSubscriptionsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountPushSubscriptionsUiAccountPushSubscriptionsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountPushUnsubscribeUiAccountPushUnsubscribePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithFormdataBody(ctx context.Context, body UiAccountPushUnsubscribeUiAccountPushUnsubscribePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountPushUnsubscribeUiAccountPushUnsubscribePostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -39866,6 +40031,193 @@ func NewUiAccountUiAccountGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewUiAccountPushRemoveUiAccountPushRemovePostRequestWithFormdataBody calls the generic UiAccountPushRemoveUiAccountPushRemovePost builder with application/x-www-form-urlencoded body
+func NewUiAccountPushRemoveUiAccountPushRemovePostRequestWithFormdataBody(server string, body UiAccountPushRemoveUiAccountPushRemovePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiAccountPushRemoveUiAccountPushRemovePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiAccountPushRemoveUiAccountPushRemovePostRequestWithBody generates requests for UiAccountPushRemoveUiAccountPushRemovePost with any type of body
+func NewUiAccountPushRemoveUiAccountPushRemovePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/push/remove")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiAccountPushStatusUiAccountPushStatusPostRequestWithFormdataBody calls the generic UiAccountPushStatusUiAccountPushStatusPost builder with application/x-www-form-urlencoded body
+func NewUiAccountPushStatusUiAccountPushStatusPostRequestWithFormdataBody(server string, body UiAccountPushStatusUiAccountPushStatusPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiAccountPushStatusUiAccountPushStatusPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiAccountPushStatusUiAccountPushStatusPostRequestWithBody generates requests for UiAccountPushStatusUiAccountPushStatusPost with any type of body
+func NewUiAccountPushStatusUiAccountPushStatusPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/push/status")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiAccountPushSubscribeUiAccountPushSubscribePostRequestWithFormdataBody calls the generic UiAccountPushSubscribeUiAccountPushSubscribePost builder with application/x-www-form-urlencoded body
+func NewUiAccountPushSubscribeUiAccountPushSubscribePostRequestWithFormdataBody(server string, body UiAccountPushSubscribeUiAccountPushSubscribePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiAccountPushSubscribeUiAccountPushSubscribePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiAccountPushSubscribeUiAccountPushSubscribePostRequestWithBody generates requests for UiAccountPushSubscribeUiAccountPushSubscribePost with any type of body
+func NewUiAccountPushSubscribeUiAccountPushSubscribePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/push/subscribe")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiAccountPushSubscriptionsUiAccountPushSubscriptionsGetRequest generates requests for UiAccountPushSubscriptionsUiAccountPushSubscriptionsGet
+func NewUiAccountPushSubscriptionsUiAccountPushSubscriptionsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/push/subscriptions")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAccountPushUnsubscribeUiAccountPushUnsubscribePostRequestWithFormdataBody calls the generic UiAccountPushUnsubscribeUiAccountPushUnsubscribePost builder with application/x-www-form-urlencoded body
+func NewUiAccountPushUnsubscribeUiAccountPushUnsubscribePostRequestWithFormdataBody(server string, body UiAccountPushUnsubscribeUiAccountPushUnsubscribePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiAccountPushUnsubscribeUiAccountPushUnsubscribePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiAccountPushUnsubscribeUiAccountPushUnsubscribePostRequestWithBody generates requests for UiAccountPushUnsubscribeUiAccountPushUnsubscribePost with any type of body
+func NewUiAccountPushUnsubscribeUiAccountPushUnsubscribePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/push/unsubscribe")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiAccountRevokeSessionUiAccountSessionsRevokePostRequestWithFormdataBody calls the generic UiAccountRevokeSessionUiAccountSessionsRevokePost builder with application/x-www-form-urlencoded body
 func NewUiAccountRevokeSessionUiAccountSessionsRevokePostRequestWithFormdataBody(server string, body UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -51791,6 +52143,29 @@ type ClientWithResponsesInterface interface {
 	// UiAccountUiAccountGetWithResponse request
 	UiAccountUiAccountGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountUiAccountGetResponse, error)
 
+	// UiAccountPushRemoveUiAccountPushRemovePostWithBodyWithResponse request with any body
+	UiAccountPushRemoveUiAccountPushRemovePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountPushRemoveUiAccountPushRemovePostResponse, error)
+
+	UiAccountPushRemoveUiAccountPushRemovePostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountPushRemoveUiAccountPushRemovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountPushRemoveUiAccountPushRemovePostResponse, error)
+
+	// UiAccountPushStatusUiAccountPushStatusPostWithBodyWithResponse request with any body
+	UiAccountPushStatusUiAccountPushStatusPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountPushStatusUiAccountPushStatusPostResponse, error)
+
+	UiAccountPushStatusUiAccountPushStatusPostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountPushStatusUiAccountPushStatusPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountPushStatusUiAccountPushStatusPostResponse, error)
+
+	// UiAccountPushSubscribeUiAccountPushSubscribePostWithBodyWithResponse request with any body
+	UiAccountPushSubscribeUiAccountPushSubscribePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountPushSubscribeUiAccountPushSubscribePostResponse, error)
+
+	UiAccountPushSubscribeUiAccountPushSubscribePostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountPushSubscribeUiAccountPushSubscribePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountPushSubscribeUiAccountPushSubscribePostResponse, error)
+
+	// UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetWithResponse request
+	UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse, error)
+
+	// UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithBodyWithResponse request with any body
+	UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse, error)
+
+	UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountPushUnsubscribeUiAccountPushUnsubscribePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse, error)
+
 	// UiAccountRevokeSessionUiAccountSessionsRevokePostWithBodyWithResponse request with any body
 	UiAccountRevokeSessionUiAccountSessionsRevokePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsRevokePostResponse, error)
 
@@ -57748,6 +58123,116 @@ func (r UiAccountUiAccountGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAccountUiAccountGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountPushRemoveUiAccountPushRemovePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountPushRemoveUiAccountPushRemovePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountPushRemoveUiAccountPushRemovePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountPushStatusUiAccountPushStatusPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountPushStatusUiAccountPushStatusPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountPushStatusUiAccountPushStatusPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountPushSubscribeUiAccountPushSubscribePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountPushSubscribeUiAccountPushSubscribePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountPushSubscribeUiAccountPushSubscribePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -65167,6 +65652,83 @@ func (c *ClientWithResponses) UiAccountUiAccountGetWithResponse(ctx context.Cont
 		return nil, err
 	}
 	return ParseUiAccountUiAccountGetResponse(rsp)
+}
+
+// UiAccountPushRemoveUiAccountPushRemovePostWithBodyWithResponse request with arbitrary body returning *UiAccountPushRemoveUiAccountPushRemovePostResponse
+func (c *ClientWithResponses) UiAccountPushRemoveUiAccountPushRemovePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountPushRemoveUiAccountPushRemovePostResponse, error) {
+	rsp, err := c.UiAccountPushRemoveUiAccountPushRemovePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountPushRemoveUiAccountPushRemovePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAccountPushRemoveUiAccountPushRemovePostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountPushRemoveUiAccountPushRemovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountPushRemoveUiAccountPushRemovePostResponse, error) {
+	rsp, err := c.UiAccountPushRemoveUiAccountPushRemovePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountPushRemoveUiAccountPushRemovePostResponse(rsp)
+}
+
+// UiAccountPushStatusUiAccountPushStatusPostWithBodyWithResponse request with arbitrary body returning *UiAccountPushStatusUiAccountPushStatusPostResponse
+func (c *ClientWithResponses) UiAccountPushStatusUiAccountPushStatusPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountPushStatusUiAccountPushStatusPostResponse, error) {
+	rsp, err := c.UiAccountPushStatusUiAccountPushStatusPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountPushStatusUiAccountPushStatusPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAccountPushStatusUiAccountPushStatusPostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountPushStatusUiAccountPushStatusPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountPushStatusUiAccountPushStatusPostResponse, error) {
+	rsp, err := c.UiAccountPushStatusUiAccountPushStatusPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountPushStatusUiAccountPushStatusPostResponse(rsp)
+}
+
+// UiAccountPushSubscribeUiAccountPushSubscribePostWithBodyWithResponse request with arbitrary body returning *UiAccountPushSubscribeUiAccountPushSubscribePostResponse
+func (c *ClientWithResponses) UiAccountPushSubscribeUiAccountPushSubscribePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountPushSubscribeUiAccountPushSubscribePostResponse, error) {
+	rsp, err := c.UiAccountPushSubscribeUiAccountPushSubscribePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountPushSubscribeUiAccountPushSubscribePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAccountPushSubscribeUiAccountPushSubscribePostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountPushSubscribeUiAccountPushSubscribePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountPushSubscribeUiAccountPushSubscribePostResponse, error) {
+	rsp, err := c.UiAccountPushSubscribeUiAccountPushSubscribePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountPushSubscribeUiAccountPushSubscribePostResponse(rsp)
+}
+
+// UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetWithResponse request returning *UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse
+func (c *ClientWithResponses) UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse, error) {
+	rsp, err := c.UiAccountPushSubscriptionsUiAccountPushSubscriptionsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse(rsp)
+}
+
+// UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithBodyWithResponse request with arbitrary body returning *UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse
+func (c *ClientWithResponses) UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse, error) {
+	rsp, err := c.UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountPushUnsubscribeUiAccountPushUnsubscribePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse, error) {
+	rsp, err := c.UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse(rsp)
 }
 
 // UiAccountRevokeSessionUiAccountSessionsRevokePostWithBodyWithResponse request with arbitrary body returning *UiAccountRevokeSessionUiAccountSessionsRevokePostResponse
@@ -75191,6 +75753,133 @@ func ParseUiAccountUiAccountGetResponse(rsp *http.Response) (*UiAccountUiAccount
 	response := &UiAccountUiAccountGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountPushRemoveUiAccountPushRemovePostResponse parses an HTTP response from a UiAccountPushRemoveUiAccountPushRemovePostWithResponse call
+func ParseUiAccountPushRemoveUiAccountPushRemovePostResponse(rsp *http.Response) (*UiAccountPushRemoveUiAccountPushRemovePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountPushRemoveUiAccountPushRemovePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountPushStatusUiAccountPushStatusPostResponse parses an HTTP response from a UiAccountPushStatusUiAccountPushStatusPostWithResponse call
+func ParseUiAccountPushStatusUiAccountPushStatusPostResponse(rsp *http.Response) (*UiAccountPushStatusUiAccountPushStatusPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountPushStatusUiAccountPushStatusPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountPushSubscribeUiAccountPushSubscribePostResponse parses an HTTP response from a UiAccountPushSubscribeUiAccountPushSubscribePostWithResponse call
+func ParseUiAccountPushSubscribeUiAccountPushSubscribePostResponse(rsp *http.Response) (*UiAccountPushSubscribeUiAccountPushSubscribePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountPushSubscribeUiAccountPushSubscribePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse parses an HTTP response from a UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetWithResponse call
+func ParseUiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse(rsp *http.Response) (*UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountPushSubscriptionsUiAccountPushSubscriptionsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse parses an HTTP response from a UiAccountPushUnsubscribeUiAccountPushUnsubscribePostWithResponse call
+func ParseUiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse(rsp *http.Response) (*UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountPushUnsubscribeUiAccountPushUnsubscribePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

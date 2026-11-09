@@ -165,6 +165,11 @@
     </div>
   </div>
 
+  {# ---------- Approval notifications (only with WEB_PUSH_ENABLED) ---------- #}
+  {% if push_public_key %}
+  {% include "account/_push.html" %}
+  {% endif %}
+
   {# ---------- Revoke-others confirm modal ---------- #}
   <dialog id="account-revoke-others-modal" class="modal">
     <div class="modal-box">
@@ -196,4 +201,10 @@
     </form>
   </dialog>
 </section>
+{% endblock %}
+
+{% block scripts %}
+{% if push_public_key %}
+<script src="/ui/static/src/app/push-subscribe.js" defer></script>
+{% endif %}
 {% endblock %}

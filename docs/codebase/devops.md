@@ -1230,6 +1230,9 @@ What an operator can do now:
               kubernetes.io/metadata.name: kube-system
   ```
 
+  `deploy/values-examples/values-vks.yaml` does this for Traefik in the
+  namespace `traefik`, and turns on the OpenBao rule too (#5833).
+
 - Run a service mesh that encrypts traffic between pods (mutual TLS).
 
 A NetworkPolicy controls who can connect. It does not encrypt. Only

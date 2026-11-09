@@ -738,6 +738,87 @@ def test_values_schema_uses_the_input_rules() -> None:
     assert compat.values_schema_breaking(head, base) == []
 
 
+def _probe_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "probes": {
+                "type": "object",
+                "properties": {
+                    "liveness": {"$ref": "#/definitions/httpProbe"},
+                    "readiness": {"$ref": "#/definitions/httpProbe", "description": "kept"},
+                },
+            }
+        },
+        "definitions": {
+            "httpProbe": {
+                "type": "object",
+                "properties": {
+                    "scheme": {"type": "string", "enum": ["HTTP", "HTTPS"]},
+                    "port": {"type": "integer"},
+                },
+            }
+        },
+    }
+
+
+def test_values_schema_finds_a_change_inside_a_referenced_definition() -> None:
+    base = _probe_schema()
+    head = copy.deepcopy(base)
+    head["definitions"]["httpProbe"]["properties"]["scheme"]["enum"] = ["HTTP"]
+    del head["definitions"]["httpProbe"]["properties"]["port"]
+    head["definitions"]["httpProbe"]["required"] = ["scheme"]
+    found = compat.values_schema_breaking(base, head)
+    for probe in ("liveness", "readiness"):
+        where = f"Helm values schema.probes.{probe}"
+        assert f"{where}.scheme: enum value 'HTTPS' removed" in found
+        assert f"{where}: argument 'port' removed" in found
+        assert f"{where}: argument 'scheme' is now required" in found
+    assert compat.values_schema_breaking(head, base) == []
+    assert compat.values_schema_breaking(base, copy.deepcopy(base)) == []
+
+
+def test_values_schema_finds_a_ref_swapped_for_a_narrower_inline_schema() -> None:
+    base = _probe_schema()
+    head = copy.deepcopy(base)
+    head["properties"]["probes"]["properties"]["liveness"] = {
+        "type": "object",
+        "properties": {"scheme": {"type": "string", "enum": ["HTTP"]}},
+    }
+    found = compat.values_schema_breaking(base, head)
+    assert "Helm values schema.probes.liveness.scheme: enum value 'HTTPS' removed" in found
+    assert "Helm values schema.probes.liveness: argument 'port' removed" in found
+
+
+def test_values_schema_of_the_chart_finds_a_removed_probe_scheme() -> None:
+    base = json.loads((_REPO_ROOT / compat.VALUES_SCHEMA_PATH).read_text(encoding="utf-8"))
+    head = copy.deepcopy(base)
+    scheme = head["definitions"]["httpProbe"]["properties"]["httpGet"]["properties"]["scheme"]
+    scheme["enum"] = ["HTTP"]
+    found = compat.values_schema_breaking(base, head)
+    assert found
+    assert all("enum value 'HTTPS' removed" in line for line in found)
+    assert compat.values_schema_breaking(base, copy.deepcopy(base)) == []
+
+
+def test_inline_refs_keeps_sibling_keys_and_stops_on_a_cycle() -> None:
+    schema = {
+        "properties": {"tree": {"$ref": "#/definitions/node", "title": "t"}},
+        "definitions": {
+            "node": {"type": "object", "properties": {"child": {"$ref": "#/definitions/node"}}}
+        },
+    }
+    tree = compat.inline_refs(schema)["properties"]["tree"]
+    assert tree["title"] == "t"
+    assert tree["properties"]["child"] == {"$ref": "#/definitions/node"}
+
+
+def test_values_schema_fails_closed_on_a_ref_that_points_to_nothing() -> None:
+    base = {"properties": {"a": {"$ref": "#/definitions/missing"}}}
+    with pytest.raises(compat.CheckError, match="points to nothing"):
+        compat.values_schema_breaking(base, base)
+
+
 def _add_chart_files(root: Path, values: str, schema: dict[str, Any]) -> None:
     (root / "deploy" / "charts" / "meho").mkdir(parents=True, exist_ok=True)
     (root / compat.VALUES_PATH).write_text(values)

@@ -1092,9 +1092,10 @@ are left. Each is a follow-up task.
    `tools/list` snapshot (`backend/contracts/mcp-tools-list.json`), and
    a break needs the `breaking-change` label. It also compares the keys of
    `deploy/charts/meho/values.yaml` and `values.schema.json`, and the chart
-   job keeps golden renders in `deploy/golden/`. Still missing: an
-   update-from-previous-tag job, an env-var registry snapshot, and a check
-   of the CLI verbs and flags. Until they exist,
+   job keeps golden renders in `deploy/golden/`. The chart job also
+   upgrades from the last release, but only for the Helm install. Still
+   missing: an update-from-previous-tag test for the other install forms,
+   an env-var registry snapshot, and a check of the CLI verbs and flags. Until they exist,
    R3 classifies those by hand. The workflow also does not run in the
    merge queue (labels are not visible there), so it is not a required
    check yet.

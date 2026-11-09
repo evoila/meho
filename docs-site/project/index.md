@@ -49,8 +49,9 @@ A breaking change merges only on purpose. The pull request must have the
 `breaking-change` label and a *Breaking changes* section that says what a
 client must change. That text goes into the release notes.
 
-Not checked by CI yet: the update from the previous release, the CLI
-verbs and flags, and the environment variables. The full
+Not checked by CI yet: the CLI verbs and flags, and the environment
+variables. The update from the previous release is tested only for the
+Helm install, not for the other install forms. The full
 1.0 stability promise, with a deprecation window, is tracked in
 [evoila/meho#3861](https://github.com/evoila/meho/issues/3861).
 

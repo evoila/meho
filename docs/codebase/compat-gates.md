@@ -77,8 +77,11 @@ Enum values compare the JSON Schema way: `1` and `1.0` are the same value
 
 The schema of the Helm values uses the input rules: a removed property, a
 newly required property, a narrower type or a removed enum value is
-breaking. The schema's `if` / `then` / `allOf` rules and
-`additionalProperties` are not compared.
+breaking. A local `$ref` (such as `#/definitions/httpProbe`) is replaced
+by the definition it points to before the compare, so a change inside a
+definition counts at every place that uses it. A `$ref` that points to
+nothing stops the check (exit 2). The schema's `if` / `then` / `allOf`
+rules and `additionalProperties` are not compared.
 
 A new tool, a new optional argument, a new output field and a new enum
 value in an input are not breaking.
@@ -122,8 +125,10 @@ break needs a `Breaking changes` line in the CHANGELOG. See
 
 - The job does not run in the merge queue: labels are not visible there.
   Add a merge queue path before the check becomes required.
-- Not covered yet: the update from the previous release, the CLI verbs and
-  flags, and environment variables.
+- Not covered yet: the CLI verbs and flags, and environment variables.
+  The update from the previous release is tested only for the Helm install
+  (the job "Upgrade from the last release" in `.github/workflows/chart.yml`).
+  The other install forms have no such test yet.
 - The Helm check sees keys and the schema, not a changed default or a
   changed template. The golden renders (below) show those in review, but
   they do not fail a pull request as breaking.

@@ -21,7 +21,10 @@ So MEHO shows a few entries itself, in two places:
 `TEAM_KNOWLEDGE_RECALL` is `true` (Helm: `config.teamKnowledgeRecall`).
 With it off, `preview_operation`, `call_operation`, the MCP start text
 and the hosted prompt are exactly as they were before recall, and MEHO
-reads nothing for them. It stays off until model tests show it helps.
+reads nothing for them. The `outputSchema` of both operation tools then
+has no `team_knowledge` field either (see "Tool text that follows a
+switch" in [mcp.md](mcp.md)). It stays off until model tests show it
+helps.
 
 All shown text is data, not instructions. It sits inside one
 untrusted-text envelope (`untrusted_text.wrap_untrusted_text`), the same

@@ -334,8 +334,11 @@ check; they keep their own dry run.
 off, MEHO does not search: nothing counts as similar, so a create of a
 new slug is written as before, `create_anyway` changes nothing, and a
 dry run answers `would_write: true` with an empty list. The console
-upload page hides its "Create anyway" box. It stays off until model
-tests show it helps.
+upload page hides its "Create anyway" box. The MCP tool
+`add_to_knowledge` then has no text about the check and no
+`create_anyway` input; a call that still sends it is refused as an
+invalid input (see "Tool text that follows a switch" in
+[mcp.md](mcp.md)). It stays off until model tests show it helps.
 
 How it decides:
 

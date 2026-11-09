@@ -1211,7 +1211,7 @@ add-on-family gate.
 
 | Tool | Role | Extra gate | What it does |
 |---|---|---|---|
-| `add_to_knowledge` | operator, or a `read_only` person who can decide approvals (`approver_may_call`) | — | Write a distilled entry to the tenant knowledge base. With `KB_SIMILAR_CHECK` on (off by default), a new slug with similar entries is not written; the answer lists them (`create_anyway` writes anyway, `dry_run` writes nothing). On a tenant that keeps its lessons in its own wiki, `wiki` says if the lesson also goes there. |
+| `add_to_knowledge` | operator, or a `read_only` person who can decide approvals (`approver_may_call`) | — | Write a distilled entry to the tenant knowledge base. With `KB_SIMILAR_CHECK` on (off by default), a new slug with similar entries is not written; the answer lists them (`create_anyway` writes anyway, `dry_run` writes nothing). With it off, the tool has no text about this and no `create_anyway` input. On a tenant that keeps its lessons in its own wiki, `wiki` says if the lesson also goes there. |
 | `add_to_memory` | operator | — | Save a scoped memory entry (user / tenant / target). |
 | `ask_docs` | operator | `meho-docs` | Synthesized, cited answer over a vendor-document collection. |
 | `call_operation` | operator | — | Invoke a resolved connector operation against a target. |
@@ -1618,6 +1618,34 @@ The redaction helper is `redacted_audit_uri(template)` in
 `mcp/registry.py`. New query-bearing resources reuse the same flag +
 contextvar pattern rather than special-casing the dispatcher per
 resource.
+
+## Tool text that follows a switch (#6077)
+
+Some features are behind a switch that is off by default. While a switch
+is off, the tools say nothing about its feature, so an agent does not read
+about a feature it cannot use, and a model test of the off state measures
+the off state.
+
+* A tool can set `ToolDefinition.for_settings`: a function that gets the
+  registered tool and returns the tool as it is shown under the current
+  settings. `tool_for_settings` (`mcp/registry.py`) applies it.
+* `all_tools_for` applies it, so `tools/list` shows the switched form. The
+  CLI reads the same list (`meho doctor` calls `tools/list`).
+* `handle_tools_call` applies it before the `inputSchema` check, so a call
+  is checked against the schema the list showed. An argument that is not
+  in that schema is refused with `-32602`, and the message names it.
+* With the switch on, the tool is the registered one, unchanged.
+* `get_tool` returns the registered tool. The hosted-run tools are built
+  from it once, when the process starts, so they keep the full text.
+
+Two tools use it today:
+
+| Switch (off by default) | Tool | With the switch off |
+| --- | --- | --- |
+| `KB_SIMILAR_CHECK` | `add_to_knowledge` | No text about the similar-entry check, no `create_anyway` input, and `dry_run` says nothing about similar entries (`mcp/tools/_kb_similar_text.py`). |
+| `TEAM_KNOWLEDGE_RECALL` | `call_operation`, `preview_operation` | No `team_knowledge` field in the `outputSchema` (`mcp/tools/_operation_recall.py`). |
+
+`tests/test_mcp_surface_conformance.py` checks both states of each switch.
 
 ## Empty optional text on read tools (#4110)
 

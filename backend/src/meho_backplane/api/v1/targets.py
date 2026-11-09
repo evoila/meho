@@ -2030,6 +2030,23 @@ async def soft_delete_target(
 # ---------------------------------------------------------------------------
 
 
+async def _raise_if_name_taken(session: AsyncSession, tenant_id: uuid.UUID, name: str) -> None:
+    """Answer 409 now when a live target of the tenant has *name*.
+
+    The same 409 as :func:`create_target`, so a token call does not wait for
+    approval only to fail after it. The unique index still guards the write.
+    """
+    taken = await session.scalar(
+        select(TargetORM.id).where(
+            TargetORM.tenant_id == tenant_id,
+            TargetORM.name == name,
+            TargetORM.deleted_at.is_(None),
+        )
+    )
+    if taken is not None:
+        raise HTTPException(status_code=409, detail=f"target {name!r} already exists in tenant")
+
+
 async def _dispatch_targets_write(
     operator: Operator, op_id: str, params: dict[str, Any]
 ) -> JSONResponse:
@@ -2067,6 +2084,7 @@ async def create_target_route(
         return await create_target(body=body, operator=operator, session=session)
     _validate_create_body_fields(body, operator)
     _resolve_create_secret_ref(body, operator)
+    await _raise_if_name_taken(session, operator.tenant_id, body.name)
     return await _dispatch_targets_write(
         operator, "targets.register", body.model_dump(mode="json", exclude_unset=True)
     )

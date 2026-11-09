@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0147_add_approval_request_principal_kind``.
+"""Tests for Alembic migration ``0148_add_approval_request_principal_kind``.
 
 The migration adds the nullable ``principal_kind`` column to
 ``approval_request`` (#3885). The tests check that:
@@ -28,14 +28,14 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0147"
-_DOWN_REVISION = "0146"
+_REVISION = "0148"
+_DOWN_REVISION = "0147"
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0147.db"
+    db_path = tmp_path / "migration_0148.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

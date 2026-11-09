@@ -2382,7 +2382,7 @@ run one at a time").
 The per-op preview hook is opt-in, so before #1855 a parked op with no
 registered builder carried only `{op_id, connector_id, target_id}` — a
 reviewer could not tell a `dangerous` op (e.g. `keycloak.realm.create`)
-from a `caution` op (e.g. `keycloak.user.create`) on the row alone.
+from a `caution` op (e.g. `keycloak.realm.update`) on the row alone.
 
 `dispatcher._build_proposed_effect` now stamps the catalog
 `descriptor.safety_level` onto **every** parked op's `proposed_effect`,

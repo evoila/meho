@@ -159,7 +159,9 @@ meho keycloak user create --target keycloak-main -f alice.json \
   --password-secret-ref <vault-path-of-the-password> --temporary
 ```
 
-This step waits for approval too (risk level `caution`).
+This step waits for approval too (risk level `dangerous`). A
+MEHO-SA-Operator or an admin must approve it, the same as the group
+steps.
 
 ## Step 5: Put each person in exactly one group
 

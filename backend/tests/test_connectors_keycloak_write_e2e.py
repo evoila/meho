@@ -105,15 +105,17 @@ EXPECTED_WRITE_OP_IDS: tuple[str, ...] = (
 #: all ``dangerous`` (privilege-adjacent: group membership + attributes drive
 #: the backplane's tenant claims). The governed deletes (#3944) are
 #: ``destructive``: a second person must approve.
+#: User create, password reset, client create/update and protocol-mapper
+#: create are ``dangerous`` too: they change what goes into the login token.
 EXPECTED_SAFETY: dict[str, str] = {
     "keycloak.realm.create": "dangerous",
     "keycloak.realm.update": "caution",
-    "keycloak.client.create": "caution",
-    "keycloak.client.update": "caution",
+    "keycloak.client.create": "dangerous",
+    "keycloak.client.update": "dangerous",
     "keycloak.client_scope.create": "caution",
-    "keycloak.protocol_mapper.create": "caution",
-    "keycloak.user.create": "caution",
-    "keycloak.user.reset_password": "caution",
+    "keycloak.protocol_mapper.create": "dangerous",
+    "keycloak.user.create": "dangerous",
+    "keycloak.user.reset_password": "dangerous",
     "keycloak.role_mapping.assign": "dangerous",
     "keycloak.group.create": "dangerous",
     "keycloak.group.update_attributes": "dangerous",

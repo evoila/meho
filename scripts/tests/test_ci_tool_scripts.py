@@ -401,10 +401,6 @@ class InstallSpacyModelTests(FakeCommandsTestCase):
         self.assertEqual(self.calls(), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class StageTailwindTests(FakeCommandsTestCase):
     """The script runs from a copy of the tree, with its own pins."""
 
@@ -489,3 +485,34 @@ class StageTailwindTests(FakeCommandsTestCase):
     def test_unknown_arch_and_no_arch_are_usage_errors(self) -> None:
         self.assertEqual(self.stage("riscv").returncode, 2)
         self.assertEqual(self.run_script(self.script).returncode, 2)
+
+    def test_job_that_needs_arm64_too_downloads_only_the_missing_binary(self) -> None:
+        # An amd64-only job saved its cache first: only the amd64 file is there.
+        self.cached.parent.mkdir(parents=True)
+        self.cached.write_bytes(b"content")
+        result = self.stage("amd64", "arm64")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), [f"curl {self.url.replace('x64', 'arm64')}"])
+        arm64 = self.cached.with_name("tailwindcss-linux-arm64")
+        self.assertEqual(arm64.read_bytes(), b"content")
+        self.assertTrue(self.staged.with_name("tailwindcss-linux-arm64").exists())
+
+
+class StageTailwindActionTests(unittest.TestCase):
+    """Each binary has its own cache entry, so a job that stages only amd64
+    never saves an entry that a job needing arm64 restores without arm64."""
+
+    def test_each_binary_has_its_own_cache_key_and_path(self) -> None:
+        action = (ROOT / ".github/actions/stage-tailwind/action.yml").read_text()
+        steps = action.split("    - name: ")[1:]
+        cache_steps = [step for step in steps if "uses: actions/cache@" in step]
+        self.assertEqual(len(cache_steps), 2)
+        for arch, name in (("amd64", "linux-x64"), ("arm64", "linux-arm64")):
+            (step,) = [step for step in cache_steps if f"'{arch}'" in step]
+            self.assertIn(f"if: contains(inputs.archs, '{arch}')", step)
+            self.assertIn(f"path: ~/.cache/meho-ci-tools/tailwindcss-*/tailwindcss-{name}\n", step)
+            self.assertIn(f"key: ci-tools-tailwind-{name}-", step)
+
+
+if __name__ == "__main__":
+    unittest.main()

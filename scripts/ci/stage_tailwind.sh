@@ -5,8 +5,9 @@
 # Usage: stage_tailwind.sh <arch>...    (arch: amd64, arm64)
 #
 # Order of choices for each arch:
-#   1. The file is in the tool folder (the job restores that folder with
-#      actions/cache, keyed by scripts/ci/tool-versions.env): use it.
+#   1. The file is in the tool folder (the job restores each file with
+#      actions/cache, keyed by its name and scripts/ci/tool-versions.env;
+#      see .github/actions/stage-tailwind): use it.
 #   2. Download it with fetch_with_retry.sh (more tries than for the other
 #      tools), check the sha256, and keep it in the tool folder so the
 #      cache can save it.

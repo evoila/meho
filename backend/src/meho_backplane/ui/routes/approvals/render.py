@@ -42,6 +42,7 @@ from meho_backplane.operations.approval_queue import (
     pending_chain_positions,
     result_state_of_envelope,
 )
+from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
 
@@ -233,6 +234,7 @@ def project_request_to_view(
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
         "proposed_effect": row.proposed_effect,
         "reveal_secret": bool(row.reveal_secret),
+        "rights_change": is_rights_change(row),
         "status": row.status,
         "reviewed_by": row.reviewed_by,
         "work_ref": row.work_ref,

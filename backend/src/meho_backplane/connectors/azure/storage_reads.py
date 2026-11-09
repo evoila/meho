@@ -147,6 +147,7 @@ async def _blob_call(
     missing: str,
     params: dict[str, str] | None = None,
     headers: Mapping[str, str] | None = None,
+    content: bytes | None = None,
 ) -> httpx.Response:
     """Send one call to the account's blob host and return the answer.
 
@@ -164,6 +165,7 @@ async def _blob_call(
             operator=operator,
             params=params,
             extra_hosts=(account.blob_host,),
+            content=content,
         )
     except AzureForbiddenError as exc:
         raise AzureForbiddenError(

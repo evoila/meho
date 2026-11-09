@@ -425,6 +425,12 @@
         <dt class="shrink-0 text-base-content/55">Operation</dt>
         <dd class="font-mono [overflow-wrap:anywhere] text-right">{{ request.op_id }}</dd>
       </div>
+      {% if request.rights_change %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-rights-change>
+          <dt class="shrink-0 text-base-content/55">Rights change</dt>
+          <dd class="text-right font-semibold">Another admin must approve</dd>
+        </div>
+      {% endif %}
       {% if request.reveal_secret %}
         <div class="flex items-baseline justify-between gap-4" data-approval-reveal-secret>
           <dt class="shrink-0 text-base-content/55">Hidden values</dt>

@@ -437,8 +437,9 @@ async def trace(
     Absence has two levels. A missing / cross-tenant **audit row** is a 404
     (never 403), matching :func:`show`: the existence check runs through the
     tenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and the
-    answer is the same as for an id that does not exist. An audit row that exists but carries **no trace** is
-    a 200 with ``trace_present=False`` — capture is a best-effort opt-in
+    answer is the same as for an id that does not exist. An audit row that
+    exists but carries **no trace** is a 200 with ``trace_present=False`` —
+    capture is a best-effort opt-in
     (F1/F7), so "no trace" is a normal observable state, not an error.
 
     Tenant isolation is enforced twice: the existence check is tenant-scoped,

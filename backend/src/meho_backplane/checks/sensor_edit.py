@@ -37,6 +37,7 @@ from meho_backplane.checks.schemas import (
     _OP_ID_MAX_LENGTH,
     _TIMEZONE_MAX_LENGTH,
     SensorCreate,
+    SensorParams,
     SensorRead,
 )
 from meho_backplane.checks.service import (
@@ -87,7 +88,7 @@ class SensorUpdate(BaseModel):
         Annotated[str, Field(min_length=1, max_length=_CONNECTOR_ID_MAX_LENGTH)] | None
     ) = None
     op_id: Annotated[str, Field(min_length=1, max_length=_OP_ID_MAX_LENGTH)] | None = None
-    params: dict[str, object] | None = None
+    params: SensorParams | None = None
     assertion: AssertionSpec | None = None
     cadence_kind: SensorCadenceKind | None = None
     interval_seconds: (

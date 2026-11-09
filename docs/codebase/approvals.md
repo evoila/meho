@@ -640,7 +640,7 @@ audit rows, the operation run and refusal rows (`write_audit_row`), the
 MCP tool rows (`write_mcp_audit_row`) and the tool rows of MEHO's own
 agent runs (`write_agent_tool_row`).
 
-**Machine requesters are marked (#3885).** Migration `0148` adds
+**Machine requesters are marked (#3885).** Migration `0149` adds
 `approval_request.principal_kind` (nullable text): the requester's
 `principal_kind` (`user` / `agent` / `service` / `runner`), saved at park
 time. A composite step that waits again during a re-run keeps the kind of
@@ -649,7 +649,7 @@ the original requester (`ResumeRequester.kind`). REST returns it as
 shows a badge with the kind next to a machine requester, and the CLI adds
 it in brackets: `show` prints `incident-triage (<sub>) [agent]`, and the
 `list` PRINCIPAL column puts it first (`[agent] incident-triage`) so a cut
-column still shows it. A person, or a request made before `0148`, gets no
+column still shows it. A person, or a request made before `0149`, gets no
 marker.
 
 **Fail-open contract.** Resolution can never fail or slow a decision: no

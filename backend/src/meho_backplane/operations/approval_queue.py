@@ -1381,7 +1381,7 @@ class ResumeRequester(NamedTuple):
     act: str | None
     name: str | None
     #: The requester's ``principal_kind`` (#3885). ``None`` on a row parked
-    #: before migration 0148.
+    #: before migration 0149.
     kind: str | None = None
 
 

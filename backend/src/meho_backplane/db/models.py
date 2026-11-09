@@ -6934,7 +6934,7 @@ class ApprovalRequest(Base):
       ``principal_kind`` (``user`` / ``agent`` / ``service`` / ``runner``),
       saved at park time so the console and the CLI can mark a machine
       requester as not a person (#3885). NULL on rows parked before
-      migration ``0148``.
+      migration ``0149``.
 
     * ``op_id`` / ``connector_id`` -- the operation + connector the
       dispatcher was asked to call. Stored verbatim for resume.
@@ -7160,7 +7160,7 @@ class ApprovalRequest(Base):
     # by migration ``0097``.
     principal_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # The requester's principal kind (#3885), so the approval surfaces can
-    # mark an agent requester as not a person. NULL before migration 0148.
+    # mark an agent requester as not a person. NULL before migration 0149.
     principal_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Dispatch coordinates for resume.
     op_id: Mapped[str] = mapped_column(Text, nullable=False)

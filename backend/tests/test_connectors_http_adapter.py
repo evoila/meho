@@ -694,6 +694,30 @@ async def test_request_json_rejects_oversize_response(
 
 
 @pytest.mark.asyncio
+async def test_capped_read_skips_content_length_check_for_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A HEAD answer has no body: its ``Content-Length`` is the resource's size.
+
+    A HEAD on a file larger than the cap must succeed, while a GET that
+    declares the same length is still refused.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    big = {"content-length": str(6 * 1024**3)}
+
+    async with respx.mock(base_url="https://files.example.com") as mock:
+        mock.head("/big.iso").respond(200, headers=big)
+        mock.get("/big.iso").respond(200, headers=big)
+        async with httpx.AsyncClient(base_url="https://files.example.com") as client:
+            head = await http_adapter._read_capped_json_response(client, "HEAD", "/big.iso")
+            with pytest.raises(ResponseTooLargeError):
+                await http_adapter._read_capped_json_response(client, "GET", "/big.iso")
+
+    assert head.status_code == 200
+    assert head.headers["content-length"] == str(6 * 1024**3)
+
+
+@pytest.mark.asyncio
 async def test_request_json_rejects_oversize_response_without_content_length(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

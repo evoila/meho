@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Weekly scan of the dependency files on main for known security advisories.
+# Other scans run only when code changes. This one also finds an advisory
+# that is published later for a package MEHO already uses.
+#
+# What it does:
+#   1. trivy (file-system mode) reads backend/uv.lock, cli/go.mod and the two
+#      package-lock.json files of the clients, with the exception file
+#      .trivyignore, and writes a JSON report;
+#   2. scripts/ci/security_weekly_issue.py opens one issue, or adds one
+#      comment with only the new findings to the open issue.
+#
+# The issue is NOT in this public repository. A finding must not be public
+# before its fix. It goes to a private repository, set by:
+#   - the repository variable SECURITY_FINDINGS_REPO (owner/name);
+#   - the repository secret SECURITY_FINDINGS_TOKEN: a token with only
+#     `issues: write` on that repository.
+# The job fails when either is missing, so a missing setup is visible.
+#
+# Runner: GitHub-hosted ubuntu-latest. No pull_request trigger, so it runs
+# no pull-request code. The built-in token only reads the repository.
+
+name: security-weekly
+
+on:
+  schedule:
+    # Mondays, 05:17 UTC.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-weekly
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: Weekly dependency scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Scan the dependency files (trivy)
+        # Same action commit, severity filter, ignore-unfixed rule and
+        # exception file as the image scan. `exit-code` stays 0: a finding
+        # goes to the issue, it does not fail this job.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          format: json
+          output: trivy-weekly.json
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "0"
+
+      - name: Open or update the findings issue
+        env:
+          GH_TOKEN: ${{ secrets.SECURITY_FINDINGS_TOKEN }}
+          FINDINGS_REPO: ${{ vars.SECURITY_FINDINGS_REPO }}
+        run: |
+          if [ -z "${GH_TOKEN}" ] || [ -z "${FINDINGS_REPO}" ]; then
+            echo "::error::SECURITY_FINDINGS_TOKEN or SECURITY_FINDINGS_REPO is not set"
+            exit 1
+          fi
+          python3 scripts/ci/security_weekly_issue.py \
+            --report trivy-weekly.json --repo "${FINDINGS_REPO}"

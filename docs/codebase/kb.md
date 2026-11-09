@@ -1089,7 +1089,7 @@ lives in two places: the wiki is the source of truth, and the store
 keeps a copy. The import (#5728) brings the wiki's pages in; the export
 (#5730) sends lessons written in MEHO out as pages for review.
 
-**The setting.** `tenant.knowledge_wiki_collection` (migration `0148`)
+**The setting.** `tenant.knowledge_wiki_collection` (migration `0149`)
 holds the key of the docs collection, per tenant. `NULL` (the default)
 means lessons live in MEHO only, and nothing below runs: both tools
 answer exactly as before. It is set through the settings file,

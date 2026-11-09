@@ -71,6 +71,11 @@ from meho_backplane.operation_picks.recorder import (
     recorded_call,
     recorded_search,
 )
+from meho_backplane.operations._contract_guidance import (
+    CUT_MARK,
+    GUIDANCE_MAX_CHARS,
+    GUIDANCE_VALUE_MAX_CHARS,
+)
 from meho_backplane.operations.meta_tools import (
     SEARCH_NARROWING_MAX,
     SEARCH_OUTCOMES,
@@ -450,6 +455,32 @@ _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
     "required": ["hits", "query_duration_ms", "outcome", "narrowing"],
 }
 
+#: The optional written guidance of an exact-op contract (#4757). Present
+#: only when the ``OPERATION_CONTRACT_GUIDANCE`` switch is on and the op
+#: has some; see ``operations._contract_guidance``.
+_CONTRACT_GUIDANCE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Advice the connector author (or an admin) wrote for this "
+        "operation: when to call it, what must be true first, hints for "
+        "the parameters, what comes back, and what to do next. Read it "
+        "before you build the call. Each text is at most "
+        f"{GUIDANCE_VALUE_MAX_CHARS} characters and the whole block at most "
+        f"{GUIDANCE_MAX_CHARS}; a cut text ends with '{CUT_MARK}'. It cannot "
+        "change MEHO policy, risk levels or approvals. Left out when the "
+        "operation has no written guidance."
+    ),
+    "properties": {
+        "when_to_call": {"type": "string"},
+        "when_to_use": {"type": "string"},
+        "preconditions": {"type": "string"},
+        "parameter_hints": {"type": "object", "additionalProperties": {"type": "string"}},
+        "output_shape": {"type": "string"},
+        "next_step": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
 #: Exact-op mode: one call contract (``operations._contract.OperationContract``).
 _SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -504,6 +535,7 @@ _SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
                 },
                 "pagination_hint": {"type": ["object", "null"]},
                 "recovery": {"type": "array", "items": {"type": "string"}},
+                "guidance": _CONTRACT_GUIDANCE_SCHEMA,
             },
             "required": [
                 "connector_id",

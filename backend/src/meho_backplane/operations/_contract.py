@@ -21,6 +21,10 @@ op_id)`` and builds an :class:`OperationContract`:
   never an instruction.
 * ``pagination_hint`` -- only when the op registered one.
 * ``recovery`` -- what a good retry looks like.
+* ``guidance`` -- the op's written advice from ``llm_instructions``,
+  size-limited (:mod:`~meho_backplane.operations._contract_guidance`).
+  Only when the ``OPERATION_CONTRACT_GUIDANCE`` switch is on and the op
+  has some; otherwise the key is left out of the payload (#4757).
 
 The lookup is deterministic: no ranking, no embedding. It uses the same
 visible-scope rule the dispatcher uses
@@ -43,13 +47,16 @@ from sqlalchemy import select
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.operations._contract_guidance import bounded_guidance
 from meho_backplane.operations._lookup import (
     enabled_for_tenant_clause,
     installed_owner_clause,
     visible_scope_clause,
 )
+from meho_backplane.operations._search import agent_description
 from meho_backplane.operations.dispatcher import descriptor_requires_target
 from meho_backplane.operations.op_policy import apply_effective_policy
+from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import VENDOR_TEXT_RULE
 
 __all__ = [
@@ -108,7 +115,12 @@ class UnknownOperationError(ValueError):
 
 
 class OperationContract(BaseModel):
-    """Everything a caller needs to form one valid ``call_operation``."""
+    """Everything a caller needs to form one valid ``call_operation``.
+
+    ``description`` is the original text, or the admin's
+    ``custom_description`` while the ``AGENT_READS_CUSTOM_DESCRIPTION``
+    switch is on (:func:`~meho_backplane.operations._search.agent_description`).
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -125,6 +137,12 @@ class OperationContract(BaseModel):
     result_shape: dict[str, Any]
     pagination_hint: dict[str, Any] | None
     recovery: list[str]
+    guidance: dict[str, Any] | None = None
+
+    def as_payload(self) -> dict[str, Any]:
+        """Return the JSON payload; ``guidance`` is left out when there is none."""
+        exclude = {"guidance"} if self.guidance is None else None
+        return self.model_dump(mode="json", exclude=exclude)
 
 
 def _fits(value: Any) -> bool:
@@ -300,7 +318,7 @@ async def build_operation_contract(
         connector_id=connector_id,
         op_id=descriptor.op_id,
         summary=descriptor.summary,
-        description=descriptor.description,
+        description=agent_description(descriptor),
         group_key=group_key,
         safety_level=descriptor.safety_level,
         requires_approval=descriptor.requires_approval,
@@ -315,5 +333,10 @@ async def build_operation_contract(
         recovery=_recovery_guidance(
             target_required=target_required,
             safety_level=descriptor.safety_level,
+        ),
+        guidance=(
+            bounded_guidance(llm_instructions)
+            if get_settings().operation_contract_guidance
+            else None
         ),
     )

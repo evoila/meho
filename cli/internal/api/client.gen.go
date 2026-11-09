@@ -6493,6 +6493,12 @@ type HTTPValidationError struct {
 // cost of runs on the default agent model (:class:`AgentModelSpend`).
 // The “None“ default keeps older response decoders working; the
 // handler always fills it.
+//
+// “server_time“ (#5504) is the server's time now, in UTC, to the
+// second (ISO 8601 with a “Z“ suffix). An agent with no shell has no
+// other clock, so it reads this when it must write down the time. Both
+// answers fill it, also the one for a login that chose no tenant. The
+// “None“ default keeps older response decoders working.
 type HealthResponse struct {
 	// AgentModelSpend Whether the spend limits count the cost of the default agent model (#5771).
 	//
@@ -6629,6 +6635,7 @@ type HealthResponse struct {
 	// replica's claim stamp advances, so alert on the minimum across
 	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
+	ServerTime   *time.Time          `json:"server_time"`
 
 	// SurfaceSummary Which working-surface MCP tools this session should see, and which it does.
 	//
@@ -7330,6 +7337,11 @@ type LearningMetrics struct {
 //
 // “db“ shares :class:`DbStatus` with the deep check, so it carries
 // the migration revision too (#4830). It still never touches Vault.
+//
+// “server_time“ (#5504) is the same field as on the deep check: the
+// server's time now, in UTC, to the second. “meho status“ falls back
+// to this route for a login with the “read_only“ role, so that login
+// reads the time here. A clock read; no Vault, no connector.
 type LivenessResponse struct {
 	// Db Database migration status.
 	//
@@ -7411,6 +7423,7 @@ type LivenessResponse struct {
 	// replica's claim stamp advances, so alert on the minimum across
 	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
+	ServerTime   *time.Time          `json:"server_time"`
 }
 
 // ManualStep A step the operator performs off-MEHO (SSH, web UI, console).
@@ -10861,10 +10874,12 @@ type Target struct {
 	Aliases []string `json:"aliases"`
 
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
-	AuthModel             AuthModel               `json:"auth_model"`
-	CreatedAt             time.Time               `json:"created_at"`
-	DeletedAt             *time.Time              `json:"deleted_at"`
-	Extras                map[string]interface{}  `json:"extras"`
+	AuthModel AuthModel              `json:"auth_model"`
+	CreatedAt time.Time              `json:"created_at"`
+	DeletedAt *time.Time             `json:"deleted_at"`
+	Extras    map[string]interface{} `json:"extras"`
+
+	// Fingerprint Product and version from the last successful probe. null means the target is not probed yet (a new target is never probed): run POST /api/v1/targets/{name}/probe, or `meho targets probe <name>` in the CLI.
 	Fingerprint           *map[string]interface{} `json:"fingerprint"`
 	FlightRecorderCapture *bool                   `json:"flight_recorder_capture"`
 	Fqdn                  *string                 `json:"fqdn"`

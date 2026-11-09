@@ -4149,6 +4149,20 @@ meho retrieval eval [flags]
 - `--save-baseline` — write the eval result to this file for future regression comparison
 - `--surface` — retrieval surface to evaluate (kb|memory|operations|all)
 
+### `meho retrieval picks`
+
+Show if calls used an operation the search returned (per connector and day)
+
+```
+meho retrieval picks [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--connector` — show only this connector id (for example `k8s-1.x`)
+- `--json` — print the raw OperationPickReport instead of the table
+- `--since` — window start; accepts relative (`30d`, `7d`, `24h`) or ISO-8601 date (`2026-04-01`)
+- `--tenant` — tenant UUID (platform admin only; others get a 403)
+
 ### `meho retrieval retire-checklist`
 
 Run the 5-criterion retire-decision checklist per retrieval surface

@@ -327,7 +327,9 @@ async def test_a_background_call_carries_the_block_on_its_first_answer(
     await _target()
     await _kb("vc-tip", product="vcenter", summary="A tip before a long call.")
 
-    async def submit(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def submit(
+        _operator: Operator, arguments: dict[str, Any], *, wrap: Any = None
+    ) -> dict[str, Any]:
         assert "async" not in arguments
         return {
             "status": "pending",

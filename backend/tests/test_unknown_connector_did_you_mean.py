@@ -55,12 +55,14 @@ from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.ingest import catalog as catalog_module
 from meho_backplane.operations.ingest import ensure_connector_class_registered
 from meho_backplane.operations.ingest.boot_stamp import stamp_catalog_profiled_connectors
-from meho_backplane.operations.ingest.catalog import (
-    ConnectorSpecCatalog,
-    ConnectorSpecEntry,
-    load_profile_resource,
-)
+from meho_backplane.operations.ingest.catalog import ConnectorSpecCatalog
 from meho_backplane.operations.ingest.connector_registration import synthesise_profiled_class
+from tests.fixtures.catalog import (
+    FIXTURE_PROFILE_RESOURCE,
+    FIXTURE_SPEC_RESOURCE,
+    catalog_with_fixture_files,
+    read_fixture_profile,
+)
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -129,26 +131,21 @@ def _register_acme_as_tenant_ingest_does() -> None:
     )
 
 
-#: The shipped fixture profile, reused for the made-up connector.
-_PROFILE_RESOURCE = "_fixture_minimal.yaml"
-
-
 def _acme_shipped_profile_catalog() -> ConnectorSpecCatalog:
-    """A catalog with one profile-backed row for the made-up connector."""
-    return ConnectorSpecCatalog(
-        entries=(
-            ConnectorSpecEntry.model_validate(
-                {
-                    "product": _ACME[0],
-                    "version": _ACME[1],
-                    "impl_id": _ACME[2],
-                    "requires_connector_class": "ProfiledRestConnector_acme_2_0",
-                    "upstream": None,
-                    "spec_resource": _PROFILE_RESOURCE,
-                    "profile_resource": _PROFILE_RESOURCE,
-                }
-            ),
-        )
+    """A catalog with one profile-backed row for the made-up connector.
+
+    The row reuses the spec and profile of the test catalog.
+    """
+    return catalog_with_fixture_files(
+        {
+            "product": _ACME[0],
+            "version": _ACME[1],
+            "impl_id": _ACME[2],
+            "requires_connector_class": "ProfiledRestConnector_acme_2_0",
+            "upstream": None,
+            "spec_resource": FIXTURE_SPEC_RESOURCE,
+            "profile_resource": FIXTURE_PROFILE_RESOURCE,
+        }
     )
 
 
@@ -166,9 +163,7 @@ def _stamp_acme_as_tenant_profile_stamp_does() -> None:
     Same class shape as the startup stamp, but the shipped catalog has no
     profile row for the triple, so it is not built-in.
     """
-    profile = ExecutionProfile.model_validate(
-        yaml.safe_load(load_profile_resource(_PROFILE_RESOURCE))
-    )
+    profile = ExecutionProfile.model_validate(yaml.safe_load(read_fixture_profile()))
     cls = synthesise_profiled_class(
         product=_ACME[0], version=_ACME[1], impl_id=_ACME[2], profile=profile
     )

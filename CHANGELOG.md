@@ -94,6 +94,13 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.45.2] - 2026-11-09
+
+### Security
+- The image carries the updated zlib: the
+  Debian `zlib1g` package is at version 1:1.3.dfsg+really1.3.1-1+deb13u1,
+  which fixes CVE-2026-85091 and CVE-2026-76844 (#6078).
+
 ## [0.45.1] - 2026-11-09
 
 ### Fixed

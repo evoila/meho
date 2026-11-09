@@ -9,6 +9,12 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.45.2](https://github.com/evoila/meho/releases/tag/v0.45.2) — 2026-11-09
+
+- **The image carries the updated zlib.** The container image has the
+  fixed Debian zlib package. Nothing else changes. This update has no
+  database migration.
+
 ## [v0.45.1](https://github.com/evoila/meho/releases/tag/v0.45.1) — 2026-11-09
 
 - **Approved changes with hidden secret values now run.** Some changes

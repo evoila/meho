@@ -322,6 +322,13 @@ Two kinds of rows carry a keyed hash of a call's params:
     (`POST /api/v1/approvals/{id}/rerun`) then needs the params sent
     again, as for a credential write; the stored copy with markers never
     runs (`_stored_call` treats it as not stored).
+    A marker the requester sent as a value is different (#6064). Example:
+    an object read from MEHO and passed back unchanged, like the
+    `expected_before` of a FortiGate interface update. Such params still
+    match `params_hash`, because the hash covers the marker too, so the
+    approved run uses them as sent (`_stored_params_can_run`). Stored
+    params with a marker that do not match the hash are the ones MEHO
+    hid; they never run.
   - For a `credential_write` operation they are not on the request row.
     They are encrypted in `approval_execution_payload` instead (see
     "Credential-write execution custody" below).
@@ -1376,11 +1383,17 @@ So the op runs at most once.
 the same row hits the already-decided guard (409 / `not_pending`), so the
 stored params drive exactly one execution.
 
-**Pre-0036 rows.** A row parked before migration 0036 has `params IS
-NULL`. Approving it via `/decide` (no in-band params) finds nothing
-to re-dispatch, so `resume_dispatch_after_approval` **fails closed** with
-a structured `denied` result naming the gap — the operator resumes it via
-REST `/approve` + params, exactly as before 0036.
+**No params to run with.** A surface that sends no params (`/decide`,
+the console, MCP by-id approve) runs the params stored on the row. When
+the row holds none MEHO can run with (a row parked before migration 0036
+has `params IS NULL`; params whose secret values MEHO already hid), the
+operation does not run. `resume_dispatch_after_approval` records the
+refusal like the release and target refusals (`_refuse_resume`, #6064):
+the claim is taken, one audit row is written
+(`result_status = "approval_resume_params_unavailable"`), and the refusal
+is stored as the run result. The request shows `result_state = "failed"`
+with that reason on every surface. The requester can then re-run it and
+send the params (`POST /api/v1/approvals/{id}/rerun`).
 
 ## Run an approved request again after its run failed (#5417)
 

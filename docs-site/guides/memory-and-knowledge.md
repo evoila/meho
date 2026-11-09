@@ -173,9 +173,10 @@ entry again, merge your change, and retry. A change to the header
 (metadata) counts as a change. A write that changes neither body nor
 metadata costs only an `updated_at` bump (no re-embed).
 
-## Lessons in a team wiki
+## Lessons in your own wiki
 
-A team can keep its lessons as pages in a Git wiki. Then a lesson lives
+A team can keep its lessons as pages in its own wiki: a Git repo of
+Markdown pages the team owns. Then a lesson lives
 in two places: the wiki is the source of truth, and MEHO keeps a copy.
 
 To set it up:
@@ -205,7 +206,9 @@ What changes for the tenant:
   `wiki` part: the collection, and whether the lesson also goes to the
   wiki. A lesson with `applies_to: product-and-version`, a full lesson
   header and status `candidate` reaches the wiki as a candidate page
-  through the knowledge export, and a person reviews it there.
+  through the knowledge export, and a person reviews it there. MEHO
+  does not send the lesson. Your own CI job calls the export and opens
+  a merge request in your wiki.
 - A person can also write the wiki page directly. The import brings it
   into MEHO after the merge.
 

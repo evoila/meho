@@ -1211,7 +1211,7 @@ add-on-family gate.
 
 | Tool | Role | Extra gate | What it does |
 |---|---|---|---|
-| `add_to_knowledge` | operator, or a `read_only` person who can decide approvals (`approver_may_call`) | — | Write a distilled entry to the tenant knowledge base. A new slug with similar entries is not written; the answer lists them (`create_anyway` writes anyway, `dry_run` writes nothing). On a tenant that keeps its lessons in a team wiki, `wiki` says if the lesson also goes there. |
+| `add_to_knowledge` | operator, or a `read_only` person who can decide approvals (`approver_may_call`) | — | Write a distilled entry to the tenant knowledge base. A new slug with similar entries is not written; the answer lists them (`create_anyway` writes anyway, `dry_run` writes nothing). On a tenant that keeps its lessons in its own wiki, `wiki` says if the lesson also goes there. |
 | `add_to_memory` | operator | — | Save a scoped memory entry (user / tenant / target). |
 | `ask_docs` | operator | `meho-docs` | Synthesized, cited answer over a vendor-document collection. |
 | `call_operation` | operator | — | Invoke a resolved connector operation against a target. |
@@ -1234,7 +1234,7 @@ add-on-family gate.
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |
 | `result_query` | operator | — | Read rows back from a JSONFlux result handle: page a window, or run a bounded structured query (filter / project / group / aggregate) server-side. |
 | `search_docs` | operator | `meho-docs` | Search a vendor-document collection for an authoritative fact. |
-| `search_knowledge` | operator | — | Search the tenant knowledge base, and the tenant's team wiki when one is set (`kb.md`). |
+| `search_knowledge` | operator | — | Search the tenant knowledge base, and the tenant's own wiki when one is set (`kb.md`). |
 | `search_memory` | operator | — | Search the operator's accessible memories. |
 | `search_operations` | operator | — | Hybrid BM25 + cosine search over a connector's operations. With `op_id` (exact-op mode) it returns that one operation's call contract instead: the stored `parameter_schema`, small examples, the target-by-name rule, the result shape and retry rules (#3668). |
 

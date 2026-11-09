@@ -76,8 +76,8 @@ spec:
     - `policies`: the tenant's switches, such as the flight recorder
       and the mail allow list. `null` means "use the default".
       `knowledge_wiki_collection` names the docs collection of the
-      tenant's team wiki (see
-      [Lessons in a team wiki](memory-and-knowledge.md#lessons-in-a-team-wiki)).
+      tenant's own wiki (see
+      [Lessons in your own wiki](memory-and-knowledge.md#lessons-in-your-own-wiki)).
     - `conventions`: the tenant's conventions, one per `slug`.
     - `targets`: the tenant's targets, one per `name`. A target has the
       same fields as when you register it (see

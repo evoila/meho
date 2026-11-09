@@ -9,16 +9,16 @@ The knowledge-base (`kb`) service is the persistent, tenant-scoped
 durable-team-knowledge layer. It has four callers:
 
 - **REST** under `/api/v1/kb/...` (G4.1-T2). This includes
-  `POST /api/v1/kb/import`, which the team wiki's CI job calls after
-  each merge (#5728, see [Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728)).
-  It also includes `POST /api/v1/kb/export`, which the team wiki's CI
-  job calls to get MEHO's confirmed and candidate generic lessons (#5730, see
+  `POST /api/v1/kb/import`, which a CI job of the tenant's own wiki calls
+  after each merge (#5728, see [Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728)).
+  It also includes `POST /api/v1/kb/export`, which a CI job of the
+  tenant's own wiki calls to get MEHO's confirmed and candidate generic lessons (#5730, see
   [Export of generic entries](#export-of-generic-entries-5730)).
 - **MCP** via the `search_knowledge` + `add_to_knowledge` meta-tools
   in [`mcp/tools/knowledge.py`](../../backend/src/meho_backplane/mcp/tools/knowledge.py)
-  (G4.1-T3). On a tenant that keeps its lessons in a team wiki, both
+  (G4.1-T3). On a tenant that keeps its lessons in its own wiki, both
   tools also report on the wiki
-  ([Team wiki search](#team-wiki-search-5976)).
+  ([Wiki search](#wiki-search-5976)).
 - **Console** under `/ui/kb` (`ui/routes/kb/routes.py`).
 - **CLI** through the `meho kb` verb (G4.1-T4). The Go CLI calls the
   REST routes; `meho kb search` calls `POST /api/v1/retrieve` with
@@ -495,13 +495,21 @@ The CLI prints a `conflicted:` counter and a `conflicts` list.
 
 ### Import of pages sent in the request (#5728)
 
+The import and the export (next section) move lessons between MEHO and
+the tenant's own wiki. MEHO never sends knowledge anywhere by itself.
+It only answers a call. Two kinds of caller can get the export: the
+tenant's own wiki job, with a login set up only for the export, and a
+person with the operator or tenant admin role (`meho kb export`).
+Without such a call, nothing leaves MEHO.
+
 `POST /api/v1/kb/import` (`kb/page_import.py::import_pages`) takes the
 pages in the request body. The caller has the pages on its own machine.
 MEHO reads no folder on the server and fetches nothing, so it never
-holds Git credentials. The first caller is a CI job in the team wiki
+holds Git credentials. The caller is a CI job in the tenant's own wiki
 repo: after every merge to main it sends the wiki's product pages with
-`applies_to: product-and-version` and `status: confirmed`. The job
-lives in the team wiki repo, not here.
+`applies_to: product-and-version` and `status: confirmed`. The first
+caller is the wiki job of the team that builds MEHO. A customer runs
+the same kind of job against its own wiki. The job lives in the wiki repo, not here.
 
 Body (`KbImportRequest`, unknown fields are a `422`):
 
@@ -536,7 +544,7 @@ one is skipped (`action: "skip"`), and `reason` says why:
    the credential label or the header name in front of the value comes
    off before the check, never a part of the value. The reason names the pattern and
    the line, never the value. MEHO holds no list of customer names, host
-   names or addresses: the team wiki's CI job checks its own
+   names or addresses: the wiki's CI job checks its own
    identifier list before it sends the pages, and refuses and reports a
    page with a listed identifier there.
 3. **Lesson header.** The page starts with a YAML header that has
@@ -631,7 +639,7 @@ as in `docs/cross-repo/keycloak-agent-client.md`):
 | Hardcoded claim (JSON type boolean) | `kb_import_only` | `true` |
 
 The client gets no `meho_tenants` claim, so the login works in one
-tenant only. The client secret lives in the team wiki repo's CI
+tenant only. The client secret lives in the wiki repo's CI
 secrets, never in MEHO.
 
 #### The call from the CI job
@@ -662,10 +670,12 @@ the answer.
 
 `POST /api/v1/kb/export` (`kb/page_export.py::export_pages`) returns
 the caller's confirmed and candidate generic entries as Markdown pages. It is the
-mirror of the import. The caller is a CI job in the team wiki repo: it
-writes the pages into the wiki and opens a merge request there, and a
-person reviews it. MEHO writes nothing, and never holds Git
-credentials. The job lives in the team wiki repo, not here.
+mirror of the import. The caller is a CI job in the tenant's own wiki
+repo: it writes the pages into the wiki and opens a merge request there,
+and a person reviews it. MEHO writes nothing, and never holds Git
+credentials. The first caller is the wiki job of the team that builds
+MEHO. A customer runs the same kind of job against its own wiki. The job lives in the
+wiki repo, not here.
 
 The route has no body. It is a `POST` because `GET /api/v1/kb/export`
 would hide an entry with the slug `export` from `GET /api/v1/kb/{slug}`.
@@ -699,7 +709,7 @@ product-and-version`. Then, by `status`:
   export it.
 
 `plan_entry` holds this rule for one entry; `add_to_knowledge` uses it
-too (see [Team wiki search](#team-wiki-search-5976)).
+too (see [Wiki search](#wiki-search-5976)).
 
 **The page.** The file name is `<slug>.md` (`path` in the answer). The
 page is the YAML lesson header, then the entry's text with a single
@@ -862,7 +872,7 @@ owner of the entry, with a permission refusal,
 service applies the same rule to every memory write (REST, MCP and the
 console). REST
 `POST /api/v1/kb` and the directory import are tenant admin only, so an
-import carries the status a reviewer set in the team wiki. The upkeep
+import carries the status a reviewer set in the tenant's own wiki. The upkeep
 job never confirms a candidate.
 
 ### Weekly upkeep (`lessons/upkeep.py`)
@@ -1080,14 +1090,16 @@ The retrieval substrate enforces tenant scoping at SQL level via the
 pinned inside `search_entries`, cross-tenant or cross-source reads
 are structurally impossible.
 
-### Team wiki search (#5976)
+### Wiki search (#5976)
 
-A tenant may keep its lessons as pages in a Git wiki. A knowledge index
+A tenant may keep its lessons as pages in its own wiki: a Git repo of
+Markdown pages the tenant owns. A knowledge index
 loads the wiki (outside MEHO), and MEHO reaches the index as a docs
 collection ([doc-collections.md](doc-collections.md)). Then a lesson
 lives in two places: the wiki is the source of truth, and the store
 keeps a copy. The import (#5728) brings the wiki's pages in; the export
-(#5730) sends lessons written in MEHO out as pages for review.
+(#5730) hands lessons written in MEHO, as pages for review, to the
+tenant's own job that calls it.
 
 **The setting.** `tenant.knowledge_wiki_collection` (migration `0150`)
 holds the key of the docs collection, per tenant. `NULL` (the default)

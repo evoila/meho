@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import tarfile
@@ -21,6 +22,7 @@ RETRY = CI_SCRIPTS / "retry.sh"
 FETCH = CI_SCRIPTS / "fetch_with_retry.sh"
 INSTALL_TOOL = CI_SCRIPTS / "install_tool.sh"
 INSTALL_MODEL = CI_SCRIPTS / "install_spacy_model.sh"
+STAGE_TAILWIND = CI_SCRIPTS / "stage_tailwind.sh"
 
 URL = "https://downloads.example.test/file"
 
@@ -397,6 +399,119 @@ class InstallSpacyModelTests(FakeCommandsTestCase):
         result = self.run_script(INSTALL_MODEL, "en_model", "3.8.0")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(self.calls(), [])
+
+
+class StageTailwindTests(FakeCommandsTestCase):
+    """The script runs from a copy of the tree, with its own pins."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.tree = self.tmp / "tree"
+        ci = self.tree / "scripts/ci"
+        ci.mkdir(parents=True)
+        for script in (STAGE_TAILWIND, FETCH):
+            shutil.copy(script, ci / script.name)
+        self.good_sha = sha256(b"content")
+        self.set_pins(self.good_sha, self.good_sha)
+        self.script = ci / "stage_tailwind.sh"
+        self.cached = self.home / ".cache/meho-ci-tools/tailwindcss-v9.0.0/tailwindcss-linux-x64"
+        self.staged = self.tree / "backend/.tool-preseed/tailwindcss-linux-x64"
+        self.url = (
+            "https://github.com/tailwindlabs/tailwindcss/releases/download/"
+            "v9.0.0/tailwindcss-linux-x64"
+        )
+
+    def set_pins(self, amd64: str, arm64: str, dockerfile_amd64: str | None = None) -> None:
+        pins = {"VER": "v9.0.0", "SHA_AMD64": amd64, "SHA_ARM64": arm64}
+        (self.tree / "scripts/ci/tool-versions.env").write_text(
+            "".join(f"TAILWIND_{key}={value}\n" for key, value in pins.items())
+        )
+        pins["SHA_AMD64"] = dockerfile_amd64 or amd64
+        (self.tree / "backend").mkdir(exist_ok=True)
+        (self.tree / "backend/Dockerfile").write_text(
+            "".join(f"ARG TAILWIND_{key}={value}\n" for key, value in pins.items())
+        )
+
+    def stage(self, *archs: str):
+        return self.run_script(self.script, *(archs or ("amd64",)), TAILWIND_FETCH_PAUSES="1 2")
+
+    def test_cached_binary_is_staged_without_a_download(self) -> None:
+        self.cached.parent.mkdir(parents=True)
+        self.cached.write_bytes(b"content")
+        result = self.stage()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.downloads(), 0)
+        self.assertEqual(self.staged.read_bytes(), b"content")
+
+    def test_wrong_cached_binary_is_thrown_away_and_downloaded_again(self) -> None:
+        self.cached.parent.mkdir(parents=True)
+        self.cached.write_bytes(b"half a file")
+        result = self.stage()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.downloads(), 1)
+        self.assertEqual(self.staged.read_bytes(), b"content")
+        self.assertEqual(self.cached.read_bytes(), b"content")
+
+    def test_download_is_kept_for_the_cache(self) -> None:
+        result = self.stage()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), [f"curl {self.url}"])
+        self.assertEqual(self.cached.read_bytes(), b"content")
+
+    def test_download_tries_for_minutes_with_the_default_pauses(self) -> None:
+        self.set_plan("fail")
+        result = self.run_script(self.script, "amd64")
+        self.assertEqual(result.returncode, 1)
+        pauses = [int(call.split()[1]) for call in self.sleeps()]
+        self.assertGreaterEqual(self.downloads(), 8)
+        self.assertGreaterEqual(sum(pauses), 300)
+        self.assertFalse(self.staged.exists())
+        self.assertFalse(self.cached.exists())
+
+    def test_wrong_download_fails_and_stages_nothing(self) -> None:
+        self.set_plan("bad")
+        result = self.stage()
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(self.staged.exists())
+        self.assertFalse(self.cached.exists())
+
+    def test_pins_that_differ_from_the_dockerfile_stop_the_script(self) -> None:
+        self.set_pins(self.good_sha, self.good_sha, dockerfile_amd64="0" * 64)
+        result = self.stage()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("TAILWIND_SHA_AMD64", result.stderr)
+        self.assertEqual(self.downloads(), 0)
+
+    def test_unknown_arch_and_no_arch_are_usage_errors(self) -> None:
+        self.assertEqual(self.stage("riscv").returncode, 2)
+        self.assertEqual(self.run_script(self.script).returncode, 2)
+
+    def test_job_that_needs_arm64_too_downloads_only_the_missing_binary(self) -> None:
+        # An amd64-only job saved its cache first: only the amd64 file is there.
+        self.cached.parent.mkdir(parents=True)
+        self.cached.write_bytes(b"content")
+        result = self.stage("amd64", "arm64")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), [f"curl {self.url.replace('x64', 'arm64')}"])
+        arm64 = self.cached.with_name("tailwindcss-linux-arm64")
+        self.assertEqual(arm64.read_bytes(), b"content")
+        self.assertTrue(self.staged.with_name("tailwindcss-linux-arm64").exists())
+
+
+class StageTailwindActionTests(unittest.TestCase):
+    """Each binary has its own cache entry, so a job that stages only amd64
+    never saves an entry that a job needing arm64 restores without arm64."""
+
+    def test_each_binary_has_its_own_cache_key_and_path(self) -> None:
+        action = (ROOT / ".github/actions/stage-tailwind/action.yml").read_text()
+        steps = action.split("    - name: ")[1:]
+        cache_steps = [step for step in steps if "uses: actions/cache@" in step]
+        self.assertEqual(len(cache_steps), 2)
+        for arch, name in (("amd64", "linux-x64"), ("arm64", "linux-arm64")):
+            (step,) = [step for step in cache_steps if f"'{arch}'" in step]
+            self.assertIn(f"if: contains(inputs.archs, '{arch}')", step)
+            self.assertIn(f"path: ~/.cache/meho-ci-tools/tailwindcss-*/tailwindcss-{name}\n", step)
+            self.assertIn(f"key: ci-tools-tailwind-{name}-", step)
 
 
 if __name__ == "__main__":

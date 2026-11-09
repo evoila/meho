@@ -4127,26 +4127,11 @@ meho remember <body> [flags]
 
 ## `meho retrieval`
 
-Retrieval-quality + migration-decision tooling
+Retrieval usage and operation-pick telemetry
 
 ```
 meho retrieval
 ```
-
-### `meho retrieval eval`
-
-Run the checked-in eval corpus + report precision@5 / MRR / coverage
-
-```
-meho retrieval eval [flags]
-```
-
-- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--baseline` — baseline kind to also run; only `grep` is supported in v0.2 (kb surface only)
-- `--compare-baseline` — compare today's eval against this saved baseline; exit 1 on any per-metric regression
-- `--json` — emit a machine-readable JSON envelope on stdout instead of the human table
-- `--save-baseline` — write the eval result to this file for future regression comparison
-- `--surface` — retrieval surface to evaluate (kb|memory|operations|all)
 
 ### `meho retrieval picks`
 
@@ -4161,21 +4146,6 @@ meho retrieval picks [flags]
 - `--json` — print the raw OperationPickReport instead of the table
 - `--since` — window start; accepts relative (`30d`, `7d`, `24h`) or ISO-8601 date (`2026-04-01`)
 - `--tenant` — tenant UUID (platform admin only; others get a 403)
-
-### `meho retrieval retire-checklist`
-
-Run the 5-criterion retire-decision checklist per retrieval surface
-
-```
-meho retrieval retire-checklist [flags]
-```
-
-- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--baseline-file` — JSON file containing per-surface baseline metrics (output of `meho retrieval eval --baseline grep --save-baseline ...`); without it, criterion 4 stays yellow
-- `--gh-repo` — GitHub repo to query for `retrieval-migration-blocker` issues
-- `--json` — emit the structured RetireChecklistReport on stdout instead of the human table
-- `--no-blockers` — skip the gh lookup; the backplane reports criterion 5 as REVIEW MANUALLY
-- `--surface` — retrieval surface to evaluate (kb|memory|operations|all)
 
 ### `meho retrieval usage`
 

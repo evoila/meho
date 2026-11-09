@@ -49,7 +49,7 @@ type GroupsResponse struct {
 //	  [--json]                                # machine-readable output
 //	  [--backplane <url>]                     # override the backplane URL
 //
-// Exit codes mirror `meho retrieval eval`:
+// Exit codes:
 //   - 0   groups listed cleanly (including the "0 enabled groups" empty case)
 //   - 2   auth_expired
 //   - 3   unreachable

@@ -182,22 +182,6 @@ const (
 	ConventionKindWorkflow    ConventionKind = "workflow"
 )
 
-// Defines values for CriterionResultName.
-const (
-	CriterionResultNameDailyUseDuration CriterionResultName = "daily_use_duration"
-	CriterionResultNameEvalPrecision    CriterionResultName = "eval_precision"
-	CriterionResultNameMehoVsBaseline   CriterionResultName = "meho_vs_baseline"
-	CriterionResultNameOpenBlockers     CriterionResultName = "open_blockers"
-	CriterionResultNameOperatorBreadth  CriterionResultName = "operator_breadth"
-)
-
-// Defines values for CriterionResultVerdict.
-const (
-	CriterionResultVerdictGreen  CriterionResultVerdict = "green"
-	CriterionResultVerdictRed    CriterionResultVerdict = "red"
-	CriterionResultVerdictYellow CriterionResultVerdict = "yellow"
-)
-
 // Defines values for DailyUsageBucketSurface.
 const (
 	DailyUsageBucketSurfaceKb         DailyUsageBucketSurface = "kb"
@@ -347,21 +331,6 @@ const (
 const (
 	EffectPhaseIntent  EffectPhase = "intent"
 	EffectPhaseOutcome EffectPhase = "outcome"
-)
-
-// Defines values for EvalRequestSurface.
-const (
-	EvalRequestSurfaceAll        EvalRequestSurface = "all"
-	EvalRequestSurfaceKb         EvalRequestSurface = "kb"
-	EvalRequestSurfaceMemory     EvalRequestSurface = "memory"
-	EvalRequestSurfaceOperations EvalRequestSurface = "operations"
-)
-
-// Defines values for EvalResultOverallVerdict.
-const (
-	EvalResultOverallVerdictGreen  EvalResultOverallVerdict = "green"
-	EvalResultOverallVerdictRed    EvalResultOverallVerdict = "red"
-	EvalResultOverallVerdictYellow EvalResultOverallVerdict = "yellow"
 )
 
 // Defines values for EventSourceAuthStrategy.
@@ -593,21 +562,6 @@ const (
 	ReadDocsRequestModeSection ReadDocsRequestMode = "section"
 )
 
-// Defines values for RetireChecklistReportOverallVerdict.
-const (
-	RetireChecklistReportOverallVerdictNOTYET         RetireChecklistReportOverallVerdict = "NOT YET"
-	RetireChecklistReportOverallVerdictREADYTORETIRE  RetireChecklistReportOverallVerdict = "READY TO RETIRE"
-	RetireChecklistReportOverallVerdictREVIEWMANUALLY RetireChecklistReportOverallVerdict = "REVIEW MANUALLY"
-)
-
-// Defines values for RetireChecklistRequestSurface.
-const (
-	RetireChecklistRequestSurfaceAll        RetireChecklistRequestSurface = "all"
-	RetireChecklistRequestSurfaceKb         RetireChecklistRequestSurface = "kb"
-	RetireChecklistRequestSurfaceMemory     RetireChecklistRequestSurface = "memory"
-	RetireChecklistRequestSurfaceOperations RetireChecklistRequestSurface = "operations"
-)
-
 // Defines values for RunApprovalReadStatus.
 const (
 	RunApprovalReadStatusApproved RunApprovalReadStatus = "approved"
@@ -769,45 +723,10 @@ const (
 	StepBodyVerifyTypeOperationCall StepBodyVerifyType = "operation_call"
 )
 
-// Defines values for SurfaceChecklistSurface.
-const (
-	SurfaceChecklistSurfaceKb         SurfaceChecklistSurface = "kb"
-	SurfaceChecklistSurfaceMemory     SurfaceChecklistSurface = "memory"
-	SurfaceChecklistSurfaceOperations SurfaceChecklistSurface = "operations"
-)
-
-// Defines values for SurfaceChecklistVerdict.
-const (
-	SurfaceChecklistVerdictNOTYET         SurfaceChecklistVerdict = "NOT YET"
-	SurfaceChecklistVerdictREADYTORETIRE  SurfaceChecklistVerdict = "READY TO RETIRE"
-	SurfaceChecklistVerdictREVIEWMANUALLY SurfaceChecklistVerdict = "REVIEW MANUALLY"
-)
-
 // Defines values for SurfaceMetricsSurface.
 const (
 	SurfaceMetricsSurfaceAgent   SurfaceMetricsSurface = "agent"
 	SurfaceMetricsSurfaceCliRest SurfaceMetricsSurface = "cli_rest"
-)
-
-// Defines values for SurfaceResultBaselineVerdict.
-const (
-	SurfaceResultBaselineVerdictGreen  SurfaceResultBaselineVerdict = "green"
-	SurfaceResultBaselineVerdictRed    SurfaceResultBaselineVerdict = "red"
-	SurfaceResultBaselineVerdictYellow SurfaceResultBaselineVerdict = "yellow"
-)
-
-// Defines values for SurfaceResultSurface.
-const (
-	SurfaceResultSurfaceKb         SurfaceResultSurface = "kb"
-	SurfaceResultSurfaceMemory     SurfaceResultSurface = "memory"
-	SurfaceResultSurfaceOperations SurfaceResultSurface = "operations"
-)
-
-// Defines values for SurfaceResultVerdict.
-const (
-	SurfaceResultVerdictGreen  SurfaceResultVerdict = "green"
-	SurfaceResultVerdictRed    SurfaceResultVerdict = "red"
-	SurfaceResultVerdictYellow SurfaceResultVerdict = "yellow"
 )
 
 // Defines values for TargetCreateProduct.
@@ -1706,6 +1625,7 @@ type ApprovalRequestView struct {
 	ParamsHash     string                 `json:"params_hash"`
 	PreviewHash    *string                `json:"preview_hash"`
 	PrincipalAct   *string                `json:"principal_act"`
+	PrincipalKind  *string                `json:"principal_kind"`
 	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
@@ -2416,31 +2336,6 @@ type BackendReadiness struct {
 	Reachable      bool                    `json:"reachable"`
 }
 
-// BaselineMetricsOverride Per-surface baseline metrics supplied by the caller.
-//
-// Criterion 4 (MEHO ≥ baseline) needs side-by-side numbers from a
-// baseline retrieval (“grep -r kb/“ for kb; “grep paths.txt +
-// yq“ for operations). The v0.2 backplane has no checked-in
-// corpus snapshot to evaluate the baseline against (see
-// :mod:`meho_backplane.api.v1.retrieve_eval` — explicit
-// “baseline=grep“ on that route is rejected with 501); the CLI
-// runs the baseline locally against the operator's kb/ checkout and
-// can pass the resulting numbers here so the retire-checklist
-// verdict honestly reflects criterion 4 instead of always reporting
-// yellow ("baseline did not run") on the API path.
-//
-// Without an override, criterion 4 stays yellow for v0.2 production
-// callers — the documented "READY TO RETIRE" path is unreachable
-// via the bare API alone, which is the honest v0.2 posture. T7
-// (#446) / v0.2.next is expected to wire a server-side corpus
-// snapshot and remove the need for this override.
-type BaselineMetricsOverride struct {
-	Coverage     float32 `json:"coverage"`
-	Kind         *string `json:"kind,omitempty"`
-	Mrr          float32 `json:"mrr"`
-	PrecisionAt5 float32 `json:"precision_at_5"`
-}
-
 // BodyCreateUiEventSourcesPost defines model for Body__create_ui_event_sources_post.
 type BodyCreateUiEventSourcesPost struct {
 	AuthStrategy string  `json:"auth_strategy"`
@@ -2687,11 +2582,6 @@ type BodyRetrievalDiagnosticsUiRetrievalDiagnosticsPost struct {
 	Limit  *int    `json:"limit,omitempty"`
 	Query  *string `json:"query,omitempty"`
 	Source *string `json:"source,omitempty"`
-}
-
-// BodyRetrievalRetireChecklistUiRetrievalRetireChecklistPost defines model for Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post.
-type BodyRetrievalRetireChecklistUiRetrievalRetireChecklistPost struct {
-	TenantFilter *string `json:"tenant_filter,omitempty"`
 }
 
 // BodyRetrievalUsageUiRetrievalUsagePost defines model for Body_retrieval_usage_ui_retrieval_usage_post.
@@ -4768,27 +4658,6 @@ type ConventionsDriftResponse struct {
 	OnlyInMeho []map[string]interface{} `json:"only_in_meho"`
 }
 
-// CriterionResult One row of the per-surface checklist.
-//
-// Frozen + “extra="forbid"“ so the structured output is stable for
-// the CLI table renderer and any future dashboard consumer. The
-// “observed_value“ + “threshold_summary“ pair is what the
-// human-readable table prints verbatim — keep both short (≤ 32
-// chars each) so the table stays scannable in an 80-column terminal.
-type CriterionResult struct {
-	Name             CriterionResultName    `json:"name"`
-	Notes            *string                `json:"notes"`
-	ObservedValue    string                 `json:"observed_value"`
-	ThresholdSummary string                 `json:"threshold_summary"`
-	Verdict          CriterionResultVerdict `json:"verdict"`
-}
-
-// CriterionResultName defines model for CriterionResult.Name.
-type CriterionResultName string
-
-// CriterionResultVerdict defines model for CriterionResult.Verdict.
-type CriterionResultVerdict string
-
 // CurrentStepResponse Returned by “meho_runbook_start“ and the non-completion path of “meho_runbook_next“.
 //
 // Carries the run coordinates (“run_id“ / “template_slug“ /
@@ -5931,51 +5800,6 @@ type EqualsCompareValue3 = bool
 type EqualsCompare_Value struct {
 	union json.RawMessage
 }
-
-// EvalRequest POST body for “/api/v1/retrieve/eval“.
-//
-// Frozen + extra=forbid so a typo (“surfaces“ instead of
-// “surface“) fails 422 at the framework boundary rather than
-// silently running the default surface and giving the caller a
-// confusing "I asked for memory, why did kb run?" response.
-type EvalRequest struct {
-	Baseline *string             `json:"baseline"`
-	Surface  *EvalRequestSurface `json:"surface,omitempty"`
-}
-
-// EvalRequestSurface defines model for EvalRequest.Surface.
-type EvalRequestSurface string
-
-// EvalResult Top-level eval result — the shape the API + CLI return.
-//
-// “overall_verdict“ is the worst-of every surface (a red surface
-// flips the whole result red); the CLI's exit-1-on-red CI-gate
-// semantics key off this field. “ran_at“ is the UTC timestamp
-// the runner started; consumers comparing two saved baselines see
-// when each was captured.
-type EvalResult struct {
-	OverallVerdict EvalResultOverallVerdict `json:"overall_verdict"`
-	RanAt          time.Time                `json:"ran_at"`
-	Surfaces       []SurfaceResult          `json:"surfaces"`
-
-	// Thresholds Per-metric green-band thresholds for a verdict computation.
-	//
-	// Frozen so the threshold object passed into :func:`verdict` cannot
-	// be mutated mid-run (a stale or rewritten threshold mid-eval would
-	// invalidate every subsequent verdict and silently shift the CI
-	// gate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,
-	// not stored — keeping it derived means the contract "yellow is 70%
-	// of green" can't drift between green-threshold customisation and
-	// the yellow boundary.
-	//
-	// Defaults match the Initiative #373 / Task #441 contract; tests and
-	// future re-tunings construct ``Thresholds(...)`` with explicit
-	// values.
-	Thresholds *Thresholds `json:"thresholds,omitempty"`
-}
-
-// EvalResultOverallVerdict defines model for EvalResult.OverallVerdict.
-type EvalResultOverallVerdict string
 
 // EventIngestResponse Accepted (“202“) or deduplicated (“200“) acknowledgement.
 //
@@ -8509,34 +8333,6 @@ type PublishTemplateResponse struct {
 	Version int    `json:"version"`
 }
 
-// QueryResult Per-query eval row — what the runner produces for each corpus entry.
-//
-// “meho_hits“ is the surface-formatted top-“k“ slug list from
-// MEHO retrieval; “baseline_hits“ mirrors it for the baseline
-// when configured. The per-query metrics (precision_at_5 / mrr /
-// coverage) are computed against “meho_hits“ + the corpus's
-// expected ground truth; “baseline_*“ mirrors are populated when
-// the baseline ran. Frozen so the runner can't accidentally mutate
-// a row while folding the surface aggregate.
-//
-// “not_run_reason“ is set when the question could not be run on
-// this install (operations surface: its connector cannot be searched
-// here). Such a row has no hits and zeros, and the surface aggregate
-// leaves it out (#4752).
-type QueryResult struct {
-	BaselineCoverageAt5    *float32  `json:"baseline_coverage_at_5"`
-	BaselineHits           *[]string `json:"baseline_hits"`
-	BaselinePrecisionAt5   *float32  `json:"baseline_precision_at_5"`
-	BaselineReciprocalRank *float32  `json:"baseline_reciprocal_rank"`
-	CoverageAt5            float32   `json:"coverage_at_5"`
-	ExpectedHits           []string  `json:"expected_hits"`
-	MehoHits               []string  `json:"meho_hits"`
-	NotRunReason           *string   `json:"not_run_reason"`
-	PrecisionAt5           float32   `json:"precision_at_5"`
-	Query                  string    `json:"query"`
-	ReciprocalRank         float32   `json:"reciprocal_rank"`
-}
-
 // ReadDocsRequest POST body for “/api/v1/read_docs“, the same fields as the MCP tool.
 //
 // “collection“ is typed optional so a missing value gets the docs
@@ -8952,51 +8748,6 @@ type ResultQuerySpec struct {
 	// Select Projection: columns to return (max 64). Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
 	Select *[]string `json:"select,omitempty"`
 }
-
-// RetireChecklistReport Top-level shape returned by :func:`compute_retire_checklist`.
-//
-// Frozen + “extra="forbid"“ so the CLI's “--json“ consumers can
-// pin the shape; “ran_at“ lets two saved reports be compared
-// chronologically without external metadata.
-type RetireChecklistReport struct {
-	CountedSurfaces *[]string                           `json:"counted_surfaces,omitempty"`
-	OverallVerdict  RetireChecklistReportOverallVerdict `json:"overall_verdict"`
-	RanAt           time.Time                           `json:"ran_at"`
-	RestExcluded    *bool                               `json:"rest_excluded,omitempty"`
-	Since           time.Time                           `json:"since"`
-	Surfaces        []SurfaceChecklist                  `json:"surfaces"`
-	TenantId        *openapi_types.UUID                 `json:"tenant_id"`
-	Until           time.Time                           `json:"until"`
-}
-
-// RetireChecklistReportOverallVerdict defines model for RetireChecklistReport.OverallVerdict.
-type RetireChecklistReportOverallVerdict string
-
-// RetireChecklistRequest POST body for “/api/v1/retrieve/retire-checklist“.
-//
-// Frozen + “extra="forbid"“ so a typo (“surfaces“ instead of
-// “surface“, or “blocker_count“ instead of “blocker_counts“)
-// fails 422 at the framework boundary rather than silently running
-// the default and giving the caller a confusing report.
-//
-// “blocker_counts“ is the surface→count mapping the CLI fills in
-// from a local “gh issue list“ lookup. “None“ (the default) is
-// valid — the service reports criterion 5 as yellow (unknown). Every
-// key must be one of the three supported surfaces; the
-// “dict[Literal, int]“ shape pins that at the Pydantic boundary.
-//
-// “baseline_overrides“ is the surface→baseline-metrics mapping the
-// CLI can fill in from a local “meho retrieval eval --baseline grep“
-// run. Without it, criterion 4 stays yellow for v0.2 production
-// callers because the backplane has no server-side corpus snapshot.
-type RetireChecklistRequest struct {
-	BaselineOverrides *map[string]BaselineMetricsOverride `json:"baseline_overrides"`
-	BlockerCounts     *map[string]int                     `json:"blocker_counts"`
-	Surface           *RetireChecklistRequestSurface      `json:"surface,omitempty"`
-}
-
-// RetireChecklistRequestSurface defines model for RetireChecklistRequest.Surface.
-type RetireChecklistRequestSurface string
 
 // RetrievalHit One document in a ranked retrieval response.
 //
@@ -10741,19 +10492,6 @@ type StepPosition struct {
 	Total int `json:"total"`
 }
 
-// SurfaceChecklist Per-surface checklist: the five criteria + the surface verdict.
-type SurfaceChecklist struct {
-	Criteria []CriterionResult       `json:"criteria"`
-	Surface  SurfaceChecklistSurface `json:"surface"`
-	Verdict  SurfaceChecklistVerdict `json:"verdict"`
-}
-
-// SurfaceChecklistSurface defines model for SurfaceChecklist.Surface.
-type SurfaceChecklistSurface string
-
-// SurfaceChecklistVerdict defines model for SurfaceChecklist.Verdict.
-type SurfaceChecklistVerdict string
-
 // SurfaceMetrics The four reflex metrics for one surface (“agent“ / “cli_rest“).
 //
 // Each ratio is reported as a rounded percentage/rate together with
@@ -10776,48 +10514,6 @@ type SurfaceMetrics struct {
 
 // SurfaceMetricsSurface defines model for SurfaceMetrics.Surface.
 type SurfaceMetricsSurface string
-
-// SurfaceResult Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.
-//
-// The verdict band is computed from the macro-mean metrics against
-// the configured :class:`Thresholds` (default
-// :data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A
-// surface with “query_count == 0“ (corpus YAML hasn't shipped
-// yet) returns “verdict="green"“ deliberately — see runner.py
-// docstring.
-//
-// “baseline_verdict“ is computed only when the baseline ran;
-// “None“ otherwise. The MEHO-≥-baseline overlay applies in the
-// aggregate verdict (see runner._apply_baseline_check).
-//
-// “query_count“ counts the scored questions only. “not_run_count“
-// counts the questions that could not be run on this install; they
-// are in “queries“ with their “not_run_reason“ but do not move the
-// metrics or the verdict (#4752).
-type SurfaceResult struct {
-	BaselineCoverage     *float32                      `json:"baseline_coverage"`
-	BaselineKind         *string                       `json:"baseline_kind"`
-	BaselineMrr          *float32                      `json:"baseline_mrr"`
-	BaselinePrecisionAt5 *float32                      `json:"baseline_precision_at_5"`
-	BaselineVerdict      *SurfaceResultBaselineVerdict `json:"baseline_verdict"`
-	Coverage             float32                       `json:"coverage"`
-	Mrr                  float32                       `json:"mrr"`
-	NotRunCount          *int                          `json:"not_run_count,omitempty"`
-	PrecisionAt5         float32                       `json:"precision_at_5"`
-	Queries              *[]QueryResult                `json:"queries,omitempty"`
-	QueryCount           int                           `json:"query_count"`
-	Surface              SurfaceResultSurface          `json:"surface"`
-	Verdict              SurfaceResultVerdict          `json:"verdict"`
-}
-
-// SurfaceResultBaselineVerdict defines model for SurfaceResult.BaselineVerdict.
-type SurfaceResultBaselineVerdict string
-
-// SurfaceResultSurface defines model for SurfaceResult.Surface.
-type SurfaceResultSurface string
-
-// SurfaceResultVerdict defines model for SurfaceResult.Verdict.
-type SurfaceResultVerdict string
 
 // SurfaceSummary Which working-surface MCP tools this session should see, and which it does.
 //
@@ -11309,25 +11005,6 @@ type ThresholdCompare struct {
 // ThresholdCompareOp defines model for ThresholdCompare.Op.
 type ThresholdCompareOp string
 
-// Thresholds Per-metric green-band thresholds for a verdict computation.
-//
-// Frozen so the threshold object passed into :func:`verdict` cannot
-// be mutated mid-run (a stale or rewritten threshold mid-eval would
-// invalidate every subsequent verdict and silently shift the CI
-// gate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,
-// not stored — keeping it derived means the contract "yellow is 70%
-// of green" can't drift between green-threshold customisation and
-// the yellow boundary.
-//
-// Defaults match the Initiative #373 / Task #441 contract; tests and
-// future re-tunings construct “Thresholds(...)“ with explicit
-// values.
-type Thresholds struct {
-	Coverage     *float32 `json:"coverage,omitempty"`
-	Mrr          *float32 `json:"mrr,omitempty"`
-	PrecisionAt5 *float32 `json:"precision_at_5,omitempty"`
-}
-
 // TopologyDiffEntry One resource's net delta between “ts1“ and “ts2“ (G9.3-T4 #860).
 //
 // Task #860 ships the graph-level *diff* between two timestamps. Each
@@ -11774,9 +11451,8 @@ type UISessionContext struct {
 //
 // “buckets“ is sorted by “(date, surface)“ ascending — the text
 // table renderer relies on this for its grouping behaviour, and
-// “--json“ consumers (T6's retire-checklist, future dashboards)
-// benefit from deterministic ordering even when nothing else
-// pins it.
+// “--json“ consumers (scripts, dashboards) benefit from
+// deterministic ordering even when nothing else pins it.
 //
 // “tenant_id“ is the tenant the report is scoped to (the
 // operator's own tenant by default, or the
@@ -12889,21 +12565,10 @@ type RetrieveEndpointApiV1RetrievePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
-// EvalEndpointApiV1RetrieveEvalPostParams defines parameters for EvalEndpointApiV1RetrieveEvalPost.
-type EvalEndpointApiV1RetrieveEvalPostParams struct {
-	Authorization *string `json:"authorization,omitempty"`
-}
-
 // OperationPicksEndpointApiV1RetrieveOperationPicksGetParams defines parameters for OperationPicksEndpointApiV1RetrieveOperationPicksGet.
 type OperationPicksEndpointApiV1RetrieveOperationPicksGetParams struct {
 	Since         *string             `form:"since,omitempty" json:"since,omitempty"`
 	ConnectorId   *string             `form:"connector_id,omitempty" json:"connector_id,omitempty"`
-	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
-	Authorization *string             `json:"authorization,omitempty"`
-}
-
-// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams defines parameters for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost.
-type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams struct {
 	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
 	Authorization *string             `json:"authorization,omitempty"`
 }
@@ -13925,12 +13590,6 @@ type ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody = ReadDocsRequest
 // RetrieveEndpointApiV1RetrievePostJSONRequestBody defines body for RetrieveEndpointApiV1RetrievePost for application/json ContentType.
 type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
 
-// EvalEndpointApiV1RetrieveEvalPostJSONRequestBody defines body for EvalEndpointApiV1RetrieveEvalPost for application/json ContentType.
-type EvalEndpointApiV1RetrieveEvalPostJSONRequestBody = EvalRequest
-
-// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody defines body for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost for application/json ContentType.
-type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody = RetireChecklistRequest
-
 // StartRunApiV1RunbooksRunsPostJSONRequestBody defines body for StartRunApiV1RunbooksRunsPost for application/json ContentType.
 type StartRunApiV1RunbooksRunsPostJSONRequestBody = StartRunRequest
 
@@ -14335,9 +13994,6 @@ type OperationsPreviewUiOperationsPreviewPostFormdataRequestBody = BodyOperation
 
 // RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody defines body for RetrievalDiagnosticsUiRetrievalDiagnosticsPost for application/x-www-form-urlencoded ContentType.
 type RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody = BodyRetrievalDiagnosticsUiRetrievalDiagnosticsPost
-
-// RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody defines body for RetrievalRetireChecklistUiRetrievalRetireChecklistPost for application/x-www-form-urlencoded ContentType.
-type RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody = BodyRetrievalRetireChecklistUiRetrievalRetireChecklistPost
 
 // RetrievalUsageUiRetrievalUsagePostFormdataRequestBody defines body for RetrievalUsageUiRetrievalUsagePost for application/x-www-form-urlencoded ContentType.
 type RetrievalUsageUiRetrievalUsagePostFormdataRequestBody = BodyRetrievalUsageUiRetrievalUsagePost
@@ -16637,18 +16293,8 @@ type ClientInterface interface {
 
 	RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// EvalEndpointApiV1RetrieveEvalPostWithBody request with any body
-	EvalEndpointApiV1RetrieveEvalPostWithBody(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	EvalEndpointApiV1RetrieveEvalPost(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
 	// OperationPicksEndpointApiV1RetrieveOperationPicksGet request
 	OperationPicksEndpointApiV1RetrieveOperationPicksGet(ctx context.Context, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBody request with any body
-	RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBody(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	RetireChecklistEndpointApiV1RetrieveRetireChecklistPost(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UsageEndpointApiV1RetrieveUsageGet request
 	UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -17640,14 +17286,6 @@ type ClientInterface interface {
 	RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithFormdataBody(ctx context.Context, body RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RetrievalEvalUiRetrievalEvalPost request
-	RetrievalEvalUiRetrievalEvalPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBody request with any body
-	RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBody(ctx context.Context, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RetrievalUsageUiRetrievalUsagePostWithBody request with any body
 	RetrievalUsageUiRetrievalUsagePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19994,56 +19632,8 @@ func (c *Client) RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *
 	return c.Client.Do(req)
 }
 
-func (c *Client) EvalEndpointApiV1RetrieveEvalPostWithBody(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEvalEndpointApiV1RetrieveEvalPostRequestWithBody(c.Server, params, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) EvalEndpointApiV1RetrieveEvalPost(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEvalEndpointApiV1RetrieveEvalPostRequest(c.Server, params, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
 func (c *Client) OperationPicksEndpointApiV1RetrieveOperationPicksGet(ctx context.Context, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewOperationPicksEndpointApiV1RetrieveOperationPicksGetRequest(c.Server, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBody(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequestWithBody(c.Server, params, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) RetireChecklistEndpointApiV1RetrieveRetireChecklistPost(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24532,42 +24122,6 @@ func (c *Client) RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBody(ctx cont
 
 func (c *Client) RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithFormdataBody(ctx context.Context, body RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRetrievalDiagnosticsUiRetrievalDiagnosticsPostRequestWithFormdataBody(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) RetrievalEvalUiRetrievalEvalPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRetrievalEvalUiRetrievalEvalPostRequest(c.Server)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBody(ctx context.Context, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -34002,61 +33556,6 @@ func NewRetrieveEndpointApiV1RetrievePostRequestWithBody(server string, params *
 	return req, nil
 }
 
-// NewEvalEndpointApiV1RetrieveEvalPostRequest calls the generic EvalEndpointApiV1RetrieveEvalPost builder with application/json body
-func NewEvalEndpointApiV1RetrieveEvalPostRequest(server string, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewEvalEndpointApiV1RetrieveEvalPostRequestWithBody(server, params, "application/json", bodyReader)
-}
-
-// NewEvalEndpointApiV1RetrieveEvalPostRequestWithBody generates requests for EvalEndpointApiV1RetrieveEvalPost with any type of body
-func NewEvalEndpointApiV1RetrieveEvalPostRequestWithBody(server string, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/api/v1/retrieve/eval")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	if params != nil {
-
-		if params.Authorization != nil {
-			var headerParam0 string
-
-			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("authorization", headerParam0)
-		}
-
-	}
-
-	return req, nil
-}
-
 // NewOperationPicksEndpointApiV1RetrieveOperationPicksGetRequest generates requests for OperationPicksEndpointApiV1RetrieveOperationPicksGet
 func NewOperationPicksEndpointApiV1RetrieveOperationPicksGetRequest(server string, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams) (*http.Request, error) {
 	var err error
@@ -34134,83 +33633,6 @@ func NewOperationPicksEndpointApiV1RetrieveOperationPicksGetRequest(server strin
 	if err != nil {
 		return nil, err
 	}
-
-	if params != nil {
-
-		if params.Authorization != nil {
-			var headerParam0 string
-
-			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("authorization", headerParam0)
-		}
-
-	}
-
-	return req, nil
-}
-
-// NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequest calls the generic RetireChecklistEndpointApiV1RetrieveRetireChecklistPost builder with application/json body
-func NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequest(server string, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequestWithBody(server, params, "application/json", bodyReader)
-}
-
-// NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequestWithBody generates requests for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost with any type of body
-func NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequestWithBody(server string, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/api/v1/retrieve/retire-checklist")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.TenantFilter != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -47823,73 +47245,6 @@ func NewRetrievalDiagnosticsUiRetrievalDiagnosticsPostRequestWithBody(server str
 	return req, nil
 }
 
-// NewRetrievalEvalUiRetrievalEvalPostRequest generates requests for RetrievalEvalUiRetrievalEvalPost
-func NewRetrievalEvalUiRetrievalEvalPostRequest(server string) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/ui/retrieval/eval")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithFormdataBody calls the generic RetrievalRetireChecklistUiRetrievalRetireChecklistPost builder with application/x-www-form-urlencoded body
-func NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithFormdataBody(server string, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	bodyStr, err := runtime.MarshalForm(body, nil)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = strings.NewReader(bodyStr.Encode())
-	return NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
-}
-
-// NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithBody generates requests for RetrievalRetireChecklistUiRetrievalRetireChecklistPost with any type of body
-func NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/ui/retrieval/retire-checklist")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
 // NewRetrievalUsageUiRetrievalUsagePostRequestWithFormdataBody calls the generic RetrievalUsageUiRetrievalUsagePost builder with application/x-www-form-urlencoded body
 func NewRetrievalUsageUiRetrievalUsagePostRequestWithFormdataBody(server string, body RetrievalUsageUiRetrievalUsagePostFormdataRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -51169,18 +50524,8 @@ type ClientWithResponsesInterface interface {
 
 	RetrieveEndpointApiV1RetrievePostWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
 
-	// EvalEndpointApiV1RetrieveEvalPostWithBodyWithResponse request with any body
-	EvalEndpointApiV1RetrieveEvalPostWithBodyWithResponse(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EvalEndpointApiV1RetrieveEvalPostResponse, error)
-
-	EvalEndpointApiV1RetrieveEvalPostWithResponse(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*EvalEndpointApiV1RetrieveEvalPostResponse, error)
-
 	// OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse request
 	OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse(ctx context.Context, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams, reqEditors ...RequestEditorFn) (*OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse, error)
-
-	// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBodyWithResponse request with any body
-	RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBodyWithResponse(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error)
-
-	RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithResponse(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error)
 
 	// UsageEndpointApiV1RetrieveUsageGetWithResponse request
 	UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error)
@@ -52172,14 +51517,6 @@ type ClientWithResponsesInterface interface {
 	RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse, error)
 
 	RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithFormdataBodyWithResponse(ctx context.Context, body RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse, error)
-
-	// RetrievalEvalUiRetrievalEvalPostWithResponse request
-	RetrievalEvalUiRetrievalEvalPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RetrievalEvalUiRetrievalEvalPostResponse, error)
-
-	// RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBodyWithResponse request with any body
-	RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error)
-
-	RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBodyWithResponse(ctx context.Context, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error)
 
 	// RetrievalUsageUiRetrievalUsagePostWithBodyWithResponse request with any body
 	RetrievalUsageUiRetrievalUsagePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrievalUsageUiRetrievalUsagePostResponse, error)
@@ -55364,29 +54701,6 @@ func (r RetrieveEndpointApiV1RetrievePostResponse) StatusCode() int {
 	return 0
 }
 
-type EvalEndpointApiV1RetrieveEvalPostResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *EvalResult
-	JSON422      *HTTPValidationError
-}
-
-// Status returns HTTPResponse.Status
-func (r EvalEndpointApiV1RetrieveEvalPostResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r EvalEndpointApiV1RetrieveEvalPostResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
 type OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -55404,29 +54718,6 @@ func (r OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *RetireChecklistReport
-	JSON422      *HTTPValidationError
-}
-
-// Status returns HTTPResponse.Status
-func (r RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -60937,49 +60228,6 @@ func (r RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse) StatusCode() int
 	return 0
 }
 
-type RetrievalEvalUiRetrievalEvalPostResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-}
-
-// Status returns HTTPResponse.Status
-func (r RetrievalEvalUiRetrievalEvalPostResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RetrievalEvalUiRetrievalEvalPostResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON422      *HTTPValidationError
-}
-
-// Status returns HTTPResponse.Status
-func (r RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
 type RetrievalUsageUiRetrievalUsagePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -63712,23 +62960,6 @@ func (c *ClientWithResponses) RetrieveEndpointApiV1RetrievePostWithResponse(ctx 
 	return ParseRetrieveEndpointApiV1RetrievePostResponse(rsp)
 }
 
-// EvalEndpointApiV1RetrieveEvalPostWithBodyWithResponse request with arbitrary body returning *EvalEndpointApiV1RetrieveEvalPostResponse
-func (c *ClientWithResponses) EvalEndpointApiV1RetrieveEvalPostWithBodyWithResponse(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EvalEndpointApiV1RetrieveEvalPostResponse, error) {
-	rsp, err := c.EvalEndpointApiV1RetrieveEvalPostWithBody(ctx, params, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseEvalEndpointApiV1RetrieveEvalPostResponse(rsp)
-}
-
-func (c *ClientWithResponses) EvalEndpointApiV1RetrieveEvalPostWithResponse(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*EvalEndpointApiV1RetrieveEvalPostResponse, error) {
-	rsp, err := c.EvalEndpointApiV1RetrieveEvalPost(ctx, params, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseEvalEndpointApiV1RetrieveEvalPostResponse(rsp)
-}
-
 // OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse request returning *OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse
 func (c *ClientWithResponses) OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse(ctx context.Context, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams, reqEditors ...RequestEditorFn) (*OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse, error) {
 	rsp, err := c.OperationPicksEndpointApiV1RetrieveOperationPicksGet(ctx, params, reqEditors...)
@@ -63736,23 +62967,6 @@ func (c *ClientWithResponses) OperationPicksEndpointApiV1RetrieveOperationPicksG
 		return nil, err
 	}
 	return ParseOperationPicksEndpointApiV1RetrieveOperationPicksGetResponse(rsp)
-}
-
-// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBodyWithResponse request with arbitrary body returning *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse
-func (c *ClientWithResponses) RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBodyWithResponse(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error) {
-	rsp, err := c.RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBody(ctx, params, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse(rsp)
-}
-
-func (c *ClientWithResponses) RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithResponse(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error) {
-	rsp, err := c.RetireChecklistEndpointApiV1RetrieveRetireChecklistPost(ctx, params, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse(rsp)
 }
 
 // UsageEndpointApiV1RetrieveUsageGetWithResponse request returning *UsageEndpointApiV1RetrieveUsageGetResponse
@@ -66988,32 +66202,6 @@ func (c *ClientWithResponses) RetrievalDiagnosticsUiRetrievalDiagnosticsPostWith
 		return nil, err
 	}
 	return ParseRetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse(rsp)
-}
-
-// RetrievalEvalUiRetrievalEvalPostWithResponse request returning *RetrievalEvalUiRetrievalEvalPostResponse
-func (c *ClientWithResponses) RetrievalEvalUiRetrievalEvalPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RetrievalEvalUiRetrievalEvalPostResponse, error) {
-	rsp, err := c.RetrievalEvalUiRetrievalEvalPost(ctx, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRetrievalEvalUiRetrievalEvalPostResponse(rsp)
-}
-
-// RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBodyWithResponse request with arbitrary body returning *RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse
-func (c *ClientWithResponses) RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error) {
-	rsp, err := c.RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse(rsp)
-}
-
-func (c *ClientWithResponses) RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBodyWithResponse(ctx context.Context, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error) {
-	rsp, err := c.RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBody(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse(rsp)
 }
 
 // RetrievalUsageUiRetrievalUsagePostWithBodyWithResponse request with arbitrary body returning *RetrievalUsageUiRetrievalUsagePostResponse
@@ -71840,39 +71028,6 @@ func ParseRetrieveEndpointApiV1RetrievePostResponse(rsp *http.Response) (*Retrie
 	return response, nil
 }
 
-// ParseEvalEndpointApiV1RetrieveEvalPostResponse parses an HTTP response from a EvalEndpointApiV1RetrieveEvalPostWithResponse call
-func ParseEvalEndpointApiV1RetrieveEvalPostResponse(rsp *http.Response) (*EvalEndpointApiV1RetrieveEvalPostResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &EvalEndpointApiV1RetrieveEvalPostResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest EvalResult
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest HTTPValidationError
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON422 = &dest
-
-	}
-
-	return response, nil
-}
-
 // ParseOperationPicksEndpointApiV1RetrieveOperationPicksGetResponse parses an HTTP response from a OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse call
 func ParseOperationPicksEndpointApiV1RetrieveOperationPicksGetResponse(rsp *http.Response) (*OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -71889,39 +71044,6 @@ func ParseOperationPicksEndpointApiV1RetrieveOperationPicksGetResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest OperationPickReport
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest HTTPValidationError
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON422 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseRetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse parses an HTTP response from a RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithResponse call
-func ParseRetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse(rsp *http.Response) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest RetireChecklistReport
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -78692,48 +77814,6 @@ func ParseRetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse(rsp *http.Respo
 	}
 
 	response := &RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest HTTPValidationError
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON422 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseRetrievalEvalUiRetrievalEvalPostResponse parses an HTTP response from a RetrievalEvalUiRetrievalEvalPostWithResponse call
-func ParseRetrievalEvalUiRetrievalEvalPostResponse(rsp *http.Response) (*RetrievalEvalUiRetrievalEvalPostResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RetrievalEvalUiRetrievalEvalPostResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	return response, nil
-}
-
-// ParseRetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse parses an HTTP response from a RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithResponse call
-func ParseRetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse(rsp *http.Response) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

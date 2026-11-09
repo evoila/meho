@@ -85,8 +85,6 @@ _OPERATOR_FLOOR_PAGES: tuple[tuple[str, str, str, str], ...] = (
     ("GET", "/ui/retrieval", "POST", "/api/v1/retrieve"),
     ("POST", "/ui/retrieval/diagnostics", "POST", "/api/v1/retrieve"),
     ("POST", "/ui/retrieval/usage", "GET", "/api/v1/retrieve/usage"),
-    ("POST", "/ui/retrieval/eval", "POST", "/api/v1/retrieve/eval"),
-    ("POST", "/ui/retrieval/retire-checklist", "POST", "/api/v1/retrieve/retire-checklist"),
     ("GET", "/ui/broadcast", "GET", "/api/v1/broadcast/recent"),
     ("GET", "/ui/broadcast/feed", "GET", "/api/v1/broadcast/recent"),
     ("GET", "/ui/broadcast/history", "GET", "/api/v1/broadcast/recent"),

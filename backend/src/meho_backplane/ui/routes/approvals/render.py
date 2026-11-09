@@ -260,7 +260,7 @@ def project_request_to_view(
         "connector_id": row.connector_id,
         "principal_sub": row.principal_sub,
         "principal_act": row.principal_act,
-        "requester": subject_ref(row.principal_sub, row.principal_name),
+        "requester": subject_ref(row.principal_sub, row.principal_name, row.principal_kind),
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
         "proposed_effect": row.proposed_effect,
         "reveal_secret": bool(row.reveal_secret),

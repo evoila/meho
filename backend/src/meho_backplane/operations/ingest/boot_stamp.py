@@ -102,7 +102,7 @@ async def _stamp_entry(service: ReviewService, entry: ConnectorSpecEntry) -> boo
     dispatch-canonical triple the way ``record_profile_stamp`` does (from the
     connector_id) so the synthesised class's resolver-facing attributes agree
     with the registry key it lands under — the catalog's raw ``product`` may
-    not round-trip (the ``_fixture`` mechanism row parses to ``fixture``).
+    not round-trip (a product ``_fixture`` parses to ``fixture``).
     """
     assert entry.profile_resource is not None  # caller-guaranteed
     raw = load_entry_profile(entry)

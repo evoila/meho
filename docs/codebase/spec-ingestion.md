@@ -230,17 +230,19 @@ table is for trees *outside* the package, like `backend/alembic` —
 re-including an in-package path there is a duplicate-archive build
 error).
 
-T1 (#1975) ships the mechanism plus a `_fixture/1.0` profile-backed
-row pointing at `_fixture_minimal.yaml` in each resource package, so
-the boot validator and the catalog-driven ingest path are exercised
-end to end.
-
-The public tree ships one spec-and-profile row: `_fixture/1.0`. It
-exists to test the path end to end. The `mehoauto/0.1.0` row ships a
-profile only (`meho_automation_minimal.yaml`) and is
+The public catalog ships no spec-and-profile row. The `mehoauto/0.1.0`
+row ships a profile only (`meho_automation_minimal.yaml`) and is
 `catalog_ingest: spec-only`. The VMware rows, specs and profiles ship
 in the VMware connector package. They use the same on-ramp through
 `register_connector_catalog`.
+
+The tests check the path end to end with their own catalog in
+`backend/tests/fixtures/catalog/`: one `_fixture/1.0` row with a tiny
+spec (`fixture_spec.yaml`) and profile (`fixture_profile.yaml`).
+`load_fixture_catalog()` parses it with that folder as its package, so
+`load_entry_spec` / `load_entry_profile` read the files from there, the
+same way they read the files of a connector package row. Test data does
+not ship in the wheel, and a fresh start registers no connector for it.
 
 ### T3 (LLM grouping) at a glance
 
@@ -1002,7 +1004,7 @@ stamped profiled class — no-ops (logged at debug, not an error), because
 synthesised class's triple is derived from the connector_id
 (`parse_connector_id`), not the catalog's raw `product`, so it agrees with
 the registry key `record_profile_stamp` lands it under even when the raw
-product does not round-trip (the `_fixture` mechanism row parses to
+product does not round-trip (a product `_fixture` parses to
 `fixture`). A malformed profile has already crashed the lifespan at
 `validate_shipped_artifacts()`; the stamp path re-parses with the same
 model, so it stays fail-closed as a second line of defence.

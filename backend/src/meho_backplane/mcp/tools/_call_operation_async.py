@@ -36,6 +36,7 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.delivery_budget import bound_complete_response
 from meho_backplane.operations.operation_run import OperationRunNotFoundError
 from meho_backplane.operations.operation_run_service import (
+    DispatchWrapper,
     get_operation_run_service,
     run_result_visible_to,
 )
@@ -119,10 +120,18 @@ def _stored_result_with_run_details(
     return bounded.model_dump(mode="json")
 
 
-async def submit_async_call(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Start the call in the background and return a ``pending`` answer."""
+async def submit_async_call(
+    operator: Operator,
+    arguments: dict[str, Any],
+    *,
+    wrap: DispatchWrapper | None = None,
+) -> dict[str, Any]:
+    """Start the call in the background and return a ``pending`` answer.
+
+    ``wrap`` is passed to :meth:`OperationRunService.submit_call`.
+    """
     started = time.monotonic()
-    run_id = await get_operation_run_service().submit_call(operator, arguments)
+    run_id = await get_operation_run_service().submit_call(operator, arguments, wrap=wrap)
     return _envelope(
         str(arguments["op_id"]),
         status="pending",

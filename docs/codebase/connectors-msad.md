@@ -91,8 +91,8 @@ central-dial / on-site only).
 | `msad.group.list` | safe | no | `Get-ADGroup -Filter *` (capped) |
 | `msad.group.get` | safe | no | `Get-ADGroup -Identity` |
 | `msad.group.members` | safe | no | `Get-ADGroupMember -Identity` |
-| `msad.group.add-member` | caution | no | `Add-ADGroupMember -Confirm:$false` |
-| `msad.group.remove-member` | caution | no | `Remove-ADGroupMember -Confirm:$false` |
+| `msad.group.add-member` | caution | **yes** | `Add-ADGroupMember -Confirm:$false` |
+| `msad.group.remove-member` | caution | **yes** | `Remove-ADGroupMember -Confirm:$false` |
 | `msad.group.delete` | **dangerous** | **yes** | `Remove-ADGroup -Confirm:$false` |
 | `msad.computer.list` | safe | no | `Get-ADComputer -Filter *` (capped) |
 | `msad.computer.get` | safe | no | `Get-ADComputer -Identity` |
@@ -113,6 +113,14 @@ A call made with a token (MCP, the command line, REST) runs only `safe` ops at
 once. A `caution` op without its own approval flag then waits for an approval
 click; in the web interface it runs at once (`_person_park_reason` in
 `operations/_validate.py`).
+
+`group.add-member` and `group.remove-member` always wait for a person to
+approve them, also in the web interface. A group membership gives rights in
+the domain: one call can add an account to Domain Admins. So these two get the
+same approval as `group.create`, and as the group membership writes of the
+Keycloak connector. MEHO does not keep a list of admin groups for
+this: a group can be named by name, DN, GUID or SID, and groups can be nested,
+so such a list would miss cases.
 
 The three `dangerous` ops (`user.delete`, `group.delete`, `computer.delete`) are
 `requires_approval=True` — a dispatch parks at `needs-approval` for a human

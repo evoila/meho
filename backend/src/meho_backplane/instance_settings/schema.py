@@ -105,6 +105,15 @@ class TenantPolicies(_Strict):
     flight_recorder: FlightRecorderPolicy | None = None
     mail_recipient_allowlist: str | None = None
     run_approval_target_kinds: StrictBool | None = None
+    knowledge_wiki_collection: Annotated[str, Field(max_length=128)] | None = None
+
+    @field_validator("knowledge_wiki_collection")
+    @classmethod
+    def _blank_wiki_collection_is_none(cls, value: str | None) -> str | None:
+        # An empty value means "no wiki": lessons live in MEHO only (#5976).
+        if value is None or not value.strip():
+            return None
+        return value.strip()
 
     @field_validator("mail_recipient_allowlist")
     @classmethod

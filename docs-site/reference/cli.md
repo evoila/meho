@@ -2986,7 +2986,7 @@ meho kb delete <slug> [flags]
 
 ### `meho kb export`
 
-Write the confirmed, generic kb entries as Markdown pages into a local folder (operator)
+Write the generic kb entries as Markdown pages into a local folder (operator)
 
 ```
 meho kb export <directory> [flags]

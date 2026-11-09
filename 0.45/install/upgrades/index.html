@@ -3358,6 +3358,11 @@ release. The rollback contract has the full checklist.</p>
 <td>The chart uses the <code>Recreate</code> update strategy: the old pod stops before the new one starts. An install made with an older chart has <code>RollingUpdate</code> and a <code>rollingUpdate</code> block on its live Deployment.</td>
 <td><strong>Nothing to do.</strong> Before a Helm 4 upgrade from such an install, the chart runs a short Job that removes the block. If an upgrade already failed with <code>spec.strategy.rollingUpdate: Forbidden</code>, see <a href="#upgrade-fails-with-specstrategyrollingupdate-forbidden">Upgrade fails with <code>spec.strategy.rollingUpdate: Forbidden</code></a>.</td>
 </tr>
+<tr>
+<td><strong>v0.46.0</strong></td>
+<td>Fifteen database migrations (<code>0138</code> to <code>0152</code>). They only add, and change no existing row. The upgrade ends every approval request that still waits. With the built-in Keycloak, four chart values must be empty or equal the chart's value: <code>config.uiKeycloakClientId</code>, <code>checkRunner.clientId</code>, <code>keycloakAdmin.url</code> and <code>keycloakAdmin.clientId</code>. The retrieval quality check and the retire checklist are removed. Machine logins no longer write targets or topology over REST. An operation from an API file runs only on a connector class that accepts such operations (<code>accepts_ingested_operations</code>); otherwise MEHO answers <code>ingested_ops_not_accepted</code>.</td>
+<td>Back up the database, and decide waiting approval requests first. If you use connector packages, update them before this version or together with it, to a version that sets <code>accepts_ingested_operations = True</code> where it runs operations from an API file. With the built-in Keycloak, remove the four values or set the value the error message names. Machine logins use the operations <code>targets.register</code>, <code>targets.update</code>, <code>targets.remove</code> and <code>topology.*</code> through <code>call_operation</code>. On OpenShift, set the UBI OpenBao image in <code>coreVault.image</code>. Details: <a href="https://github.com/evoila/meho/blob/main/CHANGELOG.md">CHANGELOG</a>.</td>
+</tr>
 </tbody>
 </table>
 <p>The authoritative, always-current version of this table lives in

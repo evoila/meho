@@ -2685,6 +2685,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0460-2026-11-09" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.46.0 — 2026-11-09
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0450-2026-11-06" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3383,6 +3394,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0460-2026-11-09" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.46.0 — 2026-11-09
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0450-2026-11-06" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3932,6 +3954,54 @@ which carries the full detail — every change, and the migration recipe
 for each breaking one.</p>
 <p>MEHO is under active development. Each release below links to its full
 notes.</p>
+<h2 id="v0460-2026-11-09"><a href="https://github.com/evoila/meho/releases/tag/v0.46.0">v0.46.0</a> — 2026-11-09<a class="headerlink" href="#v0460-2026-11-09" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Approved changes with hidden values run.</strong> A request whose settings
+  hold the hidden-value marker runs after approval. When MEHO cannot run
+  an approved request, it ends as failed, with a reason, and the
+  requester can run it again.</li>
+<li><strong>Admins may approve their own <code>dangerous</code> and <code>destructive</code>
+  changes</strong>, like MEHO-SA-Operators.</li>
+<li><strong>Nobody approves their own group or role change.</strong> In MEHO's own
+  login realm, such a change needs a second tenant admin.</li>
+<li><strong>Approving a long operation answers at once.</strong> The operation runs in
+  the background, and the page shows when it ends.</li>
+<li><strong>Changes with an unknown outcome.</strong> MEHO lists approved changes whose
+  outcome it does not know, and a person marks each one as done or not
+  done.</li>
+<li><strong>One approval for an automation run.</strong> A person approves the list of
+  operations of one automation run once.</li>
+<li><strong>Approvals on your phone.</strong> Install the web interface as an app on a
+  phone or a laptop. The approvals and broadcast pages fit a phone
+  screen.</li>
+<li><strong>Sensors.</strong> Acknowledge a red sensor until a set time, edit a sensor
+  or a dashboard in place, and move a dashboard with its sensors to
+  another site as one file. Each alert mail writes an audit row.</li>
+<li><strong>Knowledge.</strong> Search filters, a weekly clean-up, and a search of
+  your own wiki. MEHO never sends knowledge anywhere by itself.</li>
+<li><strong>More operations.</strong> Kubernetes node disk and image reads, removal of
+  one stuck finalizer, a Linux firewall change that undoes itself unless
+  you confirm it, and <code>net.fingerprint</code> for an unknown address. pfSense,
+  Hetzner Robot and DNS systems appear on the topology map.</li>
+<li><strong>First-start checks.</strong> <code>meho status --first-start</code> checks the DNS
+  name, the certificate, the clock and every system, and names the fix.</li>
+<li><strong>Every release has a security sheet and a signed operation
+  catalog.</strong></li>
+<li><strong>Security fix in the container image.</strong> The zlib package in the
+  image is updated to Debian's fixed version.</li>
+<li><strong>Tighter rules.</strong> Machine logins no longer write targets or topology
+  over REST, and a standing grant never covers a credential read.</li>
+<li><strong>Switches, off by default.</strong> Several changes for agents wait behind
+  switches until model tests show that they help: shorter list answers,
+  <code>query_topology</code> off the default tool list, team knowledge before an
+  operation, the check for similar knowledge entries, and more.</li>
+<li><strong>Before you upgrade.</strong> Back up the database: the upgrade runs fifteen
+  migrations. With the built-in Keycloak, check four chart values. The
+  retrieval quality check is removed from the product. Update your
+  connector packages first, or together with MEHO: an operation from
+  an API file runs only on a connector class that accepts such
+  operations.</li>
+</ul>
 <h2 id="v0450-2026-11-06"><a href="https://github.com/evoila/meho/releases/tag/v0.45.0">v0.45.0</a> — 2026-11-06<a class="headerlink" href="#v0450-2026-11-06" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Token calls run only safe operations at once.</strong> MCP, the command

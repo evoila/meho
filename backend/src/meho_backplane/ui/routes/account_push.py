@@ -187,12 +187,15 @@ async def _status(
         on = await is_own_endpoint(
             db_session, operator_sub=session_ctx.operator_sub, endpoint=endpoint
         )
-        if on:
+        # No login read (a short outage) keeps the stored scope: writing
+        # "none" would stop the messages until the next page open.
+        operator = await resolve_ui_operator(session_ctx) if on else None
+        if operator is not None:
             await refresh_approve_scope(
                 db_session,
                 operator_sub=session_ctx.operator_sub,
                 tenant_id=session_ctx.tenant_id,
-                approve_scope=approve_scope_for(await resolve_ui_operator(session_ctx)),
+                approve_scope=approve_scope_for(operator),
             )
     except PushStoreError:
         return _store_failed("ui_push_subscription_status_failed", session_ctx)

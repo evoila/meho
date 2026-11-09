@@ -50,6 +50,7 @@ from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.auth.flow import clear_discovery_cache, reset_verifier_store_for_testing
 from meho_backplane.ui.auth.session_store import create_session, reset_fernet_cache_for_testing
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
+from meho_backplane.ui.routes import account_push
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
 from meho_backplane.web_push import store as store_module
@@ -684,6 +685,25 @@ def test_status_reads_the_scope_again_from_the_login() -> None:
     finally:
         mock_admin.stop()
     assert {row.endpoint: row.approve_scope for row in _rows()}[here] == "all"
+
+
+def test_status_keeps_the_scope_when_the_login_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    here = "https://fcm.googleapis.com/fcm/send/here"
+    _store_row(endpoint=here, tenant_id=_TENANT_A, scope="all")
+
+    async def _no_login(_: object) -> None:
+        return None
+
+    monkeypatch.setattr(account_push, "resolve_ui_operator", _no_login)
+    client, mock = _client(role=TenantRole.OPERATOR)
+    try:
+        response = client.post(_STATUS, data={"endpoint": here})
+    finally:
+        mock.stop()
+    assert response.json() == {"on": True}
+    assert [row.approve_scope for row in _rows()] == ["all"]
 
 
 def test_status_off_writes_nothing() -> None:

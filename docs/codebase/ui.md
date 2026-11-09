@@ -954,7 +954,8 @@ time the list below reloads. So the switch shows "off" after a "Remove" in
 the list, and for a person who signs in on a browser that another person
 switched on. When the answer is "on", MEHO also reads `approve_scope` again
 from the person's login, for their rows of the current tenant. So a changed
-login group counts from the next time they open the account page.
+login group counts from the next time they open the account page. When
+MEHO cannot read the login at that moment, it keeps the stored value.
 
 Switching off drops the subscription in the browser and posts
 `POST /ui/account/push/unsubscribe`, which deletes the person's own row for

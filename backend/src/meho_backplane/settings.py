@@ -2408,6 +2408,12 @@ class Settings(BaseModel):
     #: evaluation and the model tests show it helps. Set via
     #: ``SEARCH_PLAIN_SENTENCES``.
     search_plain_sentences: bool = False
+    #: Stricter ``matched`` outcome of ``search_operations`` (#6014), behind
+    #: a switch that is off by default. When on, a search answers
+    #: ``ambiguous`` if another hit is closer in meaning than the top hit.
+    #: Only the outcome changes, never the hits or their order. Set via
+    #: ``SEARCH_CLEAR_LEAD``.
+    search_clear_lead: bool = False
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3388,6 +3394,9 @@ def get_settings() -> Settings:
         ),
         search_plain_sentences=parse_bool_env(
             os.environ.get("SEARCH_PLAIN_SENTENCES"),
+        ),
+        search_clear_lead=parse_bool_env(
+            os.environ.get("SEARCH_CLEAR_LEAD"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

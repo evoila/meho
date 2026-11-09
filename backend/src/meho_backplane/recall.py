@@ -25,6 +25,10 @@ Rules for every entry:
   ``retired``, is never shown. Neither is an expired one.
 * A confirmed knowledge entry comes before the others.
 
+Both places show something only when the ``TEAM_KNOWLEDGE_RECALL``
+setting is on. It is off by default, so nothing is shown until model
+tests show it helps.
+
 Size limits: each entry's text is cut to :data:`MAX_ENTRY_CHARS`, and the
 whole envelope stays under :data:`MAX_BLOCK_CHARS` (before an operation) or
 :data:`MAX_BAND_CHARS` (start text). Entries that do not fit are left out
@@ -59,6 +63,7 @@ from meho_backplane.kb.shared import visible_to
 from meho_backplane.lesson_header import header_expires_at
 from meho_backplane.memory.schemas import MemoryEntry, MemoryScope, memory_locator
 from meho_backplane.memory.service import MemoryService
+from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__ = [
@@ -345,8 +350,11 @@ async def memory_band(operator: Operator) -> str:
 
     Holds the newest notes of the caller's own scopes and the tenant scope;
     target notes come before an operation on that target instead. A failed
-    read gives a short band that says so, never an empty one.
+    read gives a short band that says so, never an empty one. With the
+    ``TEAM_KNOWLEDGE_RECALL`` setting off, there is no band and nothing is read.
     """
+    if not get_settings().team_knowledge_recall:
+        return ""
     read = asyncio.ensure_future(_general_notes(operator))
     _BAND_READS.add(read)
     read.add_done_callback(_BAND_READS.discard)

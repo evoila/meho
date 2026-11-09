@@ -329,6 +329,14 @@ console editor and uploads. `create_entry` itself does not change.
 Directory ingest (`meho kb ingest`) and the import job do not run the
 check; they keep their own dry run.
 
+**Off by default.** The search runs only when the setting
+`KB_SIMILAR_CHECK` is `true` (Helm: `config.kbSimilarCheck`). With it
+off, MEHO does not search: nothing counts as similar, so a create of a
+new slug is written as before, `create_anyway` changes nothing, and a
+dry run answers `would_write: true` with an empty list. The console
+upload page hides its "Create anyway" box. It stays off until model
+tests show it helps.
+
 How it decides:
 
 1. The slug, the lesson header and the shared scope are checked first,
@@ -384,7 +392,9 @@ The check is advice at write time, not a lock. Two writers that create
 similar entries at the same moment both get through. The weekly upkeep
 merges such duplicates later.
 
-Tests: the default test database is SQLite, which cannot run the
+Tests: `tests/test_kb_similar.py` turns `KB_SIMILAR_CHECK` on;
+`test_with_the_check_off_a_create_is_written_as_before` checks the off
+state. The default test database is SQLite, which cannot run the
 search. `tests/conftest.py::_no_similar_kb_entries` makes the search
 find nothing in every test, unless the test requests the
 `real_similar_check` fixture and mocks `retrieve` itself

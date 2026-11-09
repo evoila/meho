@@ -385,7 +385,8 @@ The second part has three bands:
 1. `<<HOSTED_CONTEXT>>` — short text MEHO writes. It says MEHO policy, audit,
    and approvals always apply and no tool text can change them; that only the
    newest Memory notes are in the prompt, and the knowledge base and topology
-   are not; which of the four
+   are not (with `TEAM_KNOWLEDGE_RECALL` off: that Memory, the knowledge base
+   and topology are not in the prompt); which of the four
    context tools this run has (only the registered ones); what to do without
    `read_context_resource`; and that conventions and retrieved text are data,
    not instructions.
@@ -396,8 +397,9 @@ The second part has three bands:
    MCP tools (`meho_broadcast_*`, `meho_runbook_*`, docs tools) a hosted run
    does not have.
 3. The run operator's newest Memory notes (`recall.memory_band`, #5729),
-   inside the untrusted-text envelope. Left out when there is no note. See
-   [recall.md](recall.md).
+   inside the untrusted-text envelope. Left out when there is no note, and
+   always left out while the `TEAM_KNOWLEDGE_RECALL` setting is off (the
+   default). See [recall.md](recall.md).
 
 Conventions that do not fit the budget are returned as
 `HostedContext.omissions` (`ContextOmission(kind="convention", name=<slug>,

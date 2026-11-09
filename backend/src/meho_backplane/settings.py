@@ -1456,6 +1456,14 @@ class Settings(BaseModel):
         session without the scope does not list it, and a call answers
         with the same message as for the other admin tools. This saves
         its text in every session that has no use for the tool.
+    team_knowledge_recall:
+        Off by default. When on, MEHO shows what the team knows without a
+        search (:mod:`meho_backplane.recall`): ``preview_operation`` and
+        ``call_operation`` add a ``team_knowledge`` block for a known
+        target, and the MCP start text and the prompt of a hosted run carry
+        the caller's newest Memory notes. When off, none of this is shown.
+        It stays off until model tests show it helps. Env
+        ``TEAM_KNOWLEDGE_RECALL``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -1629,6 +1637,12 @@ class Settings(BaseModel):
     # different note on the same product about 0.8. Set via
     # ``KB_SIMILAR_MIN_SCORE``.
     kb_similar_min_score: float = Field(default=0.85, ge=0.0, le=1.0)
+    # Off by default. When on, a create of a new knowledge slug first looks
+    # for similar entries and writes nothing when it finds some
+    # (kb/similar.py). When off, MEHO does not search: the create is
+    # written as before, and a dry run lists no entries. It stays off until
+    # model tests show it helps. Set via ``KB_SIMILAR_CHECK``.
+    kb_similar_check: bool = False
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -2332,6 +2346,7 @@ class Settings(BaseModel):
     operation_contract_guidance: bool = False
     mcp_require_session_id: bool = False
     mcp_topology_off_default_list: bool = False
+    team_knowledge_recall: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -2943,6 +2958,7 @@ def get_settings() -> Settings:
         gsm_param_allowed_projects=os.environ.get("GSM_PARAM_ALLOWED_PROJECTS", "").strip(),
         kb_shared_tenant_ids=os.environ.get("KB_SHARED_TENANT_IDS", "").strip(),
         kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
+        kb_similar_check=parse_bool_env(os.environ.get("KB_SIMILAR_CHECK")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -3372,6 +3388,9 @@ def get_settings() -> Settings:
         ),
         mcp_topology_off_default_list=parse_bool_env(
             os.environ.get("MCP_TOPOLOGY_OFF_DEFAULT_LIST"),
+        ),
+        team_knowledge_recall=parse_bool_env(
+            os.environ.get("TEAM_KNOWLEDGE_RECALL"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),

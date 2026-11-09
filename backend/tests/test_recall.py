@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Recall before an operation and in the start text (#5729)."""
+"""Recall before an operation and in the start text (#5729).
+
+Recall shows something only with the ``TEAM_KNOWLEDGE_RECALL`` setting on,
+so these tests turn it on. One test turns it off and shows that nothing
+new is shown.
+"""
 
 from __future__ import annotations
 
@@ -45,6 +50,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("TEAM_KNOWLEDGE_RECALL", "true")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -109,6 +115,40 @@ def _args(target: Any = _TARGET) -> dict[str, Any]:
 
 async def _preview(target: Any = _TARGET) -> dict[str, Any]:
     return await operations_tools._preview_operation_handler(_operator(), _args(target))
+
+
+def test_recall_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TEAM_KNOWLEDGE_RECALL")
+    get_settings.cache_clear()
+    assert get_settings().team_knowledge_recall is False
+
+
+@pytest.mark.usefixtures("_stub_operations")
+async def test_with_recall_off_nothing_new_is_shown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``TEAM_KNOWLEDGE_RECALL`` off, preview, call and start text are as before."""
+    monkeypatch.delenv("TEAM_KNOWLEDGE_RECALL")
+    get_settings.cache_clear()
+    await _target()
+    await _kb("vc-tip", product="vcenter", summary="A tip for this target.")
+    operator = _operator()
+    await MemoryService().remember(operator, MemoryScope.USER, "I like short answers.", "style")
+
+    preview = await _preview()
+    call = await operations_tools._call_operation_handler(operator, _args())
+    instructions = await _session_instructions(operator)
+    hosted = await assemble_hosted_context(operator, {})
+
+    assert preview == {"status": "ok", "op_id": "vm.power_off", "connector_id": "c-1"}
+    assert RECALL_KEY not in call
+    assert "data_notice" in call
+    assert await memory_band(operator) == ""
+    assert instructions is not None
+    for text in (instructions, hosted.text):
+        assert "Recent Memory notes" not in text
+        assert "I like short answers." not in text
+    assert "MEHO does not put Memory, knowledge base, or topology data in this prompt." in (
+        hosted.text
+    )
 
 
 @pytest.mark.usefixtures("_stub_operations")

@@ -342,8 +342,9 @@ async def test_a_decision_replaces_the_waiting_message(
     await _subscribe(admin, sub="admin", scope="all")
     request = _request()
 
+    # No rate-limit reset in between: a decision right after the first
+    # message must still go out, with the same tag.
     await _step(request)
-    send_module.reset_for_testing()
     request.status = decision
     await _step(request, decision)
 

@@ -20,8 +20,10 @@ so the request never waits for a push service.
   address of the approvals page. Never the request's operation, parameters
   or target. It is encrypted for each browser
   (:func:`~meho_backplane.web_push.encryption.encrypt`).
-* A person gets at most one message per :data:`RATE_LIMIT_SECONDS`. The
-  messages held back in that time become one summary at its end.
+* A person gets at most one "An approval waits" message per
+  :data:`RATE_LIMIT_SECONDS`. The ones held back in that time become one
+  summary at its end. A decision is never held back: it replaces a message
+  the person already has.
 * A push service that answers 404 or 410 (the browser dropped the
   subscription) gets its row deleted.
 * Messages go only to the browser makers' push services (checked again here,
@@ -204,7 +206,9 @@ async def _send_step(step: _Step) -> None:
         for target in targets:
             by_person[target.operator_sub].append(target)
         for person, rows in by_person.items():
-            if _limit.admit(person):
+            # A decision replaces a message the person already has (same tag
+            # and Topic), so the rate limit holds back only new requests.
+            if step.decision != "pending" or _limit.admit(person):
                 await _deliver_all(rows, message)
             elif _limit.hold(person):
                 _spawn(_send_summary_later(person), name="web-push-summary")

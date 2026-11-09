@@ -2346,7 +2346,9 @@ jobs:
           set -euo pipefail
           # A release page can exist without its image. Look at the newest
           # five releases, newest first, and take the first with an image.
-          # Only a clear "not found" skips a release. Any other error fails.
+          # Only a missing image manifest skips a release. Any other error
+          # fails, also a login error that says "not found" (for example a
+          # credential helper that is not installed).
           tags=$(gh api "repos/${{ github.repository }}/releases?per_page=30" \
             --jq '[.[] | select(.draft == false and .prerelease == false)][:5][].tag_name')
           prior=""
@@ -2359,7 +2361,7 @@ jobs:
               prior="$tag"
               break
             fi
-            if grep -qiE 'no such manifest|manifest unknown|not found' <<<"$out"; then
+            if grep -qiE 'no such manifest|manifest unknown' <<<"$out"; then
               echo ">> skipping ${tag}: its image is not published"
             else
               echo "::error::could not look up the image of ${tag}: ${out}"

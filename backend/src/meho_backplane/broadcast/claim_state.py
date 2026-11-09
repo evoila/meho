@@ -18,7 +18,9 @@ rules: the dispatch-time target advisory
 (:mod:`meho_backplane.broadcast.target_advisory`), the caller's own claim
 lookup (:mod:`meho_backplane.broadcast.announce_claim_lookup`), and the
 ``active_only`` read filter
-(:func:`meho_backplane.broadcast.history.event_matches`).
+(:func:`meho_backplane.broadcast.history.event_matches` for one row, and
+:func:`meho_backplane.broadcast.claim_archive.ended_claim_ids` for the
+newest stored step of its claim).
 
 A claim is advisory. It never locks a target and never blocks a write.
 """
@@ -49,7 +51,9 @@ def is_active_claim_step(step: AgentAnnouncementEvent, now: datetime) -> bool:
 def latest_claim_steps(steps: Iterable[AgentAnnouncementEvent]) -> list[AgentAnnouncementEvent]:
     """Return the newest step of each trusted claim in *steps*.
 
-    *steps* must be ordered newest first. Steps that are not trusted
+    *steps* must be ordered newest committed first
+    (:data:`~meho_backplane.broadcast.claim_archive.CLAIM_STEPS_NEWEST_FIRST`).
+    Steps that are not trusted
     claim steps are left out. The result keeps the newest-first order.
     """
     seen: set[object] = set()

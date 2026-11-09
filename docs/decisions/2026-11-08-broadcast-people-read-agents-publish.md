@@ -51,8 +51,8 @@ that still assumed the mixed feed:
   reads it.
 - The target advisory and the reflex claim lookup read trusted claims
   from the archive and judge each claim by its newest step
-  (`broadcast/claim_state.py`). `active_only` keeps only steps that keep
-  their claim active.
+  (`broadcast/claim_state.py`). The newest step is the one committed
+  last. `active_only` keeps only steps of claims that are still active.
 - `/ui/broadcast` shows agent announcements only, says who can post, and
   links the audit log for operations.
 

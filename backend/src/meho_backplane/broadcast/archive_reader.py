@@ -78,6 +78,7 @@ from meho_backplane.broadcast.archive_sequence import (
     number_unnumbered_rows,
     oldest_retained_seq,
 )
+from meho_backplane.broadcast.claim_archive import ended_claim_ids
 from meho_backplane.broadcast.client import get_broadcast_blocking_client, get_broadcast_client
 from meho_backplane.broadcast.history import (
     DEFAULT_WINDOW_MINUTES,
@@ -233,6 +234,19 @@ async def _scan(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def _without_ended_claims(
+    session: AsyncSession,
+    tenant_id: UUID,
+    rows: list[AgentAnnouncement],
+    flt: AnnouncementFilter,
+) -> list[AgentAnnouncement]:
+    """For ``active_only``, drop the steps of claims that have ended (#3762)."""
+    if not flt.active_only:
+        return rows
+    ended = await ended_claim_ids(session, tenant_id, rows)
+    return [row for row in rows if row.claim_id not in ended]
+
+
 @dataclass(frozen=True)
 class StoredAnnouncement:
     """One archived announcement with its per-tenant sequence number."""
@@ -341,6 +355,7 @@ async def read_announcement_history(
             upper=position.watermark,
             limit=limit,
         )
+        readable = await _without_ended_claims(session, tenant_id, rows, flt)
     gap = _scan_gap(position.after_seq, position.watermark, rows, limit) or window_gap
     next_cursor = None
     if len(rows) == limit:
@@ -350,7 +365,7 @@ async def read_announcement_history(
             HistoryPosition(watermark=position.watermark, after_seq=last, since=position.since),
         )
     return {
-        "events": _serialize(rows, flt, since=position.since),
+        "events": _serialize(readable, flt, since=position.since),
         "next_cursor": next_cursor,
         "watch_checkpoint": encode_watch_checkpoint(tenant_id, position.watermark),
         "gap": gap,
@@ -398,10 +413,11 @@ async def _watch_scan(
                 ),
             )
         rows = await _scan(session, tenant_id, after=after, upper=watermark, limit=WATCH_SCAN_LIMIT)
+        readable = await _without_ended_claims(session, tenant_id, rows, flt)
     gap = _scan_gap(after, watermark, rows, WATCH_SCAN_LIMIT)
     full = len(rows) == WATCH_SCAN_LIMIT
     new_after = cast("int", rows[-1].seq) if full else watermark
-    return _WatchScan(_matching(rows, flt, seen), new_after, full, gap)
+    return _WatchScan(_matching(readable, flt, seen), new_after, full, gap)
 
 
 class _StreamWake:
@@ -532,6 +548,7 @@ async def latest_announcements(
     this read. DB errors propagate (fail-loud).
     """
     tenant_id = operator.tenant_id
+    active_filter = flt or AnnouncementFilter()
     async with get_sessionmaker()() as session:
         await _number_older_writes(session, tenant_id)
         watermark = await archive_watermark(session, tenant_id)
@@ -547,10 +564,9 @@ async def latest_announcements(
         if since is not None:
             stmt = stmt.where(AgentAnnouncement.created_at >= since)
         rows = list((await session.execute(stmt)).scalars().all())
-    rows.reverse()
-    return LatestAnnouncements(
-        events=_matching(rows, flt or AnnouncementFilter()), watermark=watermark
-    )
+        readable = await _without_ended_claims(session, tenant_id, rows, active_filter)
+    readable.reverse()
+    return LatestAnnouncements(events=_matching(readable, active_filter), watermark=watermark)
 
 
 async def first_seq_since(operator: Operator, since: datetime) -> tuple[int, dict[str, Any] | None]:

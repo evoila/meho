@@ -33,6 +33,7 @@ from sqlalchemy import select
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
+from meho_backplane.broadcast.claim_archive import CLAIM_STEPS_NEWEST_FIRST
 from meho_backplane.broadcast.claim_state import is_active_claim_step, latest_claim_steps
 from meho_backplane.broadcast.history import (
     WRITE_OP_CLASSES,
@@ -108,7 +109,7 @@ async def _active_target_claims_newest_first(
             AgentAnnouncement.claim_id.is_not(None),
             AgentAnnouncement.owner_sub.is_not(None),
         )
-        .order_by(AgentAnnouncement.created_at.desc(), AgentAnnouncement.seq.desc())
+        .order_by(*CLAIM_STEPS_NEWEST_FIRST)
         .limit(_ADVISORY_SCAN_LIMIT)
     )
     async with get_sessionmaker()() as session:

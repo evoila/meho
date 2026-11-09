@@ -202,9 +202,10 @@ def event_matches(
       finite TTL has not run out (see
       :func:`~meho_backplane.broadcast.claim_state.is_active_claim_step`,
       #3762). Legacy announcements without a trusted claim, steps without
-      a TTL and operation events never pass. A row cannot see a later
-      ``completion`` of its claim, so an earlier step of a completed claim
-      still passes until its own TTL runs out.
+      a TTL and operation events never pass. This looks at one row only.
+      The archive reads also drop every step of a claim whose newest
+      stored step ended it
+      (:func:`~meho_backplane.broadcast.claim_archive.ended_claim_ids`).
     """
     if op_class is not None:
         # AgentAnnouncementEvent has no ``op_class``; the caller asked

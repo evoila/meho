@@ -1215,6 +1215,18 @@ class Settings(BaseModel):
         ``idempotency_key`` on ``call_operation``. When off, hosted runs
         keep the older hand-written copies. It stays off until model tests
         show it helps. Env ``AGENT_OPERATION_TOOLS_FROM_MCP``.
+    web_push_enabled:
+        Off by default. An admin turns it on (chart value
+        ``webPush.enabled``) to let a person switch on "Notify me about
+        approvals" per browser on the account page
+        (:mod:`meho_backplane.web_push`). Off: the switch is not shown, the
+        push routes answer 404 and the push key is not read. Env
+        ``WEB_PUSH_ENABLED``.
+    web_push_vapid_private_key:
+        The push key (VAPID): the base64url form of a raw 32-byte P-256
+        private key. It proves that push messages come from this MEHO. The
+        install makes it in the Secret ``<release>-core-web-push``. Never
+        logged and never shown. Env ``WEB_PUSH_VAPID_PRIVATE_KEY``.
     approval_allow_self_approval:
         Self-approval **emergency break-glass** switch (G11.7-T1 #1401).
         Default ``False`` (fail-closed): a person who is not a
@@ -1972,6 +1984,9 @@ class Settings(BaseModel):
     # approval requests (operations/_validate.py). A secret of its own, so a
     # new database password keeps every hash. Empty = made from DATABASE_URL.
     params_hash_key: str = ""
+    # The push feature (web_push/) and its key; see the docstring.
+    web_push_enabled: bool = False
+    web_push_vapid_private_key: str = Field(default="", repr=False)
     # G10.1-T3 #869 — BFF sliding-session knobs for the broadcast
     # wall-monitor's long-display requirement. The sliding extension
     # keeps an actively-viewed session alive past its login-time
@@ -3176,6 +3191,8 @@ def get_settings() -> Settings:
             "APPROVAL_HANDOFF_ENCRYPTION_KEY", ""
         ).strip(),
         params_hash_key=os.environ.get("PARAMS_HASH_KEY", "").strip(),
+        web_push_enabled=parse_bool_env(os.environ.get("WEB_PUSH_ENABLED", "false")),
+        web_push_vapid_private_key=os.environ.get("WEB_PUSH_VAPID_PRIVATE_KEY", "").strip(),
         ui_session_sliding_extension_seconds=int(
             os.environ.get("UI_SESSION_SLIDING_EXTENSION_SECONDS", "3600"),
         ),

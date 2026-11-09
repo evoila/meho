@@ -880,6 +880,86 @@ cached (skipped where `node` is missing).
 Installing needs HTTPS (or `localhost`). Opening the app needs the same
 network access as the console, for example the VPN.
 
+## Approval notifications
+
+A person can switch on "Notify me about approvals in this browser" on the
+account page. MEHO then stores that browser's push subscription. Sending
+the messages is the next step and is not built yet.
+
+**Off by default.** The admin turns the feature on for the whole site with
+the setting `WEB_PUSH_ENABLED` (chart value `webPush.enabled`). While it is
+off:
+
+- the account page shows no switch and loads no push script;
+- every route under `/ui/account/push/` answers 404;
+- the push key is not read.
+
+The same holds while the setting is on but the push key is missing or not
+valid. MEHO then logs `web_push_key_missing` or `web_push_key_unusable`
+(never the key).
+
+**The push key (VAPID).** A P-256 key pair that proves to the push services
+that a message comes from this MEHO. The install makes the private key
+once, in the Secret `<release>-core-web-push` (key `vapid_private_key`), in
+the same way as the other server keys
+([core-secrets.md](core-secrets.md)), and keeps it on every upgrade. The
+chart passes it as `WEB_PUSH_VAPID_PRIVATE_KEY`. Without a built-in core
+part, put your own key in a Secret and set `webPush.secretName`; the format
+is the base64url form of the raw 32-byte private value. Make one with:
+
+```bash
+cd backend && uv run python -c "from meho_backplane.web_push.keys import new_private_key; print(new_private_key())"
+```
+
+The private key is never logged, never in an answer, and not in the repr of
+the settings. The public key is public by design: each browser needs it to
+subscribe, so the account page puts it in `data-vapid-public-key`.
+
+**What happens when a person switches it on.** `app/push-subscribe.js`
+asks the browser for permission, subscribes with the public key, and posts
+the subscription (the push endpoint and its two keys `p256dh` and `auth`)
+to `POST /ui/account/push/subscribe`. MEHO checks it
+(`web_push/endpoints.py`):
+
+- The endpoint is `https://` on port 443, without a user name, on a push
+  service of a browser maker: `fcm.googleapis.com` (Google),
+  `updates.push.services.mozilla.com` (Mozilla), a host under
+  `.push.apple.com` (Apple) or under `.notify.windows.com` (Microsoft, for
+  Edge on Windows). Anything else gets 422 with one sentence that does not
+  quote the endpoint.
+- `p256dh` is a P-256 public key (65 bytes) and `auth` is 16 bytes, both
+  base64url.
+
+MEHO stores the row in `push_subscription` (migration `0148`) for the
+signed-in person and the current tenant, with the time. The person and the
+tenant come from the session, never from the form. The endpoint names one
+browser, so it is unique: switching on again replaces the row, and when
+another person switches on the same browser, the browser moves to them. A
+person keeps at most ten browsers; the oldest go first.
+
+Switching off drops the subscription in the browser and posts
+`POST /ui/account/push/unsubscribe`, which deletes the person's own row for
+that endpoint.
+
+**See and remove.** Below the switch, `GET /ui/account/push/subscriptions`
+lists the person's browsers (the push service and the time, never the
+endpoint or the keys). A `tenant_admin` also sees every subscription made
+in the current tenant. `POST /ui/account/push/remove` (form field
+`subscription_id`) deletes one row of the person, or, for a
+`tenant_admin`, any row of the current tenant. Every other id is 404.
+
+Every route is a console route: it needs the session and the CSRF token.
+Logs name the person, the tenant, the row id and the push service, never
+the endpoint or the keys.
+
+Code: `web_push/` (`keys.py`, `endpoints.py`, `models.py`, `store.py`),
+`ui/routes/account_push.py`, `templates/account/_push.html` and
+`_push_subscriptions.html`. Tests: `tests/test_ui_account_push.py`,
+`tests/test_web_push_checks.py`.
+
+On iPhone and iPad, web push works only in the installed app (iOS 16.4 and
+newer), so the switch says to install MEHO first.
+
 ## Dependencies
 
 - **`jinja2 >= 3.1.6`** — already a backplane dependency; no

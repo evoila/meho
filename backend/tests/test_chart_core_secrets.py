@@ -93,6 +93,7 @@ _CORE_NAMES = [
         "check-runner",
         "approval-handoff",
         "params-hash",
+        "web-push",
         "broadcast-auth",
         "tls",
         "first-login",
@@ -334,3 +335,63 @@ def test_schema_rejects_an_unknown_core_key() -> None:
     )
     assert result.returncode != 0
     assert "admin" in result.stderr
+
+
+def test_web_push_key_is_made_only_with_web_push_on() -> None:
+    assert "web-push" not in _made(_plan(_render(*_CORE_ON))).values()
+    plan = _plan(_render(*_CORE_ON, "--set", "webPush.enabled=true"))
+    assert _made(plan)[f"{_RELEASE}-core-web-push"] == "web-push"
+
+
+def test_web_push_named_secret_is_checked_for_its_key() -> None:
+    plan = _plan(
+        _render(*_CORE_ON, "--set", "webPush.enabled=true", "--set", "webPush.secretName=my-push")
+    )
+    checks = {entry.name: (entry.values_key, entry.keys) for entry in plan.check}
+    assert checks["my-push"] == ("webPush.secretName", ("vapid_private_key",))
+    assert "web-push" not in _made(plan).values()
+
+
+def _backplane_env(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    deployment = next(
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == f"{_RELEASE}-meho"
+    )
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    return {entry["name"]: entry for entry in container.get("env", [])}
+
+
+def test_web_push_is_off_by_default() -> None:
+    env = _backplane_env(_render(*_CORE_ON))
+    assert "WEB_PUSH_ENABLED" not in env
+    assert "WEB_PUSH_VAPID_PRIVATE_KEY" not in env
+
+
+def test_web_push_on_reads_the_key_from_the_made_secret() -> None:
+    env = _backplane_env(_render(*_CORE_ON, "--set", "webPush.enabled=true"))
+    assert env["WEB_PUSH_ENABLED"]["value"] == "true"
+    ref = env["WEB_PUSH_VAPID_PRIVATE_KEY"]["valueFrom"]["secretKeyRef"]
+    assert (ref["name"], ref["key"]) == (f"{_RELEASE}-core-web-push", "vapid_private_key")
+
+
+def test_web_push_without_core_needs_a_named_secret() -> None:
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            _RELEASE,
+            str(_CHART_DIR),
+            *_BASE_OVERRIDES,
+            "--set",
+            "webPush.enabled=true",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "webPush.secretName is empty" in result.stderr
+    env = _backplane_env(
+        _render("--set", "webPush.enabled=true", "--set", "webPush.secretName=my-push")
+    )
+    ref = env["WEB_PUSH_VAPID_PRIVATE_KEY"]["valueFrom"]["secretKeyRef"]
+    assert (ref["name"], ref["key"]) == ("my-push", "vapid_private_key")

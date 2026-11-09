@@ -1312,6 +1312,21 @@ paramsHashKey:
   secretName: ""
   secretKey: params_hash_key
 
+# Approval notifications in the browser (web push). Off by default. With it
+# on, a person can switch on "Notify me about approvals in this browser" on
+# the account page. The push key (VAPID) is wired only by secretKeyRef, as
+# WEB_PUSH_VAPID_PRIVATE_KEY; it is never logged or shown. With a built-in
+# core part on, the install makes the key in `<release>-core-web-push` and
+# keeps it on every upgrade. Without one, make a key (the base64url form of
+# a raw 32-byte P-256 private key), store it in a Secret and set
+# `secretName`. See docs/codebase/ui.md, "Approval notifications".
+webPush:
+  enabled: false
+  # -- Your own Secret with the key. Empty = `<release>-core-web-push`
+  # with a built-in core part.
+  secretName: ""
+  secretKey: vapid_private_key
+
 # Built-in core (#3974): PostgreSQL, Keycloak and OpenBao, each on by
 # default, and wired to the backplane by the chart (#4591, #4047). An install
 # that brings its own PostgreSQL, Keycloak or Vault sets the matching

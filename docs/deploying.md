@@ -693,6 +693,14 @@ each lives inline in
   the token by itself. For your own scrape config, read the token from the
   Secret; for your own token, set `metricsAuth.existingSecret`. See
   `docs/codebase/metrics-ready-access.md`.
+- **`webPush.*`** → `WEB_PUSH_ENABLED` and `WEB_PUSH_VAPID_PRIVATE_KEY`.
+  Approval notifications in the browser. Off by default (`webPush.enabled:
+  false`): no switch on the account page and no push key in use. With it on,
+  a person can switch on "Notify me about approvals in this browser". With a
+  built-in core part, the install makes the push key in
+  `<release>-core-web-push`; without one, set `webPush.secretName` to your
+  own Secret (key `vapid_private_key`), or the render stops. See
+  `docs/codebase/ui.md`, "Approval notifications".
 - **`API_DOCS_ENABLED`** (via `extraEnv`) — the API docs pages
   (`/openapi.json`, `/docs`, `/redoc`) are off unless this is `true`. They
   need no login, so turn them on only on an instance where that is fine.

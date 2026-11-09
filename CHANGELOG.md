@@ -94,6 +94,535 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-11-09
+
+**An approved change whose settings hold hidden values now runs.** A
+requester may send the marker `[REDACTED:param_name]` as a value, for
+example in the expected state of an object, as a MEHO read returned it.
+MEHO runs the approved request with its stored settings while they
+match the approved hash. When MEHO cannot run an approved request, the
+request ends as failed, with a reason, and the requester can run it
+again with the settings (#6066).
+
+**MEHO-Admins may approve their own `dangerous` and `destructive`
+changes, like MEHO-SA-Operators** (#5971). **Approving a long operation
+in the web interface answers at once**, and the page follows the run
+(#6012).
+
+MEHO 0.46.0 also brings a list of approved changes whose outcome MEHO
+does not know, one approval for the operation list of an automation
+run, sensor acknowledgements and dashboard files, more knowledge tools
+(filters, a check for similar entries, the tenant's own wiki), the web interface
+as an app on phones and laptops, and a signed operation catalog and a
+security sheet on every release.
+
+Several changes for agents ship behind switches that are off by
+default. They are listed under "Switches, off by default".
+
+The upgrade runs 15 database migrations (`0138` to `0152`). The new
+head is `0152`. Read "Breaking changes" and "Steps after the upgrade"
+first.
+
+### Breaking changes
+- The retrieval quality check and the retire checklist are removed: the
+  routes `POST /api/v1/retrieve/eval` and
+  `POST /api/v1/retrieve/retire-checklist`, the commands
+  `meho retrieval eval` and `meho retrieval retire-checklist`, and their
+  two tabs in the web interface (#6021). What to do: stop calling them.
+  There is no replacement in the product. Search use stays at
+  `meho retrieval usage` and `GET /api/v1/retrieve/usage`.
+- With the built-in Keycloak, the chart fills in the values of the web
+  interface, the check runner and the Keycloak admin itself.
+  `config.uiKeycloakClientId`, `checkRunner.clientId`,
+  `keycloakAdmin.url` and `keycloakAdmin.clientId` must be empty or
+  equal the chart's value. Any other value stops the render with one
+  sentence that names the key and the value it expects (#5936). What to
+  do: remove these keys from your values, or set the value the message
+  names. With your own Keycloak nothing changes.
+- The REST target writes (`POST`, `PATCH` and `DELETE` under
+  `/api/v1/targets`) and the four REST topology writes (`POST
+  /api/v1/topology/edges`, `POST /api/v1/topology/edges/bulk`, `DELETE
+  /api/v1/topology/edges/{edge_id}`, `DELETE
+  /api/v1/topology/nodes/{node_id}`) are for people with `tenant_admin`.
+  A service or runner login gets 403 `human_principal_required`. An
+  agent gets 403 `insufficient_role` (#5819, #5828). What to do: a
+  machine login uses the operations `targets.register`,
+  `targets.update`, `targets.remove` and `topology.*` through
+  `call_operation`. They follow the approval rules.
+- A tenant named in a request body or query (`tenant_id`,
+  `tenant_filter`) follows the rules of the `Meho-Tenant` header. Only a
+  platform admin who is a person may name another tenant. Agent, service
+  and runner logins stay in their own tenant, also with the platform
+  admin claim: 403 `cross_tenant_requires_platform_admin`. A tenant from
+  the caller's own tenant list answers 403 `tenant_select_with_header`
+  (#5836). What to do: pick the tenant with the `Meho-Tenant` header
+  (`MEHO_TENANT`, or `meho tenants use` on the command line).
+- A standing grant never covers an operation that reads a credential.
+  MEHO refuses to create such a grant, and an existing grant does not
+  clear the wait: a person approves each call (#6055). What to do:
+  expect approvals for these calls from service principals.
+- A service principal's call with `reveal_secret: true` waits for a
+  person's approval, also for a read that runs at once without the flag.
+  MEHO refuses the flag for agents (#5865). What to do: automation that
+  needs secret values plans for an approval click.
+- Grant writes are for people on every surface. On MCP,
+  `meho_agents_grant_create` and `meho_agent_principals_register` refuse
+  agent, service and runner logins (`human_principal_required`). The
+  grant pages of the web interface do the same. The person who makes or
+  renews a standing grant needs the role the operation needs: for
+  `targets.register` and the `topology.*` writes this is `tenant_admin`,
+  and `POST /api/v1/service-principals/grants` answers 403
+  `role_floor_required` to an operator (#5838). What to do: a tenant
+  admin makes these grants, in the web interface or with the command
+  line.
+- A `read_only` session of the web interface gets 403 on every page
+  whose REST route needs the `operator` role: event sources,
+  conventions, knowledge, agents and agent runs, agent principals,
+  checks, connectors, the docs corpus, operations, pairing, runbooks,
+  runners, scheduler, sensors, topology, retrieval and broadcast. It
+  still opens the dashboard, its account and tenant pages, memory,
+  automation and approvals (#5847). What to do: give the `operator` role
+  to people who need these pages.
+- `pfsense.filter.rule.add` and `pfsense.filter.rule.delete` fail when
+  they refuse a change. The call answers `status: error`
+  (`PfSenseFilterRuleRefusedError`, with the refusal code and the
+  guidance), the audit row records a failure, and an approved request
+  shows `result_state: failed`. `pfsense.filter.rule.add` accepts the
+  built-in rule tabs `openvpn`, `enc0`, `l2tp` and `pppoe` (#5803). What
+  to do: a script that read the refusal from a successful answer reads
+  the error.
+- `k8s.ls` answers an error when a kind has no list operation, and names
+  the kinds it can list. It also fails when a read inside it fails.
+  `statefulsets` and `daemonsets` list through `k8s.workload.list`, and
+  `cronjobs` through the new safe read `k8s.cronjob.list` (#5909). What
+  to do: a script that checked for `ok` and then looked for an error
+  inside the answer checks the status.
+
+### Steps after the upgrade
+- Back up the database first. The upgrade runs 15 migrations, `0138` to
+  `0152`. They add tables, columns and one index, and change no existing
+  row. `0139` adds the run state `uncertain`; a downgrade below `0139`
+  turns every `uncertain` run into `failed`. On PostgreSQL, `0148` builds
+  a keyword index on the operations table, and writes to that table wait
+  while it builds (#5872, #5891, #5889, #5897, #5910, #5921, #5931,
+  #5954, #5900, #5984, #5986, #6011, #5995, #6056, #6058).
+- The upgrade ends every approval request that still waits, as every
+  upgrade since 0.39.0 does (`release_changed`). Decide waiting requests
+  first, or ask the requesters to send them again.
+- The chart uses the `Recreate` update strategy: the old pod stops
+  before the new one starts, so MEHO is away while the new pod starts.
+  At the stop, MEHO lets running calls finish for up to
+  `shutdown.drainSeconds` (default 60) and refuses new calls with
+  `meho_shutting_down`, so the caller can try again (#5690). A Helm 4
+  upgrade from an older chart first runs a short Job that removes the
+  old `rollingUpdate` block (#5967). The chart waits 20 minutes
+  (`progressDeadlineSeconds: 1200`) before it reports a failed rollout
+  (#5946).
+- The key of the params hashes and value fingerprints is a secret of its
+  own (#5871). With a built-in part, the install makes it in the Secret
+  `<release>-core-params-hash` and keeps it. With no built-in part, set
+  `paramsHashKey.secretName`; without it, MEHO makes the key from
+  `DATABASE_URL`. New hashes do not match the hashes made with the key
+  from `DATABASE_URL`.
+- With the built-in Keycloak: check the four values under "Breaking
+  changes" (#5936). The upgrade turns on recovery codes in the realm
+  when `meho-admin` may change login settings (`manage-realm`).
+  Otherwise follow "Recovery codes on an older install" on the Keycloak
+  realm page (#5938). The safer realm defaults reach new installs; for a
+  running realm, follow the "Keycloak break-glass" page (#5942).
+- The built-in OpenBao uses the plain OpenBao image, which runs on
+  x86-64-v2 CPUs. On OpenShift, set the UBI image in `coreVault.image`
+  (#5945).
+- Install the 0.46.0 CLI. It brings `meho operation call --async` and
+  `meho operation run-status` (#5912), `meho sensor edit` and
+  `meho dashboard edit` (#5870), `meho sensor ack` (#5931),
+  `meho dashboard export` and `meho dashboard import` (#5918),
+  `meho approvals list --outcome-unknown` (#5910),
+  `meho approvals runs approve` (#5921), `meho tenants model-prices`
+  (#5872), `meho kb export` (#5961), `meho sessions` (#6058) and
+  `meho status --first-start` (#5939).
+
+### Switches, off by default
+Each switch is an environment setting of the backplane. With a switch
+off, MEHO works as in 0.45.0. The team turns a switch on by default only
+after model tests show that it helps.
+- `JSONFLUX_ANSWER_READY`: a large list answer also carries `items`
+  (every row in one to three short columns, when they fit) and `counts`
+  (how many rows have each value), and one short line in place of the
+  two long how-to texts on the result handle (#5985).
+- `MCP_TOPOLOGY_OFF_DEFAULT_LIST`: `query_topology` moves off the
+  default tool list to the operator tools, so only a session with the
+  `mcp:admin` scope lists and calls it. The default list then has 25
+  tools. The shorter `query_topology` text is on for everyone (#5997).
+- `OPERATION_CONTRACT_GUIDANCE`: the exact-operation answer of
+  `search_operations` carries a `guidance` block with the connector
+  author's advice: when to call, what must be true first, parameter
+  hints, the result shape and the next step, cut to 3000 characters
+  (#5996).
+- `AGENT_READS_CUSTOM_DESCRIPTION`: agents read an admin's
+  `custom_description` in place of the operation's `description`, in
+  search hits, in the exact-operation answer and in the keyword search
+  (#5986).
+- `AGENT_OPERATION_TOOLS_FROM_MCP`: a hosted agent run gets
+  `list_operation_groups`, `search_operations` and `call_operation` built
+  from the MCP tools, with `op_id`, `preview_hash` and
+  `idempotency_key` (#5990).
+- `SEARCH_PLAIN_SENTENCES`: `search_operations` can answer `matched` for
+  a plain sentence when the top hit holds any word of the query, and
+  when a group filter leaves one operation. Hits, order and scores do
+  not change (#6057).
+- `SEARCH_CLEAR_LEAD`: `search_operations` answers `ambiguous` when
+  another hit is closer in meaning than the top hit (#6062).
+- `WEB_PUSH_ENABLED` (chart `webPush.enabled`): a person can switch on
+  approval notifications for one browser on the account page. MEHO
+  stores the browser's push subscription; sending follows in a later
+  release (#6056).
+- The agent session store stays off until `SESSION_STORE_ENDPOINT`,
+  `SESSION_STORE_BUCKET` and `SESSION_STORE_CREDENTIALS_VAULT_PATH` are
+  set (#6058).
+- `OPERATION_SEARCH_STORE_QUERY_TEXT`: the records of operation searches
+  also keep the query text, not only its hash (#5984).
+
+### Security
+- A tenant in a request body or query follows the `Meho-Tenant` header
+  rules. Agent, service and runner logins stay in their own tenant, also
+  with the platform admin claim, and MCP `list_targets` looks only in
+  the caller's own tenant (#5836).
+- Pages of the web interface check the same role as their REST routes,
+  so a `read_only` session does not open operator pages (#5847).
+- Grant writes on MCP and in the web interface are for people only, and
+  a standing grant needs a creator with the operation's role (#5838).
+- A standing grant never covers an operation that reads a credential
+  (#6055).
+- Only a platform admin turns a global doc collection on or off, or
+  probes it. A tenant admin still turns their own tenant's collections
+  on and off (#5816).
+- The flight-recorder trace hides at least what the normal answer
+  hides: the same patterns, also PEM private keys, password hashes, Ceph
+  keys and BIND key secrets, and numbers under a secret name. A policy
+  change is in force right after it is saved (#5846).
+- REST target and topology writes are for people (#5819, #5828).
+- The approver sees when an approved run returns hidden values to the
+  requester (`reveal_secret`), on REST, MCP, the command line and the web
+  interface (#5865).
+- The CLI checks the login server's discovery document: the issuer must
+  be the realm address, and every address must use `https://`, except
+  on the local machine (#5845).
+- The CLI shows server text with control characters as visible escapes.
+  In the web interface, "Approve group in order" approves only the steps
+  the person saw, and names new steps (#5840).
+- Four connector operations check their input more strictly:
+  `azure.operation.status` polls only an Azure operation status address,
+  Keycloak role and realm names stay one path part,
+  `pfsense.gateway.add` refuses zones and spaces, and `wsfc.cluster.test`
+  takes only a plain file name as `report_name` (#5841).
+- An operation from a vendor API file runs only on a connector class
+  that accepts such operations, at ingest, at approval and at run time
+  (`ingested_ops_not_accepted`) (#5830).
+- The settings file refuses YAML anchors and aliases, and the export
+  never writes them (#5827). The target and topology imports of the web
+  interface refuse them too. Target `extras` take at most 2000 values
+  and 8 levels, the login page keeps at most 10,000 waiting logins, and
+  network probes run on their own small thread pool (#5885).
+- The account page lists and signs out a person's sessions in every
+  tenant. Logs name a session by a short reference, never by its id
+  (#5837).
+- The params hash key is a secret of its own (#5871).
+- The built-in Keycloak locks an account for a short time after 5 wrong
+  passwords and keeps login and admin events for 180 days (#5942). The
+  first admin and the second person set up a code app and recovery
+  codes at their first login (#5938).
+- The chart's install notes send the first passwords and the OpenBao
+  unseal key to the clipboard, not to the screen (#5944).
+- `keycloak.realm.update` takes the realm's mail server password as a
+  secret reference (`smtp_password_secret_ref`) and refuses a plain
+  password before the call waits for approval (#5911).
+- The operation contract check treats `fqdn`, `remote`, `peer`,
+  `endpoint` and the `hostname`, `ipv4` and `ipv6` formats as addresses.
+  An operation that sends a stored secret to an address from the caller
+  must wait for approval (#5839).
+
+### Governance
+- An approved request whose stored settings hold the marker
+  `[REDACTED:param_name]` runs when the settings still match the
+  approved hash. Settings where MEHO hid the values after a run started
+  never run. An approved request that MEHO cannot run takes its run
+  claim, writes one audit row (`approval_resume_params_unavailable`) and
+  ends as failed with a reason; the requester can run it again with
+  `POST /api/v1/approvals/{request_id}/rerun` (#6066).
+- A member of MEHO-Admins may approve their own `dangerous` or
+  `destructive` change, like a MEHO-SA-Operator. Agents, service logins
+  and runners never approve. On the command line and REST, an approval
+  still needs a fresh approval sign-in (#5971).
+- In the web interface, approving a request answers within about a
+  second. The operation runs in the background, exactly once, and the
+  card and the list follow the run until it ends: ran OK, run failed,
+  outcome unknown, or no result (#6012).
+- An approval request made by an agent shows the agent's name and the
+  requester's kind (`user`, `agent`, `service` or `runner`), in REST
+  (`principal_kind`), the command line and the web interface (#6011).
+- When `linux.script.run` waits for approval, the approver reads the
+  script, its size and its SHA-256, with secret-looking values hidden.
+  The new parameters `script_ref` and `expected_sha256` let MEHO refuse a
+  script that does not match the reviewed copy (#5978).
+- A person can approve the operation list of one automation run once.
+  Calls of that service principal with that run reference that are on
+  the list run without a new approval, and still go through the policy
+  check and the audit log. Destructive operations are never covered
+  (#5921).
+- MEHO lists approved changes whose outcome it does not know: a result
+  `uncertain`, or a run that started more than 15 minutes ago
+  (`APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES`) and stored no result. A
+  person who may decide approvals marks each one as "it happened" or "it
+  did not happen", with a note (#5910).
+- When MEHO does not know if an approved change happened, every view
+  says "uncertain" and tells the reader to check the target first. MEHO
+  never runs such a change again (#5891).
+
+### Added
+- The web interface installs as an app on phones and laptops, and opens
+  on the approvals page. It never keeps an old approval list: without
+  MEHO it shows "Connect to the VPN and try again" (#6005).
+- On a phone, the approvals and broadcast pages fit one column. The
+  requests you may approve come first, with a "Waiting for you" badge
+  (#6007).
+- A person can acknowledge a red sensor until a set time (at most 90
+  days), with a reason. The sensor keeps running, and warning mails stop
+  until the end time or until the state gets worse (#5931).
+- Edit a sensor or a dashboard in place: `PATCH /api/v1/sensors/{sensor_id}`,
+  `PATCH /api/v1/checks/dashboards/{dashboard_id}`, `meho sensor edit` and
+  `meho dashboard edit`. Each edit writes an audit row with the old and
+  new values (#5870).
+- Export a dashboard and its sensors as one file, and import it at
+  another site with `--map-target`. The import checks the whole file
+  first, and a second import of the same file changes nothing (#5918).
+- Each dashboard shows the result of its last alert mail, and the metric
+  `checks_alert_mail_total` counts mail results (#5889).
+- Each alert mail writes one audit row with the dashboard, the states,
+  the result and the recipients, never the mail text (#6061).
+- The sensor list warns when a sensor's connector does not fit its
+  target, and names the connector that fits. Creating such a sensor
+  needs `force: true` (#5869).
+- Knowledge and memory entries check a shared lesson header (`type`,
+  `applies_to`, `status`, dates, product, version and more). A new
+  shared scope makes an entry readable in every tenant of the instance
+  (`KB_SHARED_TENANT_IDS`). Every memory change keeps a revision (#5897).
+- `search_knowledge` and `search_memory` filter on product, version,
+  status, tags and dates inside the search, and each knowledge hit says
+  which tenant owns it (#5951).
+- Before MEHO writes a new knowledge entry, it lists entries that say
+  something similar and writes nothing. The writer updates one of them,
+  or sends `create_anyway: true` (#5952).
+- A weekly upkeep job merges knowledge entries with the same text,
+  retires expired entries and lists used candidates for a reviewer
+  (`KNOWLEDGE_UPKEEP_ENABLED`, on by default). Only a reviewer marks an
+  entry as confirmed (#5954).
+- Every update of a knowledge entry names the revision it read
+  (`expected_revision`). A write against a changed entry is refused with
+  `stale_revision` and shows what changed (#5900).
+- `POST /api/v1/kb/import` takes knowledge pages that a CI job sends,
+  with a login that may only import (#5956).
+- `POST /api/v1/kb/export` and `meho kb export` write confirmed, generic
+  lessons as Markdown pages for the tenant's own wiki, with a login that
+  may only export. MEHO sends nothing by itself; it answers the call
+  (#5961).
+- `search_knowledge` and `meho kb search` also search the docs
+  collection of the tenant's own wiki, when the tenant setting
+  `knowledge_wiki_collection` names one (#5995).
+- `POST /api/v1/settings/conventions-drift` says how a tenant's
+  conventions differ from a rules file that the tenant sends, and saves
+  nothing (#5960).
+- `preview_operation` and `call_operation` show the newest team
+  knowledge and memory notes for a known target, in a `team_knowledge`
+  block (#5957).
+- `meho kb list --order newest` lists the newest knowledge first. The
+  Claude Code plugin's session start uses it (#5801).
+- `targets.update` and the operator MCP tool `meho_targets_update`
+  change a target through `call_operation`. They wait for a tenant
+  admin's approval (#6023).
+- Target answers show the stored `secret_ref` and whether MEHO built it
+  from the target name. A missing secret answers
+  `target_secret_not_found` with the fix (#6022).
+- Registering a target answers `next_step` with the probe command to run
+  (#6019).
+- MEHO publishes the schema of one record of a targets file
+  (`docs/schemas/target-record-v1.schema.json`), and the console import
+  maps the same keys as `meho targets import` (#5898).
+- `k8s.apply` takes `force_conflicts` to take over fields that another
+  tool owns. The approval card and the dry run show what it takes over
+  (#5908).
+- New safe Kubernetes reads `k8s.node.disk` and `k8s.node.images`: disk
+  use, pressure conditions and the images on each node (#5958).
+- `k8s.finalizer.remove` removes one finalizer from an object that is
+  stuck while it is deleted. It is `destructive`: preview first, and a
+  second person approves (#5959).
+- `k8s.meho.release.info` shows what a MEHO install runs: image, chart,
+  Helm revisions and, for a host you give, `/version` and `/ready`. It
+  waits for approval because it takes an address (#5920).
+- `net.fingerprint` says which product likely runs at one address, with
+  its version, how sure it is, and the evidence. It does not log in
+  (#5926).
+- The pfSense connector puts subnets and active DHCP leases on the
+  topology map (#5914).
+- The Hetzner Robot connector puts servers, subnets and vSwitches on the
+  topology map (#5915).
+- The bind9 and Windows DNS connectors put A, AAAA and CNAME records on
+  the topology map, and link each name to the system it points to
+  (#5919).
+- `linux.firewall.load` takes `rollback_after_seconds`: the host loads
+  the old rules again by itself unless `linux.firewall.confirm` stops the
+  timer. `linux.firewall.show` reads the rules through sudo when the
+  login is not root (#6025).
+- A hosted agent definition can name `add_to_memory`,
+  `add_to_knowledge`, `list_doc_collections`, `search_docs` and
+  `read_docs` (#5859).
+- Every agent run gets its model through the model resolver.
+  `AGENT_MODEL_BACKEND` picks the model server: `anthropic` (default),
+  `openai`, `bedrock` or `vcf-paif` (#5861).
+- Each agent run records its token counts, and a tenant admin can price
+  a model MEHO does not know (`meho tenants model-prices`) (#5872).
+- Chart values `agent.openai` and `agent.modelBackend` for an
+  OpenAI-compatible model server. The key comes only from a Kubernetes
+  Secret (#5856).
+- `meho_connector_list` takes a `target` and lists only the connectors
+  that fit it (#5981).
+- MCP tool profiles: `?profile=investigate` or `?profile=operate` on the
+  MCP address lists 9 or 13 tools (#5987).
+- `meho_status` and `GET /api/v1/health` answer the server time in UTC
+  (`server_time`) (#5992).
+- MEHO keeps a short record of each operation search and the call that
+  follows it, when `REQUEST_USAGE_RETENTION_DAYS` is set (#5984).
+- `meho operation call --async` returns a run id at once, and
+  `meho operation run-status` shows the run and its result (#5912).
+- `GET /first-start`, `meho status --first-start` and the page
+  `/ui/first-start` check the DNS name, the certificate, the clock and
+  every system in the settings, and name the fix for each red line
+  (#5939). The list warns when the MEHO address is a public internet
+  address (#5965).
+- The built-in Keycloak can use your own PostgreSQL
+  (`coreKeycloak.database.*`) (#5949).
+- An agent session store: people upload agent sessions to S3-compatible
+  storage, with a secret check, an index, rights and a retention period
+  (`POST /api/v1/sessions`, `meho sessions`) (#6058).
+- Every release has a security sheet (`meho-security-sheet-<tag>.md`),
+  an SBOM and a vulnerability scan report (#5943).
+- Every release has a signed operation catalog
+  (`operation-catalog.json`) and a signed list of operation changes
+  since the previous release (#5917).
+
+### Changed
+- The chart's update strategy is `Recreate`, and MEHO lets running work
+  finish when it stops (`shutdown.drainSeconds`) (#5690).
+- The chart sets `progressDeadlineSeconds: 1200` on the MEHO Deployment
+  (#5946).
+- The `query_topology` text is shorter: about 1,050 characters (#5997).
+- MEHO texts tell people to read the broadcast feed; only agents post
+  announcements (#6020).
+- The `add_to_knowledge` text says that `search_knowledge` filters on
+  metadata keys (#5894).
+- The stored-result queries behind `result_query` use one thread per
+  query and work on duckdb 1.5 and 2.0 (#5884).
+- duckdb 2.0.0 (#5617). Python packages: fastapi 0.162.0, httpx2 2.16.0,
+  alembic 1.20.1 and six more (#5746). GitHub Actions: four updates
+  (#5745).
+
+### Removed
+- The test fixture row `_fixture/1.0` is out of the product catalog, so
+  no install registers `fixture-rest-1.0` (#6015).
+- The shared API file checker is removed from the connector helpers; no
+  operation in this repository used it (#6054).
+
+### Fixed
+- A streamed agent run counts against the person's spend cap (#5815).
+- MEHO charges every agent run for its model calls, also a failed or
+  cancelled run. A run in progress counts as one request of the cap, and
+  cancelling a run stops it (#5886).
+- `k8s.logs` with `since_time` returns the lines of the window (#5890).
+- `meho kb ingest` stores unquoted header dates and decimal numbers as
+  text (#5895).
+- The first login to the web interface creates the tenant row (#5947).
+- The helm test pods start under the restricted PodSecurity profile
+  (#5941).
+- The built-in OpenBao uses the plain OpenBao image, so it starts on
+  x86-64-v2 CPUs (#5945).
+- An install made with a chart without an update strategy upgrades to
+  `Recreate` with Helm 4 (#5967).
+- MEHO matches role group names in any case, for the one-role-group
+  check and for the self-approval group (#5970).
+- Vendor commands of the CLI show the result handle and the command to
+  read the full result (#5979).
+- An operation called on a target of another kind is refused at once
+  with `target_connector_mismatch` and a plain message, before any wait
+  for approval (#5993).
+- A blank Target field in the Run window of the web interface sends no
+  target (#6009).
+- The `raw_payload` age-off empties old audit rows in batches, and two
+  pods take different rows (#6010).
+- The one-line reminder on a `call_operation` answer says only things
+  that are true and that the caller can do (#6016).
+- `linux.file.write` keeps the mode and owner of the file it replaces
+  (#6017).
+- `linux.script.run` refuses a bad `secret_env` name or more than 32
+  entries before the call waits for approval (#6018).
+- Turning a built-in operation on or off for a tenant writes an audit
+  row of class `config_change` (#5867).
+
+### CI and tests
+- Pull requests that break the REST API or the MCP tools fail, unless
+  they have the `breaking-change` label and a "Breaking changes" section
+  (#5923).
+- The tag workflows handle release candidate tags (#5935).
+- The chart workflow has a rollback drill that a person starts (#5940)
+  and an upgrade test from the last release with Helm 4 (#5966).
+- Docs merges on `main` publish the docs site again (#5975).
+- Pinned CI tools come from the runner or a cache, and downloads retry
+  (#5974).
+- Small workflows, the chart `validate` job and pull request image
+  builds run on GitHub-hosted runners (#5902, #5929, #5922). The kind
+  jobs load images for one platform (#5905).
+- The CI retrieval quality gate scores operations questions with the
+  operation search (#5983).
+- Test runs delete each test's database copy (#5903), readiness tests
+  stop their probe threads (#5904), and the host-key pin test counts only
+  real SSH connectors (#6031).
+
+### Documentation
+- The install docs describe the built-in PostgreSQL, Keycloak and
+  OpenBao as the normal way, with your own parts as an expert path, a
+  "Ways to install MEHO" page, a "Which install form is right for you?"
+  page, and the local kind quickstart removed (#5809, #5825, #5848,
+  #5934, #5950, #5953).
+- The docs site has a "What MEHO can do" section, a guide for the
+  settings file, a connector page with open source connectors and the
+  enterprise pack, and a knowledge store backup and restore section with
+  a restore test (#5913, #5834, #5826, #5901).
+- The site, install, client, guide, contributor, architecture and
+  cross-repo pages match the code (#5817, #5818, #5820, #5821, #5822,
+  #5823, #5824, #5832, #5842, #5843, #5844, #5855, #5862, #5863, #5866,
+  #5874, #5875, #5876, #5877, #5878, #5879, #5880, #5881, #5882, #5883,
+  #5835).
+- The sensors docs say that sensors run only safe operations, and how
+  the connector version range applies to sensors and upgrades (#5831,
+  #5860).
+- The upgrade notes have a row for the SSH host-key pins of v0.34.0, and
+  a script checks the pins before an upgrade (#5964).
+- Release tags are tags with a message (#5933).
+- The topology page points to the work that adds more connectors to the
+  map (#5927).
+- Lessons go to MEHO knowledge; personal notes stay in a person's own
+  notes (#5896).
+- The knowledge docs and tool texts say "the tenant's own wiki", and
+  that MEHO never sends knowledge anywhere by itself. The Claude Code
+  plugin is version 0.32.5 (#6068).
+- Decision records name the release that shipped them and the later
+  decisions that replaced parts of them (#5873). Decision records have a
+  code owner, and the owner confirmed the withdrawal of the single-page
+  app plan (#5988). A new decision record proposes a configurable policy
+  and waits for the owner's confirmation (#6065).
+
+### Release files
+- `meho-linux-*.tar`: the install on a plain Linux server, available and in testing. Ask evoila before you use it in production. See [Ways to install MEHO](https://evoila.github.io/meho/latest/install/ways-to-install/).
+
 ## [0.45.0] - 2026-11-06
 
 **Calls made with a token now run only `safe` operations at once.** This

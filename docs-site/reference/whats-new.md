@@ -9,6 +9,47 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.46.0](https://github.com/evoila/meho/releases/tag/v0.46.0) — 2026-11-09
+
+- **Approved changes with hidden values run.** A request whose settings
+  hold the hidden-value marker runs after approval. When MEHO cannot run
+  an approved request, it ends as failed, with a reason, and the
+  requester can run it again.
+- **Admins may approve their own `dangerous` and `destructive`
+  changes**, like MEHO-SA-Operators.
+- **Approving a long operation answers at once.** The operation runs in
+  the background, and the page shows when it ends.
+- **Changes with an unknown outcome.** MEHO lists approved changes whose
+  outcome it does not know, and a person marks each one as done or not
+  done.
+- **One approval for an automation run.** A person approves the list of
+  operations of one automation run once.
+- **Approvals on your phone.** Install the web interface as an app on a
+  phone or a laptop. The approvals and broadcast pages fit a phone
+  screen.
+- **Sensors.** Acknowledge a red sensor until a set time, edit a sensor
+  or a dashboard in place, and move a dashboard with its sensors to
+  another site as one file. Each alert mail writes an audit row.
+- **Knowledge.** Search filters, a check for similar entries before a
+  new entry, a weekly clean-up, and a search of your own wiki. MEHO
+  never sends knowledge anywhere by itself.
+- **More operations.** Kubernetes node disk and image reads, removal of
+  one stuck finalizer, a Linux firewall change that undoes itself unless
+  you confirm it, and `net.fingerprint` for an unknown address. pfSense,
+  Hetzner Robot and DNS systems appear on the topology map.
+- **First-start checks.** `meho status --first-start` checks the DNS
+  name, the certificate, the clock and every system, and names the fix.
+- **Every release has a security sheet and an operation catalog**, both
+  signed.
+- **Tighter rules.** Machine logins no longer write targets or topology
+  over REST, and a standing grant never covers a credential read.
+- **Switches, off by default.** Several changes for agents wait behind
+  switches until model tests show that they help: shorter list answers,
+  `query_topology` off the default tool list, and more.
+- **Before you upgrade.** Back up the database: the upgrade runs fifteen
+  migrations. With the built-in Keycloak, check four chart values. The
+  retrieval quality check is removed from the product.
+
 ## [v0.45.0](https://github.com/evoila/meho/releases/tag/v0.45.0) — 2026-11-06
 
 - **Token calls run only safe operations at once.** MCP, the command

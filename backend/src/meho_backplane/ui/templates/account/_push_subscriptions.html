@@ -1,0 +1,50 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The push subscriptions list (swapped into ``#account-push-subscriptions``).
+  Shows the push service and the time only, never the endpoint or the keys.
+  A tenant_admin also sees every subscription made in this tenant and may
+  remove any of them.
+-#}
+{%- macro sub_row(s, show_person) -%}
+<li class="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm" data-push-row="{{ s.id }}">
+  <span class="min-w-0">
+    {% if show_person %}<span class="font-mono text-xs" data-field="push-person">{{ s.operator_sub }}</span> &middot; {% endif %}
+    <span data-field="push-service">{{ s.service }}</span>
+    <span class="text-xs opacity-60" title="{{ s.created_at.isoformat() }}">since {{ s.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+  </span>
+  <button
+    type="button"
+    class="btn btn-sm btn-ghost"
+    hx-post="/ui/account/push/remove"
+    hx-vals='{"subscription_id": "{{ s.id }}"}'
+    hx-target="#account-push-subscriptions"
+    hx-swap="innerHTML"
+  >Remove</button>
+</li>
+{%- endmacro -%}
+<div class="space-y-3">
+  <div class="space-y-1">
+    <div class="meho-overline">Your browsers</div>
+    {% if own_subscriptions %}
+    <ul class="divide-base-300 divide-y rounded-lg border border-base-300" data-field="push-own">
+      {% for s in own_subscriptions %}{{ sub_row(s, false) }}{% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-xs opacity-60" data-field="push-own-empty">No browser gets notifications yet.</p>
+    {% endif %}
+  </div>
+  {% if is_tenant_admin %}
+  <div class="space-y-1">
+    <div class="meho-overline">All browsers in this tenant (admin)</div>
+    {% if tenant_subscriptions %}
+    <ul class="divide-base-300 divide-y rounded-lg border border-base-300" data-field="push-tenant">
+      {% for s in tenant_subscriptions %}{{ sub_row(s, true) }}{% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-xs opacity-60">No browser in this tenant gets notifications.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

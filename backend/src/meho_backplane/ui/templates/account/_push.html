@@ -1,0 +1,38 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  "Notify me about approvals in this browser" card of the account page.
+  Rendered only while the admin setting WEB_PUSH_ENABLED is on and the push
+  key is usable (``push_public_key`` is set). The switch is driven by
+  ``static/src/app/push-subscribe.js``; it reads the public push key from
+  ``data-vapid-public-key`` (the browser needs it to subscribe; it is the
+  public half only). The list below loads from
+  ``/ui/account/push/subscriptions`` and reloads after each change.
+-#}
+<div class="card bg-base-100 border-base-300 border shadow-sm" data-field="push-notifications">
+  <div class="card-body space-y-3">
+    <h2 class="card-title text-base">Approval notifications</h2>
+    <label class="label cursor-pointer justify-start gap-3">
+      <input
+        type="checkbox"
+        class="toggle toggle-primary"
+        data-push-switch
+        data-vapid-public-key="{{ push_public_key }}"
+        disabled
+      />
+      <span class="text-sm">Notify me about approvals in this browser</span>
+    </label>
+    <p class="text-xs opacity-60">
+      Your browser asks you first. On an iPhone or iPad, install MEHO on the
+      home screen first. The notification says only that an approval waits.
+    </p>
+    <p class="text-sm" data-push-status role="status" aria-live="polite"></p>
+    <div
+      id="account-push-subscriptions"
+      hx-get="/ui/account/push/subscriptions"
+      hx-trigger="load, meho-push-changed from:body"
+      hx-swap="innerHTML"
+    ></div>
+  </div>
+</div>

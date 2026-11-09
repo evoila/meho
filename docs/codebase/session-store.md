@@ -120,12 +120,15 @@ gzip tar archive) and the fields `session_id`, `project`, `app`,
    session.
 4. **New bytes.** Each tail passes the secret check. MEHO writes one archive
    of the checked tails to
-   `tenants/<tenant>/sessions/<record>/<seq>.tar.gz`, or under
+   `tenants/<tenant>/sessions/<record>/<seq>-<random>.tar.gz`, or under
    `quarantine/` when the check was not sure. Then it commits the index
    row, the upload row and the audit row in one transaction. When the
    commit fails, it deletes the archive again. So each upload is stored
-   complete or not at all. Two uploads of one session at the same time:
-   one wins, the other gets `409 session_upload_in_progress`.
+   complete or not at all. Two uploads of one stored session at the same
+   time run one after the other: the second waits for the first to
+   commit, then compares against what the first stored. Two first uploads
+   of a new session at the same time: one wins, the other gets `409
+   session_upload_in_progress` and its archive is deleted again.
 
 New bytes take the state the uploader sent. So a session uploaded three
 nights in a row while it stays open has one index row, three uploads and

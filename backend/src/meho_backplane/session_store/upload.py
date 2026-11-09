@@ -76,8 +76,12 @@ class UploadMeta:
 
 
 def object_key(tenant_id: uuid.UUID, record_id: uuid.UUID, seq: int, *, quarantined: bool) -> str:
-    """Return the object key of one stored upload."""
-    key = f"tenants/{tenant_id}/sessions/{record_id}/{seq:06d}.tar.gz"
+    """Return a new object key for one stored upload.
+
+    The random part makes each key unique, so a failed commit deletes only
+    its own archive, never the archive of another upload with the same seq.
+    """
+    key = f"tenants/{tenant_id}/sessions/{record_id}/{seq:06d}-{uuid.uuid4().hex}.tar.gz"
     return f"quarantine/{key}" if quarantined else key
 
 
@@ -182,11 +186,15 @@ class _Call:
 async def _load(
     session: AsyncSession, call: _Call
 ) -> tuple[AgentSessionRecord | None, list[AgentSessionUpload]]:
+    # Lock the row: a second upload of the same session waits here until
+    # this one commits, then plans against the stored state.
     record = await session.scalar(
-        select(AgentSessionRecord).where(
+        select(AgentSessionRecord)
+        .where(
             AgentSessionRecord.tenant_id == call.operator.tenant_id,
             AgentSessionRecord.session_id == call.meta.session_id,
         )
+        .with_for_update()
     )
     if record is None:
         return None, []

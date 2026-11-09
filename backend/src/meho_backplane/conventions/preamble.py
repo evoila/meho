@@ -85,7 +85,7 @@ from meho_backplane.conventions.schemas import DEFAULT_MAX_PREAMBLE_TOKENS, Conv
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantConvention
 from meho_backplane.docs_collections.preamble import assemble_doc_catalogue
-from meho_backplane.runbooks.priming import assemble_runbook_priming
+from meho_backplane.runbooks.priming import RunbookPrimingResult, assemble_runbook_priming
 
 __all__ = [
     "BLOCK_END",
@@ -100,6 +100,12 @@ __all__ = [
     "assemble_preamble_detailed",
 ]
 
+
+#: The priming result for a session whose tool profile has no runbook
+#: tools (#4172): no text, so the band is left out.
+_NO_PRIMING: Final[RunbookPrimingResult] = RunbookPrimingResult(
+    text="", block_count=0, summarized=False
+)
 
 #: Delimiters for the broadcast-discipline band (G6.5-T6 #2546). Unlike
 #: the conventions block, the wrapped content is MEHO-authored *trusted*
@@ -386,6 +392,7 @@ async def assemble_preamble_detailed(
     session: AsyncSession | None = None,
     conventions_only: bool = False,
     include_broadcast: bool = True,
+    include_runbook_priming: bool = True,
 ) -> PreambleAssembly:
     """Assemble the preamble (verbose pack record + runbook priming band).
 
@@ -423,7 +430,8 @@ async def assemble_preamble_detailed(
     budget would force a tradeoff that neither caller wants.
 
     For ``conventions_only`` (#3759) and ``include_broadcast`` (#4113)
-    see :func:`assemble_preamble`.
+    see :func:`assemble_preamble`; for ``include_runbook_priming`` (#4172)
+    see :func:`_runbook_priming`.
     """
     conventions = await _load_conventions(session, tenant_id)
     # An empty list renders as ``text=""`` with empty receipt fields, so a
@@ -449,7 +457,7 @@ async def assemble_preamble_detailed(
     # :class:`RunbookRunService` -- threading the caller's *session*
     # through is not required because priming reads ``runbook_runs``
     # rows, which the conventions write transaction never touches.
-    priming = await assemble_runbook_priming(operator_sub, tenant_id)
+    priming = await _runbook_priming(operator_sub, tenant_id, include=include_runbook_priming)
     # G4.6-T4 (#1553): the doc-collection catalogue band. Built only when
     # the caller threaded the operator's capabilities (the MCP
     # ``initialize`` path); a ``None`` capability set or a tenant entitled
@@ -475,6 +483,23 @@ async def assemble_preamble_detailed(
         runbook_summarized=priming.summarized,
         conventions_revision=revision,
     )
+
+
+async def _runbook_priming(
+    operator_sub: str,
+    tenant_id: UUID,
+    *,
+    include: bool,
+) -> RunbookPrimingResult:
+    """Return the runbook priming band, or no band when *include* is ``False``.
+
+    #4172: the MCP ``initialize`` path passes ``False`` for a session whose
+    tool profile has no runbook tools, because the band tells the agent to
+    call them. The runs are then not read at all.
+    """
+    if not include:
+        return _NO_PRIMING
+    return await assemble_runbook_priming(operator_sub, tenant_id)
 
 
 async def _load_conventions(

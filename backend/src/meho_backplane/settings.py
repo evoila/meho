@@ -1206,6 +1206,15 @@ class Settings(BaseModel):
         human review across timezone-distant teams without tying up an
         agent loop indefinitely on a forgotten request. Set via
         ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
+    agent_operation_tools_from_mcp:
+        Off by default. When on, a hosted agent run gets
+        ``list_operation_groups``, ``search_operations`` and
+        ``call_operation`` with the input schema and text of the MCP tools
+        of the same name (:mod:`meho_backplane.agent.toolset_operations`):
+        exact-op mode on ``search_operations``, and ``preview_hash`` and
+        ``idempotency_key`` on ``call_operation``. When off, hosted runs
+        keep the older hand-written copies. It stays off until model tests
+        show it helps. Env ``AGENT_OPERATION_TOOLS_FROM_MCP``.
     approval_allow_self_approval:
         Self-approval **emergency break-glass** switch (G11.7-T1 #1401).
         Default ``False`` (fail-closed): a person who is not a
@@ -2050,6 +2059,8 @@ class Settings(BaseModel):
     # tying up an agent loop indefinitely on a forgotten request. Set via
     # ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
     agent_approval_wait_timeout_seconds: float = Field(default=1800.0, gt=0)
+    # #4754 — hosted operation tools from the MCP tools; see the docstring.
+    agent_operation_tools_from_mcp: bool = False
     # G11.5-T3 #1077 — OpenAI-compatible backend configuration for the
     # agent runtime's multi-provider resolver. Sources the credentials
     # the settings-driven default OpenAI backend builder consumes; tenants
@@ -3211,6 +3222,9 @@ def get_settings() -> Settings:
         ),
         agent_approval_wait_timeout_seconds=float(
             os.environ.get("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "1800.0"),
+        ),
+        agent_operation_tools_from_mcp=parse_bool_env(
+            os.environ.get("AGENT_OPERATION_TOOLS_FROM_MCP", "false"),
         ),
         openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
         openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip(),

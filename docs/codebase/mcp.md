@@ -249,6 +249,35 @@ What moved out:
 If the test fails, shorten the text first. Raise a limit only with a
 reason in the pull request.
 
+### Taking `query_topology` off the default list (#5980)
+
+`query_topology` was the largest tool on the default list. Few sessions
+use it, so its text mostly takes up room. Two changes:
+
+- **Shorter description.** It went from 1,927 to about 1,050
+  characters. The tool's text as the size test counts it went from
+  5,537 to 4,655 characters. With its output schema, the whole
+  `tools/list` entry went from 13,572 to 12,688 characters.
+- **A switch to take it off the default list.** Set
+  `MCP_TOPOLOGY_OFF_DEFAULT_LIST=true` (`Settings.mcp_topology_off_default_list`,
+  default `false`). Then `query_topology` is on the operator surface:
+  only a session with the `mcp:admin` scope lists and calls it. A call
+  from another session gets the same answer as for any other operator
+  tool. The switch is off by default, so nothing changes until an
+  operator turns it on. On a Helm install, set it through `extraEnv`.
+
+How it works: `registry.tool_surface(defn)` returns the surface a tool
+is on in this deploy. It is `defn.surface`, except for `query_topology`
+when the switch is on. The `tools/list` filter (`all_tools_for`), the
+call-time check in `handlers.py` and the `surface_summary` of
+`meho_status` all use it, so they agree. The registered definition does
+not change, and the conformance test still pins the default list with
+`query_topology` on it. `tests/test_mcp_topology_off_default_list.py`
+covers the switch.
+
+The CLI (`meho topology ...`), the REST routes and hosted agents that
+name `query_topology` in their tool list are not affected.
+
 ### Runbook family canonicalisation (#1612)
 
 The 11 runbook tools were the last flat multi-verb family
@@ -1150,7 +1179,7 @@ add-on-family gate.
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
 | `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. Since #5504 also the server's time now in UTC (`server_time`, ISO 8601 to the second, for example `2026-10-31T14:34:28Z`), so an agent with no shell can write down a correct time. |
 | `preview_operation` | operator | — | Preview an operation without running it. |
-| `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
+| `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). With `MCP_TOPOLOGY_OFF_DEFAULT_LIST=true` it moves to the operator surface (#5980). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |
 | `result_query` | operator | — | Read rows back from a JSONFlux result handle: page a window, or run a bounded structured query (filter / project / group / aggregate) server-side. |
 | `search_docs` | operator | `meho-docs` | Search a vendor-document collection for an authoritative fact. |

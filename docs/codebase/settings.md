@@ -86,8 +86,8 @@ spec:
   agent_readable}`, `mail_recipient_allowlist`,
   `run_approval_target_kinds` (a run approval may list a target kind; see
   [run-approvals.md](run-approvals.md)), `knowledge_wiki_collection`
-  (the docs collection of the tenant's team wiki, at most 128 characters;
-  an empty value is `null`; see [kb.md](kb.md#team-wiki-search-5976)).
+  (the docs collection of the tenant's own wiki, at most 128 characters;
+  an empty value is `null`; see [kb.md](kb.md#wiki-search-5976)).
   `null` means "use the instance default" (`false` for the switches,
   inherit or none for the others).
   `policies: null` resets all of them.

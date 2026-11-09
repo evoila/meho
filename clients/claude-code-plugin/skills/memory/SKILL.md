@@ -39,9 +39,9 @@ A **verified** outcome goes back to the right store, through the backplane,
 so the next session inherits it:
 
 - a **reusable lesson** → MEHO's knowledge store (`add_to_knowledge`), never
-  a file in a repo's knowledge folder. When the tenant keeps its lessons in a
-  team wiki, MEHO also sends the lesson there as a candidate page, and a
-  person reviews it. A person can also write the wiki page directly;
+  a file in a repo's knowledge folder. When the tenant keeps its lessons in
+  its own wiki, the tenant's export job also brings the lesson there as a
+  candidate page, and a person reviews it. A person can also write the wiki page directly;
 - a **personal preference or note** → stays in the engineer's laptop memory.
   When it turns out to be a team fact, move it to MEHO's knowledge store
   (`add_to_knowledge`);

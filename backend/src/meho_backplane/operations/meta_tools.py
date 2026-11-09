@@ -1415,7 +1415,7 @@ async def search_operations(
             op_id=op_id,
             tenant_id=str(operator.tenant_id),
         )
-        return {"operation": contract.model_dump(mode="json")}
+        return {"operation": contract.as_payload()}
 
     query = arguments["query"]
     group_key: str | None = arguments.get("group")

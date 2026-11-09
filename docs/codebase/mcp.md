@@ -768,6 +768,17 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
     rules (fix `params` on `invalid_params`; `awaiting_approval` is a
     success that waits for a person and must not be retried; a
     destructive op needs `preview_operation` first).
+  - `guidance` — only when the switch `OPERATION_CONTRACT_GUIDANCE` is
+    on (off by default, #4757) and the op has written guidance. It holds
+    the prose keys of the op's `llm_instructions`: `when_to_call` (and
+    the older `when_to_use`), `preconditions`, `parameter_hints` (a map
+    of parameter name to hint), `output_shape` and `next_step`. Each text
+    is cut to 1000 characters and the whole block to 3000; a cut text
+    ends with `…`, and when the total runs out the later keys are left
+    out. Machine keys (`pagination_hint`, `result_*`) are not in it.
+    With the switch off, or without guidance, the key is not in the
+    answer at all. The rules live in `operations/_contract_guidance.py`;
+    tests in `backend/tests/test_operation_contract_guidance.py`.
 - **Unknown op.** A known connector with no such enabled op raises
   `UnknownOperationError`: MCP answers `-32602` with
   `data.reason="unknown_op"`, REST answers `404` with
@@ -776,6 +787,7 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   is deterministic and never returns an empty list.
 - **Slim ranked hits.** A ranked hit carries `op_id`, `summary`,
   `description`, `group_key`, `safety_level` and `requires_approval`.
+  It never carries the written guidance, also with the switch on.
   The ranking scores (`fused_score`, `bm25_score`, `cosine_score`) are
   added only when the caller sets `include_scores` **and** is
   `tenant_admin` (the same role the full descriptor read needs);

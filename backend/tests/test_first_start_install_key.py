@@ -136,7 +136,7 @@ def test_dns_line_warns_and_calls_nothing_without_params_hash_key(
 
 def test_start_warns_once_without_params_hash_key() -> None:
     with capture_logs() as logs:
-        assert warn_if_params_hash_key_missing() is False
+        assert warn_if_params_hash_key_missing(get_settings().params_hash_key) is False
     assert [entry["event"] for entry in logs] == ["params_hash_key_missing"]
     assert logs[0]["log_level"] == "warning"
 
@@ -182,5 +182,5 @@ def test_proof_changes_when_params_hash_key_changes(monkeypatch: pytest.MonkeyPa
 def test_start_does_not_warn_with_params_hash_key(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_key(monkeypatch, _KEY)
     with capture_logs() as logs:
-        assert warn_if_params_hash_key_missing() is True
+        assert warn_if_params_hash_key_missing(get_settings().params_hash_key) is True
     assert logs == []

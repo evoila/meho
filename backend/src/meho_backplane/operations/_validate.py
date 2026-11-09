@@ -194,14 +194,14 @@ def derive_install_key(label: bytes) -> bytes:
     return hmac.new(_derive_key(own_key), label, hashlib.sha256).digest()
 
 
-def warn_if_params_hash_key_missing() -> bool:
-    """Log one warning when ``PARAMS_HASH_KEY`` is not set; return whether it is set.
+def warn_if_params_hash_key_missing(params_hash_key: str) -> bool:
+    """Log one warning when *params_hash_key* is empty; return whether it is set.
 
-    Called at start. MEHO still starts: the params hashes then use the key
-    made from ``DATABASE_URL``, and the first-start destination check does
-    not run.
+    Called at start with ``settings.params_hash_key``. MEHO still starts:
+    the params hashes then use the key made from ``DATABASE_URL``, and the
+    first-start destination check does not run.
     """
-    if get_settings().params_hash_key:
+    if params_hash_key:
         return True
     _log.warning(
         "params_hash_key_missing",

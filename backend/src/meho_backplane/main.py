@@ -563,7 +563,7 @@ async def _run_lifespan_startup() -> None:
     # Without PARAMS_HASH_KEY the first-start destination check does not
     # run, and the params hashes use a key made from DATABASE_URL. Warn,
     # but start.
-    warn_if_params_hash_key_missing()
+    warn_if_params_hash_key_missing(get_settings().params_hash_key)
     # G10.0-T5 (#866) — ensure ``ui/static/dist/`` exists so the
     # StaticFiles mount does not crash on a fresh clone where
     # ``tailwindcss --watch`` has not yet materialised the compiled

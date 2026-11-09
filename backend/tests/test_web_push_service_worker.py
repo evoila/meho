@@ -71,7 +71,10 @@ async function click(url) {
   const closed = await click("/ui/approvals");
   await click("https://elsewhere.example/phish");
   await click("//elsewhere.example/phish");
+  await click("/\\elsewhere.example/phish");
+  await click("/\\\\elsewhere.example/phish");
   await click(undefined);
+  await click("/ui/approvals?id=r-1#top");
   process.stdout.write(JSON.stringify({ shown, opened, closed }));
 })();
 """
@@ -119,4 +122,4 @@ def test_a_foreign_address_in_a_message_is_replaced(run: dict[str, Any]) -> None
 
 def test_a_click_opens_only_a_page_of_this_meho(run: dict[str, Any]) -> None:
     assert run["closed"] is True
-    assert run["opened"] == ["/ui/approvals"] * 4
+    assert run["opened"] == ["/ui/approvals"] * 6 + ["/ui/approvals?id=r-1#top"]

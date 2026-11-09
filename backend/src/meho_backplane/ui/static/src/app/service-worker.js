@@ -132,12 +132,19 @@
   var APPROVALS_URL = "/ui/approvals";
   var ICON_URL = "/ui/static/src/brand/icon-192.png";
 
-  // Only a path on this MEHO; anything else opens the approvals page.
+  // Only a page on this MEHO; anything else opens the approvals page. The
+  // browser's URL parser reads the address, so the origin check sees what
+  // openWindow would open.
   function safeUrl(value) {
-    if (typeof value !== "string" || value.charAt(0) !== "/" || value.charAt(1) === "/") {
+    if (typeof value !== "string" || value.charAt(0) !== "/") return APPROVALS_URL;
+    var url;
+    try {
+      url = new URL(value, self.location.origin);
+    } catch (e) {
       return APPROVALS_URL;
     }
-    return value;
+    if (url.origin !== self.location.origin) return APPROVALS_URL;
+    return url.pathname + url.search + url.hash;
   }
 
   // The notification for one push message. A message that cannot be read

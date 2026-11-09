@@ -26,7 +26,7 @@ htmx requests and for requests whose ``Accept`` header names
   ``/ui/auth/login?return_to=<original path+query>`` -- the same
   redirect contract
   :class:`~meho_backplane.ui.auth.middleware.UISessionMiddleware` uses
-  for missing sessions -- plus a ``meho_session`` cookie clear (the row
+  for missing sessions -- plus a ``__Host-meho_session`` cookie clear (the row
   is terminally dead once a refresh has failed; RFC 6749 § 6 gives the
   BFF nothing left to present). An htmx request (``HX-Request: true``)
   gets the middleware's htmx answer instead: ``204`` + ``HX-Redirect``
@@ -266,7 +266,7 @@ async def _handle_expired_callback_state(request: Request, exc: StarletteHTTPExc
     ``303`` back to ``/ui/auth/login`` so the flow restarts on one click
     instead of dead-ending on raw JSON (G0.29 #2089, Leg 1). No cookie
     is touched -- the callback runs pre-session, so there is no
-    ``meho_session`` to clear. Non-HTML / scripted callers keep the
+    ``__Host-meho_session`` to clear. Non-HTML / scripted callers keep the
     structured ``authorization_state_expired`` body.
     """
     accept = request.headers.get("accept", "")

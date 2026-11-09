@@ -1595,6 +1595,40 @@ pins the dropdown + drawer tenant scoping; the
 pins the history pane's per-tenant archive read + the wall layout + the
 sliding-session extension.
 
+### The broadcast page on a phone (#6000)
+
+The page works on a phone screen (about 390 px wide) and still looks the
+same on a laptop:
+
+* **Rows.** Below the `sm` width `broadcast/_event_row.html` uses a
+  6-column grid: time and person on line one, the operation (or the
+  announcement text) on line two, status and target on line three. The
+  class and payload cells and the column header show from `sm` up. Newest
+  events stay on top, as before.
+* **Filters.** Below `md` the four filters fold away behind a "Filters"
+  button (Alpine `filtersOpen` on the form), so the newest events sit at
+  the top of the screen. Without JavaScript the fields stay visible.
+* **Announcements.** An agent announcement has no audit row, so it has
+  no detail drawer. On a phone a tap on it (or on the small button in
+  its status cell, which carries `aria-expanded`) folds out a details
+  block under the row: the phase, the full text without cutting, the
+  targets and the claim metadata (`detailsOpen`, local to the row). From
+  `sm` up the columns show these, and the block stays hidden.
+* **Details.** A tap on an operation row opens the detail drawer as before. Below
+  `lg` the drawer sits under the feed, so `openDrawer` scrolls it into
+  view once it is swapped in. It swaps with `settle:0ms`: htmx keeps the
+  old element's classes until the settle step, and the empty placeholder
+  is `hidden` below `lg` (it shows from `lg` up only).
+* **Sidebar.** `base.html` starts the sidebar closed on every page load
+  below `lg`, so a phone shows the page and not the menu. Before, the
+  saved open/closed choice (`meho.sidebar`, default open) opened the menu
+  over the page on every load. From `lg` up the sidebar always shows
+  (`lg:drawer-open`), so nothing changes there. This holds for every
+  console page.
+
+`test_ui_broadcast_phone_layout.py` pins the markup and script; the look
+was checked in a real browser at 390 px and 1366 px wide.
+
 ### Known limits
 
 * **op_id filtering is client-side only** — it narrows the in-DOM

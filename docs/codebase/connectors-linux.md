@@ -342,6 +342,18 @@ backplane rather than around it. It returns `stdout` as a list of lines so
 a large output spills to a `result_query` handle through the JSONFlux
 reducer rather than flooding agent context; `stderr` is capped inline.
 
+### File mode and owner (`file.write`)
+
+`file.write` writes the new content to a temp file in the same folder,
+then renames it over the old file. The temp file starts as `0600`. When the
+file already exists, the script copies the old file's mode and owner onto
+the temp file before the rename. So a `0644 root:root` file stays
+`0644 root:root`, and a daemon that reads it as a non-root user can still
+read it. If the copy fails, the script stops before the rename: the old
+file stays as it was and the op returns `written: false`. A new file is
+created `0600` and owned by root. If a non-root service must read a new
+file, change its mode afterwards.
+
 ### Root elevation
 
 Every write that needs root funnels through `_sudo.py`'s
@@ -463,6 +475,14 @@ host), exactly the un-governed footgun this connector exists to retire.
   must not collide with a reserved wrapper variable (`tmp` / `args` / `f`) or
   with a name already declared in `env`, and the mapping is bounded (≤ 32
   entries).
+- **Checked before the call waits for approval.** The `secret_env` schema
+  carries `propertyNames` (the POSIX name pattern) and `maxProperties: 32`.
+  The dispatcher checks the schema before the policy gate, so a bad name or
+  too many entries fail at once with `invalid_params`, and no approval is
+  asked for. The pattern ends with `(?![\s\S])`, not `$`, so a name with a
+  trailing newline also fails here. The handler (`_validate_secret_env`) still checks every rule at
+  run time. The reserved names, the clash with `env`, and the reference shape
+  are checked only there.
 - **Resolution at execution time only.** The value is resolved when the handler
   runs — the `_approved=True` resume path (or a non-parking dispatch) — never at
   park time. Each field is read through the connector's single Vault seam

@@ -3079,6 +3079,16 @@ two resources, and the graph's change history.</p>
 traversals you will actually run, and how a resource gets <em>into</em> the
 graph in the first place.</p>
 <div class="admonition note">
+<p class="admonition-title">Taking the tool off the default MCP tool list</p>
+<p>Every MCP session lists <code>query_topology</code> by default. If your agents
+do not use it, set <code>MCP_TOPOLOGY_OFF_DEFAULT_LIST=true</code> on the
+backplane (on a Helm install, through <code>extraEnv</code>). Then a session
+lists and calls it only when it asks for the <code>mcp:admin</code> scope
+(<code>MEHO_MCP_SCOPES=mcp:admin</code> in the Claude Code plugin, or the
+<code>scopes</code> setting of the <code>.mcpb</code> bundle). This makes the tool list of
+every other session shorter. The CLI and REST routes do not change.</p>
+</div>
+<div class="admonition note">
 <p class="admonition-title">Prerequisites, roles, and maturity</p>
 <ul>
 <li>A running backplane and an authenticated session

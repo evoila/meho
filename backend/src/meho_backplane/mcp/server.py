@@ -484,7 +484,8 @@ async def _session_instructions(operator: Operator) -> str | None:
     #5770: a session that is not an agent gets the reader form of that band
     (read the feed, do not post), because MEHO refuses its announcements.
 
-    #5729: the caller's newest Memory notes follow the preamble
+    #5729: with the ``TEAM_KNOWLEDGE_RECALL`` setting on (off by default),
+    the caller's newest Memory notes follow the preamble
     (:func:`meho_backplane.recall.memory_band`).
 
     #4172: the bands follow the session's tool profile; see

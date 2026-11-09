@@ -180,7 +180,8 @@ async def _call_operation_handler(
     dispatch arguments, so they are taken out before the call reaches
     :func:`call_operation`. Every answer carries ``data_notice``: the
     result holds text a vendor system returned, and that text is data.
-    A call that names a target also carries ``team_knowledge``
+    With the ``TEAM_KNOWLEDGE_RECALL`` setting on (off by default), a call
+    that names a target also carries ``team_knowledge``
     (:mod:`meho_backplane.mcp.tools._operation_recall`), also when it
     starts in the background with ``async: true``. A check of a run with
     ``run_id`` does not. Each call (not a check) writes one call record
@@ -231,7 +232,7 @@ async def _preview_operation_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Shim over :func:`preview_operation` (#1683), plus ``team_knowledge``."""
+    """Shim over :func:`preview_operation` (#1683), plus ``team_knowledge`` when it is on."""
     return await with_recall(operator, arguments, await preview_operation(operator, arguments))
 
 

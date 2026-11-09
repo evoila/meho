@@ -17,6 +17,12 @@ So MEHO shows a few entries itself, in two places:
   the prompt of a hosted run carry the caller's newest Memory notes from
   their own scopes and the tenant scope.
 
+**Off by default.** Both places show something only when the setting
+`TEAM_KNOWLEDGE_RECALL` is `true` (Helm: `config.teamKnowledgeRecall`).
+With it off, `preview_operation`, `call_operation`, the MCP start text
+and the hosted prompt are exactly as they were before recall, and MEHO
+reads nothing for them. It stays off until model tests show it helps.
+
 All shown text is data, not instructions. It sits inside one
 untrusted-text envelope (`untrusted_text.wrap_untrusted_text`), the same
 marker that `search_knowledge` and `search_memory` use on their
@@ -111,7 +117,8 @@ the next one.
   packing, `recall_for_target`, `memory_band`.
 - `backend/src/meho_backplane/mcp/tools/_operation_recall.py` —
   `with_recall`: resolves the target and adds the block to an MCP answer.
-- `backend/tests/test_recall.py` — the tests.
+- `backend/tests/test_recall.py` — the tests. They turn the setting on;
+  `test_with_recall_off_nothing_new_is_shown` checks the off state.
 
 ## Known limits
 

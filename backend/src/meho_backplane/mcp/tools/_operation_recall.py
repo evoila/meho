@@ -5,7 +5,9 @@
 
 The block (:func:`meho_backplane.recall.recall_for_target`) shows what the
 team knows about the call's target. It is added only when the call names a
-target that resolves, and never to a ``rate_limited`` answer. A
+target that resolves, and never to a ``rate_limited`` answer. It is
+added only when the ``TEAM_KNOWLEDGE_RECALL`` setting is on (off by
+default); when it is off, the answer goes out as it came. A
 ``call_operation`` answer keeps its wire limit: when the block would push
 the answer over it, the answer goes out without the block, so the block
 never makes a result ``partial``.
@@ -21,6 +23,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
 from meho_backplane.recall import RECALL_KEY, recall_for_target, unavailable_block
+from meho_backplane.settings import get_settings
 
 __all__ = ["with_recall"]
 
@@ -35,6 +38,8 @@ async def with_recall(
     max_wire_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Return *answer* with the ``team_knowledge`` block, when it applies and fits."""
+    if not get_settings().team_knowledge_recall:
+        return answer
     if answer.get("status") == "rate_limited" or arguments.get("target") is None:
         return answer
     try:

@@ -179,10 +179,12 @@
             </div>
           </div>
 
+          {% if similar_check %}
           <label class="label cursor-pointer justify-start gap-2">
             <input type="checkbox" name="create_anyway" value="true" class="checkbox checkbox-sm" />
             <span class="label-text">Create anyway, even when similar entries exist</span>
           </label>
+          {% endif %}
 
           <div class="flex flex-wrap gap-2">
             <button
@@ -242,10 +244,12 @@
             Slugs are derived from filenames. Re-uploading unchanged content is a no-op.
           </p>
 
+          {% if similar_check %}
           <label class="label cursor-pointer justify-start gap-2">
             <input type="checkbox" name="create_anyway" value="true" class="checkbox checkbox-sm" />
             <span class="label-text">Create anyway, even when similar entries exist</span>
           </label>
+          {% endif %}
 
           <div class="flex flex-wrap gap-2">
             <button

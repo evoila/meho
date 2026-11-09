@@ -514,6 +514,7 @@ def build_kb_router() -> APIRouter:
             "csrf_token": csrf_token,
             "active_surface": "knowledge",
             "page_title": "Upload · Knowledge",
+            "similar_check": get_settings().kb_similar_check,
         }
         response = get_templates().TemplateResponse(request, "kb/upload.html", context)
         response.set_cookie(

@@ -76,6 +76,10 @@ _log = structlog.get_logger(__name__)
 #: envelope (either an ``OperationResult`` or its ``model_dump`` dict).
 _DispatchCoro = Callable[[], Awaitable[Any]]
 
+#: Runs the background dispatch it is given and returns its answer. Lets a
+#: caller see the end of a background call (the operation pick records use it).
+DispatchWrapper = Callable[[Callable[[], Awaitable[dict[str, Any]]]], Awaitable[dict[str, Any]]]
+
 #: Upper limit for a run check that waits (#5264). It stays below the
 #: usual 60-second read limit of HTTP proxies, so a waiting check is not
 #: cut off on its way back to the caller.
@@ -163,7 +167,13 @@ class OperationRunService:
 
     # -- submit -----------------------------------------------------------
 
-    async def submit_call(self, operator: Operator, arguments: dict[str, Any]) -> uuid.UUID:
+    async def submit_call(
+        self,
+        operator: Operator,
+        arguments: dict[str, Any],
+        *,
+        wrap: DispatchWrapper | None = None,
+    ) -> uuid.UUID:
         """Create a durable run for an async ``/operations/call`` and launch it.
 
         Persists a ``pending`` row (origin ``direct``) with a lease claimed
@@ -175,6 +185,9 @@ class OperationRunService:
         "op_id", "target"?, "params"?, "work_ref"?}``. Only a ``params_hash``
         is persisted, never the raw params (the run never resumes, and a
         params blob would be a new secret surface).
+
+        ``wrap``, when given, runs the dispatch in the background task, so
+        the caller can act when the call ends.
         """
         from meho_backplane.operations._validate import compute_audit_params_hash
         from meho_backplane.operations.meta_tools import call_operation
@@ -195,11 +208,15 @@ class OperationRunService:
             params_hash=params_hash,
             approval_request_id=None,
         )
+
+        def dispatch() -> Awaitable[dict[str, Any]]:
+            return call_operation(operator, arguments)
+
         self._launch(
             run_id,
             op_id=op_id,
             owner=owner,
-            coro_factory=lambda: call_operation(operator, arguments),
+            coro_factory=dispatch if wrap is None else lambda: wrap(dispatch),
         )
         return run_id
 

@@ -2,10 +2,13 @@
 // Copyright (c) 2026 evoila Group
 
 // Package retrieval hosts the cobra commands under `meho retrieval ...`.
-// It ships one verb:
+// It ships two verbs:
 //
 //   - `meho retrieval usage` — daily-use telemetry from request usage events
 //     against /api/v1/retrieve/usage.
+//   - `meho retrieval picks` — per connector and day, whether calls used
+//     an operation the search before them returned (#4750), against
+//     /api/v1/retrieve/operation-picks.
 //
 // G0.12-T12 #1270 migrated this package off the per-verb hand-rolled
 // `postXxxWithBearer` helpers + hand-typed copies of backend pydantic
@@ -43,10 +46,11 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "retrieval",
-		Short:        "Retrieval usage telemetry",
+		Short:        "Retrieval usage and operation-pick telemetry",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newUsageCmd())
+	cmd.AddCommand(newPicksCmd())
 	return cmd
 }
 

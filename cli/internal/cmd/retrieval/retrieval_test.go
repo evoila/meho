@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -223,16 +224,17 @@ func TestDecodeDetailStringFallback(t *testing.T) {
 	}
 }
 
-// TestNewRootCmdRegistersOnlyUsage — `meho retrieval` has exactly one
-// verb, `usage`. The eval and retire-checklist verbs were removed; a
-// test catches either one coming back by accident.
-func TestNewRootCmdRegistersOnlyUsage(t *testing.T) {
+// TestNewRootCmdRegistersOnlyUsageAndPicks — `meho retrieval` has
+// exactly two verbs, `usage` and `picks`. The eval and retire-checklist
+// verbs were removed; a test catches either one coming back by accident.
+func TestNewRootCmdRegistersOnlyUsageAndPicks(t *testing.T) {
 	root := NewRootCmd()
 	var names []string
 	for _, sub := range root.Commands() {
 		names = append(names, strings.SplitN(sub.Use, " ", 2)[0])
 	}
-	if len(names) != 1 || names[0] != "usage" {
-		t.Errorf("`meho retrieval` subcommands = %v, want [usage]", names)
+	sort.Strings(names)
+	if len(names) != 2 || names[0] != "picks" || names[1] != "usage" {
+		t.Errorf("`meho retrieval` subcommands = %v, want [picks usage]", names)
 	}
 }

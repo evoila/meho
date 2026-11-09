@@ -115,6 +115,9 @@ from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
+from meho_backplane.api.v1.retrieve_operation_picks import (
+    router as api_v1_retrieve_operation_picks_router,
+)
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
 from meho_backplane.api.v1.run_approvals import router as api_v1_run_approvals_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
@@ -1049,6 +1052,9 @@ app.include_router(api_v1_retrieve_router)
 # `audit_query` class via the `audit_op_id` / `audit_op_class`
 # contextvar overrides honoured by the chassis broadcast publisher.
 app.include_router(api_v1_retrieve_usage_router)
+# #4750 -- per connector and day: did the agent call an operation the
+# search returned, and did it run? `GET /api/v1/retrieve/operation-picks`.
+app.include_router(api_v1_retrieve_operation_picks_router)
 # G4.5-T3 (#1521) — federated vendor-document retrieval at
 # `POST /api/v1/search_docs` (the `meho-docs` add-on, Initiative #1518).
 # Operator role minimum; tenant-scoped via the forwarded operator JWT.

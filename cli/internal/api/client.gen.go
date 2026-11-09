@@ -7653,6 +7653,50 @@ type OperationOverrideRow struct {
 // OperationOverrideRowScope defines model for OperationOverrideRow.Scope.
 type OperationOverrideRowScope string
 
+// OperationPickBucket The numbers of one connector on one day.
+type OperationPickBucket struct {
+	// Calls call_operation calls.
+	Calls int `json:"calls"`
+
+	// CallsAtRank1 Calls whose op_id was the first result.
+	CallsAtRank1 int `json:"calls_at_rank_1"`
+
+	// CallsInResults Calls whose op_id was in the linked search.
+	CallsInResults int `json:"calls_in_results"`
+
+	// CallsInResultsOk Calls whose op_id was in the linked search and that returned ok.
+	CallsInResultsOk int `json:"calls_in_results_ok"`
+
+	// CallsInTop3 Calls whose op_id was in the first three results.
+	CallsInTop3 int `json:"calls_in_top_3"`
+
+	// CallsNotInResults Calls after a search whose op_id was not in its results.
+	CallsNotInResults int `json:"calls_not_in_results"`
+
+	// CallsUnknownOp Calls to an op_id that does not exist.
+	CallsUnknownOp int `json:"calls_unknown_op"`
+
+	// CallsWithoutSearch Calls with no search on the same connector in the 5 minutes before.
+	CallsWithoutSearch int                `json:"calls_without_search"`
+	ConnectorId        string             `json:"connector_id"`
+	Date               openapi_types.Date `json:"date"`
+
+	// Searches search_operations calls.
+	Searches int `json:"searches"`
+
+	// SearchesFollowedByCall Searches that a later call on the same connector was linked to.
+	SearchesFollowedByCall int `json:"searches_followed_by_call"`
+}
+
+// OperationPickReport The report for one tenant and window.
+type OperationPickReport struct {
+	Buckets     []OperationPickBucket `json:"buckets"`
+	ConnectorId *string               `json:"connector_id"`
+	Since       time.Time             `json:"since"`
+	TenantId    openapi_types.UUID    `json:"tenant_id"`
+	Until       time.Time             `json:"until"`
+}
+
 // OperationRunStatus Closed lifecycle status of an :class:`OperationRun`.
 //
 // Async governed dispatch (#3079). A “POST /api/v1/operations/call“
@@ -12467,6 +12511,14 @@ type RetrieveEndpointApiV1RetrievePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// OperationPicksEndpointApiV1RetrieveOperationPicksGetParams defines parameters for OperationPicksEndpointApiV1RetrieveOperationPicksGet.
+type OperationPicksEndpointApiV1RetrieveOperationPicksGetParams struct {
+	Since         *string             `form:"since,omitempty" json:"since,omitempty"`
+	ConnectorId   *string             `form:"connector_id,omitempty" json:"connector_id,omitempty"`
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // UsageEndpointApiV1RetrieveUsageGetParams defines parameters for UsageEndpointApiV1RetrieveUsageGet.
 type UsageEndpointApiV1RetrieveUsageGetParams struct {
 	Since         *string                                          `form:"since,omitempty" json:"since,omitempty"`
@@ -16187,6 +16239,9 @@ type ClientInterface interface {
 
 	RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// OperationPicksEndpointApiV1RetrieveOperationPicksGet request
+	OperationPicksEndpointApiV1RetrieveOperationPicksGet(ctx context.Context, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UsageEndpointApiV1RetrieveUsageGet request
 	UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -19513,6 +19568,18 @@ func (c *Client) RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, 
 
 func (c *Client) RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRetrieveEndpointApiV1RetrievePostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OperationPicksEndpointApiV1RetrieveOperationPicksGet(ctx context.Context, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOperationPicksEndpointApiV1RetrieveOperationPicksGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -33416,6 +33483,102 @@ func NewRetrieveEndpointApiV1RetrievePostRequestWithBody(server string, params *
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewOperationPicksEndpointApiV1RetrieveOperationPicksGetRequest generates requests for OperationPicksEndpointApiV1RetrieveOperationPicksGet
+func NewOperationPicksEndpointApiV1RetrieveOperationPicksGetRequest(server string, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/retrieve/operation-picks")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ConnectorId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "connector_id", runtime.ParamLocationQuery, *params.ConnectorId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -50307,6 +50470,9 @@ type ClientWithResponsesInterface interface {
 
 	RetrieveEndpointApiV1RetrievePostWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
 
+	// OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse request
+	OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse(ctx context.Context, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams, reqEditors ...RequestEditorFn) (*OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse, error)
+
 	// UsageEndpointApiV1RetrieveUsageGetWithResponse request
 	UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error)
 
@@ -54475,6 +54641,29 @@ func (r RetrieveEndpointApiV1RetrievePostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RetrieveEndpointApiV1RetrievePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OperationPickReport
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -62717,6 +62906,15 @@ func (c *ClientWithResponses) RetrieveEndpointApiV1RetrievePostWithResponse(ctx 
 	return ParseRetrieveEndpointApiV1RetrievePostResponse(rsp)
 }
 
+// OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse request returning *OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse
+func (c *ClientWithResponses) OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse(ctx context.Context, params *OperationPicksEndpointApiV1RetrieveOperationPicksGetParams, reqEditors ...RequestEditorFn) (*OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse, error) {
+	rsp, err := c.OperationPicksEndpointApiV1RetrieveOperationPicksGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOperationPicksEndpointApiV1RetrieveOperationPicksGetResponse(rsp)
+}
+
 // UsageEndpointApiV1RetrieveUsageGetWithResponse request returning *UsageEndpointApiV1RetrieveUsageGetResponse
 func (c *ClientWithResponses) UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error) {
 	rsp, err := c.UsageEndpointApiV1RetrieveUsageGet(ctx, params, reqEditors...)
@@ -70759,6 +70957,39 @@ func ParseRetrieveEndpointApiV1RetrievePostResponse(rsp *http.Response) (*Retrie
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest RetrieveResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOperationPicksEndpointApiV1RetrieveOperationPicksGetResponse parses an HTTP response from a OperationPicksEndpointApiV1RetrieveOperationPicksGetWithResponse call
+func ParseOperationPicksEndpointApiV1RetrieveOperationPicksGetResponse(rsp *http.Response) (*OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OperationPicksEndpointApiV1RetrieveOperationPicksGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OperationPickReport
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

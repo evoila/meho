@@ -119,6 +119,11 @@ Detail payloads land in ``extras``. Codes:
   target (:func:`descriptor_requires_target`, which includes every
   ``ingested`` op) is checked right after the descriptor lookup, before
   the policy gate, so it never surfaces as ``no_connector``.
+* ``target_connector_mismatch`` -- a typed/composite op whose handler is
+  a connector method, called on a target whose connector does not have
+  that method (a linux op on an rke2 target). Refused right after the
+  target check, before the policy gate and any wait for approval, with
+  one audit row (#5948, :mod:`~meho_backplane.operations._target_connector_match`).
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -390,6 +395,7 @@ from meho_backplane.operations._secret_values import (
     reveal_hidden_values,
     split_reveal_secret,
 )
+from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -3735,6 +3741,18 @@ async def _dispatch_now(
     # before the catalog guard, the policy gate or a wait for approval.
     if target is None and descriptor_requires_target(descriptor):
         return result_target_required(op_id, _elapsed_ms(started))
+    # #5948: a connector-bound op whose handler the target's connector does
+    # not have (a linux op on an rke2 target) cannot run. Refused here, before
+    # the policy gate and any wait for approval, with its own audit row.
+    mismatch = await refuse_target_connector_mismatch(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if mismatch is not None:
+        return mismatch
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility

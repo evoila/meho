@@ -704,11 +704,9 @@ async def _render_preview(
     without-name case) is mapped to an inline ``400`` form error, replicating
     the REST route's ``try/except ValueError``.
 
-    The target is forwarded **verbatim** (whitespace-stripped, not coerced to
-    ``None``) so a blank field on an ingested op -- which always needs a
-    target to resolve its connector -- fails loud as that ``400`` ("supply a
-    target name") rather than as a confusing in-envelope ``no_connector``
-    fault.
+    A blank target field sends no target (see :func:`_form_target`), so a
+    target-less op previews; an op that needs a target answers
+    ``target_required``, shown as that inline ``400``.
 
     No dispatch, no audit row -- the meta-tool guarantees both.
     """
@@ -722,10 +720,7 @@ async def _render_preview(
     arguments: dict[str, Any] = {
         "connector_id": connector_id,
         "op_id": op_id,
-        # Bare-string target shape ``_normalize_target_arg`` accepts. An empty
-        # string (blank field) becomes the meta-tool's ``target_required``
-        # envelope -- surfaced inline below (#136).
-        "target": target.strip(),
+        "target": _form_target(target),
         "params": parsed_params,
     }
     envelope = await preview_operation(operator, arguments)
@@ -748,6 +743,17 @@ async def _render_preview(
         "params": params,
     }
     return get_templates().TemplateResponse(request, "operations/_preview.html", context)
+
+
+def _form_target(target: str) -> str | None:
+    """Return the target name of the form field, or ``None`` when it is blank.
+
+    A blank field means "no target", the same as the CLI and MCP with no
+    target. An empty string would make the meta-tool answer
+    ``target_required`` also for an op that needs no target (#5705). An op
+    that does need one still answers ``target_required`` for ``None``.
+    """
+    return target.strip() or None
 
 
 def _parse_params_field(params: str) -> dict[str, Any]:
@@ -904,9 +910,9 @@ async def _render_call_result(
     name -- the empty-string / dict-without-name case) is mapped to an inline
     ``400`` form error, replicating the REST route's ``try/except ValueError``.
 
-    The target is forwarded **verbatim** (whitespace-stripped, not coerced to
-    ``None``) so a blank field on an op that needs a target fails loud as that
-    ``400`` rather than as a confusing in-envelope fault.
+    A blank target field sends no target (see :func:`_form_target`), so a
+    target-less op runs; an op that needs a target answers
+    ``target_required``, shown as that inline ``400``.
     """
     operator = await _resolve_operator(session)
 
@@ -918,10 +924,7 @@ async def _render_call_result(
     arguments: dict[str, Any] = {
         "connector_id": connector_id,
         "op_id": op_id,
-        # Bare-string target shape ``_normalize_target_arg`` accepts. An empty
-        # string (blank field) becomes the meta-tool's ``target_required``
-        # envelope -- surfaced inline below (#136).
-        "target": target.strip(),
+        "target": _form_target(target),
         "params": parsed_params,
     }
     # ``work_ref`` is an opaque per-op override; bind it only when non-empty so

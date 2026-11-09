@@ -1120,12 +1120,12 @@ table can never silently drift from the code:
   reclassification or an un-pinned addition fails CI at the listing path
   a client actually observes.
 
-Counts: **26 working + 54 operator + 1 pairing-gated automation =
-81 registered tools**, plus the **3 human-only verbs** (below) that
+Counts: **26 working + 55 operator + 1 pairing-gated automation =
+82 registered tools**, plus the **3 human-only verbs** (below) that
 carry no MCP registration under any claim set. Four of the 26 working
 tools (`ask_docs`, `search_docs`, `read_docs`, `list_doc_collections`)
 appear only when the tenant has the `meho-docs` capability; a session
-without it lists 22. The 26 working and 54
+without it lists 22. The 26 working and 55
 operator counts are the **unpaired baseline** — a session with every
 capability provisioned but no add-on paired — so they stay byte-identical
 to a build that never carried the automation family; the single
@@ -1242,6 +1242,7 @@ session (on top of the Role + Extra-gate columns).
 | `meho_sensor_list` | operator | — | List sensors with their latest-result projection. |
 | `meho_sensor_results` | operator | — | Per-tick evidence trend history for one sensor. |
 | `meho_targets_register` | tenant_admin | — | Register a new target in the tenant. |
+| `meho_targets_update` | tenant_admin | — | Change fields of one target in the tenant, by its id. |
 | `meho_topology_annotate` | tenant_admin | — | Assert a curated graph edge auto-discovery can't infer. |
 | `meho_topology_bulk_import` | tenant_admin | — | Batch-assert curated graph edges in one atomic pass. |
 | `meho_topology_create_node` | tenant_admin | — | Manually seed a graph node. |
@@ -1447,12 +1448,13 @@ Five synthetic connectors follow this mould (natural key
 | `secret-broker-1.x` | `secret.handoff.export` / `secret.handoff.import` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves on each instance) | #5228 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
+| `targets-registry-1.x` | `targets.update` | `meho_targets_update` (`caution` + `requires_approval`; the same code as `PATCH /api/v1/targets/{name}`; the target is named by its id) | — |
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
 | `targets-registry-1.x` | `targets.probe` | (dispatch-only; a `safe` op that detects a target's product and version and stores them, the same code as `POST /api/v1/targets/{name}/probe`) | #5653 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
 | `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
 
-**Per-op role floor.** `targets.register` and the five `topology.*`
+**Per-op role floor.** `targets.register`, `targets.update` and the five `topology.*`
 writes need the `tenant_admin` role from a person, the same as their
 REST routes and `meho_*` tools. Those fronts check the role at the door,
 but `call_operation` (and the REST dispatch route and the CLI) needs only
@@ -1502,6 +1504,24 @@ a service principal run it at once. That call needs no `tenant_admin`: a
 service login has the `operator` role, and the delete grant is enough (#5480). It is reached through
 `call_operation` only; there is no `meho_*` tool for it. See
 [`targets.md`](targets.md#removing-a-target-targetsremove).
+
+`meho_targets_update` (`mcp/tools/targets_update.py` +
+`connectors/targets/update.py`) changes fields of one target. It runs the
+`targets.update` operation, which finds the target by id, locks the row,
+and calls `apply_target_update`, the code of
+REST `PATCH /api/v1/targets/{name}`, so every check of that route applies
+and none is written again. It is `caution` with `requires_approval=True`,
+not the dial above: `host` and `fqdn` carry `x-meho-caller-address: true`
+and the call can change `secret_ref`, so every call waits until a person
+with `tenant_admin` approves it. People who change a target at once use
+`PATCH`, `meho targets update` or the web console. The role floor is
+`tenant_admin`, so a person with the `operator` role is refused on every
+path, also through `call_operation`. The target is named by `target_id`,
+never by name, so an approved call changes the target the approver saw;
+the preview names that target and the fields the call sends. Only the
+sent fields change, and an explicit `null` clears a nullable field. Its
+`inputSchema` is the operation's `parameter_schema` (one object), and its
+`outputSchema` is the parked-shape union, like `meho_targets_register`.
 
 ## Audit URI redaction for query-bearing resources
 

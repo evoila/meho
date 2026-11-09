@@ -98,6 +98,7 @@ _COVERED_TOOLS: frozenset[str] = frozenset(
         "meho_topology_delete_node",
         "meho_topology_unannotate",
         "meho_targets_register",
+        "meho_targets_update",
         "preview_operation",
         "query_audit",
         "query_topology",

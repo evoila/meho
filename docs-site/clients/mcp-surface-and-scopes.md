@@ -91,8 +91,8 @@ Example URL: `https://<meho-host>/mcp?profile=investigate`.
 The governance and lifecycle tools — connector lifecycle and ingest,
 agents / principals / grants, scheduler, sensors, broadcast overrides,
 runbook **template authoring**, topology **mutations**, target
-registration, doc-collection create/delete, memory promotion, approvals
-**read**, and audit query — form a second tier of **54 operator-plane
+registration and change, doc-collection create/delete, memory promotion, approvals
+**read**, and audit query — form a second tier of **55 operator-plane
 tools**. They are absent from a default session's tool list and refused
 at call time, and they appear **only** for a session that explicitly
 requested the `mcp:admin` OAuth scope.

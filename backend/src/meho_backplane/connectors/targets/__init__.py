@@ -5,7 +5,8 @@
 
 ``targets.register`` (#2861) and its opposite ``targets.remove`` (#4623),
 plus ``targets.probe``, which detects a target's product and version
-(``probe.py``).
+(``probe.py``), and ``targets.update``, which changes fields of one target
+(``update.py``).
 
 The third **synthetic** connector subpackage (after ``secret`` and
 ``topology``): no vendor connector backs it. Importing the package (the
@@ -48,6 +49,11 @@ from meho_backplane.connectors.targets.probe import (
     register_targets_probe_operation,
     targets_probe_preflight,
 )
+from meho_backplane.connectors.targets.update import (
+    TARGETS_UPDATE_OP_ID,
+    build_targets_update_preview,
+    register_targets_update_operation,
+)
 from meho_backplane.operations._preview import (
     register_permission_preflight,
     register_preview_builder,
@@ -59,11 +65,15 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 register_typed_op_registrar(register_targets_registry_operations)
 # targets.probe lives in its own module, with its own registrar.
 register_typed_op_registrar(register_targets_probe_operation)
+# targets.update lives in its own module, with its own registrar.
+register_typed_op_registrar(register_targets_update_operation)
 # The preview of targets.remove names the target and its topology count.
 register_preview_builder(TARGETS_REMOVE_OP_ID, build_targets_remove_preview)
+register_preview_builder(TARGETS_UPDATE_OP_ID, build_targets_update_preview)
 register_permission_preflight(TARGETS_PROBE_OP_ID, targets_probe_preflight)
 
 __all__ = [
     "register_targets_probe_operation",
     "register_targets_registry_operations",
+    "register_targets_update_operation",
 ]

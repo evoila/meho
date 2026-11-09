@@ -139,12 +139,12 @@ _GROUP_KEY = "registry"
 _GROUP_WHEN_TO_USE = (
     "Write to the tenant's target registry: register a new target "
     "(name + product + host, plus optional connection detail) so it can "
-    "be dispatched against, detect a target's product and version, or "
-    "remove a target whose system is gone. Use "
+    "be dispatched against, detect a target's product and version, change "
+    "a target's fields, or remove a target whose system is gone. Use "
     "when onboarding a system the agent must later drive — an rke2 "
     "cluster, a vCenter, a DNS server — or when cleaning up after it. "
-    "A registration from an agent principal waits for a person to approve "
-    "it; a removal always waits for a second person to approve it. "
+    "A registration from an agent principal, and every change, waits for a "
+    "person to approve it; a removal always waits for a second person. "
     "Target reads live on list_targets / query_topology, not here."
 )
 

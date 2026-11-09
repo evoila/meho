@@ -161,7 +161,7 @@ before returning. Seven verbs:
 
 | Verb | What it does | Throws |
 |---|---|---|
-| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False, may_set_curation_keys=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, checks the lesson header, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug; `LessonHeaderError` on a wrong header value; `KbSharedNotAllowedError`, `KbSharedSlugError` (shared scope) |
+| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False, may_set_curation_keys=None, may_confirm=True, expected_revision=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, checks the lesson header, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug; `LessonHeaderError` on a wrong header value; `KbSharedNotAllowedError`, `KbSharedSlugError` (shared scope) |
 | `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. Also finds a shared entry of another tenant. | – |
 | `get_revision(tenant_id, entry_id, revision_id)` | Exact retained read. Returns `KbEntryRevision` only when the revision belongs to the entry and both belong to the tenant; otherwise `None`, without saying why. | – |
 | `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0, order="slug")` | List entries; slug-sorted by default, `order="newest"` sorts by `updated_at`, newest first; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
@@ -445,7 +445,15 @@ Only a `tenant_admin` may set the curation keys
   (`source_kind`, the key the curated-slice search filter scopes to,
   and `shared`, see "Lesson header and shared scope";
   `KbReservedMetadataError`, `reason: reserved_metadata`). So an
-  operator's entry cannot look curated.
+  operator's entry cannot look curated;
+- drops those keys from the stored entry when it changes an entry, also
+  when the write sends no `metadata` (`_drop_review_marks`). A shared
+  entry stays private until a tenant admin shares it again.
+
+A caller that may not confirm (`create_entry(..., may_confirm=False)`;
+the MCP tool passes `lesson_header.py::may_confirm`) stores a
+`confirmed` entry as `candidate` when it changes it. So text that
+nobody reviewed never keeps the marks of an earlier review.
 
 An operator can still create new entries and change its own. A
 `tenant_admin` keeps the wiki-like rule on both surfaces.

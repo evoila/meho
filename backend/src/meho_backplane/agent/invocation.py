@@ -156,6 +156,7 @@ __all__ = [
     "ScheduledRunNoInputError",
     "get_agent_invoker",
     "reset_agent_invoker_for_testing",
+    "run_output_visible_to",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -1604,7 +1605,8 @@ class AgentInvoker:
         Reads the ``agent_run`` row (the durable source of truth), so it
         works after the creating request has returned and even after the
         in-memory task is gone. A cross-tenant / unknown id raises
-        :class:`AgentRunNotFoundError`.
+        :class:`AgentRunNotFoundError`. The view carries ``output`` and
+        ``error`` only when :func:`run_output_visible_to` allows it.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -1614,7 +1616,11 @@ class AgentInvoker:
             agent_name = await _resolve_run_agent_name(
                 session, tenant_id=operator.tenant_id, row=row
             )
-            return _row_to_view(row, agent_name=agent_name)
+            return _row_to_view(
+                row,
+                agent_name=agent_name,
+                show_output=run_output_visible_to(row, operator),
+            )
 
     async def cancel(self, operator: Operator, run_id: uuid.UUID) -> AgentRunSummary:
         """Cancel a non-terminal run the operator's tenant owns.
@@ -2033,13 +2039,34 @@ async def _resolve_run_agent_name(
     return names.get(row.agent_definition_id)
 
 
-def _row_to_view(row: AgentRunRow, *, agent_name: str | None = None) -> AgentRunStatusView:
+#: The triggers of runs that act as the agent's own login, not for a person.
+_AGENT_OWN_LOGIN_TRIGGERS: Final[frozenset[str]] = frozenset(
+    {AgentRunTrigger.SCHEDULED.value, AgentRunTrigger.EVENT.value}
+)
+
+
+def run_output_visible_to(row: AgentRunRow, operator: Operator) -> bool:
+    """Whether *operator* may read the ``output`` and ``error`` of the run in *row*.
+
+    A direct run, and each child run it starts, acts for the person who
+    started it. Its output can hold that person's private memory notes,
+    so only that person reads its output and error. Other people in the
+    tenant see its state and token usage. A scheduled or event run acts
+    as the agent's own login, so everyone in the tenant reads it.
+    """
+    return row.trigger in _AGENT_OWN_LOGIN_TRIGGERS or row.identity_sub == operator.sub
+
+
+def _row_to_view(
+    row: AgentRunRow, *, agent_name: str | None = None, show_output: bool = True
+) -> AgentRunStatusView:
     """Project an ``agent_run`` row onto the poll-time view.
 
     *agent_name* is the producing definition's name, resolved read-time by
     the caller from the row's ``agent_definition_id`` (``None`` for an
     ad-hoc run or a dangling soft-FK); the id itself is read straight off
-    the row.
+    the row. With *show_output* false, ``output`` and ``error`` are
+    ``None``.
     """
     return AgentRunStatusView(
         run_id=row.id,
@@ -2047,8 +2074,8 @@ def _row_to_view(row: AgentRunRow, *, agent_name: str | None = None) -> AgentRun
         turns=row.turns,
         provider=row.provider,
         model=row.model,
-        output=row.output,
-        error=row.error,
+        output=row.output if show_output else None,
+        error=row.error if show_output else None,
         agent_definition_id=row.agent_definition_id,
         agent_name=agent_name,
         identity_sub=row.identity_sub,

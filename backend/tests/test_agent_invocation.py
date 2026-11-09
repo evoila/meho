@@ -52,6 +52,7 @@ from meho_backplane.agent.invocation import (
     _finalize_child_run,
     _record_child_run,
     _resolve_child_definition,
+    run_output_visible_to,
 )
 from meho_backplane.agent.reaper import (
     AGENT_RUN_REAPER_INTERRUPTION_REASON,
@@ -390,6 +391,39 @@ async def test_poll_cross_tenant_run_is_not_found() -> None:
 
     with pytest.raises(AgentRunNotFoundError):
         await invoker.poll(_make_operator(tenant_id=_TENANT_B, sub="op-b"), outcome.run_id)
+
+
+async def test_poll_by_a_second_operator_shows_state_but_not_output() -> None:
+    """Only the starter of a direct run reads its output; a colleague sees its state."""
+    await _seed_definition()
+    invoker = _invoker_with(_final_text("starter only"))
+    outcome = await invoker.run(_make_operator(sub="op-starter"), "reader", "go")
+
+    colleague = await invoker.poll(_make_operator(sub="op-colleague"), outcome.run_id)
+    assert colleague.status is AgentRunStatus.SUCCEEDED
+    assert colleague.identity_sub == "op-starter"
+    assert colleague.output is None
+    assert colleague.error is None
+
+    starter = await invoker.poll(_make_operator(sub="op-starter"), outcome.run_id)
+    assert starter.output == {"text": "starter only"}
+
+
+@pytest.mark.parametrize(
+    ("trigger", "reader_sub", "visible"),
+    [
+        (AgentRunTrigger.DIRECT, "op-starter", True),
+        (AgentRunTrigger.DIRECT, "op-colleague", False),
+        (AgentRunTrigger.AGENT_INVOKED, "op-starter", True),
+        (AgentRunTrigger.AGENT_INVOKED, "op-colleague", False),
+        (AgentRunTrigger.SCHEDULED, "op-colleague", True),
+        (AgentRunTrigger.EVENT, "op-colleague", True),
+    ],
+)
+def test_run_output_visible_to(trigger: AgentRunTrigger, reader_sub: str, visible: bool) -> None:
+    """A run for a person shows its output to that person; an agent's own run to the tenant."""
+    row = AgentRunRow(tenant_id=_TENANT_A, identity_sub="op-starter", trigger=trigger.value)
+    assert run_output_visible_to(row, _make_operator(sub=reader_sub)) is visible
 
 
 async def test_poll_unknown_handle_is_not_found() -> None:

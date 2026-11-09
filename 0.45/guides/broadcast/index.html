@@ -3232,7 +3232,10 @@ The four-step loop it prescribes:</p>
 <ol>
 <li><strong>Read before you start.</strong> <code>meho_broadcast_recent</code> (or
    <code>meho broadcast recent --target &lt;t&gt;</code>) scoped to the target. If
-   conflicting work is in flight, surface it <em>before</em> proceeding.</li>
+   conflicting work is in flight, surface it <em>before</em> proceeding.
+   This is the only step for a person: people read the feed, only agents
+   post. A person's login skips steps 2 and 4; its operations are already
+   in the audit log.</li>
 <li><strong>Announce intent.</strong> <code>meho_broadcast_announce</code> with the planned activity
    scoped to the target. An agent that goes quiet for &gt;10 minutes
    without an announce looks like it crashed.</li>
@@ -3264,7 +3267,7 @@ neutral and ships only the substrate.</p>
 <tr>
 <td><code>meho_broadcast_announce</code> returns <code>agent_identity_required</code></td>
 <td>Only an agent can post. A person's own login is refused.</td>
-<td>Post from a MEHO-hosted agent run, or with the login of an agent registered with <code>meho agent-principal register</code>.</td>
+<td>A person: skip the step; your operations are already in the audit log. An agent: post from a MEHO-hosted agent run, or with the login of an agent registered with <code>meho agent-principal register</code>.</td>
 </tr>
 <tr>
 <td><code>meho status --watch</code> exits with <code>insufficient_role</code> (exit 5)</td>

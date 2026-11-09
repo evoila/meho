@@ -18,6 +18,10 @@ Heuristics (v1):
 * **read-before-act** -- the calling MCP session has no prior
   ``meho_broadcast_recent`` call recorded in ``audit_log`` (correlated by
   ``agent_session_id``). A one-liner recommends reading the feed first.
+  A service login with a ``work_ref`` runs its dispatch under the session
+  of its orchestration run, but reads the feed under its MCP session, so
+  the probe looks under both (#5489). A hosted agent run counts only its
+  own run session.
 * **announce-before-mutate** -- the op is write-class (the class the
   dispatcher stores on its audit row,
   :func:`~meho_backplane.operations._audit.descriptor_op_class`, is in
@@ -26,7 +30,11 @@ Heuristics (v1):
   (:func:`~meho_backplane.broadcast.announce_claim_lookup.announce_claim_gap`). A
   one-liner names ``meho_broadcast_announce`` and says why no claim
   covers the op: none at all, expired, another target, or another
-  planned op class (#4091).
+  planned op class (#4091). Only a caller that may publish an
+  announcement gets it: a live hosted agent run or a registered agent
+  principal (:func:`~meho_backplane.auth.agent_admission.resolve_agent_admission`).
+  Anyone else would be refused, so MEHO does not tell them to announce
+  (#5489).
 
 Design contract (mirrors the #2550 / #2718 mould):
 
@@ -68,7 +76,7 @@ from typing import Any, Final
 import structlog
 from sqlalchemy import exists, select
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.broadcast.announce_claim_lookup import ClaimGap, announce_claim_gap
 from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.broadcast.history import WRITE_OP_CLASSES
@@ -147,7 +155,64 @@ def _dedupe_key(session_id: uuid.UUID, heuristic: str) -> str:
     return f"meho:reflex:advisory:{session_id}:{heuristic}"
 
 
-async def _session_read_broadcast(session_id: uuid.UUID) -> bool:
+def _read_probe_session_ids(session_id: uuid.UUID) -> list[uuid.UUID]:
+    """The session ids under which this caller's feed read may be stored.
+
+    The read is stored under the MCP session id. A service login with a
+    ``work_ref`` dispatches with :data:`agent_session_id_var` set to the
+    session of its orchestration run (#3446), so *session_id* is that run
+    and not the MCP session. The MCP session id is added in that case.
+
+    Inside a hosted agent run the run is the session, and a read by the
+    outer MCP session does not count, so the run id stays the only one.
+    """
+    # Lazy import: ``meho_backplane.agent`` imports the broadcast package.
+    from meho_backplane.agent.invoke import current_agent_run_id_var
+
+    ids = [session_id]
+    if current_agent_run_id_var.get() is not None:
+        return ids
+    raw = structlog.contextvars.get_contextvars().get("mcp_session_id")
+    if isinstance(raw, str):
+        try:
+            mcp_session_id = uuid.UUID(raw)
+        except ValueError:
+            return ids
+        if mcp_session_id != session_id:
+            ids.append(mcp_session_id)
+    return ids
+
+
+async def _may_announce(operator: Operator) -> bool:
+    """Whether MEHO would accept an announcement from *operator*.
+
+    Uses the same check as ``meho_broadcast_announce``. A caller outside a
+    hosted agent run whose token is not an agent token is refused there
+    without any lookup, so it is answered here without one as well; this
+    also keeps the refusal log of the announce path free of entries for
+    announcements nobody sent.
+    """
+    # Lazy imports: ``meho_backplane.agent`` imports the broadcast package,
+    # and ``auth.agent_admission`` imports ``broadcast.agent_events``.
+    from meho_backplane.agent.invoke import current_agent_run_id_var
+    from meho_backplane.auth.agent_admission import (
+        AgentIdentityRequiredError,
+        resolve_agent_admission,
+    )
+
+    if (
+        current_agent_run_id_var.get() is None
+        and operator.principal_kind is not PrincipalKind.AGENT
+    ):
+        return False
+    try:
+        await resolve_agent_admission(operator)
+    except AgentIdentityRequiredError:
+        return False
+    return True
+
+
+async def _session_read_broadcast(session_ids: list[uuid.UUID]) -> bool:
     """Whether this MCP session already called ``meho_broadcast_recent``.
 
     One indexed existence probe on ``audit_log`` -- the
@@ -166,11 +231,11 @@ async def _session_read_broadcast(session_id: uuid.UUID) -> bool:
         result = await session.execute(
             select(
                 exists().where(
-                    AuditLog.agent_session_id == session_id,
+                    AuditLog.agent_session_id.in_(session_ids),
                     AuditLog.path == _BROADCAST_RECENT_PATH,
                 )
                 | exists().where(
-                    RequestUsageEvent.session_id == session_id,
+                    RequestUsageEvent.session_id.in_(session_ids),
                     RequestUsageEvent.kind == "request_finished",
                     RequestUsageEvent.route == _BROADCAST_RECENT_ROUTE,
                 )
@@ -213,7 +278,8 @@ async def build_reflex_advisory(
       (:func:`resolve_agent_session_id` returns ``None``);
     * read-before-act does not qualify (the session already read the
       feed) and announce-before-mutate does not qualify (the op is
-      read-class, or the caller holds a covering active claim);
+      read-class, the caller may not publish an announcement, or the
+      caller holds a covering active claim);
     * every qualifying heuristic was already nudged to this session in
       the current window (its ``SET NX`` found its key present).
 
@@ -239,14 +305,15 @@ async def build_reflex_advisory(
         # issued when the session has not read the feed; a qualified-but-
         # already-nudged read falls through to announce with its key
         # untouched.
-        if not await _session_read_broadcast(session_id) and await _claim(
+        if not await _session_read_broadcast(_read_probe_session_ids(session_id)) and await _claim(
             session_id, _HEURISTIC_READ, window_minutes
         ):
             return {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
 
-        # announce-before-mutate -- only for write-class ops; the claim is
-        # issued only when the op qualifies and holds no covering claim.
-        if op_class not in WRITE_OP_CLASSES:
+        # announce-before-mutate -- only for write-class ops by a caller
+        # that may publish; the claim is issued only when the op qualifies
+        # and holds no covering claim.
+        if op_class not in WRITE_OP_CLASSES or not await _may_announce(operator):
             return {}
         gap = await announce_claim_gap(operator, op_class=op_class, target_name=target_name)
         if gap is not None and await _claim(session_id, _HEURISTIC_ANNOUNCE, window_minutes):

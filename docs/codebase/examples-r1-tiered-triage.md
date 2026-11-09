@@ -132,7 +132,7 @@ operation tools (`list_operation_groups`, `search_operations`,
 `broadcast_recent`, `broadcast_watch`), and the opt-in read tools
 (`query_topology`, `search_memory`, `search_knowledge`,
 `read_context_resource`), plus `invoke_agent` when composition is
-wired. An agent can read memory but cannot write it. An agent
+wired and the toolset spec names it. An agent can read memory but cannot write it. An agent
 definition that names `add_to_memory` in its toolset spec gets a
 logged warning and the tool is not registered; the model cannot
 call it.

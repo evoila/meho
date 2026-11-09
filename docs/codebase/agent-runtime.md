@@ -932,7 +932,23 @@ escalate a cheap-tier agent to a deep-tier agent, but MEHO sees one agent run
 invoking another.
 
 `invoke_agent` is **off by default**. It is appended to a built agent only when
-the `PydanticAgentRun` carries a `child_agent_resolver`. The live `AgentInvoker`
+the `PydanticAgentRun` carries a `child_agent_resolver` **and** the definition's
+toolset spec names `invoke_agent` in `meta_tools`
+(`toolset_admits_invoke_agent` in `agent/toolset.py`). No spec, an omitted
+`meta_tools` list, or an empty list gives no `invoke_agent`.
+
+A child run gets at most what both specs allow. `_maybe_build_invoke_tool` in
+`agent/run.py` wraps `run_child`: before the child loop starts, it replaces the
+child's spec with `narrow_child_toolset(parent spec, child spec)` — the tools on
+both `meta_tools` lists (an omitted list stands for the default, non-opt-in set)
+and the connectors on both `connectors` lists (an omitted list means no limit).
+The child's own `invoke_agent` is built from that limited spec, so a grandchild
+is limited again. `_resolve_child_definition` uses the same owner rule as a
+direct run (`AgentInvoker._load_definition`): an agent login resolves only the
+definitions whose `identity_ref` is its own client id; a person resolves any
+enabled definition of the tenant.
+
+The live `AgentInvoker`
 (T7 #1067) wires it: its default runtime injects `_resolve_child_definition`
 (the tenant-scoped `AgentDefinitionService` lookup), `_record_child_run` (the
 `agent_run` lineage recorder), and `_finalize_child_run` (T8 #1087 — the

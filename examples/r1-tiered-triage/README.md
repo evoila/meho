@@ -68,7 +68,7 @@ the example stays current with the primitives.
 |---|---|
 | [`README.md`](./README.md) | This file. The one-paragraph framing. |
 | [`GUIDE.md`](./GUIDE.md) | The step-by-step operator recipe: principal registration, agent creation, scheduler wire-up, permission grants, budget seeding, end-to-end verification. |
-| [`agent.cheap-tier-classifier.json`](./agent.cheap-tier-classifier.json) | The cheap-tier `AgentDefinitionCreate` payload (`model_tier=fast`, `turn_budget=12`, escalate-only toolset). `meho agent create` consumes it. |
+| [`agent.cheap-tier-classifier.json`](./agent.cheap-tier-classifier.json) | The cheap-tier `AgentDefinitionCreate` payload (`model_tier=fast`, `turn_budget=12`; the toolset names `invoke_agent` plus the three tools the deep tier uses, because a child run gets only the tools both toolsets allow). `meho agent create` consumes it. |
 | [`agent.deep-tier-investigator.json`](./agent.deep-tier-investigator.json) | The deep-tier `AgentDefinitionCreate` payload (`model_tier=deep`, `turn_budget=25`, structured `PolicyDecision` output). |
 | [`scheduler.cron.json`](./scheduler.cron.json) | The `ScheduledTriggerCreate` payload (`*/15 * * * *`) that fires the cheap tier. `meho scheduler create` consumes it. |
 | [`permissions.json`](./permissions.json) | `AgentPermission` grants for both principals. Cheap tier: read broadcast + escalate to the deep tier (nothing else). Deep tier: read-only across discovery connectors; any write op routes through the approval gate. |

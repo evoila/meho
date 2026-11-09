@@ -231,13 +231,17 @@ def test_cheap_tier_definition_payload_parses_against_live_schema() -> None:
         "R1 cheap tier must stay on the fast tier; see Initiative #807 R1 -- "
         "the pattern's name is 'cheap-tier on a schedule, escalating to deep'."
     )
-    # The cheap tier's toolset is deliberately narrow: only the
-    # call_operation meta-tool is registered; invoke_agent is
-    # auto-appended by the runtime when child composition is wired.
-    # An accidental broadening (e.g. opening list_operation_groups
-    # / search_operations) would let the model do its own discovery
-    # on every firing, which is a deep-tier shape.
-    assert parsed.toolset.get("meta_tools") == ["call_operation"]
+    # The cheap tier names invoke_agent, so it can hand events to the deep tier. A child run
+    # gets only the tools both toolsets allow, so the cheap tier also names
+    # the three tools the deep tier investigates with, and has no
+    # connector limit. Its system prompt keeps it from doing discovery itself.
+    assert parsed.toolset.get("meta_tools") == [
+        "list_operation_groups",
+        "search_operations",
+        "call_operation",
+        "invoke_agent",
+    ]
+    assert parsed.toolset.get("connectors") is None
 
 
 def test_deep_tier_definition_payload_parses_against_live_schema() -> None:

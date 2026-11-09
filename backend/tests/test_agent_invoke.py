@@ -193,7 +193,7 @@ async def test_running_agent_invokes_child_under_same_identity() -> None:
         name="cheap-agent",
         system_prompt="You delegate hard sub-tasks.",
         request_limit=5,
-        toolset={"meta_tools": []},
+        toolset={"meta_tools": ["invoke_agent"]},
     )
 
     operator = _make_operator()
@@ -229,7 +229,7 @@ async def test_cascade_terminates_on_depth_cap(monkeypatch: pytest.MonkeyPatch) 
         name="recursive-agent",
         system_prompt="loop",
         request_limit=20,
-        toolset={"meta_tools": []},
+        toolset={"meta_tools": ["invoke_agent"]},
     )
 
     async def resolver(operator: Operator, agent_name: str) -> AgentDefinition | None:
@@ -605,7 +605,7 @@ def _delegating_runtime() -> tuple[PydanticAgentRun, AgentDefinition]:
         name="cheap-agent",
         system_prompt="You delegate hard sub-tasks.",
         request_limit=5,
-        toolset={"meta_tools": []},
+        toolset={"meta_tools": ["invoke_agent"]},
     )
     return runtime, parent_def
 
@@ -711,7 +711,7 @@ async def test_result_keeps_the_requests_of_a_child_that_ran_out_of_budget() -> 
         name="cheap-agent",
         system_prompt="You delegate hard sub-tasks.",
         request_limit=5,
-        toolset={"meta_tools": []},
+        toolset={"meta_tools": ["invoke_agent"]},
     )
 
     handle = runtime.start(parent_def, _make_operator(), "delegate this")
@@ -787,7 +787,10 @@ async def test_parallel_child_runs_each_get_their_own_token_counts() -> None:
         child_run_finalizer=finalizer,
     )
     parent_def = AgentDefinition(
-        name="parent", system_prompt="You delegate.", request_limit=5, toolset={"meta_tools": []}
+        name="parent",
+        system_prompt="You delegate.",
+        request_limit=5,
+        toolset={"meta_tools": ["invoke_agent"]},
     )
 
     result = await runtime.result(runtime.start(parent_def, _make_operator(), "go"))

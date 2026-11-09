@@ -138,7 +138,7 @@ Verify:
 ```bash
 meho agent list | grep r1-
 # expect:
-# r1-cheap-tier-classifier   model=fast  enabled=true  toolset.meta_tools=[call_operation]
+# r1-cheap-tier-classifier   model=fast  enabled=true  toolset.meta_tools=[list_operation_groups,search_operations,call_operation,invoke_agent]
 # r1-deep-tier-investigator  model=deep  enabled=true  output_schema=set
 ```
 
@@ -220,9 +220,11 @@ The [`permissions.json`](./permissions.json) file documents four
 > to the deep tier is **not** checked against the agent-grants table.
 > The runtime path (see
 > [`backend/src/meho_backplane/agent/invoke.py:307-477`](../../backend/src/meho_backplane/agent/invoke.py))
-> permits the call when (a) the depth cap is not exceeded and
-> (b) the `child_agent_resolver` returns a definition for the
-> requested name. The in-process harness in
+> permits the call when (a) the cheap tier's toolset names
+> `invoke_agent`, (b) the depth cap is not exceeded and
+> (c) the `child_agent_resolver` returns a definition for the
+> requested name. The deep tier then runs with only the tools and
+> connectors that both toolsets allow. The in-process harness in
 > [`workflow.py`](./workflow.py) (`_name_resolver`) installs a
 > single-edge resolver that returns the deep tier's definition for
 > `r1-deep-tier-investigator` and `None` for everything else — so

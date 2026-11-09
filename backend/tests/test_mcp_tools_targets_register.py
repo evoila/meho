@@ -27,6 +27,7 @@ the ``create_target`` service and its guards are covered end-to-end in
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
@@ -36,6 +37,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors.targets.ops import _probe_next_step
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, Tenant
 from meho_backplane.db.models import Target as TargetORM
@@ -258,6 +260,41 @@ async def test_human_admin_creates_and_round_trips_via_list_targets(
     listed = _list_targets_call(client, 2).json()["result"]["structuredContent"]
     assert [t["name"] for t in listed["targets"]] == ["rdc-vault"]
     assert listed["targets"][0]["id"] == payload["target_id"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+async def test_register_result_says_unprobed_and_names_the_probe(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    _seeded_tenant: None,
+) -> None:
+    """The register result names ``targets.probe`` and the CLI command for the new target."""
+    client, _op = client_with_operator
+    created = _register_call(
+        client, 1, {"name": "new-vault", "product": "vault", "host": "vault.example"}
+    ).json()["result"]
+    assert created["isError"] is False
+    next_step = created["structuredContent"]["next_step"]
+    assert "not probed yet" in next_step
+    assert "targets.probe" in next_step
+    assert "targets-registry-1.x" in next_step
+    assert "`meho targets probe -- new-vault`" in next_step
+
+
+@pytest.mark.parametrize(
+    ("name", "cli_command"),
+    [
+        ("db;id", "meho targets probe -- 'db;id'"),
+        ("team's-db", "meho targets probe -- 'team'\"'\"'s-db'"),
+        ("-rf", "meho targets probe -- -rf"),
+        ("$(whoami)", "meho targets probe -- '$(whoami)'"),
+    ],
+)
+def test_probe_next_step_quotes_the_name_for_the_shell(name: str, cli_command: str) -> None:
+    """The CLI command in the hint is one safe shell word after ``--``, for any valid name."""
+    next_step = _probe_next_step(name)
+    assert f"`{cli_command}`" in next_step
+    command = next_step.split("`")[1]
+    assert shlex.split(command) == ["meho", "targets", "probe", "--", name]
 
 
 async def _stored_vpn_required(name: str) -> bool:

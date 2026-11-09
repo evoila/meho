@@ -10823,10 +10823,12 @@ type Target struct {
 	Aliases []string `json:"aliases"`
 
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
-	AuthModel             AuthModel               `json:"auth_model"`
-	CreatedAt             time.Time               `json:"created_at"`
-	DeletedAt             *time.Time              `json:"deleted_at"`
-	Extras                map[string]interface{}  `json:"extras"`
+	AuthModel AuthModel              `json:"auth_model"`
+	CreatedAt time.Time              `json:"created_at"`
+	DeletedAt *time.Time             `json:"deleted_at"`
+	Extras    map[string]interface{} `json:"extras"`
+
+	// Fingerprint Product and version from the last successful probe. null means the target is not probed yet (a new target is never probed): run POST /api/v1/targets/{name}/probe, or `meho targets probe <name>` in the CLI.
 	Fingerprint           *map[string]interface{} `json:"fingerprint"`
 	FlightRecorderCapture *bool                   `json:"flight_recorder_capture"`
 	Fqdn                  *string                 `json:"fqdn"`

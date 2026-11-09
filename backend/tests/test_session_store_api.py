@@ -291,6 +291,14 @@ async def test_an_end_sets_the_state_and_an_unfinished_session_keeps_it(
 
 
 @pytest.mark.asyncio
+async def test_the_retention_path_is_not_a_session_id(client: TestClient) -> None:
+    resp = _upload(client, _transcript(_LINE_1), session_id="retention")
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "session_id_reserved"
+    assert await _records() == []
+
+
+@pytest.mark.asyncio
 async def test_a_known_secret_is_replaced_before_it_is_stored(
     client: TestClient, store: _FakeStore
 ) -> None:

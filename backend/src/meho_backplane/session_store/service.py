@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Final
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,8 +51,6 @@ __all__ = [
     "retention_days_for",
     "set_retention",
 ]
-
-MAX_PAGE: Final[int] = 200
 
 
 class SessionNotFoundError(Exception):

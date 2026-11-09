@@ -73,6 +73,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 #: A session id: letters, digits, ``.``, ``_`` and ``-``, 1 to 128 characters.
 SESSION_ID_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+_RESERVED_SESSION_ID: Final[str] = "retention"
 
 _CHUNK: Final[int] = 1024 * 1024
 
@@ -174,6 +175,11 @@ async def upload_agent_session(
     outcome: Annotated[str | None, Form(max_length=200)] = None,
 ) -> SessionUploadResult:
     """Upload one session, or its new tail. A retry of the same bytes changes nothing."""
+    if session_id == _RESERVED_SESSION_ID:
+        # GET /api/v1/sessions/retention is the retention setting, not a session.
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail="session_id_reserved"
+        )
     config, store = _configured()
     meta = UploadMeta(
         session_id=session_id,

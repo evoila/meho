@@ -396,6 +396,14 @@ after model tests show that it helps.
 - When MEHO does not know if an approved change happened, every view
   says "uncertain" and tells the reader to check the target first. MEHO
   never runs such a change again (#5891).
+- A login never approves its own group or role change. MEHO refuses the
+  approval of `keycloak.group.member.add`, `keycloak.role_mapping.assign`
+  or `keycloak.group.update_attributes` when the change is for the
+  approver's own login. A second login of the same person is not a
+  second person. In MEHO's own login realm, these changes need a second
+  person who is a tenant admin (a platform admin for the platform admin
+  group or role); no self-approval rule covers them. The audit row of
+  the decision names the login the change is for (#5973).
 
 ### Added
 - The web interface installs as an app on phones and laptops, and opens

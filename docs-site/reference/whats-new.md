@@ -17,6 +17,8 @@ notes.
   requester can run it again.
 - **Admins may approve their own `dangerous` and `destructive`
   changes**, like MEHO-SA-Operators.
+- **Nobody approves their own group or role change.** In MEHO's own
+  login realm, such a change needs a second tenant admin.
 - **Approving a long operation answers at once.** The operation runs in
   the background, and the page shows when it ends.
 - **Changes with an unknown outcome.** MEHO lists approved changes whose

@@ -295,6 +295,19 @@ from Vault there.
   that path, or run `meho targets update <name> --secret-ref <path>`.
   It never shows the hvac text or the Vault URL. The builder is
   `operations/_errors_target_secret.py`.
+- **A machine login gets only the own path, unless a person approves.**
+  A call of `targets.register` from an agent, a service login or a
+  runner can run with no person, under a standing grant or an approved
+  multi-step run. Such a call may store only the new target's own path
+  `tenants/<tenant_id>/<name>`, or no path (`secret_ref: null`). MEHO
+  also refuses the own path when another target of the tenant, live or
+  removed, already stores it. The answer names the path and says what
+  to do: leave out `secret_ref`, pick another name, or ask a person.
+  A person's own call, and a call a person approved (the verdict is
+  `needs-approval`), may use any path inside the tenant. The check is
+  `machine_secret_ref_refusal` in
+  `connectors/targets/register_secret_ref.py`; the tests are in
+  `tests/test_targets_register_machine_secret_ref.py`.
 
 ## Name and host rules for new and changed targets
 

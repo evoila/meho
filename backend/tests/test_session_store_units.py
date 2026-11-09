@@ -36,14 +36,14 @@ def _state(data: bytes) -> dict[str, Any]:
 
 
 def test_plan_new_files_are_whole_tails() -> None:
-    plan = plan_upload({}, [], {"a": b"one\n", "b": b""})
+    plan = plan_upload({}, [], {"a": b"one\n", "b": b""}, final=False)
     assert plan.tails == {"a": (0, b"one\n"), "b": (0, b"")}
     assert plan.conflicts == []
 
 
 def test_plan_finds_the_tail_and_keeps_a_missing_file() -> None:
     stored = {"a": _state(b"one\n"), "gone": _state(b"x")}
-    plan = plan_upload(stored, [stored], {"a": b"one\ntwo\n"})
+    plan = plan_upload(stored, [stored], {"a": b"one\ntwo\n"}, final=False)
     assert plan.tails == {"a": (4, b"two\n")}
     assert plan.states["gone"].size == 1
     assert plan.new_bytes == 4
@@ -52,7 +52,7 @@ def test_plan_finds_the_tail_and_keeps_a_missing_file() -> None:
 def test_plan_same_or_older_state_is_no_change() -> None:
     first = {"a": _state(b"one\n")}
     second = {"a": _state(b"one\ntwo\n")}
-    plan = plan_upload(second, [first, second], {"a": b"one\n"})
+    plan = plan_upload(second, [first, second], {"a": b"one\n"}, final=False)
     assert plan.tails == {}
     assert plan.conflicts == []
 
@@ -62,9 +62,27 @@ def test_plan_same_or_older_state_is_no_change() -> None:
 )
 def test_plan_changed_stored_part_is_a_conflict(new: bytes) -> None:
     stored = {"a": _state(b"one\n")}
-    plan = plan_upload(stored, [stored], {"a": new})
+    plan = plan_upload(stored, [stored], {"a": new}, final=False)
     assert plan.conflicts == ["a"]
     assert plan.tails == {}
+
+
+def test_plan_keeps_back_an_unfinished_last_line_until_the_end() -> None:
+    files = {"a": b"one\ntw", "only-part": b"tw"}
+    plan = plan_upload({}, [], files, final=False)
+    assert plan.tails == {"a": (0, b"one\n")}
+    assert plan.states["a"].size == 4
+    stored = {"a": _state(b"one\n")}
+    assert plan_upload(stored, [stored], {"a": b"one\ntwo"}, final=False).tails == {}
+    ended = plan_upload(stored, [stored], {"a": b"one\ntwo"}, final=True)
+    assert ended.tails == {"a": (4, b"two")}
+
+
+def test_plan_a_retry_of_an_older_upload_with_an_unfinished_line_is_no_change() -> None:
+    first = {"a": _state(b"one\n")}
+    second = {"a": _state(b"one\ntwo\n")}
+    plan = plan_upload(second, [first, second], {"a": b"one\ntw"}, final=False)
+    assert (plan.tails, plan.conflicts) == ({}, [])
 
 
 # --- archive -----------------------------------------------------------------

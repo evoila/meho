@@ -7,8 +7,9 @@ The steps of :func:`upload_session`:
 
 1. Unpack the archive (:mod:`.archive`).
 2. Compare it with the stored session and find the new tail of each file
-   (:mod:`.plan`). A changed stored part is a conflict (``409``), and an
-   upload of a session that another person started is refused too.
+   (:mod:`.plan`). A tail holds whole lines only. A changed stored part
+   is a conflict (``409``), and an upload of a session that another
+   person started is refused too.
 3. With no new bytes: change only the state (open to ended or
    unfinished), or change nothing at all. A retry of the same bytes is
    safe.
@@ -214,7 +215,10 @@ async def _plan_or_refuse(
         if record is not None and record.uploaded_by_sub != call.operator.sub:
             raise SessionConflictError("session_owned_by_another_person")
         plan = plan_upload(
-            record.files if record is not None else {}, [u.files for u in uploads], files
+            record.files if record is not None else {},
+            [u.files for u in uploads],
+            files,
+            final=call.meta.state in ("ended", "unfinished"),
         )
         if plan.conflicts:
             raise SessionConflictError("session_conflict", plan.conflicts)

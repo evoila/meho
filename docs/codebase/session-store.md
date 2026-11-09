@@ -112,6 +112,12 @@ gzip tar archive) and the fields `session_id`, `project`, `app`,
    - anything else: the stored part changed. `409 session_conflict` with
      the paths. Nothing is overwritten.
 
+   MEHO stores whole lines only. While the session is `open`, a tail ends
+   at the last newline of the file: the last line may still be in
+   writing, so it waits for a later upload. With `state` ended or
+   unfinished, the last line is taken as it is. So the secret check
+   always sees each line in one piece.
+
    A session that another person started is `409
    session_owned_by_another_person`.
 3. **No new bytes.** An upload with `state` ended or unfinished ends an open

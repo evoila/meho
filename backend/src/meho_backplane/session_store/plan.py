@@ -18,6 +18,12 @@ size and SHA-256 hash of that file (before the secret check):
   conflict. Nothing is overwritten.
 
 A stored file that the upload does not carry stays as it is.
+
+MEHO stores and checks whole lines only. While a session is open, the
+last line of a file can still be in writing, so a tail ends at the last
+newline, and the rest waits for a later upload. When the uploader says
+the session ended (or is unfinished), the last line is taken as it is.
+So the secret check always sees each line in one piece.
 """
 
 from __future__ import annotations
@@ -66,34 +72,45 @@ def _state(raw: Mapping[str, Any]) -> FileState:
     return FileState(size=int(raw["size"]), sha256=str(raw["sha256"]))
 
 
+def _whole_lines(data: bytes, *, final: bool) -> bytes:
+    """Return *data* up to its last newline, or all of it when *final*."""
+    return data if final else data[: data.rfind(b"\n") + 1]
+
+
 def plan_upload(
     stored: Mapping[str, Mapping[str, Any]],
     earlier: Iterable[Mapping[str, Mapping[str, Any]]],
     files: Mapping[str, bytes],
+    *,
+    final: bool,
 ) -> UploadPlan:
     """Plan an upload of *files* against the *stored* states.
 
     *earlier* holds the file states after each earlier upload, so a retry of
-    an older upload is known.
+    an older upload is known. *final* is true when the session ended (or is
+    unfinished): then the last line of a file counts even without a newline.
     """
-    known: set[tuple[str, int, str]] = set()
+    known: set[tuple[str, FileState]] = set()
     for states in earlier:
         for path, raw in states.items():
-            state = _state(raw)
-            known.add((path, state.size, state.sha256))
+            known.add((path, _state(raw)))
     plan = UploadPlan(states={path: _state(raw) for path, raw in stored.items()})
     for path in sorted(files):
         data = files[path]
+        lines = _whole_lines(data, final=final)
         whole = FileState(size=len(data), sha256=sha256_hex(data))
+        cut = FileState(size=len(lines), sha256=sha256_hex(lines))
         current = plan.states.get(path)
         if current is None:
-            plan.tails[path] = (0, data)
-            plan.states[path] = whole
-        elif whole == current or (path, whole.size, whole.sha256) in known:
+            if lines or not data:
+                plan.tails[path] = (0, lines)
+                plan.states[path] = cut
+        elif current in (whole, cut) or {(path, whole), (path, cut)} & known:
             continue
         elif whole.size > current.size and sha256_hex(data[: current.size]) == current.sha256:
-            plan.tails[path] = (current.size, data[current.size :])
-            plan.states[path] = whole
+            if cut.size > current.size:
+                plan.tails[path] = (current.size, lines[current.size :])
+                plan.states[path] = cut
         else:
             plan.conflicts.append(path)
     return plan

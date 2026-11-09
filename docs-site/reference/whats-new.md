@@ -48,7 +48,10 @@ notes.
   `query_topology` off the default tool list, and more.
 - **Before you upgrade.** Back up the database: the upgrade runs fifteen
   migrations. With the built-in Keycloak, check four chart values. The
-  retrieval quality check is removed from the product.
+  retrieval quality check is removed from the product. Update your
+  connector packages first, or together with MEHO: an operation from
+  an API file runs only on a connector class that accepts such
+  operations.
 
 ## [v0.45.0](https://github.com/evoila/meho/releases/tag/v0.45.0) — 2026-11-06
 

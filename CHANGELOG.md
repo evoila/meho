@@ -197,6 +197,19 @@ first.
   `cronjobs` through the new safe read `k8s.cronjob.list` (#5909). What
   to do: a script that checked for `ok` and then looked for an error
   inside the answer checks the status.
+- An operation loaded from an API file runs only on a connector class
+  that sets `accepts_ingested_operations = True`. The default is
+  `False`. It is `True` on the generic connector, on
+  `ProfiledRestConnector` and on the GitHub, Hetzner Robot, Harbor and
+  Argo CD classes. On any other class, MEHO refuses the operation with
+  `ingested_ops_not_accepted`: at ingest (REST 422, MCP `-32602`), before
+  a call waits for approval, when an approved call runs, and in
+  `preview_operation`. Each refused call writes one `denied` audit row
+  (#5830). What to do, for connector authors: set
+  `accepts_ingested_operations = True` on each of your connector classes
+  that should run operations from an API file, release the package, then
+  update the installs. A class built on `ProfiledRestConnector` has the
+  flag already.
 
 ### Steps after the upgrade
 - Back up the database first. The upgrade runs 15 migrations, `0138` to
@@ -233,6 +246,11 @@ first.
 - The built-in OpenBao uses the plain OpenBao image, which runs on
   x86-64-v2 CPUs. On OpenShift, set the UBI image in `coreVault.image`
   (#5945).
+- An install with connector packages updates those packages before this
+  version, or together with it, to a package version that sets
+  `accepts_ingested_operations = True` on its classes that run
+  operations from an API file. Otherwise every such operation answers
+  `ingested_ops_not_accepted` (#5830).
 - Install the 0.46.0 CLI. It brings `meho operation call --async` and
   `meho operation run-status` (#5912), `meho sensor edit` and
   `meho dashboard edit` (#5870), `meho sensor ack` (#5931),

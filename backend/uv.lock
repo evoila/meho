@@ -604,7 +604,7 @@ wheels = [
 
 [[package]]
 name = "cryptography"
-version = "50.0.2"
+version = "41.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },

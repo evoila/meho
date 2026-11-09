@@ -3216,11 +3216,11 @@ MEHO checks both against the approval rules.</p>
 <p><strong>Register targets on the operator surfaces above.</strong> Registration is an
 operator-trust decision. For agents, the default MCP tools only read
 targets (<code>list_targets</code>). A session that asked for the <code>mcp:admin</code>
-scope also has <code>meho_targets_register</code> (tenant_admin only). Through
-<code>call_operation</code>, the connector <code>targets-registry-1.x</code> offers
-<code>targets.register</code>, <code>targets.remove</code> and <code>targets.probe</code>; an agent's
-register waits for a person's approval, and <code>targets.remove</code> always
-waits for one. MEHO has no MCP tool to stage a secret. This is also why
+scope also has <code>meho_targets_register</code> and <code>meho_targets_update</code>
+(tenant_admin only). Through <code>call_operation</code>, the connector
+<code>targets-registry-1.x</code> offers <code>targets.register</code>, <code>targets.update</code>,
+<code>targets.remove</code> and <code>targets.probe</code>; an agent's register and every update
+wait for a person's approval, and <code>targets.remove</code> always waits for one. MEHO has no MCP tool to stage a secret. This is also why
 the CLI is worth installing before your first agent session.</p>
 <h2 id="write-a-targetsyaml">Write a <code>targets.yaml</code><a class="headerlink" href="#write-a-targetsyaml" title="Permanent link">&para;</a></h2>
 <p>The file is a <code>targets:</code> list. A minimal, realistic pair — a

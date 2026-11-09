@@ -9,6 +9,8 @@ package cmd
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -52,6 +54,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/secret"
 	"github.com/evoila/meho/cli/internal/cmd/sensor"
 	serviceprincipal "github.com/evoila/meho/cli/internal/cmd/service-principal"
+	"github.com/evoila/meho/cli/internal/cmd/settings"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/tenants"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
@@ -78,7 +81,23 @@ import (
 // to pick the process exit code (auth_expired → 2, unreachable → 3,
 // unexpected → 4, generic → 1).
 func Execute() error {
+	trustSavedCA(os.Stderr)
 	return newRootCmdFor(os.Args[1:]).Execute()
+}
+
+// trustSavedCA trusts the CA file `meho login --ca-file` recorded. It
+// runs before the command tree is built, because that build already
+// fetches the dynamic commands from the backplane. A file that is gone
+// only warns: the request that follows then fails on the certificate
+// with the transport's own message.
+func trustSavedCA(errOut io.Writer) {
+	cfg, err := auth.LoadConfig()
+	if err != nil || cfg.CAFile == "" {
+		return
+	}
+	if err := auth.TrustCAFile(cfg.CAFile); err != nil {
+		fmt.Fprintf(errOut, "warning: the CA file from `meho login` is not usable: %v\n", err)
+	}
 }
 
 // newRootCmd builds the command tree for the process's own arguments.
@@ -173,6 +192,11 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// (`meho tenants flight-recorder-policy set`). Wraps PATCH
 	// /api/v1/tenants/flight-recorder-policy; tenant-scoped, tenant_admin.
 	root.AddCommand(tenants.NewRootCmd())
+
+	// `meho settings` -- export, import and history of the settings
+	// file (#4048). Static: it must work on the first day, before any
+	// target or dynamic command exists.
+	root.AddCommand(settings.NewRootCmd())
 	// T3 (#2880) -- event_source registry admin verbs (add / list /
 	// describe / update / delete). Wraps /api/v1/event-sources/*.
 	root.AddCommand(eventsource.NewRootCmd())

@@ -400,8 +400,10 @@ func parseTargetsYAML(data []byte) ([]map[string]any, error) {
 		}
 		// YAML reads an unquoted `version: 8.0` as the number 8, which
 		// the API rejects (and which has already lost the ".0"). Fail
-		// here with a hint instead of guessing the string.
-		if v, ok := e["version"]; ok {
+		// here with a hint instead of guessing the string. `version:
+		// null` is what `meho targets export` writes for a target with
+		// no version.
+		if v := e["version"]; v != nil {
 			if _, isStr := v.(string); !isStr {
 				return nil, fmt.Errorf("entry %q: `version` must be a string; quote it (for example version: \"8.0\")", name)
 			}
@@ -501,7 +503,9 @@ func mapEntry(entry map[string]any) (map[string]any, []string) {
 			fmt.Sprintf("unknown field %q: not a target column, stored in extras", k))
 	}
 
-	if len(extras) > 0 {
+	// An explicit `extras: {}` is kept: on --update it clears the stored
+	// map, the same as in the settings file.
+	if _, explicit := entry["extras"].(map[string]any); explicit || len(extras) > 0 {
 		body["extras"] = extras
 	}
 	return body, warnings

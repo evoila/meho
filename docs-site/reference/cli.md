@@ -3389,6 +3389,7 @@ Authenticate against the MEHO backplane via Keycloak device-code flow
 meho login <backplane-url> [flags]
 ```
 
+- `--ca-file` — PEM file with the CA to trust for this backplane, next to the system roots: ca.crt of the <release>-core-tls Secret on a fresh install, or the customer's CA. Later commands keep using it
 - `--client-id` — OAuth client_id to use for the device-code flow (auto-discovered when blank)
 - `--insecure-allow-http` — permit a plaintext http:// backplane URL for a localhost backplane only (local-dev convenience; the bearer token is sent in the clear — never use against a remote host)
 - `--issuer` — Keycloak realm issuer URL (auto-discovered from the backplane when blank)
@@ -4747,6 +4748,50 @@ meho service-principals read-scope show <principal-sub> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw ServiceReadScopeRead JSON
 
+## `meho settings`
+
+Export, import and review the MEHO settings file (export / import / history)
+
+```
+meho settings
+```
+
+### `meho settings export`
+
+Write the settings file from the live state
+
+```
+meho settings export [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by 'meho login')
+- `--json` — print errors as JSON; the file itself stays YAML
+- `--out` — file to write (default: stdout)
+
+### `meho settings history`
+
+List the applied settings imports, newest first
+
+```
+meho settings history [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by 'meho login')
+- `--json` — print the endpoint's answer as JSON
+
+### `meho settings import`
+
+Check a settings file, show what it changes, and apply it
+
+```
+meho settings import <file> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by 'meho login')
+- `--json` — print the endpoint's answer as JSON
+- `--preview` — show the mistakes and the diff; write nothing
+- `--yes` — apply without asking
+
 ## `meho status`
 
 Show operator identity + backplane health; --watch streams live activity
@@ -4764,7 +4809,7 @@ meho status [flags]
 
 ## `meho targets`
 
-Operate the MEHO targets registry (add / update / delete / list / describe / probe / import / discover)
+Operate the MEHO targets registry (add / update / delete / list / describe / probe / import / export / discover)
 
 ```
 meho targets
@@ -4834,6 +4879,19 @@ meho targets discover <product> [flags]
 - `--import-yaml` — print the candidates as a file for `meho targets import` instead of the tables
 - `--json` — emit machine-readable JSON to stdout instead of the human tables
 - `--seed-target` — scope discovery to one already-registered target's reach (resolved tenant-scoped)
+
+### `meho targets export`
+
+Write the tenant's targets as a targets.yaml file
+
+```
+meho targets export [flags]
+```
+
+- `--backplane` — backplane URL to export from (defaults to the URL recorded by 'meho login')
+- `--json` — print errors as JSON; the file itself stays YAML
+- `--out` — file to write (default: stdout)
+- `--tenant` — tenant id (defaults to the one set with 'meho tenants use')
 
 ### `meho targets import`
 

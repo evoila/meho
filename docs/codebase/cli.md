@@ -1166,6 +1166,27 @@ is `docs-site/guides/several-tenants.md`. The CLI side:
   in one tenant, and the login that keeps the choice. The fake backplane
   refuses the deep check for the read_only role, as the real one does.
 
+## Settings file (`meho settings`, `meho targets export`, #4048)
+
+`internal/cmd/settings/` holds `export`, `import` and `history`. The shape of the
+file and the exit codes are in [`settings.md`](settings.md#command-line). Two
+things are specific to the CLI:
+
+- `import` decodes `POST /api/v1/settings/import` by hand: a refused apply sends
+  the preview's body on 422, where the generated type expects FastAPI's
+  validation error. `--json` prints the raw bytes.
+- `targets export` imports this package and cuts `targets:` out of the settings
+  export on YAML nodes, so key order and the quoting of `version: "8.0"` survive.
+  An exported `version: null` and `extras: {}` read back through `targets import`.
+
+`meho login --ca-file <pem>` calls `auth.TrustCAFile`, which swaps
+`http.DefaultTransport` for a clone with the file added to the system roots.
+Every request goes through that transport, also the Keycloak calls. The absolute
+path is kept as `ca_file` in `config.json`, and `Execute` trusts it again before
+the command tree is built, because that build already fetches the dynamic
+commands. A file that is gone only warns; the request then fails on the
+certificate.
+
 ## Audit receipt on writes with no body (#4976)
 
 Some write routes answer `204 No Content`. They have no body, so the

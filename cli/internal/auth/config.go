@@ -32,6 +32,10 @@ type Config struct {
 	// backplane, or nil. The CLI sends its ID in the Meho-Tenant
 	// header on every call. A login in one tenant needs none.
 	Tenant *Tenant `json:"tenant,omitempty"`
+	// CAFile is the absolute path `meho login --ca-file` trusted for
+	// this backplane. Every later command trusts it too, or the first
+	// command after the login would fail on the same certificate.
+	CAFile string `json:"ca_file,omitempty"`
 }
 
 // Tenant names one tenant of the person: the ID the CLI sends, and

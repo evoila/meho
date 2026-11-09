@@ -1,0 +1,9 @@
+[
+  {"section": "Tenants", "kind": "added", "tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "", "detail": ""},
+  {"section": "Tenants", "kind": "not in file", "tenant": "cccccccc-cccc-cccc-cccc-cccccccccccc", "key": "", "detail": ""},
+  {"section": "Policies", "kind": "changed", "tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "flight_recorder.retention_days", "detail": "null -> 14"},
+  {"section": "Policies", "kind": "changed", "tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "announce_gate_enabled", "detail": "false -> true"},
+  {"section": "Conventions", "kind": "added", "tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "change-window", "detail": ""},
+  {"section": "Targets", "kind": "changed", "tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "vc-01", "detail": "extras: {\"a\":[\"x\"],\"b\":1} -> {}; host: \"10.1.0.1\" -> \"vc-01.ünï.test<\"; version: null -> \"8.0\""},
+  {"section": "Targets", "kind": "not in file", "tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "vc-02", "detail": ""}
+]

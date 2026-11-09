@@ -1,0 +1,91 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The settings page (#4048): export, import with a preview, history. Also
+  the first login's landing page, with its two choices (``first_run``).
+  The upload form posts multipart, so a file up to 4 MiB passes the CSRF
+  middleware; the token rides in ``hx-headers``.
+
+  Context (set by :mod:`meho_backplane.ui.routes.settings`): ``first_run``,
+  ``revisions``, ``csrf_token``, and ``export_mistakes`` after a refused export.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Settings &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <header>
+    <h1 class="flex items-center gap-2 text-2xl font-semibold">Settings{% include "_maturity_badge.html" %}</h1>
+    <p class="text-sm opacity-70">
+      The policies, conventions and targets of this MEHO as one file. The file
+      never holds a secret. Same as <code class="font-mono">meho settings</code>.
+    </p>
+  </header>
+
+  {% if first_run %}
+    <div class="card bg-base-100 border-base-300 border shadow-sm" data-settings-first-run>
+      <div class="card-body space-y-3">
+        <h2 class="card-title text-base">Set up this MEHO</h2>
+        <p class="text-sm">Nothing is set up yet. Choose how to start:</p>
+        <div class="flex flex-wrap gap-2">
+          <a href="/ui/connectors" class="btn btn-sm" data-action="first-run-form">Fill in the form</a>
+          <a href="#settings-import" class="btn btn-sm btn-primary" data-action="first-run-import">Import a settings file</a>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if export_mistakes %}
+    <div class="alert alert-error" role="alert" data-settings-export-refused>
+      <div>
+        <p>The export was refused:</p>
+        <ul class="list-disc pl-5">
+          {% for sentence in export_mistakes %}<li>{{ sentence }}</li>{% endfor %}
+        </ul>
+      </div>
+    </div>
+  {% endif %}
+
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body flex-row flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 class="card-title text-base">Export</h2>
+        <p class="text-sm opacity-70">Download the settings as <code class="font-mono">meho-settings.yaml</code>.</p>
+      </div>
+      <a href="/ui/settings/export" class="btn btn-sm" data-action="settings-export">Export</a>
+    </div>
+  </div>
+
+  <form
+    id="settings-import"
+    hx-post="/ui/settings/import/preview"
+    hx-encoding="multipart/form-data"
+    hx-target="#settings-import-result"
+    hx-swap="innerHTML"
+    hx-disabled-elt="find button[type=submit]"
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    aria-label="Import a settings file"
+  >
+    <div class="card-body space-y-3">
+      <h2 class="card-title text-base">Import</h2>
+      <p class="text-sm opacity-70">The preview writes nothing. An import adds and updates; it never deletes.</p>
+      <input
+        type="file"
+        name="file"
+        accept=".yaml,.yml,.json,text/yaml,application/x-yaml,application/yaml"
+        class="file-input file-input-bordered file-input-sm"
+        aria-label="Settings file"
+      />
+      <div class="flex justify-end">
+        <button type="submit" class="btn btn-sm btn-primary" data-action="settings-preview">Preview</button>
+      </div>
+    </div>
+  </form>
+
+  <div id="settings-import-result"></div>
+
+  {% include "settings/_history.html" %}
+</section>
+{% endblock %}

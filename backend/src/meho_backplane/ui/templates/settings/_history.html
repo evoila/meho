@@ -1,0 +1,31 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The revisions, newest first. Rendered in the page and, with ``oob``, by the
+  apply result, so the list is current after an import.
+-#}
+<div id="settings-history" {% if oob | default(false) %}hx-swap-oob="true"{% endif %} class="card bg-base-100 border-base-300 border shadow-sm">
+  <div class="card-body space-y-3">
+    <h2 class="card-title text-base">History</h2>
+    {% if revisions %}
+      <div class="overflow-x-auto rounded-box border border-base-300">
+        <table class="table table-sm">
+          <thead><tr><th>When</th><th>Who</th><th>Changed</th><th>Revision</th></tr></thead>
+          <tbody>
+            {% for revision in revisions %}
+              <tr data-settings-revision="{{ revision.id }}">
+                <td class="whitespace-nowrap">{{ revision.ts.strftime("%Y-%m-%d %H:%M:%S UTC") }}</td>
+                <td class="font-mono text-xs">{{ revision.actor_sub }}</td>
+                <td>{{ revision.changed }}</td>
+                <td class="font-mono text-xs">{{ revision.id }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="text-sm opacity-70" data-settings-history-empty>No settings import has been applied yet.</p>
+    {% endif %}
+  </div>
+</div>

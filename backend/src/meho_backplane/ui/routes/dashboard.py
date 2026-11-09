@@ -51,8 +51,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Final
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from meho_backplane.audit_query import AuditQueryFilters, query_audit
 from meho_backplane.db.engine import get_sessionmaker
@@ -61,6 +61,7 @@ from meho_backplane.health import readiness_snapshot
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.roles import is_ui_operator
+from meho_backplane.ui.routes.settings import SETTINGS_PATH, lands_on_settings
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_dashboard_router"]
@@ -238,7 +239,7 @@ async def _render_dashboard(
     request: Request,
     session: UISessionContext = _require_ui_session_dep,
     audit_allowed: bool = _audit_read_allowed_dep,
-) -> HTMLResponse:
+) -> HTMLResponse | RedirectResponse:
     """Render ``GET /ui/`` for the authenticated operator.
 
     Per acceptance criterion 1 on #866: returns 200 with
@@ -249,7 +250,13 @@ async def _render_dashboard(
     The handler also mints + sets the CSRF cookie so any subsequent
     HTMX ``hx-post`` / ``hx-delete`` from this page passes the
     double-submit check.
+
+    On a fresh install this is where every login ends up, so an admin is sent
+    to the settings page instead (#4048); see
+    :func:`~meho_backplane.ui.routes.settings.lands_on_settings`.
     """
+    if await lands_on_settings(session):
+        return RedirectResponse(SETTINGS_PATH, status_code=status.HTTP_303_SEE_OTHER)
     readiness = await _readiness_snapshot()
     # The chassis context processor injects ``ready`` into every render
     # from ``request.state.ui_ready`` (the middleware's short-TTL-cached
@@ -311,6 +318,9 @@ def build_dashboard_router() -> APIRouter:
         _render_dashboard,
         methods=["GET"],
         name="ui_dashboard",
+        # The first-run redirect makes the return type a union of two
+        # Response classes, which FastAPI cannot read as a response model.
+        response_model=None,
         # Returning HTML rather than JSON; reflect that in the
         # OpenAPI surface (the dashboard route is not API-documented,
         # but the response class hints aid tooling that walks the

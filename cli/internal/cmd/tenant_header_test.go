@@ -490,10 +490,10 @@ func TestConfigAfterLogin_KeepsTenantOfSameBackplane(t *testing.T) {
 		auth.Config{BackplaneURL: "https://meho.example.test", Tenant: chosen}); err != nil {
 		t.Fatalf("SaveConfigAt: %v", err)
 	}
-	if got := configAfterLogin("https://meho.example.test"); got.Tenant == nil || *got.Tenant != *chosen {
+	if got := configAfterLogin("https://meho.example.test", ""); got.Tenant == nil || *got.Tenant != *chosen {
 		t.Errorf("same backplane: tenant = %+v; want lab-b", got.Tenant)
 	}
-	if got := configAfterLogin("https://other.example.test"); got.Tenant != nil || got.BackplaneURL != "https://other.example.test" {
+	if got := configAfterLogin("https://other.example.test", ""); got.Tenant != nil || got.BackplaneURL != "https://other.example.test" {
 		t.Errorf("other backplane: config = %+v; want no tenant", got)
 	}
 }

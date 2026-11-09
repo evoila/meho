@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -39,6 +40,7 @@ func newLoginCmd() *cobra.Command {
 		insecureAllowHTTP bool
 		resolveEntries    []string
 		printToken        bool
+		caFile            string
 	)
 
 	cmd := &cobra.Command{
@@ -96,6 +98,13 @@ func newLoginCmd() *cobra.Command {
 			// --insecure-allow-http opts a loopback backplane out
 			// (see NormaliseURLAllowHTTP).
 			backplaneURL, err := backplane.NormaliseURLAllowHTTP(args[0], insecureAllowHTTP)
+			if err != nil {
+				return err
+			}
+
+			// Trust --ca-file before the client below is built: that
+			// client may be a clone of the default transport.
+			caPath, err := trustLoginCA(caFile)
 			if err != nil {
 				return err
 			}
@@ -205,7 +214,7 @@ func newLoginCmd() *cobra.Command {
 			// hard error: the token is already safely stored, and
 			// the operator can supply --backplane explicitly on the
 			// next invocation.
-			if err := auth.SaveConfig(configAfterLogin(backplaneURL)); err != nil {
+			if err := auth.SaveConfig(configAfterLogin(backplaneURL, caPath)); err != nil {
 				fmt.Fprintf(errOut,
 					"warning: failed to persist backplane URL to config file: %v\n", err)
 			}
@@ -250,7 +259,27 @@ func newLoginCmd() *cobra.Command {
 			"device-code prompt, the success message, warnings — goes to stderr) so it can be captured "+
 			"with 'TOKEN=$(meho login --print-token <backplane-url>)'. WARNING: the value is a live bearer "+
 			"credential — never log it or paste it into shared channels")
+	cmd.Flags().StringVar(&caFile, "ca-file", "",
+		"PEM file with the CA to trust for this backplane, next to the system roots: ca.crt of the "+
+			"<release>-core-tls Secret on a fresh install, or the customer's CA. Later commands keep using it")
 	return cmd
+}
+
+// trustLoginCA trusts --ca-file for this process and returns its
+// absolute path for the config file, so a later command run from
+// another folder still finds it. An empty flag does nothing.
+func trustLoginCA(caFile string) (string, error) {
+	if caFile == "" {
+		return "", nil
+	}
+	path, err := filepath.Abs(caFile)
+	if err != nil {
+		return "", fmt.Errorf("--ca-file: %w", err)
+	}
+	if err := auth.TrustCAFile(path); err != nil {
+		return "", fmt.Errorf("--ca-file: %w", err)
+	}
+	return path, nil
 }
 
 // offlineFallbackNote is the one line `meho login` prints when the
@@ -358,12 +387,12 @@ func resolveAuthConfig(ctx context.Context, httpClient *http.Client, backplaneUR
 			// failure with a hint that pinning both flags is the
 			// supported fallback.
 			return authConfig{}, fmt.Errorf(
-				"backplane auth-config discovery failed (%w); pass both --issuer and --client-id to skip discovery, or install your deployment's root CA in your system trust store",
+				"backplane auth-config discovery failed (%w); pass both --issuer and --client-id to skip discovery; for a private CA, pass --ca-file <pem> or install your deployment's root CA in your system trust store",
 				err,
 			)
 		}
 		return authConfig{}, fmt.Errorf(
-			"backplane auth-config discovery failed (%w); rerun with --issuer and --client-id, or install your deployment's root CA in your system trust store",
+			"backplane auth-config discovery failed (%w); rerun with --issuer and --client-id; for a private CA, pass --ca-file <pem> or install your deployment's root CA in your system trust store",
 			err,
 		)
 	}
@@ -534,13 +563,19 @@ func printAccessToken(w io.Writer, tok string) {
 }
 
 // configAfterLogin is the config `meho login` writes: the backplane
-// URL, plus the tenant chosen with `meho tenants use` when the login
-// is for the same backplane. A new login keeps that choice, because
-// the token still lists all of the person's tenants (#5241).
-func configAfterLogin(backplaneURL string) auth.Config {
-	cfg := auth.Config{BackplaneURL: backplaneURL}
-	if prev, err := auth.LoadConfig(); err == nil && prev.Tenant != nil && sameBackplane(prev.BackplaneURL, backplaneURL) {
-		cfg.Tenant = prev.Tenant
+// URL, plus what the person chose earlier for the same backplane. A new
+// login keeps the tenant chosen with `meho tenants use`, because the
+// token still lists all of the person's tenants (#5241), and keeps the
+// CA file unless caFile names a new one.
+func configAfterLogin(backplaneURL, caFile string) auth.Config {
+	cfg := auth.Config{BackplaneURL: backplaneURL, CAFile: caFile}
+	prev, err := auth.LoadConfig()
+	if err != nil || !sameBackplane(prev.BackplaneURL, backplaneURL) {
+		return cfg
+	}
+	cfg.Tenant = prev.Tenant
+	if cfg.CAFile == "" {
+		cfg.CAFile = prev.CAFile
 	}
 	return cfg
 }

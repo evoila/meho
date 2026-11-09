@@ -3528,3 +3528,23 @@ through service history never changes the agent cursor. The agent section
 opens the established human-only elevation modal, including its required
 time-bounded expiry. Service principals have no registry or stored display
 name, so their stored JWT subject intentionally remains the fail-open label.
+
+## Settings page (#4048)
+
+`GET /ui/settings` (`ui/routes/settings.py`, `templates/settings/`) exports,
+previews, applies and lists the settings file. It is the first login's landing
+page: while `is_first_run` holds, `GET /ui/` answers 303 here for an admin. The
+file format and the behaviour are in [`settings.md`](settings.md#console).
+
+- The gates are the REST ones (`require_settings_admin`,
+  `require_human_settings_admin`), so a `platform_admin` passes too, which
+  `resolve_operator_or_403` of the connectors surface would refuse.
+- The upload and the apply are multipart: the CSRF middleware caps a url-encoded
+  body at 256 KiB, and a settings file may be 4 MiB. `_read_file` raises
+  Starlette's `max_part_size` for the base64 field.
+- The apply form carries the file as base64, not in a textarea, so
+  `file_sha256` on the revision is the digest of the file the operator picked.
+- "No file chosen" and "you may not import this file" are 200 fragments, because
+  HTMX does not swap a 4xx. The role gates stay real 403s.
+- The landing check fails soft, like the role lift: a database error shows the
+  dashboard.

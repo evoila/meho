@@ -56,7 +56,14 @@ from meho_backplane.instance_settings.service import (
 )
 from meho_backplane.middleware import verify_jwt_and_bind
 
-__all__ = ["router"]
+__all__ = [
+    "SettingsImportResponse",
+    "export",
+    "require_human_settings_admin",
+    "require_settings_admin",
+    "router",
+    "run_import",
+]
 
 router = APIRouter(prefix="/api/v1/settings", tags=["settings"])
 
@@ -66,7 +73,7 @@ _OP_ID_IMPORT: Final[str] = "settings.import"
 _OP_ID_HISTORY: Final[str] = "settings.history"
 
 
-def _require_settings_admin(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
+def require_settings_admin(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
     """``tenant_admin`` or ``platform_admin``; anyone else gets 403 ``insufficient_role``."""
     if operator.platform_admin or operator.tenant_role == TenantRole.TENANT_ADMIN:
         return operator
@@ -78,7 +85,7 @@ def _require_settings_admin(operator: Operator = Depends(verify_jwt_and_bind)) -
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="insufficient_role")
 
 
-def _require_human_settings_admin(
+def require_human_settings_admin(
     operator: Operator = Depends(verify_jwt_and_bind),
 ) -> Operator:
     """The import's gate: a person first (403 ``human_principal_required``), then the role.
@@ -87,11 +94,11 @@ def _require_human_settings_admin(
     even though its role is capped below ``tenant_admin`` as well.
     """
     ensure_human_principal(operator)
-    return _require_settings_admin(operator)
+    return require_settings_admin(operator)
 
 
-_settings_admin = Depends(_require_settings_admin)
-_human_settings_admin = Depends(_require_human_settings_admin)
+_settings_admin = Depends(require_settings_admin)
+_human_settings_admin = Depends(require_human_settings_admin)
 
 
 class SettingsImportResponse(BaseModel):
@@ -140,6 +147,41 @@ def _plan_response(plan: ImportPlan, *, preview: bool) -> SettingsImportResponse
         mistakes=plan.mistakes,
         warnings=plan.warnings,
         diff=plan.diff,
+    )
+
+
+async def run_import(
+    session: AsyncSession,
+    operator: Operator,
+    content: bytes,
+    *,
+    preview: bool,
+) -> SettingsImportResponse:
+    """Preview or apply *content*: the one code path of the API and the console.
+
+    Binds the audit fields of the request it runs in. The caller checks the
+    role first and maps :class:`SettingsForbiddenError` (a file the operator may
+    not import). The answer holds the mistakes when the file has any.
+    """
+    if preview:
+        structlog.contextvars.bind_contextvars(audit_op_id=_OP_ID_PREVIEW, audit_op_class="read")
+        return _plan_response(await build_plan(session, operator, content), preview=True)
+
+    # "read" until the service is about to write (it re-binds "write"), so
+    # a refused or unchanged file leaves no write in the audit log.
+    structlog.contextvars.bind_contextvars(audit_op_id=_OP_ID_IMPORT, audit_op_class="read")
+    result = await apply_import(session, operator, content)
+    if result.plan.mistakes:
+        return _plan_response(result.plan, preview=False)
+    return SettingsImportResponse(
+        preview=False,
+        ok=not result.failed,
+        mistakes=[],
+        warnings=result.plan.warnings,
+        diff=result.diff,
+        applied=result.applied,
+        revision_id=result.revision_id,
+        failed=result.failed,
     )
 
 
@@ -218,35 +260,15 @@ async def import_settings(
     """
     content = await _read_file(request)
     try:
-        if preview:
-            structlog.contextvars.bind_contextvars(
-                audit_op_id=_OP_ID_PREVIEW, audit_op_class="read"
-            )
-            return _plan_response(await build_plan(session, operator, content), preview=True)
-
-        # "read" until the service is about to write (it re-binds "write"), so
-        # a refused or unchanged file leaves no write in the audit log.
-        structlog.contextvars.bind_contextvars(audit_op_id=_OP_ID_IMPORT, audit_op_class="read")
-        result = await apply_import(session, operator, content)
+        body = await run_import(session, operator, content, preview=preview)
     except SettingsForbiddenError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-
-    if result.plan.mistakes:
-        body = _plan_response(result.plan, preview=False)
+    if body.mistakes and not preview:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content=body.model_dump(mode="json"),
         )
-    return SettingsImportResponse(
-        preview=False,
-        ok=not result.failed,
-        mistakes=[],
-        warnings=result.plan.warnings,
-        diff=result.diff,
-        applied=result.applied,
-        revision_id=result.revision_id,
-        failed=result.failed,
-    )
+    return body
 
 
 @router.get("/history", response_model=list[SettingsRevision])

@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +21,9 @@ import (
 
 	"golang.org/x/oauth2"
 
+	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/migrate"
+	"github.com/evoila/meho/cli/internal/version"
 )
 
 // TestResolveAuthConfigUsesOverrides skips backplane discovery when
@@ -560,4 +564,138 @@ func TestPrintMigrationNudge_SilentOnDirResolutionError(t *testing.T) {
 	var buf bytes.Buffer
 	printMigrationNudge(&buf)
 	// No assertion — just must not panic.
+}
+
+// The acceptance criterion for --ca-file: a login against a server with
+// a self-signed certificate works, and the next command trusts it too.
+// The server plays the backplane and Keycloak, as a fresh install does
+// with one `<release>-core-tls` certificate.
+func TestLoginWithCAFileTrustsASelfSignedInstall(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MEHO_KEYRING_DISABLE", "1")
+
+	var srv *httptest.Server
+	writeJSON := func(w http.ResponseWriter, value any) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(value)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/auth-config", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]string{
+			"keycloak_issuer": srv.URL + "/realms/meho", "audience": "meho", "cli_client_id": "meho-cli",
+		})
+	})
+	mux.HandleFunc("/realms/meho/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]string{
+			"issuer":                        srv.URL + "/realms/meho",
+			"device_authorization_endpoint": srv.URL + "/device",
+			"token_endpoint":                srv.URL + "/token",
+		})
+	})
+	mux.HandleFunc("/device", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{
+			"device_code": "dev", "user_code": "ABCD", "verification_uri": srv.URL + "/verify",
+			"expires_in": 60, "interval": 1,
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"access_token": "tok", "token_type": "Bearer", "expires_in": 300})
+	})
+	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]string{"version": version.Version})
+	})
+	srv = httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	login := func(args ...string) (string, error) {
+		cmd := newLoginCmd()
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(append([]string{srv.URL}, args...))
+		cmd.SetContext(context.Background())
+		err := cmd.Execute()
+		return stdout.String() + stderr.String(), err
+	}
+
+	if _, err := login(); err == nil {
+		t.Fatal("a self-signed install must fail without --ca-file")
+	} else if !strings.Contains(err.Error(), "--ca-file") {
+		t.Errorf("the failure must name --ca-file: %v", err)
+	}
+
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	block := &pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := login("--ca-file", caFile); err != nil {
+		t.Fatalf("login --ca-file: %v\n%s", err, out)
+	}
+
+	cfg, err := auth.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CAFile != caFile {
+		t.Errorf("config ca_file = %q", cfg.CAFile)
+	}
+
+	// A new process starts from the plain transport; trustSavedCA must
+	// bring the trust back from the config.
+	http.DefaultTransport = originalTransport
+	var warning bytes.Buffer
+	trustSavedCA(&warning)
+	if warning.Len() != 0 {
+		t.Errorf("warning: %s", warning.String())
+	}
+	resp, err := http.Get(srv.URL + "/version") //nolint:noctx
+	if err != nil {
+		t.Fatalf("a later command does not trust the CA: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// A login without the flag keeps the file for the same backplane.
+	if got := configAfterLogin(cfg.BackplaneURL, ""); got.CAFile != caFile {
+		t.Errorf("re-login dropped ca_file: %q", got.CAFile)
+	}
+	if got := configAfterLogin("https://other.example.test", ""); got.CAFile != "" {
+		t.Errorf("another backplane kept ca_file: %q", got.CAFile)
+	}
+}
+
+func TestLoginRejectsACAFileWithNoCertificate(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	bad := filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(bad, []byte("nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newLoginCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"https://meho.example.test", "--ca-file", bad})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--ca-file") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSavedCAFileThatIsGoneOnlyWarns(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := auth.SaveConfig(auth.Config{
+		BackplaneURL: "https://meho.example.test",
+		CAFile:       filepath.Join(t.TempDir(), "gone.crt"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var warning bytes.Buffer
+	trustSavedCA(&warning)
+	if !strings.Contains(warning.String(), "CA file") {
+		t.Errorf("warning = %q", warning.String())
+	}
 }

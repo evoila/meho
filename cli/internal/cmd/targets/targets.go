@@ -101,8 +101,8 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "targets",
-		Short:        "Operate the MEHO targets registry (add / update / delete / list / describe / probe / import / discover)",
-		Long:         "Add, update, delete, list, describe, probe, bulk-import, and discover targets in the operator's tenant.",
+		Short:        "Operate the MEHO targets registry (add / update / delete / list / describe / probe / import / export / discover)",
+		Long:         "Add, update, delete, list, describe, probe, bulk-import, export, and discover targets in the operator's tenant.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newAddCmd())
@@ -112,6 +112,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newDescribeCmd())
 	cmd.AddCommand(newProbeCmd())
 	cmd.AddCommand(newImportCmd())
+	cmd.AddCommand(newExportCmd())
 	cmd.AddCommand(newDiscoverCmd())
 	return cmd
 }

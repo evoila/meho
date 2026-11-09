@@ -1,0 +1,70 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The preview: the mistakes as sentences, then the diff, row for row what
+  ``meho settings import --preview`` prints. The apply form carries the exact
+  file bytes as base64, so nothing is held on the server between the two steps.
+-#}
+<div class="card bg-base-100 border-base-300 border shadow-sm" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}' data-settings-preview>
+  <div class="card-body space-y-3">
+    {% if answer.mistakes %}
+      <div class="alert alert-error" role="alert">
+        <div>
+          <p>Mistakes in the file. Nothing was written.</p>
+          <ul class="list-disc pl-5" data-settings-mistakes>
+            {% for sentence in answer.mistakes %}<li>{{ sentence }}</li>{% endfor %}
+          </ul>
+        </div>
+      </div>
+    {% endif %}
+    {% if answer.warnings %}
+      <div class="alert alert-warning" role="status">
+        <ul class="list-disc pl-5" data-settings-warnings>
+          {% for sentence in answer.warnings %}<li>{{ sentence }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    {% if rows %}
+      <div class="overflow-x-auto rounded-box border border-base-300">
+        <table class="table table-sm">
+          <thead><tr><th>Section</th><th>Change</th><th>Tenant</th><th>Item</th><th>Before and after</th></tr></thead>
+          <tbody>
+            {% for row in rows %}
+              <tr data-settings-row data-kind="{{ row.kind }}">
+                <td>{{ row.section }}</td>
+                <td>
+                  {% if row.kind == "added" %}<span class="badge badge-success badge-sm">added</span>
+                  {% elif row.kind == "changed" %}<span class="badge badge-info badge-sm">changed</span>
+                  {% else %}<span class="badge badge-ghost badge-sm">not in file</span>{% endif %}
+                </td>
+                <td class="font-mono text-xs">{{ row.tenant }}</td>
+                <td class="font-mono">{{ row.key }}</td>
+                <td class="font-mono text-xs">{{ row.detail }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+    {% if not_in_file %}
+      <p class="text-sm opacity-70">"Not in file" is information only: an import never deletes.</p>
+    {% endif %}
+    {% if answer.ok and not has_changes %}
+      <p class="text-sm" data-settings-nothing>Nothing to change.</p>
+    {% endif %}
+    {% if answer.ok and has_changes %}
+      <form
+        hx-post="/ui/settings/import/apply"
+        hx-encoding="multipart/form-data"
+        hx-target="#settings-import-result"
+        hx-swap="innerHTML"
+        hx-disabled-elt="find button[type=submit]"
+        class="flex justify-end"
+      >
+        <input type="hidden" name="file_b64" value="{{ file_b64 }}" />
+        <button type="submit" class="btn btn-sm btn-primary" data-action="settings-apply">Apply</button>
+      </form>
+    {% endif %}
+  </div>
+</div>

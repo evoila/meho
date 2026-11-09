@@ -1,0 +1,34 @@
+{
+  "tenants": {
+    "added": [{"tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}],
+    "changed": [],
+    "not_in_file": [{"tenant": "cccccccc-cccc-cccc-cccc-cccccccccccc"}]
+  },
+  "policies": {
+    "added": [],
+    "changed": [
+      {"tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "flight_recorder.retention_days", "before": null, "after": 14},
+      {"tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "announce_gate_enabled", "before": false, "after": true}
+    ],
+    "not_in_file": []
+  },
+  "conventions": {
+    "added": [
+      {"tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "change-window", "value": {"slug": "change-window", "title": "Change window"}}
+    ],
+    "changed": [],
+    "not_in_file": []
+  },
+  "targets": {
+    "added": [],
+    "changed": [
+      {
+        "tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "key": "vc-01",
+        "before": {"version": null, "host": "10.1.0.1", "extras": {"b": 1, "a": ["x"]}},
+        "after": {"version": "8.0", "host": "vc-01.ünï.test<", "extras": {}}
+      }
+    ],
+    "not_in_file": [{"tenant": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "key": "vc-02"}]
+  }
+}

@@ -1,0 +1,24 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The apply's answer, plus the history list swapped out of band.
+-#}
+{% if answer.failed %}
+  <div class="alert alert-warning" role="alert" data-settings-failed>
+    <div>
+      <p>These items could not be written. The rest were:</p>
+      <ul class="list-disc pl-5">
+        {% for sentence in answer.failed %}<li>{{ sentence }}</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+{% endif %}
+<div class="alert {{ 'alert-success' if answer.applied else 'alert-info' }}" role="status" data-settings-result>
+  {% if answer.revision_id %}
+    <span>Applied; revision <span class="font-mono">{{ answer.revision_id }}</span>.</span>
+  {% else %}
+    <span>Nothing was changed.</span>
+  {% endif %}
+</div>
+{% with oob = true %}{% include "settings/_history.html" %}{% endwith %}

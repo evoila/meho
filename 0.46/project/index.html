@@ -3051,8 +3051,8 @@ a v(N−1) client makes to keep working on v(N); see the <em>Breaking
 changes</em> convention in the
 <a href="https://github.com/evoila/meho/blob/main/CHANGELOG.md">CHANGELOG</a>).</p>
 <h3 id="what-ci-checks-today">What CI checks today<a class="headerlink" href="#what-ci-checks-today" title="Permanent link">&para;</a></h3>
-<p>A check in CI stops a change that breaks the REST API or the MCP tools.
-It compares each pull request with the version on <code>main</code>:</p>
+<p>A check in CI stops a change that breaks the REST API, the MCP tools or
+the Helm values. It compares each pull request with the version on <code>main</code>:</p>
 <ul>
 <li><strong>REST API:</strong> the public paths under <code>/api/v1/</code>. The console paths
   under <code>/ui/</code> are not covered. Examples of a break: a removed path, a
@@ -3060,12 +3060,19 @@ It compares each pull request with the version on <code>main</code>:</p>
 <li><strong>MCP tools:</strong> the tool names, the surface a tool is listed on, and the
   input and output schemas. Examples of a break: a removed tool, a removed
   argument, a new required argument, a removed field in the result.</li>
+<li><strong>Helm values:</strong> the keys of <code>values.yaml</code> and the rules in
+  <code>values.schema.json</code>. Examples of a break: a removed key (an operator's
+  setting for it stops working), a new required value, a removed allowed
+  value. A second check keeps golden renders of the chart in
+  <code>deploy/golden/</code>, so a review sees what a chart change does to the
+  installed objects.</li>
 </ul>
 <p>A breaking change merges only on purpose. The pull request must have the
 <code>breaking-change</code> label and a <em>Breaking changes</em> section that says what a
 client must change. That text goes into the release notes.</p>
-<p>Not checked by CI yet: the Helm values, the update from the previous
-release, the CLI verbs and flags, and the environment variables. The full
+<p>Not checked by CI yet: the CLI verbs and flags, and the environment
+variables. The update from the previous release is tested only for the
+Helm install, not for the other install forms. The full
 1.0 stability promise, with a deprecation window, is tracked in
 <a href="https://github.com/evoila/meho/issues/3861">evoila/meho#3861</a>.</p>
 <h2 id="security-policy">Security policy<a class="headerlink" href="#security-policy" title="Permanent link">&para;</a></h2>

@@ -373,6 +373,7 @@ async def hybrid_search(
     group_id: uuid.UUID | None,
     query: str,
     limit: int,
+    keep_best_meaning: bool = False,
 ) -> list[OperationSearchHit]:
     """BM25 + cosine RRF over ``endpoint_descriptor`` rows.
 
@@ -381,6 +382,10 @@ async def hybrid_search(
     a deterministic application-layer ranking. The PG path is what
     production hits; the SQLite path keeps the unit tests deterministic
     without a Postgres container.
+
+    *keep_best_meaning* (switch ``SEARCH_CLEAR_LEAD``, #6014) adds the
+    candidate with the best meaning score after the top *limit* hits when
+    the cut left it out. The top *limit* hits and their order stay the same.
     """
     conn = await session.connection()
     if conn.dialect.name == "postgresql":
@@ -393,6 +398,7 @@ async def hybrid_search(
             group_id=group_id,
             query=query,
             limit=limit,
+            keep_best_meaning=keep_best_meaning,
         )
     return await _hybrid_search_fallback(
         session,
@@ -403,6 +409,7 @@ async def hybrid_search(
         group_id=group_id,
         query=query,
         limit=limit,
+        keep_best_meaning=keep_best_meaning,
     )
 
 
@@ -416,6 +423,7 @@ async def _hybrid_search_pg(
     group_id: uuid.UUID | None,
     query: str,
     limit: int,
+    keep_best_meaning: bool,
 ) -> list[OperationSearchHit]:
     """PostgreSQL path -- FTS GIN + pgvector IVFFlat + RRF fusion.
 
@@ -457,7 +465,7 @@ async def _hybrid_search_pg(
     )
     cosine_rows = cosine_result.all()
 
-    fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
+    fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit, keep_best_meaning=keep_best_meaning)
     if not fused:
         return []
     return await _hydrate_hits(session, fused, tenant_id=tenant_id)
@@ -473,6 +481,7 @@ async def _hybrid_search_fallback(
     group_id: uuid.UUID | None,
     query: str,
     limit: int,
+    keep_best_meaning: bool,
 ) -> list[OperationSearchHit]:
     """SQLite (test-only) path -- substring + Python cosine ranking.
 
@@ -529,7 +538,7 @@ async def _hybrid_search_fallback(
             cosine_rows.append(_FallbackRow(row.id, cosine))
     bm25_rows.sort(key=lambda r: r.score, reverse=True)
     cosine_rows.sort(key=lambda r: r.score, reverse=True)
-    fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
+    fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit, keep_best_meaning=keep_best_meaning)
     if not fused:
         return []
     return await _hydrate_hits(session, fused, tenant_id=tenant_id)
@@ -579,6 +588,7 @@ def _rrf_fuse(
     cosine_rows: Sequence[Any],
     *,
     limit: int,
+    keep_best_meaning: bool = False,
 ) -> list[_FusedEntry]:
     """RRF fusion mirroring :func:`~meho_backplane.retrieval.retriever._rrf_fuse`.
 
@@ -587,6 +597,9 @@ def _rrf_fuse(
     step. Replicated here rather than imported because the retriever's
     helper is keyed on document UUIDs and the entry class is private to
     that module.
+
+    *keep_best_meaning* appends the entry with the best cosine score when
+    the cut to *limit* left it out (:func:`hybrid_search`).
     """
     if limit <= 0:
         return []
@@ -603,7 +616,17 @@ def _rrf_fuse(
         entry = entries.setdefault(descriptor_id, _FusedEntry(descriptor_id))
         entry.cosine_score = float(row.score) if row.score is not None else None
         entry.fused_score += 1.0 / (RRF_K + rank)
-    return sorted(entries.values(), key=lambda e: e.fused_score, reverse=True)[:limit]
+    ranked = sorted(entries.values(), key=lambda e: e.fused_score, reverse=True)
+    kept = ranked[:limit]
+    if keep_best_meaning and len(ranked) > limit:
+        best = max(
+            (e for e in ranked if e.cosine_score is not None),
+            key=lambda e: e.cosine_score or 0.0,
+            default=None,
+        )
+        if best is not None and best not in kept:
+            kept.append(best)
+    return kept
 
 
 def _coerce_uuid(value: Any) -> uuid.UUID:

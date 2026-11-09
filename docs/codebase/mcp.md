@@ -921,6 +921,32 @@ Every other result has an `outcome` field:
   - **Before turning it on:** compare the benchmark lane with the switch
     off and on, for a small model and for Claude, then one live run on a
     test install (see the pull request of #5490).
+- **A stricter `matched`, behind a switch (#6014).** A search can answer
+  `matched` when the top hit won the score list by a little, while
+  another hit is closer in meaning. A live search for "list virtual
+  machines" did this: the top hit was about one VM, and the right
+  operation was fifth. The backplane switch `SEARCH_CLEAR_LEAD` (an env
+  var, off by default) changes only the outcome, never the hits or their
+  order:
+  - When another hit has a better meaning score (`cosine_score`) than the
+    top hit, the answer is `ambiguous`. A top hit with no meaning score
+    counts as behind any hit that has one.
+  - With the switch on, the search also reads the candidate with the best
+    meaning score, even when it ranks below `limit` (for example eleventh,
+    below ten keyword hits). The top hit is compared against it. The
+    returned list is still cut to `limit`.
+  - Off: the same answers as before the switch existed.
+  - Why not a wider near-tie band: a band of two list positions took
+    `matched` away from six right top hits for each wrong one, over the
+    operations MEHO registers from code. It also cannot work with
+    `SEARCH_PLAIN_SENTENCES`, because a search with no keyword hits has
+    its top two exactly one list position apart.
+  - Code: `operations/_search_clear_lead.py` and `_run_search` in
+    `operations/meta_tools.py`. Tests: `tests/test_search_clear_lead.py`
+    and `tests/integration/test_search_clear_lead_pg.py`.
+  - **Before turning it on:** compare the benchmark lane with the switch
+    off and on, for a small model and for Claude, then one live run on a
+    test install (see the pull request of #6014).
 - The enabled-operation check and the group list use the same tenant
   filter as dispatch, and count enabled rows only. So the text never
   names a disabled operation or another tenant's operation.

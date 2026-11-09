@@ -22,8 +22,11 @@ so the request never waits for a push service.
   (:func:`~meho_backplane.web_push.encryption.encrypt`).
 * A person gets at most one "An approval waits" message per
   :data:`RATE_LIMIT_SECONDS`. The ones held back in that time become one
-  summary at its end. A decision is never held back: it replaces a message
-  the person already has.
+  summary at its end. A decision goes out at once only to a person who got
+  the "An approval waits" message of that request, because it replaces that
+  message. For everyone else a decision counts against the same limit, so a
+  burst of decisions (for example many requests expiring at once) does not
+  flood a phone.
 * A push service that answers 404 or 410 (the browser dropped the
   subscription) gets its row deleted.
 * Messages go only to the browser makers' push services (checked again here,
@@ -40,7 +43,7 @@ import asyncio
 import json
 import time
 import uuid
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -80,6 +83,8 @@ _log = structlog.get_logger(__name__)
 APPROVALS_PAGE = "/ui/approvals"
 #: At most one message per person in this many seconds; then one summary.
 RATE_LIMIT_SECONDS = 30.0
+#: At most this many shown requests are remembered per person (oldest go first).
+_SHOWN_LIMIT = 1000
 #: How long a push service keeps an undelivered message (seconds).
 _TTL_SECONDS = 24 * 60 * 60
 _TIMEOUT = httpx.Timeout(10.0)
@@ -119,12 +124,34 @@ class _Message:
 
 
 class _RateLimit:
-    """One message per person per window; count the held-back ones."""
+    """One message per person per window; count the held-back ones.
+
+    Also remembers, per person, the requests whose "An approval waits"
+    message was sent, so their decision can replace it at once. At most
+    :data:`_SHOWN_LIMIT` per person; the oldest are forgotten first.
+    """
 
     def __init__(self, window: float) -> None:
         self.window = window
         self._last: dict[str, float] = {}
         self._held: dict[str, int] = {}
+        self._shown: dict[str, OrderedDict[uuid.UUID, None]] = {}
+
+    def remember_shown(self, person: str, request_id: uuid.UUID) -> None:
+        shown = self._shown.setdefault(person, OrderedDict())
+        shown[request_id] = None
+        while len(shown) > _SHOWN_LIMIT:
+            shown.popitem(last=False)
+
+    def take_shown(self, person: str, request_id: uuid.UUID) -> bool:
+        """``True`` (and forget it) when the person got this request's first message."""
+        shown = self._shown.get(person)
+        if shown is None or request_id not in shown:
+            return False
+        del shown[request_id]
+        if not shown:
+            del self._shown[person]
+        return True
 
     def admit(self, person: str) -> bool:
         now = time.monotonic()
@@ -206,9 +233,15 @@ async def _send_step(step: _Step) -> None:
         for target in targets:
             by_person[target.operator_sub].append(target)
         for person, rows in by_person.items():
-            # A decision replaces a message the person already has (same tag
-            # and Topic), so the rate limit holds back only new requests.
-            if step.decision != "pending" or _limit.admit(person):
+            # A decision for a request whose first message this person got
+            # replaces that message (same tag and Topic), so it goes out at
+            # once. Every other message counts against the rate limit.
+            pending = step.decision == "pending"
+            if not pending and _limit.take_shown(person, step.request_id):
+                await _deliver_all(rows, message)
+            elif _limit.admit(person):
+                if pending:
+                    _limit.remember_shown(person, step.request_id)
                 await _deliver_all(rows, message)
             elif _limit.hold(person):
                 _spawn(_send_summary_later(person), name="web-push-summary")

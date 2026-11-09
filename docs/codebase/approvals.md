@@ -3616,9 +3616,13 @@ of this MEHO, never another address.
 **Rate limit.** A person gets at most one "An approval waits" message per
 30 seconds (`RATE_LIMIT_SECONDS`). The messages held back in that time
 become one summary at its end: "N more approval messages. Open the
-approvals page." (tag `approval-summary`). A decision is never held back:
-it replaces a message the person already has. The limit is kept in
-memory, per process.
+approvals page." (tag `approval-summary`). A decision goes out at once only
+to a person who got the "An approval waits" message of that request, because
+it replaces that message. For everyone else a decision counts against the
+same limit, so a burst of decisions (for example many requests expiring at
+once) gives one message and one summary, not one message per request. MEHO
+remembers up to 1,000 such requests per person (the oldest are forgotten
+first). The limit is kept in memory, per process.
 
 **Where messages go.** Only to the browser makers' push services: the
 endpoint is checked again before each send, not only when it was stored.

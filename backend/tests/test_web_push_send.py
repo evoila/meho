@@ -404,6 +404,48 @@ async def test_the_rate_limit_holds_and_ends_with_one_summary(
     assert time.monotonic() - started >= 0.3
 
 
+async def test_a_burst_of_decisions_gives_one_decision_message(
+    push_service: _FakePushService,
+) -> None:
+    admin = _browser("admin")
+    await _subscribe(admin, sub="admin", scope="all")
+    send_module.reset_for_testing(window=0.3)
+    requests = [_request() for _ in range(5)]
+
+    # No reset in between: 5 new requests, then all 5 expire.
+    for request in requests:
+        await record_approval_step_event(
+            tenant_id=_TENANT, request=request, decision="pending", audit_id=uuid.uuid4()
+        )
+    for request in requests:
+        request.status = "expired"
+        await record_approval_step_event(
+            tenant_id=_TENANT, request=request, decision="expired", audit_id=uuid.uuid4()
+        )
+    await send_module.wait_for_sends_for_testing()
+
+    messages = push_service.to(admin)
+    assert [m["title"] for m in messages] == [
+        "An approval waits",
+        "Approval expired",
+        "Approvals changed",
+    ]
+    # Only the request whose first message was shown gets its decision at once.
+    assert messages[0]["tag"] == messages[1]["tag"] == f"approval-{requests[0].id}"
+    assert messages[2]["body"] == "8 more approval messages. Open the approvals page."
+
+
+def test_the_remembered_requests_stay_bounded() -> None:
+    limit = send_module._RateLimit(30.0)
+    ids = [uuid.uuid4() for _ in range(send_module._SHOWN_LIMIT + 1)]
+    for request_id in ids:
+        limit.remember_shown("admin", request_id)
+
+    assert not limit.take_shown("admin", ids[0])
+    assert limit.take_shown("admin", ids[-1])
+    assert not limit.take_shown("admin", ids[-1])
+
+
 def test_the_default_window_is_thirty_seconds() -> None:
     assert send_module.RATE_LIMIT_SECONDS == 30.0
 

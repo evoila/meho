@@ -202,6 +202,7 @@ from meho_backplane.metrics import VAULT_TENANT_SCOPE_ENFORCED, render_metrics
 from meho_backplane.metrics_access import verify_metrics_access
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import operation_catalog_write, set_default_reducer
+from meho_backplane.operations._validate import warn_if_params_hash_key_missing
 from meho_backplane.operations.approval_expiry import (
     expire_approvals_from_older_release,
     start_approval_expiry_sweeper,
@@ -559,6 +560,10 @@ async def _run_lifespan_startup() -> None:
     # #5771: a default model with no price row costs 0, so the spend
     # limits would not count it. Warn, but start.
     warn_if_model_unpriced(get_settings().agent_default_model)
+    # Without PARAMS_HASH_KEY the first-start destination check does not
+    # run, and the params hashes use a key made from DATABASE_URL. Warn,
+    # but start.
+    warn_if_params_hash_key_missing()
     # G10.0-T5 (#866) — ensure ``ui/static/dist/`` exists so the
     # StaticFiles mount does not crash on a fresh clone where
     # ``tailwindcss --watch`` has not yet materialised the compiled

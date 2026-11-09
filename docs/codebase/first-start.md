@@ -40,9 +40,13 @@ User docs: `docs-site/install/first-start-checks.md`.
    it calls `BACKPLANE_URL/first-start/destination?nonce=<random>` and
    compares the answer with `_destination_proof(nonce)`, an HMAC under a key
    of this install (`derive_install_key` in `operations/_validate.py`, made
-   from `PARAMS_HASH_KEY` or `DATABASE_URL`, the same on every pod). While
-   the certificate line is red, the DNS line stays green and says the
+   from `PARAMS_HASH_KEY` only, the same on every pod). While the
+   certificate line is red, the DNS line stays green and says the
    destination is checked once the certificate is green.
+   Without `PARAMS_HASH_KEY`, `derive_install_key` raises
+   `InstallKeyMissingError`: `/first-start/destination` answers 404, and the
+   DNS line is a `warn` that names the setting. MEHO also logs
+   `params_hash_key_missing` once at start.
 
 Surfaces: `meho status --first-start` (`cli/internal/cmd/first_start.go`,
 exit code 6 on a red line; `WARN` label for a warning) and `/ui/first-start`

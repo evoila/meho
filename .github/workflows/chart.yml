@@ -154,7 +154,7 @@ jobs:
           files=$(gh api --paginate \
             "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
             --jq '.[].filename')
-          if grep -qE '^(deploy/charts/meho/|deploy/linux-server/packaging/render-values\.yaml$|deploy/linux-server/values-single-node\.yaml$|deploy/golden/|scripts/ci/helm_golden\.py$|\.github/workflows/chart\.yml$)' <<<"$files"; then
+          if grep -qE '^(deploy/charts/meho/|deploy/linux-server/packaging/render-values\.yaml$|deploy/linux-server/values-single-node\.yaml$|deploy/golden/|deploy/values-examples/values-openshift\.yaml$|scripts/ci/helm_golden\.py$|\.github/workflows/chart\.yml$)' <<<"$files"; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
           else
             echo "chart=false" >> "$GITHUB_OUTPUT"

@@ -2960,6 +2960,12 @@
           "extras": {
             "type": "object"
           },
+          "flight_recorder_capture": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "fqdn": {
             "type": [
               "string",
@@ -3001,6 +3007,15 @@
             "maxLength": 100,
             "minLength": 1,
             "type": "string"
+          },
+          "secret_field_map": {
+            "additionalProperties": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxProperties": 50,
+            "type": "object"
           },
           "secret_ref": {
             "type": [

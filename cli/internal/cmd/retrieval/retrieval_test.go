@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -223,26 +224,17 @@ func TestDecodeDetailStringFallback(t *testing.T) {
 	}
 }
 
-// TestNewRootCmdRegistersAllThreeVerbs — every advertised verb has
-// a cobra subcommand. The CLI manifest is the contract operators
-// build muscle memory around; dropping a verb silently is the
-// regression class we want to catch at unit-time.
-func TestNewRootCmdRegistersAllThreeVerbs(t *testing.T) {
+// TestNewRootCmdRegistersOnlyUsageAndPicks — `meho retrieval` has
+// exactly two verbs, `usage` and `picks`. The eval and retire-checklist
+// verbs were removed; a test catches either one coming back by accident.
+func TestNewRootCmdRegistersOnlyUsageAndPicks(t *testing.T) {
 	root := NewRootCmd()
-	want := map[string]bool{
-		"eval":             false,
-		"usage":            false,
-		"retire-checklist": false,
-	}
+	var names []string
 	for _, sub := range root.Commands() {
-		name := strings.SplitN(sub.Use, " ", 2)[0]
-		if _, ok := want[name]; ok {
-			want[name] = true
-		}
+		names = append(names, strings.SplitN(sub.Use, " ", 2)[0])
 	}
-	for name, seen := range want {
-		if !seen {
-			t.Errorf("subcommand %q not registered under `meho retrieval`", name)
-		}
+	sort.Strings(names)
+	if len(names) != 2 || names[0] != "picks" || names[1] != "usage" {
+		t.Errorf("`meho retrieval` subcommands = %v, want [picks usage]", names)
 	}
 }

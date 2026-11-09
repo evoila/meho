@@ -542,6 +542,14 @@ host), exactly the un-governed footgun this connector exists to retire.
   must not collide with a reserved wrapper variable (`tmp` / `args` / `f`) or
   with a name already declared in `env`, and the mapping is bounded (≤ 32
   entries).
+- **Checked before the call waits for approval.** The `secret_env` schema
+  carries `propertyNames` (the POSIX name pattern) and `maxProperties: 32`.
+  The dispatcher checks the schema before the policy gate, so a bad name or
+  too many entries fail at once with `invalid_params`, and no approval is
+  asked for. The pattern ends with `(?![\s\S])`, not `$`, so a name with a
+  trailing newline also fails here. The handler (`_validate_secret_env`) still checks every rule at
+  run time. The reserved names, the clash with `env`, and the reference shape
+  are checked only there.
 - **Resolution at execution time only.** The value is resolved when the handler
   runs — the `_approved=True` resume path (or a non-parking dispatch) — never at
   park time. Each field is read through the connector's single Vault seam

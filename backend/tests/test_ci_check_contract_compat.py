@@ -813,6 +813,21 @@ def test_inline_refs_keeps_sibling_keys_and_stops_on_a_cycle() -> None:
     assert tree["properties"]["child"] == {"$ref": "#/definitions/node"}
 
 
+def test_inline_refs_keeps_a_null_default() -> None:
+    schema = {"properties": {"a": {"type": ["string", "null"], "default": None}}}
+    assert compat.inline_refs(schema) == schema
+    assert compat.values_schema_breaking(schema, copy.deepcopy(schema)) == []
+
+
+def test_inline_refs_keeps_a_null_enum_value() -> None:
+    schema = {
+        "properties": {"scheme": {"$ref": "#/definitions/scheme"}},
+        "definitions": {"scheme": {"enum": ["HTTP", None]}},
+    }
+    assert compat.inline_refs(schema)["properties"]["scheme"] == {"enum": ["HTTP", None]}
+    assert compat.values_schema_breaking(schema, copy.deepcopy(schema)) == []
+
+
 def test_values_schema_fails_closed_on_a_ref_that_points_to_nothing() -> None:
     base = {"properties": {"a": {"$ref": "#/definitions/missing"}}}
     with pytest.raises(compat.CheckError, match="points to nothing"):

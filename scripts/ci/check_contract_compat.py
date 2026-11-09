@@ -482,26 +482,28 @@ def _resolve_local(document: Any, ref: str) -> Any:
     return node
 
 
-def inline_refs(document: Any, node: Any = None, chain: tuple[str, ...] = ()) -> Any:
-    """Return *node* (default: the whole *document*) with every local ``$ref`` replaced.
+def inline_refs(document: Any) -> Any:
+    """Return *document* with every local ``$ref`` replaced.
 
     A ``{"$ref": "#/definitions/x"}`` becomes a copy of ``definitions.x``, so
     a change inside a definition is compared at every place that uses it.
     Keys next to ``$ref`` are kept. A reference that points back into its own
     chain is left as it is, so a self-referencing schema cannot loop.
     """
-    if node is None:
-        node = document
+    return _inline(document, document, ())
+
+
+def _inline(document: Any, node: Any, chain: tuple[str, ...]) -> Any:
     if isinstance(node, list):
-        return [inline_refs(document, item, chain) for item in node]
+        return [_inline(document, item, chain) for item in node]
     if not isinstance(node, dict):
         return node
     ref = node.get("$ref")
     if isinstance(ref, str) and ref.startswith("#") and ref not in chain:
-        target = inline_refs(document, _resolve_local(document, ref), (*chain, ref))
-        rest = {k: inline_refs(document, v, chain) for k, v in node.items() if k != "$ref"}
+        target = _inline(document, _resolve_local(document, ref), (*chain, ref))
+        rest = {k: _inline(document, v, chain) for k, v in node.items() if k != "$ref"}
         return {**target, **rest} if isinstance(target, dict) else target
-    return {key: inline_refs(document, value, chain) for key, value in node.items()}
+    return {key: _inline(document, value, chain) for key, value in node.items()}
 
 
 def values_schema_breaking(base: Any, head: Any) -> list[str]:

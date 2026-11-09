@@ -5065,6 +5065,26 @@ type DbStatus struct {
 	Revision *string `json:"revision"`
 }
 
+// DecideAcceptedBody Answer of “/decide“ with “async: true“ on an approval (HTTP 202, #5110).
+//
+// The decision is saved and audited. The operation runs in the
+// background: “run_id“ names that run. Read the request with
+// “GET /api/v1/approvals/{id}“ until “result_state“ is no longer
+// “started“ or “not_started“. The decision fields mean the same as
+// in :class:`DecideResponseBody`.
+type DecideAcceptedBody struct {
+	ApprovalRequestId openapi_types.UUID `json:"approval_request_id"`
+	ApprovalRule      *string            `json:"approval_rule"`
+	Async             *bool              `json:"async,omitempty"`
+	DecidedBy         *string            `json:"decided_by"`
+	DecidedByName     *string            `json:"decided_by_name"`
+	Decision          string             `json:"decision"`
+	Reason            string             `json:"reason"`
+	RunId             openapi_types.UUID `json:"run_id"`
+	SelfApproved      *bool              `json:"self_approved"`
+	Status            *string            `json:"status,omitempty"`
+}
+
 // DecideRequestBody POST body for “/decide“ — the operator-decision path.
 //
 // Distinct from :class:`ApproveRequestBody` (which requires the
@@ -5072,6 +5092,9 @@ type DbStatus struct {
 // approves by request id alone — the params are read back from the
 // row the dispatcher stored at park time (#1503).
 type DecideRequestBody struct {
+	// Async Answer at once (#5110). When true and the decision is 'approved', MEHO saves the decision, starts the operation in the background and answers HTTP 202 with a run id. Read the request with GET /api/v1/approvals/{id} to see the run end (result_state). Ignored on a rejection. Default false: the answer comes after the operation ends, as before.
+	Async *bool `json:"async,omitempty"`
+
 	// Decision One of 'approved' / 'rejected'.
 	Decision string `json:"decision"`
 
@@ -13319,6 +13342,11 @@ type RunbooksDetailUiRunbooksSlugGetParams struct {
 	Version *int `form:"version,omitempty" json:"version,omitempty"`
 }
 
+// RunNoticesUiRunsNoticesGetParams defines parameters for RunNoticesUiRunsNoticesGet.
+type RunNoticesUiRunsNoticesGetParams struct {
+	RunId *[]openapi_types.UUID `form:"run_id,omitempty" json:"run_id,omitempty"`
+}
+
 // UiSchedulerListUiSchedulerGetParams defines parameters for UiSchedulerListUiSchedulerGet.
 type UiSchedulerListUiSchedulerGetParams struct {
 	Kind    *KindFilterValue   `form:"kind,omitempty" json:"kind,omitempty"`
@@ -16731,6 +16759,12 @@ type ClientInterface interface {
 
 	ApprovalRejectUiApprovalsRequestIdRejectPostWithFormdataBody(ctx context.Context, requestId openapi_types.UUID, body ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ApprovalHistoryRowUiApprovalsRequestIdRowGet request
+	ApprovalHistoryRowUiApprovalsRequestIdRowGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalRunStateUiApprovalsRequestIdRunGet request
+	ApprovalRunStateUiApprovalsRequestIdRunGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAuditPageUiAuditGet request
 	UiAuditPageUiAuditGet(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17336,6 +17370,9 @@ type ClientInterface interface {
 
 	// UiRunnersListUiRunnersGet request
 	UiRunnersListUiRunnersGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunNoticesUiRunsNoticesGet request
+	RunNoticesUiRunsNoticesGet(ctx context.Context, params *RunNoticesUiRunsNoticesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiSchedulerListUiSchedulerGetWithBody request with any body
 	UiSchedulerListUiSchedulerGetWithBody(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -21712,6 +21749,30 @@ func (c *Client) ApprovalRejectUiApprovalsRequestIdRejectPostWithFormdataBody(ct
 	return c.Client.Do(req)
 }
 
+func (c *Client) ApprovalHistoryRowUiApprovalsRequestIdRowGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalHistoryRowUiApprovalsRequestIdRowGetRequest(c.Server, requestId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalRunStateUiApprovalsRequestIdRunGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalRunStateUiApprovalsRequestIdRunGetRequest(c.Server, requestId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UiAuditPageUiAuditGet(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAuditPageUiAuditGetRequest(c.Server, params)
 	if err != nil {
@@ -24462,6 +24523,18 @@ func (c *Client) RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBody(ctx co
 
 func (c *Client) UiRunnersListUiRunnersGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiRunnersListUiRunnersGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunNoticesUiRunsNoticesGet(ctx context.Context, params *RunNoticesUiRunsNoticesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunNoticesUiRunsNoticesGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -40895,6 +40968,74 @@ func NewApprovalRejectUiApprovalsRequestIdRejectPostRequestWithBody(server strin
 	return req, nil
 }
 
+// NewApprovalHistoryRowUiApprovalsRequestIdRowGetRequest generates requests for ApprovalHistoryRowUiApprovalsRequestIdRowGet
+func NewApprovalHistoryRowUiApprovalsRequestIdRowGetRequest(server string, requestId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/%s/row", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewApprovalRunStateUiApprovalsRequestIdRunGetRequest generates requests for ApprovalRunStateUiApprovalsRequestIdRunGet
+func NewApprovalRunStateUiApprovalsRequestIdRunGetRequest(server string, requestId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/%s/run", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAuditPageUiAuditGetRequest generates requests for UiAuditPageUiAuditGet
 func NewUiAuditPageUiAuditGetRequest(server string, params *UiAuditPageUiAuditGetParams) (*http.Request, error) {
 	var err error
@@ -48102,6 +48243,55 @@ func NewUiRunnersListUiRunnersGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewRunNoticesUiRunsNoticesGetRequest generates requests for RunNoticesUiRunsNoticesGet
+func NewRunNoticesUiRunsNoticesGetRequest(server string, params *RunNoticesUiRunsNoticesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runs/notices")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.RunId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "run_id", runtime.ParamLocationQuery, *params.RunId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiSchedulerListUiSchedulerGetRequest calls the generic UiSchedulerListUiSchedulerGet builder with application/json body
 func NewUiSchedulerListUiSchedulerGetRequest(server string, params *UiSchedulerListUiSchedulerGetParams, body UiSchedulerListUiSchedulerGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -50962,6 +51152,12 @@ type ClientWithResponsesInterface interface {
 
 	ApprovalRejectUiApprovalsRequestIdRejectPostWithFormdataBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, body ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalRejectUiApprovalsRequestIdRejectPostResponse, error)
 
+	// ApprovalHistoryRowUiApprovalsRequestIdRowGetWithResponse request
+	ApprovalHistoryRowUiApprovalsRequestIdRowGetWithResponse(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ApprovalHistoryRowUiApprovalsRequestIdRowGetResponse, error)
+
+	// ApprovalRunStateUiApprovalsRequestIdRunGetWithResponse request
+	ApprovalRunStateUiApprovalsRequestIdRunGetWithResponse(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ApprovalRunStateUiApprovalsRequestIdRunGetResponse, error)
+
 	// UiAuditPageUiAuditGetWithResponse request
 	UiAuditPageUiAuditGetWithResponse(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*UiAuditPageUiAuditGetResponse, error)
 
@@ -51567,6 +51763,9 @@ type ClientWithResponsesInterface interface {
 
 	// UiRunnersListUiRunnersGetWithResponse request
 	UiRunnersListUiRunnersGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiRunnersListUiRunnersGetResponse, error)
+
+	// RunNoticesUiRunsNoticesGetWithResponse request
+	RunNoticesUiRunsNoticesGetWithResponse(ctx context.Context, params *RunNoticesUiRunsNoticesGetParams, reqEditors ...RequestEditorFn) (*RunNoticesUiRunsNoticesGetResponse, error)
 
 	// UiSchedulerListUiSchedulerGetWithBodyWithResponse request with any body
 	UiSchedulerListUiSchedulerGetWithBodyWithResponse(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerListUiSchedulerGetResponse, error)
@@ -52430,6 +52629,7 @@ type DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *DecideResponseBody
+	JSON202      *DecideAcceptedBody
 	JSON422      *HTTPValidationError
 }
 
@@ -57434,6 +57634,50 @@ func (r ApprovalRejectUiApprovalsRequestIdRejectPostResponse) StatusCode() int {
 	return 0
 }
 
+type ApprovalHistoryRowUiApprovalsRequestIdRowGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalHistoryRowUiApprovalsRequestIdRowGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalHistoryRowUiApprovalsRequestIdRowGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalRunStateUiApprovalsRequestIdRunGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalRunStateUiApprovalsRequestIdRunGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalRunStateUiApprovalsRequestIdRunGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAuditPageUiAuditGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -60627,6 +60871,28 @@ func (r UiRunnersListUiRunnersGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiRunnersListUiRunnersGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunNoticesUiRunsNoticesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunNoticesUiRunsNoticesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunNoticesUiRunsNoticesGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -64454,6 +64720,24 @@ func (c *ClientWithResponses) ApprovalRejectUiApprovalsRequestIdRejectPostWithFo
 	return ParseApprovalRejectUiApprovalsRequestIdRejectPostResponse(rsp)
 }
 
+// ApprovalHistoryRowUiApprovalsRequestIdRowGetWithResponse request returning *ApprovalHistoryRowUiApprovalsRequestIdRowGetResponse
+func (c *ClientWithResponses) ApprovalHistoryRowUiApprovalsRequestIdRowGetWithResponse(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ApprovalHistoryRowUiApprovalsRequestIdRowGetResponse, error) {
+	rsp, err := c.ApprovalHistoryRowUiApprovalsRequestIdRowGet(ctx, requestId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalHistoryRowUiApprovalsRequestIdRowGetResponse(rsp)
+}
+
+// ApprovalRunStateUiApprovalsRequestIdRunGetWithResponse request returning *ApprovalRunStateUiApprovalsRequestIdRunGetResponse
+func (c *ClientWithResponses) ApprovalRunStateUiApprovalsRequestIdRunGetWithResponse(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ApprovalRunStateUiApprovalsRequestIdRunGetResponse, error) {
+	rsp, err := c.ApprovalRunStateUiApprovalsRequestIdRunGet(ctx, requestId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalRunStateUiApprovalsRequestIdRunGetResponse(rsp)
+}
+
 // UiAuditPageUiAuditGetWithResponse request returning *UiAuditPageUiAuditGetResponse
 func (c *ClientWithResponses) UiAuditPageUiAuditGetWithResponse(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*UiAuditPageUiAuditGetResponse, error) {
 	rsp, err := c.UiAuditPageUiAuditGet(ctx, params, reqEditors...)
@@ -66440,6 +66724,15 @@ func (c *ClientWithResponses) UiRunnersListUiRunnersGetWithResponse(ctx context.
 	return ParseUiRunnersListUiRunnersGetResponse(rsp)
 }
 
+// RunNoticesUiRunsNoticesGetWithResponse request returning *RunNoticesUiRunsNoticesGetResponse
+func (c *ClientWithResponses) RunNoticesUiRunsNoticesGetWithResponse(ctx context.Context, params *RunNoticesUiRunsNoticesGetParams, reqEditors ...RequestEditorFn) (*RunNoticesUiRunsNoticesGetResponse, error) {
+	rsp, err := c.RunNoticesUiRunsNoticesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunNoticesUiRunsNoticesGetResponse(rsp)
+}
+
 // UiSchedulerListUiSchedulerGetWithBodyWithResponse request with arbitrary body returning *UiSchedulerListUiSchedulerGetResponse
 func (c *ClientWithResponses) UiSchedulerListUiSchedulerGetWithBodyWithResponse(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerListUiSchedulerGetResponse, error) {
 	rsp, err := c.UiSchedulerListUiSchedulerGetWithBody(ctx, params, contentType, body, reqEditors...)
@@ -67883,6 +68176,13 @@ func ParseDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse(rsp *ht
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest DecideAcceptedBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -74632,6 +74932,58 @@ func ParseApprovalRejectUiApprovalsRequestIdRejectPostResponse(rsp *http.Respons
 	return response, nil
 }
 
+// ParseApprovalHistoryRowUiApprovalsRequestIdRowGetResponse parses an HTTP response from a ApprovalHistoryRowUiApprovalsRequestIdRowGetWithResponse call
+func ParseApprovalHistoryRowUiApprovalsRequestIdRowGetResponse(rsp *http.Response) (*ApprovalHistoryRowUiApprovalsRequestIdRowGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalHistoryRowUiApprovalsRequestIdRowGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseApprovalRunStateUiApprovalsRequestIdRunGetResponse parses an HTTP response from a ApprovalRunStateUiApprovalsRequestIdRunGetWithResponse call
+func ParseApprovalRunStateUiApprovalsRequestIdRunGetResponse(rsp *http.Response) (*ApprovalRunStateUiApprovalsRequestIdRunGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalRunStateUiApprovalsRequestIdRunGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUiAuditPageUiAuditGetResponse parses an HTTP response from a UiAuditPageUiAuditGetWithResponse call
 func ParseUiAuditPageUiAuditGetResponse(rsp *http.Response) (*UiAuditPageUiAuditGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -78284,6 +78636,32 @@ func ParseUiRunnersListUiRunnersGetResponse(rsp *http.Response) (*UiRunnersListU
 	response := &UiRunnersListUiRunnersGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseRunNoticesUiRunsNoticesGetResponse parses an HTTP response from a RunNoticesUiRunsNoticesGetWithResponse call
+func ParseRunNoticesUiRunsNoticesGetResponse(rsp *http.Response) (*RunNoticesUiRunsNoticesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunNoticesUiRunsNoticesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

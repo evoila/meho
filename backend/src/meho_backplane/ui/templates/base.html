@@ -121,6 +121,9 @@
        from a microtask at the end of its own script task, so a later
        script would register too late (#1692). -#}
     <script src="/ui/static/src/app/approvals-bell.js" defer></script>
+    {#- "The run has ended" notice (#5110): watches the background runs a
+       page started and asks on the bell's timer. On every console page. -#}
+    <script src="/ui/static/src/app/run-notices.js" defer></script>
     {#- App-shell native-<dialog> modal controller (G0.26-T3 #1803).
        Loaded OUTSIDE ``component_scripts`` so it ships on EVERY console
        page: it opens HTMX-injected ``<dialog class="modal">`` fragments
@@ -440,6 +443,9 @@
          dismiss it (#1803). #}
       <div id="meho-approvals-modal-container"></div>
     </div>
+
+    {# "The run has ended" notices (#5110), added by ``run-notices.js``. #}
+    <div id="meho-run-notices" class="toast toast-end toast-bottom z-50" aria-live="polite"></div>
 
     {# Per-surface deferred JS that does NOT register Alpine
        components -- plain-JS page scripts (topology) and heavy vendor

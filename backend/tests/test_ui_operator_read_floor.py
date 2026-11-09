@@ -134,6 +134,10 @@ _READ_ONLY_PAGES: dict[str, tuple[str, str] | None] = {
     "/ui/approvals/list": ("GET", "/api/v1/approvals"),
     "/ui/approvals/in-order": ("GET", "/api/v1/approvals"),
     "/ui/approvals/{request_id}": ("GET", "/api/v1/approvals/{request_id}"),
+    "/ui/approvals/{request_id}/run": ("GET", "/api/v1/approvals/{request_id}"),
+    "/ui/approvals/{request_id}/row": ("GET", "/api/v1/approvals/{request_id}"),
+    # The "the run has ended" notice: only runs the caller started (#5110).
+    "/ui/runs/notices": None,
     "/ui/automation": ("GET", "/api/v1/automation"),
     "/ui/memory": ("GET", "/api/v1/memory"),
     "/ui/memory/create": ("GET", "/api/v1/memory"),

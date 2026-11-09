@@ -74,6 +74,7 @@ from meho_backplane.operations.approval_queue import (
     rehydrate_resume_target,
 )
 from meho_backplane.operations.approval_resume_checks import preview_changed_since_request
+from meho_backplane.operations.grant_approval import grant_changed_since_request
 
 __all__ = [
     "RERUN_AUDIT_PATH",
@@ -208,6 +209,15 @@ def _static_refusal(request: ApprovalRequest, params: dict[str, Any]) -> RerunRe
     if request.resume_parent is not None and "params" not in request.resume_parent:
         return RerunRefusal.INPUT_NOT_KEPT
     return None
+
+
+async def _object_changed(
+    operator: Operator, request: ApprovalRequest, target: Any, params: dict[str, Any]
+) -> bool:
+    """The object of the call, or the login or group a change of rights is for, moved."""
+    if await object_changed_since_request(operator, request, target, params) is not None:
+        return True
+    return await grant_changed_since_request(operator, request, target, params) is not None
 
 
 def _target_refusal(denied: OperationResult) -> RerunRefusal:
@@ -349,7 +359,7 @@ async def _check_rerun(
             reason = _target_refusal(denied)
         elif await preview_changed_since_request(operator, request, target, effective):
             reason = RerunRefusal.PREVIEW_CHANGED
-        elif await object_changed_since_request(operator, request, target, effective) is not None:
+        elif await _object_changed(operator, request, target, effective):
             reason = RerunRefusal.OBJECT_CHANGED
     if reason is not None:
         raise await _refuse(

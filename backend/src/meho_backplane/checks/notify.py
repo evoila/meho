@@ -147,8 +147,8 @@ SMTP session. And neither :func:`notify_dashboard_transition` nor
 :func:`notify_finding` raises: a refused, unconfigured, or failed
 :func:`~meho_backplane.connectors.mail.transport.send_email` is logged
 (``checks_notify_failed`` / ``checks_finding_email_failed``) and swallowed --
-for a Dashboard mail the result is also kept on the Dashboard row and
-counted (:mod:`meho_backplane.checks.mail_result`) --
+for a Dashboard mail the result is also kept on the Dashboard row, written
+to the audit log and counted (:mod:`meho_backplane.checks.mail_result`) --
 contract parity with ``investigate_on_transition``'s never-raise posture. A
 broken MTA must not convert a committed transition claim into a persist-path
 failure, nor a persisted finding into a lost noise-suppression policy.
@@ -181,7 +181,7 @@ import structlog
 
 from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.checks.acknowledgement import all_acknowledged
-from meho_backplane.checks.mail_result import record_mail_result
+from meho_backplane.checks.mail_result import AlertMail, record_mail_result
 from meho_backplane.connectors.mail.allowlist import (
     RecipientNotAllowedError,
     assert_recipient_allowed,
@@ -734,11 +734,40 @@ def _allowed_recipients(raw: str, **log_fields: object) -> list[str]:
     return survivors
 
 
-async def _record(notice: DashboardNotice, *, sent: bool, reason: str | None) -> None:
-    """Store and count the result of this alert mail attempt (never raises)."""
+def _alert_mail(notice: DashboardNotice, recipients: list[str]) -> AlertMail:
+    """What the audit row of this attempt records (see :class:`AlertMail`)."""
+    configured = [part.strip() for part in (notice.notify_email or "").split(",")]
+    change = notice.member_change
+    sensor = (
+        None
+        if change is None
+        else {
+            "id": str(change.sensor_id),
+            "name": change.name,
+            "previous_state": change.previous_state,
+            "current_state": change.current_state,
+            "acknowledgement_ended": change.acknowledgement_ended,
+        }
+    )
+    return AlertMail(
+        dashboard_name=notice.name,
+        previous_state=notice.previous_state,
+        current_state=notice.current_state,
+        subject=_subject(notice),
+        to=tuple(recipients),
+        refused=tuple(entry for entry in configured if entry and entry not in recipients),
+        sensor=sensor,
+    )
+
+
+async def _record(
+    notice: DashboardNotice, recipients: list[str], *, sent: bool, reason: str | None
+) -> None:
+    """Store, audit and count the result of this alert mail attempt (never raises)."""
     await record_mail_result(
         tenant_id=notice.tenant_id,
         dashboard_id=notice.dashboard_id,
+        mail=_alert_mail(notice, recipients),
         sent=sent,
         reason=reason,
     )
@@ -769,7 +798,7 @@ async def _deliver(notice: DashboardNotice, recipients: list[str]) -> None:
             reason="unexpected_error",
             exc_info=True,
         )
-        await _record(notice, sent=False, reason="unexpected_error")
+        await _record(notice, recipients, sent=False, reason="unexpected_error")
         return
 
     if not result.sent:
@@ -778,9 +807,9 @@ async def _deliver(notice: DashboardNotice, recipients: list[str]) -> None:
             dashboard_id=str(notice.dashboard_id),
             reason=result.reason,
         )
-        await _record(notice, sent=False, reason=result.reason)
+        await _record(notice, recipients, sent=False, reason=result.reason)
         return
-    await _record(notice, sent=True, reason=None)
+    await _record(notice, recipients, sent=True, reason=None)
     _log().info(
         "checks_notify_sent",
         member_count=len(notice.members),
@@ -880,7 +909,7 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
             "checks_notify_no_allowed_recipients",
             dashboard_id=str(notice.dashboard_id),
         )
-        await _record(notice, sent=False, reason="no_allowed_recipients")
+        await _record(notice, [], sent=False, reason="no_allowed_recipients")
         return
     await _deliver(notice, recipients)
 

@@ -356,10 +356,15 @@ def test_detail_shows_who_acknowledged_a_member_until_when_and_why() -> None:
 
 
 def _set_mail_result(dash_id: uuid.UUID, *, sent: bool, reason: str | None) -> None:
-    from meho_backplane.checks.mail_result import record_mail_result
+    from meho_backplane.checks.mail_result import AlertMail, record_mail_result
 
+    mail = AlertMail(
+        dashboard_name="x", previous_state="ok", current_state="critical", subject="s", to=()
+    )
     asyncio.run(
-        record_mail_result(tenant_id=_TENANT_A, dashboard_id=dash_id, sent=sent, reason=reason)
+        record_mail_result(
+            tenant_id=_TENANT_A, dashboard_id=dash_id, mail=mail, sent=sent, reason=reason
+        )
     )
 
 

@@ -24,7 +24,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import meho_backplane.connectors.linux  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.connectors.linux import ops_firewall_rollback as rollback
 from meho_backplane.connectors.linux.ops import PathConfinementError
@@ -53,7 +52,6 @@ from meho_backplane.settings import get_settings
 
 _SUDO_CANARY = "linux-fw-sudo-canary-xyz-517"  # gitleaks:allow -- synthetic
 _ROLLBACK_ID = "0123456789abcdef"
-_ROLLBACK_MODULE = "meho_backplane.connectors.linux.ops_firewall_rollback"
 _NEW_RULES = "table inet filter {\n  chain input { type filter hook input priority 0; }\n}\n"
 
 

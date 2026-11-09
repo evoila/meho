@@ -4915,6 +4915,52 @@ meho service-principals read-scope show <principal-sub> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw ServiceReadScopeRead JSON
 
+## `meho sessions`
+
+List, show and delete stored agent sessions
+
+```
+meho sessions
+```
+
+### `meho sessions delete`
+
+Delete one stored agent session and its files (DELETE /api/v1/sessions/{session_id})
+
+```
+meho sessions delete <session-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--confirm` — do not ask before deleting
+- `--json` — print the result as JSON
+
+### `meho sessions list`
+
+List the stored agent sessions of your tenant (GET /api/v1/sessions)
+
+```
+meho sessions list [flags]
+```
+
+- `--all` — follow every page to the end
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--json` — print the sessions as JSON
+- `--limit` — sessions per page (1 to 200)
+- `--project` — only sessions of this project
+- `--state` — only sessions in this state: open, ended or unfinished
+
+### `meho sessions show`
+
+Show one stored agent session (GET /api/v1/sessions/{session_id})
+
+```
+meho sessions show <session-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--json` — print the session as JSON
+
 ## `meho status`
 
 Show operator identity + backplane health; --watch streams live activity

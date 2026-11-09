@@ -127,9 +127,9 @@ async def _subscribe(
             "ui_push_subscription_refused",
             operator_sub=session_ctx.operator_sub,
             tenant_id=str(session_ctx.tenant_id),
-            reason=str(exc),
+            reason=exc.message,
         )
-        return PlainTextResponse(str(exc), status_code=422)
+        return PlainTextResponse(exc.message, status_code=422)
     try:
         await save_subscription(
             db_session,

@@ -47,7 +47,11 @@ _HOST_SUFFIXES: dict[str, str] = {
 
 
 class SubscriptionRefusedError(ValueError):
-    """The subscription is not accepted; the message is one plain sentence."""
+    """The subscription is not accepted; ``message`` is one plain sentence."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
 
 @dataclass(frozen=True)

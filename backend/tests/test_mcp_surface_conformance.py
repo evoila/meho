@@ -52,6 +52,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -70,6 +71,7 @@ from meho_backplane.mcp.handlers import handle_tools_list
 from meho_backplane.mcp.human_only import HUMAN_ONLY_MCP_TOOLS, human_only_remediation
 from meho_backplane.mcp.registry import MCP_ADMIN_SCOPE
 from meho_backplane.operations import approval_queue
+from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -759,3 +761,113 @@ def test_tools_list_over_mcp_route_elevated_session() -> None:
     assert resp.status_code == 200, resp.text
     names = sorted(tool["name"] for tool in resp.json()["result"]["tools"])
     assert names == list(FULL_SURFACE_SORTED)
+
+
+# ---------------------------------------------------------------------------
+# Tool text that follows a switch (KB_SIMILAR_CHECK, TEAM_KNOWLEDGE_RECALL)
+# ---------------------------------------------------------------------------
+
+#: Words that belong to the two switched features. With both switches off,
+#: none of them may be in the listing.
+_SWITCHED_WORDS: tuple[str, ...] = (
+    "create_anyway",
+    "similar entries",
+    "similar_entries",
+    "`similar`",
+    "team_knowledge",
+)
+
+#: The tools whose listing follows a switch, and the switch each follows.
+_SWITCHED_TOOLS: dict[str, str] = {
+    "add_to_knowledge": "KB_SIMILAR_CHECK",
+    "call_operation": "TEAM_KNOWLEDGE_RECALL",
+    "preview_operation": "TEAM_KNOWLEDGE_RECALL",
+}
+
+
+def _set_switches(monkeypatch: pytest.MonkeyPatch, *, similar: bool, recall: bool) -> None:
+    monkeypatch.setenv("KB_SIMILAR_CHECK", "true" if similar else "false")
+    monkeypatch.setenv("TEAM_KNOWLEDGE_RECALL", "true" if recall else "false")
+    get_settings.cache_clear()
+
+
+async def _listed_tools(operator: Operator) -> dict[str, dict[str, Any]]:
+    result = await handle_tools_list(operator, None)
+    return {tool["name"]: tool for tool in result["tools"]}
+
+
+async def test_switches_off_listing_has_no_word_of_the_switched_features(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With both switches off, no listed tool talks about the two features."""
+    _set_switches(monkeypatch, similar=False, recall=False)
+    tools = await _listed_tools(_operator(capabilities=frozenset({_DOCS_CAPABILITY})))
+    for name, tool in tools.items():
+        text = str(tool)
+        for word in _SWITCHED_WORDS:
+            assert word not in text, f"{name} lists {word!r} with its switch off"
+    knowledge = tools["add_to_knowledge"]
+    assert "create_anyway" not in knowledge["inputSchema"]["properties"]
+    assert "dry_run" in knowledge["inputSchema"]["properties"]
+    for name in ("call_operation", "preview_operation"):
+        assert "team_knowledge" not in tools[name]["outputSchema"]["properties"]
+
+
+@pytest.mark.parametrize("switch", sorted(set(_SWITCHED_TOOLS.values())))
+async def test_a_switch_on_lists_its_tools_as_registered(
+    monkeypatch: pytest.MonkeyPatch, switch: str
+) -> None:
+    """With a switch on, its tools list the same text and schema as registered.
+
+    The registered definition is the full text from before the switch
+    existed, so "on" changes nothing. The other switch stays off, so each
+    switch is checked on its own.
+    """
+    _set_switches(
+        monkeypatch, similar=switch == "KB_SIMILAR_CHECK", recall=switch == "TEAM_KNOWLEDGE_RECALL"
+    )
+    tools = await _listed_tools(_operator())
+    for name, tool_switch in _SWITCHED_TOOLS.items():
+        registered = mcp_registry._TOOLS[name][0].to_wire()
+        if tool_switch == switch:
+            assert tools[name] == registered
+        else:
+            assert tools[name] != registered
+    if switch == "KB_SIMILAR_CHECK":
+        assert "create_anyway" in tools["add_to_knowledge"]["inputSchema"]["properties"]
+        assert "similar entries first" in tools["add_to_knowledge"]["description"]
+    else:
+        for name in ("call_operation", "preview_operation"):
+            assert "team_knowledge" in tools[name]["outputSchema"]["properties"]
+
+
+def test_switches_off_over_mcp_route_and_create_anyway_is_refused_clearly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``/mcp`` route (also what the CLI reads) lists the off text, and checks calls by it.
+
+    A call that still sends ``create_anyway`` gets an invalid-input answer
+    that names the field, not an internal error.
+    """
+    _set_switches(monkeypatch, similar=False, recall=False)
+    with _client_for(_operator()) as client:
+        listed = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        called = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "add_to_knowledge",
+                    "arguments": {"slug": "new-topic", "body": "Text.", "create_anyway": True},
+                },
+            },
+        )
+    assert listed.status_code == 200, listed.text
+    tools = {tool["name"]: tool for tool in listed.json()["result"]["tools"]}
+    assert "create_anyway" not in str(tools["add_to_knowledge"])
+    assert "team_knowledge" not in str(tools["call_operation"])
+    error = called.json()["error"]
+    assert error["code"] == -32602
+    assert "create_anyway" in error["message"]

@@ -113,6 +113,7 @@ from meho_backplane.mcp.registry import (
     redacted_audit_uri,
     role_at_least,
     surface_visible,
+    tool_for_settings,
     tool_role_gate_met,
     tool_surface,
 )
@@ -455,6 +456,9 @@ async def handle_tools_call(
             status_code = 404
             raise McpInvalidParamsError(f"unknown tool: {name!r}")
         defn, handler = entry
+        # The tool as tools/list shows it under the current settings, so the
+        # input check below uses the listed schema.
+        defn = tool_for_settings(defn)
         # Request usage (#3734): label the request with the registered tool.
         note_request_route(f"tool:{name}")
         audit_payload["op_class"] = resolve_op_class(name, defn.op_class)

@@ -109,7 +109,7 @@ Per CLAUDE.md postulate 5, the agent never sees vendor-specific tools. The kb fl
 
 - One-shot import: the operator points `meho kb ingest` at their cloned consumer `kb/` directory; re-running after a consumer-side `git pull` is cheap (body-hash skip re-embeds only changed entries).
 - ≥1-month overlap: the consumer repo's `kb/` stays live as the fallback; operators use `meho kb search` for daily lookups, `grep` is the override.
-- Operator-driven retire — there is **no auto-retirement**. The retire decision is operationalised by G4.3's `meho retrieval retire-checklist` (a surface-scoped 5-criterion checklist; kb is one of three surfaces it scores), backed by the G4.3 eval corpus (#440, closed) and eval runner (#441, closed — `meho retrieval eval` / `POST /api/v1/retrieve/eval`, precision@5 / MRR / coverage@5 vs the `grep` baseline). The G4.3 Initiative [#373](https://github.com/evoila/meho/issues/373) tracks the remaining operationalisation. The operator runbook [`docs/cross-repo/kb-migration.md`](../cross-repo/kb-migration.md) is the end-to-end recipe.
+- Operator-driven retire — there is **no auto-retirement**. The team decides when to delete the in-repo copy. `meho retrieval usage` shows whether daily lookups have moved to MEHO. The operator runbook [`docs/cross-repo/kb-migration.md`](../cross-repo/kb-migration.md) is the end-to-end recipe.
 
 ## What's intentionally out of scope
 
@@ -124,6 +124,6 @@ Per CLAUDE.md postulate 5, the agent never sees vendor-specific tools. The kb fl
 - [Initiative #331 G4.1](https://github.com/evoila/meho/issues/331) — scope + DoD. Tasks: T1 [#415](https://github.com/evoila/meho/issues/415), T2 [#416](https://github.com/evoila/meho/issues/416), T3 [#417](https://github.com/evoila/meho/issues/417), T4 [#418](https://github.com/evoila/meho/issues/418), T5 [#419](https://github.com/evoila/meho/issues/419), T6 [#420](https://github.com/evoila/meho/issues/420).
 - Substrate: [#225 G0.4 retrieval substrate](https://github.com/evoila/meho/issues/225) — `index_document` ([`retrieval/indexer.py`](../../backend/src/meho_backplane/retrieval/indexer.py)), `retrieve` ([`retrieval/retriever.py`](../../backend/src/meho_backplane/retrieval/retriever.py)).
 - [decision #2](../decisions/locked-decisions.md) — one-shot import + 1-month overlap.
-- Downstream: [#373 G4.3](https://github.com/evoila/meho/issues/373) — retrieval migration tooling (eval + `meho retrieval retire-checklist`).
+- Retrieval quality CI gate: `scripts/ci/run_eval_gate.py` scores the eval runner in `backend/scripts/retrieval_eval/` (test tooling, not part of the product).
 - Canary acceptance: [`backend/tests/acceptance/test_g41_kb_canary.py`](../../backend/tests/acceptance/test_g41_kb_canary.py) (T5 #419).
 - [docs/architecture/connectors.md](connectors.md), [docs/architecture/mcp.md](mcp.md), [docs/architecture/audit.md](audit.md).

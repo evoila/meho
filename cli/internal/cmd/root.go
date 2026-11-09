@@ -143,10 +143,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newDoctorCmd())
 
-	// G4.3-T2 (#441) -- retrieval-quality + migration-decision tooling.
-	// `meho retrieval eval` ships first; sibling verbs (usage T5b #464,
-	// retire-checklist T6 #445) graft onto the same parent in their own
-	// PRs.
+	// `meho retrieval usage` -- retrieval usage telemetry.
 	root.AddCommand(retrieval.NewRootCmd())
 
 	// G0.6-T13 (#481) -- operation meta-tool surface for the G0.6

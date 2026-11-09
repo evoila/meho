@@ -1400,10 +1400,9 @@ oracle.
 the per-tenant broadcast feed. That is safe here because the bound
 payload is only the query *hash*, the binary product/version scope, the
 `collection`, `target` and `scope_source` values, and the hit count —
-the **raw query is never bound**. (Contrast
-`retrieve/eval`, which binds `op_class="audit_query"` to force
-aggregate-only broadcast precisely because its payload could carry
-operator-sensitive query intent.) `classify_op` maps `meho.docs.search`
+the **raw query is never bound**. (Contrast `retrieve/usage`, which
+binds `op_class="audit_query"` to force aggregate-only broadcast.)
+`classify_op` maps `meho.docs.search`
 to `other`; the explicit `op_class="read"` is what makes the row a
 read.
 
@@ -1636,6 +1635,6 @@ detection of planted instructions. See `docs/codebase/untrusted-text-envelope.md
   (`required_capability`, `capability_satisfied`, `all_tools_for`).
 - Transport: `backend/src/meho_backplane/auth/corpus.py`.
 - Audit binding precedent: `backend/src/meho_backplane/api/v1/retrieve.py`
-  (query-hash privacy), `retrieve_eval.py` (op_id / op_class override).
+  (query-hash privacy), `retrieve_usage.py` (op_id / op_class override).
 - Binary-filters-not-weights decision: #1178 / #1177; PG JSONB
   containment <https://www.postgresql.org/docs/16/datatype-json.html#JSON-CONTAINMENT>.

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Index tables of the agent session store (migration ``0149``).
+"""Index tables of the agent session store (migration ``0150``).
 
 * :class:`AgentSessionRecord` -- one row per session and tenant.
   ``files`` maps each file path to ``{"size", "sha256"}`` of the bytes

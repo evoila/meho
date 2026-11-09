@@ -116,10 +116,10 @@ from meho_backplane.operations._audit import (
 )
 from meho_backplane.operations._errors import (
     result_already_resumed,
-    result_denied,
     result_object_changed_since_approval,
     result_preview_changed_since_approval,
     result_release_changed_while_waiting,
+    result_resume_params_unavailable,
     result_target_changed_since_approval,
     result_target_gone_since_approval,
 )
@@ -2293,12 +2293,13 @@ async def resume_dispatch_after_approval(
       hash-verified against ``params_hash`` by :func:`approve_request`).
     * ``/decide`` and the MCP by-id approve hold only the request id, so
       they pass ``params=None`` and this helper falls back to the params
-      stored on the row at park time (``request.params``, #1503). A row
-      written before migration 0036 has ``params IS NULL`` and no
-      caller-supplied params — there is nothing to re-dispatch, so the
-      helper **fails closed** with a structured ``denied`` result naming
-      the gap (the op must be resumed via REST ``/approve`` + params, the
-      pre-0036 path).
+      stored on the row at park time (``request.params``, #1503). When
+      the row holds no params MEHO can run with (``_stored_call``), there
+      is nothing to re-dispatch: the run is refused like the release and
+      target refusals (:func:`_refuse_resume`, error code
+      ``approval_resume_params_unavailable``), so the request ends as a
+      failed run with a reason, and the requester can re-run it with the
+      params (#6064).
 
     Target re-hydration (G11.7-T1 #1401): the row persists only
     ``target_id``, not the full target. A write op whose handler reads
@@ -2344,7 +2345,7 @@ async def resume_dispatch_after_approval(
     # params of the run only.
     effective_params, reveal_secret = _stored_call(request, params)
     if effective_params is None and request.execution_handle is None:
-        return _resume_pre0036_denied(operator, request)
+        return await _refuse_resume_params_unavailable(operator, request)
 
     release_refusal = await refuse_resume_if_release_changed(operator, request)
     if release_refusal is not None:
@@ -2355,10 +2356,9 @@ async def resume_dispatch_after_approval(
         return target_refusal
 
     # Exactly-one-resumer claim (#2293): win the atomic conditional UPDATE
-    # right before executing -- after the pre-0036 params check above, so
-    # that gap never burns the claim and leaves the op un-executable. A
-    # refusal above (release or target) takes the claim itself: such a
-    # request never runs later. A lost claim means another
+    # right before executing. A refusal above (no params to run with,
+    # release or target) takes the claim itself and stores the refusal as
+    # the run result: such a request never runs later. A lost claim means another
     # resumer already executed the approved op (the in-process agent waiter
     # that read the same approved row, or a racing operator
     # surface), so no-op with a benign already_resumed result rather than
@@ -2422,16 +2422,36 @@ def _stored_call(
     (``request.reveal_secret``). So the choice also survives for a
     credential write, whose params are not on the row and come from the
     caller on a re-run. The params are ``None`` when the row stores none and
-    none were sent. Stored params whose secret-named values were replaced
-    by a marker (after the first run, :func:`claim_resume`) count as none:
-    they can no longer run the call.
+    none were sent, or when the stored params can no longer run the call
+    (:func:`_stored_params_can_run`).
     """
     if params is not None:
         params, _ = split_reveal_secret(params)
     effective: dict[str, Any] | None = params
-    if effective is None and not holds_hidden_param_values(request.params):
+    if effective is None and _stored_params_can_run(request):
         effective = cast(dict[str, Any] | None, request.params)
     return effective, bool(request.reveal_secret)
+
+
+def _stored_params_can_run(request: ApprovalRequest) -> bool:
+    """True when the params stored on *request* are still the ones the requester sent.
+
+    Stored params without a marker (``[REDACTED:param_name]``) can run.
+    With a marker, there are two cases (#6064):
+
+    * MEHO wrote it (:func:`claim_resume` or :func:`end_run_input`): the
+      real secret value is gone, so the params no longer match the
+      request's ``params_hash``. They cannot run the call.
+    * The requester sent it as a value, for example an object read from
+      MEHO and passed back unchanged. The hash covers it, so the params
+      still match ``params_hash``. They run as sent.
+    """
+    stored = cast(dict[str, Any] | None, request.params)
+    if stored is None:
+        return False
+    if not holds_hidden_param_values(stored):
+        return True
+    return params_hash_matches(stored, request.params_hash)
 
 
 async def refuse_resume_if_release_changed(
@@ -2725,14 +2745,17 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any, *, parked_op
         )
 
 
-def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
-    """Fail-closed result for a pre-0036 row with no stored params to re-dispatch.
+async def _refuse_resume_params_unavailable(
+    operator: Operator, request: ApprovalRequest
+) -> OperationResult:
+    """Refuse an approved run that has no params MEHO can run with (#6064).
 
-    A row parked before migration 0036 has ``params IS NULL`` and is
-    approved via a surface that carries no params (/decide, MCP by-id), so
-    there is nothing to re-dispatch — refuse rather than dispatch an empty
-    call. Reached before the claim, so it never burns it. Extracted to keep
-    :func:`resume_dispatch_after_approval` under the function-size budget.
+    The surface sent no params, and :func:`_stored_call` found none on the
+    row. The run is recorded like the other refusals (:func:`_refuse_resume`):
+    the claim is taken, one audit row is written, and the refusal is stored
+    as the run result. So the request ends as a failed run with a reason on
+    every surface, instead of staying approved and not run, and the
+    requester can re-run it with the params.
     """
     _log().warning(
         "approval_resume_params_unavailable",
@@ -2741,15 +2764,8 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
         connector_id=request.connector_id,
         operator_sub=operator.sub,
     )
-    return result_denied(
-        request.op_id,
-        (
-            f"approval request {request.id} has no stored params "
-            "(parked before migration 0036); re-dispatch refused — "
-            "approve via REST /approve with the original params instead"
-        ),
-        0.0,
-    )
+    refusal = result_resume_params_unavailable(request.op_id, approval_request_id=request.id)
+    return await _refuse_resume(operator, request, refusal, audit_payload={})
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:

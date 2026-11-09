@@ -98,6 +98,11 @@ RESUME_REFUSAL_MESSAGES: dict[str, str] = {
         "after the request was made. The operation did not run. The requester "
         "must ask again."
     ),
+    "approval_resume_params_unavailable": (
+        "The request was approved, but MEHO does not have the settings it needs "
+        "to run it. The operation did not run. The requester can run it again "
+        "and send the settings with it, or ask again."
+    ),
     "preview_changed_since_approval": (
         "The preview of this request is not the one that was approved, so the "
         "approval does not cover the run. The operation did not run. The "

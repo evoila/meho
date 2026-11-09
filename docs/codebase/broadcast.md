@@ -376,6 +376,13 @@ not offer the tool, because MEHO cannot see tools the client hides. The
 conventions write path keeps the default (`include_broadcast=True`), so
 its result does not change.
 
+People read the feed; only agents post (#5770). A session that is not
+an agent (`auth/agent_admission.py::is_agent_caller` is false: no hosted
+run and no agent token) gets `BROADCAST_READER_BAND` instead. It keeps
+the "read the feed first" step and tells the session to skip
+`meho_broadcast_announce`. The plugin skill and its `call_operation`
+reminder say the same, and the tool description says it first.
+
 ### Read path (SSE and UI history)
 
 See *Reader side* in the overview. `/ui/broadcast/stream` and
@@ -483,7 +490,12 @@ from server-side facts only. There are two ways in:
 
 Everything else gets the stable machine error `agent_identity_required`
 (MCP `-32602` with `error.data = {code, reason, remediation}`, REST
-`403` with the same `detail`). MEHO never guesses an agent from the
+`403` with the same `detail`). A caller that is not an agent at all (a
+person's login outside a hosted run) gets a remediation that says to
+skip the step: its operations are already in the audit log. On MCP this
+refusal comes before the input check (#5770): the tool's `caller_check`
+runs `require_agent_caller`, which needs no database read, before the
+dispatcher checks the arguments. MEHO never guesses an agent from the
 transport, a person's login client, a CLI login, a flag, or a `run_id`
 the caller sent.
 

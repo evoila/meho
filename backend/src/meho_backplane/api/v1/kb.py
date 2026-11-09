@@ -815,7 +815,7 @@ def _require_exporter(operator: Operator = Depends(verify_jwt_and_bind)) -> Oper
 
 @router.post("/export", response_model=KbExportResult)
 async def export_kb_pages(operator: Operator = Depends(_require_exporter)) -> KbExportResult:
-    """Return the caller's confirmed, generic entries as Markdown pages (#5730).
+    """Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).
 
     The team wiki's CI job calls this with the ``kb_export_only`` login,
     writes the pages into the wiki and opens a merge request there. An

@@ -3046,6 +3046,36 @@ set**, so the steps of one change ticket read in the order they were sent.
 change ticket oldest first and stops at the first step that fails (#3597,
 see "Approve a change ticket's requests in order" below).
 
+`approve <id>` answers at once (#5110, `approve_wait.go`). It sends
+`/decide` with `"async": true`: MEHO saves the decision, starts the
+operation in the background and answers HTTP 202 with the run id. The CLI
+then reads the request once and prints its state, the `Run:` line
+(`started` while it runs) and "Approved. The operation is running. Check
+it with `meho approvals show <id>`." With `--wait` it reads
+`GET /api/v1/approvals/{id}` every 3 seconds until `result_state` is
+`executed`, `failed` or `uncertain`, and then prints the run lines as
+before. The "outcome unknown" list does not end the wait: a run longer
+than that age limit is still waited for. When the CLI cannot check the
+run, it prints once that the run takes longer than usual and that Ctrl-C
+stops the wait (the run goes on). Each read is a
+short call, so a proxy time limit cannot cut the wait; up to 5 failed
+reads in a row are tried again. When the person may read runs (operator
+role), each read also checks the run (`GET /api/v1/operations/runs/{id}`):
+a run that ended without storing a result on the request ends the wait
+with "The run ended, but MEHO stored no result." A run that only found
+that another caller runs the operation (`succeeded` with result status
+`already_resumed`) does not end the wait: the CLI stops reading that run
+and waits on the request alone. `--json` prints the
+request view (`ApprovalRequestView`) after the approve, or with `--wait`
+after the run ended. When the answer to `/decide` is lost on the network
+(a transport error, not an HTTP answer), the CLI reads the request again:
+when it is no longer pending it prints that state after "The answer to
+this call was lost on the network.", else the `unreachable` error as
+before. A MEHO from before #5110 refuses the unknown `async` field with
+422 before it saves anything; the CLI then approves again without it.
+`reject`, `approve <id> <id> ...` and `--in-order` do not send `async`:
+`--in-order` needs each run's result before the next step.
+
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 
 A session-BFF surface (cookie session + CSRF double-submit, not the
@@ -3086,11 +3116,71 @@ no new gate, service call, route, or migration.
 | `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All, plus an "Outcome unknown" tab, #5026), a `work_ref` filter, an oldest/newest toggle (`order`, #3596), and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the pending **panel** modal fragment, oldest first with step numbers when a change ticket has two or more pending requests (#3596). (G10.8-T #1827) |
 | `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / oldest-newest toggle / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…, order=…)`; `tab=all` passes `status=None`. `order` is `oldest`, `newest`, or empty (the default rule in "Chains of requests under one change ticket" below); any other value is a 422. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
 | `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
-| `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + the fail-open `approval.approved` add-on step event. Needs a recent console sign-in that asked for the credentials (the fresh approval sign-in rule above); otherwise the modal re-renders with the sign-in link. |
+| `POST` | `/ui/approvals/{id}/approve` | Approve in-process + start the parked op in the background + the fail-open `approval.approved` add-on step event. Answers within about a second, however long the op runs (#5110, below). Needs a recent console sign-in that asked for the credentials (the fresh approval sign-in rule above); otherwise the modal re-renders with the sign-in link. |
+| `GET` | `/ui/approvals/{id}/run` | The run part of the outcome card, as it is now (#5110). Asks again every 3 seconds while the run goes on. |
+| `GET` | `/ui/approvals/{id}/row` | One row of the history list, as it is now (#5110). Asks again every 3 seconds while the run goes on. |
+| `GET` | `/ui/runs/notices?run_id=` | The "the run has ended" notices for up to 20 runs this person started (#5110, below). |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + the `approval.rejected` add-on step event; the op never runs. |
 | `GET` | `/ui/approvals/in-order?work_ref=` | The "Approve group in order" modal: the change ticket's requests oldest first and a Start button (#3597). |
 | `POST` | `/ui/approvals/in-order` | Runs the steps in order (form: `work_ref`, `reason`, `confirm_id`, one `step_id` per step shown); renders what happened to each step (#3597). Approves nothing when a pending request of the ticket is not among the posted `step_id`s. |
 | `POST` | `/ui/approvals/{id}/outcome-check` | "Mark as checked" in the modal of a request on the "Outcome unknown" tab (#5026): form `verdict` and `note`. Runs nothing; the modal shows the recorded check. |
+
+**Approve answers at once; the page follows the run (#5110).** Approving
+used to run the whole operation inside the web request, so the dialog
+stayed open, without progress, until the operation ended (a content
+library deploy can take hours), and a proxy could cut the request.
+`run_watch.start_approved_run` now starts the run with
+`OperationRunService.submit_approval_resume` — the same run claim, policy
+bypass and audit as before, so the operation still runs exactly once and
+writes its audit row — and waits at most `ANSWER_WAIT_SECONDS` (1 second).
+A quick run shows its result on the card at once. A longer one shows
+"Approved. The operation is running." with a spinner and says that closing
+the window is safe: closing never stops the run.
+
+`run_watch.live_run(request, run)` says where the run is. It reads the
+stored request and its latest background run (`operation_run` rows with
+`approval_request_id`), so it works on every MEHO server process:
+
+- A result stored on the request wins: `executed`, `failed` or `uncertain`,
+  with the summary and the audit link.
+- Else the background run decides: still going is `running`; ended with a
+  result is that result; ended without one (a crash, a server restart that
+  the reaper turned into `uncertain`, a cancel) is `ended_no_result` ("no
+  result: check it"). So nothing shows "running" forever.
+- When another caller (usually the waiting requester) runs the operation,
+  the request is `started` until its result is stored. Once the run is
+  older than the "outcome unknown" time
+  (`approval_outcome_unknown_after_minutes`), the asking stops and the
+  state is `started_no_result` ("Approved, but MEHO has no result", with
+  the advice to check the target). Only the age counts, so a request that
+  someone marked as checked does not start asking again.
+- A re-run (#5417) clears the stored result but makes no background run.
+  So a background run made before `rerun_started_at` belongs to an earlier
+  attempt and is left out: the re-run shows `started`, not the old
+  attempt's result.
+
+The card part (`_run_state.html`) and each list row (`_history_row.html`)
+carry `hx-get` + `hx-trigger="every 3s"` + `hx-swap="outerHTML"` while
+`polling` is true and drop them at a final state, the pattern of the
+connector import job card.
+
+**The "the run has ended" notice (#5110).** Not tied to approvals, so the
+operations page can use it too. A page marks a background run whose state
+is not final yet (`polling`) with `data-meho-watch-run="<run id>"`, also
+when another caller runs the operation.
+`static/src/app/run-notices.js` keeps those ids for the browser tab
+(sessionStorage, so they survive a move to another page) and, on the
+5-second `meho:approval-badge-poll` timer of `approvals-bell.js` (only
+while the page is visible), asks `GET /ui/runs/notices?run_id=...`
+(`ui/routes/run_notices.py`). The answer has one notice
+(`runs/_ended_notices.html`) per ended run, added to `#meho-run-notices`
+in the corner of every page (`base.html`). Each notice says how the run
+ended and, for an approval run, has a "View request" button that opens the
+request. The route reads all asked runs in one query. Only the person who started a run gets its notice: a run of
+another person or tenant, or an unknown id, gets a hidden marker, and the
+script stops asking for it. A final state shown in an open dialog carries
+`data-meho-run-seen`, so the notice does not repeat it. The Close button
+is handled in the script, not in the template.
 
 The console is **read-only over substrate that already exists** — it adds
 no new service call, no `api/v1` Bearer route, no CLI verb, and no

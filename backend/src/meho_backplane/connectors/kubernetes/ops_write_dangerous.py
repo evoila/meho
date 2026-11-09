@@ -73,6 +73,8 @@ from kubernetes_asyncio.dynamic import DynamicClient
 
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
+    SecretRefReadError,
+    TargetSecretNotFoundError,
     check_param_secret_ref,
     load_vault_secret_data,
     strip_credential_value,
@@ -592,11 +594,18 @@ async def _resolve_secret_refs(
         store_ref = body.strip() if sep else str(raw_ref).strip()
         field = fragment.strip() if (sep and fragment.strip()) else secret_key
         check_param_secret_ref(operator, store_ref, param=param, mount=mount)
-        payload = await load_vault_secret_data(
-            _SecretRefTarget(name=target.name, host=target.host, secret_ref=store_ref),
-            operator,
-            mount=mount,
-        )
+        try:
+            payload = await load_vault_secret_data(
+                _SecretRefTarget(name=target.name, host=target.host, secret_ref=store_ref),
+                operator,
+                mount=mount,
+            )
+        except TargetSecretNotFoundError as exc:
+            # The ref came from a param, not from the cluster target: report
+            # it as a param read error, with the store error as its cause
+            # (the same answer load_param_secret_data gives).
+            cause = exc.__cause__ if exc.__cause__ is not None else exc
+            raise SecretRefReadError(param=param, secret_ref=store_ref, cause=cause) from cause
         value = payload.get(field) if isinstance(payload, dict) else None
         stripped = strip_credential_value(value) if isinstance(value, str) else None
         if not stripped:

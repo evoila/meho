@@ -38,7 +38,7 @@ from meho_backplane.conventions.preamble import (
     BLOCK_END,
     BLOCK_START,
     BROADCAST_BLOCK_START,
-    BROADCAST_DISCIPLINE_BAND,
+    BROADCAST_READER_BAND,
     GUARD_PREFIX,
 )
 from meho_backplane.conventions.render import ConventionEntry, render_conventions
@@ -92,7 +92,8 @@ async def test_initialize_instructions_omitted_for_empty_tenant(
     present and equals exactly those three bands (no conventions block).
     Since #4113 the broadcast band needs a session that can call
     ``meho_broadcast_announce``, so this test uses an ``operator``
-    session.
+    session. The fixture operator is a person's login, so since #5770 the
+    broadcast band is the reader form (read the feed, do not post).
     """
     client, _op = client_with_operator
 
@@ -102,12 +103,9 @@ async def test_initialize_instructions_omitted_for_empty_tenant(
     assert "error" not in body
     instructions = body["result"]["instructions"]
     assert instructions == (
-        f"{BROADCAST_DISCIPLINE_BAND}\n\n{VENDOR_TEXT_BAND}\n\n{FEATURE_MATURITY_BAND}"
+        f"{BROADCAST_READER_BAND}\n\n{VENDOR_TEXT_BAND}\n\n{FEATURE_MATURITY_BAND}"
     )
     assert BLOCK_START not in instructions  # no conventions block
-    # #4113: the band tells the agent to skip a step whose tool its
-    # client does not offer (MEHO cannot see client-side tool hiding).
-    assert "If your client does not offer one of these tools, skip that step." in instructions
 
 
 @pytest.mark.asyncio

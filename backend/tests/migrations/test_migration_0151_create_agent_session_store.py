@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0150_create_agent_session_store`` (#4901).
+"""Tests for Alembic migration ``0151_create_agent_session_store`` (#4901).
 
 The migration adds the three tables of the agent session store. The tests
 check that ``upgrade`` creates them with the columns of the models, that
@@ -29,8 +29,8 @@ from meho_backplane.session_store.models import (
 )
 from meho_backplane.settings import get_settings
 
-_REVISION = "0150"
-_DOWN_REVISION = "0149"
+_REVISION = "0151"
+_DOWN_REVISION = "0150"
 _MODELS = (AgentSessionRecord, AgentSessionUpload, AgentSessionRetention)
 
 
@@ -40,7 +40,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0150.db"
+    db_path = tmp_path / "migration_0151.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

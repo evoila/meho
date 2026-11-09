@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Export confirmed, generic knowledge entries as Markdown pages (#5730).
+"""Export generic knowledge entries as Markdown pages (#5730).
 
 ``POST /api/v1/kb/export`` calls :func:`export_pages`. The caller is a
 CI job of the team wiki repo (or an operator through ``meho kb
@@ -18,14 +18,18 @@ Which entries of the caller's tenant take part:
   or a directory ingest are left out, so a page never goes round in a
   circle. An entry with no recorded provenance (written before MEHO
   kept it) is listed in ``skipped`` with the reason.
-* ``status: confirmed`` gives a page. ``status: retired`` or
-  ``status: replaced`` gives a page to remove. Any other status gives
-  neither.
+* ``status: confirmed`` gives a page. ``status: candidate`` gives a
+  page too, with ``status: candidate``, so a person reviews the lesson
+  in the wiki (#5976: a lesson from ``add_to_knowledge`` reaches the
+  wiki this way). ``status: retired`` or ``status: replaced`` gives a
+  page to remove. Any other status gives neither.
 * A page needs the complete lesson header: ``type``, ``applies_to`` and
-  ``status``, the fields the import needs. A confirmed entry without
-  one of them (a direct write may leave out ``type``) is listed in
-  ``skipped`` with the missing fields, so the import never refuses an
-  exported page.
+  ``status``, the fields the import needs. An entry without one of them
+  (a direct write may leave out ``type``) is listed in ``skipped`` with
+  the missing fields, so the import never refuses an exported page.
+
+:func:`plan_entry` holds this rule for one entry. ``add_to_knowledge``
+uses it too, to tell the caller whether the lesson goes to the wiki.
 
 Each page is ``<slug>.md``: the lesson header, then the entry's text.
 The header holds only the lesson header fields, in a fixed order, so a
@@ -66,6 +70,7 @@ __all__ = [
     "KbExportResult",
     "KbExportSkip",
     "export_pages",
+    "plan_entry",
     "render_page",
 ]
 
@@ -73,7 +78,9 @@ __all__ = [
 EXPORTED_APPLIES_TO: Final[str] = "product-and-version"
 #: The statuses that give a page to remove.
 _REMOVED_STATUSES: Final[tuple[str, ...]] = ("retired", "replaced")
-_EXPORTED_STATUSES: Final[tuple[str, ...]] = ("confirmed", *_REMOVED_STATUSES)
+#: The statuses that give a page.
+_PAGE_STATUSES: Final[tuple[str, ...]] = ("confirmed", "candidate")
+_EXPORTED_STATUSES: Final[tuple[str, ...]] = (*_PAGE_STATUSES, *_REMOVED_STATUSES)
 
 KbRemovedStatus = Literal["retired", "replaced"]
 
@@ -140,44 +147,13 @@ async def export_pages(tenant_id: uuid.UUID) -> KbExportResult:
     remove: list[KbExportRemoval] = []
     skipped: list[KbExportSkip] = []
     for slug, body, raw_metadata in rows:
-        metadata = dict(raw_metadata or {})
-        source_kind = read_provenance(metadata).source_kind
-        if source_kind is None:
-            skipped.append(
-                KbExportSkip(
-                    slug=slug,
-                    reason="MEHO has no record of where this entry came from; write it again"
-                    " in MEHO to export it",
-                )
-            )
-            continue
-        if source_kind != "direct":
-            continue
-        status = metadata["status"]
-        if status != "confirmed":
-            remove.append(KbExportRemoval(path=f"{slug}.md", slug=slug, status=status))
-            continue
-        missing = [name for name in REQUIRED_HEADER_FIELDS if metadata.get(name) in (None, "")]
-        if missing:
-            skipped.append(
-                KbExportSkip(
-                    slug=slug,
-                    reason="the entry has no complete lesson header"
-                    f" (missing: {', '.join(missing)}); set it in MEHO to export it",
-                )
-            )
-            continue
-        content = render_page(slug, body, metadata)
-        secret = find_secret(content)
-        if secret is not None:
-            skipped.append(
-                KbExportSkip(
-                    slug=slug,
-                    reason=f"the entry holds what looks like a secret ({secret}); remove it",
-                )
-            )
-            continue
-        pages.append(KbExportPage(path=f"{slug}.md", slug=slug, content=content))
+        planned = plan_entry(slug, body, dict(raw_metadata or {}))
+        if isinstance(planned, KbExportPage):
+            pages.append(planned)
+        elif isinstance(planned, KbExportRemoval):
+            remove.append(planned)
+        elif isinstance(planned, KbExportSkip):
+            skipped.append(planned)
 
     result = KbExportResult(
         page_count=len(pages),
@@ -195,6 +171,45 @@ async def export_pages(tenant_id: uuid.UUID) -> KbExportResult:
         skipped=result.skipped_count,
     )
     return result
+
+
+def plan_entry(
+    slug: str, body: str, metadata: dict[str, Any]
+) -> KbExportPage | KbExportRemoval | KbExportSkip | None:
+    """Return what the export does with one entry (see the module docstring).
+
+    ``None`` means the entry is not part of the export: not generic, a
+    status that gives nothing, or it came in from a page.
+    """
+    status = metadata.get("status")
+    if metadata.get("applies_to") != EXPORTED_APPLIES_TO or status not in _EXPORTED_STATUSES:
+        return None
+    source_kind = read_provenance(metadata).source_kind
+    if source_kind is None:
+        return KbExportSkip(
+            slug=slug,
+            reason="MEHO has no record of where this entry came from; write it again"
+            " in MEHO to export it",
+        )
+    if source_kind != "direct":
+        return None
+    if status in _REMOVED_STATUSES:
+        return KbExportRemoval(path=f"{slug}.md", slug=slug, status=status)
+    missing = [name for name in REQUIRED_HEADER_FIELDS if metadata.get(name) in (None, "")]
+    if missing:
+        return KbExportSkip(
+            slug=slug,
+            reason="the entry has no complete lesson header"
+            f" (missing: {', '.join(missing)}); set it in MEHO to export it",
+        )
+    content = render_page(slug, body, metadata)
+    secret = find_secret(content)
+    if secret is not None:
+        return KbExportSkip(
+            slug=slug,
+            reason=f"the entry holds what looks like a secret ({secret}); remove it",
+        )
+    return KbExportPage(path=f"{slug}.md", slug=slug, content=content)
 
 
 def render_page(slug: str, body: str, metadata: dict[str, Any]) -> str:

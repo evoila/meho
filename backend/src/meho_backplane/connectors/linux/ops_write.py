@@ -70,6 +70,7 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
+    TargetSecretNotFoundError,
     check_param_secret_ref,
     strip_credential_value,
 )
@@ -663,6 +664,11 @@ async def _resolve_secret_env(
             check_param_secret_ref(operator, path, param="secret_env")
             try:
                 secret_data = await connector._resolve_secret(stub, operator)
+            except TargetSecretNotFoundError as exc:
+                raise LinuxWriteError(
+                    f"secret_env[{name!r}] could not resolve vault reference {path}#{field}: "
+                    "Vault has no secret at that path"
+                ) from exc
             except (VaultClientError, CredentialsReadError) as exc:
                 # The underlying errors name the target / field / secret_ref
                 # path, never a credential value; add the ENV for the operator.
@@ -941,12 +947,25 @@ async def linux_firewall_load(
     Applies / replaces the host firewall ruleset atomically, **validating it
     before applying** (``nft -c -f`` / ``iptables-restore --test``): a ruleset
     that fails validation never touches the live firewall. Returns
-    ``{applied, backend, validated, rolled_back?}``.
+    ``{applied, backend, validated, rolled_back?}``. With
+    ``rollback_after_seconds`` it first starts a timer that puts the old rules
+    back (:mod:`~meho_backplane.connectors.linux.ops_firewall_rollback`) and
+    also returns ``rollback_id`` and ``rollback_due_at``.
     """
     ruleset = params["ruleset"]
     if not isinstance(ruleset, str) or not ruleset.strip():
         raise LinuxWriteSafetyError("ruleset must be a non-empty string")
     backend = bound_firewall_backend(params.get("backend"))
+    if params.get("rollback_after_seconds") is not None:
+        from meho_backplane.connectors.linux.ops_firewall_rollback import (
+            bound_rollback_seconds,
+            load_firewall_with_rollback,
+        )
+
+        seconds = bound_rollback_seconds(params["rollback_after_seconds"])
+        return await load_firewall_with_rollback(
+            connector, target, ruleset, backend, seconds, operator
+        )
 
     sudo_password = await _resolve_sudo_password(connector, target, operator)
     script = build_firewall_load_script(ruleset, backend)
@@ -1466,7 +1485,8 @@ _FIREWALL_LOAD_OP = LinuxOp(
         "touches the live firewall. safety_level=dangerous, "
         "requires_approval=true: it parks for a human. Non-secret, so a human "
         "previews the ruleset via preview_operation before approving. Returns "
-        "{applied, backend, validated}."
+        "{applied, backend, validated}; with rollback_after_seconds also "
+        "{rollback_id, rollback_due_at}."
     ),
     parameter_schema={
         "type": "object",
@@ -1481,6 +1501,16 @@ _FIREWALL_LOAD_OP = LinuxOp(
                 "enum": list(FIREWALL_BACKENDS),
                 "description": "Firewall backend (default nft).",
             },
+            "rollback_after_seconds": {
+                "type": "integer",
+                "minimum": 60,
+                "maximum": 1800,
+                "description": (
+                    "Start a timer on the host first. When it ends without "
+                    "linux.firewall.confirm, the host loads the old rules again. "
+                    "Needs systemd."
+                ),
+            },
         },
         "required": ["ruleset"],
         "additionalProperties": False,
@@ -1491,6 +1521,8 @@ _FIREWALL_LOAD_OP = LinuxOp(
             "applied": {"type": "boolean"},
             "backend": {"type": "string"},
             "validated": {"type": "boolean"},
+            "rollback_id": {"type": "string"},
+            "rollback_due_at": {"type": "string", "format": "date-time"},
         },
         "required": ["applied", "backend", "validated"],
         "additionalProperties": True,
@@ -1504,15 +1536,25 @@ _FIREWALL_LOAD_OP = LinuxOp(
             "Call to load the default-deny firewall ruleset the first-boot "
             "script was meant to apply, or to replace a broken one -- validated "
             "before it goes live. Approval-gated: it parks for a human, who sees "
-            "the full ruleset in the preview. " + SSH_TRANSPORT_NOTE
+            "the full ruleset in the preview. For every change of a remote "
+            "host's rules, set rollback_after_seconds: a rule with good syntax "
+            "can still cut the SSH path, and the timer then puts the old rules "
+            "back. Run your checks over new connections, then call "
+            "linux.firewall.confirm before the timer ends. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {
             "ruleset": "The full ruleset text.",
             "backend": "Optional; nft (default) or iptables.",
+            "rollback_after_seconds": (
+                "60 to 1800. Leave time for your checks and for a person to approve "
+                "linux.firewall.confirm. Only one timed change per host can wait for "
+                "its confirm at a time; a second load is refused until then."
+            ),
         },
         "output_shape": (
             "{applied, backend, validated}; validated=false with the live "
-            "firewall unchanged when the ruleset failed the pre-apply check."
+            "firewall unchanged when the ruleset failed the pre-apply check. "
+            "With the timer also rollback_id and rollback_due_at (UTC)."
         ),
     },
 )

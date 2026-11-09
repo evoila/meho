@@ -569,6 +569,12 @@ async def handle_tools_call(
         if defn.op_class == "read":
             arguments = _drop_empty_optional_text(arguments, defn.inputSchema)
 
+        # Who-calls check (#5770): a tool that always refuses some callers
+        # says so before the input check, so the caller gets the refusal on
+        # the first try instead of an input error first.
+        if defn.caller_check is not None:
+            defn.caller_check(operator)
+
         # Validate arguments against the tool's inputSchema. ``cls`` is
         # pinned to :class:`jsonschema.Draft202012Validator` to make the
         # "JSON Schema 2020-12" contract called out in :class:`ToolDefinition`

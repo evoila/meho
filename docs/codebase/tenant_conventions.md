@@ -284,7 +284,7 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
 ## Session-preamble assembler (T4)
 
 [`backend/src/meho_backplane/conventions/preamble.py`](../../backend/src/meho_backplane/conventions/preamble.py)
-ships `assemble_preamble(tenant_id, operator_sub, *, capabilities=None, max_tokens=600, conventions_only=False, include_broadcast=True) ->
+ships `assemble_preamble(tenant_id, operator_sub, *, capabilities=None, max_tokens=600, conventions_only=False, include_broadcast=True, broadcast_can_post=True) ->
 PreambleResult`. G12.4-T2 (#1316) extended the signature with a
 required positional `operator_sub` so the assembler can append a
 runbook-priming band (per-run summaries from
@@ -385,7 +385,9 @@ Who uses them:
   on its own line, not charged to it. The broadcast band is sent only
   when the session's tool list has `meho_broadcast_announce`
   (`include_broadcast`), so a `read_only` session gets no text about
-  tools it cannot call.
+  tools it cannot call. A session that is not an agent (a person's
+  login) gets the reader form of the band (`broadcast_can_post=False`,
+  #5770): read the feed first, and skip `meho_broadcast_announce`.
 
 What "fits" means:
 

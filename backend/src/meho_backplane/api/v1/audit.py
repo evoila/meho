@@ -418,7 +418,7 @@ async def trace(
     The **operator read surface** of the dispatch flight recorder
     (``docs/decisions/dispatch-flight-recorder.md``): the ordered, already
     redacted+capped spans a governed dispatch produced. Read-only — it renders
-    what the capture/redaction seams (#3213/#3214) stored and never
+    what the capture/redaction seams stored and never
     re-processes, un-redacts, or writes.
 
     A person keeps **full** access, independent of the agent gate: this serves
@@ -436,8 +436,8 @@ async def trace(
 
     Absence has two levels. A missing / cross-tenant **audit row** is a 404
     (never 403), matching :func:`show`: the existence check runs through the
-    tenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and
-    existence never leaks. An audit row that exists but carries **no trace** is
+    tenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and the
+    answer is the same as for an id that does not exist. An audit row that exists but carries **no trace** is
     a 200 with ``trace_present=False`` — capture is a best-effort opt-in
     (F1/F7), so "no trace" is a normal observable state, not an error.
 
@@ -445,8 +445,8 @@ async def trace(
     and :func:`~meho_backplane.flight_recorder.load_trace` additionally filters
     the trace header on ``tenant_id`` as defence in depth.
 
-    Only an ``operation_execution`` row resolves to the flight recorder
-    (#3747); any other class answers ``trace_present=False``.
+    Only an ``operation_execution`` row resolves to the flight recorder; any
+    other class answers ``trace_present=False``.
     """
     _bind_audit_overrides(_AUDIT_TRACE_OP_ID)
     # Audit-existence gate first: 404 (never 403) on a missing / cross-tenant

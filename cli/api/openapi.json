@@ -466,128 +466,6 @@
         }
       }
     },
-    "/api/v1/retrieve/eval": {
-      "post": {
-        "tags": [
-          "retrieval"
-        ],
-        "summary": "Eval Endpoint",
-        "description": "Run the eval corpus against the retrieving tenant's substrate.\n\nTenant-scoped to ``operator.tenant_id`` \u2014 no surface accepts a\ndifferent tenant id from the body. ``read_only`` operators get\n403 via :func:`require_role` before reaching this handler.\n\nThe request's ``surface`` value flows through to\n:func:`~meho_backplane.retrieval.eval.runner.eval_all`; ``\"all\"``\nruns every shipped corpus, single-surface values scope the run.\nThe ``baseline=\"grep\"`` flag is honoured for kb only (v0.2 ships\nno operations / memory baseline); other surfaces silently ignore\nit.\n\nAudit overrides + enrichment contextvars are bound **before** the\nrunner kicks off so a handler exception still produces an audit\nrow with partial payload. The runner itself is in-process \u2014\nno HTTP round-trip back to ``/api/v1/retrieve``.",
-        "operationId": "eval_endpoint_api_v1_retrieve_eval_post",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EvalRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EvalResult"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Server-side baseline evaluation is not implemented; the request body's ``baseline`` field is non-empty and v0.2 has no checked-in corpus snapshot. Run the baseline locally via ``meho retrieval eval --baseline grep``."
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/retrieve/retire-checklist": {
-      "post": {
-        "tags": [
-          "retrieval"
-        ],
-        "summary": "Retire Checklist Endpoint",
-        "description": "Return the five-criterion retire-decision checklist per surface.\n\nThe usage criteria read request usage events (``request_usage``),\nnot ``audit_log``. MEHO collects them only when\n``REQUEST_USAGE_RETENTION_DAYS`` is set, so they stay unmet when that\nsetting is off, and they cover only the time since collection started.\n\nTenant scoping mirrors the sibling usage route:\nCallers are scoped to ``operator.tenant_id``; a ``tenant_filter``\nquery parameter naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638).\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
-        "operationId": "retire_checklist_endpoint_api_v1_retrieve_retire_checklist_post",
-        "parameters": [
-          {
-            "name": "tenant_filter",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "nullable": true,
-              "title": "Tenant Filter"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RetireChecklistRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RetireChecklistReport"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/search_docs": {
       "post": {
         "tags": [
@@ -6165,7 +6043,7 @@
           "knowledge"
         ],
         "summary": "Ingest Kb",
-        "description": "Server-side bulk ingest from a directory on the backplane host.\n\n``tenant_admin`` only -- bulk ingest is a privileged operation.\nThe request shape accepts both ``directory`` and ``tarball_url``\nfields (the task body's contract), but only the ``directory``\nbranch is implemented in v0.2; a ``tarball_url`` request returns\n**501 Not Implemented**, mirroring\n:mod:`meho_backplane.api.v1.retrieve_eval`'s posture toward its\nunimplemented baseline field.\n\nWalks the supplied directory via\n:meth:`KbService.ingest_directory` and returns the five-bucket\n:class:`KbIngestionResult` (files sharing a slug are listed in\n``conflicts`` and not written). The directory is **confined to**\n``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``): a path\nresolving outside it (``..`` traversal or escaping symlink) raises\n:class:`~meho_backplane.kb.KbIngestRootError`, mapped to a **400**\n``kb_ingest_path_outside_root`` here before any file is read --\nclosing the path-traversal / LFI hole (#101 L8 + L14) even for a\n``tenant_admin``. A path inside the root that does not exist or is\nnot a directory fails closed with ``directory_not_found`` /\n``not_a_directory`` (also 400).\n\nBinds ``audit_op_id=\"kb.ingest\"`` + ``audit_op_class=\"write\"``\nplus the five result counters in the audit payload (NOT the\nfile contents or paths). ``audit_dry_run`` flags dry-run calls so an operator\ncan grep their audit log for trial vs real ingests.",
+        "description": "Server-side bulk ingest from a directory on the backplane host.\n\n``tenant_admin`` only -- bulk ingest is a privileged operation.\nThe request shape accepts both ``directory`` and ``tarball_url``\nfields (the task body's contract), but only the ``directory``\nbranch is implemented in v0.2; a ``tarball_url`` request returns\n**501 Not Implemented**.\n\nWalks the supplied directory via\n:meth:`KbService.ingest_directory` and returns the five-bucket\n:class:`KbIngestionResult` (files sharing a slug are listed in\n``conflicts`` and not written). The directory is **confined to**\n``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``): a path\nresolving outside it (``..`` traversal or escaping symlink) raises\n:class:`~meho_backplane.kb.KbIngestRootError`, mapped to a **400**\n``kb_ingest_path_outside_root`` here before any file is read --\nclosing the path-traversal / LFI hole (#101 L8 + L14) even for a\n``tenant_admin``. A path inside the root that does not exist or is\nnot a directory fails closed with ``directory_not_found`` /\n``not_a_directory`` (also 400).\n\nBinds ``audit_op_id=\"kb.ingest\"`` + ``audit_op_class=\"write\"``\nplus the five result counters in the audit payload (NOT the\nfile contents or paths). ``audit_dry_run`` flags dry-run calls so an operator\ncan grep their audit log for trial vs real ingests.",
         "operationId": "ingest_kb_api_v1_kb_ingest_post",
         "parameters": [
           {
@@ -20656,69 +20534,6 @@
         }
       }
     },
-    "/ui/retrieval/eval": {
-      "post": {
-        "tags": [
-          "ui-retrieval"
-        ],
-        "summary": "Retrieval Eval",
-        "description": "Run the Eval Quality fragment (delegates to :func:`_render_eval`).",
-        "operationId": "retrieval_eval_ui_retrieval_eval_post",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/retrieval/retire-checklist": {
-      "post": {
-        "tags": [
-          "ui-retrieval"
-        ],
-        "summary": "Retrieval Retire Checklist",
-        "description": "Run the Retire Checklist fragment (delegates to :func:`_render_retire`).",
-        "operationId": "retrieval_retire_checklist_ui_retrieval_retire_checklist_post",
-        "requestBody": {
-          "content": {
-            "application/x-www-form-urlencoded": {
-              "schema": {
-                "$ref": "#/components/schemas/Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/ui/runbooks": {
       "get": {
         "tags": [
@@ -26779,44 +26594,6 @@
         "title": "BackendReadiness",
         "description": "Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).\n\nThe liveness snapshot a probe reads back from a collection's backend.\nThe collection-probe route persists ``doc_count`` / ``last_ingested_at``\n/ ``readiness`` onto the ``doc_collections`` row and transitions\n``status`` from this result **on success only** \u2014 modelled on\n:class:`~meho_backplane.connectors.schemas.FingerprintResult`, which\n``probe_target`` caches onto ``Target.fingerprint`` the same way.\n\n``index_built`` is the managed-RAG footgun this surface exists to\nhide: a managed-RAG ANN index answers searches only once it has been\nexplicitly (re)built, and rebuilds serialize per project. ``False``\nmeans the backend is reachable but the index is not yet answerable \u2014\nthe probe maps it to ``status='rebuilding'`` / ``'provisioning'`` so\nthe search path can fail typed rather than return a silent empty 200.\n\nFrozen so a persisted snapshot cannot be mutated after the probe\nreads it. ``detail`` is the free-form JSON the ``readiness`` column\nstores verbatim for operator diagnostics (never agent-facing)."
       },
-      "BaselineMetricsOverride": {
-        "properties": {
-          "precision_at_5": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Precision At 5"
-          },
-          "mrr": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Mrr"
-          },
-          "coverage": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Coverage"
-          },
-          "kind": {
-            "type": "string",
-            "maxLength": 16,
-            "minLength": 1,
-            "title": "Kind",
-            "default": "grep"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "precision_at_5",
-          "mrr",
-          "coverage"
-        ],
-        "title": "BaselineMetricsOverride",
-        "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
-      },
       "Body__create_ui_event_sources_post": {
         "properties": {
           "name": {
@@ -27535,18 +27312,6 @@
         },
         "type": "object",
         "title": "Body_retrieval_diagnostics_ui_retrieval_diagnostics_post"
-      },
-      "Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post": {
-        "properties": {
-          "tenant_filter": {
-            "type": "string",
-            "maxLength": 64,
-            "title": "Tenant Filter",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "title": "Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post"
       },
       "Body_retrieval_usage_ui_retrieval_usage_post": {
         "properties": {
@@ -30380,56 +30145,6 @@
         "title": "ConventionsDriftResponse",
         "description": "The drift check's answer. ``in_sync`` is true only when nothing differs.\n\n``added``: ``{slug, value}``, a rule in the file that MEHO does not have.\n``changed``: ``{slug, before, after}``, only the fields an import would\nchange. ``only_in_meho``: ``{slug}``, an operational convention the file\ndoes not have. All three are empty when ``mistakes`` is not."
       },
-      "CriterionResult": {
-        "properties": {
-          "name": {
-            "type": "string",
-            "enum": [
-              "daily_use_duration",
-              "operator_breadth",
-              "eval_precision",
-              "meho_vs_baseline",
-              "open_blockers"
-            ],
-            "title": "Name"
-          },
-          "verdict": {
-            "type": "string",
-            "enum": [
-              "green",
-              "yellow",
-              "red"
-            ],
-            "title": "Verdict"
-          },
-          "observed_value": {
-            "type": "string",
-            "maxLength": 64,
-            "title": "Observed Value"
-          },
-          "threshold_summary": {
-            "type": "string",
-            "maxLength": 64,
-            "title": "Threshold Summary"
-          },
-          "notes": {
-            "type": "string",
-            "maxLength": 256,
-            "nullable": true,
-            "title": "Notes"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "name",
-          "verdict",
-          "observed_value",
-          "threshold_summary"
-        ],
-        "title": "CriterionResult",
-        "description": "One row of the per-surface checklist.\n\nFrozen + ``extra=\"forbid\"`` so the structured output is stable for\nthe CLI table renderer and any future dashboard consumer. The\n``observed_value`` + ``threshold_summary`` pair is what the\nhuman-readable table prints verbatim \u2014 keep both short (\u2264 32\nchars each) so the table stays scannable in an 80-column terminal."
-      },
       "CurrentStepResponse": {
         "properties": {
           "kind": {
@@ -32407,67 +32122,6 @@
         ],
         "title": "EqualsCompare",
         "description": "Strict-equality comparator: ``ok`` on match, ``critical`` otherwise.\n\nEquality is type-strict for booleans -- ``True`` never equals ``1`` -- so\nthe ``value`` operand keeps whatever JSON scalar type it was given (Pydantic\nsmart-union preserves it) and the evaluator compares with matching strictness."
-      },
-      "EvalRequest": {
-        "properties": {
-          "surface": {
-            "type": "string",
-            "enum": [
-              "kb",
-              "memory",
-              "operations",
-              "all"
-            ],
-            "title": "Surface",
-            "default": "all"
-          },
-          "baseline": {
-            "type": "string",
-            "maxLength": 16,
-            "nullable": true,
-            "title": "Baseline"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "title": "EvalRequest",
-        "description": "POST body for ``/api/v1/retrieve/eval``.\n\nFrozen + extra=forbid so a typo (``surfaces`` instead of\n``surface``) fails 422 at the framework boundary rather than\nsilently running the default surface and giving the caller a\nconfusing \"I asked for memory, why did kb run?\" response."
-      },
-      "EvalResult": {
-        "properties": {
-          "ran_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Ran At"
-          },
-          "surfaces": {
-            "items": {
-              "$ref": "#/components/schemas/SurfaceResult"
-            },
-            "type": "array",
-            "title": "Surfaces"
-          },
-          "overall_verdict": {
-            "type": "string",
-            "enum": [
-              "green",
-              "yellow",
-              "red"
-            ],
-            "title": "Overall Verdict"
-          },
-          "thresholds": {
-            "$ref": "#/components/schemas/Thresholds"
-          }
-        },
-        "type": "object",
-        "required": [
-          "ran_at",
-          "surfaces",
-          "overall_verdict"
-        ],
-        "title": "EvalResult",
-        "description": "Top-level eval result \u2014 the shape the API + CLI return.\n\n``overall_verdict`` is the worst-of every surface (a red surface\nflips the whole result red); the CLI's exit-1-on-red CI-gate\nsemantics key off this field. ``ran_at`` is the UTC timestamp\nthe runner started; consumers comparing two saved baselines see\nwhen each was captured."
       },
       "EventIngestResponse": {
         "properties": {
@@ -36373,79 +36027,6 @@
         "title": "PublishTemplateResponse",
         "description": "Response for ``meho_runbook_publish_template`` -- the now-published coordinates."
       },
-      "QueryResult": {
-        "properties": {
-          "query": {
-            "type": "string",
-            "title": "Query"
-          },
-          "expected_hits": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Expected Hits"
-          },
-          "meho_hits": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Meho Hits"
-          },
-          "precision_at_5": {
-            "type": "number",
-            "title": "Precision At 5"
-          },
-          "reciprocal_rank": {
-            "type": "number",
-            "title": "Reciprocal Rank"
-          },
-          "coverage_at_5": {
-            "type": "number",
-            "title": "Coverage At 5"
-          },
-          "baseline_hits": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "nullable": true,
-            "title": "Baseline Hits"
-          },
-          "baseline_precision_at_5": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Precision At 5"
-          },
-          "baseline_reciprocal_rank": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Reciprocal Rank"
-          },
-          "baseline_coverage_at_5": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Coverage At 5"
-          },
-          "not_run_reason": {
-            "type": "string",
-            "nullable": true,
-            "title": "Not Run Reason"
-          }
-        },
-        "type": "object",
-        "required": [
-          "query",
-          "expected_hits",
-          "meho_hits",
-          "precision_at_5",
-          "reciprocal_rank",
-          "coverage_at_5"
-        ],
-        "title": "QueryResult",
-        "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate.\n\n``not_run_reason`` is set when the question could not be run on\nthis install (operations surface: its connector cannot be searched\nhere). Such a row has no hits and zeros, and the surface aggregate\nleaves it out (#4752)."
-      },
       "ReadDocsRequest": {
         "properties": {
           "collection": {
@@ -37323,120 +36904,6 @@
         "type": "object",
         "title": "ResultQuerySpec",
         "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``aggregate`` \u2264 8, ``group_by`` \u2264 4,\n``order_by`` \u2264 4, ``select`` \u2264 64, and each ``IN`` value list \u2264 1000)\nand the operator/aggregate allow-lists are enforced here, at construction;\nfield-vs-schema validation needs the handle's columns and happens in\n:func:`compile_query`.\n\n``path`` is the other read: an RFC 6901 pointer into a document handle,\nor into the top-level fields a rows handle left out of its inline\nsummary. It is never compiled to SQL, so it cannot be combined with any\nrelational field (checked here, at construction)."
-      },
-      "RetireChecklistReport": {
-        "properties": {
-          "ran_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Ran At"
-          },
-          "tenant_id": {
-            "type": "string",
-            "format": "uuid",
-            "nullable": true,
-            "title": "Tenant Id"
-          },
-          "since": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Since"
-          },
-          "until": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Until"
-          },
-          "surfaces": {
-            "items": {
-              "$ref": "#/components/schemas/SurfaceChecklist"
-            },
-            "type": "array",
-            "title": "Surfaces"
-          },
-          "overall_verdict": {
-            "type": "string",
-            "enum": [
-              "READY TO RETIRE",
-              "REVIEW MANUALLY",
-              "NOT YET"
-            ],
-            "title": "Overall Verdict"
-          },
-          "counted_surfaces": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Counted Surfaces"
-          },
-          "rest_excluded": {
-            "type": "boolean",
-            "title": "Rest Excluded",
-            "default": true
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "ran_at",
-          "tenant_id",
-          "since",
-          "until",
-          "surfaces",
-          "overall_verdict"
-        ],
-        "title": "RetireChecklistReport",
-        "description": "Top-level shape returned by :func:`compute_retire_checklist`.\n\nFrozen + ``extra=\"forbid\"`` so the CLI's ``--json`` consumers can\npin the shape; ``ran_at`` lets two saved reports be compared\nchronologically without external metadata."
-      },
-      "RetireChecklistRequest": {
-        "properties": {
-          "surface": {
-            "type": "string",
-            "enum": [
-              "kb",
-              "memory",
-              "operations",
-              "all"
-            ],
-            "title": "Surface",
-            "default": "all"
-          },
-          "blocker_counts": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "propertyNames": {
-              "enum": [
-                "kb",
-                "memory",
-                "operations"
-              ]
-            },
-            "type": "object",
-            "nullable": true,
-            "title": "Blocker Counts"
-          },
-          "baseline_overrides": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/BaselineMetricsOverride"
-            },
-            "propertyNames": {
-              "enum": [
-                "kb",
-                "memory",
-                "operations"
-              ]
-            },
-            "type": "object",
-            "nullable": true,
-            "title": "Baseline Overrides"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "title": "RetireChecklistRequest",
-        "description": "POST body for ``/api/v1/retrieve/retire-checklist``.\n\nFrozen + ``extra=\"forbid\"`` so a typo (``surfaces`` instead of\n``surface``, or ``blocker_count`` instead of ``blocker_counts``)\nfails 422 at the framework boundary rather than silently running\nthe default and giving the caller a confusing report.\n\n``blocker_counts`` is the surface\u2192count mapping the CLI fills in\nfrom a local ``gh issue list`` lookup. ``None`` (the default) is\nvalid \u2014 the service reports criterion 5 as yellow (unknown). Every\nkey must be one of the three supported surfaces; the\n``dict[Literal, int]`` shape pins that at the Pydantic boundary.\n\n``baseline_overrides`` is the surface\u2192baseline-metrics mapping the\nCLI can fill in from a local ``meho retrieval eval --baseline grep``\nrun. Without it, criterion 4 stays yellow for v0.2 production\ncallers because the backplane has no server-side corpus snapshot."
       },
       "RetrievalHit": {
         "properties": {
@@ -40260,44 +39727,6 @@
         "title": "StepPosition",
         "description": "1-indexed position of the current step within the template.\n\n:attr:`n` is the 1-indexed step number; :attr:`total` is the\ntemplate's full step count. Position is the **only** structural\nhint about the template's overall shape that the run surface\nexposes -- operators need to know \"step 3 of 12\" for progress UX,\nbut exposing the count alone is materially different from\nexposing the *contents* of the other steps (which :class:`StepBody`\ndeliberately does not).\n\nInvariants (enforced by :meth:`_validate_n_within_total`):\n\n* ``n >= 1`` (Pydantic ``Field(ge=1)``) -- there is no step 0.\n* ``total >= 1`` (Pydantic ``Field(ge=1)``) -- a runbook has at\n  least one step; an empty template is rejected at publish time\n  anyway (#1295).\n* ``n <= total`` -- you cannot be on step 11 of a 10-step template."
       },
-      "SurfaceChecklist": {
-        "properties": {
-          "surface": {
-            "type": "string",
-            "enum": [
-              "kb",
-              "memory",
-              "operations"
-            ],
-            "title": "Surface"
-          },
-          "verdict": {
-            "type": "string",
-            "enum": [
-              "READY TO RETIRE",
-              "REVIEW MANUALLY",
-              "NOT YET"
-            ],
-            "title": "Verdict"
-          },
-          "criteria": {
-            "items": {
-              "$ref": "#/components/schemas/CriterionResult"
-            },
-            "type": "array",
-            "title": "Criteria"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "surface",
-          "verdict",
-          "criteria"
-        ],
-        "title": "SurfaceChecklist",
-        "description": "Per-surface checklist: the five criteria + the surface verdict."
-      },
       "SurfaceMetrics": {
         "properties": {
           "surface": {
@@ -40363,98 +39792,6 @@
         ],
         "title": "SurfaceMetrics",
         "description": "The four reflex metrics for one surface (``agent`` / ``cli_rest``).\n\nEach ratio is reported as a rounded percentage/rate together with\nthe raw numerator and denominator, so a consumer can re-derive the\nratio and a zero-denominator surface reads as ``None`` (N/A) rather\nthan a misleading ``0.0``. Frozen so report instances can be passed\naround without accidental mutation."
-      },
-      "SurfaceResult": {
-        "properties": {
-          "surface": {
-            "type": "string",
-            "enum": [
-              "kb",
-              "memory",
-              "operations"
-            ],
-            "title": "Surface"
-          },
-          "query_count": {
-            "type": "integer",
-            "title": "Query Count"
-          },
-          "precision_at_5": {
-            "type": "number",
-            "title": "Precision At 5"
-          },
-          "mrr": {
-            "type": "number",
-            "title": "Mrr"
-          },
-          "coverage": {
-            "type": "number",
-            "title": "Coverage"
-          },
-          "verdict": {
-            "type": "string",
-            "enum": [
-              "green",
-              "yellow",
-              "red"
-            ],
-            "title": "Verdict"
-          },
-          "baseline_kind": {
-            "type": "string",
-            "const": "grep",
-            "nullable": true,
-            "title": "Baseline Kind"
-          },
-          "baseline_precision_at_5": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Precision At 5"
-          },
-          "baseline_mrr": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Mrr"
-          },
-          "baseline_coverage": {
-            "type": "number",
-            "nullable": true,
-            "title": "Baseline Coverage"
-          },
-          "baseline_verdict": {
-            "type": "string",
-            "enum": [
-              "green",
-              "yellow",
-              "red"
-            ],
-            "nullable": true,
-            "title": "Baseline Verdict"
-          },
-          "not_run_count": {
-            "type": "integer",
-            "title": "Not Run Count",
-            "default": 0
-          },
-          "queries": {
-            "items": {
-              "$ref": "#/components/schemas/QueryResult"
-            },
-            "type": "array",
-            "title": "Queries"
-          }
-        },
-        "type": "object",
-        "required": [
-          "surface",
-          "query_count",
-          "precision_at_5",
-          "mrr",
-          "coverage",
-          "verdict"
-        ],
-        "title": "SurfaceResult",
-        "description": "Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.\n\nThe verdict band is computed from the macro-mean metrics against\nthe configured :class:`Thresholds` (default\n:data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A\nsurface with ``query_count == 0`` (corpus YAML hasn't shipped\nyet) returns ``verdict=\"green\"`` deliberately \u2014 see runner.py\ndocstring.\n\n``baseline_verdict`` is computed only when the baseline ran;\n``None`` otherwise. The MEHO-\u2265-baseline overlay applies in the\naggregate verdict (see runner._apply_baseline_check).\n\n``query_count`` counts the scored questions only. ``not_run_count``\ncounts the questions that could not be run on this install; they\nare in ``queries`` with their ``not_run_reason`` but do not move the\nmetrics or the verdict (#4752)."
       },
       "SurfaceSummary": {
         "properties": {
@@ -41477,34 +40814,6 @@
         "title": "ThresholdCompare",
         "description": "Numeric-bound comparator: ``ok`` / ``degraded`` / ``critical``.\n\nThe observed value is tested ``value <op> bound``. ``critical`` is checked\nbefore ``degraded``, so the more-severe band wins. At least one bound is\nrequired; when both are set they must be ordered by severity for the\noperator direction (``gt``/``gte``: ``degraded <= critical``; ``lt``/``lte``:\n``degraded >= critical``). Non-numeric (or boolean) input is ``unknown``."
       },
-      "Thresholds": {
-        "properties": {
-          "precision_at_5": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Precision At 5",
-            "default": 0.8
-          },
-          "mrr": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Mrr",
-            "default": 0.5
-          },
-          "coverage": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Coverage",
-            "default": 0.9
-          }
-        },
-        "type": "object",
-        "title": "Thresholds",
-        "description": "Per-metric green-band thresholds for a verdict computation.\n\nFrozen so the threshold object passed into :func:`verdict` cannot\nbe mutated mid-run (a stale or rewritten threshold mid-eval would\ninvalidate every subsequent verdict and silently shift the CI\ngate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,\nnot stored \u2014 keeping it derived means the contract \"yellow is 70%\nof green\" can't drift between green-threshold customisation and\nthe yellow boundary.\n\nDefaults match the Initiative #373 / Task #441 contract; tests and\nfuture re-tunings construct ``Thresholds(...)`` with explicit\nvalues."
-      },
       "TopologyDiffEntry": {
         "properties": {
           "change_kind": {
@@ -42171,7 +41480,7 @@
           "total_searches"
         ],
         "title": "UsageReport",
-        "description": "Top-level shape returned by :func:`compute_usage` + the API route.\n\n``buckets`` is sorted by ``(date, surface)`` ascending \u2014 the text\ntable renderer relies on this for its grouping behaviour, and\n``--json`` consumers (T6's retire-checklist, future dashboards)\nbenefit from deterministic ordering even when nothing else\npins it.\n\n``tenant_id`` is the tenant the report is scoped to (the\noperator's own tenant by default, or the\n``tenant_admin``-supplied filter). ``None`` is reserved for the\ncross-tenant case; v0.2 has one production tenant so this is\neffectively a v0.2.next placeholder, but the shape is locked\ntoday so consumers don't break when the cross-tenant verb lands."
+        "description": "Top-level shape returned by :func:`compute_usage` + the API route.\n\n``buckets`` is sorted by ``(date, surface)`` ascending \u2014 the text\ntable renderer relies on this for its grouping behaviour, and\n``--json`` consumers (scripts, dashboards) benefit from\ndeterministic ordering even when nothing else pins it.\n\n``tenant_id`` is the tenant the report is scoped to (the\noperator's own tenant by default, or the\n``tenant_admin``-supplied filter). ``None`` is reserved for the\ncross-tenant case; v0.2 has one production tenant so this is\neffectively a v0.2.next placeholder, but the shape is locked\ntoday so consumers don't break when the cross-tenant verb lands."
       },
       "ValidationError": {
         "properties": {

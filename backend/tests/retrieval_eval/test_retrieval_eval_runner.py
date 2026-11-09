@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for :mod:`meho_backplane.retrieval.eval.runner`.
+"""Behavioural tests for :mod:`scripts.retrieval_eval.runner`.
 
 Coverage matrix (G4.3-T2 / Task #441 acceptance criteria):
 
@@ -20,10 +20,6 @@ Coverage matrix (G4.3-T2 / Task #441 acceptance criteria):
   ``test_retrieval_eval_memory_corpus.py``.
 * :func:`eval_all` — overall verdict is the worst of the per-surface
   verdicts; one red surface flips the whole result.
-* Baseline integration — when *baseline_corpus_root* is set, the kb
-  surface populates ``baseline_*`` fields and the
-  MEHO-≥-baseline check downgrades to red when MEHO loses on any
-  metric.
 * :func:`save_baseline` / :func:`load_baseline` round-trip preserves
   the EvalResult shape.
 * :func:`compare_baseline` — detects per-surface regressions, ignores
@@ -40,9 +36,8 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-
-from meho_backplane.retrieval.eval.operation_search import OperationSearchResult
-from meho_backplane.retrieval.eval.runner import (
+from scripts.retrieval_eval.operation_search import OperationSearchResult
+from scripts.retrieval_eval.runner import (
     EvalResult,
     RegressionEpsilon,
     SurfaceResult,
@@ -52,6 +47,7 @@ from meho_backplane.retrieval.eval.runner import (
     load_baseline,
     save_baseline,
 )
+
 from meho_backplane.retrieval.retriever import RetrievalHit
 
 # ---------------------------------------------------------------------------
@@ -93,7 +89,7 @@ def _make_perfect_retrieve_fn() -> Any:
     argument the runner threads through picks the right answer map
     at call time.
     """
-    from meho_backplane.retrieval.eval.corpus import load_corpus
+    from scripts.retrieval_eval.corpus import load_corpus
 
     kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
     memory_answers = {row.query: row.expected_hits[0] for row in load_corpus("memory")}
@@ -128,7 +124,7 @@ def _make_perfect_retrieve_fn() -> Any:
 
 def _make_perfect_search_operations_fn() -> Any:
     """Stub operation search that returns the corpus's first expected op_id."""
-    from meho_backplane.retrieval.eval.corpus import load_corpus
+    from scripts.retrieval_eval.corpus import load_corpus
 
     ops_answers = {row.query: row.expected_op_ids[0] for row in load_corpus("operations")}
 
@@ -172,7 +168,7 @@ def _make_partial_retrieve_fn() -> Any:
     Models a degraded retrieval substrate — should produce yellow
     (partial precision/MRR/coverage but above the red floor).
     """
-    from meho_backplane.retrieval.eval.corpus import load_corpus
+    from scripts.retrieval_eval.corpus import load_corpus
 
     corpus = load_corpus("kb")
     # Answer for the first half; nothing for the rest.
@@ -270,9 +266,6 @@ async def test_eval_surface_kb_per_query_results_carry_expected_and_meho_hits() 
         assert q.precision_at_5 == 1.0
         assert q.reciprocal_rank == 1.0
         assert q.coverage_at_5 == 1.0
-        # No baseline ran.
-        assert q.baseline_hits is None
-        assert q.baseline_precision_at_5 is None
 
 
 # ---------------------------------------------------------------------------
@@ -373,113 +366,6 @@ async def test_eval_all_surface_filter_scopes_the_run() -> None:
     )
 
     assert {s.surface for s in result.surfaces} == {"kb"}
-
-
-# ---------------------------------------------------------------------------
-# Baseline integration
-# ---------------------------------------------------------------------------
-
-
-def _seed_grep_kb(tmp_path: Path) -> Path:
-    """Seed a tiny kb directory grep can match against."""
-    from meho_backplane.retrieval.eval.corpus import load_corpus
-
-    kb = tmp_path / "kb"
-    kb.mkdir()
-    # For each kb query in the corpus, write a file whose body
-    # contains the query text + an extra word so "esxcli" matches
-    # the esxcli file etc.
-    for row in load_corpus("kb"):
-        for slug in row.expected_hits:
-            (kb / f"{slug}.md").write_text(
-                f"# {slug}\n{row.query}\n",
-                encoding="utf-8",
-            )
-    return kb
-
-
-@pytest.mark.asyncio
-async def test_eval_surface_kb_with_baseline_populates_baseline_fields(
-    tmp_path: Path,
-) -> None:
-    """``baseline_corpus_root`` set → per-query baseline_* fields populated."""
-    kb_root = _seed_grep_kb(tmp_path)
-
-    result = await eval_surface(
-        "kb",
-        tenant_id=uuid.uuid4(),
-        retrieve_fn=_make_perfect_retrieve_fn(),
-        baseline_corpus_root=kb_root,
-    )
-
-    assert result.baseline_kind == "grep"
-    assert result.baseline_precision_at_5 is not None
-    assert result.baseline_mrr is not None
-    assert result.baseline_coverage is not None
-    assert result.baseline_verdict in {"green", "yellow", "red"}
-
-    for q in result.queries:
-        assert q.baseline_hits is not None
-        assert q.baseline_precision_at_5 is not None
-        assert q.baseline_reciprocal_rank is not None
-        assert q.baseline_coverage_at_5 is not None
-
-
-@pytest.mark.asyncio
-async def test_eval_surface_kb_meho_worse_than_baseline_downgrades_to_red(
-    tmp_path: Path,
-) -> None:
-    """When MEHO loses to baseline on any metric → overall verdict = red."""
-    # Seed grep kb so the baseline finds slugs (precision > 0).
-    kb_root = _seed_grep_kb(tmp_path)
-
-    # MEHO returns nothing → baseline beats MEHO trivially.
-    async def empty_retrieve(
-        *,
-        tenant_id: uuid.UUID,
-        query: str,
-        source: str | None = None,
-        kind: str | None = None,
-        limit: int = 10,
-        principal_sub: str | None = None,
-    ) -> list[RetrievalHit]:
-        return []
-
-    result = await eval_surface(
-        "kb",
-        tenant_id=uuid.uuid4(),
-        retrieve_fn=empty_retrieve,
-        baseline_corpus_root=kb_root,
-    )
-
-    # MEHO precision/MRR/coverage all 0; baseline > 0 → MEHO < baseline → red.
-    assert result.precision_at_5 == 0.0
-    # The base verdict before the baseline check would be red anyway, but
-    # the assertion proves the baseline check fires either way.
-    assert result.verdict == "red"
-
-
-@pytest.mark.asyncio
-async def test_eval_surface_kb_meho_equals_baseline_does_not_downgrade(
-    tmp_path: Path,
-) -> None:
-    """When MEHO == baseline on every metric, the base verdict is preserved."""
-    kb_root = _seed_grep_kb(tmp_path)
-
-    # Both MEHO and baseline return identical hits → metrics equal →
-    # no downgrade. The base verdict (driven by absolute thresholds)
-    # stands.
-    result = await eval_surface(
-        "kb",
-        tenant_id=uuid.uuid4(),
-        retrieve_fn=_make_perfect_retrieve_fn(),
-        baseline_corpus_root=kb_root,
-    )
-
-    # MEHO is perfect (1.0/1.0/1.0); baseline is whatever grep
-    # returned. The downgrade check fires only when MEHO < baseline.
-    # Perfect MEHO can't be less than baseline — verdict stays green.
-    assert result.verdict == "green"
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +578,7 @@ async def test_eval_surface_uses_default_retrieve_when_none_passed() -> None:
     ) -> list[RetrievalHit]:
         return []
 
-    with patch("meho_backplane.retrieval.eval.runner.retrieve", new=stub_retrieve):
+    with patch("scripts.retrieval_eval.runner.retrieve", new=stub_retrieve):
         result = await eval_surface("kb", tenant_id=uuid.uuid4())
 
     # Empty hits everywhere → 0 metrics → red verdict.

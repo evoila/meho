@@ -303,8 +303,8 @@ def verdict(
     The bands are computed metric-by-metric and the worst wins (so
     one red metric is enough to flip the entire surface to red). This
     matches the operator intuition "the surface is only as healthy
-    as its weakest signal" and aligns with the `meho retrieval
-    eval --compare-baseline` regression detection — a single metric
+    as its weakest signal" and aligns with the CI gate's
+    ``--compare-baseline`` regression detection — a single metric
     crossing the red boundary is what gates merge in CI.
 
     Parameters

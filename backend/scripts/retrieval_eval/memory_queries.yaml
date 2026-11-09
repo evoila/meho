@@ -3,16 +3,16 @@
 # 10 queries covering the 5 memory scope shapes proportionally
 # (~2 per scope: user / user-tenant / user-target / tenant / target).
 # Memory entries are operator notes the consumer-agent would have
-# written via `remember_*` MCP tools over a normal RDC operator
+# written via `remember_*` MCP tools over a normal operator
 # workflow; queries are the phrasings an operator (or the agent on
 # their behalf) would type to `search_memory` to find them again.
 # Per-entry `notes` records the originating context — keep when
 # editing so human review on regression has the why.
 #
-# Schema: meho_backplane.retrieval.eval.corpus.MemoryCorpusQuery.
+# Schema: scripts.retrieval_eval.corpus.MemoryCorpusQuery.
 # Each expected hit is a `(scope, slug)` pair — same slug can
 # legitimately exist under different scopes (e.g. `<operator>` may
-# have user-target notes about `rdc-vcenter` while the tenant has
+# have user-target notes about `acme-vcenter` while the tenant has
 # target-scope notes about the same target).
 #
 # Editing rules:
@@ -64,10 +64,10 @@
 
 # --- user-tenant queries (2) ---
 
-- query: my notes on the rdc-internal tenant runbook quirks
+- query: my notes on the acme-ops tenant runbook quirks
   expected_hits:
-    - ["user-tenant", "rdc-internal-runbook-quirks"]
-    - ["tenant", "rdc-internal-runbook"]
+    - ["user-tenant", "acme-ops-runbook-quirks"]
+    - ["tenant", "acme-ops-runbook"]
   notes: >-
     user-tenant scope — the operator's private overlay on the shared
     tenant runbook (which steps they always forget, who they Slack
@@ -75,9 +75,9 @@
     fallback when the operator hasn't written their own overlay yet;
     surfaces "the team has the answer even if I don't".
 
-- query: how I structure my Slack standup for rdc-internal
+- query: how I structure my Slack standup for acme-ops
   expected_hits:
-    - ["user-tenant", "standup-template-rdc-internal"]
+    - ["user-tenant", "standup-template-acme-ops"]
   notes: >-
     user-tenant scope — operator's personal standup template scoped to
     one tenant (different tenants have different reporting cadences).
@@ -86,10 +86,10 @@
 
 # --- user-target queries (2) ---
 
-- query: VPN steps I use for rdc-vcenter
+- query: VPN steps I use for acme-vcenter
   expected_hits:
-    - ["user-target", "rdc-vcenter-vpn-steps"]
-    - ["target", "rdc-vcenter-vpn-setup"]
+    - ["user-target", "acme-vcenter-vpn-steps"]
+    - ["target", "acme-vcenter-vpn-setup"]
   notes: >-
     user-target first — the operator's private VPN steps (their
     1Password item refs, their preferred client). Target-scope is the
@@ -97,24 +97,24 @@
     the target was first onboarded); surfaces when the operator
     hasn't yet captured their own overlay on the team-wide procedure.
 
-- query: gotchas I hit deploying to holodeck-lab
+- query: gotchas I hit deploying to acme-holodeck
   expected_hits:
-    - ["user-target", "holodeck-lab-personal-gotchas"]
-    - ["target", "holodeck-lab-known-issues"]
+    - ["user-target", "acme-holodeck-personal-gotchas"]
+    - ["target", "acme-holodeck-known-issues"]
   notes: >-
     user-target scope — the "I personally hit this once and lost an
     hour" notes the operator captures over time. Target-scope
-    `holodeck-lab-known-issues` is the acceptable fallback because
+    `acme-holodeck-known-issues` is the acceptable fallback because
     the personal gotchas are an overlay on the team-wide
     known-issues list.
 
 # --- tenant queries (2) ---
 
-- query: rdc-internal tenant naming convention for K8s namespaces
+- query: acme-ops tenant naming convention for K8s namespaces
   expected_hits:
     - ["tenant", "k8s-namespace-naming"]
   notes: >-
-    tenant scope — shared convention every operator on rdc-internal
+    tenant scope — shared convention every operator on acme-ops
     follows. Single ground-truth pair because the convention is the
     canonical answer; an operator's user-scope override would be a
     bug (deviating from team convention silently).
@@ -132,23 +132,23 @@
 
 # --- target queries (2) ---
 
-- query: VPN setup for rdc-vcenter
+- query: VPN setup for acme-vcenter
   expected_hits:
-    - ["target", "rdc-vcenter-vpn-setup"]
-    - ["user-target", "rdc-vcenter-vpn-steps"]
+    - ["target", "acme-vcenter-vpn-setup"]
+    - ["user-target", "acme-vcenter-vpn-steps"]
   notes: >-
     target scope first — the team-wide VPN-onboarding runbook for the
-    rdc-vcenter target (captured when the target was first
+    acme-vcenter target (captured when the target was first
     onboarded). User-target is the acceptable fallback / adjacent:
     when the operator has their own overlay, the eval still credits
     surfacing the broader team runbook.
 
-- query: known issues with holodeck-lab
+- query: known issues with acme-holodeck
   expected_hits:
-    - ["target", "holodeck-lab-known-issues"]
-    - ["target", "holodeck-lab-overview"]
+    - ["target", "acme-holodeck-known-issues"]
+    - ["target", "acme-holodeck-overview"]
   notes: >-
     target scope — the team-wide known-issues + overview for the
-    holodeck-lab target. Two target-scope pairs because both are
+    acme-holodeck target. Two target-scope pairs because both are
     legitimate top-N hits for "known issues" (the overview links to
     the issues list).

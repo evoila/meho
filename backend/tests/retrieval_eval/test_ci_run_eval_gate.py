@@ -3,8 +3,8 @@
 
 """Behavioural tests for :mod:`scripts.ci.run_eval_gate`.
 
-The CI gate is the load-bearing "MEHO ≥ baseline" check that gates
-every backend PR (Initiative #373 retire-criterion #4). The previous
+The CI gate checks retrieval quality against the checked-in baseline
+on every PR that changes search code. The previous
 shape returned exit 0 when the baseline file was missing — a silent
 gate-bypass surface. These tests pin the corrected fail-loud
 behaviour so a future regression is caught at PR time.

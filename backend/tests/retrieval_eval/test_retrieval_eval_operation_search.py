@@ -22,16 +22,16 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from scripts.retrieval_eval.corpus import load_corpus
+from scripts.retrieval_eval.operation_search import (
+    OperationSearchResult,
+    search_corpus_operations,
+)
+from scripts.retrieval_eval.runner import eval_all, eval_surface
 from sqlalchemy import func, select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document, EndpointDescriptor
-from meho_backplane.retrieval.eval.corpus import load_corpus
-from meho_backplane.retrieval.eval.operation_search import (
-    OperationSearchResult,
-    search_corpus_operations,
-)
-from meho_backplane.retrieval.eval.runner import eval_all, eval_surface
 from meho_backplane.settings import get_settings
 
 _TENANT_A = uuid.UUID("00000000-0000-0000-0000-0000000000aa")

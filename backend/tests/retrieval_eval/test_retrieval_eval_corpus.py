@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for :mod:`meho_backplane.retrieval.eval.corpus`.
+"""Behavioural tests for :mod:`scripts.retrieval_eval.corpus`.
 
 Coverage matrix (G4.3-T1 / Task #440 acceptance criteria):
 
@@ -25,8 +25,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-
-from meho_backplane.retrieval.eval.corpus import (
+from scripts.retrieval_eval.corpus import (
     KB_PASSAGE_FIXTURE_VERSION,
     CorpusValidationError,
     KbCorpusQuery,
@@ -262,7 +261,7 @@ def test_load_corpus_raises_on_malformed_yaml(
     """Acceptance #2: malformed YAML raises ``CorpusValidationError`` naming the file.
 
     The failure message must surface the surface name + filename so an
-    operator running ``meho retrieval eval`` can find the bad entry
+    reader of the CI gate log can find the bad entry
     without grepping the corpus.
     """
     bad = tmp_path / "kb_queries.yaml"
@@ -270,7 +269,7 @@ def test_load_corpus_raises_on_malformed_yaml(
     bad.write_text("- query: q\n  expected_hits: [a, b: c]\n")
 
     monkeypatch.setattr(
-        "meho_backplane.retrieval.eval.corpus.resources.files",
+        "scripts.retrieval_eval.corpus.resources.files",
         lambda _pkg: _FakeRoot(tmp_path),
     )
 
@@ -291,7 +290,7 @@ def test_load_corpus_raises_on_schema_mismatch(
     bad.write_text("- query: how do I revert a snapshot\n  expected_slug: vcenter-9.0-snapshot\n")
 
     monkeypatch.setattr(
-        "meho_backplane.retrieval.eval.corpus.resources.files",
+        "scripts.retrieval_eval.corpus.resources.files",
         lambda _pkg: _FakeRoot(tmp_path),
     )
 
@@ -312,7 +311,7 @@ def test_load_corpus_raises_on_top_level_non_list(
     bad.write_text("query: q\nexpected_hits: [a]\n")  # mapping at top level
 
     monkeypatch.setattr(
-        "meho_backplane.retrieval.eval.corpus.resources.files",
+        "scripts.retrieval_eval.corpus.resources.files",
         lambda _pkg: _FakeRoot(tmp_path),
     )
 
@@ -330,7 +329,7 @@ def test_load_corpus_treats_empty_file_as_empty_list(
     bad.write_text("")
 
     monkeypatch.setattr(
-        "meho_backplane.retrieval.eval.corpus.resources.files",
+        "scripts.retrieval_eval.corpus.resources.files",
         lambda _pkg: _FakeRoot(tmp_path),
     )
 
@@ -344,7 +343,7 @@ def test_load_corpus_kb_missing_file_is_hard_error(
 ) -> None:
     """The kb corpus is mandatory in T1; missing YAML must raise loudly."""
     monkeypatch.setattr(
-        "meho_backplane.retrieval.eval.corpus.resources.files",
+        "scripts.retrieval_eval.corpus.resources.files",
         lambda _pkg: _FakeRoot(tmp_path),  # tmp_path has no kb_queries.yaml
     )
 

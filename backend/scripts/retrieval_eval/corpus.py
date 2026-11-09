@@ -74,9 +74,8 @@ class KbCorpusQuery(BaseModel):
     Attributes
     ----------
     query
-        The natural-language phrasing an operator would type. Sourced
-        from operator Slack history + recent Claude session logs (see
-        per-entry ``notes`` for the originating context).
+        The natural-language phrasing an operator would type (see
+        per-entry ``notes`` for the context).
     expected_hits
         Ordered list of ``kb`` slugs (without the ``.md`` suffix) the
         operator would consider a correct hit. The first entry is the
@@ -287,9 +286,8 @@ class CorpusValidationError(Exception):
     """Raised when a corpus YAML file is malformed or schema-mismatched.
 
     The message names the surface, the file path that was loaded, and
-    the underlying parse / validation error. Operators running
-    ``meho retrieval eval`` (T2) see the message verbatim; the loud
-    failure is intentional — a corpus that loads with garbage entries
+    the underlying parse / validation error. The CI gate prints the
+    message verbatim; the loud failure is intentional — a corpus that loads with garbage entries
     would produce eval numbers that look authoritative but reflect
     nothing about retrieval quality.
     """

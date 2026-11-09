@@ -268,6 +268,7 @@ def test_unreachable_target_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) 
 
 def test_public_answer_runs_fresh_after_a_repair(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
+    monkeypatch.setattr(first_start, "_PUBLIC_RESULT_HOLD_S", 0.0)
     up = {"esx-2": False}
 
     async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
@@ -296,8 +297,27 @@ async def test_overlapping_public_calls_share_one_run(monkeypatch: pytest.Monkey
     )
     assert first is second
     assert calls == 2  # two systems, one run
-    await first_start.run_public_first_start_checks()
-    assert calls == 4  # the next call runs again
+
+
+async def test_repeated_public_calls_in_the_hold_time_start_one_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_green(monkeypatch)
+    calls = 0
+
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        nonlocal calls
+        calls += 1
+        return "up"
+
+    monkeypatch.setattr(first_start, "_probe_one", probe)
+    first = await first_start.run_public_first_start_checks()
+    for _ in range(5):
+        assert await first_start.run_public_first_start_checks() is first
+    assert calls == 2  # two systems, one run
+    monkeypatch.setattr(first_start, "_PUBLIC_RESULT_HOLD_S", 0.0)
+    assert await first_start.run_public_first_start_checks() is not first
+    assert calls == 4  # after the hold time, the next call runs again
 
 
 async def test_names_show_only_when_asked_and_only_for_the_tenant(

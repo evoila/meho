@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 import tracemalloc
+import uuid
 from typing import Any, ClassVar
 
 import pytest
@@ -17,7 +18,13 @@ import yaml
 from pydantic import ValidationError
 
 from meho_backplane.connectors.net import tls as net_tls
-from meho_backplane.connectors.net.probe_pool import PROBE_POOL_WORKERS, run_blocking_probe
+from meho_backplane.connectors.net.probe_pool import (
+    PROBE_POOL_WORKERS,
+    PROBE_TENANT_SHARE,
+    ProbePoolBusyError,
+    run_blocking_probe,
+)
+from meho_backplane.operations._errors import is_probe_pool_busy, result_probe_pool_busy
 from meho_backplane.targets.extras_limits import (
     EXTRAS_MAX_DEPTH,
     EXTRAS_MAX_NODES,
@@ -41,6 +48,32 @@ d: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]
 # --- probe pool ------------------------------------------------------------
 
 
+def _tenants(count: int) -> list[uuid.UUID]:
+    return [uuid.uuid4() for _ in range(count)]
+
+
+async def _wait_until(check: Any) -> None:
+    for _ in range(200):
+        if check():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("condition not met in time")
+
+
+def _fill_pool(silent_peer: Any) -> list[asyncio.Task[Any]]:
+    """Fill every probe thread, each tenant with its full share."""
+    tenants = _tenants(PROBE_POOL_WORKERS // PROBE_TENANT_SHARE)
+    return [
+        asyncio.create_task(run_blocking_probe(silent_peer, tenant_id=tenant, timeout=10))
+        for tenant in tenants
+        for _ in range(PROBE_TENANT_SHARE)
+    ]
+
+
+def test_tenant_share_is_below_the_number_of_threads() -> None:
+    assert PROBE_TENANT_SHARE < PROBE_POOL_WORKERS
+
+
 async def test_waiting_probes_leave_the_default_thread_pool_free() -> None:
     release = threading.Event()
     running: list[int] = []
@@ -50,17 +83,13 @@ async def test_waiting_probes_leave_the_default_thread_pool_free() -> None:
         release.wait(10)
         return "done"
 
-    probes = [
-        asyncio.create_task(run_blocking_probe(_silent_peer)) for _ in range(PROBE_POOL_WORKERS)
-    ]
+    probes = _fill_pool(_silent_peer)
     # One more probe than the pool has threads: it waits in the probe queue.
-    queued = asyncio.create_task(run_blocking_probe(_silent_peer))
+    queued = asyncio.create_task(
+        run_blocking_probe(_silent_peer, tenant_id=uuid.uuid4(), timeout=10)
+    )
     try:
-        for _ in range(100):
-            if len(running) == PROBE_POOL_WORKERS:
-                break
-            await asyncio.sleep(0.05)
-        assert len(running) == PROBE_POOL_WORKERS
+        await _wait_until(lambda: len(running) == PROBE_POOL_WORKERS)
         begin = time.monotonic()
         assert await asyncio.to_thread(lambda: "login ok") == "login ok"
         assert time.monotonic() - begin < 0.1
@@ -70,12 +99,121 @@ async def test_waiting_probes_leave_the_default_thread_pool_free() -> None:
     assert await asyncio.gather(*probes, queued) == ["done"] * (PROBE_POOL_WORKERS + 1)
 
 
+async def test_tenant_over_its_share_is_refused_and_another_tenant_still_runs() -> None:
+    release = threading.Event()
+    running: list[str] = []
+
+    def _silent_peer(name: str) -> str:
+        running.append(name)
+        release.wait(10)
+        return name
+
+    busy_tenant, other_tenant = _tenants(2)
+    held = [
+        asyncio.create_task(
+            run_blocking_probe(_silent_peer, "busy", tenant_id=busy_tenant, timeout=10)
+        )
+        for _ in range(PROBE_TENANT_SHARE)
+    ]
+    try:
+        await _wait_until(lambda: len(running) == PROBE_TENANT_SHARE)
+        with pytest.raises(ProbePoolBusyError, match="probe_pool_busy"):
+            await run_blocking_probe(_silent_peer, "refused", tenant_id=busy_tenant, timeout=10)
+        other = asyncio.create_task(
+            run_blocking_probe(_silent_peer, "other", tenant_id=other_tenant, timeout=10)
+        )
+        await _wait_until(lambda: "other" in running)
+    finally:
+        release.set()
+    assert await other == "other"
+    assert await asyncio.gather(*held) == ["busy"] * PROBE_TENANT_SHARE
+    assert "refused" not in running
+
+
+async def test_tenant_gets_its_share_back_when_its_probes_end() -> None:
+    tenant = uuid.uuid4()
+    for _ in range(PROBE_TENANT_SHARE + 1):
+        assert await run_blocking_probe(lambda: "ok", tenant_id=tenant, timeout=1) == "ok"
+
+
+async def test_share_stays_in_use_until_a_cancelled_probe_ends() -> None:
+    release = threading.Event()
+    running: list[int] = []
+
+    def _silent_peer() -> str:
+        running.append(1)
+        release.wait(10)
+        return "done"
+
+    tenant = uuid.uuid4()
+    held = [
+        asyncio.create_task(run_blocking_probe(_silent_peer, tenant_id=tenant, timeout=10))
+        for _ in range(PROBE_TENANT_SHARE)
+    ]
+    try:
+        await _wait_until(lambda: len(running) == PROBE_TENANT_SHARE)
+        for task in held:
+            task.cancel()
+        await asyncio.gather(*held, return_exceptions=True)
+        # The threads still wait on their sockets, so the share is still in use.
+        with pytest.raises(ProbePoolBusyError):
+            await run_blocking_probe(_silent_peer, tenant_id=tenant, timeout=10)
+    finally:
+        release.set()
+    for _ in range(200):
+        try:
+            assert await run_blocking_probe(lambda: "ok", tenant_id=tenant, timeout=1) == "ok"
+            break
+        except ProbePoolBusyError:
+            await asyncio.sleep(0.02)
+    else:
+        raise AssertionError("the share was not freed")
+
+
+async def test_probe_that_waited_longer_than_its_timeout_does_not_start() -> None:
+    release = threading.Event()
+    started: list[str] = []
+
+    def _silent_peer(name: str = "held") -> str:
+        started.append(name)
+        release.wait(10)
+        return name
+
+    probes = _fill_pool(_silent_peer)
+    late = asyncio.create_task(
+        run_blocking_probe(_silent_peer, "late", tenant_id=uuid.uuid4(), timeout=0.1)
+    )
+    try:
+        await _wait_until(lambda: len(started) == PROBE_POOL_WORKERS)
+        await asyncio.sleep(0.3)
+    finally:
+        release.set()
+    with pytest.raises(ProbePoolBusyError, match="did not start"):
+        await late
+    await asyncio.gather(*probes)
+    assert "late" not in started
+
+
 async def test_probe_pool_returns_the_error_of_the_probe() -> None:
     def _fail() -> None:
         raise OSError("unreachable")
 
     with pytest.raises(OSError, match="unreachable"):
-        await run_blocking_probe(_fail)
+        await run_blocking_probe(_fail, tenant_id=uuid.uuid4(), timeout=1)
+
+
+def test_probe_pool_busy_is_its_own_dispatch_error() -> None:
+    exc = ProbePoolBusyError("this tenant already has 2 network probes running or waiting")
+    assert is_probe_pool_busy(exc)
+    assert not is_probe_pool_busy(RuntimeError("other"))
+    result = result_probe_pool_busy("net.ping", exc, 1.0)
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("probe_pool_busy:")
+    assert result.extras is not None
+    assert result.extras["error_code"] == "probe_pool_busy"
+    assert result.extras["tenant_share"] == PROBE_TENANT_SHARE
+    assert result.extras["exception_class"] == "ProbePoolBusyError"
 
 
 # --- tls deadline ----------------------------------------------------------

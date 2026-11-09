@@ -23,7 +23,7 @@ Each builder owns one ``error_code`` from the contract documented in
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
-``write_capability_denied`` / ``not_found`` / ``connector_timeout`` /
+``probe_pool_busy`` / ``write_capability_denied`` / ``not_found`` / ``connector_timeout`` /
 ``vault_credentials_read_error`` / ``connector_error`` /
 ``release_changed_while_waiting``.
 The ``status`` field maps
@@ -95,6 +95,7 @@ __all__ = [
     "result_object_changed_since_approval",
     "result_park_check_refused",
     "result_preview_changed_since_approval",
+    "result_probe_pool_busy",
     "result_rate_limited",
     "result_receipt_too_large",
     "result_release_changed_while_waiting",
@@ -1748,6 +1749,62 @@ def result_connector_probe_refused(
             "error_code": "connector_probe_refused",
             "allowlist_env": PROBE_ALLOWLIST_ENV,
             "host": host,
+            "detail": detail,
+            "exception_class": type(exc).__name__,
+        },
+    )
+
+
+@lru_cache(maxsize=1)
+def _probe_pool_busy_error_type() -> type[BaseException] | None:
+    """Resolve ``ProbePoolBusyError`` lazily, or ``None`` if unresolvable.
+
+    Deferred for the same reason as :func:`_probe_refused_error_type`.
+    """
+    try:
+        from meho_backplane.connectors.net.probe_pool import ProbePoolBusyError
+    except Exception:  # pragma: no cover -- the package is a runtime dependency
+        return None
+    return ProbePoolBusyError
+
+
+def is_probe_pool_busy(exc: BaseException) -> bool:
+    """Whether *exc* is a ``net.*`` probe refused because its tenant's share was in use."""
+    exc_type = _probe_pool_busy_error_type()
+    return exc_type is not None and isinstance(exc, exc_type)
+
+
+def result_probe_pool_busy(
+    op_id: str,
+    exc: BaseException,
+    duration_ms: float,
+) -> OperationResult:
+    """A ``net.*`` probe did not run: its tenant's share of the probe pool was in use.
+
+    Each tenant may have only a few blocking probes in the probe pool at one
+    time (``connectors/net/probe_pool.py``). No socket was opened, so this is
+    not a reachability answer; a Sensor on it reads ``unknown``.
+    """
+    from meho_backplane.connectors.net.probe_pool import PROBE_POOL_BUSY, PROBE_TENANT_SHARE
+
+    detail = _sanitize_free_text(str(getattr(exc, "reason", "") or exc))
+    summary = (
+        f"{PROBE_POOL_BUSY}: MEHO did not run this network probe, so this is NOT a "
+        f"reachability answer. Each tenant may have {PROBE_TENANT_SHARE} slow network "
+        f"probes (net.ping, net.trace, net.path_mtu, net.tls_inspect) running or waiting "
+        f"at one time. Retry when the other probes have ended. See "
+        f"docs/codebase/connectors-net-diagnostics.md."
+    )
+    if detail:
+        summary = f"{summary} Detail: {detail}"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": PROBE_POOL_BUSY,
+            "tenant_share": PROBE_TENANT_SHARE,
             "detail": detail,
             "exception_class": type(exc).__name__,
         },

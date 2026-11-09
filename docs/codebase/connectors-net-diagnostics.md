@@ -267,6 +267,33 @@ and `ConnectionRefusedError` are all `OSError` subclasses — so the
 handler's `except` arms are ordered specific-before-general
 (timeout → DNS → refused → generic `OSError`).
 
+### The probe pool and each tenant's share
+
+`net.ping`, `net.trace`, `net.path_mtu` and `net.tls_inspect` use
+blocking sockets. They run on a small thread pool of their own
+(`connectors/net/probe_pool.py`, `run_blocking_probe`), not on the
+default thread pool of the event loop:
+
+- The pool has `PROBE_POOL_WORKERS` (4) threads.
+- Each tenant may have `PROBE_TENANT_SHARE` (2) probes in the pool at one
+  time, running or waiting. The share is below the number of threads, so
+  one tenant never holds every thread.
+- A probe over its tenant's share does not wait. It fails at once with
+  `ProbePoolBusyError`, and the dispatcher returns the error code
+  `probe_pool_busy` (`is_probe_pool_busy` + `result_probe_pool_busy` in
+  `operations/_errors.py`). `extras` carries `tenant_share`, `detail` and
+  `exception_class`.
+- A probe that waits in the queue counts that time against its own
+  timeout (the per-echo timeout for `net.ping`, the per-hop timeout for
+  `net.trace`). When it waited longer, it does not start and fails with
+  the same error.
+- A slot is free again when the probe's thread ends, also when the caller
+  stopped waiting earlier.
+
+No socket was opened, so like `connector_probe_refused` this is not a
+reading: a Sensor on it reads `unknown`. Tests:
+`tests/test_blocking_work_limits.py`.
+
 ## `net.http_probe` (T3, #2408)
 
 `net.http_probe(url, method=HEAD|GET, timeout_seconds?)` issues a
@@ -625,8 +652,8 @@ Control flow (`connectors/net/tls.py`):
 
 1. `assert_probe_allowed(host)` — the T1 allowlist floor, before any
    socket opens.
-2. `asyncio.to_thread(_blocking_tls_inspect, ...)` — the blocking
-   socket + handshake runs off the event loop. The context is
+2. `run_blocking_probe(_blocking_tls_inspect, ...)` — the blocking
+   socket + handshake runs on the probe pool, off the event loop. The context is
    `SSL.Context(TLS_CLIENT_METHOD)` with `set_verify(VERIFY_NONE)`; SNI
    is set from `server_name` (default `host`) **only for hostnames**
    (RFC 6066 forbids an IP-literal SNI).
@@ -757,7 +784,8 @@ The ICMP cohort completes local-tool parity (`ping` / `traceroute` /
 diagnosis. All three live in `connectors/net/icmp.py` behind one
 registrar (`register_net_icmp_operations`), share the `net-probe-1.x`
 identity, and reuse the three T1 foundations. The blocking socket work
-runs off the event loop via `asyncio.to_thread`. IPv4-only, Linux-only in
+runs on the probe pool, off the event loop (see "The probe pool and each
+tenant's share"). IPv4-only, Linux-only in
 v1.
 
 The load-bearing decision is the **pod-security posture** (resolved

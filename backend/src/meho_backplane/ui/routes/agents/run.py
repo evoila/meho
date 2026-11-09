@@ -57,8 +57,9 @@ can only GET):
   the transcript fragment whose ``sse-connect`` carries it.
 * ``GET /ui/agents/{name}/run/stream?token=...`` -- the cookie-authed
   bridge. It verifies the token against the cookie session (so a forged /
-  replayed / cross-session token streams nothing), lifts the operator,
-  and proxies ``stream_events`` with ``X-Accel-Buffering: no`` so each
+  cross-session token streams nothing), records the token's first use
+  (a second GET with the same token gets ``204`` and starts no run), lifts
+  the operator, and proxies ``stream_events`` with ``X-Accel-Buffering: no`` so each
   frame flushes immediately (SSE buffering #1389 is fixed, so the console
   paints turn-by-turn rather than only at completion).
 
@@ -106,6 +107,7 @@ import structlog
 from fastapi import HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 
 from meho_backplane.agent.invocation import (
     AgentDisabledError,
@@ -123,6 +125,7 @@ from meho_backplane.operations.agent_run import (
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.agents.run_token import (
+    claim_run_token,
     mint_run_token,
     verify_run_token,
 )
@@ -373,7 +376,7 @@ async def stream_run_events(
     *,
     name: str,
     token: str,
-) -> StreamingResponse:
+) -> Response:
     """``GET /ui/agents/{name}/run/stream`` -- the cookie-authed SSE bridge.
 
     Verifies the run token against the cookie session (a forged / expired
@@ -382,6 +385,12 @@ async def stream_run_events(
     segment, then proxies ``stream_events`` for the lifted operator. The
     run prompt comes from the *token* (authorised by the CSRF-gated POST),
     not the query string, so a tampered query cannot change what runs.
+
+    One token starts one run. The first accepted GET records the token's
+    id (:func:`claim_run_token`). Every later GET with the same token gets
+    ``204 No Content`` and starts no run; ``204`` also tells the browser's
+    ``EventSource`` to stop reconnecting. When Valkey cannot record the
+    use, the bridge answers ``503`` and starts no run.
 
     Sets ``X-Accel-Buffering: no`` so the per-frame flush is not held by
     an intermediary (nginx) buffer -- the live console paints turn-by-turn
@@ -393,6 +402,18 @@ async def stream_run_events(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="agent_run_token_invalid",
         )
+    try:
+        first_use = await claim_run_token(decoded.token_id)
+    except RedisError as exc:
+        # No exc_info: a traceback with locals would print the token.
+        _log.warning("ui_agent_run_token_claim_failed", name=name, error_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="agent_run_token_store_unavailable",
+        ) from exc
+    if not first_use:
+        _log.info("ui_agent_run_token_reused", name=name)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     structlog.contextvars.bind_contextvars(
         audit_op_id="agent.run_events",
         audit_op_class="write",

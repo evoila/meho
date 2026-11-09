@@ -15,7 +15,8 @@ same order, so the sign never says something else than the approve does:
 1. A machine login never approves (:func:`_check_reviewer_role`).
 2. A ``read_only`` person without the ``approver`` flag cannot decide.
 3. Only a ``pending`` request can be approved.
-4. The group rule (:func:`_check_approver_group`): an own change only for
+4. The group rule (:func:`_check_approver_group`): a change of rights only
+   for another admin, whatever the group of the requester; an own change only for
    a MEHO-SA-Operator or a MEHO-Admin, with a click in the web interface when the
    ``caution`` change waited only because it came with a token (#3980),
    or a ``safe`` / ``caution`` change under the break-glass switch;
@@ -43,13 +44,13 @@ from meho_backplane.operations.approval_queue import (
     ApprovalRoleFloorError,
     ApprovalRule,
     NonHumanApprovalError,
+    RightsChangeApprovalError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     _check_approver_group,
     _check_approver_role_floor,
     _check_reviewer_role,
 )
-from meho_backplane.operations.grant_approval import check_grant_approval
 
 __all__ = [
     "WEB_APPROVAL_HINT",
@@ -81,6 +82,8 @@ class ApproveRightReason(StrEnum):
       change, and the person is not in a group that may approve it.
     * ``role_too_low`` — the operation needs a higher role from the person
       who approves it.
+    * ``rights_change`` — a change of rights, and the person is the
+      requester or not an admin.
     * ``no_approval_access`` — a ``read_only`` person without the
       ``approver`` flag.
     * ``not_a_person`` — an AI tool or another machine login.
@@ -92,6 +95,7 @@ class ApproveRightReason(StrEnum):
     OWN_CHANGE = "own_change"
     WRONG_GROUP = "wrong_group"
     ROLE_TOO_LOW = "role_too_low"
+    RIGHTS_CHANGE = "rights_change"
     NO_APPROVAL_ACCESS = "no_approval_access"
     NOT_A_PERSON = "not_a_person"
     NOT_PENDING = "not_pending"
@@ -209,7 +213,6 @@ def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
             f"This request is {request.status}. Only a pending request can be approved.",
         )
     try:
-        check_grant_approval(operator, request)
         rule = _check_approver_group(operator, request, log_break_glass=False)
         _check_approver_role_floor(operator, request)
     except SelfApprovalForbiddenError as exc:
@@ -223,6 +226,8 @@ def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
         return _refused(ApproveRightReason.OWN_CHANGE, message)
     except ApprovalGroupForbiddenError as exc:
         return _refused(ApproveRightReason.WRONG_GROUP, exc.reason_text)
+    except RightsChangeApprovalError as exc:
+        return _refused(ApproveRightReason.RIGHTS_CHANGE, exc.reason_text)
     except ApprovalRoleFloorError as exc:
         return _refused(ApproveRightReason.ROLE_TOO_LOW, exc.reason_text)
     return _allowed(rule)

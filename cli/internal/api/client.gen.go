@@ -1726,6 +1726,7 @@ type ApprovalRequestView struct {
 	// The console modal renders from the same resolver, so the two surfaces
 	// never drift. Populated on ``GET /{id}`` only; the list view omits it.
 	ReviewerContext *ReviewerContextView `json:"reviewer_context,omitempty"`
+	RightsChange    *bool                `json:"rights_change,omitempty"`
 	RunId           *openapi_types.UUID  `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`ApprovalRequest`.

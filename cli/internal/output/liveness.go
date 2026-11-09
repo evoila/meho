@@ -18,13 +18,15 @@ const OperatorRoleNote = "  The other checks (credential store, readiness, appro
 
 // PrintLiveness renders the liveness answer (GET /api/v1/health/live)
 // for `meho status`: the identity, the tenants with the current one
-// marked, the database state, and the note that the deep checks need
-// the operator role. The first lines match PrintHealth, so a person
-// reads the same shape in every role.
+// marked, the database state, the server's time in UTC (#5504), and
+// the note that the deep checks need the operator role. The first
+// lines match PrintHealth, so a person reads the same shape in every
+// role.
 func PrintLiveness(stdoutW io.Writer, resp *api.LivenessResponse) error {
 	fmt.Fprintf(stdoutW, "Logged in as %s\n", formatOperatorIdentity(resp.Operator))
 	fmt.Fprint(stdoutW, formatTenants(resp.Operator))
 	fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+	fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
 	fmt.Fprintln(stdoutW, OperatorRoleNote)
 	return nil
 }

@@ -206,6 +206,7 @@ from meho_backplane.ui.routes.approvals.run_watch import (
     live_runs_for,
     start_approved_run,
 )
+from meho_backplane.ui.routes.approvals.waiting import WaitingFirstPager
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_approvals_router"]
@@ -224,6 +225,11 @@ _PENDING_LIMIT: Final[int] = 50
 #: glance cap (which would silently truncate the history). One page is kept
 #: small so the first paint is fast; "Load more" advances the offset.
 _HISTORY_PAGE_SIZE: Final[int] = 25
+
+#: How many pending requests the Pending tab reads per query when it sorts
+#: "waiting for you" first (#6000). The check runs in Python, so the tab
+#: reads every pending request of the view, one batch at a time.
+_WAITING_SCAN_BATCH: Final[int] = 500
 
 #: Maximum work_ref length accepted by the history filter. ``work_ref`` is
 #: an opaque external change-ticket string (e.g. ``"gh:evoila/meho#1"``);
@@ -332,6 +338,24 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
     return operator
 
 
+async def _operator_or_none(session: UISessionContext) -> Operator | None:
+    """Return the session's :class:`Operator`, or ``None`` when it cannot be checked.
+
+    The Pending tab uses it to put the requests this person may approve
+    first. The list pages are open with the session alone, and a list is
+    still useful without that order. So any failed check (a session that
+    ended, a tenant switched in another tab, the sign-in service not
+    reachable) shows the plain order with no "waiting for you" mark,
+    instead of an error. The decision routes keep the strict
+    :func:`_resolve_operator`.
+    """
+    try:
+        return await _resolve_operator(session)
+    except Exception as exc:
+        log.warning("ui_approvals_waiting_order_skipped", error=type(exc).__name__)
+        return None
+
+
 def _is_htmx(request: Request) -> bool:
     """Return whether *request* is an HTMX-driven fetch.
 
@@ -431,6 +455,45 @@ async def _list_history_for_session(
         )
     has_more = len(rows) > _HISTORY_PAGE_SIZE
     return rows[:_HISTORY_PAGE_SIZE], has_more
+
+
+async def _list_pending_waiting_first(
+    session: UISessionContext,
+    operator: Operator,
+    *,
+    work_ref: str | None,
+    offset: int,
+    order: ApprovalListOrder,
+) -> tuple[list[ApprovalRequest], bool, set[uuid.UUID]]:
+    """Page the Pending tab with the requests *operator* may approve first.
+
+    The split runs over every pending request of the view before the page
+    is cut, so a request waiting for this person is on page one even when
+    hundreds of newer requests are not. The queue is read in batches of
+    :data:`_WAITING_SCAN_BATCH`; :class:`WaitingFirstPager` keeps only the
+    rows the page can need. Each batch starts after the last row of the
+    batch before (not at a counted offset), so a request decided during the
+    scan does not make the scan skip a row. Returns ``(rows, has_more, waiting ids)``.
+    """
+    pager = WaitingFirstPager(operator, offset=offset, size=_HISTORY_PAGE_SIZE)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        last: ApprovalRequest | None = None
+        while True:
+            batch = await list_pending(
+                db_session,
+                tenant_id=session.tenant_id,
+                status="pending",
+                work_ref=work_ref,
+                limit=_WAITING_SCAN_BATCH,
+                order=order,
+                after=last,
+            )
+            pager.add(batch)
+            if len(batch) < _WAITING_SCAN_BATCH:
+                break
+            last = batch[-1]
+    return pager.page()
 
 
 async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) -> ApprovalRequest:
@@ -674,14 +737,21 @@ async def _build_history_context(
         resolved_order = "oldest"
     else:
         resolved_order = "newest"
-    rows, has_more = await _list_history_for_session(
-        session,
-        status_filter=_HISTORY_TABS[tab],
-        work_ref=work_ref_filter,
-        offset=offset,
-        order=resolved_order,
-        outcome_unknown=tab == _OUTCOME_UNKNOWN_TAB,
-    )
+    operator = await _operator_or_none(session) if tab == "pending" else None
+    waiting: set[uuid.UUID] = set()
+    if operator is not None:
+        rows, has_more, waiting = await _list_pending_waiting_first(
+            session, operator, work_ref=work_ref_filter, offset=offset, order=resolved_order
+        )
+    else:
+        rows, has_more = await _list_history_for_session(
+            session,
+            status_filter=_HISTORY_TABS[tab],
+            work_ref=work_ref_filter,
+            offset=offset,
+            order=resolved_order,
+            outcome_unknown=tab == _OUTCOME_UNKNOWN_TAB,
+        )
     # The "outcome unknown" rows name the target to check (#5026); the
     # other tabs show the target in the modal only.
     target_names: dict[uuid.UUID, str] = {}
@@ -701,6 +771,7 @@ async def _build_history_context(
                     target_name=target_names.get(row.target_id) if row.target_id else None,
                 ),
                 "live": live.get(row.id),
+                "waiting_for_me": row.id in waiting,
             }
             for row in rows
         ],

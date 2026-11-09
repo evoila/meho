@@ -1595,6 +1595,40 @@ pins the dropdown + drawer tenant scoping; the
 pins the history pane's per-tenant archive read + the wall layout + the
 sliding-session extension.
 
+### The broadcast page on a phone (#6000)
+
+The page works on a phone screen (about 390 px wide) and still looks the
+same on a laptop:
+
+* **Rows.** Below the `sm` width `broadcast/_event_row.html` uses a
+  6-column grid: time and person on line one, the operation (or the
+  announcement text) on line two, status and target on line three. The
+  class and payload cells and the column header show from `sm` up. Newest
+  events stay on top, as before.
+* **Filters.** Below `md` the four filters fold away behind a "Filters"
+  button (Alpine `filtersOpen` on the form), so the newest events sit at
+  the top of the screen. Without JavaScript the fields stay visible.
+* **Announcements.** An agent announcement has no audit row, so it has
+  no detail drawer. On a phone a tap on it (or on the small button in
+  its status cell, which carries `aria-expanded`) folds out a details
+  block under the row: the phase, the full text without cutting, the
+  targets and the claim metadata (`detailsOpen`, local to the row). From
+  `sm` up the columns show these, and the block stays hidden.
+* **Details.** A tap on an operation row opens the detail drawer as before. Below
+  `lg` the drawer sits under the feed, so `openDrawer` scrolls it into
+  view once it is swapped in. It swaps with `settle:0ms`: htmx keeps the
+  old element's classes until the settle step, and the empty placeholder
+  is `hidden` below `lg` (it shows from `lg` up only).
+* **Sidebar.** `base.html` starts the sidebar closed on every page load
+  below `lg`, so a phone shows the page and not the menu. Before, the
+  saved open/closed choice (`meho.sidebar`, default open) opened the menu
+  over the page on every load. From `lg` up the sidebar always shows
+  (`lg:drawer-open`), so nothing changes there. This holds for every
+  console page.
+
+`test_ui_broadcast_phone_layout.py` pins the markup and script; the look
+was checked in a real browser at 390 px and 1366 px wide.
+
 ### Known limits
 
 * **op_id filtering is client-side only** — it narrows the in-DOM
@@ -3390,9 +3424,10 @@ It is the operator-console face of the in-process hybrid retriever
 route fronts: diagnosing "is retrieval returning what I expect?" previously
 meant a Python REPL inside the cluster or a `curl` against the REST endpoint.
 
-The page has four client-side tabs: **Diagnostics** (the default),
-**Usage Analytics**, **Eval Quality** and **Retire Checklist**. Each tab
-posts to its own HTMX fragment route.
+The page has two client-side tabs: **Diagnostics** (the default) and
+**Usage Analytics**. Each tab posts to its own HTMX fragment route.
+Retrieval quality is checked in CI (`scripts/ci/run_eval_gate.py`), not
+on this page.
 
 ### Routes
 
@@ -3411,15 +3446,6 @@ posts to its own HTMX fragment route.
 * `POST /ui/retrieval/usage` — runs `retrieval.usage.compute_usage` for the
   own tenant over a `since` window and swaps `retrieval/_usage_results.html`.
   A bad `since` renders an inline 400 card.
-* `POST /ui/retrieval/eval` — runs `retrieval.eval.eval_all` for the own
-  tenant and the caller's `sub` (no baseline) and swaps
-  `retrieval/_eval_results.html`.
-* `POST /ui/retrieval/retire-checklist` — runs
-  `retrieval.retire.compute_retire_checklist` with the caller's `sub` and
-  swaps `retrieval/_retire_results.html`. Read-only: there is no purge
-  button. A platform admin may pick another tenant with the
-  `tenant_filter` field; `authorize_tenant_scope` decides, and a refusal
-  renders an inline error card.
 
 ### Mirroring the docs-corpus console
 
@@ -3464,10 +3490,9 @@ ephemeral.
 `operator` role minimum (the whole surface sits behind `require_ui_operator`,
 **not** `require_ui_admin`, matching the OPERATOR floor the REST route carries;
 a `read_only` session gets `403 operator_required`).
-Diagnostics is **own-tenant only**: tenant identity is derived from the
+Both tabs are **own-tenant only**: tenant identity is derived from the
 reconstructed operator's `tenant_id` and the per-principal isolation predicate
-is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
-(that is the sibling T3 concern). When Memory rows can be candidates (Source
+is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`. When Memory rows can be candidates (Source
 is `memory` or empty) the handler also passes the Memory eligibility built by
 `MemoryRbacResolver.eligibility()` (#3741), so the candidate SQL drops
 memories the operator may not see, and expired ones, before ranking — the
@@ -3482,8 +3507,8 @@ surface is read-only, so no confirm gates.
   future stub cannot shadow a real route.
 * Inside `build_retrieval_router`, the literal `POST /ui/retrieval/diagnostics`
   is registered ahead of any `{param}` route (a NOTE comment pins the invariant
-  mirroring `corpus/routes.py`). The Usage, Eval and Retire tabs post to their
-  own literal routes (`/usage`, `/eval`, `/retire-checklist`). No `{param}`
+  mirroring `corpus/routes.py`). The Usage tab posts to its own literal
+  route (`/usage`). No `{param}`
   route exists today, but the ordering is pinned for when one lands.
 
 ### Tests
@@ -3497,14 +3522,13 @@ surface is read-only, so no confirm gates.
   absent from every bound payload), CSRF (403 on missing header, live-cookie
   reuse without rotation, 401 propagation on a dead session), and the route
   ordering (retrieval include before stubs; literal diagnostics before any param
-  route) + dashboard tile, plus the Usage, Eval and Retire tabs.
-  `tests/test_ui_operator_read_floor.py` checks the `read_only` 403, and
-  `tests/test_retrieval_eval_principal.py` checks that the eval and retire
-  runs pass the caller's `sub`.
+  route) + dashboard tile, plus the Usage tab and a check that only the
+  Diagnostics and Usage tabs render.
+  `tests/test_ui_operator_read_floor.py` checks the `read_only` 403.
 
 ### Honesty-gap badge contrast (#2460)
 
-The T2 Usage + T3 Retire fragments render the counted `/mcp` search-surface
+The Usage fragment renders the counted `/mcp` search-surface
 labels (`mcp:search_knowledge` / `_memory` / `_operations`) as
 `badge badge-ghost badge-outline` spans **inside** the `.alert.alert-info`
 honesty-gap banner. In the DaisyUI 5 bundle `.badge-outline` and `.badge-ghost`

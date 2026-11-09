@@ -1399,6 +1399,16 @@ class Settings(BaseModel):
         scope. Deployments with fine-grained scope enforcement set
         this to the value the IdP expects. Set via
         ``VCF_PAIF_OIDC_SCOPE``.
+    operation_contract_guidance:
+        Off by default (#4757). When on, the exact-op contract of
+        ``search_operations`` (a call with ``op_id``) also carries a
+        ``guidance`` block: the written advice from the operation's
+        ``llm_instructions`` (``when_to_call`` / ``when_to_use``,
+        ``preconditions``, ``parameter_hints``, ``output_shape``,
+        ``next_step``), with a size limit
+        (:mod:`meho_backplane.operations._contract_guidance`). Ranked hits
+        do not change. It stays off until model tests show it helps.
+        Env ``OPERATION_CONTRACT_GUIDANCE``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
@@ -1426,6 +1436,14 @@ class Settings(BaseModel):
         :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
         so operators can confirm the deploy's audit-replay capture
         state without diffing env vars.
+    mcp_topology_off_default_list:
+        Whether ``query_topology`` leaves the default MCP tool list.
+        Default ``False``: every session lists it, as before. Set
+        ``MCP_TOPOLOGY_OFF_DEFAULT_LIST=true`` to move it to the tools a
+        session gets only when it asks for the ``mcp:admin`` scope. A
+        session without the scope does not list it, and a call answers
+        with the same message as for the other admin tools. This saves
+        its text in every session that has no use for the tool.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -2296,7 +2314,9 @@ class Settings(BaseModel):
     # external orchestrator (or running tests without the drain) opt out.
     event_drain_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
     event_drain_enabled: bool = True
+    operation_contract_guidance: bool = False
     mcp_require_session_id: bool = False
+    mcp_topology_off_default_list: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -2356,6 +2376,15 @@ class Settings(BaseModel):
     #: (:func:`~meho_backplane.docs_search.call_log.log_query_text`). Set via
     #: ``DOCS_DEBUG_LOG_QUERY_TEXT``.
     docs_debug_log_query_text: bool = False
+    #: Whether the agent reads an admin's ``custom_description`` (#4753).
+    #: ``False`` (default): ``search_operations`` hits, the exact-op contract
+    #: and the keyword half of search use the original ``description``, as
+    #: before. ``True``: when an admin set a non-empty ``custom_description``
+    #: with ``meho_connector_edit_op``, it takes the place of ``description``
+    #: in all three. The keyword half then uses the index of migration
+    #: ``0148`` (``endpoint_descriptor_bm25_custom_idx``). Set via
+    #: ``AGENT_READS_CUSTOM_DESCRIPTION``.
+    agent_reads_custom_description: bool = False
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3304,8 +3333,14 @@ def get_settings() -> Settings:
         event_drain_enabled=parse_bool_env(
             os.environ.get("EVENT_DRAIN_ENABLED", "true"),
         ),
+        operation_contract_guidance=parse_bool_env(
+            os.environ.get("OPERATION_CONTRACT_GUIDANCE", "false"),
+        ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),
+        ),
+        mcp_topology_off_default_list=parse_bool_env(
+            os.environ.get("MCP_TOPOLOGY_OFF_DEFAULT_LIST"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
@@ -3322,6 +3357,9 @@ def get_settings() -> Settings:
         ),
         docs_debug_log_query_text=parse_bool_env(
             os.environ.get("DOCS_DEBUG_LOG_QUERY_TEXT"),
+        ),
+        agent_reads_custom_description=parse_bool_env(
+            os.environ.get("AGENT_READS_CUSTOM_DESCRIPTION"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

@@ -605,19 +605,52 @@ the stable, machine-truthful key. This is the first slice of Initiative
 `sub` → name join table (the agent / runner principal tables key on the
 Keycloak client id, not the token `sub`; see
 `meho_backplane.ui.references`), so the name cannot be resolved after the
-fact. Migration `0097` adds two nullable `approval_request` columns:
+fact from the `sub` alone. Migration `0097` adds two nullable
+`approval_request` columns:
 
 - `principal_name` — the requester's name, set in
-  `create_pending_request` from the parking `Operator.name`.
+  `create_pending_request`.
 - `reviewed_by_name` — the approver's name, set in `approve_request` /
   `reject_request` from the deciding `Operator.name`.
 
-Both come from the JWT `name` claim — the same hoist-at-write pattern
-`audit_log.principal_name` uses (#1212). The approval audit rows
-(`_write_audit_row`) carry the same `payload['principal_name']` so the
-name-aware audit views resolve the row's `operator_sub` too, and the
-`/decide` response gains an additive `decided_by_name` beside
-`decided_by`.
+This is the same hoist-at-write pattern `audit_log.principal_name` uses
+(#1212). The approval audit rows (`_write_audit_row`) carry the same
+`payload['principal_name']` so the name-aware audit views resolve the
+row's `operator_sub` too, and the `/decide` response gains an additive
+`decided_by_name` beside `decided_by`.
+
+**Where the requester's name comes from (#3885).** An agent's token
+(`client_credentials`) has no `name` claim. But at write time MEHO has
+the token's client id (`Operator.client_id`), and a registered agent is
+found by it. So one helper,
+`meho_backplane.auth.display_name.principal_display_name`, picks the
+name in this order:
+
+1. The token's `name` claim. A person's name always wins.
+2. For an agent token: the registered agent's name
+   (`AgentPrincipal.name`), found by `keycloak_client_id ==
+   Operator.client_id` in the caller's tenant. A revoked agent still
+   counts.
+3. For any machine token (agent, service, runner): the client id itself,
+   for example `agent:<name>`.
+
+No name in any step: nothing is stored, as before. Every place that
+stores the caller's name calls this helper: the approval request and its
+audit rows, the operation run and refusal rows (`write_audit_row`), the
+MCP tool rows (`write_mcp_audit_row`) and the tool rows of MEHO's own
+agent runs (`write_agent_tool_row`).
+
+**Machine requesters are marked (#3885).** Migration `0149` adds
+`approval_request.principal_kind` (nullable text): the requester's
+`principal_kind` (`user` / `agent` / `service` / `runner`), saved at park
+time. A composite step that waits again during a re-run keeps the kind of
+the original requester (`ResumeRequester.kind`). REST returns it as
+`ApprovalRequestView.principal_kind`. The console `subject(ref)` macro
+shows a badge with the kind next to a machine requester, and the CLI adds
+it in brackets: `show` prints `incident-triage (<sub>) [agent]`, and the
+`list` PRINCIPAL column puts it first (`[agent] incident-triage`) so a cut
+column still shows it. A person, or a request made before `0149`, gets no
+marker.
 
 **Fail-open contract.** Resolution can never fail or slow a decision: no
 identity provider is called; the surface reads a column already loaded on
@@ -3346,6 +3379,56 @@ is read via `.get` on the real dict, so a missing key degrades cleanly
 under `StrictUndefined`. Template-only: no route, projection, or schema
 change (`render.project_request_to_view` already passes `proposed_effect`
 through verbatim).
+
+### The approvals page on a phone (#6000)
+
+The page works on a phone screen (about 390 px wide) and still looks the
+same on a laptop. It uses the existing Tailwind and DaisyUI classes, with
+the `sm:` width (640 px) as the switch point.
+
+- **Waiting for you first.** On the Pending tab, the requests the
+  signed-in person may approve come first, each with a "Waiting for you"
+  badge (`data-waiting-for-me` on the row). The check is
+  `approval_rights.approve_right`, the same one the modal and the approve
+  use. `ui/routes/approvals/waiting.py` (`WaitingFirstPager`) does the
+  split; each group keeps the order the database returned (a change
+  ticket's steps stay oldest first). The split runs over all pending
+  requests before the page is cut (`routes._list_pending_waiting_first`),
+  so a request waiting for you is on page one even behind hundreds of
+  newer ones, and "Load more" goes on in the same order. The route reads
+  the queue in batches of 500 (`_WAITING_SCAN_BATCH`), and the pager keeps
+  only the rows the page can need, so a long queue does not fill memory.
+  Each batch starts right after the last row of the batch before
+  (`list_pending(after=…)`, sorted by time and then request id), not at a
+  counted offset. So a request that someone decides during the scan does
+  not move the rest of the queue, and the scan skips no row. The other tabs do not check the person and keep their
+  order.
+- **The person check can fail.** The list pages are open with the session
+  alone. To know who may approve, the Pending tab also checks the
+  session's sign-in (`routes._operator_or_none`, the same check the modal
+  makes). When that check fails for any reason (a session that ended, a
+  tenant switched in another tab, the sign-in service not reachable), the
+  list shows its plain order with no badge, and logs
+  `ui_approvals_waiting_order_skipped`. It never shows the badge without a
+  real check.
+- **Rows.** Below `sm` a row stacks: the text wraps instead of being cut
+  (`[overflow-wrap:anywhere] sm:truncate`), so the person sees who asks
+  for what, and the Review / View button fills the row as a large touch
+  target. The status tabs wrap to a second line. The bell panel rows do
+  the same.
+- **Decision window.** The modal, the bell panel, the "decision recorded"
+  window and the in-order window open as a sheet from the bottom on a
+  phone (`modal-bottom sm:modal-middle`). In the request modal the
+  decision bar (Deny / Approve and their confirm steps,
+  `data-approval-decision-bar`) sticks to the bottom of the window while
+  the detail scrolls, so the buttons are in reach without scrolling, also
+  on a laptop for a long request. The reason field sits above the bar;
+  the confirm forms still read it by id (`hx-include`). On a phone the
+  two buttons are larger and share the row.
+
+The console has no browser test harness. `test_ui_approvals_phone_layout.py`
+pins the order and the markup; the look was checked in a real browser at
+390 px and 1366 px wide (no sideways scroll, decision buttons in view).
 
 ## Ordered and dependent approvals (#3598)
 

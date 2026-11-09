@@ -61,6 +61,17 @@
     the modal opens (bell, history row, or a deep link), so the extra confirm
     cannot be skipped by the link the approver used.
 
+  Phone layout (#6000)
+    Below the ``sm`` width the dialog opens as a sheet from the bottom of
+    the screen (``modal-bottom``), full width; from ``sm`` up it is the
+    centred dialog as before (``sm:modal-middle``). The decision bar
+    (Deny / Approve and their confirm steps) sticks to the bottom of the
+    dialog while the request detail scrolls, so the buttons are in reach
+    of one thumb without scrolling. The reason field sits above the bar,
+    not in it, so the bar stays small; the confirm forms still read it
+    by id (``hx-include``). On a phone the buttons are larger and share
+    the row width.
+
   Hidden values (``request.reveal_secret``)
     When the requester asked for the hidden values of the answer, the detail
     list says so (``data-approval-reveal-secret``), on every status, and the
@@ -156,7 +167,7 @@
       Approvals &amp; break-glass guide &rarr;</a>
   </p>
 {%- endmacro -%}
-<dialog id="meho-approvals-modal" class="modal" aria-label="Review approval request">
+<dialog id="meho-approvals-modal" class="modal modal-bottom sm:modal-middle" aria-label="Review approval request">
   <div class="modal-box max-w-2xl">
     <div class="flex items-start justify-between gap-4">
       <h3 class="text-lg font-semibold" id="meho-approval-detail-title">
@@ -779,24 +790,29 @@
         no modal-in-modal. The Confirm form carries the CSRF header echo, pulls
         the shared reason via ``hx-include``, and disables itself during dispatch
         exactly as the single-click form did before (#1693 / #1754). -#}
-    <div class="modal-action mt-4 flex-col items-stretch gap-3" x-data="{ armed: '' }">
-      <label class="form-control w-full max-w-md self-start">
-        <span class="label-text text-xs">Reason <span class="opacity-60">(optional)</span></span>
-        {# Single shared reason field; each confirm form pulls it via
-           hx-include so the operator types it once. A textarea, not a text
-           input: the delegated-decision trailer (``Instructed-by:`` /
-           ``Instruction:`` / ``Refs:``) is one line per field
-           and a text input drops the line breaks on paste. #}
-        <textarea
-          id="meho-approval-reason"
-          name="reason"
-          rows="3"
-          maxlength="2000"
-          class="textarea textarea-bordered textarea-sm"
-          placeholder="Recorded on the decision audit row"
-          aria-label="Decision reason"
-        ></textarea>
-      </label>
+    <label class="mt-4 flex w-full max-w-md flex-col gap-1">
+      <span class="text-xs">Reason <span class="opacity-60">(optional)</span></span>
+      {# Single shared reason field; each confirm form pulls it via
+         hx-include so the operator types it once. A textarea, not a text
+         input: the delegated-decision trailer (``Instructed-by:`` /
+         ``Instruction:`` / ``Refs:``) is one line per field
+         and a text input drops the line breaks on paste. #}
+      <textarea
+        id="meho-approval-reason"
+        name="reason"
+        rows="3"
+        maxlength="2000"
+        class="textarea textarea-sm w-full"
+        placeholder="Recorded on the decision audit row"
+        aria-label="Decision reason"
+      ></textarea>
+    </label>
+
+    <div
+      class="modal-action sticky -bottom-6 z-10 -mx-6 -mb-6 mt-3 flex-col items-stretch gap-3 border-t border-base-300 bg-base-100 px-6 pt-3 pb-6"
+      data-approval-decision-bar
+      x-data="{ armed: '' }"
+    >
 
       {# Phase 1 -- resting armers. ``type="button"``: the first click only sets
          the Alpine ``armed`` flag; it never posts. A blocked self-approval
@@ -805,7 +821,7 @@
       <div class="flex items-end justify-end gap-2" x-show="armed === ''">
         <button
           type="button"
-          class="btn btn-sm btn-error btn-outline gap-1"
+          class="btn btn-md btn-error btn-outline flex-1 gap-1 sm:btn-sm sm:flex-none"
           data-action="reject"
           x-on:click="armed = 'reject'"
         >
@@ -816,7 +832,7 @@
         {# The sign-in is too old for an approval: the Approve button is the
            link to a new sign-in. The POST checks the sign-in again anyway. #}
         <a
-          class="btn btn-sm btn-primary gap-1"
+          class="btn btn-md btn-primary flex-1 gap-1 sm:btn-sm sm:flex-none"
           href="{{ sign_in_url }}"
           data-action="sign-in-to-approve"
         >
@@ -826,7 +842,7 @@
         {% else %}
         <button
           type="button"
-          class="btn btn-sm btn-primary gap-1"
+          class="btn btn-md btn-primary flex-1 gap-1 sm:btn-sm sm:flex-none"
           data-action="approve"
           {% if approve_blocked %}disabled aria-disabled="true" aria-label="Approve disabled: {{ approve_right.message }}"{% elif out_of_order %}x-on:click="armed = 'approve-early'"{% else %}x-on:click="armed = 'approve'"{% endif %}
         >

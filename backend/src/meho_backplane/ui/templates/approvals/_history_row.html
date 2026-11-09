@@ -21,6 +21,13 @@
   gets a second line: the target (``req.target_name``, else
   ``req.target_id``), when the latest run started, and what to check.
 
+  Phone layout (#6000): below the ``sm`` width the row stacks. The text
+  wraps instead of being cut, so the person sees who asks for what, and the
+  Review / View button fills the row width as a large touch target. From
+  ``sm`` up the row is one line, as before. A pending row the person may
+  approve (``req.waiting_for_me``, Pending tab only) carries a "Waiting for
+  you" badge; the route puts those rows first.
+
   Context variables:
     req               -- dict: the projected request; ``req.live`` is where
                          its run is now (``run_watch.live_run``), or None
@@ -32,8 +39,9 @@
 {% from "_references.html" import subject %}
 {%- set live = req.live -%}
 {%- set run_state = live.result_state if live else req.result_state -%}
-<li class="flex items-center justify-between gap-3 px-4 py-3"
+<li class="flex flex-col items-stretch gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
   id="approval-row-{{ req.id }}"
+  {% if req.get("waiting_for_me") %}data-waiting-for-me{% endif %}
   {% if live and live.polling %}
   hx-get="/ui/approvals/{{ req.id }}/row"
   hx-trigger="every {{ poll_seconds }}s"
@@ -43,7 +51,10 @@
   {% endif %}
 >
   <div class="min-w-0 space-y-1">
-    <div class="flex items-center gap-2">
+    <div class="flex flex-wrap items-center gap-2">
+      {% if req.get("waiting_for_me") %}
+        <span class="badge badge-sm badge-primary">Waiting for you</span>
+      {% endif %}
       <span
         class="badge badge-sm {{ status_pill_class.get(req.status, 'badge-ghost') }}"
         aria-label="Status {{ req.status }}"
@@ -77,14 +88,14 @@
           data-outcome-check="{{ req.outcome_check.verdict }}"
         >{{ "checked: it happened" if req.outcome_check.verdict == "happened" else "checked: it did not happen" }}</span>
       {% endif %}
-      <p class="truncate font-mono text-sm">{{ req.op_id }}</p>
+      <p class="min-w-0 font-mono text-sm [overflow-wrap:anywhere] sm:truncate">{{ req.op_id }}</p>
       {#- Chain step (#3596): this pending request is step k of N pending
           requests under one change ticket. -#}
       {% if req.chain %}
         <span class="badge badge-sm badge-info shrink-0" data-approval-chain-step="{{ req.chain.step }}">Step {{ req.chain.step }} of {{ req.chain.total }}</span>
       {% endif %}
     </div>
-    <p class="truncate text-xs text-base-content/55">
+    <p class="text-xs text-base-content/55 [overflow-wrap:anywhere] sm:truncate">
       <span>{{ req.connector_id }}</span>
       <span aria-hidden="true">&middot;</span>
       <span>requested by {{ subject(req.requester) }}</span>
@@ -137,7 +148,7 @@
   </div>
   <button
     type="button"
-    class="btn btn-sm shrink-0 {% if req.status == 'pending' %}btn-primary{% else %}btn-ghost{% endif %}"
+    class="btn btn-md w-full shrink-0 sm:btn-sm sm:w-auto {% if req.status == 'pending' %}btn-primary{% else %}btn-ghost{% endif %}"
     hx-get="/ui/approvals/{{ req.id }}"
     hx-target="#meho-approvals-modal-container"
     hx-swap="innerHTML"

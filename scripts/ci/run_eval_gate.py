@@ -4,11 +4,11 @@
 
 """Run the retrieval-eval runner + check the result against a baseline.
 
-CI gate for G4.3-T2 (#441). The workflow
-``.github/workflows/eval-gate.yml`` runs this script on every PR
-that touches ``backend/src/meho_backplane/retrieval/`` (the read
-path the eval gates) or ``backend/src/meho_backplane/retrieval/eval/``
-(the eval engine itself).
+The workflow ``.github/workflows/eval-gate.yml`` runs this script on
+every PR that touches ``backend/src/meho_backplane/retrieval/`` (the
+read path the eval gates) or ``backend/scripts/retrieval_eval/`` (the
+eval engine itself). The eval engine is test tooling: it lives under
+``backend/scripts/``, outside the product package.
 
 What the gate exercises today
 -----------------------------
@@ -38,10 +38,7 @@ What it does NOT catch (yet)
 The live retrieval substrate (BM25 + cosine + RRF fusion in
 ``retriever.py``) is not exercised here. That coverage lives in
 ``tests/integration/test_retrieval_e2e.py`` and the
-``chart.yml::helm-test`` job (Helm test Pod + pgvector). When the
-Initiative #373 retire-checklist (T6 #445) wires a per-surface
-threshold check against the live substrate, this gate becomes the
-inner ring + a new "live eval" job becomes the outer ring.
+``chart.yml::helm-test`` job (Helm test Pod + pgvector).
 
 Baseline + regression detection
 -------------------------------
@@ -76,20 +73,25 @@ from collections.abc import Awaitable
 from datetime import UTC, datetime
 from pathlib import Path
 
-# Importable because the CI job runs `uv sync` in backend/ first +
-# invokes this script with PYTHONPATH=backend/src.
-from meho_backplane.retrieval.eval.baseline_io import (
+# meho_backplane is importable because the CI job runs `uv sync` in
+# backend/ first. The eval engine is the `scripts.retrieval_eval`
+# package under backend/, which is not installed, so put backend/ on
+# the import path first.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
+
+from scripts.retrieval_eval.baseline_io import (
     compare_baseline,
     load_baseline,
     save_baseline,
 )
-from meho_backplane.retrieval.eval.corpus import load_corpus
-from meho_backplane.retrieval.eval.operation_search import OperationSearchResult
-from meho_backplane.retrieval.eval.runner import eval_all
+from scripts.retrieval_eval.corpus import load_corpus
+from scripts.retrieval_eval.operation_search import OperationSearchResult
+from scripts.retrieval_eval.runner import eval_all
+
 from meho_backplane.retrieval.retriever import RetrievalHit
 
 # Deterministic timezone-aware timestamp for stub RetrievalHits. Matches
-# the shape used by tests/test_retrieval_eval_runner.py::_make_hit so the
+# the shape used by tests/retrieval_eval/test_retrieval_eval_runner.py::_make_hit so the
 # gate script and the unit tests stay aligned on stub semantics.
 _STUB_TS: datetime = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -98,7 +100,7 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
     """Stub retrieve_fn that returns the corpus's first expected hit per query.
 
     Same shape the unit tests use — see
-    ``tests/test_retrieval_eval_runner.py::_make_perfect_retrieve_fn``.
+    ``tests/retrieval_eval/test_retrieval_eval_runner.py::_make_perfect_retrieve_fn``.
     Models the "production retrieval is working perfectly" baseline
     across every shipped surface; ensures the gate's reference run is
     always green so any drop is a regression in the runner / metrics /

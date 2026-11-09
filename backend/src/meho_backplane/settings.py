@@ -2376,6 +2376,14 @@ class Settings(BaseModel):
     #: ``0148`` (``endpoint_descriptor_bm25_custom_idx``). Set via
     #: ``AGENT_READS_CUSTOM_DESCRIPTION``.
     agent_reads_custom_description: bool = False
+    #: How ``search_operations`` treats a plain sentence (#5490). ``False``
+    #: (default): as before. ``True``: the keyword half matches an operation
+    #: that holds any word of the query, not only every word, and a search
+    #: with a ``group`` filter that leaves exactly one operation answers
+    #: ``matched``. Hit order can change, so it stays off until the routing
+    #: evaluation and the model tests show it helps. Set via
+    #: ``SEARCH_PLAIN_SENTENCES``.
+    search_plain_sentences: bool = False
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3348,6 +3356,9 @@ def get_settings() -> Settings:
         ),
         agent_reads_custom_description=parse_bool_env(
             os.environ.get("AGENT_READS_CUSTOM_DESCRIPTION"),
+        ),
+        search_plain_sentences=parse_bool_env(
+            os.environ.get("SEARCH_PLAIN_SENTENCES"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

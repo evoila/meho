@@ -112,6 +112,10 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
+from meho_backplane.operations._search_plain_sentences import (
+    group_leaves_one_operation,
+    top_hit_holds_a_query_word,
+)
 from meho_backplane.operations.addon_orchestration import (
     bound_parent_linkage,
     resolve_or_open_orchestration_run,
@@ -1152,7 +1156,11 @@ async def _visible_group_keys(
     return [g.group_key for g in groups]
 
 
-def _classify_hits(hits: list[OperationSearchHit]) -> SearchOutcome:
+def _classify_hits(
+    hits: list[OperationSearchHit],
+    *,
+    top_holds_a_word: bool = False,
+) -> SearchOutcome:
     """Decide ``matched`` or ``ambiguous`` for a non-empty hit list.
 
     Reads the scores the retriever already returned; never re-ranks.
@@ -1160,9 +1168,14 @@ def _classify_hits(hits: list[OperationSearchHit]) -> SearchOutcome:
     close in meaning, the usual shape of a misleading near-match — or when
     the top two ``fused_score`` values sit inside
     :data:`SEARCH_NEAR_TIE_BAND`.
+
+    *top_holds_a_word* is ``True`` when the top hit has no BM25 score but
+    its text holds a word of the query (switch ``SEARCH_PLAIN_SENTENCES``,
+    #5490): then it counts as a word match, and only the near-tie check
+    can still make the result ``ambiguous``.
     """
     top = hits[0]
-    if top.bm25_score is None:
+    if top.bm25_score is None and not top_holds_a_word:
         return "ambiguous"
     if len(hits) > 1 and top.fused_score - hits[1].fused_score < SEARCH_NEAR_TIE_BAND:
         return "ambiguous"
@@ -1299,7 +1312,22 @@ async def _run_search(
         limit=max(limit, SEARCH_CLASSIFY_MIN_HITS),
     )
     if hits:
-        return hits[:limit], _classify_hits(hits), None
+        outcome = _classify_hits(
+            hits,
+            top_holds_a_word=await top_hit_holds_a_query_word(session, hits=hits, query=query),
+        )
+        if outcome == "ambiguous" and await group_leaves_one_operation(
+            session,
+            hits=hits,
+            group_id=group_id,
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        ):
+            # Nothing is left to narrow (#5490, ``SEARCH_PLAIN_SENTENCES``).
+            outcome = "matched"
+        return hits[:limit], outcome, None
     has_enabled = await _has_enabled_operation(
         session,
         tenant_id=tenant_id,

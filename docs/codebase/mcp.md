@@ -867,6 +867,31 @@ Every other result has an `outcome` field:
   second hit cannot hide. The returned list is then cut to `limit`.
 - The near-tie band is `SEARCH_NEAR_TIE_BAND`: one list position at the
   top of one ranking signal.
+- **Plain sentences, behind a switch (#5490).** The keyword half of the
+  search needs every word of the query in the operation's text. A
+  sentence of several words almost never has that, so its top hit has no
+  keyword score and the answer is `ambiguous`, even when the top hit is
+  right. The backplane switch `SEARCH_PLAIN_SENTENCES` (an env var, off by
+  default) changes only the outcome, never the hits or their order:
+  - A top hit without a keyword score counts as a word match when its
+    `summary` or `description` (the text the agent reads) holds any word
+    of the query, with the same word rules as the keyword index (stemmed,
+    without stop words). The near-tie check still applies.
+  - A search with a `group` filter that leaves exactly one enabled
+    operation answers `matched`. The count uses the same tenant, enabled
+    and installed rules as the search.
+  - Off: the same answers as before the switch existed.
+  - Why the ranking does not change: a local test that let any word count
+    in the ranking put the right operation first less often (hit@1 0.757
+    → 0.657 when the query is the words of the op id, over the 580
+    operations MEHO registers from code).
+  - Code: `operations/_search_plain_sentences.py`, `_classify_hits` and
+    `_run_search` in `operations/meta_tools.py`. Tests:
+    `tests/test_search_plain_sentences.py` and
+    `tests/integration/test_search_plain_sentences_pg.py`.
+  - **Before turning it on:** compare the benchmark lane with the switch
+    off and on, for a small model and for Claude, then one live run on a
+    test install (see the pull request of #5490).
 - The enabled-operation check and the group list use the same tenant
   filter as dispatch, and count enabled rows only. So the text never
   names a disabled operation or another tenant's operation.

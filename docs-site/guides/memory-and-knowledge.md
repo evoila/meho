@@ -206,7 +206,9 @@ What changes for the tenant:
   `wiki` part: the collection, and whether the lesson also goes to the
   wiki. A lesson with `applies_to: product-and-version`, a full lesson
   header and status `candidate` reaches the wiki as a candidate page
-  through the knowledge export, and a person reviews it there.
+  through the knowledge export, and a person reviews it there. MEHO
+  does not send the lesson. Your own CI job calls the export and opens
+  a merge request in your wiki.
 - A person can also write the wiki page directly. The import brings it
   into MEHO after the merge.
 

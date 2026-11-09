@@ -496,9 +496,11 @@ The CLI prints a `conflicted:` counter and a `conflicts` list.
 ### Import of pages sent in the request (#5728)
 
 The import and the export (next section) move lessons between MEHO and
-the tenant's own wiki. MEHO never sends knowledge anywhere by itself. A
-job outside MEHO must call the export, with a login the tenant admin
-created. Without that job and that login, nothing leaves MEHO.
+the tenant's own wiki. MEHO never sends knowledge anywhere by itself.
+It only answers a call. Two kinds of caller can get the export: the
+tenant's own wiki job, with a login set up only for the export, and a
+person with the operator or tenant admin role (`meho kb export`).
+Without such a call, nothing leaves MEHO.
 
 `POST /api/v1/kb/import` (`kb/page_import.py::import_pages`) takes the
 pages in the request body. The caller has the pages on its own machine.
@@ -506,8 +508,8 @@ MEHO reads no folder on the server and fetches nothing, so it never
 holds Git credentials. The caller is a CI job in the tenant's own wiki
 repo: after every merge to main it sends the wiki's product pages with
 `applies_to: product-and-version` and `status: confirmed`. The first
-caller is our own team wiki's job. A customer runs the same kind of job
-against its own wiki. The job lives in the wiki repo, not here.
+caller is the wiki job of the team that builds MEHO. A customer runs
+the same kind of job against its own wiki. The job lives in the wiki repo, not here.
 
 Body (`KbImportRequest`, unknown fields are a `422`):
 
@@ -671,8 +673,8 @@ the caller's confirmed and candidate generic entries as Markdown pages. It is th
 mirror of the import. The caller is a CI job in the tenant's own wiki
 repo: it writes the pages into the wiki and opens a merge request there,
 and a person reviews it. MEHO writes nothing, and never holds Git
-credentials. The first caller is our own team wiki's job. A customer
-runs the same kind of job against its own wiki. The job lives in the
+credentials. The first caller is the wiki job of the team that builds
+MEHO. A customer runs the same kind of job against its own wiki. The job lives in the
 wiki repo, not here.
 
 The route has no body. It is a `POST` because `GET /api/v1/kb/export`

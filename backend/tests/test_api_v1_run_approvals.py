@@ -297,3 +297,23 @@ def test_destructive_entry_and_second_request_are_refused(client: TestClient, ke
     _request(client, key)
     second = client.post(_BASE, headers=_service(key), json=_BODY)
     assert second.status_code == 409
+
+
+def test_entry_that_runs_a_root_command_is_refused(client: TestClient, key: Any) -> None:
+    # #6092 -- the linux-ssh connector marks linux.script.run at import.
+    import meho_backplane.connectors.linux  # noqa: F401
+
+    body = {
+        **_BODY,
+        "entries": [
+            *_BODY["entries"],
+            {"connector_id": "linux-ssh-1.x", "op_id": "linux.script.run"},
+        ],
+    }
+    refused = client.post(_BASE, headers=_service(key), json=body)
+    assert refused.status_code == 422
+    detail = refused.json()["detail"]
+    assert detail.startswith("entries[1]: op 'linux.script.run' runs a command as root on the host")
+    assert "a person approves each call" in detail
+
+    _request(client, key)

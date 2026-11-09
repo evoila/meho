@@ -550,6 +550,27 @@ def test_account_modal_carries_self_logout_warning() -> None:
     assert "revoking it signs you" in body
 
 
+def test_account_page_shows_the_install_hint() -> None:
+    """The account page tells how to install MEHO, and its head links the manifest."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _csrf, _sid = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_SELF,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        response = client.get("/ui/account")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-field="install-hint"' in body
+    assert "Add to Home Screen" in body
+    assert "Add to Dock" in body
+    assert "Chrome or Edge" in body
+    assert 'rel="manifest" href="/ui/static/src/pwa/manifest.webmanifest"' in body
+
+
 def test_revoke_requires_csrf() -> None:
     """A revoke POST without the CSRF token gets csrf_token_invalid 403."""
     _seed_tenant(_TENANT_A, "tenant-a")

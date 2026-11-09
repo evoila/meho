@@ -61,6 +61,7 @@ from structlog.testing import capture_logs
 import meho_backplane.connectors._shared.vault_creds as vault_creds_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vault_creds import (
+    TargetSecretNotFoundError,
     VaultCredentialsReadError,
     load_basic_credentials,
 )
@@ -240,18 +241,19 @@ async def test_missing_field_against_dev_vault(operator_context_vault: str) -> N
 
 
 async def test_missing_path_against_dev_vault(operator_context_vault: str) -> None:
-    """Reading an unseeded path surfaces as a read-phase error, not a crash.
+    """Reading an unseeded path raises the missing-secret error, not a crash.
 
-    hvac raises ``InvalidPath`` for a non-existent KV-v2 path; that
-    propagates out of the helper (it is not a login-phase
-    ``VaultClientError``, so a caller maps it to the read phase). The
-    assertion here is that the call fails rather than returning a bogus
-    credential — the exact exception type is hvac's, surfaced verbatim.
+    hvac raises ``InvalidPath`` for a non-existent KV-v2 path. The shared
+    loader turns it into :class:`TargetSecretNotFoundError`, which names
+    the target and the ref and carries no Vault URL. The call fails
+    rather than returning a bogus credential.
     """
-    import hvac.exceptions
-
-    with pytest.raises((VaultCredentialsReadError, hvac.exceptions.VaultError)):
+    with pytest.raises(TargetSecretNotFoundError) as exc:
         await load_basic_credentials(_Target(secret_ref="targets/does-not-exist"), _make_operator())
+
+    assert exc.value.target_name == "vc-lab-01"
+    assert exc.value.secret_ref == "targets/does-not-exist"
+    assert "http" not in str(exc.value)
 
 
 async def test_no_secret_in_logs_against_dev_vault(

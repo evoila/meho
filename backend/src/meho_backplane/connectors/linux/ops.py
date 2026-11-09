@@ -399,7 +399,8 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
     (``service.status`` / ``sysctl.read`` / ``dns.lookup``), ``FIREWALL_OPS``
     (``firewall.show``), ``STORAGE_OPS`` (``mount.list``) -- plus the T2
     governed ``WRITE_OPS`` (``file.write`` / ``service.control`` /
-    ``script.run`` / ``sysctl.write`` / ``firewall.load``). Implemented as a
+    ``script.run`` / ``sysctl.write`` / ``firewall.load``) and
+    ``FIREWALL_ROLLBACK_OPS`` (``firewall.confirm``). Implemented as a
     function call rather than a module-level literal so the import order
     stays linear (this module defines :class:`LinuxOp` + the shared helpers
     first, then imports the per-domain op tuples from their siblings; the
@@ -408,6 +409,7 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
     """
     from meho_backplane.connectors.linux.ops_file import FILE_OPS
     from meho_backplane.connectors.linux.ops_firewall import FIREWALL_OPS
+    from meho_backplane.connectors.linux.ops_firewall_rollback import FIREWALL_ROLLBACK_OPS
     from meho_backplane.connectors.linux.ops_host import HOST_OPS
     from meho_backplane.connectors.linux.ops_storage import STORAGE_OPS
     from meho_backplane.connectors.linux.ops_write import WRITE_OPS
@@ -419,6 +421,7 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
         *FIREWALL_OPS,
         *STORAGE_OPS,
         *WRITE_OPS,
+        *FIREWALL_ROLLBACK_OPS,
     )
 
 
@@ -491,8 +494,12 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "day-0 signal: confirm the default-deny ruleset the first-boot script "
         "was meant to load is present), and ``linux.firewall.load`` "
         "validates then applies / replaces a ruleset (``nft -c -f`` before "
-        "``nft -f``), approval-gated. Large rulesets spill to a result handle "
-        "paged with ``result_query(handle_id, offset, limit)``. " + SSH_TRANSPORT_NOTE
+        "``nft -f``), approval-gated. With ``rollback_after_seconds`` the load "
+        "first starts a timer on the host that puts the old rules back, and "
+        "``linux.firewall.confirm`` stops it once your checks pass -- use the "
+        "timer for every change of a remote host's rules. Large rulesets spill "
+        "to a result handle paged with ``result_query(handle_id, offset, "
+        "limit)``. " + SSH_TRANSPORT_NOTE
     ),
     "storage": (
         "Use to inspect the host's mount table and NFS exports WITHOUT "

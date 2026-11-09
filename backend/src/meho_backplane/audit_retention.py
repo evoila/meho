@@ -45,12 +45,25 @@ Why NULL and not DELETE
 The topology / flight-recorder reapers DELETE whole rows because their
 tables are pure history/trace. Here the row is the audit record of
 account and must survive; only the pre-redaction *body* ages off. So the
-statement is a bounded ``UPDATE ... SET raw_payload = NULL`` rather than a
-DELETE. It rides the ``audit_log_occurred_at_idx`` btree declared in
-:class:`~meho_backplane.db.models.AuditLog` ``__table_args__``, and the
-``raw_payload IS NOT NULL`` predicate skips rows already aged off (and this
-sweeper's own audit rows, which carry no raw payload), so the working set
-converges to zero once the backlog is cleared. The value is written as a
+statement is an ``UPDATE ... SET raw_payload = NULL`` rather than a
+DELETE. The ``raw_payload IS NOT NULL`` predicate skips rows already aged
+off (and this sweeper's own audit rows, which carry no raw payload), so the
+working set converges to zero once the backlog is cleared.
+
+Batches
+-------
+
+One run empties old rows in batches of :data:`_BATCH_SIZE` rows, oldest
+first, and commits after each batch. So a big backlog (the first run after a
+long gap) never holds one long transaction, and on PostgreSQL the
+append-only trigger checks at most one batch of rows per transaction. Each
+batch picks its rows through the ``audit_log_occurred_at_idx`` btree and
+starts at the ``occurred_at`` where the last batch ended, so a batch does not
+read the rows that earlier batches of the run already emptied. A batch with
+fewer rows than :data:`_BATCH_SIZE` is the last one. A run also stops after
+:data:`_MAX_RUN_SECONDS`; the next run then goes on from the oldest row that
+is still left. If a batch fails, the batches before it stay committed. The
+value is written as a
 real SQL NULL via :func:`sqlalchemy.null` -- not Python ``None``, which the
 JSON column's ``none_as_null=False`` default would persist as the JSON
 literal ``'null'`` and which would keep matching ``IS NOT NULL`` forever
@@ -144,7 +157,10 @@ Every run writes exactly one
 ``operator_sub='system:audit-raw-payload-retention'``,
 ``method='INTERNAL'``, ``path='audit.raw_payload.prune'``,
 ``status_code=200``, ``payload={"nulled_raw_payload_rows": N,
-"retention_days": D, "cutoff": <iso-ts>}``, ``tenant_id`` the system
+"retention_days": D, "cutoff": <iso-ts>, "stopped_early": B}``. ``N`` is
+the total over all batches of the run; ``stopped_early`` is ``true`` when
+the run hit :data:`_MAX_RUN_SECONDS` (old rows may be left for the next
+run). ``tenant_id`` is the system
 sentinel (:data:`AUDIT_RAW_PAYLOAD_SYSTEM_TENANT_ID`) -- the same
 soft-FK-exploiting per-deploy sentinel the topology / flight-recorder
 prunes use so operators querying by their own tenant do not see prune
@@ -160,16 +176,16 @@ row: nothing ran, so there is nothing to record.
 
 Fail-closed contract: the audit writer raises on commit failure; the
 per-tick ``try`` / ``except`` in :func:`_prune_loop` logs and continues to
-the next cadence -- one bad audit write must not kill the loop. The UPDATE
-has already committed before the audit row is attempted, so a lost audit
-row never leaves a secret un-aged.
+the next cadence -- one bad audit write must not kill the loop. Every
+batch has already committed before the audit row is attempted, so a lost
+audit row never leaves a secret un-aged.
 
 Per-pod leader election is deferred (Initiative-level, same as the sibling
-sweepers): under N replicas the worst case is N identical bounded UPDATEs
-in the same second re-nulling rows the previous winner already nulled --
-idempotent (``raw_payload IS NOT NULL`` matches nothing) and below the
-noise floor of normal DB load. Each replica writes its own run row; the
-next start of any replica reads the newest one.
+sweepers): under N replicas the worst case is N runs at the same time over
+the same rows. Each batch skips the rows another run has locked, so the
+runs share the work without waiting for each other; a run that finds fewer
+rows than one batch ends, and the other runs empty the rest. Each replica
+writes its own run row; the next start of any replica reads the newest one.
 """
 
 from __future__ import annotations
@@ -179,9 +195,10 @@ import contextlib
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 import structlog
-from sqlalchemy import null, select, update
+from sqlalchemy import Update, null, select, update
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
@@ -226,6 +243,20 @@ AUDIT_RAW_PAYLOAD_SYSTEM_TENANT_ID: uuid.UUID = uuid.UUID("00000000-0000-0000-00
 #: registrars, other loops). Settings allow no interval below 60 seconds, so
 #: this never exceeds the interval.
 _FIRST_RUN_DELAY_SECONDS: float = 60.0
+
+#: Rows one batch empties, in one transaction (see "Batches" above).
+_BATCH_SIZE: int = 5_000
+
+#: A run starts no new batch after this many seconds. The next run goes on
+#: from the oldest row that is still left.
+_MAX_RUN_SECONDS: float = 15 * 60.0
+
+
+class _AgeOffResult(NamedTuple):
+    """What one run of the age-off did."""
+
+    nulled_rows: int
+    stopped_early: bool
 
 
 def _resolve_system_tenant_id() -> uuid.UUID:
@@ -314,56 +345,95 @@ async def _read_last_run_or_none(*, since: datetime) -> datetime | None:
         return None
 
 
-async def _null_raw_payload_older_than(cutoff: datetime) -> int:
-    """NULL ``raw_payload`` on rows older than *cutoff*; return the row count.
+def _batch_statement(cutoff: datetime, *, not_before: datetime | None) -> Update:
+    """Build the ``UPDATE`` that empties ``raw_payload`` on one batch of old rows.
 
-    Bounded ``UPDATE ... SET raw_payload = NULL WHERE occurred_at < cutoff
-    AND raw_payload IS NOT NULL``. The ``occurred_at`` predicate rides the
-    ``audit_log_occurred_at_idx`` btree.
+    The inner ``SELECT`` picks up to :data:`_BATCH_SIZE` ids of rows with
+    ``not_before <= occurred_at < cutoff`` and ``raw_payload IS NOT NULL``,
+    oldest first, through the ``audit_log_occurred_at_idx`` btree. On
+    PostgreSQL it locks them with ``FOR UPDATE SKIP LOCKED``: two runs at the
+    same time take different rows and never wait for each other. A row that
+    another run emptied first fails the ``raw_payload IS NOT NULL`` check, so
+    the append-only trigger never sees a NULL-to-NULL update (which it
+    rejects). ``FOR UPDATE`` needs
+    the ``UPDATE`` right on one column, which the runtime role has. SQLite
+    ignores the lock clause.
 
     The value is set with :func:`sqlalchemy.null` (a real **SQL NULL**), not
     Python ``None``: ``_PORTABLE_JSON`` is ``JSON().with_variant(JSONB())``
     with the default ``none_as_null=False``, so ``.values(raw_payload=None)``
     would persist the JSON literal ``'null'`` -- which is *not* SQL NULL and
     would keep matching the ``IS NOT NULL`` predicate on every future tick
-    (never converging, inflating the count forever). Writing SQL NULL makes an
-    aged row invisible to the next sweep, so the working set converges to zero
-    as the backlog clears. (Rows that were pre-existing JSON ``'null'`` -- the
-    dispatcher's error-arm no-body rows -- are normalised to SQL NULL the one
-    time they cross the cutoff; harmless.)
+    (never converging, inflating the count forever). (Rows that were
+    pre-existing JSON ``'null'`` -- the dispatcher's error-arm no-body rows --
+    are normalised to SQL NULL the one time they cross the cutoff; harmless.)
 
-    ``rowcount`` is typed only on the concrete ``CursorResult`` the runtime
-    returns, not the abstract ``Result`` mypy infers (same
-    ``type: ignore[attr-defined]`` shape the topology sweeper documents). It
-    is ``None`` only for ``executemany`` batches this single-statement UPDATE
-    never triggers, so ``or 0`` collapses ``int | None`` to the ``int`` the
-    audit payload needs.
+    ``RETURNING occurred_at`` gives the row count and where the next batch
+    starts. It works on PostgreSQL and on SQLite 3.35 and newer.
+    """
+    picked = [AuditLog.raw_payload.is_not(None), AuditLog.occurred_at < cutoff]
+    if not_before is not None:
+        picked.append(AuditLog.occurred_at >= not_before)
+    batch_ids = (
+        select(AuditLog.id)
+        .where(*picked)
+        .order_by(AuditLog.occurred_at)
+        .limit(_BATCH_SIZE)
+        .with_for_update(skip_locked=True)
+    )
+    return (
+        update(AuditLog)
+        .where(AuditLog.id.in_(batch_ids))
+        .values(raw_payload=null())
+        .returning(AuditLog.occurred_at)
+        .execution_options(synchronize_session=False)
+    )
+
+
+async def _null_one_batch(cutoff: datetime, *, not_before: datetime | None) -> list[datetime]:
+    """Run one batch (:func:`_batch_statement`) in its own transaction.
+
+    Return the ``occurred_at`` of each row it emptied.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        result = await session.execute(
-            update(AuditLog)
-            .where(
-                AuditLog.occurred_at < cutoff,
-                AuditLog.raw_payload.is_not(None),
-            )
-            .values(raw_payload=null())
-        )
+        result = await session.execute(_batch_statement(cutoff, not_before=not_before))
+        occurred = list(result.scalars())
         await session.commit()
-        nulled: int = result.rowcount or 0  # type: ignore[attr-defined]
-    return nulled
+    return occurred
+
+
+async def _null_raw_payload_older_than(cutoff: datetime) -> _AgeOffResult:
+    """Empty ``raw_payload`` on all rows older than *cutoff*, one batch at a time.
+
+    Each batch is its own transaction (see "Batches" in the module
+    docstring). The run ends after a batch with fewer than
+    :data:`_BATCH_SIZE` rows, or, with ``stopped_early=True``, when
+    :data:`_MAX_RUN_SECONDS` have passed.
+    """
+    deadline = time.monotonic() + _MAX_RUN_SECONDS
+    nulled = 0
+    not_before: datetime | None = None
+    while True:
+        occurred = await _null_one_batch(cutoff, not_before=not_before)
+        nulled += len(occurred)
+        if len(occurred) < _BATCH_SIZE:
+            return _AgeOffResult(nulled_rows=nulled, stopped_early=False)
+        if time.monotonic() >= deadline:
+            return _AgeOffResult(nulled_rows=nulled, stopped_early=True)
+        not_before = max(occurred)
 
 
 async def _write_prune_audit_row(
     *,
-    nulled_rows: int,
+    result: _AgeOffResult,
     retention_days: int,
     cutoff: datetime,
     duration_ms: float,
 ) -> None:
     """Write the one summary audit row, swallowing audit-side failures.
 
-    The UPDATE has already committed before this helper runs; an audit-write
+    Every batch has already committed before this helper runs; an audit-write
     failure must not stall the loop. Surface it loud-but-non-fatal so a
     flapping audit substrate is visible without leaving secrets un-aged.
     Without the row, the next process start finds no record of this run and
@@ -379,15 +449,16 @@ async def _write_prune_audit_row(
             status_code=200,
             duration_ms=duration_ms,
             payload={
-                "nulled_raw_payload_rows": nulled_rows,
+                "nulled_raw_payload_rows": result.nulled_rows,
                 "retention_days": retention_days,
                 "cutoff": cutoff.isoformat(),
+                "stopped_early": result.stopped_early,
             },
         )
     except Exception:
         _log.exception(
             "audit_raw_payload_retention_audit_write_failed",
-            nulled_raw_payload_rows=nulled_rows,
+            nulled_raw_payload_rows=result.nulled_rows,
             retention_days=retention_days,
         )
 
@@ -419,17 +490,18 @@ async def _run_one_prune_tick() -> None:
         return
 
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)
-    nulled_rows = await _null_raw_payload_older_than(cutoff)
+    result = await _null_raw_payload_older_than(cutoff)
     duration_ms = (time.perf_counter() - tick_started) * 1000.0
     _log.info(
         "audit_raw_payload_retention_tick_done",
-        nulled_raw_payload_rows=nulled_rows,
+        nulled_raw_payload_rows=result.nulled_rows,
+        stopped_early=result.stopped_early,
         retention_days=retention_days,
         cutoff=cutoff.isoformat(),
         duration_ms=duration_ms,
     )
     await _write_prune_audit_row(
-        nulled_rows=nulled_rows,
+        result=result,
         retention_days=retention_days,
         cutoff=cutoff,
         duration_ms=duration_ms,

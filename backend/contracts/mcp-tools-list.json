@@ -3053,8 +3053,20 @@
               "name": {
                 "type": "string"
               },
+              "next_step": {
+                "type": "string"
+              },
               "product": {
                 "type": "string"
+              },
+              "secret_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "secret_ref_derived": {
+                "type": "boolean"
               },
               "target_id": {
                 "type": "string"
@@ -3068,7 +3080,198 @@
               "name",
               "product",
               "host",
-              "tenant_id"
+              "tenant_id",
+              "secret_ref",
+              "secret_ref_derived",
+              "next_step"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_request_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "op_id": {
+                "type": "string"
+              },
+              "status": {
+                "const": "awaiting_approval"
+              }
+            },
+            "required": [
+              "status",
+              "approval_request_id",
+              "op_id",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "auth_model": {
+            "enum": [
+              "impersonation",
+              "shared_service_account",
+              "per_user"
+            ],
+            "type": "string"
+          },
+          "extras": {
+            "type": "object"
+          },
+          "flight_recorder_capture": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "fqdn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "x-meho-caller-address": true
+          },
+          "host": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string",
+            "x-meho-caller-address": true
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "port": {
+            "maximum": 65535,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "preferred_impl_id": {
+            "maxLength": 200,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "product": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "secret_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "tls_ca_pin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_server_name": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verify_tls": {
+            "type": "boolean"
+          },
+          "version": {
+            "maxLength": 100,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vpn_required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "target_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_targets_update",
+      "outputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "product": {
+                "type": "string"
+              },
+              "target_id": {
+                "type": "string"
+              },
+              "updated_fields": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "target_id",
+              "name",
+              "product",
+              "version",
+              "host",
+              "updated_fields"
             ],
             "type": "object"
           },
@@ -5321,6 +5524,33 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "guidance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "next_step": {
+                        "type": "string"
+                      },
+                      "output_shape": {
+                        "type": "string"
+                      },
+                      "parameter_hints": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      },
+                      "preconditions": {
+                        "type": "string"
+                      },
+                      "when_to_call": {
+                        "type": "string"
+                      },
+                      "when_to_use": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
                   },
                   "op_id": {
                     "type": "string"

@@ -5,7 +5,8 @@
 #
 # Runs the retrieval-eval engine against the checked-in eval corpus
 # on every PR that touches the retrieval substrate or the eval
-# library; fails the build when the eval verdict goes red OR when
+# library (backend/scripts/retrieval_eval/, test tooling that is not
+# part of the product package); fails the build when the eval verdict goes red OR when
 # any per-surface metric regresses against the checked-in baseline
 # (`ci/eval-baseline.json`) by more than the noise floor (0.02).
 #
@@ -28,15 +29,10 @@
 # It does **not** today exercise the live BM25+cosine+RRF retrieval
 # substrate. That coverage lives in `tests/integration/test_retrieval_e2e.py`
 # (PG via testcontainers + fastembed) and the chart.yml `helm-test`
-# job (Helm test Pod + pgvector). When G4.3-T6 (#445)'s
-# `retire-checklist` verb wires a per-surface threshold check
-# against the live substrate, this gate becomes the inner ring +
-# a new "live eval" job becomes the outer ring.
+# job (Helm test Pod + pgvector).
 #
-# Required status check candidate (after T6 #445 lands the
-# live-substrate version of the gate; today this gate is
-# advisory-strict — it fails the workflow but isn't yet in branch
-# protection).
+# This gate is advisory-strict: it fails the workflow but isn't in
+# branch protection.
 #
 # All third-party actions pinned to immutable SHAs with the
 # human-readable tag in a trailing comment (devops_best_practices:
@@ -49,7 +45,7 @@ on:
   pull_request:
     paths:
       - 'backend/src/meho_backplane/retrieval/**'
-      - 'backend/src/meho_backplane/api/v1/retrieve_eval.py'
+      - 'backend/scripts/retrieval_eval/**'
       - 'scripts/ci/run_eval_gate.py'
       - 'ci/eval-baseline.json'
       - '.github/workflows/eval-gate.yml'

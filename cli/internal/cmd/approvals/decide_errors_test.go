@@ -44,7 +44,7 @@ func runDecisionWithMock(t *testing.T, decideHandler mockHandler, verb, reason s
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	cmd.SetContext(context.Background())
-	return &stderr, runDecision(cmd, stubID, verb, reason, true, srv.URL)
+	return &stderr, runDecision(cmd, stubID, verb, reason, decisionOpts{JSONOut: true, BackplaneOverride: srv.URL})
 }
 
 // json422 answers 422 with a JSON body and the JSON content type, the

@@ -61,8 +61,8 @@ The "any subsequent action" definition is deliberately broad in v0.2:
 
 A stricter per-surface action-shape match (``search_knowledge`` →
 specifically a kb-resource-read) is v0.2.next refinement; the broad
-definition is the right v0.2 baseline because the retire-checklist
-(T6) only needs a directional signal ("operators do something after
+definition is the right v0.2 baseline because a reader of the report
+only needs a directional signal ("operators do something after
 searching, vs grep-and-fall-through"), not a perfect per-hit
 attribution.
 
@@ -325,9 +325,8 @@ class UsageReport(BaseModel):
 
     ``buckets`` is sorted by ``(date, surface)`` ascending — the text
     table renderer relies on this for its grouping behaviour, and
-    ``--json`` consumers (T6's retire-checklist, future dashboards)
-    benefit from deterministic ordering even when nothing else
-    pins it.
+    ``--json`` consumers (scripts, dashboards) benefit from
+    deterministic ordering even when nothing else pins it.
 
     ``tenant_id`` is the tenant the report is scoped to (the
     operator's own tenant by default, or the
@@ -361,7 +360,7 @@ class UsageReport(BaseModel):
     #: ``True`` whenever REST ``POST /api/v1/retrieve`` is excluded from
     #: the counter (always, in v0.2 — see :data:`REST_RETRIEVE_EXCLUDED`).
     #: The machine-readable companion to ``counted_surfaces`` for
-    #: consumers (T6 retire-checklist, dashboards) that want a boolean
+    #: consumers (scripts, dashboards) that want a boolean
     #: rather than to diff the surface list.
     rest_excluded: bool = Field(default=REST_RETRIEVE_EXCLUDED)
 

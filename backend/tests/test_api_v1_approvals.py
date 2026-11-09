@@ -472,6 +472,126 @@ async def test_approve_async_returns_202_and_run_handle(
     assert fake.resumed == [request_id]
 
 
+async def _park_for_decide() -> uuid.UUID:
+    """Park one request from another person; return its id."""
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._validate import compute_params_hash
+    from meho_backplane.operations.approval_queue import create_pending_request
+
+    params = {"disk_gb": 40}
+    requester = Operator(
+        sub="op-requester",
+        name="Requester",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
+    async with get_sessionmaker()() as session:
+        request = await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="vmware-rest-9.0",
+            op_id="vm.create",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+        await session.commit()
+        return request.id
+
+
+async def _post_decide(request_id: uuid.UUID, body: dict[str, Any]) -> httpx.Response:
+    key = make_rsa_keypair("kid-decide-async")
+    headers = {
+        "Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR, sub='op-approver')}"
+    }
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="https://testserver",
+        ) as ac:
+            return await ac.post(
+                f"/api/v1/approvals/{request_id}/decide", json=body, headers=headers
+            )
+
+
+@pytest.mark.asyncio
+async def test_decide_async_approve_returns_202_and_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`POST /decide` with `async: true` saves the approval and answers 202 at once (#5110)."""
+    from meho_backplane.api.v1 import approvals as approvals_module
+
+    request_id = await _park_for_decide()
+    fixed = uuid.uuid4()
+    fake = _FakeRunService(fixed)
+    monkeypatch.setattr(approvals_module, "get_operation_run_service", lambda: fake)
+
+    response = await _post_decide(request_id, {"decision": "approved", "async": True})
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["run_id"] == str(fixed)
+    assert body["status"] == "pending"
+    assert body["async"] is True
+    assert body["approval_request_id"] == str(request_id)
+    assert body["decision"] == "approved"
+    assert body["decided_by"] == "op-approver"
+    assert body["self_approved"] is False
+    assert body["approval_rule"]
+    assert "dispatch_status" not in body
+    # The run was handed to the background, once, for this request.
+    assert fake.resumed == [request_id]
+
+
+@pytest.mark.asyncio
+async def test_decide_async_reject_answers_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejection ignores `async`: 200, nothing runs."""
+    from meho_backplane.api.v1 import approvals as approvals_module
+
+    request_id = await _park_for_decide()
+    fake = _FakeRunService(uuid.uuid4())
+    monkeypatch.setattr(approvals_module, "get_operation_run_service", lambda: fake)
+
+    response = await _post_decide(request_id, {"decision": "rejected", "async": True})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"] == "rejected"
+    assert response.json()["dispatch_status"] is None
+    assert fake.resumed == []
+
+
+@pytest.mark.asyncio
+async def test_decide_without_async_runs_inline_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without `async`, `/decide` runs the operation before it answers (200)."""
+    from meho_backplane.api.v1 import approvals as approvals_module
+
+    request_id = await _park_for_decide()
+    fake = _FakeRunService(uuid.uuid4())
+    monkeypatch.setattr(approvals_module, "get_operation_run_service", lambda: fake)
+    inline = SimpleNamespace(
+        status="ok", op_id="vm.create", result={"vm": "vm-1"}, error=None, extras={}
+    )
+
+    async def _resume(**_: object) -> SimpleNamespace:
+        return inline
+
+    monkeypatch.setattr(approvals_module, "_resume_dispatch_after_approval", _resume)
+
+    response = await _post_decide(request_id, {"decision": "approved"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["dispatch_status"] == "ok"
+    assert fake.resumed == []
+
+
 # ---------------------------------------------------------------------------
 # #3243 — approve-only capability: approvals-plane access decoupled from
 # dispatch. A ``read_only`` + ``approver=true`` principal is admitted to the

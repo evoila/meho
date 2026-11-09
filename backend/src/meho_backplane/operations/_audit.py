@@ -31,8 +31,10 @@ from decimal import Decimal
 from typing import Any
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_operation_op_class
 from meho_backplane.connectors.schemas import OperationResult
@@ -559,7 +561,9 @@ def _resolve_target_id(target: Any) -> uuid.UUID | None:
     return raw if isinstance(raw, uuid.UUID) else None
 
 
-def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
+async def _apply_principal_name(
+    session: AsyncSession, payload: dict[str, Any], operator: Operator
+) -> None:
     """Store the caller's display name in ``payload["principal_name"]`` (#4029).
 
     Audit readers (``meho audit show`` / ``query``, the console) read the
@@ -567,11 +571,14 @@ def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
     rows use. The name always belongs to the row's ``operator_sub``. On an
     approved run that is the approver when a person approves through the
     console, CLI or REST, and the agent when MEHO's own agent waits for
-    the approval and resumes the run itself. Left out when the token has no
-    ``name`` claim.
+    the approval and resumes the run itself. The name comes from
+    :func:`~meho_backplane.auth.display_name.principal_display_name`, so an
+    agent token without a ``name`` claim gets the registered agent name or
+    its client id (#3885). Left out when there is no name at all.
     """
-    if operator.name:
-        payload["principal_name"] = operator.name
+    name = await principal_display_name(session, operator)
+    if name:
+        payload["principal_name"] = name
 
 
 class AuditCommitError(RuntimeError):
@@ -641,7 +648,6 @@ async def write_audit_row(
         redaction_policy_id=redaction_policy_id,
         handle_metadata=handle_metadata,
     )
-    _apply_principal_name(payload, operator)
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
     # The session this row belongs to (#4672): the agent run's id inside
@@ -676,6 +682,7 @@ async def write_audit_row(
     if hasattr(AuditLog, "policy_decision"):
         runbook_kwargs["policy_decision"] = policy_decision_var.get()
     async with sessionmaker() as session:
+        await _apply_principal_name(session, payload, operator)
         row = AuditLog(
             id=audit_id,
             occurred_at=datetime.now(UTC),

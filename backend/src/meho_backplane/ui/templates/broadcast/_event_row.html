@@ -23,6 +23,15 @@
   UNTRUSTED — rendered escaped via ``x-text``, never innerHTML),
   ev.target/ev.targets, ev.work_ref, ev.planned_op_class, ev.ttl_minutes.
 
+  Phone layout (#6000): below the ``sm`` width the row uses a 6-column
+  grid and drops the column header. Line one: time and agent. Line two:
+  the announcement text. Line three: the details button and the targets.
+  The phase and claim columns show from ``sm`` up. On a phone a tap on the
+  row folds out a details block under it (``detailsOpen``, local to the
+  row): the phase, the full text without cutting, the targets and the
+  claim details. The small button does the same and carries
+  ``aria-expanded`` for screen readers.
+
   ``wall`` (default ``false``): when the row renders inside the
   wall-monitor feed (``broadcast/wall.html`` includes ``_feed.html`` with
   ``wall=True``), the row uses taller padding + a larger type scale so
@@ -38,10 +47,12 @@
     Trusted structured fields (``phase`` / ``planned_op_class`` /
     ``ttl_minutes``) render as chips. -#}
 <li
-  class="grid grid-cols-12 items-center gap-2 border-l-2 border-l-secondary {% if wall %}px-4 py-4 text-base{% else %}px-3 py-2 text-sm{% endif %}"
+  x-data="{ detailsOpen: false }"
+  class="grid grid-cols-6 items-center gap-x-2 gap-y-1 border-l-2 border-l-secondary sm:grid-cols-12 sm:gap-2 {% if wall %}px-4 py-4 text-base{% else %}px-3 py-2 text-sm{% endif %}"
   role="listitem"
   :data-event-id="rowKey(ev)"
   :aria-label="rowAriaLabel(ev)"
+  x-on:click="detailsOpen = !detailsOpen"
 >
   {# ---------- timestamp ---------- #}
   <span class="col-span-2 font-mono text-xs opacity-70">
@@ -49,7 +60,7 @@
   </span>
 
   {# ---------- agent ---------- #}
-  <span class="col-span-2 truncate">
+  <span class="col-span-4 truncate sm:col-span-2">
     <span
       class="badge badge-secondary badge-sm gap-1"
       :title="'Published by agent ' + (ev.owner_sub || ev.principal_sub || '')"
@@ -60,7 +71,7 @@
   </span>
 
   {# ---------- activity (agent-authored, UNTRUSTED → quoted + escaped) ---------- #}
-  <span class="col-span-3 truncate">
+  <span class="col-span-6 truncate sm:col-span-3">
     <span
       class="border-l-2 border-base-300 pl-2 italic opacity-90"
       :title="ev.activity"
@@ -69,7 +80,7 @@
   </span>
 
   {# ---------- phase chip ---------- #}
-  <span class="col-span-1">
+  <span class="hidden sm:col-span-1 sm:block">
     <span
       class="badge badge-sm"
       :class="phaseBadgeClass(ev.phase)"
@@ -77,17 +88,49 @@
     ></span>
   </span>
 
+  {# ---------- phone only: the button that folds out the details ---------- #}
+  <button
+    type="button"
+    class="btn btn-ghost btn-xs col-span-1 sm:hidden"
+    :aria-expanded="detailsOpen ? 'true' : 'false'"
+    aria-label="Announcement details"
+    x-on:click.stop="detailsOpen = !detailsOpen"
+  >
+    <span aria-hidden="true" x-text="detailsOpen ? '&#x25BE;' : '&#x25B8;'"></span>
+  </button>
+
   {# ---------- target(s) ---------- #}
-  <span class="col-span-2 truncate text-xs opacity-80">
+  <span class="col-span-5 truncate text-xs opacity-80 sm:col-span-2">
     <span :title="announcementTargets(ev)" x-text="announcementTargets(ev) || '—'"></span>
   </span>
 
   {# ---------- claim details: planned_op_class · TTL · work_ref ---------- #}
-  <span class="col-span-2 truncate text-xs">
+  <span class="hidden truncate text-xs sm:col-span-2 sm:block">
     <span
       class="opacity-60"
       :title="announcementMeta(ev)"
       x-text="announcementMeta(ev) || '—'"
     ></span>
   </span>
+
+  {# ---------- phone only: the details folded out by a tap ----------
+     The same fields the sm-and-up columns show, in full and wrapped.
+     Agent-authored text stays on ``x-text``. -#}
+  <div
+    class="col-span-6 space-y-1 text-xs sm:hidden"
+    x-show="detailsOpen"
+    data-announcement-details
+  >
+    <span
+      class="badge badge-sm"
+      :class="phaseBadgeClass(ev.phase)"
+      x-text="ev.phase || 'update'"
+    ></span>
+    <p
+      class="whitespace-pre-wrap border-l-2 border-base-300 pl-2 italic [overflow-wrap:anywhere]"
+      x-text="ev.activity"
+    ></p>
+    <p class="[overflow-wrap:anywhere] opacity-80" x-text="announcementTargets(ev) || '—'"></p>
+    <p class="[overflow-wrap:anywhere] opacity-60" x-text="announcementMeta(ev) || '—'"></p>
+  </div>
 </li>

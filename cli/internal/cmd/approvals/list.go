@@ -294,7 +294,7 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, 
 			output.SafeText(approveRightLabel(e.MayApprove, e.MayApproveReason)),
 			truncate(output.SafeText(e.ConnectorId), 24),
 			truncate(output.SafeText(e.OpId), 32),
-			truncate(principalScanLabel(e.PrincipalSub, e.PrincipalName), 20),
+			truncate(requesterScanLabel(e.PrincipalSub, e.PrincipalName, e.PrincipalKind), 20),
 			output.SafeText(e.CreatedAt),
 		)
 	}

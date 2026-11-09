@@ -108,6 +108,15 @@ class TenantPolicies(_Strict):
     # still carry this key, so it is accepted and ignored: never read,
     # written or exported.
     announce_gate_enabled: StrictBool | None = Field(default=None, exclude=True)
+    knowledge_wiki_collection: Annotated[str, Field(max_length=128)] | None = None
+
+    @field_validator("knowledge_wiki_collection")
+    @classmethod
+    def _blank_wiki_collection_is_none(cls, value: str | None) -> str | None:
+        # An empty value means "no wiki": lessons live in MEHO only (#5976).
+        if value is None or not value.strip():
+            return None
+        return value.strip()
 
     @field_validator("mail_recipient_allowlist")
     @classmethod

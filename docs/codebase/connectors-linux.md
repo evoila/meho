@@ -150,6 +150,14 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 | `linux.mount.list` | `storage` | — | `{rows, total}` (each row `kind` = `mount` / `export`) |
 
 `linux.about` is the identity canary (its handler wraps `fingerprint`).
+`linux.firewall.show` reads the rules as root. When the login is not root,
+it runs the read under sudo through `_sudo.py`, with the `sudo_password`
+(or `password`) of the target's secret. When the secret holds no password,
+it sends an empty one: a login that may use sudo without a password still
+reads, and any other login gets `permission_denied`. It checks the exit status and keeps the error text. A
+read that fails is an error that starts with `permission_denied` or
+`read_failed`, never `rows: []`. `backend: none` means only that the host
+has neither `nft` nor `iptables-save`.
 `linux.mount.list` inspects the mount table (`findmnt` / `mount`) plus NFS
 exports (`exportfs -s` / `showmount -e`); each row carries a `kind`
 discriminator. Block-topology and capacity reporting (`df` / `lsblk`) is
@@ -318,7 +326,8 @@ in `ops_write.py`; the root-elevation primitive lives in `_sudo.py`.
 | `linux.service.control` | `service` | `caution` (no approval) | `action`, `unit`, `daemon_reload?` | `{unit, action, daemon_reload, ok}` |
 | `linux.script.run` | `exec` | `dangerous` + approval | `script`, `interpreter?`, `arguments?`, `working_directory?`, `env?`, `secret_env?`, `timeout_seconds?`, `use_sudo?`, `script_ref?`, `expected_sha256?` | `{stdout, total, stderr, exit_code, interpreter, used_sudo}` |
 | `linux.sysctl.write` | `system` | `dangerous` + approval | `key`, `value` | `{key, value, applied, dropin_path}` |
-| `linux.firewall.load` | `firewall` | `dangerous` + approval | `ruleset`, `backend?` | `{applied, backend, validated}` |
+| `linux.firewall.load` | `firewall` | `dangerous` + approval | `ruleset`, `backend?`, `rollback_after_seconds?` | `{applied, backend, validated}`, plus `{rollback_id, rollback_due_at}` with the timer |
+| `linux.firewall.confirm` | `firewall` | `caution` + approval | `rollback_id`, `install_path?` | `{confirmed, rollback_id, installed, install_path}` |
 
 ### Tier rationale
 
@@ -341,6 +350,76 @@ first-boot script can be re-run (or a multi-step fix applied) *through* the
 backplane rather than around it. It returns `stdout` as a list of lines so
 a large output spills to a `result_query` handle through the JSONFlux
 reducer rather than flooding agent context; `stderr` is capped inline.
+
+### Firewall changes with a timed way back
+
+A rule with good syntax can still cut the SSH path to the host. Then only
+a console login can fix it. So `linux.firewall.load` takes an optional
+`rollback_after_seconds` (60 to 1800). Without it, the load works as
+before. With it, one root script (`ops_firewall_rollback.py`) runs these
+steps in this order:
+
+1. Take the host lock (`flock` on `/var/lib/meho/firewall-rollback/.lock`).
+   Refuse when another timed change still waits for its confirm or its
+   timer. Only one timed change can wait at a time. To tell, the script
+   asks systemd whether the other timer still waits or its restore runs,
+   and it also checks the saved end time. So a change of the host clock
+   does not let a second change start.
+2. Save the live rules to `/var/lib/meho/firewall-rollback/<rollback_id>/`
+   (a root-only folder) and check the syntax of the saved file. The nft
+   copy starts with `flush ruleset`, so loading it replaces the rules. For
+   iptables, each table that the new rules use but the live rules do not
+   goes into the saved copy as an empty table. So loading the saved copy
+   also clears a table that the new rules added.
+3. Check the syntax of the new rules.
+4. Start a timer with `systemd-run --on-active=<seconds>`. When it ends, it
+   takes the lock, loads the saved rules and writes a `restored` mark.
+   It waits for the lock as long as a load or a confirm holds it, and it
+   loads nothing without the lock.
+5. Load the new rules.
+
+If the save or the timer fails, the script stops before any change and the
+call is an error. A host without systemd or `flock` is refused. If the load
+itself fails (iptables can stop after some tables are in), the script loads
+the saved rules at once. Only when that works does it stop the timer. If it
+does not work, the timer stays and tries again when it ends. The answer
+adds `rollback_id` and `rollback_due_at` (UTC, from the host clock).
+
+`linux.firewall.confirm` keeps the new rules:
+
+- It opens a **new** SSH connection, not one from the pool. A pooled
+  connection stays open under the new rules, so it proves nothing.
+- It holds the same lock as the load and the timer, so it never runs at
+  the same time as the restore.
+- It refuses an unknown `rollback_id`, a timer that already ran, and a
+  timer that ends in less than 20 seconds. It checks the time left again
+  right before it stops the timer. The error says whether the old rules
+  are back or coming back.
+- It writes a `keep` mark, then stops the timer. The restore does nothing
+  when it finds `keep`, so a restore that started just before the stop
+  cannot undo the confirm. With `install_path` it first checks the new
+  rules, then writes them to that file, so they survive a reboot. The path
+  must be inside the write roots of `linux.file.write`. An existing file
+  keeps its mode.
+
+`linux.firewall.confirm` is `caution` with `requires_approval=true`. The
+operation contract check asks every operation that is not `safe` to wait
+for approval, and a call made with a token waits for a person's approval
+anyway. So a person approves the confirm too. Pick a timer long enough for
+the checks and for that approval. If the approval comes too late, the
+confirm refuses and the old rules come back by themselves.
+
+### File mode and owner (`file.write`)
+
+`file.write` writes the new content to a temp file in the same folder,
+then renames it over the old file. The temp file starts as `0600`. When the
+file already exists, the script copies the old file's mode and owner onto
+the temp file before the rename. So a `0644 root:root` file stays
+`0644 root:root`, and a daemon that reads it as a non-root user can still
+read it. If the copy fails, the script stops before the rename: the old
+file stays as it was and the op returns `written: false`. A new file is
+created `0600` and owned by root. If a non-root service must read a new
+file, change its mode afterwards.
 
 ### Root elevation
 
@@ -463,6 +542,14 @@ host), exactly the un-governed footgun this connector exists to retire.
   must not collide with a reserved wrapper variable (`tmp` / `args` / `f`) or
   with a name already declared in `env`, and the mapping is bounded (≤ 32
   entries).
+- **Checked before the call waits for approval.** The `secret_env` schema
+  carries `propertyNames` (the POSIX name pattern) and `maxProperties: 32`.
+  The dispatcher checks the schema before the policy gate, so a bad name or
+  too many entries fail at once with `invalid_params`, and no approval is
+  asked for. The pattern ends with `(?![\s\S])`, not `$`, so a name with a
+  trailing newline also fails here. The handler (`_validate_secret_env`) still checks every rule at
+  run time. The reserved names, the clash with `env`, and the reference shape
+  are checked only there.
 - **Resolution at execution time only.** The value is resolved when the handler
   runs — the `_approved=True` resume path (or a non-parking dispatch) — never at
   park time. Each field is read through the connector's single Vault seam
@@ -503,6 +590,8 @@ connector has no `command.run` verb to extend it to.
   `ops_host.py` (service.status / sysctl.read / dns.lookup),
   `ops_firewall.py` (firewall.show), `ops_storage.py` (mount.list) — each
   ships its handler, command builder, output parser, and `LinuxOp` rows.
+- `ops_firewall_rollback.py` — the timed load of `firewall.load` and the
+  `firewall.confirm` op (`FIREWALL_ROLLBACK_OPS`).
 - `ops_write.py` — the five write verbs (`WRITE_OPS`), `LINUX_WRITE_ROOTS`
   / `confine_write_path`, the `secret_env` checks and the two park-time
   preview builders (`register_linux_write_previews`).

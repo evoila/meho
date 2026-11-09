@@ -514,6 +514,19 @@ class LinuxSshConnector(SshConnector):
 
         return await linux_firewall_load(self, target, params, operator)
 
+    async def firewall_confirm(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.firewall.confirm`` (group ``firewall``, caution)."""
+        from meho_backplane.connectors.linux.ops_firewall_rollback import (
+            linux_firewall_confirm,
+        )
+
+        return await linux_firewall_confirm(self, target, params, operator)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`LINUX_OPS` into ``endpoint_descriptor``.

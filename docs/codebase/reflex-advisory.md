@@ -55,13 +55,16 @@ dispatcher._reduce_and_audit_success(...)   # after the audit commit
         · settings.reflex_advisory_window_minutes == 0
         · resolve_agent_session_id() is None   # no MCP session (CLI etc.)
       [otherwise, heuristics in priority order, first winner returns:]
-        · read-before-act:  no audit_log row with
-            agent_session_id == session AND
+        · read-before-act:  no audit_log row (or usage event) with
+            agent_session_id IN (session, MCP session*) AND
             path == "/mcp/tools/call/meho_broadcast_recent"
           → claim (session, "read_before_act") via SET NX EX → _READ_NUDGE
         · announce-before-mutate:  op_class is write-class AND
+            the caller may publish (_may_announce) AND
             gap = announce_claim_gap(...) is not None
           → claim (session, "announce_before_mutate") → _ANNOUNCE_NUDGES[gap]
+
+  * the MCP session id is added only outside a hosted agent run
   → wrap_ok_result(..., extras={**activity, **checks, **reflex})
 ```
 
@@ -70,6 +73,30 @@ builder returns the first (read, then announce) whose per-`(session,
 heuristic)` dedupe claim it wins, and leaves the other heuristic's claim
 untouched so a later response can still carry it — a deduped read on one
 response falls through to announce on the next.
+
+### Who gets each nudge (#5489)
+
+| Caller | Read nudge | Announce nudge |
+|---|---|---|
+| Live MEHO-hosted agent run | yes, until the run itself reads the feed | yes |
+| Registered agent principal | yes, until its MCP session reads the feed | yes |
+| Service login (client credentials) | yes, until its MCP session reads the feed | no |
+| Person over MCP | yes, until its MCP session reads the feed | no |
+| CLI / REST call without a session | no | no |
+
+- **Read nudge.** A service login that sends a `work_ref` runs each
+  dispatch under the session of its orchestration run
+  (`operations/addon_orchestration.py`), but its feed read is stored
+  under its MCP session. The read check looks under both ids. A hosted
+  agent run counts only reads of the run itself: a read by the outer MCP
+  session does not tell the agent inside the run what is in the feed.
+- **Announce nudge.** Only a caller that may publish gets it: a live
+  hosted agent run or a registered, not revoked agent principal. The
+  check is the one `meho_broadcast_announce` uses
+  (`auth/agent_admission.py::resolve_agent_admission`). A caller outside
+  a hosted run whose token is not an agent token is answered without a
+  lookup. Anyone else would be refused with `agent_identity_required`,
+  so MEHO does not tell them to announce.
 
 ## Design contract
 
@@ -142,6 +169,11 @@ claim wins:
   keys on `meho_broadcast_recent` only (the discipline's read step the
   issue names). A session that only tailed the feed via
   `meho_broadcast_watch` still gets the read nudge.
+- **Adoption numbers and service logins.** The adoption report
+  (`reflex/adoption.py`) groups rows by `agent_session_id` alone. For a
+  service login with a `work_ref` the feed read and the operations have
+  different session ids, so that report can count such a session as
+  "acted without reading". The advisory itself looks under both ids.
 - **Coarse claim coverage (v1).** A claim covers an op when its declared
   `planned_op_class` matches the op's class (or the claim declared no
   class) and its target attribution covers the op (or either is

@@ -377,6 +377,13 @@ not offer the tool, because MEHO cannot see tools the client hides. The
 conventions write path keeps the default (`include_broadcast=True`), so
 its result does not change.
 
+People read the feed; only agents post (#5770). A session that is not
+an agent (`auth/agent_admission.py::is_agent_caller` is false: no hosted
+run and no agent token) gets `BROADCAST_READER_BAND` instead. It keeps
+the "read the feed first" step and tells the session to skip
+`meho_broadcast_announce`. The plugin skill and its `call_operation`
+reminder say the same, and the tool description says it first.
+
 ### Read path (SSE and UI history)
 
 See *Reader side* in the overview. `/ui/broadcast/stream` and
@@ -426,8 +433,8 @@ claim step (`claim_id` and `owner_sub` set), is not the `completion`, and
 has a finite TTL that has not run out. Legacy rows from before trusted
 admission are history, never a claim. The same rules drive the caller's
 own claim lookup of the reflex advisory
-([reflex-advisory.md](reflex-advisory.md)) and, row by row, the
-`active_only` read filter.
+([reflex-advisory.md](reflex-advisory.md)) and the `active_only` read
+filter.
 
 Design contract:
 
@@ -465,9 +472,17 @@ path, merged as a clobber-free union of distinct keys
 3. `reflex_advisory` — #3133, built in `broadcast/reflex.py`, a
    session-scoped coordination nudge (read-before-act /
    announce-before-mutate) deduped per `(session, heuristic)`; see
-   [`docs/codebase/reflex-advisory.md`](reflex-advisory.md). #3133 also
-   shipped an opt-in announce gate that refused a write without a claim;
-   #3762 removed it (see *People read, agents publish* below).
+   [`docs/codebase/reflex-advisory.md`](reflex-advisory.md). Who gets
+   each nudge (#5489): every agent session gets the read nudge until it
+   has read the feed (for a service login with a `work_ref`, a read in
+   its MCP session counts). Only a caller that may publish (a live
+   hosted agent run or a registered agent principal, see "Who can
+   publish" below) gets the announce nudge; a person or a service login
+   does not. The full table is in
+   [`reflex-advisory.md`](reflex-advisory.md).
+   #3133 also shipped an opt-in announce gate that refused a write
+   without a claim; #3762 removed it (see *People read, agents publish*
+   below).
 
 ## Who can publish (#3736)
 
@@ -488,7 +503,12 @@ from server-side facts only. There are two ways in:
 
 Everything else gets the stable machine error `agent_identity_required`
 (MCP `-32602` with `error.data = {code, reason, remediation}`, REST
-`403` with the same `detail`). MEHO never guesses an agent from the
+`403` with the same `detail`). A caller that is not an agent at all (a
+person's login outside a hosted run) gets a remediation that says to
+skip the step: its operations are already in the audit log. On MCP this
+refusal comes before the input check (#5770): the tool's `caller_check`
+runs `require_agent_caller`, which needs no database read, before the
+dispatcher checks the arguments. MEHO never guesses an agent from the
 transport, a person's login client, a CLI login, a flag, or a `run_id`
 the caller sent.
 
@@ -595,11 +615,15 @@ own. So nothing may wait for an announcement a person cannot make:
   reads it.
 - **Reads use trusted claims.** The target advisory and the reflex claim
   lookup use only trusted claims, judged by their newest step (see *When
-  a claim is active* above). `active_only` keeps only steps that keep
-  their claim active: legacy rows, steps without a TTL and `completion`
-  steps no longer pass. One row cannot see a later `completion` of its
-  claim, so an earlier step of a completed claim still passes
-  `active_only` until its own TTL runs out.
+  a claim is active* above). "Newest" means committed last: the reads
+  sort by `seq`, because a step's time is set before the write takes
+  the tenant's lock and server clocks can differ. `active_only` keeps
+  only steps that keep their claim active: legacy rows, steps without a
+  TTL and `completion` steps do not pass. The archive reads also check
+  the newest stored step of each claim
+  (`broadcast/claim_archive.py::ended_claim_ids`). So when a claim is
+  completed or its newest TTL has run out, all its earlier steps stop
+  passing too.
 - **The UI shows readers and publishers.** `/ui/broadcast` lists agent
   announcements only, and says that only trusted agents post and where
   operations are recorded. The operation filters (op class, op id), the

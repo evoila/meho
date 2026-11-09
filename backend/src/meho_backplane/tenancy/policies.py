@@ -37,6 +37,7 @@ __all__ = [
     "FLIGHT_RECORDER_FIELDS",
     "INHERIT_SENTINEL",
     "set_flight_recorder_policy",
+    "set_knowledge_wiki_collection",
     "set_mail_recipient_allowlist",
     "set_run_approval_target_kinds",
 ]
@@ -141,4 +142,24 @@ def set_run_approval_target_kinds(tenant: Tenant, value: bool) -> bool:
         audit_tenant_id=str(tenant.id),
     )
     _log.info("tenant_run_approval_target_kinds_updated", tenant_id=str(tenant.id), enabled=value)
+    return True
+
+
+def set_knowledge_wiki_collection(tenant: Tenant, value: str | None) -> bool:
+    """Set the docs collection where *tenant* keeps its lessons (#5976); return whether it changed.
+
+    ``None`` means lessons live in MEHO only. Read at search time with no
+    cache, so nothing to evict. The settings import is its only writer
+    besides direct seeding.
+    """
+    old_value = tenant.knowledge_wiki_collection
+    if old_value == value:
+        return False
+    tenant.knowledge_wiki_collection = value
+    structlog.contextvars.bind_contextvars(
+        audit_knowledge_wiki_collection_before=_audit_value(old_value),
+        audit_knowledge_wiki_collection_after=_audit_value(value),
+        audit_tenant_id=str(tenant.id),
+    )
+    _log.info("tenant_knowledge_wiki_collection_updated", tenant_id=str(tenant.id))
     return True

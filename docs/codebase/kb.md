@@ -12,11 +12,13 @@ durable-team-knowledge layer. It has four callers:
   `POST /api/v1/kb/import`, which the team wiki's CI job calls after
   each merge (#5728, see [Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728)).
   It also includes `POST /api/v1/kb/export`, which the team wiki's CI
-  job calls to get MEHO's confirmed, generic lessons (#5730, see
-  [Export of confirmed, generic entries](#export-of-confirmed-generic-entries-5730)).
+  job calls to get MEHO's confirmed and candidate generic lessons (#5730, see
+  [Export of generic entries](#export-of-generic-entries-5730)).
 - **MCP** via the `search_knowledge` + `add_to_knowledge` meta-tools
   in [`mcp/tools/knowledge.py`](../../backend/src/meho_backplane/mcp/tools/knowledge.py)
-  (G4.1-T3).
+  (G4.1-T3). On a tenant that keeps its lessons in a team wiki, both
+  tools also report on the wiki
+  ([Team wiki search](#team-wiki-search-5976)).
 - **Console** under `/ui/kb` (`ui/routes/kb/routes.py`).
 - **CLI** through the `meho kb` verb (G4.1-T4). The Go CLI calls the
   REST routes; `meho kb search` calls `POST /api/v1/retrieve` with
@@ -172,7 +174,7 @@ not a `KbService` method: the import route calls it directly. See
 [Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728).
 `kb/page_export.py::export_pages(tenant_id)` is not one either: the
 export route calls it directly. See
-[Export of confirmed, generic entries](#export-of-confirmed-generic-entries-5730).
+[Export of generic entries](#export-of-generic-entries-5730).
 
 ### `walk_kb_directory` (`kb/file_walker.py`)
 
@@ -656,10 +658,10 @@ curl -sf -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 The job fails when the call fails. It reports the skipped pages from
 the answer.
 
-### Export of confirmed, generic entries (#5730)
+### Export of generic entries (#5730)
 
 `POST /api/v1/kb/export` (`kb/page_export.py::export_pages`) returns
-the caller's confirmed, generic entries as Markdown pages. It is the
+the caller's confirmed and candidate generic entries as Markdown pages. It is the
 mirror of the import. The caller is a CI job in the team wiki repo: it
 writes the pages into the wiki and opens a merge request there, and a
 person reviews it. MEHO writes nothing, and never holds Git
@@ -672,15 +674,17 @@ would hide an entry with the slug `export` from `GET /api/v1/kb/{slug}`.
 another tenant), and only entries with `applies_to:
 product-and-version`. Then, by `status`:
 
-- `confirmed`: a page, when the entry has the complete lesson header
-  (`type`, `applies_to` and `status`, the fields the import needs:
-  `page_import.py::REQUIRED_HEADER_FIELDS`). A confirmed entry without
-  one of them (a direct write may leave out `type`) is listed in
-  `skipped` with the missing fields. Set the field in MEHO to export
-  it. So the import never refuses an exported page.
+- `confirmed` or `candidate`: a page, when the entry has the complete
+  lesson header (`type`, `applies_to` and `status`, the fields the
+  import needs: `page_import.py::REQUIRED_HEADER_FIELDS`). A candidate
+  keeps `status: candidate`, so a person reviews it in the wiki; this
+  is how a lesson from `add_to_knowledge` reaches the wiki (#5976). An
+  entry without one of the fields (a direct write may leave out `type`)
+  is listed in `skipped` with the missing fields. Set the field in MEHO
+  to export it. So the import never refuses an exported page.
 - `retired` or `replaced`: a page to remove (`remove`). The header
   does not matter here.
-- any other status (`candidate`, `disputed`) or no status: neither.
+- any other status (`disputed`) or no status: neither.
   The page in the wiki stays as it was. A deleted entry gives no page
   to remove either.
 
@@ -693,6 +697,9 @@ product-and-version`. Then, by `status`:
 - no provenance (`state: "legacy"`, written before MEHO recorded it):
   listed in `skipped` with the reason. Write the entry again in MEHO to
   export it.
+
+`plan_entry` holds this rule for one entry; `add_to_knowledge` uses it
+too (see [Team wiki search](#team-wiki-search-5976)).
 
 **The page.** The file name is `<slug>.md` (`path` in the answer). The
 page is the YAML lesson header, then the entry's text with a single
@@ -1072,6 +1079,109 @@ The retrieval substrate enforces tenant scoping at SQL level via the
 `documents.tenant_id` filter. Combined with `source=KB_SOURCE` being
 pinned inside `search_entries`, cross-tenant or cross-source reads
 are structurally impossible.
+
+### Team wiki search (#5976)
+
+A tenant may keep its lessons as pages in a Git wiki. A knowledge index
+loads the wiki (outside MEHO), and MEHO reaches the index as a docs
+collection ([doc-collections.md](doc-collections.md)). Then a lesson
+lives in two places: the wiki is the source of truth, and the store
+keeps a copy. The import (#5728) brings the wiki's pages in; the export
+(#5730) sends lessons written in MEHO out as pages for review.
+
+**The setting.** `tenant.knowledge_wiki_collection` (migration `0150`)
+holds the key of the docs collection, per tenant. `NULL` (the default)
+means lessons live in MEHO only, and nothing below runs: both tools
+answer exactly as before. It is set through the settings file,
+`policies.knowledge_wiki_collection` ([settings.md](settings.md)),
+written by `tenancy/policies.py::set_knowledge_wiki_collection` and read
+at call time with no cache (`kb/wiki_search.py::wiki_collection_of`).
+
+**The merged search** (`kb/wiki_search.py::search_wiki`). After the
+store search, `search_knowledge` (MCP) and `POST /api/v1/retrieve` with
+`source="kb"` (`meho kb search`) search the collection with the same
+query and `limit`:
+
+1. The caller needs the docs add-on (`meho-docs` capability).
+2. A search with `filters`, header filters, a time window or
+   `scope="shared"` (REST: `kind` or `metadata_filters`) does not search
+   the wiki: the wiki cannot apply them.
+3. The same entitlement and readiness check as `search_docs`
+   (`resolve_entitled_ready_collection`, capability
+   `meho-docs:<collection>`), then the same docs search service
+   (`docs_search/service.py::search_docs`). The backend gets the
+   caller's token, as for `search_docs`.
+4. A wiki hit whose page the store's hits hold as an imported copy is
+   left out (`duplicate_count`). Only the caller's own tenant's hits
+   count: a shared hit of another tenant comes from that tenant's wiki.
+   The page is matched by its whole path: the copy's provenance
+   `relative_path` must equal the hit's `document_id` or the path after
+   `blob/<commit>/` in its `source_url` / `upstream_url`. A page with
+   the same file name in another folder stays in the answer. A wiki hit
+   is only one part of a page, and the import does not record which
+   repository a page came from. So the hit's text must be part of the
+   stored entry's text, and then the whole wiki page is compared: it is
+   read once per search through `read_docs` (mode `page`) with the hit's
+   `read_handle`. A page is named by the hit's `document_id` and source
+   links, so pages at the same path in another repository or at another
+   commit are each read. Its text without the lesson header must be the
+   stored entry's whole text (spaces and line breaks aside, Unicode in
+   form NFC). A page at the same path in another repository that only
+   shares a paragraph with the copy stays, and so does a longer page
+   whose one paragraph is the copy. When the page cannot be read in full
+   (the collection offers no read, the read is refused or fails, or the
+   page is cut or has more to read), the wiki hit stays. The read counts
+   toward the caller's read limit at the backend.
+   The store hit stays: it has the slug for a full read and is what the
+   recall before an operation uses.
+
+The answer:
+
+- MCP: the wiki hits follow the store hits in `hits`. Each is a
+  `DocsChunk` with `source: "wiki"`, `collection` set and its
+  `source_url` (the source link the index sent, for a Git page its path
+  and commit), its text wrapped as untrusted. The store hits keep their
+  shape. `wiki` holds `collection`, `searched`, `reason`, `message`,
+  `hit_count` and `duplicate_count`. The size limit counts the whole
+  answer, `wiki` included. When the answer is too large, the
+  lowest-ranked hits are left out first, so wiki hits go before store
+  hits.
+- REST: `RetrieveResponse.wiki` is a `KbWikiSearch` with the hits in
+  `wiki.hits`; `null` on every other call. `meho kb search` prints the
+  wiki hits after the table, or the line that says why the wiki was not
+  searched.
+
+When the wiki is not searched, the store's hits still come back, and
+`wiki.searched` is `false` with a `reason`: `docs_addon_off`,
+`filtered`, `not_entitled`, `unknown_collection`,
+`collection_not_ready` (not ready or turned off) or `index_unavailable`
+(the backend raised `CorpusUnavailable`: down, an error answer or a
+bad answer). `wiki.message` says the same in one sentence. Any other
+error fails the whole search, as before.
+
+**Audit.** The search's own audit row (op id `search_knowledge` on MCP,
+the retrieve row on REST) gets `collection` (the key `search_docs`
+binds), `wiki_status` (`searched` or the reason) and `wiki_hit_count`.
+The raw query is still only hashed.
+
+**`add_to_knowledge`.** The tool stores every lesson as before, with
+provenance `source_kind: "direct"`. On a tenant with the setting, its
+answer also has `wiki` (`kb/wiki_search.py::wiki_note_for`):
+`collection`, `export` and `message`. `export` is what the export does
+with the stored entry (`page_export.py::plan_entry`):
+
+- `page`: "Stored. This tenant keeps its lessons in the wiki behind
+  collection `<key>`. This lesson will also appear there as a candidate
+  page for review." (or "confirmed page" for a confirmed entry);
+- `skip`: the lesson does not go there yet, and why (a missing header
+  field, no provenance, a secret);
+- `remove`: the entry is retired or replaced, so its page goes;
+- `none`: the lesson stays in MEHO (not `applies_to:
+  product-and-version`, or a status that is not sent).
+
+Only lessons written in MEHO go out. Copies of wiki pages
+(`source_kind: "import"`) never go back, so an older copy never
+overwrites a wiki page.
 
 ## Dependencies
 

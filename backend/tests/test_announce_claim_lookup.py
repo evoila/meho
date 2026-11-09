@@ -329,6 +329,11 @@ async def test_reflex_advisory_is_silent_when_the_archive_holds_the_claim() -> N
 async def test_reflex_advisory_says_the_claim_expired() -> None:
     await _read_the_feed()
     await _claim(minutes_ago=30, target=_VC, ttl_minutes=10)
-    with _agent_session():
+    # Only a caller that may publish gets the announce nudge (#5489); this
+    # test is about the claim reason, so the caller counts as one.
+    may_announce = patch(
+        "meho_backplane.broadcast.reflex._may_announce", new=AsyncMock(return_value=True)
+    )
+    with _agent_session(), may_announce:
         advisory = await build_reflex_advisory(_operator(), op_class=_OP_CLASS, target_name=_VC)
     assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGES["expired"]}

@@ -827,6 +827,153 @@ pill state on a non-dashboard surface (`/ui/memory`) — including that
 both a hung **async** probe and a blocking **sync** probe render
 "starting" promptly rather than blocking the render.
 
+## Installable app
+
+A person can install the console as an app from the browser, on a phone
+or on a Mac or Windows laptop. The app opens on the approvals page in its
+own window. The pages stay server-built; there is no build step.
+
+The pieces, all plain static files under `ui/static/src/`:
+
+| File | What it does |
+|---|---|
+| `pwa/manifest.webmanifest` | The web app manifest: name, icons, start page `/ui/approvals`, scope `/ui/`, `display: standalone`, brand colours. Served as `application/manifest+json`. |
+| `brand/icon-192.png`, `brand/icon-512.png`, `brand/icon-maskable-512.png`, `brand/apple-touch-icon.png` | App icons, drawn from `brand/favicon.svg`. The maskable icon keeps the mark inside the safe area Android may crop to; the 180 px touch icon is for iPhone and iPad. |
+| `app/service-worker.js` | The service worker (a script the browser runs in the background). |
+| `app/pwa-register.js` | Registers the worker with scope `/ui/`. |
+| `pwa/offline.html` | Shown when MEHO cannot be reached: "Connect to the VPN and try again." |
+
+`_head_assets.html` links the manifest and the touch icon and loads
+`pwa-register.js`, so every console page and the wall page carry them.
+The account page has a short "Install MEHO as an app" card with the steps
+for each browser.
+
+Rules of the service worker:
+
+- It caches **only** the app shell: the fixed `SHELL_URLS` list (icons,
+  CSS, fonts, the theme script, the manifest, the offline page). That list
+  is the whole allow-list. It never writes a console page (approvals,
+  broadcast or any other), an `/api` answer, or a URL with a query to the
+  cache.
+- A page always comes from MEHO. When MEHO cannot be reached, the worker
+  answers with the offline page, so the app never shows an old approval
+  list.
+- Shell files come from MEHO first (so a release shows at once); the
+  cached copy is used only when MEHO cannot be reached.
+- Every other request is left to the browser.
+
+Why the worker file sits under `/ui/static/`: that path is the one the
+session check lets through, and the browser fetches the worker without a
+session. A worker may only control pages under its own folder, so the
+static mount (`static_files.py`) sends `Service-Worker-Allowed: /ui/` with
+this one file.
+
+Change a file in `SHELL_URLS`? Nothing to do: shell files are loaded from
+MEHO first. Change the list itself or the caching rules? Raise the
+version in `CACHE_NAME`; the next activate deletes the old cache.
+
+Tests: `tests/test_ui_pwa.py` checks the served types, the manifest and
+icons, the offline page, and runs the worker in `node` against fake
+browser objects to prove approvals, broadcast and `/api` are never
+cached (skipped where `node` is missing).
+
+Installing needs HTTPS (or `localhost`). Opening the app needs the same
+network access as the console, for example the VPN.
+
+## Approval notifications
+
+A person can switch on "Notify me about approvals in this browser" on the
+account page. MEHO then stores that browser's push subscription. Sending
+the messages is the next step and is not built yet.
+
+**Off by default.** The admin turns the feature on for the whole site with
+the setting `WEB_PUSH_ENABLED` (chart value `webPush.enabled`). While it is
+off:
+
+- the account page shows no switch and loads no push script;
+- every route under `/ui/account/push/` answers 404;
+- the push key is not read.
+
+The same holds while the setting is on but the push key is missing or not
+valid. MEHO then logs `web_push_key_missing` or `web_push_key_unusable`
+(never the key).
+
+**The push key (VAPID).** A P-256 key pair that proves to the push services
+that a message comes from this MEHO. The install makes the private key
+once, in the Secret `<release>-core-web-push` (key `vapid_private_key`), in
+the same way as the other server keys
+([core-secrets.md](core-secrets.md)), and keeps it on every upgrade. The
+chart passes it as `WEB_PUSH_VAPID_PRIVATE_KEY`. Without a built-in core
+part, put your own key in a Secret and set `webPush.secretName`; the format
+is the base64url form of the raw 32-byte private value. Make one with:
+
+```bash
+cd backend && uv run python -c "from meho_backplane.web_push.keys import new_private_key; print(new_private_key())"
+```
+
+The private key is never logged, never in an answer, and not in the repr of
+the settings. The public key is public by design: each browser needs it to
+subscribe, so the account page puts it in `data-vapid-public-key`.
+
+**What happens when a person switches it on.** `app/push-subscribe.js`
+asks the browser for permission, subscribes with the public key, and posts
+the subscription (the push endpoint and its two keys `p256dh` and `auth`)
+to `POST /ui/account/push/subscribe`. MEHO checks it
+(`web_push/endpoints.py`):
+
+- The endpoint is `https://` on port 443, without a user name, on a push
+  service of a browser maker: `fcm.googleapis.com` (Google),
+  `updates.push.services.mozilla.com` (Mozilla), a host under
+  `.push.apple.com` (Apple) or under `.notify.windows.com` (Microsoft, for
+  Edge on Windows). Anything else gets 422 with one sentence that does not
+  quote the endpoint.
+- `p256dh` is a P-256 public key (65 bytes) and `auth` is 16 bytes, both
+  base64url.
+
+MEHO stores the row in `push_subscription` (migration `0151`) for the
+signed-in person and the current tenant, with the time. The person and the
+tenant come from the session, never from the form. The endpoint names one
+browser, so it is unique: switching on again replaces the row, and when
+another person switches on the same browser, the browser moves to them. A
+person keeps at most ten browsers; the oldest go first.
+
+The save is one `INSERT ... ON CONFLICT (endpoint) DO UPDATE`, so two saves
+of the same browser at the same time both succeed. When the database
+refuses a write, the route answers 503 with one plain sentence. The store
+raises `PushStoreError` without the database error attached, because that
+error quotes the endpoint and the keys.
+
+**What the switch shows.** The switch shows "on" only when MEHO has this
+browser saved for the signed-in person, not only when the browser holds a
+subscription. The script asks `POST /ui/account/push/status` (form field
+`endpoint`; answer `{"on": true|false}`) when the page opens and again each
+time the list below reloads. So the switch shows "off" after a "Remove" in
+the list, and for a person who signs in on a browser that another person
+switched on.
+
+Switching off drops the subscription in the browser and posts
+`POST /ui/account/push/unsubscribe`, which deletes the person's own row for
+that endpoint.
+
+**See and remove.** Below the switch, `GET /ui/account/push/subscriptions`
+lists the person's browsers (the push service and the time, never the
+endpoint or the keys). A `tenant_admin` also sees every subscription made
+in the current tenant. `POST /ui/account/push/remove` (form field
+`subscription_id`) deletes one row of the person, or, for a
+`tenant_admin`, any row of the current tenant. Every other id is 404.
+
+Every route is a console route: it needs the session and the CSRF token.
+Logs name the person, the tenant, the row id and the push service, never
+the endpoint or the keys.
+
+Code: `web_push/` (`keys.py`, `endpoints.py`, `models.py`, `store.py`),
+`ui/routes/account_push.py`, `templates/account/_push.html` and
+`_push_subscriptions.html`. Tests: `tests/test_ui_account_push.py`,
+`tests/test_web_push_checks.py`.
+
+On iPhone and iPad, web push works only in the installed app (iOS 16.4 and
+newer), so the switch says to install MEHO first.
+
 ## Dependencies
 
 - **`jinja2 >= 3.1.6`** — already a backplane dependency; no
@@ -1539,6 +1686,34 @@ pins the dropdown + drawer tenant scoping; the
 [T3 wall/replay suite](../../backend/tests/test_ui_broadcast_wall_replay.py)
 pins the history pane's per-tenant archive read + the wall layout + the
 sliding-session extension.
+
+### The broadcast page on a phone (#6000)
+
+The page works on a phone screen (about 390 px wide) and still looks the
+same on a laptop:
+
+* **Rows.** Below the `sm` width `broadcast/_event_row.html` uses a
+  6-column grid: time and agent on line one, the announcement text on
+  line two, the details button and the targets on line three. The phase
+  and claim cells and the column header show from `sm` up. Newest
+  announcements stay on top, as before.
+* **Filters.** Below `md` the two filters fold away behind a "Filters"
+  button (Alpine `filtersOpen` on the form), so the newest announcements sit at
+  the top of the screen. Without JavaScript the fields stay visible.
+* **Details.** On a phone a tap on an announcement (or on its small
+  button, which carries `aria-expanded`) folds out a details
+  block under the row: the phase, the full text without cutting, the
+  targets and the claim metadata (`detailsOpen`, local to the row). From
+  `sm` up the columns show these, and the block stays hidden.
+* **Sidebar.** `base.html` starts the sidebar closed on every page load
+  below `lg`, so a phone shows the page and not the menu. Before, the
+  saved open/closed choice (`meho.sidebar`, default open) opened the menu
+  over the page on every load. From `lg` up the sidebar always shows
+  (`lg:drawer-open`), so nothing changes there. This holds for every
+  console page.
+
+`test_ui_broadcast_phone_layout.py` pins the markup and script; the look
+was checked in a real browser at 390 px and 1366 px wide.
 
 ### Known limits
 
@@ -3335,9 +3510,10 @@ It is the operator-console face of the in-process hybrid retriever
 route fronts: diagnosing "is retrieval returning what I expect?" previously
 meant a Python REPL inside the cluster or a `curl` against the REST endpoint.
 
-The page has four client-side tabs: **Diagnostics** (the default),
-**Usage Analytics**, **Eval Quality** and **Retire Checklist**. Each tab
-posts to its own HTMX fragment route.
+The page has two client-side tabs: **Diagnostics** (the default) and
+**Usage Analytics**. Each tab posts to its own HTMX fragment route.
+Retrieval quality is checked in CI (`scripts/ci/run_eval_gate.py`), not
+on this page.
 
 ### Routes
 
@@ -3356,15 +3532,6 @@ posts to its own HTMX fragment route.
 * `POST /ui/retrieval/usage` — runs `retrieval.usage.compute_usage` for the
   own tenant over a `since` window and swaps `retrieval/_usage_results.html`.
   A bad `since` renders an inline 400 card.
-* `POST /ui/retrieval/eval` — runs `retrieval.eval.eval_all` for the own
-  tenant and the caller's `sub` (no baseline) and swaps
-  `retrieval/_eval_results.html`.
-* `POST /ui/retrieval/retire-checklist` — runs
-  `retrieval.retire.compute_retire_checklist` with the caller's `sub` and
-  swaps `retrieval/_retire_results.html`. Read-only: there is no purge
-  button. A platform admin may pick another tenant with the
-  `tenant_filter` field; `authorize_tenant_scope` decides, and a refusal
-  renders an inline error card.
 
 ### Mirroring the docs-corpus console
 
@@ -3409,10 +3576,9 @@ ephemeral.
 `operator` role minimum (the whole surface sits behind `require_ui_operator`,
 **not** `require_ui_admin`, matching the OPERATOR floor the REST route carries;
 a `read_only` session gets `403 operator_required`).
-Diagnostics is **own-tenant only**: tenant identity is derived from the
+Both tabs are **own-tenant only**: tenant identity is derived from the
 reconstructed operator's `tenant_id` and the per-principal isolation predicate
-is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
-(that is the sibling T3 concern). When Memory rows can be candidates (Source
+is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`. When Memory rows can be candidates (Source
 is `memory` or empty) the handler also passes the Memory eligibility built by
 `MemoryRbacResolver.eligibility()` (#3741), so the candidate SQL drops
 memories the operator may not see, and expired ones, before ranking — the
@@ -3427,8 +3593,8 @@ surface is read-only, so no confirm gates.
   future stub cannot shadow a real route.
 * Inside `build_retrieval_router`, the literal `POST /ui/retrieval/diagnostics`
   is registered ahead of any `{param}` route (a NOTE comment pins the invariant
-  mirroring `corpus/routes.py`). The Usage, Eval and Retire tabs post to their
-  own literal routes (`/usage`, `/eval`, `/retire-checklist`). No `{param}`
+  mirroring `corpus/routes.py`). The Usage tab posts to its own literal
+  route (`/usage`). No `{param}`
   route exists today, but the ordering is pinned for when one lands.
 
 ### Tests
@@ -3442,14 +3608,13 @@ surface is read-only, so no confirm gates.
   absent from every bound payload), CSRF (403 on missing header, live-cookie
   reuse without rotation, 401 propagation on a dead session), and the route
   ordering (retrieval include before stubs; literal diagnostics before any param
-  route) + dashboard tile, plus the Usage, Eval and Retire tabs.
-  `tests/test_ui_operator_read_floor.py` checks the `read_only` 403, and
-  `tests/test_retrieval_eval_principal.py` checks that the eval and retire
-  runs pass the caller's `sub`.
+  route) + dashboard tile, plus the Usage tab and a check that only the
+  Diagnostics and Usage tabs render.
+  `tests/test_ui_operator_read_floor.py` checks the `read_only` 403.
 
 ### Honesty-gap badge contrast (#2460)
 
-The T2 Usage + T3 Retire fragments render the counted `/mcp` search-surface
+The Usage fragment renders the counted `/mcp` search-surface
 labels (`mcp:search_knowledge` / `_memory` / `_operations`) as
 `badge badge-ghost badge-outline` spans **inside** the `.alert.alert-info`
 honesty-gap banner. In the DaisyUI 5 bundle `.badge-outline` and `.badge-ghost`

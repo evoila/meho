@@ -24,6 +24,11 @@ Coverage mirrors the acceptance criteria on the issue, by name:
 * announce-before-mutate fires for a write-class op with no covering
   claim and stays silent when a claim covers it; read-class ops never
   trip it;
+* who gets each nudge (#5489): a service login with a ``work_ref`` that
+  read the feed in its MCP session gets no read nudge; a caller that may
+  not publish an announcement (a person, a service login, a revoked
+  agent) gets no announce nudge; a registered agent principal and a live
+  hosted agent run keep both nudges;
 * read-before-act has priority over announce-before-mutate, and the two
   dedupe independently (a deduped read falls through to announce with the
   announce key untouched);
@@ -47,6 +52,7 @@ from uuid import UUID
 import pytest
 import structlog
 
+from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
     get_broadcast_client,
@@ -71,14 +77,19 @@ from meho_backplane.operations import (
     reset_dispatcher_caches,
 )
 from meho_backplane.operations._audit import agent_session_id_var
+from meho_backplane.operations.addon_orchestration import (
+    OrchestrationRun,
+    bound_parent_linkage,
+)
 from meho_backplane.settings import get_settings
 
 from ._request_usage_helpers import seed_usage_event
-from .broadcast_admission_helpers import seed_announcement
+from .broadcast_admission_helpers import seed_agent_principal, seed_agent_run, seed_announcement
 
 _TENANT = UUID("00000000-0000-0000-0000-000000003133")
 _SESSION = UUID("33333333-3333-3333-3333-333333333333")
 _RECENT_PATH = "/mcp/tools/call/meho_broadcast_recent"
+_AGENT_CLIENT = "agent:reflex-bot"
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +117,43 @@ def _operator(sub: str = "user-b", *, tenant_id: UUID = _TENANT) -> Operator:
         tenant_role=TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
     )
+
+
+def _service_login(sub: str = "svc-addon") -> Operator:
+    """A client-credentials login that is not a registered agent principal."""
+    return Operator(
+        sub=sub,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.SERVICE,
+        client_id="addon-client",
+    )
+
+
+async def _agent_principal() -> Operator:
+    """A registered agent principal -- a caller that may publish."""
+    await seed_agent_principal(_TENANT, _AGENT_CLIENT)
+    return Operator(
+        sub=f"svc-{_AGENT_CLIENT}",
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.AGENT,
+        client_id=_AGENT_CLIENT,
+    )
+
+
+@contextmanager
+def _hosted_run(run_id: UUID) -> Iterator[None]:
+    """Bind the context the agent runtime sets around a hosted run's loop."""
+    run_token = current_agent_run_id_var.set(run_id)
+    session_token = agent_session_id_var.set(run_id)
+    try:
+        yield
+    finally:
+        agent_session_id_var.reset(session_token)
+        current_agent_run_id_var.reset(run_token)
 
 
 @contextmanager
@@ -383,6 +431,7 @@ async def test_read_nudge_fires_for_direct_mcp_session_via_header_fallback() -> 
 async def test_announce_nudge_fires_for_write_without_claim(gap: str, says: str) -> None:
     """A write-class op with no covering claim fires the nudge naming why (#4091)."""
     await _seed_broadcast_recent(_SESSION)  # satisfy read so announce is reached
+    operator = await _agent_principal()
     store = _FakeSetStore()
     with (
         _patch_set(store),
@@ -392,7 +441,7 @@ async def test_announce_nudge_fires_for_write_without_claim(gap: str, says: str)
         ),
         _bound_session(_SESSION),
     ):
-        advisory = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
+        advisory = await build_reflex_advisory(operator, op_class="write", target_name="vault-1")
     nudge = advisory[REFLEX_ADVISORY_EXTRAS_KEY]
     assert says in nudge
     assert "meho_broadcast_announce" in nudge
@@ -402,6 +451,7 @@ async def test_announce_nudge_fires_for_write_without_claim(gap: str, says: str)
 async def test_announce_nudge_silent_when_claim_covers_op() -> None:
     """An active covering claim suppresses the announce nudge."""
     await _seed_broadcast_recent(_SESSION)
+    operator = await _agent_principal()
     store = _FakeSetStore()
     with (
         _patch_set(store),
@@ -411,7 +461,7 @@ async def test_announce_nudge_silent_when_claim_covers_op() -> None:
         ),
         _bound_session(_SESSION),
     ):
-        advisory = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
+        advisory = await build_reflex_advisory(operator, op_class="write", target_name="vault-1")
     assert advisory == {}
     assert store.calls == 0
 
@@ -435,12 +485,173 @@ async def test_read_class_op_never_trips_announce() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Who gets each nudge (#5489)
+# ---------------------------------------------------------------------------
+
+_MCP_SESSION = UUID("55555555-5555-5555-5555-555555555555")
+_RUN_SESSION = UUID("66666666-6666-6666-6666-666666666666")
+
+
+def _orchestration_run() -> OrchestrationRun:
+    return OrchestrationRun(
+        session_id=_RUN_SESSION,
+        anchor_audit_id=uuid.uuid4(),
+        work_ref="change-42",
+        keycloak_client_id="addon-client",
+    )
+
+
+@pytest.mark.parametrize("read_record", ["audit_row", "usage_event"])
+async def test_service_login_with_work_ref_that_read_the_feed_gets_no_read_nudge(
+    read_record: str,
+) -> None:
+    """The read is stored under the MCP session; the dispatch runs under the
+    session of the orchestration run. The probe finds the read anyway."""
+    if read_record == "audit_row":
+        await _seed_broadcast_recent(_MCP_SESSION, sub="svc-addon")
+    else:
+        await seed_usage_event(
+            tenant_id=_TENANT,
+            route="tool:meho_broadcast_recent",
+            occurred_at=datetime.now(UTC),
+            session_id=_MCP_SESSION,
+        )
+    store = _FakeSetStore()
+    with (
+        _patch_set(store),
+        _bound_session(None),
+        _bound_mcp_session(_MCP_SESSION),
+    ):
+        async with bound_parent_linkage(_orchestration_run()):
+            advisory = await build_reflex_advisory(
+                _service_login(), op_class="credential_read", target_name=None
+            )
+    assert advisory == {}
+    assert store.calls == 0
+
+
+async def test_service_login_with_work_ref_that_never_read_gets_the_read_nudge() -> None:
+    """Without a read in either session the nudge still fires."""
+    await _seed_broadcast_recent(uuid.uuid4(), sub="someone-else")
+    store = _FakeSetStore()
+    with (
+        _patch_set(store),
+        _bound_session(None),
+        _bound_mcp_session(_MCP_SESSION),
+    ):
+        async with bound_parent_linkage(_orchestration_run()):
+            advisory = await build_reflex_advisory(
+                _service_login(), op_class="credential_read", target_name=None
+            )
+    assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
+    # The dedupe stays keyed on the session the dispatch runs under.
+    assert any(str(_RUN_SESSION) in key for key in store.store)
+
+
+async def test_malformed_mcp_session_id_is_ignored_by_the_read_probe() -> None:
+    """A bad header value adds nothing; the nudge for the run session stays."""
+    store = _FakeSetStore()
+    with (
+        _patch_set(store),
+        _bound_session(_RUN_SESSION),
+        structlog.contextvars.bound_contextvars(mcp_session_id="not-a-uuid"),
+    ):
+        advisory = await build_reflex_advisory(
+            _service_login(), op_class="credential_read", target_name=None
+        )
+    assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
+
+
+async def test_hosted_run_does_not_count_a_read_by_the_outer_mcp_session() -> None:
+    """Inside a hosted agent run the run is the session, as before."""
+    run_id = await seed_agent_run(_TENANT, identity_sub="user-b")
+    await _seed_broadcast_recent(_MCP_SESSION)
+    store = _FakeSetStore()
+    with _patch_set(store), _bound_mcp_session(_MCP_SESSION), _hosted_run(run_id):
+        advisory = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
+    assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
+
+
+@pytest.mark.parametrize(
+    "who",
+    ["person", "service_login", "unregistered_agent", "revoked_agent", "finished_run"],
+)
+async def test_caller_that_cannot_announce_gets_no_announce_nudge(who: str) -> None:
+    """MEHO would refuse this caller's announcement, so it does not ask for one."""
+    await _seed_broadcast_recent(_SESSION)
+    operator = _operator()
+    run_id: UUID | None = None
+    if who == "service_login":
+        operator = _service_login()
+    elif who in {"unregistered_agent", "revoked_agent"}:
+        operator = Operator(
+            sub="svc-bot",
+            raw_jwt="fixture-jwt-not-real",
+            tenant_id=_TENANT,
+            tenant_role=TenantRole.OPERATOR,
+            principal_kind=PrincipalKind.AGENT,
+            client_id=_AGENT_CLIENT,
+        )
+        if who == "revoked_agent":
+            await seed_agent_principal(_TENANT, _AGENT_CLIENT, revoked=True)
+    elif who == "finished_run":
+        run_id = await seed_agent_run(_TENANT, identity_sub="user-b", status="succeeded")
+        await _seed_broadcast_recent(run_id)
+    claim_gap = AsyncMock(return_value="no_claim")
+    store = _FakeSetStore()
+    with (
+        _patch_set(store),
+        patch("meho_backplane.broadcast.reflex.announce_claim_gap", new=claim_gap),
+        _hosted_run(run_id) if run_id is not None else _bound_session(_SESSION),
+    ):
+        first = await build_reflex_advisory(operator, op_class="write", target_name="vault-1")
+        second = await build_reflex_advisory(operator, op_class="write", target_name="vault-1")
+    assert first == {}
+    assert second == {}
+    assert store.calls == 0
+    claim_gap.assert_not_called()
+
+
+async def test_person_gets_no_lookup_for_the_announce_check() -> None:
+    """A person outside a hosted run is answered without a database lookup."""
+    await _seed_broadcast_recent(_SESSION)
+    admission = AsyncMock(side_effect=AssertionError("no admission lookup expected"))
+    with (
+        _patch_set(_FakeSetStore()),
+        patch("meho_backplane.auth.agent_admission.resolve_agent_admission", new=admission),
+        _bound_session(_SESSION),
+    ):
+        advisory = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
+    assert advisory == {}
+    admission.assert_not_called()
+
+
+async def test_live_hosted_run_keeps_the_announce_nudge() -> None:
+    """A live hosted agent run may publish, so it is still told to announce."""
+    run_id = await seed_agent_run(_TENANT, identity_sub="user-b")
+    await _seed_broadcast_recent(run_id)
+    with (
+        _patch_set(_FakeSetStore()),
+        patch(
+            "meho_backplane.broadcast.reflex.announce_claim_gap",
+            new=AsyncMock(return_value="no_claim"),
+        ),
+        _hosted_run(run_id),
+    ):
+        advisory = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
+    assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGES["no_claim"]}
+
+
+# ---------------------------------------------------------------------------
 # Priority + independent dedupe
 # ---------------------------------------------------------------------------
 
 
 async def test_read_has_priority_then_announce_on_next_call() -> None:
     """Read wins first; the announce key is untouched so it fires next call."""
+    operator = await _agent_principal()
     store = _FakeSetStore()
     with (
         _patch_set(store),
@@ -453,10 +664,10 @@ async def test_read_has_priority_then_announce_on_next_call() -> None:
         # First write-class dispatch: read qualifies (no prior recent) AND
         # announce qualifies, but read wins and the announce key is left
         # unclaimed.
-        first = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
+        first = await build_reflex_advisory(operator, op_class="write", target_name="vault-1")
         # Second dispatch: read is now deduped, so it falls through to the
         # still-unclaimed announce heuristic.
-        second = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
+        second = await build_reflex_advisory(operator, op_class="write", target_name="vault-1")
     assert first == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
     assert second == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGES["no_claim"]}
 
@@ -702,6 +913,11 @@ async def test_write_with_an_unknown_last_word_gets_both_write_warnings(
         _patch_set(_FakeSetStore()),
         patch.object(bc, "pipeline", new=_FakeNxPipeline().pipeline),
         patch("meho_backplane.broadcast.reflex.announce_claim_gap", new=claim_gap),
+        # This test is about the op class; who may announce is tested above.
+        patch(
+            "meho_backplane.broadcast.reflex._may_announce",
+            new=AsyncMock(return_value=True),
+        ),
         _bound_session(_SESSION),
     ):
         result = await dispatch(

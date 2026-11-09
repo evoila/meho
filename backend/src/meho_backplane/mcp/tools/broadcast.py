@@ -75,6 +75,7 @@ import structlog
 from meho_backplane.auth.agent_admission import (
     AgentAdmission,
     AgentIdentityRequiredError,
+    require_agent_caller,
     resolve_agent_admission,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -523,13 +524,36 @@ async def _publish_agent_announcement_impl(
     return ack
 
 
+def _identity_refusal(exc: AgentIdentityRequiredError) -> McpInvalidParamsError:
+    """Map an admission refusal to the ``-32602`` the announce tool returns."""
+    return McpInvalidParamsError(
+        str(exc),
+        data={"code": exc.code, "reason": exc.reason, "remediation": exc.remediation},
+    )
+
+
+def _announce_caller_check(operator: Operator) -> None:
+    """Refuse a caller that is not an agent before the input check (#5770).
+
+    The dispatcher runs this before it checks the arguments against the
+    input schema, so a person's login gets ``agent_identity_required`` on
+    the first try, not an input error first.
+    """
+    try:
+        require_agent_caller(operator)
+    except AgentIdentityRequiredError as exc:
+        raise _identity_refusal(exc) from exc
+
+
 async def _handler_announce(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """``meho_broadcast_announce`` handler.
 
-    Validates the wire arguments belt-and-suspenders (the dispatcher's
+    Checks who calls first (#5770): a caller that is not a trusted agent
+    gets ``agent_identity_required`` before any argument check. Then
+    validates the wire arguments belt-and-suspenders (the dispatcher's
     JSON-Schema validator runs first, but the per-field re-checks here
     preserve the typed contract a direct ``_handler_announce`` call
     site -- e.g. a unit test -- would otherwise miss). Surfaces every
@@ -560,6 +584,14 @@ async def _handler_announce(
     contract (frontend escapes, Slack plain-text, downstream agents
     must not interpret prose as policy).
     """
+    # Trusted admission (#3736): only a checked agent identity publishes.
+    # It runs before the argument checks (#5770), so a caller that can
+    # never publish gets ``agent_identity_required`` first, not an input
+    # error.
+    try:
+        admission = await resolve_agent_admission(operator)
+    except AgentIdentityRequiredError as exc:
+        raise _identity_refusal(exc) from exc
     activity = arguments.get("activity")
     if not isinstance(activity, str):
         raise McpInvalidParamsError("activity: must be a string")
@@ -584,16 +616,6 @@ async def _handler_announce(
     # a malformed request from a looping caller still gets a clean
     # ``-32602`` rather than being masked by the rate-limit gate below.
     claims = _parse_announce_claims(arguments)
-    # Trusted admission (#3736): only a checked agent identity publishes.
-    # A person's own token gets the stable ``agent_identity_required``
-    # error with the way to get a trusted identity.
-    try:
-        admission = await resolve_agent_admission(operator)
-    except AgentIdentityRequiredError as exc:
-        raise McpInvalidParamsError(
-            str(exc),
-            data={"code": exc.code, "reason": exc.reason, "remediation": exc.remediation},
-        ) from exc
     # Per-principal flood control BEFORE the publish (G6.5-T6 #2546): the
     # tenant stream is count-trimmed (``BROADCAST_MAXLEN`` = 10000), so a
     # looping principal could otherwise evict the whole tenant's
@@ -629,15 +651,15 @@ register_mcp_tool(
         name="meho_broadcast_announce",
         surface=ToolSurface.WORKING,
         description=(
-            "Post a short note to your tenant's broadcast feed so other "
-            "operators and agents see what you are doing. Call it on your "
-            "own, not only when asked: before any operation that changes "
-            "infrastructure (check `safety_level` / `requires_approval` "
-            "from `search_operations`), and again when you finish. Others "
-            "read it with `meho_broadcast_recent`.\n\n"
-            "WHO CAN POST: only an agent: a MEHO-hosted agent run, or the "
-            "token of a registered agent principal. Any other caller gets "
-            "-32602 with error.data.code='agent_identity_required'.\n\n"
+            "Agents only: post a short note to your tenant's broadcast feed "
+            "so others see what you are doing. A person's login cannot post "
+            "here: skip this tool and read the feed with "
+            "`meho_broadcast_recent`. Only a MEHO-hosted agent run or a "
+            "registered agent principal's token can post; others get -32602 "
+            "with error.data.code='agent_identity_required'.\n\n"
+            "As an agent, call it on your own before any operation that "
+            "changes infrastructure (see `safety_level` / "
+            "`requires_approval`), and again when you finish.\n\n"
             "CLAIM STEPS: 'phase'='start' (the default) opens a claim and "
             "returns a 'claim_id'. 'update' and 'completion' need that "
             "'claim_id' and an 'idempotency_key'. Only the claim's owner can "
@@ -747,6 +769,7 @@ register_mcp_tool(
         },
         required_role=TenantRole.OPERATOR,
         op_class="write",
+        caller_check=_announce_caller_check,
     ),
     handler=_handler_announce,
 )

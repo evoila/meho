@@ -14,9 +14,19 @@
   ``/ui/broadcast/feed`` and swap the ``#broadcast-feed`` fragment so the
   re-rendered fragment's ``sse-connect`` URL carries them -- the server
   drops non-matching announcements before they reach the browser.
+
+  Phone layout (#6000)
+  --------------------
+  Below the ``md`` width the two fields fold away behind a "Filters"
+  button, so the newest announcements sit at the top of the screen. The
+  button opens and closes them (Alpine ``filtersOpen``). From ``md`` up
+  the button is hidden and the fields always show, as before. Without
+  JavaScript the fields stay visible.
 -#}
+{% from "_icons.html" import icon %}
 <form
   class="card bg-base-100 border-base-300 border shadow-sm"
+  x-data="{ filtersOpen: false }"
   hx-get="/ui/broadcast/feed"
   hx-target="#broadcast-feed"
   hx-swap="outerHTML"
@@ -27,7 +37,22 @@
   aria-label="Filter agent announcements"
   onsubmit="return false;"
 >
-  <div class="card-body grid gap-3 md:grid-cols-2">
+  <button
+    type="button"
+    class="btn btn-ghost btn-md justify-between md:hidden"
+    aria-controls="broadcast-filter-fields"
+    aria-expanded="false"
+    :aria-expanded="filtersOpen.toString()"
+    x-on:click="filtersOpen = !filtersOpen"
+  >
+    Filters
+    {{ icon("chevron-down", class="size-4") }}
+  </button>
+  <div
+    id="broadcast-filter-fields"
+    class="card-body grid gap-3 md:grid-cols-2"
+    :class="filtersOpen ? '' : 'max-md:hidden'"
+  >
     {# ---------- principal ---------- #}
     <label class="form-control">
       <span class="label-text">Principal</span>

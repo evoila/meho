@@ -49,9 +49,11 @@ BACKEND_DIR = TESTS_DIR.parent
 
 # Paths are relative to backend/, sorted.
 OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
+    "tests/retrieval_eval/test_ci_run_eval_gate.py",
     "tests/test_agent_toolset_working_surface.py",
     "tests/test_api_v1_operations_preview_response.py",
     "tests/test_api_v1_settings.py",
+    "tests/test_broadcast_person_guidance.py",
     "tests/test_chart_approval_handoff.py",
     "tests/test_chart_bring_your_own_render.py",
     "tests/test_chart_broadcast_hardening.py",
@@ -90,7 +92,6 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_measure_test_map.py",
     "tests/test_ci_merge_queue_cleanup.py",
     "tests/test_ci_merge_queue_watchdog.py",
-    "tests/test_ci_run_eval_gate.py",
     "tests/test_ci_spec_shelf_lists.py",
     "tests/test_connector_kit.py",
     "tests/test_connector_overlay_build.py",

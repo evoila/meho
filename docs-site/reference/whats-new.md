@@ -42,6 +42,8 @@ notes.
   name, the certificate, the clock and every system, and names the fix.
 - **Every release has a security sheet and an operation catalog**, both
   signed.
+- **Security fix in the container image.** The zlib package in the
+  image is updated to Debian's fixed version.
 - **Tighter rules.** Machine logins no longer write targets or topology
   over REST, and a standing grant never covers a credential read.
 - **Switches, off by default.** Several changes for agents wait behind

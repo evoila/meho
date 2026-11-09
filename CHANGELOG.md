@@ -373,6 +373,9 @@ after model tests show that it helps.
   `endpoint` and the `hostname`, `ipv4` and `ipv6` formats as addresses.
   An operation that sends a stored secret to an address from the caller
   must wait for approval (#5839).
+- The image carries the updated zlib from Debian's security update
+  (`zlib1g` `1:1.3.dfsg+really1.3.1-1+deb13u1`), with a minimum-version
+  check in the build (#6078).
 
 ### Governance
 - An approved request whose stored settings hold the marker

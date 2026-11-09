@@ -150,9 +150,12 @@ from meho_backplane.operations.approval_resume_checks import (
     target_changed_since_request,
 )
 from meho_backplane.operations.grant_approval import (
+    RIGHTS_CHANGE_REFUSAL,
     check_grant_approval,
+    check_rights_change_approval,
     grant_audit_fields,
     grant_changed_since_request,
+    is_rights_change,
 )
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
@@ -185,6 +188,7 @@ __all__ = [
     "ParamsMismatchError",
     "PreviewBindingMissingError",
     "ResultAccessForbiddenError",
+    "RightsChangeApprovalError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
     "WithdrawForbiddenError",
@@ -615,6 +619,23 @@ class ApprovalRoleFloorError(UnauthorizedApprovalError):
                 f"operator {operator_sub!r} may not approve approval_request {request_id}: {denial}"
             ),
         )
+
+
+class RightsChangeApprovalError(ApprovalRoleFloorError):
+    """The person may not approve this change of rights.
+
+    Raised by :func:`approve_request` when the request carries the
+    rights-change mark and the person is the requester or not an admin
+    (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`).
+    Subclasses :class:`ApprovalRoleFloorError`, so every approve route
+    answers 403 with its text.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str) -> None:
+        super().__init__(
+            request_id, operator_sub=operator_sub, role=role, denial=RIGHTS_CHANGE_REFUSAL
+        )
+        self.reason_text = RIGHTS_CHANGE_REFUSAL
 
 
 class ResultAccessForbiddenError(ApprovalError):
@@ -1422,6 +1443,7 @@ async def create_pending_request(
     idempotency_key: str | None = None,
     requester: ResumeRequester | None = None,
     reveal_secret: bool = False,
+    rights_change: bool = False,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1621,6 +1643,8 @@ async def create_pending_request(
         ),
         reveal_secret=reveal_secret,
     )
+    if rights_change or is_rights_change(request):
+        request.rights_change = True
     if idempotency_key is None:
         session.add(request)
         await session.flush()
@@ -3560,6 +3584,11 @@ def _check_approver_group(
     the risk level of the change; there are no per-system, per-connector
     or time-limited exceptions.
 
+    * A change of rights: only another admin
+      (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
+      No self-approval rule below can allow it.
+    * A change of a login's or group's rights:
+      :func:`~meho_backplane.operations.grant_approval.check_grant_approval`.
     * Own change: :func:`_check_self_approval`.
     * Another person's ``dangerous`` or ``destructive`` change: only a
       MEHO-SA-Operator or a tenant admin may approve it, as the decision
@@ -3572,6 +3601,8 @@ def _check_approver_group(
     A request without a stamped level is treated as lower-risk, the same
     as the break-glass check and :func:`_check_destructive_preview_binding`.
     """
+    check_rights_change_approval(operator, request)
+    check_grant_approval(operator, request)
     self_rule = _check_self_approval(operator, request, log_break_glass=log_break_glass)
     if self_rule is not None:
         return self_rule
@@ -3642,7 +3673,6 @@ async def _load_pending_for_approval(
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
-    check_grant_approval(operator, request)
     rule = _check_approver_group(operator, request)
     _check_approver_role_floor(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):

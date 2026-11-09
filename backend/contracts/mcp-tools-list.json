@@ -5326,6 +5326,33 @@
                       "null"
                     ]
                   },
+                  "guidance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "next_step": {
+                        "type": "string"
+                      },
+                      "output_shape": {
+                        "type": "string"
+                      },
+                      "parameter_hints": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      },
+                      "preconditions": {
+                        "type": "string"
+                      },
+                      "when_to_call": {
+                        "type": "string"
+                      },
+                      "when_to_use": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "op_id": {
                     "type": "string"
                   },

@@ -768,6 +768,17 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
     rules (fix `params` on `invalid_params`; `awaiting_approval` is a
     success that waits for a person and must not be retried; a
     destructive op needs `preview_operation` first).
+  - `guidance` — only when the switch `OPERATION_CONTRACT_GUIDANCE` is
+    on (off by default, #4757) and the op has written guidance. It holds
+    the prose keys of the op's `llm_instructions`: `when_to_call` (and
+    the older `when_to_use`), `preconditions`, `parameter_hints` (a map
+    of parameter name to hint), `output_shape` and `next_step`. Each text
+    is cut to 1000 characters and the whole block to 3000; a cut text
+    ends with `…`, and when the total runs out the later keys are left
+    out. Machine keys (`pagination_hint`, `result_*`) are not in it.
+    With the switch off, or without guidance, the key is not in the
+    answer at all. The rules live in `operations/_contract_guidance.py`;
+    tests in `backend/tests/test_operation_contract_guidance.py`.
 - **Unknown op.** A known connector with no such enabled op raises
   `UnknownOperationError`: MCP answers `-32602` with
   `data.reason="unknown_op"`, REST answers `404` with
@@ -776,10 +787,42 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   is deterministic and never returns an empty list.
 - **Slim ranked hits.** A ranked hit carries `op_id`, `summary`,
   `description`, `group_key`, `safety_level` and `requires_approval`.
+  It never carries the written guidance, also with the switch on.
   The ranking scores (`fused_score`, `bm25_score`, `cosine_score`) are
   added only when the caller sets `include_scores` **and** is
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
+- **The admin's description, behind a switch (#4753).** An admin can
+  replace an operation's text with `meho_connector_edit_op`
+  (`custom_description`). The backplane switch
+  `AGENT_READS_CUSTOM_DESCRIPTION` (an env var, off by default) decides
+  whether the agent reads it.
+  - **Off (default):** the agent reads the original `description` in
+    each ranked hit, in the exact-op contract and in the keyword (BM25)
+    half of search, as before the switch existed. An override saved
+    earlier changes nothing for the agent.
+  - **On:** when `custom_description` is set and not empty, the agent
+    reads it in place of the original `description` in all three
+    places. In the keyword half, the admin's words count and the
+    replaced words no longer count. The meaning half (the embedding)
+    includes the admin's text in both states, so the original words can
+    still find the operation through its embedding, and the `matched` /
+    `ambiguous` label still follows the fused scores. Setting it to
+    `null` brings the original text back.
+  - Each state has its own keyword index: `endpoint_descriptor_bm25_idx`
+    (migration `0005`) for off, `endpoint_descriptor_bm25_custom_idx`
+    (migration `0148`) for on. Turn the switch on only after `0148` ran,
+    else the keyword half scans the table. Code: `agent_description`,
+    `BM25_ORIGINAL_DOCUMENT_SQL` and `BM25_CUSTOM_DOCUMENT_SQL` in
+    `operations/_search.py`; the switch is
+    `Settings.agent_reads_custom_description`.
+  - **Before turning it on** (measurement plan of the pull request):
+    on the benchmark lane, compare the routing score with the switch
+    off and on, for a small model and for Claude, on a few operations
+    with a weak description and a clear `custom_description`. Then one
+    live run on a test install: set a `custom_description`, search
+    with words that appear only in it, check the hit shows the new
+    text, set it to `null`, check the original is back.
 
 The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
 the `outcome` fields described in the next section) and the exact-op

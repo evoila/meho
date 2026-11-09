@@ -1130,3 +1130,20 @@ def test_ui_session_lifetimes_default_to_the_login_server_session(
         assert settings.ui_session_absolute_lifetime_seconds == 36000
     finally:
         get_settings.cache_clear()
+
+
+def test_agent_reads_custom_description_is_off_unless_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``AGENT_READS_CUSTOM_DESCRIPTION`` switch is off by default (#4753)."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("AGENT_READS_CUSTOM_DESCRIPTION", raising=False)
+    assert Settings.model_fields["agent_reads_custom_description"].default is False
+    get_settings.cache_clear()
+    try:
+        assert get_settings().agent_reads_custom_description is False
+        monkeypatch.setenv("AGENT_READS_CUSTOM_DESCRIPTION", "true")
+        get_settings.cache_clear()
+        assert get_settings().agent_reads_custom_description is True
+    finally:
+        get_settings.cache_clear()

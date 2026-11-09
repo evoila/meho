@@ -203,3 +203,22 @@ def test_workflow_has_schedule_dispatch_and_least_privilege() -> None:
     assert "pull_request" not in triggers
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["jobs"]["scan"]["runs-on"] == "ubuntu-latest"
+
+
+def _workflow_step(name: str) -> dict[str, Any]:
+    workflow = yaml.safe_load(_WORKFLOW.read_text())
+    steps = workflow["jobs"]["scan"]["steps"]
+    return next(s for s in steps if s["name"] == name)
+
+
+def test_workflow_scans_every_severity() -> None:
+    scan = _workflow_step("Scan the dependency files (trivy)")
+    severities = set(scan["with"]["severity"].split(","))
+    assert severities == {"UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
+
+
+def test_workflow_reads_findings_repo_and_token_from_secrets() -> None:
+    env = _workflow_step("Open or update the findings issue")["env"]
+    assert env["FINDINGS_REPO"] == "${{ secrets.SECURITY_FINDINGS_REPO }}"
+    assert env["GH_TOKEN"] == "${{ secrets.SECURITY_FINDINGS_TOKEN }}"
+    assert "vars." not in _WORKFLOW.read_text()

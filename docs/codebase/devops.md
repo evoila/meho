@@ -2850,7 +2850,7 @@ their isolation posture:
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for every event (#4626) |
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`) |
-| `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository variable `SECURITY_FINDINGS_REPO`, secret `SECURITY_FINDINGS_TOKEN`), so a finding is never public before its fix. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
+| `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |
 
 ### Two in-repo isolation patterns

@@ -13,10 +13,11 @@
 #      comment with only the new findings to the open issue.
 #
 # The issue is NOT in this public repository. A finding must not be public
-# before its fix. It goes to a private repository, set by:
-#   - the repository variable SECURITY_FINDINGS_REPO (owner/name);
-#   - the repository secret SECURITY_FINDINGS_TOKEN: a token with only
-#     `issues: write` on that repository.
+# before its fix. It goes to a private repository, set by two repository
+# secrets (a secret, not a variable, so the job log masks both values):
+#   - SECURITY_FINDINGS_REPO: the repository name (owner/name);
+#   - SECURITY_FINDINGS_TOKEN: a token with only `issues: write` on that
+#     repository.
 # The job fails when either is missing, so a missing setup is visible.
 #
 # Runner: GitHub-hosted ubuntu-latest. No pull_request trigger, so it runs
@@ -47,9 +48,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Scan the dependency files (trivy)
-        # Same action commit, severity filter, ignore-unfixed rule and
-        # exception file as the image scan. `exit-code` stays 0: a finding
-        # goes to the issue, it does not fail this job.
+        # Same action commit, ignore-unfixed rule and exception file as the
+        # image scan, but every severity: a weekly report also lists a LOW or
+        # MEDIUM advisory that has a fix. `exit-code` stays 0: a finding goes
+        # to the issue, it does not fail this job.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           scan-type: fs
@@ -57,7 +59,7 @@ jobs:
           scanners: vuln
           format: json
           output: trivy-weekly.json
-          severity: CRITICAL,HIGH
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore
           exit-code: "0"
@@ -65,7 +67,7 @@ jobs:
       - name: Open or update the findings issue
         env:
           GH_TOKEN: ${{ secrets.SECURITY_FINDINGS_TOKEN }}
-          FINDINGS_REPO: ${{ vars.SECURITY_FINDINGS_REPO }}
+          FINDINGS_REPO: ${{ secrets.SECURITY_FINDINGS_REPO }}
         run: |
           if [ -z "${GH_TOKEN}" ] || [ -z "${FINDINGS_REPO}" ]; then
             echo "::error::SECURITY_FINDINGS_TOKEN or SECURITY_FINDINGS_REPO is not set"

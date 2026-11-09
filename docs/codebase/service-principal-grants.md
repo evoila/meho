@@ -427,6 +427,12 @@ call without a target is refused unless the scope has the "no target"
 entry. The check reads one row and writes nothing, so `preview_operation`
 reports the same verdict (`policy_verdict=deny`).
 
+**A topology refresh** follows the scope too. `POST /api/v1/topology/refresh/{target_name}`
+and the console refresh read the target through its connector without the
+policy gate, so the refresh service checks the scope itself
+(`topology/refresh_read_scope.py`). A target outside the scope gets 403
+`read_scope_denied`, and MEHO does not call the connector.
+
 What the scope does not change:
 
 - A change (a mutating `caution`, `dangerous` or `destructive` operation,

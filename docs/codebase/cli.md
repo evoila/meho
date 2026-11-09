@@ -880,6 +880,7 @@ field, so a response from an older backplane prints as it always did.
 | `Logged in as …` | `operator` | `Logged in as alice@example.com (sub: …)` |
 | `Vault: …` | `vault` | `Vault: reachable, read OK (version=42)` |
 | `DB: …` | `db` | `DB: migrated, revision 0115` |
+| `Server time: …` | `server_time` | `Server time: 2026-10-31T14:34:28Z` — the server's time in UTC (#5504); also printed for a login that chose no tenant |
 | `Readiness: …` | `readiness` | `Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)` |
 | `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
 | `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
@@ -1215,10 +1216,11 @@ is `docs-site/guides/several-tenants.md`. The CLI side:
   backplane's reason and how to pick another tenant (exit 4). With the
   read_only role in the current tenant the deep check answers `403
   insufficient_role`; status then reads `GET /api/v1/health/live` and
-  prints the identity, the tenants, the database state and a note that
-  the other checks need the operator role (`output.PrintLiveness`,
-  exit 0; `--json` prints the `LivenessResponse`). The deep check stays
-  behind the operator role on the backplane.
+  prints the identity, the tenants, the database state, the server's
+  time in UTC (`server_time`, #5504) and a note that the other checks
+  need the operator role (`output.PrintLiveness`, exit 0; `--json`
+  prints the `LivenessResponse`). The deep check stays behind the
+  operator role on the backplane.
 - The stored login is unchanged: one token holds all of the person's
   tenants, so a switch needs no new login. There is no global
   `--tenant` flag: several commands already use `--tenant` for "a

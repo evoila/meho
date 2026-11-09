@@ -24,6 +24,8 @@ import (
 const (
 	tenantAID = "aaaaaaaa-0000-4000-8000-000000000001"
 	tenantBID = "bbbbbbbb-0000-4000-8000-000000000002"
+	// liveServerTime is the server's time the fake liveness route sends (#5504).
+	liveServerTime = "2026-10-31T14:34:28Z"
 )
 
 // tenantBackplane is a fake backplane for a person in tenants lab-a
@@ -107,6 +109,7 @@ func (b *tenantBackplane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/v1/health/live":
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"operator": b.operator(current), "db": map[string]any{"migrated": true},
+			"server_time": liveServerTime,
 		})
 	case "/api/v1/targets":
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -423,6 +426,7 @@ func TestStatus_ReaderTenantShowsCurrentTenant(t *testing.T) {
 		"    lab-a  read_only  (current)\n",
 		"    lab-b  operator\n",
 		"  DB:    migrated\n",
+		"  Server time: " + liveServerTime + "\n",
 		"need the operator role in this tenant",
 	} {
 		if !strings.Contains(out, want) {
@@ -445,6 +449,11 @@ func TestStatus_ReaderTenantShowsCurrentTenant(t *testing.T) {
 	if err != nil || json.Unmarshal([]byte(out), &live) != nil || live.Operator.TenantId == nil ||
 		live.Operator.TenantId.String() != tenantAID || strings.Contains(out, "\"vault\"") {
 		t.Errorf("status --json in a read_only tenant: err=%v out=%q", err, out)
+	}
+	// #5504: the server's time rides on the liveness answer too.
+	if live.ServerTime == nil || live.ServerTime.UTC().Format(time.RFC3339) != liveServerTime ||
+		!strings.Contains(out, "\"server_time\": \""+liveServerTime+"\"") {
+		t.Errorf("status --json in a read_only tenant must carry server_time=%s: out=%q", liveServerTime, out)
 	}
 }
 

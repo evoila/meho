@@ -404,7 +404,7 @@ def test_prune_tick_nulls_old_raw_payload_and_keeps_the_row(pg: _Pg, tick_env: N
     assert json.loads(recent_after["raw_payload"]) == _RAW_BODY, (
         "a row inside the retention window keeps its raw_payload"
     )
-    assert state["second_pass"] == 0
+    assert state["second_pass"].nulled_rows == 0
     assert len(state["prune_payloads"]) == 1
     assert state["prune_payloads"][0]["nulled_raw_payload_rows"] == 1
 

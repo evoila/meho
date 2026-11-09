@@ -780,6 +780,37 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   added only when the caller sets `include_scores` **and** is
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
+- **The admin's description, behind a switch (#4753).** An admin can
+  replace an operation's text with `meho_connector_edit_op`
+  (`custom_description`). The backplane switch
+  `AGENT_READS_CUSTOM_DESCRIPTION` (an env var, off by default) decides
+  whether the agent reads it.
+  - **Off (default):** the agent reads the original `description` in
+    each ranked hit, in the exact-op contract and in the keyword (BM25)
+    half of search, as before the switch existed. An override saved
+    earlier changes nothing for the agent.
+  - **On:** when `custom_description` is set and not empty, the agent
+    reads it in place of the original `description` in all three
+    places. In the keyword half, the admin's words count and the
+    replaced words no longer count. The meaning half (the embedding)
+    includes the admin's text in both states, so the original words can
+    still find the operation through its embedding, and the `matched` /
+    `ambiguous` label still follows the fused scores. Setting it to
+    `null` brings the original text back.
+  - Each state has its own keyword index: `endpoint_descriptor_bm25_idx`
+    (migration `0005`) for off, `endpoint_descriptor_bm25_custom_idx`
+    (migration `0148`) for on. Turn the switch on only after `0148` ran,
+    else the keyword half scans the table. Code: `agent_description`,
+    `BM25_ORIGINAL_DOCUMENT_SQL` and `BM25_CUSTOM_DOCUMENT_SQL` in
+    `operations/_search.py`; the switch is
+    `Settings.agent_reads_custom_description`.
+  - **Before turning it on** (measurement plan of the pull request):
+    on the benchmark lane, compare the routing score with the switch
+    off and on, for a small model and for Claude, on a few operations
+    with a weak description and a clear `custom_description`. Then one
+    live run on a test install: set a `custom_description`, search
+    with words that appear only in it, check the hit shows the new
+    text, set it to `null`, check the original is back.
 
 The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
 the `outcome` fields described in the next section) and the exact-op
@@ -1014,8 +1045,8 @@ is not set.
 - `meho_status` (and `GET /api/v1/health`) then answers with
   `operator.tenant_id` and `operator.tenant_role` set to `null`,
   `operator.tenants` (each tenant's `tenant_id`, `name`, `tenant_role`,
-  `current`), `vault.detail = "tenant_not_chosen"` and the database
-  state. It runs no tenant work (no credential check, no add-on
+  `current`), `vault.detail = "tenant_not_chosen"`, the database
+  state and `server_time` (#5504). It runs no tenant work (no credential check, no add-on
   pairings, no tool comparison). With a current tenant, `meho_status`
   answers as before and also lists `operator.tenants`, with `current`
   set on the current one. Inside an agent run that a person started, no
@@ -1105,7 +1136,7 @@ add-on-family gate.
 | `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
-| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. Since #5504 also the server's time now in UTC (`server_time`, ISO 8601 to the second, for example `2026-10-31T14:34:28Z`), so an agent with no shell can write down a correct time. |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |

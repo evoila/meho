@@ -16,10 +16,18 @@ Two steps for each file part:
    * a secret-like name still has a value after step 1, for example
      ``"password": "..."`` in JSON or in escaped JSON, which the
      ``api_key`` pattern does not cover because of the quote after the
-     name.
+     name; or
+   * a private key block in plain text starts in one upload and ends in
+     another.
 
    Such a part is still stored, with step 1 applied, but its upload goes
    to the quarantine prefix of the bucket. Only an admin can open it.
+
+A private key block in plain text spans many lines. Its ``BEGIN`` line
+becomes one marker, and every line up to its ``END`` line is removed. A
+block can start in an earlier upload: :func:`ends_inside_private_key`
+reads the stored part of the file (an upload always sends the whole file)
+and says whether the new part starts inside a key.
 
 The check is pure: no I/O and no logging. The result never holds a found
 value, only counts and pattern names.
@@ -34,7 +42,7 @@ from typing import Final
 
 from meho_backplane.redaction.patterns import get_pattern, secret_spans
 
-__all__ = ["CheckedPart", "check_part"]
+__all__ = ["CheckedPart", "check_part", "ends_inside_private_key"]
 
 #: Patterns with a clear secret shape. ``uuid``, ``ipv4``, ``ipv6`` and
 #: ``fqdn`` are left out: they are not secrets, and a transcript needs
@@ -152,13 +160,54 @@ class _JsonWalk:
         return node
 
 
+#: The ``BEGIN`` or ``END`` line of a private key block.
+_KEY_MARK: Final[re.Pattern[str]] = re.compile(r"-----(BEGIN|END) (?:[A-Z0-9]+ )*PRIVATE KEY-----")
+_KEY_MARK_BYTES: Final[re.Pattern[bytes]] = re.compile(_KEY_MARK.pattern.encode())
+_KEY_MARKER: Final[str] = "[REDACTED:pem_private_key]"
+
+
+def _json_value(body: str) -> object | None:
+    """Return the parsed JSON object or array of one line, or ``None``."""
+    if not body.lstrip().startswith(("{", "[")):
+        return None
+    try:
+        parsed: object = json.loads(body)
+    except ValueError:
+        return None
+    return parsed
+
+
+def _opens_key(body: str) -> bool:
+    """Whether a plain-text *body* ends inside a private key block."""
+    marks = [match.group(1) for match in _KEY_MARK.finditer(body)]
+    return bool(marks) and marks[-1] == "BEGIN"
+
+
+def ends_inside_private_key(data: bytes, end: int) -> bool:
+    """Whether ``data[:end]`` ends inside a private key block in plain text.
+
+    Follows the same rules as :func:`check_part`: outside a key, a
+    ``BEGIN`` line that is not a JSON line opens a key; inside a key, the
+    next ``END`` closes it. Only lines with a mark are decoded.
+    """
+    inside = False
+    for match in _KEY_MARK_BYTES.finditer(data, 0, end):
+        if inside:
+            inside = match.group(1) != b"END"
+            continue
+        if match.group(1) != b"BEGIN":
+            continue
+        start = data.rfind(b"\n", 0, match.start()) + 1
+        stop = data.find(b"\n", match.start(), end)
+        line = data[start : stop if stop != -1 else end].decode("utf-8", errors="replace")
+        inside = _json_value(line) is None
+    return inside
+
+
 def _check_line(line: str, counts: dict[str, int]) -> tuple[str, bool]:
     body = line.rstrip("\r\n")
     ending = line[len(body) :]
-    try:
-        parsed = json.loads(body) if body.lstrip().startswith(("{", "[")) else None
-    except ValueError:
-        parsed = None
+    parsed = _json_value(body)
     if parsed is None:
         cleaned, found = _replace_known(body)
         unclear = _has_unclear_secret(cleaned)
@@ -174,7 +223,32 @@ def _check_line(line: str, counts: dict[str, int]) -> tuple[str, bool]:
     return cleaned + ending, unclear
 
 
-def check_part(raw: bytes) -> CheckedPart:
+class _KeyBlock:
+    """Remove the lines of a private key block in plain text, line by line."""
+
+    def __init__(self, counts: dict[str, int], *, inside: bool) -> None:
+        self.counts = counts
+        self.inside = inside
+        self.started_before = inside
+
+    def line(self, line: str) -> tuple[str, bool]:
+        """Return the checked *line* and whether it is unclear."""
+        if self.inside:
+            end = next((m for m in _KEY_MARK.finditer(line) if m.group(1) == "END"), None)
+            if end is None:
+                return "", False
+            self.inside = False
+            line = line[end.end() :]
+            if not line.strip():
+                return "", False
+        cleaned, unclear = _check_line(line, self.counts)
+        body = line.rstrip("\r\n")
+        if _json_value(body) is None and _opens_key(body):
+            self.inside = True
+        return cleaned, unclear
+
+
+def check_part(raw: bytes, *, inside_private_key: bool = False) -> CheckedPart:
     """Check one file part line by line: replace known secrets, say when it is unclear.
 
     A line that is a JSON object or array (a JSON Lines transcript) is
@@ -182,6 +256,11 @@ def check_part(raw: bytes) -> CheckedPart:
     the JSON, and a ``"password": "..."`` pair is seen as a name and a
     value. A line that changed is written back as compact JSON; a line with
     no finding keeps its bytes. Any other line is checked as plain text.
+
+    *inside_private_key* says that the part starts inside a private key
+    block of an earlier upload (:func:`ends_inside_private_key`). Then its
+    lines up to the ``END`` line become one marker. A block that starts or
+    ends outside this part sends the part to quarantine.
     """
     try:
         text = raw.decode("utf-8")
@@ -190,11 +269,19 @@ def check_part(raw: bytes) -> CheckedPart:
     counts: dict[str, int] = {}
     unclear = False
     lines: list[str] = []
+    block = _KeyBlock(counts, inside=inside_private_key)
+    if inside_private_key:
+        lines.append(_KEY_MARKER + "\n")
+        counts["pem_private_key"] = 1
     for line in _LINE.findall(text):
-        cleaned, line_unclear = _check_line(line, counts)
+        cleaned, line_unclear = block.line(line)
         lines.append(cleaned)
         unclear = unclear or line_unclear
-    reasons = ("possible_secret",) if unclear else ()
+    reasons: tuple[str, ...] = ()
+    if unclear:
+        reasons += ("possible_secret",)
+    if block.started_before or block.inside:
+        reasons += ("split_private_key",)
     return CheckedPart(
         content="".join(lines).encode("utf-8"), redactions=counts, unclear_reasons=reasons
     )

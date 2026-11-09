@@ -11,8 +11,10 @@ retention loops (for example :mod:`meho_backplane.request_usage.retention`):
 * a session is old when its last upload (``last_seen_at``) is older than
   the tenant's period (``agent_session_retention``) or the default
   (``SESSION_STORE_RETENTION_DAYS_DEFAULT``);
-* for each old session it deletes the files first, then the rows. When
-  the object storage fails, the rows stay and the next run tries again;
+* for each old session it locks the session row (an upload locks it
+  too), checks the age again, deletes the files, then the rows. So an
+  upload that came in after the search keeps its session. When the
+  object storage fails, the rows stay and the next run tries again;
 * at most :data:`MAX_PER_RUN` sessions per run, so one run stays short;
 * one ``INTERNAL`` audit row per deleted session, in the same commit as
   the deleted rows;
@@ -59,17 +61,17 @@ CLEANUP_PATH: Final[str] = "sessions.cleanup"
 MAX_PER_RUN: Final[int] = 500
 
 
-async def _expired(now: datetime) -> list[tuple[uuid.UUID, uuid.UUID, str]]:
-    """Return ``(tenant_id, record_id, session_id)`` of old sessions, oldest first."""
+async def _expired(now: datetime) -> list[tuple[uuid.UUID, uuid.UUID, datetime]]:
+    """Return ``(tenant_id, record_id, cutoff)`` of old sessions, oldest first."""
     config = load_config()
-    found: list[tuple[uuid.UUID, uuid.UUID, str]] = []
+    found: list[tuple[uuid.UUID, uuid.UUID, datetime]] = []
     async with get_sessionmaker()() as session:
         tenants = list(await session.scalars(select(AgentSessionRecord.tenant_id).distinct()))
         for tenant_id in tenants:
             retention = await retention_days_for(session, tenant_id, config)
             cutoff = now - timedelta(days=retention.retention_days)
             rows = await session.execute(
-                select(AgentSessionRecord.id, AgentSessionRecord.session_id)
+                select(AgentSessionRecord.id)
                 .where(
                     AgentSessionRecord.tenant_id == tenant_id,
                     AgentSessionRecord.last_seen_at < cutoff,
@@ -77,17 +79,27 @@ async def _expired(now: datetime) -> list[tuple[uuid.UUID, uuid.UUID, str]]:
                 .order_by(AgentSessionRecord.last_seen_at)
                 .limit(MAX_PER_RUN - len(found))
             )
-            found.extend((tenant_id, record_id, session_id) for record_id, session_id in rows)
+            found.extend((tenant_id, record_id, cutoff) for record_id in rows.scalars())
             if len(found) >= MAX_PER_RUN:
                 break
     return found
 
 
 async def _remove(
-    store: ObjectStore, tenant_id: uuid.UUID, record_id: uuid.UUID, session_id: str
-) -> None:
-    """Delete one session's files, then its rows with their audit row in one commit."""
+    store: ObjectStore, tenant_id: uuid.UUID, record_id: uuid.UUID, cutoff: datetime
+) -> bool:
+    """Delete one old session's files, then its rows with their audit row in one commit.
+
+    Returns ``False`` when the session is gone or had an upload since the search.
+    """
     async with get_sessionmaker()() as session:
+        session_id = await session.scalar(
+            select(AgentSessionRecord.session_id)
+            .where(AgentSessionRecord.id == record_id, AgentSessionRecord.last_seen_at < cutoff)
+            .with_for_update()
+        )
+        if session_id is None:
+            return False
         keys = list(
             await session.scalars(
                 select(AgentSessionUpload.object_key).where(
@@ -112,6 +124,7 @@ async def _remove(
             )
         )
         await session.commit()
+    return True
 
 
 async def cleanup_once(*, now: datetime | None = None) -> int | None:
@@ -121,14 +134,15 @@ async def cleanup_once(*, now: datetime | None = None) -> int | None:
     store = get_object_store()
     deleted = 0
     failed = 0
-    for tenant_id, record_id, session_id in await _expired(now or datetime.now(UTC)):
+    for tenant_id, record_id, cutoff in await _expired(now or datetime.now(UTC)):
         try:
-            await _remove(store, tenant_id, record_id, session_id)
+            removed = await _remove(store, tenant_id, record_id, cutoff)
         except Exception:
             failed += 1
             _log.warning("session_store_cleanup_failed", record_id=str(record_id), exc_info=True)
             continue
-        deleted += 1
+        if removed:
+            deleted += 1
     _log.info("session_store_cleanup_done", deleted=deleted, failed=failed)
     return deleted
 

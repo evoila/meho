@@ -61,13 +61,14 @@ class QuarantinedError(Exception):
     """The upload is in quarantine and the caller is not an admin."""
 
 
-async def _record(session: AsyncSession, operator: Operator, session_id: str) -> AgentSessionRecord:
-    record = await session.scalar(
-        select(AgentSessionRecord).where(
-            AgentSessionRecord.tenant_id == operator.tenant_id,
-            AgentSessionRecord.session_id == session_id,
-        )
+async def _record(
+    session: AsyncSession, operator: Operator, session_id: str, *, lock: bool = False
+) -> AgentSessionRecord:
+    query = select(AgentSessionRecord).where(
+        AgentSessionRecord.tenant_id == operator.tenant_id,
+        AgentSessionRecord.session_id == session_id,
     )
+    record = await session.scalar(query.with_for_update() if lock else query)
     if record is None:
         raise SessionNotFoundError(session_id)
     return record
@@ -186,10 +187,13 @@ async def delete_session(
     """Delete one session: its files first, then its rows and the audit row.
 
     When the object storage fails, nothing in the index changes and a retry
-    is safe. A file that is already gone is not an error.
+    is safe. A file that is already gone is not an error. The session row
+    is locked first, like an upload locks it, so an upload at the same
+    time either ends before the files are listed or waits until the rows
+    are gone.
     """
     async with get_sessionmaker()() as session:
-        record = await _record(session, operator, session_id)
+        record = await _record(session, operator, session_id, lock=True)
         keys = list(
             await session.scalars(
                 select(AgentSessionUpload.object_key).where(

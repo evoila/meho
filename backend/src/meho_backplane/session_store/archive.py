@@ -15,20 +15,31 @@ transcript ``<session-id>.jsonl`` and the folder ``<session-id>/``.
 * a path that is absolute, has a ``..`` part, a backslash or a control
   character, or that comes twice;
 * more entries (files, folders, any member) or more unpacked bytes than
-  the limits allow;
+  the limits allow. The gzip stream is unpacked with a byte limit before
+  tar reads any header, so tar metadata (for example a large PAX header)
+  cannot grow past the limit either;
 * an archive with no file.
 """
 
 from __future__ import annotations
 
+import gzip
 import io
 import tarfile
+import zlib
 from collections.abc import Mapping
 from typing import Final
 
 __all__ = ["ArchiveError", "read_archive", "write_archive"]
 
 _MAX_PATH_CHARS: Final[int] = 512
+
+#: Tar bytes one entry may add on top of its file bytes: its header, the
+#: padding of its data, and an extended header for a long path.
+_ENTRY_OVERHEAD: Final[int] = 4 * tarfile.BLOCKSIZE + 2 * _MAX_PATH_CHARS
+
+#: The end blocks and the padding of the last tar record.
+_END_OVERHEAD: Final[int] = 2 * tarfile.RECORDSIZE
 
 
 class ArchiveError(ValueError):
@@ -55,12 +66,29 @@ def _clean_path(name: str) -> str:
     return path
 
 
+def _gunzip(data: bytes, limit: int) -> bytes:
+    """Unpack the gzip *data*, refusing more than *limit* bytes."""
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as stream:
+            tar = stream.read(limit + 1)
+    except (OSError, EOFError, zlib.error) as exc:
+        raise ArchiveError(
+            "archive_unreadable", "the upload is not a readable gzip tar archive"
+        ) from exc
+    if len(tar) > limit:
+        raise ArchiveError(
+            "archive_too_large", f"the archive unpacks to more than {limit} tar bytes"
+        )
+    return tar
+
+
 def read_archive(data: bytes, *, max_files: int, max_unpacked_bytes: int) -> dict[str, bytes]:
     """Return ``{path: bytes}`` of every regular file in the gzip tar *data*."""
+    tar = _gunzip(data, max_unpacked_bytes + max_files * _ENTRY_OVERHEAD + _END_OVERHEAD)
     files: dict[str, bytes] = {}
     total = 0
     try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        with tarfile.open(fileobj=io.BytesIO(tar), mode="r:") as archive:
             for count, member in enumerate(archive, start=1):
                 # Every entry counts toward the limit, folders too.
                 if count > max_files:

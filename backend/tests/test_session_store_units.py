@@ -23,7 +23,7 @@ from meho_backplane.session_store.archive import ArchiveError, read_archive, wri
 from meho_backplane.session_store.config import SessionStoreConfig, load_config
 from meho_backplane.session_store.object_store import ObjectStoreError, S3ObjectStore
 from meho_backplane.session_store.plan import plan_upload, sha256_hex
-from meho_backplane.session_store.secret_check import check_part
+from meho_backplane.session_store.secret_check import check_part, ends_inside_private_key
 
 _LIMITS: dict[str, int] = {"max_files": 10, "max_unpacked_bytes": 1000}
 
@@ -159,6 +159,29 @@ def test_archive_cut_off_is_unreadable() -> None:
     assert exc.value.reason == "archive_unreadable"
 
 
+def test_archive_limit_counts_tar_metadata() -> None:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+        info = tarfile.TarInfo("a.jsonl")
+        info.size = 3
+        info.pax_headers = {"comment": "x" * 1_000_000}
+        tar.addfile(info, io.BytesIO(b"hi\n"))
+    with pytest.raises(ArchiveError) as exc:
+        read_archive(buffer.getvalue(), max_files=2, max_unpacked_bytes=1024)
+    assert exc.value.reason == "archive_too_large"
+
+
+def test_archive_at_the_limits_with_long_paths_is_read() -> None:
+    files = {f"{n:03d}-" + "p" * 500: b"x" * 100 for n in range(10)}
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+        for path, content in files.items():
+            info = tarfile.TarInfo(path)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    assert read_archive(buffer.getvalue(), **_LIMITS) == files
+
+
 # --- secret check --------------------------------------------------------------
 
 
@@ -207,6 +230,51 @@ def test_check_is_not_sure_about_a_secret_like_pair(line: bytes) -> None:
 )
 def test_check_is_sure_about_placeholders(line: bytes) -> None:
     assert not check_part(line).unclear
+
+
+# The markers are split so the secret scanners of the repo do not flag them.
+_BEGIN = b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----\n"
+_END = b"-----END " + b"OPENSSH PRIVATE KEY-----\n"
+_KEY = (
+    _BEGIN
+    + b"b3BlbnNzaC1rZXktdjEAAAAAMadeUpKeyMaterialLineOne\n"
+    + b"MadeUpKeyMaterialLineTwoNotARealKeyAtAll0000\n"
+    + _END
+)
+
+
+def _no_key_material(data: bytes) -> bool:
+    return b"MadeUpKeyMaterial" not in data
+
+
+def test_check_removes_a_whole_private_key_block() -> None:
+    part = check_part(b"cat id_ed25519\n" + _KEY + b"done\n")
+    assert part.content == b"cat id_ed25519\n[REDACTED:pem_private_key]\ndone\n"
+    assert part.redactions == {"pem_private_key": 1}
+    assert not part.unclear
+
+
+def test_check_quarantines_a_private_key_split_between_two_parts() -> None:
+    text = b"cat id_ed25519\n" + _KEY + b"done\n"
+    cut = text.index(b"MadeUpKeyMaterialLineTwo")
+    first = check_part(text[:cut])
+    assert ends_inside_private_key(text, cut)
+    second = check_part(text[cut:], inside_private_key=True)
+    for part in (first, second):
+        assert _no_key_material(part.content)
+        assert part.unclear_reasons == ("split_private_key",)
+    assert second.content == b"[REDACTED:pem_private_key]\ndone\n"
+    assert not ends_inside_private_key(text, len(text))
+
+
+def test_check_key_inside_one_json_line_does_not_open_a_block() -> None:
+    line = b'{"text": "-----BEGIN ' + b'PRIVATE KEY-----\\nMadeUpKeyMaterial"}\n'
+    data = line + b"next plain line\n"
+    part = check_part(data)
+    assert _no_key_material(part.content)
+    assert part.content.endswith(b"next plain line\n")
+    assert not part.unclear
+    assert not ends_inside_private_key(data, len(data))
 
 
 def test_check_is_not_sure_about_bytes_that_are_not_text() -> None:

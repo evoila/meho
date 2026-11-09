@@ -44,7 +44,7 @@ from meho_backplane.session_store.models import AgentSessionRecord, AgentSession
 from meho_backplane.session_store.object_store import ObjectStore
 from meho_backplane.session_store.plan import UploadPlan, plan_upload, sha256_hex
 from meho_backplane.session_store.schemas import SessionUploadResult
-from meho_backplane.session_store.secret_check import check_part
+from meho_backplane.session_store.secret_check import check_part, ends_inside_private_key
 
 __all__ = ["SessionConflictError", "UploadMeta", "object_key", "upload_session"]
 
@@ -108,13 +108,17 @@ def _next_state(current: str, requested: str, *, new_bytes: bool) -> str:
     return current
 
 
-async def _store_tails(call: _Call, record_id: uuid.UUID, seq: int, plan: UploadPlan) -> _Stored:
+async def _store_tails(
+    call: _Call, record_id: uuid.UUID, seq: int, plan: UploadPlan, uploaded: dict[str, bytes]
+) -> _Stored:
     checked: dict[str, bytes] = {}
     files: dict[str, Any] = {}
     redactions = 0
     unclear = False
     for path, (offset, tail) in plan.tails.items():
-        part = check_part(tail)
+        # The upload holds the whole file, so a key that starts in an
+        # earlier upload is seen in the stored part before the tail.
+        part = check_part(tail, inside_private_key=ends_inside_private_key(uploaded[path], offset))
         checked[path] = part.content
         redactions += sum(part.redactions.values())
         unclear = unclear or part.unclear
@@ -305,7 +309,7 @@ async def upload_session(
 
         stored: _Stored | None = None
         if plan.tails:
-            stored = await _store_tails(call, record.id, record.upload_count + 1, plan)
+            stored = await _store_tails(call, record.id, record.upload_count + 1, plan, files)
             _add_upload_row(session, record, stored, now)
             record.files = {p: state.as_json() for p, state in plan.states.items()}
             record.upload_count = stored.seq

@@ -13,16 +13,22 @@ import contextlib
 import io
 import tarfile
 from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select, update
+from sqlalchemy.dialects.postgresql.base import PGDialect
+from sqlalchemy.orm import ORMExecuteState, Session
+from sqlalchemy.sql import ClauseElement
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.session_store.config import load_config
-from meho_backplane.session_store.models import AgentSessionUpload
+from meho_backplane.session_store.models import AgentSessionRecord, AgentSessionUpload
+from meho_backplane.session_store.retention import _expired, _remove
 from meho_backplane.session_store.schemas import SessionUploadResult
+from meho_backplane.session_store.service import delete_session
 from meho_backplane.session_store.upload import SessionConflictError, UploadMeta, upload_session
 from meho_backplane.settings import get_settings
 
@@ -167,6 +173,98 @@ async def test_a_line_sent_in_two_uploads_is_checked_whole(
     assert stored.startswith(_LINE_1)
     for part in (value[:4], value[4:]):
         assert part not in stored
+
+
+@pytest.mark.asyncio
+async def test_a_private_key_sent_in_two_uploads_is_never_stored() -> None:
+    store = _Store()
+    # The markers are split so the secret scanners of the repo do not flag them.
+    key = (
+        (b"-----BEGIN " + b"RSA PRIVATE KEY-----\n")
+        + b"MIIEMadeUpKeyMaterialLineOneNotARealKey000\n"
+        + b"MadeUpKeyMaterialLineTwoNotARealKey111\n"
+        + (b"-----END " + b"RSA PRIVATE KEY-----\n")
+    )
+    cut = key.index(b"MadeUpKeyMaterialLineTwo")
+    first = await _upload(store, _LINE_1 + b"cat key.pem\n" + key[:cut])
+    second = await _upload(store, _LINE_1 + b"cat key.pem\n" + key + b"done\n")
+    assert first.quarantined and second.quarantined
+    stored = b"".join(_tail(store.objects[row.object_key]) for row in await _upload_rows())
+    assert b"MadeUpKeyMaterial" not in stored
+    assert stored.endswith(b"[REDACTED:pem_private_key]\ndone\n")
+
+
+async def _make_old() -> None:
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(AgentSessionRecord).values(last_seen_at=datetime.now(UTC) - timedelta(days=400))
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_a_session_that_got_an_upload_after_the_search() -> None:
+    store = _Store()
+    await _upload(store, _LINE_1)
+    await _make_old()
+    found = await _expired(datetime.now(UTC))
+    assert len(found) == 1
+    line_2 = b'{"type":"user","message":{"content":"one more"}}\n'
+    await _upload(store, _LINE_1 + line_2)
+    tenant_id, record_id, cutoff = found[0]
+    assert not await _remove(store, tenant_id, record_id, cutoff)
+    rows = await _upload_rows()
+    assert len(rows) == 2
+    assert sorted(store.objects) == sorted(row.object_key for row in rows)
+
+
+@pytest.fixture
+def statements() -> Iterator[list[str]]:
+    """The SQL of every ORM statement, as PostgreSQL would run it."""
+    seen: list[str] = []
+
+    def record(state: ORMExecuteState) -> None:
+        statement = state.statement
+        assert isinstance(statement, ClauseElement)
+        seen.append(str(statement.compile(dialect=PGDialect())))
+
+    event.listen(Session, "do_orm_execute", record)
+    yield seen
+    event.remove(Session, "do_orm_execute", record)
+
+
+def _locks_before_listing_files(seen: list[str]) -> bool:
+    locked = next(
+        n for n, sql in enumerate(seen) if "agent_session_record" in sql and "FOR UPDATE" in sql
+    )
+    listed = next(n for n, sql in enumerate(seen) if "agent_session_upload.object_key" in sql)
+    return locked < listed
+
+
+@pytest.mark.asyncio
+async def test_delete_locks_the_session_before_it_lists_the_files(
+    statements: list[str],
+) -> None:
+    store = _Store()
+    await _upload(store, _LINE_1)
+    statements.clear()
+    await delete_session(_OPERATOR, _SID, store=store, path="/api/v1/sessions")
+    assert _locks_before_listing_files(statements)
+    assert store.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_locks_the_session_before_it_lists_the_files(
+    statements: list[str],
+) -> None:
+    store = _Store()
+    await _upload(store, _LINE_1)
+    await _make_old()
+    (tenant_id, record_id, cutoff), *_ = await _expired(datetime.now(UTC))
+    statements.clear()
+    assert await _remove(store, tenant_id, record_id, cutoff)
+    assert _locks_before_listing_files(statements)
+    assert store.objects == {}
 
 
 @pytest.mark.asyncio

@@ -101,6 +101,8 @@ gzip tar archive) and the fields `session_id`, `project`, `app`,
    device, a path with `..`, a leading `/`, a backslash or a control
    character, a path that comes twice, too many entries (files and
    folders) or bytes, a cut-off archive and an empty one (`422 archive_*`).
+   The gzip stream is unpacked with a byte limit before tar reads any
+   header, so tar metadata (such as a large extended header) counts too.
 2. **Compare** (`plan.py`). The laptop sends the whole current files every
    time. For each file MEHO compares the size and SHA-256 hash with what it
    stored before (the hashes are of the bytes before the secret check):
@@ -151,10 +153,16 @@ replacement never breaks the JSON. Other lines are checked as text.
   keys, kubeconfigs, `Authorization` headers, bearer tokens, JWTs, URL
   secrets, password hashes, Ceph keys, BIND keys and `password=...` style
   pairs. Host names, IP addresses and UUIDs stay: they are not secrets.
+- **A private key over many lines is removed whole.** In plain text, the
+  `BEGIN` line of a private key becomes one marker, and every line up to
+  the `END` line goes. A key can start in one upload and end in the next.
+  The upload always holds the whole file, so MEHO reads the stored part
+  before the new tail and knows the tail starts inside a key.
 - **Unclear content goes to quarantine.** The check is not sure when a file
-  is not UTF-8 text, or when a secret-like name still has a value, for
-  example `"password": "..."` in JSON. Variables (`${X}`), placeholders
-  (`<x>`), short values and markers do not count.
+  is not UTF-8 text, when a secret-like name still has a value, for
+  example `"password": "..."` in JSON, or when a private key starts or
+  ends in another upload. Variables (`${X}`), placeholders (`<x>`), short
+  values and markers do not count.
 
 A quarantined upload is stored (with the known secrets replaced) but only a
 tenant admin can download it. An operator gets `403
@@ -173,9 +181,11 @@ upload as in quarantine.
   archive of one upload. Put the tails of all uploads together in `seq`
   order to get the whole (checked) files; each upload row says where its
   tail starts.
-- `DELETE /api/v1/sessions/{session_id}` deletes the files first, then the
-  rows. When the store fails (`502 session_store_unavailable`) nothing in
-  the index changes, and a retry is safe.
+- `DELETE /api/v1/sessions/{session_id}` locks the session row (an upload
+  locks it too), deletes the files, then the rows. So an upload at the same
+  time ends before the files are listed, or waits until the rows are gone.
+  When the store fails (`502 session_store_unavailable`) nothing in the
+  index changes, and a retry is safe.
 
 ### Audit
 
@@ -193,7 +203,8 @@ The cleanup job (`retention.py`) runs every
 `SESSION_STORE_CLEANUP_INTERVAL_SECONDS`. A session is old when its last
 upload is older than the tenant's period (`PUT /api/v1/sessions/retention`,
 1 to 3650 days, or `null` for the default). For each old session it
-deletes the files, then the rows with an `INTERNAL` audit row
+locks the session row and checks the age again, so a session that got an
+upload after the search stays. Then it deletes the files, then the rows with an `INTERNAL` audit row
 (`sessions.cleanup`, `system:session-store-cleanup`) in the same commit.
 When the store fails, the rows stay and the next run tries again. One run
 removes at most 500 sessions. The job does nothing while the store is not

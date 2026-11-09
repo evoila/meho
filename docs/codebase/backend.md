@@ -212,7 +212,8 @@ this stage it exposes:
   Low-privilege / monitoring principals poll the companion
   `GET /api/v1/health/live` liveness probe instead: valid JWT
   required (any tenant role), reports operator identity +
-  DB-migration liveness (`LivenessResponse`), and its code path never
+  DB-migration liveness and the server's time in UTC (`LivenessResponse`,
+  `server_time` since #5504), and its code path never
   touches Vault or the dispatcher (a source-level guard test in
   `backend/tests/test_api_v1_health_split.py` pins this). The
   `require_role` gate wraps the `verify_jwt_and_bind` dependency,

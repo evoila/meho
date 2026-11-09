@@ -930,7 +930,7 @@ to `POST /ui/account/push/subscribe`. MEHO checks it
 - `p256dh` is a P-256 public key (65 bytes) and `auth` is 16 bytes, both
   base64url.
 
-MEHO stores the row in `push_subscription` (migration `0148`) for the
+MEHO stores the row in `push_subscription` (migration `0149`) for the
 signed-in person and the current tenant, with the time. The person and the
 tenant come from the session, never from the form. The endpoint names one
 browser, so it is unique: switching on again replaces the row, and when

@@ -143,6 +143,10 @@ dependencies = [
     # Floor at 50.0.0: CVE-2026-69247 (PKCS#7 EnvelopedData Bleichenbacher
     # oracle) is fixed there and the trivy image gate fails on anything older.
     "cryptography>=50.0.0",
+    # S3-compatible object storage for the agent session store (#4901). Was
+    # already installed through ``pydantic-ai-slim[bedrock]``; declared here
+    # because the session store imports it directly.
+    "boto3>=1.43.0",
 ]
 
 [dependency-groups]
@@ -367,6 +371,13 @@ ignore_missing_imports = true
 # place. If hvac later ships stubs, drop this override.
 [[tool.mypy.overrides]]
 module = ["hvac.*"]
+ignore_missing_imports = true
+
+# boto3 / botocore (the session store's S3-compatible object storage,
+# #4901) ship no ``py.typed`` marker; the client is ``Any`` and its use is
+# kept inside :mod:`meho_backplane.session_store.object_store`.
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
 # ``requests`` is hvac's transport dependency. We only catch its

@@ -195,6 +195,7 @@ async def reduce_into_store(
         max_spill_rows=max_spill_rows,
         sample_byte_budget=sample_byte_budget,
         admission_guard=_OPEN_GUARD,
+        answer_ready=False,
     )
     context = {"tenant_id": str(uuid4()), "operator_sub": "benchmark", "op_id": profile.name}
     return await reducer.reduce(profile.payload(rows), None, context=context)

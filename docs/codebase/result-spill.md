@@ -75,6 +75,59 @@ The handle itself is minted **unconditionally** on every reduce — a
 skipped spill never suppresses the handle, it only flips the drill-in
 branch to `available=false`.
 
+### Answer-ready replies (`JSONFLUX_ANSWER_READY`, off by default)
+
+A setting that is off by default changes the reduced reply so a model can
+answer most questions without a second call. It stays off until model
+tests show that a small open model does better and Claude does not do
+worse. Turning it on by default is a separate change.
+
+With `JSONFLUX_ANSWER_READY=true`, a reduced list reply changes like this
+(`operations/answer_ready.py`, called from `JsonFluxReducer.reduce`):
+
+- Today's summary keys stay.
+- `counts`: for each short column with 10 or fewer different values and at
+  least one repeated value, how many rows have each value, for example
+  `{"power_state": {"POWERED_ON": 46, "POWERED_OFF": 23}}`. A missing value
+  counts as `"null"`. At most 1 KB.
+- `items`: every row, cut to 1 to 3 short columns, when the table fits in
+  3 KB and in the room left under the 4,096-byte summary limit. If 3
+  columns do not fit, the table drops columns down to 1. A table is all
+  rows or none, so a cut table never looks like the whole list. With
+  `items`, the sample rows are dropped (`handle.sample_rows` is null and
+  `sample_rows_returned` is 0), because the table already has those rows.
+  Without `items`, the sample stays as today.
+- The two long texts on the handle are replaced by one line in
+  `fetch_more.drill_in.rationale`, for example "Showing all 69 rows this
+  call returned in items (name). The counts cover all 69 rows. For other
+  columns or a filter, call result_query with handle_id=... The vendor may
+  hold more rows than this call returned." It says when only the first
+  rows were stored, or when no rows were stored. When rows were stored, the
+  line always ends with that vendor note, so a reduced page is never called
+  the whole source (#3676). The note on parts kept out of the summary
+  (`parts_note`) stays in the summary only, not in this line.
+  `native_pagination.rationale` is null when the operation has no paging
+  hint; a paging hint still ships as today.
+
+How the columns are picked. A short column holds only text of 64
+characters or less, numbers, bools and nulls. The first column is the
+operation's `result_digest` name and status fields when it has that hint,
+else the first identity column found (`name`, `display_name`, `title`,
+`hostname`, `connector_id`, `key`, `id`, `value`). The next columns are the
+counted columns with more than one value.
+
+`counts` and `items` cover every row the call returned, also when the
+store kept only the first rows. A summary key with the same name (a part
+called `counts`) is never replaced; that block is left out. Credential-class
+operations, reduces without an `op_id`, and results over the admission
+work limit keep today's reply.
+
+When the whole reply is over the response limit and the rows can still be
+read through the handle, `query_topology` drops `items` and `counts` first
+and keeps the handle (`delivery="partial"`). `call_operation` drops the
+whole summary in that case. In both, the handle's line then says the reply
+was too large and how to read the rows, because it no longer shows them.
+
 ## Result field catalog (#3631)
 
 The captured JSON is the source of truth for a reduced result. The

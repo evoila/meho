@@ -38,7 +38,7 @@ from meho_backplane.api.v1.topology import router as topology_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.targets.ops import register_targets_registry_operations
-from meho_backplane.connectors.targets.update_op import register_targets_update_operation
+from meho_backplane.connectors.targets.update import register_targets_update_operation
 from meho_backplane.connectors.topology.ops import register_topology_graph_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, GraphEdge, GraphNode, Tenant
@@ -200,12 +200,8 @@ async def test_a_token_change_waits_and_runs_on_the_same_target_id(client: TestC
 
     result = await _approve_and_run(request_id)
     assert result.status == "ok", result
-    assert result.result == {
-        "status": "updated",
-        "target_id": str(row.id),
-        "name": _EXISTING,
-        "fields": ["host"],
-    }
+    assert result.result["target_id"] == str(row.id)
+    assert result.result["updated_fields"] == ["host"]
     assert (await _live_targets())[_EXISTING].host == "other.example"
 
 

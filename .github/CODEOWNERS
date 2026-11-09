@@ -13,3 +13,6 @@
 # change opened by the kit owner needs another code owner to approve it.
 # See docs/decisions/2026-11-01-connector-kit.md (decision 3).
 /backend/connector-kit/ @damir-topic
+
+# Decision records: the project owner reviews every change to a decided rule.
+/docs/decisions/ @damir-topic

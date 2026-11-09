@@ -37,9 +37,17 @@ import (
 // CallResult mirrors the backend OperationResult Pydantic model.
 // Result and Extras stay json.RawMessage because the backend types
 // Result as a oneOf(dict, list) union — pretty-printing the raw bytes
-// is the cleanest renderer. Set-shaped responses arrive already
-// reduced to a JSONFlux handle envelope + sample by the dispatcher,
-// so they render verbatim here with the handle hint intact.
+// is the cleanest renderer.
+//
+// Handle and Delivery carry the top-level `handle` and `delivery`
+// keys. A large set-shaped result arrives reduced: Result holds a
+// short summary and sample, and Handle points at the full result in
+// the result store. Its handle_id is what `meho operation
+// result-query` reads. Delivery says whether the backplane handed
+// over the whole result ("complete", "partial", "unavailable"), or is
+// nil on an old backplane. Render prints both: the human render names
+// the handle id (WriteResultHandle) and --json prints every key the
+// backend OperationResult model has (#4659).
 //
 // AuditID is the id of the committed audit row, or nil when the
 // backplane did not commit one (an old backplane, or a call that
@@ -60,7 +68,9 @@ type CallResult struct {
 	Status     string          `json:"status"`
 	OpID       string          `json:"op_id"`
 	Result     json.RawMessage `json:"result"`
+	Handle     json.RawMessage `json:"handle,omitempty"`
 	AuditID    *string         `json:"audit_id"`
+	Delivery   *string         `json:"delivery"`
 	Error      *string         `json:"error"`
 	Extras     json.RawMessage `json:"extras,omitempty"`
 	DurationMs float64         `json:"duration_ms"`
@@ -577,7 +587,8 @@ func isSpace(b byte) bool {
 }
 
 // Render runs the unified post-dispatch path every verb uses: validate
-// the status enum, render the envelope (JSON or human), then map
+// the status enum, render the envelope (JSON or human; the human render
+// of an ok result ends with the result handle, see WriteResultHandle), then map
 // "error" / "denied" / "rate_limited" / "not_found" to ErrOpError. When
 // prettyPrinter is nil the generic envelope is used.
 //
@@ -618,10 +629,17 @@ func (c Connector) Render(
 		if err := output.PrintJSON(cmd.OutOrStdout(), r); err != nil {
 			return err
 		}
-	} else if prettyPrinter != nil {
-		prettyPrinter(cmd.OutOrStdout(), r)
 	} else {
-		c.PrintGeneric(cmd.OutOrStdout(), opID, r)
+		if prettyPrinter != nil {
+			prettyPrinter(cmd.OutOrStdout(), r)
+		} else {
+			c.PrintGeneric(cmd.OutOrStdout(), opID, r)
+		}
+		// After the verb's own render, so every vendor verb shows the
+		// handle of a reduced result, also one with a custom printer.
+		if r.Status == "ok" {
+			WriteResultHandle(cmd.OutOrStdout(), r.Handle, r.Delivery)
+		}
 	}
 	if r.Status == "ok" {
 		return nil

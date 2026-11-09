@@ -49,11 +49,11 @@ make in the operator console runs at once.
 **Register targets on the operator surfaces above.** Registration is an
 operator-trust decision. For agents, the default MCP tools only read
 targets (`list_targets`). A session that asked for the `mcp:admin`
-scope also has `meho_targets_register` (tenant_admin only). Through
-`call_operation`, the connector `targets-registry-1.x` offers
-`targets.register`, `targets.remove` and `targets.probe`; an agent's
-register waits for a person's approval, and `targets.remove` always
-waits for one. MEHO has no MCP tool to stage a secret. This is also why
+scope also has `meho_targets_register` and `meho_targets_update`
+(tenant_admin only). Through `call_operation`, the connector
+`targets-registry-1.x` offers `targets.register`, `targets.update`,
+`targets.remove` and `targets.probe`; an agent's register and every update
+wait for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret. This is also why
 the CLI is worth installing before your first agent session.
 
 ## Write a `targets.yaml`

@@ -52,6 +52,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/secret"
 	"github.com/evoila/meho/cli/internal/cmd/sensor"
 	serviceprincipal "github.com/evoila/meho/cli/internal/cmd/service-principal"
+	"github.com/evoila/meho/cli/internal/cmd/sessions"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/tenants"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
@@ -142,10 +143,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newDoctorCmd())
 
-	// G4.3-T2 (#441) -- retrieval-quality + migration-decision tooling.
-	// `meho retrieval eval` ships first; sibling verbs (usage T5b #464,
-	// retire-checklist T6 #445) graft onto the same parent in their own
-	// PRs.
+	// `meho retrieval usage` -- retrieval usage telemetry.
 	root.AddCommand(retrieval.NewRootCmd())
 
 	// G0.6-T13 (#481) -- operation meta-tool surface for the G0.6
@@ -173,6 +171,9 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// (`meho tenants flight-recorder-policy set`). Wraps PATCH
 	// /api/v1/tenants/flight-recorder-policy; tenant-scoped, tenant_admin.
 	root.AddCommand(tenants.NewRootCmd())
+	// #4901 -- agent session store admin verbs (list / show / delete).
+	// Wraps /api/v1/sessions; operator to read, tenant_admin to delete.
+	root.AddCommand(sessions.NewRootCmd())
 	// T3 (#2880) -- event_source registry admin verbs (add / list /
 	// describe / update / delete). Wraps /api/v1/event-sources/*.
 	root.AddCommand(eventsource.NewRootCmd())

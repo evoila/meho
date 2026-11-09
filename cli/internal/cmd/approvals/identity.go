@@ -33,3 +33,37 @@ func principalScanLabel(sub string, name *string) string {
 	}
 	return output.SafeText(sub)
 }
+
+// machineKinds are the principal_kind values of a machine login: an
+// agent, a service account or a check runner, not a person (#3885).
+var machineKinds = map[string]bool{"agent": true, "service": true, "runner": true}
+
+// machineKind returns the kind when a machine login made the request,
+// else "". A nil kind (a request made before the server saved it) and
+// "user" both give "".
+func machineKind(kind *string) string {
+	if kind != nil && machineKinds[*kind] {
+		return *kind
+	}
+	return ""
+}
+
+// requesterLabel is principalLabel for the requester, with the kind in
+// brackets after it when a machine login asked: "triage (<sub>) [agent]".
+func requesterLabel(sub string, name, kind *string) string {
+	label := principalLabel(sub, name)
+	if k := machineKind(kind); k != "" {
+		return label + " [" + k + "]"
+	}
+	return label
+}
+
+// requesterScanLabel is principalScanLabel for the requester. The kind
+// comes first ("[agent] triage"), so a cut column still shows it.
+func requesterScanLabel(sub string, name, kind *string) string {
+	label := principalScanLabel(sub, name)
+	if k := machineKind(kind); k != "" {
+		return "[" + k + "] " + label
+	}
+	return label
+}

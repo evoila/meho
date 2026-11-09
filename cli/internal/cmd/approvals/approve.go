@@ -82,6 +82,7 @@ func newApproveCmd() *cobra.Command {
 		reason            string
 		workRef           string
 		inOrder           bool
+		wait              bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -94,7 +95,7 @@ func newApproveCmd() *cobra.Command {
 			"paused agent run resumes off the broadcast (T9 #1117). " +
 			"Only pending requests can be approved; any other status " +
 			"returns 409. --reason attaches a human-readable " +
-			"rationale to the decision row.\n\n" + severalIDsHelp +
+			"rationale to the decision row.\n\n" + approveWaitHelp + "\n\n" + severalIDsHelp +
 			"\n\n" + approveRightsHelp + "\n\n" + inOrderHelp + "\n\n" + approveSignInHelp +
 			"\n\n" + delegatedReasonHelp("approve"),
 		Args:          approveArgs(&workRef, &inOrder),
@@ -112,10 +113,12 @@ func newApproveCmd() *cobra.Command {
 			if len(args) > 1 {
 				return runApproveMany(cmd, args, reason, jsonOut, backplaneOverride)
 			}
-			return runDecision(cmd, args[0], "approve", reason, jsonOut, backplaneOverride)
+			return runDecision(cmd, args[0], "approve", reason, decisionOpts{Wait: wait, JSONOut: jsonOut, BackplaneOverride: backplaneOverride})
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "optional rationale for the approval; the command help explains the Instructed-by: layout")
+	cmd.Flags().BoolVar(&wait, "wait", false,
+		"wait until the approved operation has ended, then print how it ended (asks again every few seconds)")
 	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"with --in-order: the change ticket whose pending requests to approve, oldest first")
 	cmd.Flags().BoolVar(&inOrder, "in-order", false,
@@ -154,7 +157,7 @@ func newRejectCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDecision(cmd, args[0], "reject", reason, jsonOut, backplaneOverride)
+			return runDecision(cmd, args[0], "reject", reason, decisionOpts{JSONOut: jsonOut, BackplaneOverride: backplaneOverride})
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "optional rationale for the rejection; the command help explains the Instructed-by: layout")
@@ -169,12 +172,17 @@ func newRejectCmd() *cobra.Command {
 // /decide POST through the typed client, then re-fetches the
 // ApprovalRequestView so the renderer has the full post-decision
 // shape (status, reviewed_by, decided_at).
+//
+// An approve answers at once: the operation runs in the background
+// (#5110). With opts.Wait the command waits until the run has ended.
+// When the answer of the POST is lost on the way, the command reads the
+// request again and prints the state MEHO has.
 func runDecision(
 	cmd *cobra.Command,
 	idArg, verb, reason string,
-	jsonOut bool,
-	backplaneOverride string,
+	opts decisionOpts,
 ) error {
+	jsonOut := opts.JSONOut
 	requestID, err := parseRequestID(idArg)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(),
@@ -182,7 +190,7 @@ func runDecision(
 			jsonOut,
 		)
 	}
-	backplaneURL, err := backplane.Resolve(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
@@ -190,10 +198,18 @@ func runDecision(
 	if cerr != nil {
 		return cerr
 	}
-	detail, decided, err := postDecision(cmd.Context(), client, requestID, verb, reason)
+	detail, answer, err := postDecision(cmd.Context(), client, requestID, verb, reason)
 	var noBrowser *auth.NoBrowserError
 	if errors.As(err, &noBrowser) {
 		return output.RenderError(cmd.ErrOrStderr(), noBrowserError(noBrowser.URL), jsonOut)
+	}
+	lost := false
+	if err != nil && isLostAnswer(err) {
+		// The POST may have reached MEHO; only its answer is missing.
+		// Read the request: when it is no longer pending, show that.
+		if again, gerr := fetchDetail(cmd.Context(), client, requestID); gerr == nil && again != nil && again.Status != api.ApprovalRequestStatusPending {
+			detail, answer, err, lost = again, nil, nil, true
+		}
 	}
 	if err != nil && verb == "approve" {
 		return routeApproveError(cmd, backplaneURL, err, jsonOut)
@@ -207,10 +223,21 @@ func runDecision(
 			jsonOut,
 		)
 	}
+	if lost && !jsonOut {
+		fmt.Fprintln(cmd.OutOrStdout(), lostAnswerNote)
+	}
+	endedWithoutResult := false
+	if opts.Wait && verb == "approve" && !runHasResult(detail) {
+		detail, endedWithoutResult, err = waitForRun(cmd, client, requestID, answer.runID(), jsonOut)
+		if err != nil {
+			return routeRequestError(cmd, backplaneURL, err, jsonOut)
+		}
+	}
 	if jsonOut {
 		return output.PrintJSON(cmd.OutOrStdout(), detail)
 	}
-	printDecision(cmd.OutOrStdout(), idArg, detail, decided)
+	printDecision(cmd.OutOrStdout(), idArg, detail, answer.decided())
+	printRunHint(cmd.OutOrStdout(), idArg, detail, endedWithoutResult)
 	return nil
 }
 
@@ -253,7 +280,7 @@ func postDecision(
 	client *api.AuthedClient,
 	requestID uuid.UUID,
 	verb, reason string,
-) (*api.ApprovalRequestView, *api.DecideResponseBody, error) {
+) (*api.ApprovalRequestView, *decideAnswer, error) {
 	// verb is "approve" or "reject"; backend wants the past-tense form.
 	decision := "approved"
 	if verb == "reject" {
@@ -267,8 +294,17 @@ func postDecision(
 	var signIn *approvalSignIn
 	if decision == "approved" {
 		signIn = newApprovalSignIn(client, nil)
+		// Answer at once; the operation runs in the background (#5110).
+		inBackground := true
+		body.Async = &inBackground
 	}
 	resp, err := sendDecide(ctx, client, requestID, body, signIn, false)
+	if body.Async != nil && refusedAsyncField(err) {
+		// An older MEHO does not know the field and refused the call
+		// before it saved anything. Approve the old way.
+		body.Async = nil
+		resp, err = sendDecide(ctx, client, requestID, body, signIn, false)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -277,7 +313,7 @@ func postDecision(
 	// the decide call just succeeded, but defensive against a
 	// token-rotation window between the two calls).
 	detail, err := fetchDetail(ctx, client, requestID)
-	return detail, resp.JSON200, err
+	return detail, &decideAnswer{done: resp.JSON200, accepted: resp.JSON202}, err
 }
 
 // sendDecide posts one decision to POST /api/v1/approvals/{id}/decide.

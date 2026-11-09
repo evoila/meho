@@ -45,6 +45,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -415,6 +416,11 @@ def test_happy_path_returns_full_federation_response(
         "model": "anthropic:claude-sonnet-5-5",
         "spend_counted": True,
     }
+
+    # #5504: the server's time now, in UTC, to the second. Its value moves,
+    # so pin the format here; tests/test_health_server_time.py pins the rest.
+    server_time = body.pop("server_time")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", server_time)
 
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()
     assert body == {

@@ -142,7 +142,8 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   role) and from ``approver``. It gives no right to run operations.
   Never read from a request field, header or command-line flag. The
   approval checks ask :attr:`Operator.may_self_approve`, which also
-  refuses every machine login.
+  says yes for a person with the ``tenant_admin`` role (MEHO-Admins,
+  #5969) and refuses every machine login.
 * ``tenants_claim_malformed`` — ``True`` when the ``meho_tenants`` claim
   is there but is not a list, or has an entry MEHO could not read
   (:func:`~meho_backplane.auth.jwt._tenants_claim_malformed`). The good
@@ -362,6 +363,15 @@ class Operator(BaseModel):
     #: :func:`~meho_backplane.middleware.verify_jwt_and_bind` refuses it on
     #: every other REST route, and the MCP seam refuses it on every call.
     kb_import_only: bool = False
+    #: The login may only export knowledge (``kb_export_only`` claim, #5730).
+    #: Such a token reaches ``POST /api/v1/kb/export`` and nothing else, in
+    #: the same way as ``kb_import_only``.
+    kb_export_only: bool = False
+    #: The login may only run the conventions drift check
+    #: (``conventions_drift_only`` claim). Such a token reaches
+    #: ``POST /api/v1/settings/conventions-drift`` and nothing else, in the
+    #: same way as :attr:`kb_import_only`.
+    conventions_drift_only: bool = False
     runner_id: UUID | None = None
     check_runner_dispatch: bool = False
     #: The ``auth_time`` claim: when the person last entered their
@@ -404,22 +414,33 @@ class Operator(BaseModel):
     #: and MCP never do. Off means the call came with a token: it follows the
     #: agent rule, so only ``safe`` operations run at once.
     web_session: bool = False
+    #: The MCP tool profile the client named with ``?profile=`` (#4172),
+    #: or ``None`` for the full tool list. Only the MCP route sets it, from
+    #: the URL; see :mod:`meho_backplane.mcp.profiles`. It only hides
+    #: tools. It gives no right and takes no right from the person.
+    mcp_tool_profile: str | None = None
 
     @property
     def may_self_approve(self) -> bool:
         """Return ``True`` when this person may approve their own change.
 
         The one place the approval checks ask (#3328). True only for a
-        person (``principal_kind=user``) with :attr:`self_approver` set
-        in a chosen current tenant. A machine login (agent, service,
-        runner) always gets ``False``, even when its token carries the
-        group: agents never approve (#3325). A status answer without a
-        chosen tenant (:attr:`tenant_chosen` is ``False``) gets ``False``
-        too. The answer is the same for every risk level that waits for
-        approval. There are no per-system, per-connector or time-limited
+        person (``principal_kind=user``) in a chosen current tenant who
+        is in one of two groups there: MEHO-SA-Operators
+        (:attr:`self_approver`), or MEHO-Admins (the ``tenant_admin``
+        role, #5969). A platform admin who works in a tenant without a
+        role group there has the ``tenant_admin`` role
+        (:attr:`role_from_platform_admin`), so they count as an admin.
+        A machine login (agent, service, runner) always gets ``False``,
+        even when its token carries the group or the role: agents never
+        approve (#3325). A status answer without a chosen tenant
+        (:attr:`tenant_chosen` is ``False``) gets ``False`` too. The
+        answer is the same for every risk level that waits for approval.
+        There are no per-system, per-connector or time-limited
         exceptions.
         """
-        return self.self_approver and self.tenant_chosen and is_human_principal(self)
+        in_a_self_approval_group = self.self_approver or self.tenant_role == TenantRole.TENANT_ADMIN
+        return in_a_self_approval_group and self.tenant_chosen and is_human_principal(self)
 
 
 #: Machine (non-human) principal kinds. A human operator authenticates as

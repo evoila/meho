@@ -227,6 +227,7 @@ def isolated_registry() -> Iterator[None]:
         scheduler,
         sensors,
         targets_register,
+        targets_update,
         topology,
         topology_bulk_import,
         topology_create_node,
@@ -333,6 +334,8 @@ def isolated_registry() -> Iterator[None]:
     # unregistered in any test file that imports this fixture after the first
     # one runs in the process.
     importlib.reload(targets_register)
+    # The target change tool (``meho_targets_update``) has its own module too.
+    importlib.reload(targets_update)
     # G12.2-T4 (#1298): the runbook template MCP tools
     # (``meho_runbook_*_template`` x 6) join the reload list for the same
     # reason every other tool module does -- the autouse

@@ -48,7 +48,6 @@ import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -123,7 +122,7 @@ _RESOLVE_OPERATOR = "meho_backplane.ui.routes.approvals.routes._resolve_operator
 
 #: The route-module symbol the approve handler calls after committing the
 #: decision; mocked so the test does not drive the live dispatcher.
-_RESUME_DISPATCH = "meho_backplane.ui.routes.approvals.routes.resume_dispatch_after_approval"
+_RESUME_DISPATCH = "meho_backplane.operations.approval_queue.resume_dispatch_after_approval"
 
 
 # ---------------------------------------------------------------------------
@@ -345,9 +344,9 @@ def _operator(
     )
 
 
-def _dispatch_result() -> SimpleNamespace:
-    """A minimal stand-in for the dispatcher result the approve path logs."""
-    return SimpleNamespace(status="ok", op_id="vsphere.vm.create", result={}, error=None)
+def _dispatch_result() -> dict[str, object]:
+    """A minimal stand-in for the result of the approved run (its JSON form)."""
+    return {"status": "ok", "op_id": "vsphere.vm.create", "result": {}, "error": None}
 
 
 # ---------------------------------------------------------------------------
@@ -2902,12 +2901,12 @@ def test_approve_refused_by_release_change_says_nothing_ran() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    refused = SimpleNamespace(
-        status="denied",
-        op_id="vsphere.vm.create",
-        audit_id=uuid.UUID(_RUN_AUDIT_ID),
-        extras={"error_code": "release_changed_while_waiting"},
-    )
+    refused = {
+        "status": "denied",
+        "op_id": "vsphere.vm.create",
+        "audit_id": _RUN_AUDIT_ID,
+        "extras": {"error_code": "release_changed_while_waiting"},
+    }
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -2979,12 +2978,12 @@ def test_approve_refused_by_target_gone_says_nothing_ran() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    refused = SimpleNamespace(
-        status="denied",
-        op_id="vsphere.vm.create",
-        audit_id=uuid.UUID(_RUN_AUDIT_ID),
-        extras={"error_code": "target_gone_since_approval"},
-    )
+    refused = {
+        "status": "denied",
+        "op_id": "vsphere.vm.create",
+        "audit_id": _RUN_AUDIT_ID,
+        "extras": {"error_code": "target_gone_since_approval"},
+    }
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -3018,12 +3017,12 @@ def test_approve_whose_run_fails_shows_a_failed_card() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    failed = SimpleNamespace(
-        status="error",
-        op_id="vsphere.vm.create",
-        audit_id=uuid.UUID(_RUN_AUDIT_ID),
-        extras={"error_code": "connector_vault_forbidden"},
-    )
+    failed = {
+        "status": "error",
+        "op_id": "vsphere.vm.create",
+        "audit_id": _RUN_AUDIT_ID,
+        "extras": {"error_code": "connector_vault_forbidden"},
+    }
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -3248,13 +3247,13 @@ def test_approve_card_shows_the_next_step_of_a_failed_run() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    failed = SimpleNamespace(
-        status="error",
-        op_id=_CDROM_OP_ID,
-        audit_id=uuid.UUID(_RUN_AUDIT_ID),
-        extras={"error_code": "result_unknown"},
-        result=_RESULT_UNKNOWN_ENVELOPE["result"],
-    )
+    failed = {
+        "status": "error",
+        "op_id": _CDROM_OP_ID,
+        "audit_id": _RUN_AUDIT_ID,
+        "extras": {"error_code": "result_unknown"},
+        "result": _RESULT_UNKNOWN_ENVELOPE["result"],
+    }
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -3582,16 +3581,16 @@ def test_approve_whose_outcome_is_unknown_shows_an_uncertain_card() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
     csrf = _csrf_token(session_id)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-    uncertain = SimpleNamespace(
-        status="error",
-        op_id="vsphere.vm.create",
-        audit_id=None,
-        extras={
+    uncertain = {
+        "status": "error",
+        "op_id": "vsphere.vm.create",
+        "audit_id": None,
+        "extras": {
             "error_code": "audit_commit_failed",
             "execution_outcome": "uncertain",
             "retry": False,
         },
-    )
+    }
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)

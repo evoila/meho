@@ -40,6 +40,7 @@ spec:
         flight_recorder: { enabled: true, retention_days: 14, agent_readable: null }
         mail_recipient_allowlist: "@example.com"
         run_approval_target_kinds: false
+        knowledge_wiki_collection: null
       conventions:
         - slug: change-window
           title: Change window
@@ -84,8 +85,11 @@ spec:
   `announce_gate_enabled`, `flight_recorder.{enabled, retention_days,
   agent_readable}`, `mail_recipient_allowlist`,
   `run_approval_target_kinds` (a run approval may list a target kind; see
-  [run-approvals.md](run-approvals.md)). `null` means "use the
-  instance default" (`false` for the switches, inherit for the others).
+  [run-approvals.md](run-approvals.md)), `knowledge_wiki_collection`
+  (the docs collection of the tenant's own wiki, at most 128 characters;
+  an empty value is `null`; see [kb.md](kb.md#wiki-search-5976)).
+  `null` means "use the instance default" (`false` for the switches,
+  inherit or none for the others).
   `policies: null` resets all of them.
 - `conventions[]` — keyed by `slug`. `title` and `kind` are needed when the
   convention is new. `kind` cannot change on import, the same as on
@@ -118,7 +122,7 @@ spec:
 The schema refuses unknown keys, so none of these can be added by hand; the
 secret check and the CI check (below) catch secret-shaped values anywhere.
 
-- The 17 settings that carry secrets: `DATABASE_URL`,
+- The 18 settings that carry secrets: `DATABASE_URL`,
   `BROADCAST_REDIS_PASSWORD`, `RESULT_CACHE_REDIS_PASSWORD`,
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `KEYCLOAK_ADMIN_CLIENT_SECRET`, `UI_KEYCLOAK_CLIENT_SECRET`,
@@ -126,7 +130,8 @@ secret check and the CI check (below) catch secret-shaped values anywhere.
   `PARAMS_HASH_KEY`,
   `CHECK_RUNNER_CLIENT_SECRET`, `VAULT_SCHEDULER_TOKEN`,
   `SATELLITE_WRITE_SIGNING_KEY`, `VCF_PAIF_OIDC_CLIENT_SECRET`,
-  `MAIL_SMTP_PASSWORD`, `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`.
+  `MAIL_SMTP_PASSWORD`, `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`,
+  `WEB_PUSH_VAPID_PRIVATE_KEY`.
 - Every generated `<release>-core-*` Kubernetes Secret (#4041, #4043, #4044).
 - The OpenBao unseal key and root token.
 - The TLS private key and the certificate chain. The certificate is a
@@ -289,6 +294,14 @@ body and writes nothing. Otherwise it adds or updates, never deletes:
 - `diff` in the answer is what actually changed; `revision_id` is the new
   revision.
 - An unchanged file gives an empty diff and writes no revision.
+
+### `POST /api/v1/settings/conventions-drift`
+
+The drift check for the team rules. Body: a settings file with one tenant
+block that holds only `conventions`, each of kind `operational`. The answer
+says what differs from the tenant's operational conventions. It writes
+nothing. The details, the login and the call the CI job makes are in
+[tenant_conventions.md](tenant_conventions.md#drift-check-against-the-team-rules).
 
 ### `GET /api/v1/settings/history?limit=50`
 

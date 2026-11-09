@@ -119,6 +119,11 @@ Detail payloads land in ``extras``. Codes:
   target (:func:`descriptor_requires_target`, which includes every
   ``ingested`` op) is checked right after the descriptor lookup, before
   the policy gate, so it never surfaces as ``no_connector``.
+* ``target_connector_mismatch`` -- a typed/composite op whose handler is
+  a connector method, called on a target whose connector does not have
+  that method (a linux op on an rke2 target). Refused right after the
+  target check, before the policy gate and any wait for approval, with
+  one audit row (#5948, :mod:`~meho_backplane.operations._target_connector_match`).
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -286,7 +291,10 @@ from meho_backplane.connectors import (
     resolve_connector_or_label,
     resolve_target_version,
 )
-from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
+from meho_backplane.connectors._shared.vault_creds import (
+    SecretRefReadError,
+    TargetSecretNotFoundError,
+)
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
@@ -345,6 +353,7 @@ from meho_backplane.operations._errors import (
     result_write_capability_denied,
     wrap_ok_result,
 )
+from meho_backplane.operations._errors_target_secret import result_target_secret_not_found
 from meho_backplane.operations._handler_resolve import (
     forget_target_if_changed,
     get_or_create_connector_instance,
@@ -390,6 +399,7 @@ from meho_backplane.operations._secret_values import (
     reveal_hidden_values,
     split_reveal_secret,
 )
+from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -1929,6 +1939,22 @@ async def _run_branch_with_error_handling(
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
             result_vault_credentials_read_error(op_id, ref_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    except TargetSecretNotFoundError as missing_exc:
+        # Vault has no secret at the target's own secret_ref. Name the target,
+        # the ref and the fix, never the hvac text.
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_target_secret_not_found(
+                op_id, missing_exc, tenant_id=operator.tenant_id, duration_ms=duration_ms
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -3735,6 +3761,18 @@ async def _dispatch_now(
     # before the catalog guard, the policy gate or a wait for approval.
     if target is None and descriptor_requires_target(descriptor):
         return result_target_required(op_id, _elapsed_ms(started))
+    # #5948: a connector-bound op whose handler the target's connector does
+    # not have (a linux op on an rke2 target) cannot run. Refused here, before
+    # the policy gate and any wait for approval, with its own audit row.
+    mismatch = await refuse_target_connector_mismatch(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if mismatch is not None:
+        return mismatch
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility

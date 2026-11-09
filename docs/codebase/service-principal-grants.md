@@ -90,9 +90,12 @@ When a `SERVICE` op would park, the gate consults a live standing grant
 matched — the dispatcher and the composite sub-op gate both pass it; the
 gateway path is safe-only and never needs it). A match auto-approves the
 op and records the use; absent a match, the op parks for a human decision.
-Two ops are refused **before** any grant lookup, so even a stale grant
+Three kinds of op are refused **before** any grant lookup, so even a stale grant
 row cannot auto-approve them: the `destructive` tier (the tier always
-parks for a human) and an op with a parameter marked
+parks for a human), an op that reads a credential (`classify_op` says
+`credential_read`; grant create refuses it with "A standing grant cannot
+cover OP: it shows a secret, so a person always approves it", and a wider
+grant never clears its wait; `credential_read_grant_reason`), and an op with a parameter marked
 `x-meho-caller-address: true` (it connects to an address the caller
 gives; a grant never covers the address, so a person approves each call,
 and grant create refuses such a grant — `caller_address_grant_reason`).

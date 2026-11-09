@@ -603,8 +603,7 @@ func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
 }
 
 // TestErrOpErrorIsSentinel — verifies the sentinel exists + is
-// distinct, so callers (and main) can switch on it. Mirrors the
-// retrieval sibling's errEvalGate test.
+// distinct, so callers (and main) can switch on it.
 func TestErrOpErrorIsSentinel(t *testing.T) {
 	if errOpError == nil {
 		t.Fatalf("errOpError should be a non-nil sentinel")

@@ -449,7 +449,7 @@ def test_only_the_approval_result_read_still_writes_legacy_rows() -> None:
     assert _legacy_constant_writers() == ["operations/approval_queue.py"]
 
 
-_USAGE_READERS = ("compute_usage", "compute_retire_checklist", "compute_reflex_report")
+_USAGE_READERS = ("compute_usage", "compute_reflex_report")
 
 
 def test_report_routes_read_request_usage_events() -> None:

@@ -64,6 +64,7 @@ import structlog
 
 from meho_backplane.audit import _resolve_audit_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
@@ -227,8 +228,8 @@ async def write_mcp_audit_row(
     # ``AuditEntry`` row. Use ``setdefault`` so a caller that explicitly
     # bound a different ``principal_name`` via the ``audit_*`` contextvar
     # convention (e.g. a future delegation-aware path) wins on collision.
-    if operator.name is not None:
-        payload.setdefault("principal_name", operator.name)
+    # The name itself is set inside the session below: an agent token has
+    # no ``name`` claim, so it is looked up there (#3885).
     if operator.email is not None:
         payload.setdefault("principal_email", operator.email)
 
@@ -275,6 +276,9 @@ async def write_mcp_audit_row(
     note_request_status(status_code)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
+        principal_name = await principal_display_name(session, operator)
+        if principal_name is not None:
+            payload.setdefault("principal_name", principal_name)
         row = AuditLog(
             id=audit_id,
             event_class=event_class,

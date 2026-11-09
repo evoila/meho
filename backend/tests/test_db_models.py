@@ -359,6 +359,7 @@ def test_migration_installs_tenant_table_and_indexes(
                 "mail_recipient_allowlist",  # #3499 per-tenant mail recipient allowlist
                 "agent_model_prices",  # #5853 per-tenant prices of unknown agent models
                 "run_approval_target_kinds_enabled",  # #4126 target kinds in run approvals
+                "knowledge_wiki_collection",  # #5976 docs collection of the team wiki
             }
 
             audit_columns = {col["name"] for col in inspector.get_columns("audit_log")}

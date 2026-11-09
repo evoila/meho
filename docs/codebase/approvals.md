@@ -322,6 +322,13 @@ Two kinds of rows carry a keyed hash of a call's params:
     (`POST /api/v1/approvals/{id}/rerun`) then needs the params sent
     again, as for a credential write; the stored copy with markers never
     runs (`_stored_call` treats it as not stored).
+    A marker the requester sent as a value is different (#6064). Example:
+    an object read from MEHO and passed back unchanged, like the
+    `expected_before` of a FortiGate interface update. Such params still
+    match `params_hash`, because the hash covers the marker too, so the
+    approved run uses them as sent (`_stored_params_can_run`). Stored
+    params with a marker that do not match the hash are the ones MEHO
+    hid; they never run.
   - For a `credential_write` operation they are not on the request row.
     They are encrypted in `approval_execution_payload` instead (see
     "Credential-write execution custody" below).
@@ -605,19 +612,52 @@ the stable, machine-truthful key. This is the first slice of Initiative
 `sub` → name join table (the agent / runner principal tables key on the
 Keycloak client id, not the token `sub`; see
 `meho_backplane.ui.references`), so the name cannot be resolved after the
-fact. Migration `0097` adds two nullable `approval_request` columns:
+fact from the `sub` alone. Migration `0097` adds two nullable
+`approval_request` columns:
 
 - `principal_name` — the requester's name, set in
-  `create_pending_request` from the parking `Operator.name`.
+  `create_pending_request`.
 - `reviewed_by_name` — the approver's name, set in `approve_request` /
   `reject_request` from the deciding `Operator.name`.
 
-Both come from the JWT `name` claim — the same hoist-at-write pattern
-`audit_log.principal_name` uses (#1212). The approval audit rows
-(`_write_audit_row`) carry the same `payload['principal_name']` so the
-name-aware audit views resolve the row's `operator_sub` too, and the
-`/decide` response gains an additive `decided_by_name` beside
-`decided_by`.
+This is the same hoist-at-write pattern `audit_log.principal_name` uses
+(#1212). The approval audit rows (`_write_audit_row`) carry the same
+`payload['principal_name']` so the name-aware audit views resolve the
+row's `operator_sub` too, and the `/decide` response gains an additive
+`decided_by_name` beside `decided_by`.
+
+**Where the requester's name comes from (#3885).** An agent's token
+(`client_credentials`) has no `name` claim. But at write time MEHO has
+the token's client id (`Operator.client_id`), and a registered agent is
+found by it. So one helper,
+`meho_backplane.auth.display_name.principal_display_name`, picks the
+name in this order:
+
+1. The token's `name` claim. A person's name always wins.
+2. For an agent token: the registered agent's name
+   (`AgentPrincipal.name`), found by `keycloak_client_id ==
+   Operator.client_id` in the caller's tenant. A revoked agent still
+   counts.
+3. For any machine token (agent, service, runner): the client id itself,
+   for example `agent:<name>`.
+
+No name in any step: nothing is stored, as before. Every place that
+stores the caller's name calls this helper: the approval request and its
+audit rows, the operation run and refusal rows (`write_audit_row`), the
+MCP tool rows (`write_mcp_audit_row`) and the tool rows of MEHO's own
+agent runs (`write_agent_tool_row`).
+
+**Machine requesters are marked (#3885).** Migration `0149` adds
+`approval_request.principal_kind` (nullable text): the requester's
+`principal_kind` (`user` / `agent` / `service` / `runner`), saved at park
+time. A composite step that waits again during a re-run keeps the kind of
+the original requester (`ResumeRequester.kind`). REST returns it as
+`ApprovalRequestView.principal_kind`. The console `subject(ref)` macro
+shows a badge with the kind next to a machine requester, and the CLI adds
+it in brackets: `show` prints `incident-triage (<sub>) [agent]`, and the
+`list` PRINCIPAL column puts it first (`[agent] incident-triage`) so a cut
+column still shows it. A person, or a request made before `0149`, gets no
+marker.
 
 **Fail-open contract.** Resolution can never fail or slow a decision: no
 identity provider is called; the surface reads a column already loaded on
@@ -778,7 +818,7 @@ model, or resume endpoint):
    raises `SelfApprovalForbiddenError` (→ HTTP 403 `self_approval_forbidden`
    on REST; the console shows the plain text) when `operator.sub ==
    request.principal_sub` and none of the self-approval rules below
-   allows it. The person is not a MEHO-SA-Operator, the change did not
+   allows it. The person is not a MEHO-SA-Operator or a MEHO-Admin, the change did not
    wait only because it came with a token, and the audited **emergency
    break-glass** switch `APPROVAL_ALLOW_SELF_APPROVAL=true`
    (`Settings.approval_allow_self_approval`, default `False` =
@@ -798,8 +838,8 @@ model, or resume endpoint):
    **Who may approve, by group (#3328).** `_check_approver_group`
    (`approval_queue.py`) decides, after the role check. The rules come
    from [the decision record](../decisions/approval-groups-and-self-approval.md):
-   - A MEHO-SA-Operator (`Operator.may_self_approve`) may approve their
-     own change at every risk level. Everyone else gets
+   - A MEHO-SA-Operator or a MEHO-Admin (`Operator.may_self_approve`)
+     may approve their own change at every risk level. Everyone else gets
      `SelfApprovalForbiddenError` for their own change, unless break-glass
      covers it (`safe` and `caution` only).
    - Another person's `dangerous` or `destructive` change may be approved
@@ -880,8 +920,8 @@ request field, header or command-line flag can set it.
 | Group | Their own change | Another person's `safe` or `caution` change (also one marked `requires_approval`) | Another person's `dangerous` or `destructive` change |
 |---|---|---|---|
 | MEHO-SA-Operators | yes, at every risk level, on purpose | yes | yes |
-| MEHO-Admins | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | yes |
-| MEHO-Operators | the same as MEHO-Admins | yes | no |
+| MEHO-Admins | yes, at every risk level, on purpose | yes | yes |
+| MEHO-Operators | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | no |
 | MEHO-Approvers | (they cannot run changes) | yes | no |
 | MEHO-Readers | (they cannot run changes) | no | no |
 
@@ -923,6 +963,76 @@ self-approval (`self_approved`), which rule allowed it (`approval_rule`)
 and how the person proved they were present (`approval_auth`: channel
 `web` or `rest`, method `fresh_sign_in` or `one_time_code`).
 
+## Changes of rights: the login is never its own approver
+
+`operations/grant_approval.py` checks the Keycloak writes that change who
+has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign` and
+`keycloak.group.update_attributes`. The connector registers them
+(`connectors/keycloak/ops_write_grant.py`) and adds a `grant` block to the
+preview of the waiting request:
+
+- `user_id`: the login the change is for. A user name is resolved to its
+  id when the request is parked.
+- `group_id`: the group the change is for, resolved the way the handler
+  resolves it. An id in the params wins; without one, the name is looked
+  up on its level (`parent_id`). So a request cannot name one group and
+  point at another by id.
+- `login_realm`: the target manages a realm of MEHO's own login, see
+  `_backplane_login_realms()`.
+- `platform_admin`: the group the handler will change is the platform
+  admin group, or the roles include the platform admin role.
+- `members`: for a group attribute change in the login realm, the ids of
+  the logins in the group (up to 1000, read page by page). `None` when
+  they could not be read, when Keycloak answers with something that is
+  not a list (an error object, `null`), or when the group has more.
+
+A value that could not be read is `None`, never a guess.
+
+`approve_request` and `approve_right` call `check_grant_approval` before
+the group rule. It refuses with `ApprovalRoleFloorError` (403):
+
+- when the login or the group the change is for is unknown (the lookup
+  failed when the request was parked). Nobody can approve such a request;
+  the requester sends a new one;
+- when the login the change is for is the approver, in every group and for
+  every risk level. A second login of the same person is another login, so
+  it is another approver in this check;
+- for a group attribute change in the login realm, when the approver is in
+  the group, or when MEHO could not read who is in the group;
+- in the login realm, when the approver is the requester, even for a
+  MEHO-SA-Operator;
+- in the login realm, when the approver is not a tenant admin (not a
+  platform admin for the platform admin group or role).
+
+A request without the `grant` block, or with a group MEHO could not read,
+gets the strict rule. The decision audit row carries `grant_user_id`,
+`grant_group_id` (when the change names a group), `grant_for_approver`,
+`grant_in_login_realm` and, when the request named one, `grant_username`.
+MEHO does not link two logins of one person.
+
+**The run is bound to the ids the approver saw.** The handlers resolve a
+user name or a group name again when the change runs. A name can move to
+another account or group while the request waits. So right before every
+approved run, `grant_changed_since_request` builds the card again against
+the live system and compares `user_id` and `group_id` with the stored
+ones. A changed id, or one that cannot be read, refuses the run with the
+`object_changed_since_approval` error code. The check runs for every
+change of rights, also without a preview hash, in the shared resume check
+`refuse_resume_if_preview_changed` (the approve surfaces and the agent's
+own resume) and in the re-run after a failure (`approval_rerun`).
+
+**The run is also bound to the facts that decided who may approve.** The
+same check refuses the run:
+
+- for a group attribute change in the login realm, when the approver
+  (`reviewed_by`) is in the group now. A person can join the group after
+  the request was made, so the saved member list is not enough. When the
+  live member list cannot be read, or no approver is recorded, the run is
+  refused too;
+- when the change now needs a stricter approval than the one it got: the
+  live card says login realm or platform admin where the saved one said
+  no, or cannot say which it is.
+
 ## The "may I approve this?" answer (#3329)
 
 People see, for each request, whether they may approve it and why not.
@@ -937,7 +1047,7 @@ interface only show it.
   approved (`not_pending`), the group rule of #3328 (`own_change`,
   `wrong_group`), and the role floor of the operation (`role_too_low`).
   Otherwise the answer is `ok`. For an own change that a
-  MEHO-SA-Operator (or break-glass) may approve, the answer is yes with
+  MEHO-SA-Operator, a MEHO-Admin (or break-glass) may approve, the answer is yes with
   `own_change`. So is a web click on an own `caution` change that
   waited only because it came with a token (#3980): the web interface
   says yes, the command line and REST say no. It does not check what can change before the click: the
@@ -1160,10 +1270,13 @@ approve it is the operator. Since #3328 the main answer is the
    [The approval groups and how a person approves](#the-approval-groups-and-how-a-person-approves-3325)).
 
 This works at every risk level, also for `dangerous` and `destructive`
-changes. A MEHO-Admin is not a MEHO-SA-Operator: a person is in exactly
-one role group per tenant, so a single admin cannot approve their own
-`dangerous` or `destructive` change. Give the single operator the
-MEHO-SA-Operators group for their daily changes.
+changes. A MEHO-Admin is not a MEHO-SA-Operator (a person is in exactly
+one role group per tenant), but `Operator.may_self_approve` is also true
+for the `tenant_admin` role. So a single admin may approve their own
+change in the same way, and the row records the same rule
+`sa_operator_self_approval`. A site that wants a second person for an
+admin's risky changes keeps the admins out of risky work and gives the
+people who run changes the MEHO-Operators group.
 
 The break-glass switch `APPROVAL_ALLOW_SELF_APPROVAL` is still an
 **emergency** escape, not the everyday answer. Flipping it posture-wide
@@ -1224,7 +1337,7 @@ and it is the difference between the two agent-run entry points in
 
 | Identity shape | How it parks | `principal_sub` | `principal_act` | Approve by the human op |
 |---|---|---|---|---|
-| Direct human op | human dispatches a write that waits, as `USER` | the human's `sub` | `NULL` | **Clears only for a MEHO-SA-Operator** (or a token `caution` change approved with a web click, or break-glass for `safe` / `caution`); else blocked — `requester == approver` |
+| Direct human op | human dispatches a write that waits, as `USER` | the human's `sub` | `NULL` | **Clears only for a MEHO-SA-Operator or a MEHO-Admin** (or a token `caution` change approved with a web click, or break-glass for `safe` / `caution`); else blocked — `requester == approver` |
 | Human-initiated delegated agent run (`run`) | human launches an agent; agent binds as RFC 8693 *actor* | the human's `sub` | the agent's `sub` | Same as a direct human op — RFC 8693 subject is the human; `requester == approver` |
 | Autonomous / scheduled agent run (`run_scheduled`) | agent authenticates as itself; **no** delegation bound | the agent's `sub` | `NULL` | **Clears** under the group rules for another person's change — distinct `sub`, no break-glass, full audit lineage |
 
@@ -1254,7 +1367,7 @@ and it is the difference between the two agent-run entry points in
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `approve` returns `self_approval_forbidden` and you are the tenant's only operator | The write was parked under **your own** `sub` — a direct human op, or a human-initiated delegated agent run (where RFC 8693 keeps you the subject) — and you are not in MEHO-SA-Operators. | Put yourself in **MEHO-SA-Operators** (the change applies at your next login), then approve with a click in the web interface. Or re-park the write under an **agent-requester** (the four-step recipe above). Reserve `APPROVAL_ALLOW_SELF_APPROVAL` for genuine emergencies; it re-opens the #1401 single-account hole posture-wide for `safe` and `caution`. |
+| `approve` returns `self_approval_forbidden` and you are the tenant's only operator | The write was parked under **your own** `sub` — a direct human op, or a human-initiated delegated agent run (where RFC 8693 keeps you the subject) — and you are not in MEHO-SA-Operators or MEHO-Admins. | Put yourself in **MEHO-SA-Operators** (the change applies at your next login), then approve with a click in the web interface. Or re-park the write under an **agent-requester** (the four-step recipe above). Reserve `APPROVAL_ALLOW_SELF_APPROVAL` for genuine emergencies; it re-opens the single-account hole posture-wide for `safe` and `caution`. |
 
 ### Operator-facing discoverability of this story (#2669)
 
@@ -1347,11 +1460,17 @@ So the op runs at most once.
 the same row hits the already-decided guard (409 / `not_pending`), so the
 stored params drive exactly one execution.
 
-**Pre-0036 rows.** A row parked before migration 0036 has `params IS
-NULL`. Approving it via `/decide` (no in-band params) finds nothing
-to re-dispatch, so `resume_dispatch_after_approval` **fails closed** with
-a structured `denied` result naming the gap — the operator resumes it via
-REST `/approve` + params, exactly as before 0036.
+**No params to run with.** A surface that sends no params (`/decide`,
+the console, MCP by-id approve) runs the params stored on the row. When
+the row holds none MEHO can run with (a row parked before migration 0036
+has `params IS NULL`; params whose secret values MEHO already hid), the
+operation does not run. `resume_dispatch_after_approval` records the
+refusal like the release and target refusals (`_refuse_resume`, #6064):
+the claim is taken, one audit row is written
+(`result_status = "approval_resume_params_unavailable"`), and the refusal
+is stored as the run result. The request shows `result_state = "failed"`
+with that reason on every surface. The requester can then re-run it and
+send the params (`POST /api/v1/approvals/{id}/rerun`).
 
 ## Run an approved request again after its run failed (#5417)
 
@@ -2182,6 +2301,7 @@ later, each with its own builder
 | `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `labels` and `annotations` maps, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
 | `k8s.secret.update` | every call | name, namespace, `mode`, the key names that are set, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts, the key names the Secret has now, in `replace` mode the key names that are removed | any value |
 | `k8s.job.create` | every call | name, namespace and the whole Job `spec` as it will be created: Job settings (`backoffLimit`, ...), node choice (`nodeName`, `nodeSelector`, `tolerations`, `affinity`), `hostPID` / `hostNetwork` / `hostIPC`, service account, pod and container `securityContext`, image, `command`, `args`, `volumes`, `volumeMounts`, env var names, `envFrom` and `valueFrom` references (Secret or ConfigMap name and key) | every inline `env` value and probe `httpHeaders` value (the name stays); on `command` and `args`, read as one command line: the value of a `NAME=VALUE` or `--name=value` whose name holds a secret word (`PGPASSWORD=...`, `--password=...`, any length), the argument after a secret flag (`--password x`, `-p x`; also across the end of `command`), the password in `user:password` after `-u` / `--user`, the password in a URL, tokens with a known vendor prefix (`ghp_...`). A list item is one argument of the program, so such a value runs to the end of the item, spaces and shell operators included (`PGPASSWORD=x;tail` is hidden whole); only in the item after `-c` (alone or in a short option group such as `-ec` or `-lc`), a shell command string, is the value one shell word, quotes and escapes included, and an unquoted shell operator such as `;` or `&&` ends it, so the commands after it stay visible; secret-shaped text anywhere in the spec (JWTs, bearer tokens); the value of a field with a secret-shaped name (a `secret` volume, `imagePullSecrets`). A secret on a command line with no known shape is shown. |
+| `linux.script.run` | every call | target, interpreter, the script text with its size and SHA-256, the reviewed copy (`script_ref`) and whether the script matches `expected_sha256`, argument byte size, env var names, the `secret_env` references (`path#field`), working directory, `use_sudo`, timeout ([`connectors-linux.md`](connectors-linux.md)) | the argument values and env values; in the script text, values that look like secrets, with the command-line rules of `k8s.job.create` and two changes: `-p` hides its value only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are; and a password glued to `-u` (`curl -uuser:password`) is hidden too (then the SHA-256 is left out too) |
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
@@ -2463,13 +2583,13 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
   secret-version soft-delete) while still being the four-eyes-critical
   action the requirement protects, so #3290 widened the refusal to cover
   it; `caution` / `safe` still honour break-glass. Since #3328 the
-  group rules decide the rest: a MEHO-SA-Operator may approve their own
+  group rules decide the rest: a MEHO-SA-Operator or a MEHO-Admin may approve their own
   `dangerous` or `destructive` change (`approval_rule`
   `sa_operator_self_approval`), and another person's change at these
   levels needs a MEHO-SA-Operator or a tenant admin (see
   [Who may approve, by group](#the-approval-groups-and-how-a-person-approves-3325)).
-  A single-operator tenant puts its operator in MEHO-SA-Operators, or
-  uses the agent-requester pattern.
+  A single-operator tenant puts its operator in MEHO-SA-Operators or
+  MEHO-Admins, or uses the agent-requester pattern.
 - **Registration fail-fast.** `_register_in_session` (`operations/typed_register.py`)
   now rejects a `destructive` descriptor declared `requires_approval=False`
   at registration time — an inconsistent row can't exist. Belt-and-suspenders
@@ -2478,7 +2598,7 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
 Conformance for the op — an agent's request waits for a person like any
 other destructive request (agent verdict `NEEDS_APPROVAL`, #3980), no standing
 grant (`ServicePrincipalGrant` refuses), no break-glass self-approval
-(only a MEHO-SA-Operator may approve their own), no satellite mint
+(only a MEHO-SA-Operator or a MEHO-Admin may approve their own), no satellite mint
 (`MintRefusalCode.OP_NOT_SAFE`), dispatch
 refused without a matching hash, park refused without a blast-radius block,
 and the full preview→park→human-approve→audited-resume flow — is pinned in
@@ -3016,6 +3136,36 @@ set**, so the steps of one change ticket read in the order they were sent.
 change ticket oldest first and stops at the first step that fails (#3597,
 see "Approve a change ticket's requests in order" below).
 
+`approve <id>` answers at once (#5110, `approve_wait.go`). It sends
+`/decide` with `"async": true`: MEHO saves the decision, starts the
+operation in the background and answers HTTP 202 with the run id. The CLI
+then reads the request once and prints its state, the `Run:` line
+(`started` while it runs) and "Approved. The operation is running. Check
+it with `meho approvals show <id>`." With `--wait` it reads
+`GET /api/v1/approvals/{id}` every 3 seconds until `result_state` is
+`executed`, `failed` or `uncertain`, and then prints the run lines as
+before. The "outcome unknown" list does not end the wait: a run longer
+than that age limit is still waited for. When the CLI cannot check the
+run, it prints once that the run takes longer than usual and that Ctrl-C
+stops the wait (the run goes on). Each read is a
+short call, so a proxy time limit cannot cut the wait; up to 5 failed
+reads in a row are tried again. When the person may read runs (operator
+role), each read also checks the run (`GET /api/v1/operations/runs/{id}`):
+a run that ended without storing a result on the request ends the wait
+with "The run ended, but MEHO stored no result." A run that only found
+that another caller runs the operation (`succeeded` with result status
+`already_resumed`) does not end the wait: the CLI stops reading that run
+and waits on the request alone. `--json` prints the
+request view (`ApprovalRequestView`) after the approve, or with `--wait`
+after the run ended. When the answer to `/decide` is lost on the network
+(a transport error, not an HTTP answer), the CLI reads the request again:
+when it is no longer pending it prints that state after "The answer to
+this call was lost on the network.", else the `unreachable` error as
+before. A MEHO from before #5110 refuses the unknown `async` field with
+422 before it saves anything; the CLI then approves again without it.
+`reject`, `approve <id> <id> ...` and `--in-order` do not send `async`:
+`--in-order` needs each run's result before the next step.
+
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 
 A session-BFF surface (cookie session + CSRF double-submit, not the
@@ -3056,11 +3206,71 @@ no new gate, service call, route, or migration.
 | `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All, plus an "Outcome unknown" tab, #5026), a `work_ref` filter, an oldest/newest toggle (`order`, #3596), and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the pending **panel** modal fragment, oldest first with step numbers when a change ticket has two or more pending requests (#3596). (G10.8-T #1827) |
 | `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / oldest-newest toggle / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…, order=…)`; `tab=all` passes `status=None`. `order` is `oldest`, `newest`, or empty (the default rule in "Chains of requests under one change ticket" below); any other value is a 422. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
 | `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
-| `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + the fail-open `approval.approved` add-on step event. Needs a recent console sign-in that asked for the credentials (the fresh approval sign-in rule above); otherwise the modal re-renders with the sign-in link. |
+| `POST` | `/ui/approvals/{id}/approve` | Approve in-process + start the parked op in the background + the fail-open `approval.approved` add-on step event. Answers within about a second, however long the op runs (#5110, below). Needs a recent console sign-in that asked for the credentials (the fresh approval sign-in rule above); otherwise the modal re-renders with the sign-in link. |
+| `GET` | `/ui/approvals/{id}/run` | The run part of the outcome card, as it is now (#5110). Asks again every 3 seconds while the run goes on. |
+| `GET` | `/ui/approvals/{id}/row` | One row of the history list, as it is now (#5110). Asks again every 3 seconds while the run goes on. |
+| `GET` | `/ui/runs/notices?run_id=` | The "the run has ended" notices for up to 20 runs this person started (#5110, below). |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + the `approval.rejected` add-on step event; the op never runs. |
 | `GET` | `/ui/approvals/in-order?work_ref=` | The "Approve group in order" modal: the change ticket's requests oldest first and a Start button (#3597). |
 | `POST` | `/ui/approvals/in-order` | Runs the steps in order (form: `work_ref`, `reason`, `confirm_id`, one `step_id` per step shown); renders what happened to each step (#3597). Approves nothing when a pending request of the ticket is not among the posted `step_id`s. |
 | `POST` | `/ui/approvals/{id}/outcome-check` | "Mark as checked" in the modal of a request on the "Outcome unknown" tab (#5026): form `verdict` and `note`. Runs nothing; the modal shows the recorded check. |
+
+**Approve answers at once; the page follows the run (#5110).** Approving
+used to run the whole operation inside the web request, so the dialog
+stayed open, without progress, until the operation ended (a content
+library deploy can take hours), and a proxy could cut the request.
+`run_watch.start_approved_run` now starts the run with
+`OperationRunService.submit_approval_resume` — the same run claim, policy
+bypass and audit as before, so the operation still runs exactly once and
+writes its audit row — and waits at most `ANSWER_WAIT_SECONDS` (1 second).
+A quick run shows its result on the card at once. A longer one shows
+"Approved. The operation is running." with a spinner and says that closing
+the window is safe: closing never stops the run.
+
+`run_watch.live_run(request, run)` says where the run is. It reads the
+stored request and its latest background run (`operation_run` rows with
+`approval_request_id`), so it works on every MEHO server process:
+
+- A result stored on the request wins: `executed`, `failed` or `uncertain`,
+  with the summary and the audit link.
+- Else the background run decides: still going is `running`; ended with a
+  result is that result; ended without one (a crash, a server restart that
+  the reaper turned into `uncertain`, a cancel) is `ended_no_result` ("no
+  result: check it"). So nothing shows "running" forever.
+- When another caller (usually the waiting requester) runs the operation,
+  the request is `started` until its result is stored. Once the run is
+  older than the "outcome unknown" time
+  (`approval_outcome_unknown_after_minutes`), the asking stops and the
+  state is `started_no_result` ("Approved, but MEHO has no result", with
+  the advice to check the target). Only the age counts, so a request that
+  someone marked as checked does not start asking again.
+- A re-run (#5417) clears the stored result but makes no background run.
+  So a background run made before `rerun_started_at` belongs to an earlier
+  attempt and is left out: the re-run shows `started`, not the old
+  attempt's result.
+
+The card part (`_run_state.html`) and each list row (`_history_row.html`)
+carry `hx-get` + `hx-trigger="every 3s"` + `hx-swap="outerHTML"` while
+`polling` is true and drop them at a final state, the pattern of the
+connector import job card.
+
+**The "the run has ended" notice (#5110).** Not tied to approvals, so the
+operations page can use it too. A page marks a background run whose state
+is not final yet (`polling`) with `data-meho-watch-run="<run id>"`, also
+when another caller runs the operation.
+`static/src/app/run-notices.js` keeps those ids for the browser tab
+(sessionStorage, so they survive a move to another page) and, on the
+5-second `meho:approval-badge-poll` timer of `approvals-bell.js` (only
+while the page is visible), asks `GET /ui/runs/notices?run_id=...`
+(`ui/routes/run_notices.py`). The answer has one notice
+(`runs/_ended_notices.html`) per ended run, added to `#meho-run-notices`
+in the corner of every page (`base.html`). Each notice says how the run
+ended and, for an approval run, has a "View request" button that opens the
+request. The route reads all asked runs in one query. Only the person who started a run gets its notice: a run of
+another person or tenant, or an unknown id, gets a hidden marker, and the
+script stops asking for it. A final state shown in an open dialog carries
+`data-meho-run-seen`, so the notice does not repeat it. The Close button
+is handled in the script, not in the template.
 
 The console is **read-only over substrate that already exists** — it adds
 no new service call, no `api/v1` Bearer route, no CLI verb, and no
@@ -3259,6 +3469,56 @@ is read via `.get` on the real dict, so a missing key degrades cleanly
 under `StrictUndefined`. Template-only: no route, projection, or schema
 change (`render.project_request_to_view` already passes `proposed_effect`
 through verbatim).
+
+### The approvals page on a phone (#6000)
+
+The page works on a phone screen (about 390 px wide) and still looks the
+same on a laptop. It uses the existing Tailwind and DaisyUI classes, with
+the `sm:` width (640 px) as the switch point.
+
+- **Waiting for you first.** On the Pending tab, the requests the
+  signed-in person may approve come first, each with a "Waiting for you"
+  badge (`data-waiting-for-me` on the row). The check is
+  `approval_rights.approve_right`, the same one the modal and the approve
+  use. `ui/routes/approvals/waiting.py` (`WaitingFirstPager`) does the
+  split; each group keeps the order the database returned (a change
+  ticket's steps stay oldest first). The split runs over all pending
+  requests before the page is cut (`routes._list_pending_waiting_first`),
+  so a request waiting for you is on page one even behind hundreds of
+  newer ones, and "Load more" goes on in the same order. The route reads
+  the queue in batches of 500 (`_WAITING_SCAN_BATCH`), and the pager keeps
+  only the rows the page can need, so a long queue does not fill memory.
+  Each batch starts right after the last row of the batch before
+  (`list_pending(after=…)`, sorted by time and then request id), not at a
+  counted offset. So a request that someone decides during the scan does
+  not move the rest of the queue, and the scan skips no row. The other tabs do not check the person and keep their
+  order.
+- **The person check can fail.** The list pages are open with the session
+  alone. To know who may approve, the Pending tab also checks the
+  session's sign-in (`routes._operator_or_none`, the same check the modal
+  makes). When that check fails for any reason (a session that ended, a
+  tenant switched in another tab, the sign-in service not reachable), the
+  list shows its plain order with no badge, and logs
+  `ui_approvals_waiting_order_skipped`. It never shows the badge without a
+  real check.
+- **Rows.** Below `sm` a row stacks: the text wraps instead of being cut
+  (`[overflow-wrap:anywhere] sm:truncate`), so the person sees who asks
+  for what, and the Review / View button fills the row as a large touch
+  target. The status tabs wrap to a second line. The bell panel rows do
+  the same.
+- **Decision window.** The modal, the bell panel, the "decision recorded"
+  window and the in-order window open as a sheet from the bottom on a
+  phone (`modal-bottom sm:modal-middle`). In the request modal the
+  decision bar (Deny / Approve and their confirm steps,
+  `data-approval-decision-bar`) sticks to the bottom of the window while
+  the detail scrolls, so the buttons are in reach without scrolling, also
+  on a laptop for a long request. The reason field sits above the bar;
+  the confirm forms still read it by id (`hx-include`). On a phone the
+  two buttons are larger and share the row.
+
+The console has no browser test harness. `test_ui_approvals_phone_layout.py`
+pins the order and the markup; the look was checked in a real browser at
+390 px and 1366 px wide (no sideways scroll, decision buttons in view).
 
 ## Ordered and dependent approvals (#3598)
 
@@ -3848,7 +4108,7 @@ and `/preview`. Paths are under `backend/src/meho_backplane/`.
    lives on the row's `proposed_effect`. The add-on gets
    `status="awaiting_approval"` and `extras.approval_request_id`. It should
    store that id.
-4. **A human approves.** A MEHO-SA-Operator may approve their own delete.
+4. **A human approves.** A MEHO-SA-Operator or a MEHO-Admin may approve their own delete.
    Everyone else needs a MEHO-SA-Operator or a tenant admin to approve it,
    and break-glass never covers this tier
    (`operations/approval_queue.py` `_check_self_approval`,
@@ -3941,7 +4201,7 @@ by a service principal. The instance holds only disposable test systems,
 so nothing waits for a person there. Everything else in this document
 stays as it is: people and agents keep their rules, a run approval never
 covers a delete, satellites get no delete, and self-approval follows the
-group rules (only a MEHO-SA-Operator approves their own delete).
+group rules (only a MEHO-SA-Operator or a MEHO-Admin approves their own delete).
 
 - The mode is one instance-wide switch, set at install time and fixed for
   the life of the database (`meho_backplane/sandbox_mode.py`). Every other

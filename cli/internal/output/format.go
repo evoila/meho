@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/evoila/meho/cli/internal/api"
 )
@@ -348,6 +349,7 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 	if tenantNotChosen(resp.Operator) {
 		fmt.Fprintln(stdoutW, "  No tenant chosen. Choose one with `meho tenants use <name>`.")
 		fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+		fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
 		return nil
 	}
 
@@ -356,6 +358,10 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 
 	// DB subsystem. migrated is a tri-state (true, false, nil/unknown).
 	fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+
+	// The server's time in UTC (#5504). An older backplane sends no
+	// field; the line is skipped then.
+	fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
 
 	// Readiness checks, approval settings and gated features (#4830).
 	// An older backplane sends none of these; the lines are skipped
@@ -412,6 +418,15 @@ func formatAgentModelSpend(s *api.AgentModelSpend) string {
 		"  Agent model: %s has no price in MEHO, so spend limits do not count its runs",
 		s.Model,
 	)
+}
+
+// formatServerTime renders the server's time line in UTC, to the
+// second. Empty when the backplane sends no time.
+func formatServerTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return fmt.Sprintf("  Server time: %s\n", t.UTC().Format(time.RFC3339))
 }
 
 // tenantNotChosen reports a status answer for a login with several

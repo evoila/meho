@@ -1436,6 +1436,14 @@ class Settings(BaseModel):
         :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
         so operators can confirm the deploy's audit-replay capture
         state without diffing env vars.
+    mcp_topology_off_default_list:
+        Whether ``query_topology`` leaves the default MCP tool list.
+        Default ``False``: every session lists it, as before. Set
+        ``MCP_TOPOLOGY_OFF_DEFAULT_LIST=true`` to move it to the tools a
+        session gets only when it asks for the ``mcp:admin`` scope. A
+        session without the scope does not list it, and a call answers
+        with the same message as for the other admin tools. This saves
+        its text in every session that has no use for the tool.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -2308,6 +2316,7 @@ class Settings(BaseModel):
     event_drain_enabled: bool = True
     operation_contract_guidance: bool = False
     mcp_require_session_id: bool = False
+    mcp_topology_off_default_list: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -3329,6 +3338,9 @@ def get_settings() -> Settings:
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),
+        ),
+        mcp_topology_off_default_list=parse_bool_env(
+            os.environ.get("MCP_TOPOLOGY_OFF_DEFAULT_LIST"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),

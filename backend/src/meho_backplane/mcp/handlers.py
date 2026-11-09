@@ -114,6 +114,7 @@ from meho_backplane.mcp.registry import (
     role_at_least,
     surface_visible,
     tool_role_gate_met,
+    tool_surface,
 )
 from meho_backplane.mcp.server import (
     McpExecutionFailedError,
@@ -499,11 +500,12 @@ async def handle_tools_call(
         # role-forbidden call still reports the role reason — so the
         # listing filter is enforced, not cosmetic: knowing the name of an
         # operator-plane tool can't bypass the mcp:admin elevation gate.
-        if not surface_visible(operator, defn.surface):
+        surface = tool_surface(defn)
+        if not surface_visible(operator, surface):
             _log.warning(
                 "mcp_tool_call_surface_forbidden",
                 tool=name,
-                surface=defn.surface,
+                surface=surface,
             )
             status_code = 403
             raise McpInvalidParamsError(

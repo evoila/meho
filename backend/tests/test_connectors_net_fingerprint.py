@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -643,6 +644,32 @@ def test_extract_title_edge_cases() -> None:
     assert extract_title("<title></title>") is None
     assert extract_title("no title here") is None
     assert len(extract_title("<title>" + "a" * 1000 + "</title>") or "") == 256
+
+
+@pytest.mark.parametrize(
+    ("body", "title"),
+    [
+        ('<html><head><title lang="en">vSphere Client</title ></head>', "vSphere Client"),
+        ("<title>first</title><title>second</title>", "first"),
+        ("<title>open only", None),
+        ("<title no end", None),
+        ("<title>a <b>bold</b> word</TITLE\n>", "a <b>bold</b> word"),
+        ("</title><title>after a stray close</title>", "after a stray close"),
+    ],
+)
+def test_extract_title_finds_the_first_closed_title(body: str, title: str | None) -> None:
+    assert extract_title(body) == title
+
+
+@pytest.mark.parametrize(
+    "piece",
+    ["<title>", "<title", "<title></title", "<title>" + "</title " * 4],
+)
+def test_extract_title_is_fast_on_a_64_kib_page_of_repeated_tags(piece: str) -> None:
+    body = piece * (64 * 1024 // len(piece))
+    start = time.perf_counter()
+    extract_title(body)
+    assert time.perf_counter() - start < 0.05
 
 
 def test_two_products_with_the_same_score_give_unknown() -> None:

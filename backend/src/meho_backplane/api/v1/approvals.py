@@ -355,6 +355,11 @@ class ApprovalRequestView(BaseModel):
     #: surface fails open to the ``principal_sub`` GUID. Additive; a client
     #: that ignores it is unaffected.
     principal_name: str | None = None
+    #: The requester's principal kind: ``user`` for a person, ``agent`` /
+    #: ``service`` / ``runner`` for a machine login (#3885). The console and
+    #: the CLI mark a machine requester with it. ``None`` on a request made
+    #: before MEHO saved it. Additive.
+    principal_kind: str | None = None
     op_id: str
     connector_id: str
     target_id: uuid.UUID | None
@@ -644,6 +649,7 @@ def _view(
         principal_sub=row.principal_sub,
         principal_act=row.principal_act,
         principal_name=row.principal_name,
+        principal_kind=row.principal_kind,
         op_id=row.op_id,
         connector_id=row.connector_id,
         target_id=row.target_id,

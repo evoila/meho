@@ -196,6 +196,15 @@ _ENV_NAME_CHARSET: frozenset[str] = frozenset(
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
 )
 
+#: The same POSIX name rule as a JSON Schema ``pattern``: the charset above, not
+#: starting with a digit. ``linux.script.run``'s ``secret_env`` schema uses it in
+#: ``propertyNames``, so the dispatcher refuses a bad name before the call waits
+#: for approval. :func:`_validate_secret_env` still checks every name at run time.
+#: It ends with ``(?![\s\S])``, not ``$``: Python's ``$`` also matches before a
+#: final newline, so ``"NAME\n"`` would pass. The lookahead works in Python and
+#: in ECMA-262 regex.
+_ENV_NAME_PATTERN: str = r"^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])"
+
 #: Upper bound on the number of ``secret_env`` entries one ``script.run`` may
 #: declare -- a bounded fan-out of per-call Vault reads, not an open-ended loop.
 _MAX_SECRET_ENV: int = 32
@@ -1289,6 +1298,15 @@ _SCRIPT_RUN_OP = LinuxOp(
             },
             "secret_env": {
                 "type": "object",
+                # Checked by the dispatcher before the call waits for approval,
+                # so a bad name or too many entries fail at once (#3554).
+                "propertyNames": {
+                    "pattern": _ENV_NAME_PATTERN,
+                    "description": (
+                        "ENV_NAME: letters, digits and '_'; must not start with a digit."
+                    ),
+                },
+                "maxProperties": _MAX_SECRET_ENV,
                 "additionalProperties": {"type": "string"},
                 "description": (
                     "Optional map of ENV_NAME -> '<vault-path>#<field>'. Each "
@@ -1301,7 +1319,9 @@ _SCRIPT_RUN_OP = LinuxOp(
                     "params, the result, or a log -- only this ENV_NAME -> "
                     "reference mapping is persisted. Use this instead of putting a "
                     "bare secret in arguments/env. A name must not repeat an env "
-                    "name or a reserved wrapper variable."
+                    "name or a reserved wrapper variable. ENV_NAME uses letters, "
+                    "digits and '_' and does not start with a digit; at most 32 "
+                    "entries."
                 ),
             },
             "timeout_seconds": {

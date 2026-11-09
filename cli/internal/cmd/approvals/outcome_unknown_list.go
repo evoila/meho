@@ -48,7 +48,7 @@ func printOutcomeUnknownTable(w io.Writer, items []api.ApprovalRequestView, offs
 			truncate(output.SafeText(e.OpId), 32),
 			output.SafeText(target),
 			output.SafeText(started),
-			truncate(principalScanLabel(e.PrincipalSub, e.PrincipalName), 20),
+			truncate(requesterScanLabel(e.PrincipalSub, e.PrincipalName, e.PrincipalKind), 20),
 			approvedBy,
 		)
 	}

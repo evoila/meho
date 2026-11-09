@@ -177,6 +177,7 @@ def _make_operator(
     *,
     check_runner_dispatch: bool = False,
     tenant_id: str = _DEFAULT_TEST_TENANT,
+    agent_role_capped: bool = False,
 ) -> Operator:
     """Build a minimal :class:`Operator` for the forward-auth tests.
 
@@ -194,6 +195,7 @@ def _make_operator(
         tenant_id=tenant_id,
         tenant_role="operator",
         check_runner_dispatch=check_runner_dispatch,
+        agent_role_capped=agent_role_capped,
     )
 
 
@@ -266,6 +268,21 @@ async def test_vault_client_for_operator_logs_in_and_yields_authenticated_client
     ]
     # Token was revoked on context exit.
     assert fake.auth.token.revoke_calls == 1
+
+
+async def test_agent_token_that_says_tenant_admin_gets_no_vault_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vault reads the role from the token, so MEHO does not send a capped agent token."""
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="old-agent-jwt", agent_role_capped=True)
+
+    with pytest.raises(VaultRoleDeniedError, match="register it again"):
+        async with vault_client_for_operator(operator):
+            pass  # pragma: no cover - the login is refused first
+
+    assert fake.auth.jwt.login_calls == []
+    assert fake.auth.token.revoke_calls == 0
 
 
 async def test_vault_client_for_operator_revokes_token_even_when_body_raises(

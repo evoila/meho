@@ -1308,9 +1308,10 @@ hosted jobs). It is not a required check. `image.yml` no longer has a
 lock scan and no longer runs for a change that only touches
 `.trivyignore`. What the lock scan does not cover: the Debian packages of
 the base image and anything else in the image that is not in the lock
-file (only the image scan on main and tags checks those); and the few
-Windows-only packages in the lock file that the image never installs (a
-finding there fails this job while the image scan passes).
+file (only the image scan on main and tags checks those). The other way
+round, the lock scan checks more than the image: it also checks the few
+Windows-only packages in the lock file that the image never installs. A
+finding in one of those fails this job while the image scan passes.
 
 **Action pin discipline (same rule as cosign).** Every third-party
 action in the new steps is SHA-pinned with the human-readable tag in

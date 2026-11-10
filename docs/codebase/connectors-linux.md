@@ -582,6 +582,9 @@ env values. So an env value must not change which code runs. `env` and
 - names that control how a shell starts or splits words: `ENV`,
   `SHELLOPTS`, `BASHOPTS`, `PS4`, `IFS`, `GLOBIGNORE`, `CDPATH`,
   `PROMPT_COMMAND`, `ZDOTDIR`, `HOME`;
+- bash variables whose assigned value bash evaluates as arithmetic:
+  `HISTCMD`, `OPTIND`, `RANDOM`, `SRANDOM`. An arithmetic value can run a
+  command, so the wrapper's own `export` line would run it;
 - names that control where commands and libraries are found: `PATH`,
   `GCONV_PATH`;
 - Java start options: `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`,

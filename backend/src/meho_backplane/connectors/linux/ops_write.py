@@ -218,7 +218,10 @@ _MAX_SECRET_ENV: int = 32
 #:   (:func:`build_script_run_wrapper` sets ``tmp`` and, when arguments are
 #:   present, ``args``; the sudo primitive uses ``f``);
 #: * names that control how a shell or an interpreter starts, how the wrapper
-#:   splits words, where commands are found, or which libraries are loaded.
+#:   splits words, where commands are found, or which libraries are loaded;
+#: * bash variables whose assigned value bash evaluates as arithmetic. An
+#:   arithmetic value can run a command substitution, so the wrapper's own
+#:   ``export`` line would run it.
 #:
 #: Names that start with one of :data:`_RESERVED_ENV_PREFIXES` are refused too.
 #: A script that needs one of these can set it in its own body, where the
@@ -240,6 +243,11 @@ _RESERVED_ENV_NAMES: frozenset[str] = frozenset(
         "PROMPT_COMMAND",
         "ZDOTDIR",
         "HOME",
+        # Bash evaluates a value assigned to these as arithmetic.
+        "HISTCMD",
+        "OPTIND",
+        "RANDOM",
+        "SRANDOM",
         # Where commands and libraries are found.
         "PATH",
         "GCONV_PATH",

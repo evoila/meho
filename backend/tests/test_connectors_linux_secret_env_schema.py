@@ -15,6 +15,8 @@ the rules a schema cannot say (the clash with ``env``, the reference shape).
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -29,8 +31,10 @@ from meho_backplane.connectors.linux.ops_write import (
     _RESERVED_ENV_PREFIXES,
     WRITE_OPS,
     LinuxWriteSafetyError,
+    _is_reserved_env_name,
     _validate_env,
     _validate_secret_env,
+    build_script_run_wrapper,
 )
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.settings import get_settings
@@ -114,6 +118,10 @@ _RESERVED_SAMPLES = (
     "SHELLOPTS",
     "PATH",
     "IFS",
+    "RANDOM",
+    "SRANDOM",
+    "OPTIND",
+    "HISTCMD",
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
     "PYTHONPATH",
@@ -180,6 +188,51 @@ def test_schema_rejects_a_bad_env_name(name: str) -> None:
     assert {e["path"] for e in errors} == {"$.env"}
     with pytest.raises(LinuxWriteSafetyError):
         _validate_env({name: "v"})
+
+
+#: An env value that runs a command when bash evaluates it as arithmetic.
+#: ``tmp`` is set by the wrapper before the export lines, so ``set -u`` does
+#: not stop the evaluation first.
+_ARITHMETIC_PROBE = "tmp[$(echo MEHO_PROBE_RAN >&2)]"
+
+
+def _names_that_run_the_probe(names: list[str]) -> list[str]:
+    """Return the names whose export line in the real wrapper runs the probe."""
+    ran = []
+    for name in names:
+        wrapper = build_script_run_wrapper(
+            "/bin/true",
+            "true",
+            arguments=None,
+            working_directory=None,
+            env={name: _ARITHMETIC_PROBE},
+        )
+        proc = subprocess.run(
+            ["bash", "-c", wrapper], capture_output=True, text=True, timeout=10, check=False
+        )
+        if "MEHO_PROBE_RAN" in proc.stderr:
+            ran.append(name)
+    return ran
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_no_allowed_env_name_runs_its_value_in_the_wrapper() -> None:
+    """Every bash variable that runs its value at ``export`` is reserved.
+
+    Each name bash knows is exported once with a value that runs a command
+    when bash evaluates it as arithmetic. The names that run it must all be
+    reserved, so the value never runs before the reviewed script.
+    """
+    known = subprocess.run(
+        ["bash", "-c", "compgen -v"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    candidates = sorted(set(known) | {"HISTCMD", "OPTIND", "RANDOM", "SRANDOM"})
+    ran = _names_that_run_the_probe(candidates)
+    # The probe works: bash runs it for RANDOM on every supported version.
+    assert "RANDOM" in ran
+    assert [name for name in ran if not _is_reserved_env_name(name)] == []
+    # A plain name keeps the value as text.
+    assert _names_that_run_the_probe(["APP_MODE"]) == []
 
 
 # -- dispatcher: refused before the call waits for approval -----------------

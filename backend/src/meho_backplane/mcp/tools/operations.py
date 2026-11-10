@@ -1086,8 +1086,9 @@ register_mcp_tool(
             "required": ["status", "op_id", "connector_id"],
         },
         required_role=TenantRole.OPERATOR,
-        # A read-only request-shape inspection. No dispatch, no audit row,
-        # no mutation -- ``"read"`` matches the actual op-class (unlike
+        # A read-only request-shape inspection. No dispatch, no audit row
+        # for the operation, no mutation (the tool call itself gets the
+        # usual MCP request row) -- ``"read"`` matches the actual op-class (unlike
         # ``call_operation``'s ``"tool_call"`` envelope, which wraps a
         # dispatch whose true class lives on the inner DISPATCH row).
         op_class="read",

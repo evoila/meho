@@ -96,6 +96,7 @@ from meho_backplane.mcp.registry import (
 )
 from meho_backplane.mcp.resources.kb import read_kb_entry
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._kb_similar_text import (
     CREATE_ANYWAY_PROPERTY,
     DRY_RUN_PROPERTY,
@@ -107,6 +108,10 @@ from meho_backplane.mcp.tools._search_filters import (
     FILTER_TOOL_TEXT,
     header_filter_terms,
     time_window_from,
+)
+from meho_backplane.mcp.tools._short_tool_texts import (
+    ADD_TO_KNOWLEDGE_SHORT,
+    SEARCH_KNOWLEDGE_SHORT,
 )
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.settings import get_settings
@@ -462,6 +467,7 @@ register_mcp_tool(
         name="search_knowledge",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(SEARCH_KNOWLEDGE_SHORT),
         description=(
             "Search the tenant's knowledge base: vendor API patterns, lab "
             "conventions, known-good runbooks, post-incident learnings. "
@@ -640,7 +646,7 @@ register_mcp_tool(
         # A reviewer with the read_only role may still correct entries.
         approver_may_call=True,
         op_class=_OP_CLASS_WRITE,
-        for_settings=similar_check_for_settings,
+        for_settings=with_short_text(ADD_TO_KNOWLEDGE_SHORT, then=similar_check_for_settings),
     ),
     handler=_add_to_knowledge_handler,
 )

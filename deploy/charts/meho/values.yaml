@@ -716,6 +716,10 @@ config:
   # a new knowledge entry is not written while similar entries exist; the
   # writer gets the list instead. See `docs/codebase/kb.md`.
   kbSimilarCheck: "false"
+  # -- `mcpShortToolTexts` is rendered into `MCP_SHORT_TOOL_TEXTS`. When
+  # `"true"`, the biggest tools on the default MCP tool list send a short
+  # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
+  mcpShortToolTexts: "false"
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
   # authorization-code + PKCE grant server-side against the operator's

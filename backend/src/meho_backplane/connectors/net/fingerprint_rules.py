@@ -52,9 +52,8 @@ _ABOUT_FIELDS: Final[dict[str, str]] = {
     "productLineId": "product_line_id",
 }
 
-_TITLE_RE: Final[re.Pattern[str]] = re.compile(
-    r"<title[^>]*>(.*?)</title\s*>", re.IGNORECASE | re.DOTALL
-)
+_TITLE_OPEN_RE: Final[re.Pattern[str]] = re.compile(r"<title", re.IGNORECASE)
+_TITLE_CLOSE_RE: Final[re.Pattern[str]] = re.compile(r"</title\s*>", re.IGNORECASE)
 
 #: Products this op can name. Each has the vendor MEHO reports with it.
 _VENDORS: Final[dict[str, str]] = {
@@ -145,9 +144,23 @@ def clip(value: Any) -> str | None:
 
 
 def extract_title(body: str) -> str | None:
-    """Return the text of the first ``<title>`` in *body*, or None."""
-    found = _TITLE_RE.search(body)
-    return clip(found.group(1)) if found else None
+    """Return the text of the first ``<title>`` in *body*, or None.
+
+    The search runs in three steps: the first ``<title``, the ``>`` that
+    ends it, and the first ``</title>`` after that. Each step starts where
+    the last one stopped, so the time grows only linearly with the body,
+    also for a page that repeats ``<title>`` with no closing tag.
+    """
+    opening = _TITLE_OPEN_RE.search(body)
+    if opening is None:
+        return None
+    text_start = body.find(">", opening.end()) + 1
+    if text_start == 0:
+        return None
+    closing = _TITLE_CLOSE_RE.search(body, text_start)
+    if closing is None:
+        return None
+    return clip(body[text_start : closing.start()])
 
 
 def _local_name(tag: Any) -> str:

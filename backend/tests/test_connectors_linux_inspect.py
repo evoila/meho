@@ -40,7 +40,6 @@ from meho_backplane.connectors.linux.ops_inspect import (
     validate_journal_priority,
     validate_journal_time,
 )
-from meho_backplane.operations.jsonflux_reducer import _detect_collection
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
@@ -145,13 +144,13 @@ def test_new_ops_declare_no_secret_parameter() -> None:
 
 def test_journal_command_default_is_bounded() -> None:
     cmd = build_journal_tail_command({})
-    assert "journalctl -o json --no-pager -n 200 " in cmd
-    assert "head -c" in cmd
+    assert "journalctl -o json --all --no-pager -n 200;" in cmd
+    assert f"head -c {8 * 1024 * 1024} " in cmd
 
 
 def test_journal_command_caps_lines_at_the_log_tail_maximum() -> None:
     cmd = build_journal_tail_command({"lines": 10**6})
-    assert f"-n {MAX_TAIL_LINES} " in cmd
+    assert f"-n {MAX_TAIL_LINES};" in cmd
 
 
 def test_journal_command_quotes_every_value() -> None:
@@ -200,9 +199,14 @@ def _journal_line(**fields: Any) -> str:
     return json.dumps(entry)
 
 
+def _journal_stdout(lines: list[str], rc: int = 0) -> str:
+    """Host answer of the journal command: the lines, then the journalctl exit code."""
+    return "".join(line + "\n" for line in lines) + f"\nMEHO_JOURNAL_RC={rc}\n"
+
+
 @pytest.mark.asyncio
 async def test_journal_tail_returns_rows_in_the_reducer_envelope() -> None:
-    out = "\n".join([_journal_line(), _journal_line(MESSAGE="again")]) + "\n"
+    out = _journal_stdout([_journal_line(), _journal_line(MESSAGE="again")])
     result, _ = await _run("journal_tail", {}, _proc(stdout=out))
     assert result["total"] == 2
     assert result["truncated"] is False
@@ -211,8 +215,8 @@ async def test_journal_tail_returns_rows_in_the_reducer_envelope() -> None:
         "unit": "nfs-server.service",
         "priority": 3,
         "message": "boom",
+        "message_truncated": False,
     }
-    assert _detect_collection(result) is not None
 
 
 @pytest.mark.asyncio
@@ -223,17 +227,51 @@ async def test_journal_tail_edge_rows() -> None:
         _journal_line(PRIORITY="x", __REALTIME_TIMESTAMP="nope"),
         "not json",
     ]
-    result, _ = await _run("journal_tail", {}, _proc(stdout="\n".join(lines) + "\n"))
+    result, _ = await _run("journal_tail", {}, _proc(stdout=_journal_stdout(lines)))
     rows = result["rows"]
     assert rows[0]["message"] == "hi"
     assert rows[1]["unit"] == "kernel" and rows[1]["message"] is None
     assert rows[2]["priority"] is None and rows[2]["ts"] is None
-    assert rows[3] == {"ts": None, "unit": None, "priority": None, "message": "not json"}
+    assert rows[3] == {
+        "ts": None,
+        "unit": None,
+        "priority": None,
+        "message": "not json",
+        "message_truncated": False,
+    }
 
 
-def test_journal_output_cut_by_the_byte_cap_drops_the_half_line() -> None:
-    rows, truncated = parse_journal_output(_journal_line() + '\n{"MESSAGE": "cut o')
+def test_journal_repeated_message_field_is_joined() -> None:
+    rows, _ = parse_journal_output(_journal_stdout([_journal_line(MESSAGE=["a", [98], None])]))
+    assert rows[0]["message"] == "a\nb"
+
+
+@pytest.mark.asyncio
+async def test_journal_tail_long_message_is_cut_and_marked() -> None:
+    long = "x" * 5000
+    lines = [_journal_line(MESSAGE=long), "y" * 5000]
+    result, _ = await _run("journal_tail", {}, _proc(stdout=_journal_stdout(lines)))
+    for row in result["rows"]:
+        assert len(row["message"]) == 4096 and row["message_truncated"] is True
+    assert result["truncated"] is False
+
+
+def test_journal_output_cut_by_the_byte_cap_is_truncated() -> None:
+    rows, truncated = parse_journal_output(_journal_line() + "\nMEHO_JOURNAL_CUT\n")
     assert len(rows) == 1 and truncated is True
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        _journal_stdout([_journal_line()], rc=1),
+        _journal_line() + "\n",
+        _journal_line() + '\n{"MESSAGE": "cut o',
+    ],
+)
+def test_journal_output_without_a_clean_exit_code_is_an_error(stdout: str) -> None:
+    with pytest.raises(LinuxInspectError):
+        parse_journal_output(stdout)
 
 
 @pytest.mark.asyncio
@@ -258,14 +296,18 @@ async def test_journal_tail_empty_with_stderr_is_an_error_not_an_empty_answer() 
 @pytest.mark.asyncio
 async def test_journal_tail_rows_with_stderr_carry_a_warning() -> None:
     result, _ = await _run(
-        "journal_tail", {}, _proc(stdout=_journal_line() + "\n", stderr="Hint: not seeing all")
+        "journal_tail",
+        {},
+        _proc(stdout=_journal_stdout([_journal_line()]), stderr="Hint: not seeing all"),
     )
     assert result["warning"] == "Hint: not seeing all"
 
 
 @pytest.mark.asyncio
 async def test_journal_tail_a_genuinely_empty_window_is_an_empty_list() -> None:
-    result, _ = await _run("journal_tail", {"since": "1 min ago"}, _proc())
+    result, _ = await _run(
+        "journal_tail", {"since": "1 min ago"}, _proc(stdout=_journal_stdout([]))
+    )
     assert result["rows"] == [] and result["total"] == 0
 
 
@@ -369,7 +411,6 @@ async def test_dir_list_returns_sorted_rows_in_the_reducer_envelope() -> None:
     }
     assert result["total"] == 3
     assert (result["exists"], result["truncated"], result["incomplete"]) == (True, False, False)
-    assert _detect_collection(result) is not None
     assert "-maxdepth 1" in cmd and "-name '.*' -prune -o" in cmd
 
 

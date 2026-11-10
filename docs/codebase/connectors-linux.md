@@ -148,7 +148,7 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 | `linux.dns.lookup` | `network` | `name` | `{name, found, addresses, exit_code}` |
 | `linux.firewall.show` | `firewall` | — | `{rows, total, backend}` |
 | `linux.mount.list` | `storage` | — | `{rows, total}` (each row `kind` = `mount` / `export`) |
-| `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message}` |
+| `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
 | `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
 | `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
 
@@ -180,15 +180,23 @@ the kernel's empty answer, not an empty file. An empty regular file has
 Three reads for storage and NFS diagnosis, in `ops_inspect.py` (handlers
 and checks) and `ops_inspect_ops.py` (op rows).
 
-- `linux.journal.tail` runs `journalctl -o json --no-pager -n <lines>`
-  (default 200, same cap as `log.tail`). `unit` uses the unit-name check
-  of `service.status`; `since` / `until` allow letters, digits, space and
-  `: + . _ -` (max 64 characters) and are passed as `--since=<quoted>`;
-  `priority` is `0`-`7` or a syslog level name. Output is cut at 8 MiB and
-  each message at 4096 characters; a cut sets `truncated`. No
-  `journalctl` (exit 127), a failed exit, or no rows with text on stderr
-  (for example no permission to read the journal) is an error, never an
-  empty list. Rows with stderr text carry a `warning`.
+- `linux.journal.tail` runs `journalctl -o json --all --no-pager -n <lines>`
+  (default 200, same cap as `log.tail`). `--all` keeps fields over 4096
+  bytes; without it `journalctl` prints them as `null`. `unit` uses the
+  unit-name check of `service.status`; `since` / `until` allow letters,
+  digits, space and `: + . _ -` (max 64 characters) and are passed as
+  `--since=<quoted>`; `priority` is `0`-`7` or a syslog level name.
+  The command prints the exit code of `journalctl` after its output,
+  because a pipe returns only the exit code of its last command. The
+  output is cut at 8 MiB, and then `awk` (in the C locale, so it counts
+  bytes) drops the last line if it is not whole, so a cut never splits a
+  UTF-8 character. A cut ends with a cut marker and sets `truncated`. A
+  message over 4096 characters is cut and its row has
+  `message_truncated: true`. No `journalctl` (exit 127), a `journalctl`
+  exit code other than 0, an output with neither the exit code nor the
+  cut marker, or no rows with text on stderr (for example no permission
+  to read the journal) is an error, never an empty list. Rows with
+  stderr text carry a `warning`.
 - `linux.fs.usage` runs `df -B1 --output=source,fstype,size,used,avail,itotal,iused`
   for one path. `/` itself is allowed here only. A `-` inode count is
   `null`. A df failure or an answer that cannot be read is an error.

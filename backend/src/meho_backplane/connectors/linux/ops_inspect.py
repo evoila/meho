@@ -106,6 +106,11 @@ _MAX_MESSAGE_CHARS: int = 4096
 #: Exit code the journal and df commands use when the binary is absent.
 _NO_BINARY_EXIT: int = 127
 
+#: Last line of the journal output: the exit code of ``journalctl``, or
+#: the marker that the byte cap cut the output.
+_JOURNAL_RC_PREFIX: str = "MEHO_JOURNAL_RC="
+_JOURNAL_CUT_MARKER: str = "MEHO_JOURNAL_CUT"
+
 _JOURNAL_TIME_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9:+._ -]{1,64}$")
 JOURNAL_TIME_PATTERN: str = r"^[A-Za-z0-9:+._ -]{1,64}$"
 JOURNAL_PRIORITIES: frozenset[str] = frozenset(
@@ -213,18 +218,24 @@ def _journal_lines(raw: Any) -> int:
     return min(value, MAX_TAIL_LINES)
 
 
-def build_journal_tail_command(params: dict[str, Any]) -> str:
+def build_journal_tail_command(params: dict[str, Any], max_bytes: int = _MAX_JOURNAL_BYTES) -> str:
     """Build the fixed ``journalctl -o json`` command from validated params.
 
     Every value is validated first and ``shlex.quote``d. ``--since=`` and
     ``--until=`` carry their value in the same word, so a value that
-    starts with ``-`` can never be read as an option. The output is cut
-    at a byte cap; the exit code ``127`` says ``journalctl`` is absent.
+    starts with ``-`` can never be read as an option. ``--all`` keeps
+    fields over 4096 bytes (without it ``journalctl`` prints them as
+    ``null``). The exit code of ``journalctl`` is printed after its
+    output, because the pipe returns the exit code of its last command.
+    The output is cut at *max_bytes*, and then at the last whole line, so
+    a cut never splits a UTF-8 character; a cut ends with the cut marker.
+    The exit code ``127`` says ``journalctl`` is absent.
     """
     parts = [
         "journalctl",
         "-o",
         "json",
+        "--all",
         "--no-pager",
         "-n",
         str(_journal_lines(params.get("lines"))),
@@ -237,20 +248,62 @@ def build_journal_tail_command(params: dict[str, Any]) -> str:
         parts.append("--until=" + shlex.quote(validate_journal_time(params["until"])))
     if params.get("priority") is not None:
         parts += ["-p", validate_journal_priority(params["priority"])]
+    cap = int(max_bytes)
+    # In the C locale awk counts bytes. Only the last line of a cut
+    # output has no line break, so only it brings the count over the cap.
+    cut = (
+        f"LC_ALL=C awk -v max={cap} "
+        f"'{{ n += length($0) + 1; "
+        f'if (n > max) {{ print "{_JOURNAL_CUT_MARKER}"; exit }} print }}\''
+    )
     return (
         f"command -v journalctl >/dev/null 2>&1 || exit {_NO_BINARY_EXIT}; "
-        f"{' '.join(parts)} | head -c {_MAX_JOURNAL_BYTES}"
+        f"{{ {' '.join(parts)}; printf '\\n{_JOURNAL_RC_PREFIX}%s\\n' \"$?\"; }} "
+        f"| head -c {cap} | {cut}"
     )
 
 
+def _journal_message(value: Any) -> str | None:
+    """Return the ``MESSAGE`` field as text.
+
+    ``journalctl`` prints a field that is not valid UTF-8 as a list of
+    bytes, and a field that is in the entry more than once as a list of
+    its values (joined here with line breaks).
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(b, int) for b in value):
+        return bytes(b for b in value if 0 <= b < 256).decode("utf-8", "replace")
+    if isinstance(value, list):
+        return "\n".join(part for part in (_journal_message(v) for v in value) if part is not None)
+    return str(value)
+
+
+def _bounded_message(message: str | None) -> tuple[str | None, bool]:
+    if message is not None and len(message) > _MAX_MESSAGE_CHARS:
+        return message[:_MAX_MESSAGE_CHARS], True
+    return message, False
+
+
 def _journal_row(line: str) -> dict[str, Any]:
-    """Turn one ``journalctl -o json`` line into a ``{ts, unit, priority, message}`` row."""
+    """Turn one ``journalctl -o json`` line into a ``{ts, unit, priority, message}`` row.
+
+    ``message_truncated`` is ``True`` when the message was cut at
+    :data:`_MAX_MESSAGE_CHARS` characters.
+    """
     try:
         entry = json.loads(line)
     except ValueError:
         entry = None
     if not isinstance(entry, dict):
-        return {"ts": None, "unit": None, "priority": None, "message": line[:_MAX_MESSAGE_CHARS]}
+        raw, cut = _bounded_message(line)
+        return {
+            "ts": None,
+            "unit": None,
+            "priority": None,
+            "message": raw,
+            "message_truncated": cut,
+        }
     ts: str | None = None
     try:
         ts = datetime.fromtimestamp(int(entry["__REALTIME_TIMESTAMP"]) / 1_000_000, UTC).isoformat()
@@ -261,37 +314,37 @@ def _journal_row(line: str) -> dict[str, Any]:
         priority: int | None = int(entry["PRIORITY"])
     except (KeyError, TypeError, ValueError):
         priority = None
-    message = entry.get("MESSAGE")
-    if isinstance(message, list):
-        message = bytes(b for b in message if isinstance(b, int) and 0 <= b < 256).decode(
-            "utf-8", "replace"
-        )
-    elif message is not None and not isinstance(message, str):
-        message = str(message)
-    if isinstance(message, str):
-        message = message[:_MAX_MESSAGE_CHARS]
+    message, cut = _bounded_message(_journal_message(entry.get("MESSAGE")))
     return {
         "ts": ts,
         "unit": unit if isinstance(unit, str) else None,
         "priority": priority,
         "message": message,
+        "message_truncated": cut,
     }
 
 
 def parse_journal_output(stdout: str) -> tuple[list[dict[str, Any]], bool]:
-    """Parse the journal output into ``(rows, truncated)``.
+    """Parse the journal output into ``(rows, truncated)``, or raise.
 
-    Output that does not end with a line break was cut by the byte cap:
-    the half line is dropped and ``truncated`` is ``True``. A line that is
-    not JSON is kept as a row with the raw text in ``message``.
+    The output ends with the exit code of ``journalctl`` or, when the
+    byte cap cut it, with the cut marker (``truncated`` is ``True``). An
+    exit code other than ``0``, or an output with neither line, raises
+    :class:`LinuxInspectError`: a failed read is never served as rows.
+    A line that is not JSON is kept as a row with the raw text in
+    ``message``.
     """
-    lines = stdout.split("\n")
-    truncated = False
-    if lines and lines[-1] != "":
-        lines = lines[:-1]
-        truncated = True
-    rows = [_journal_row(line) for line in lines if line.strip()]
-    return rows, truncated
+    lines = [line for line in stdout.split("\n") if line.strip()]
+    last = lines.pop() if lines else ""
+    if last == _JOURNAL_CUT_MARKER:
+        return [_journal_row(line) for line in lines], True
+    if not last.startswith(_JOURNAL_RC_PREFIX):
+        raise LinuxInspectError("the journal read did not finish cleanly; the journal was not read")
+    if last != f"{_JOURNAL_RC_PREFIX}0":
+        raise LinuxInspectError(
+            f"journalctl failed (exit {last[len(_JOURNAL_RC_PREFIX) :]}); the journal was not read"
+        )
+    return [_journal_row(line) for line in lines], False
 
 
 async def linux_journal_tail(
@@ -309,8 +362,13 @@ async def linux_journal_tail(
         raise LinuxInspectError("journalctl did not finish cleanly; the journal was not read")
     raw_out = getattr(proc, "stdout", None)
     raw_err = getattr(proc, "stderr", None)
-    rows, truncated = parse_journal_output(raw_out if isinstance(raw_out, str) else "")
     warning = raw_err.strip()[:500] if isinstance(raw_err, str) else ""
+    try:
+        rows, truncated = parse_journal_output(raw_out if isinstance(raw_out, str) else "")
+    except LinuxInspectError as exc:
+        if warning:
+            raise LinuxInspectError(f"{exc}; journalctl said: {warning}") from None
+        raise
     if warning and not rows:
         raise LinuxInspectError(f"journalctl returned no entries and said: {warning}")
     result = normalise_json_rows(rows)

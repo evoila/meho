@@ -26,7 +26,8 @@ _JOURNAL_TAIL_OP = LinuxOp(
     description=(
         "Reads the last entries of the systemd journal (default 200, max 10000), for one unit, "
         "a time window or a lowest priority. Returns {rows, total, truncated}; each row is "
-        "{ts, unit, priority, message}. Read-only. Errors if journalctl is missing or unreadable."
+        "{ts, unit, priority, message, message_truncated}. Read-only. Errors if journalctl is "
+        "missing or unreadable."
     ),
     parameter_schema={
         "type": "object",
@@ -78,6 +79,7 @@ _JOURNAL_TAIL_OP = LinuxOp(
                         "unit": {"type": ["string", "null"]},
                         "priority": {"type": ["integer", "null"]},
                         "message": {"type": ["string", "null"]},
+                        "message_truncated": {"type": "boolean"},
                     },
                 },
             },
@@ -104,7 +106,9 @@ _JOURNAL_TAIL_OP = LinuxOp(
             "priority": "err shows errors and worse.",
         },
         "output_shape": (
-            "{rows, total, truncated}; rows are {ts, unit, priority, message}, oldest first. "
+            "{rows, total, truncated}; rows are {ts, unit, priority, message, "
+            "message_truncated}, oldest first. truncated means older rows were cut at the "
+            "byte cap; message_truncated means that message was cut at 4096 characters. "
             "If warning is set, the journal may be incomplete (for example the login can "
             "only see its own messages). Large answers spill to a result_query handle."
         ),

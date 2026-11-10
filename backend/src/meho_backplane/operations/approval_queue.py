@@ -1420,6 +1420,9 @@ class ResumeRequester(NamedTuple):
     #: The requester's ``principal_kind`` (#3885). ``None`` on a row parked
     #: before migration 0149.
     kind: str | None = None
+    #: The requester's ``client`` block from the stored effect
+    #: (AUDIT_CLIENT_IDENTITY). ``None`` when the request has none.
+    client: dict[str, Any] | None = None
 
 
 #: The requester of the approval request whose composite is being re-run
@@ -1576,10 +1579,12 @@ async def create_pending_request(
             proposed_effect["target_id"] = str(target_id)
     # The requester's login client and channel (AUDIT_CLIENT_IDENTITY), so
     # every approval surface can say through which tool the change was asked
-    # for. Not for a re-park on behalf of an earlier requester: *operator* is
-    # then the reviewer, not the requester.
-    if requester is None and client_identity_enabled():
-        proposed_effect = {**proposed_effect, CLIENT_PAYLOAD_KEY: build_client_block(operator)}
+    # for. A re-park on behalf of an earlier requester keeps that requester's
+    # block: *operator* is then the reviewer, not the requester.
+    if client_identity_enabled():
+        client = build_client_block(operator) if requester is None else requester.client
+        if client is not None:
+            proposed_effect = {**proposed_effect, CLIENT_PAYLOAD_KEY: client}
 
     # RFC 8693 ``act`` (#1481): the agent principal acting on the human
     # subject's behalf on a delegated run, read from the same
@@ -1591,7 +1596,10 @@ async def create_pending_request(
     # dead code — ``Operator`` has no such field, so it was always ``None``.
     principal_act: str | None = resolve_actor_sub()
     if requester is not None:
-        principal_sub, principal_act, principal_name, principal_kind = requester
+        principal_sub = requester.sub
+        principal_act = requester.act
+        principal_name = requester.name
+        principal_kind = requester.kind
     else:
         principal_sub = operator.sub
         principal_name = await principal_display_name(session, operator)
@@ -2899,12 +2907,14 @@ async def _refuse_resume_params_unavailable(
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
-    """The requester saved on *request* (#4217)."""
+    """The requester saved on *request* (#4217), with the requester's ``client`` block."""
+    client = (request.proposed_effect or {}).get(CLIENT_PAYLOAD_KEY)
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
         request.principal_name,
         request.principal_kind,
+        client if isinstance(client, dict) else None,
     )
 
 

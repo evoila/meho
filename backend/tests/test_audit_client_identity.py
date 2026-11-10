@@ -44,7 +44,12 @@ from meho_backplane.main import app
 from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.operations._audit import write_audit_row
 from meho_backplane.operations._validate import compute_params_hash
-from meho_backplane.operations.approval_queue import approve_request, create_pending_request
+from meho_backplane.operations.approval_queue import (
+    ResumeRequester,
+    approve_request,
+    create_pending_request,
+    requester_of,
+)
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import APPROVAL_CLIENT_ID as _APPROVAL_CLIENT
@@ -355,10 +360,26 @@ async def test_request_stores_nothing_with_the_switch_off() -> None:
 
 
 @pytest.mark.asyncio
-async def test_repark_for_an_earlier_requester_stores_no_reviewer_client(switch_on: None) -> None:
+async def test_repark_keeps_the_requester_client(switch_on: None) -> None:
+    # An approved multi-step operation re-run by the reviewer waits again:
+    # the new request names the original requester's client, not the reviewer's.
+    first = await _park(_operator(sub="op-requester", azp="meho-mcp"))
+    reviewer = _operator(sub="op-reviewer", azp="meho-ui", web=True)
+    request = await _park(reviewer, requester=requester_of(first))
+    assert request.principal_sub == "op-requester"
+    assert request.proposed_effect["client"] == first.proposed_effect["client"]
+    assert request.proposed_effect["client"]["azp"] == "meho-mcp"
+    assert request.proposed_effect["client"]["channel"] == "token"
+
+
+@pytest.mark.asyncio
+async def test_repark_for_a_requester_without_a_client_stores_none(switch_on: None) -> None:
+    # A request parked with the switch off has no block; the reviewer's
+    # block must not take its place.
     reviewer = _operator(sub="op-reviewer", azp="meho-ui", web=True)
     request = await _park(
-        reviewer, requester=("op-requester", None, "Requester", PrincipalKind.USER.value)
+        reviewer,
+        requester=ResumeRequester("op-requester", None, "Requester", PrincipalKind.USER.value),
     )
     assert "client" not in request.proposed_effect
 

@@ -683,6 +683,37 @@ async def test_dispatch_runs_as_synthetic_tenant_user_operator(
     assert operator.raw_jwt == ""
 
 
+@pytest.mark.asyncio
+async def test_stored_reveal_secret_param_is_dropped_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored Sensor with ``reveal_secret`` in its params runs without it.
+
+    The create, edit and import checks refuse the flag. A row stored with it
+    still runs, and the runner sends the other params only, so the answer is
+    the default view with secret values hidden.
+    """
+    captured: dict[str, Any] = {}
+
+    async def _capturing_dispatch(*, params: dict[str, Any], **_kwargs: Any) -> OperationResult:
+        captured["params"] = params
+        return _ok_result({"count": 3})
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _capturing_dispatch)
+
+    sensor_id = await _create_interval_sensor(
+        interval_seconds=300, params={"reveal_secret": True, "limit": 5}
+    )
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    assert captured["params"] == {"limit": 5}
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "ok"
+
+
 def _service_create_payload(*, identity_sub: str) -> SensorCreate:
     """A minimal valid interval ``SensorCreate`` for the real create path."""
     return SensorCreate.model_validate(

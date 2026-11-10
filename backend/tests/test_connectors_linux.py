@@ -513,6 +513,10 @@ async def test_file_read_reads_a_symlink_whose_target_passes_the_check() -> None
         "/etc/ssh/ssh_host_ed25519_key",
         "/etc/ceph/ceph.client.admin.keyring",
         "/var/lib/app/credentials.json",
+        "/etc/bind/keys/Kexample.com.+013+12345.private",
+        "/etc/postfix/sasl_passwd",
+        "/var/lib/cloud/instance/user-data.txt",
+        "/etc/wpa_supplicant/wpa_supplicant.conf",
     ],
 )
 async def test_file_read_refuses_a_real_path_that_fails_the_check(real_path: str) -> None:
@@ -1224,6 +1228,44 @@ def test_confine_read_path_refuses_key_and_password_files(path: str) -> None:
 def test_confine_read_path_refuses_secret_files_by_name(path: str) -> None:
     with pytest.raises(PathConfinementError, match="keys, tokens or password hashes"):
         confine_read_path(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("/etc/bind/keys/Kexample.com.+013+12345.private", id="dnssec-private-key"),
+        pytest.param("/var/lib/bind/Kexample.com.+008+54321.private", id="dnssec-private-key-var"),
+        pytest.param("/etc/postfix/sasl_passwd", id="postfix-sasl-passwd"),
+        pytest.param("/etc/postfix/sasl_passwd.db", id="postfix-sasl-passwd-map"),
+        pytest.param("/var/lib/cloud/instance/user-data.txt", id="cloud-init-user-data"),
+        pytest.param("/var/lib/cloud/instances/i-1/user-data.txt.i", id="cloud-init-user-data-i"),
+        pytest.param("/var/lib/cloud/seed/nocloud/user-data", id="cloud-init-seed-user-data"),
+        pytest.param("/var/lib/cloud/instance/vendor-data.txt", id="cloud-init-vendor-data"),
+        pytest.param("/var/lib/cloud/instance/cloud-config.txt", id="cloud-init-cloud-config"),
+        pytest.param("/var/lib/cloud/instance/obj.pkl", id="cloud-init-obj-pkl"),
+        pytest.param("/run/cloud-init/instance-data-sensitive.json", id="cloud-init-sensitive"),
+        pytest.param("/etc/wpa_supplicant/wpa_supplicant.conf", id="wpa-supplicant"),
+        pytest.param("/etc/wpa_supplicant.conf", id="wpa-supplicant-etc"),
+        pytest.param("/etc/nginx/.htpasswd", id="htpasswd"),
+        pytest.param("/var/lib/app/.netrc", id="netrc"),
+    ],
+)
+def test_confine_read_path_refuses_more_secret_file_formats(path: str) -> None:
+    with pytest.raises(PathConfinementError, match="keys, tokens or password hashes"):
+        confine_read_path(path)
+
+
+def test_confine_read_path_keeps_cloud_init_status_files() -> None:
+    # The first-boot checks read these; they hold no secret.
+    for path in (
+        "/var/lib/cloud/instance/boot-finished",
+        "/var/lib/cloud/data/status.json",
+        "/var/lib/cloud/data/result.json",
+        "/run/cloud-init/instance-data.json",
+        "/var/log/cloud-init.log",
+        "/etc/postfix/main.cf",
+    ):
+        assert confine_read_path(path) == path
 
 
 @pytest.mark.parametrize("pattern", LINUX_READ_DENY)

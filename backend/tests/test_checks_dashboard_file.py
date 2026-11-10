@@ -308,6 +308,25 @@ async def test_export_holds_settings_and_placeholders(client: TestClient, key: A
 
 
 @pytest.mark.asyncio
+async def test_export_drops_a_stored_reveal_secret_param(client: TestClient, key: Any) -> None:
+    await _setup(client, key)
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.scalars(
+                select(Sensor).where(Sensor.tenant_id == _TENANT_A, Sensor.name == "items-c")
+            )
+        ).one()
+        row.params = {"reveal_secret": True, "limit": 5}
+        await session.commit()
+    resp = client.get(
+        _EXPORT, params={"name": "estate"}, headers=_headers(key, tenant_id=_TENANT_A)
+    )
+    assert resp.status_code == 200, resp.text
+    by_name = {s["name"]: s for s in resp.json()["sensors"]}
+    assert by_name["items-c"]["params"] == {"limit": 5}
+
+
+@pytest.mark.asyncio
 async def test_export_unknown_or_other_tenant_is_not_found(client: TestClient, key: Any) -> None:
     await _setup(client, key)
     missing = client.get(
@@ -572,6 +591,7 @@ async def test_connector_that_does_not_fit_needs_force(client: TestClient, key: 
         pytest.param({"extra": 1}, id="unknown-field"),
         pytest.param({"sensors": "twice"}, id="same-sensor-twice"),
         pytest.param({"sensors": "bad-cadence"}, id="bad-cadence"),
+        pytest.param({"sensors": "reveal-secret"}, id="reveal-secret"),
     ],
 )
 @pytest.mark.asyncio
@@ -582,6 +602,8 @@ async def test_bad_file_is_refused(client: TestClient, key: Any, change: dict[st
         bad["sensors"] = [exported["sensors"][2], exported["sensors"][2]]
     elif change.get("sensors") == "bad-cadence":
         bad["sensors"] = [{**exported["sensors"][2], "interval_seconds": None}]
+    elif change.get("sensors") == "reveal-secret":
+        bad["sensors"] = [{**exported["sensors"][2], "params": {"reveal_secret": True}}]
     else:
         bad.update(change)
     resp = client.post(

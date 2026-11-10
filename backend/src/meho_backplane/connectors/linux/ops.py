@@ -188,6 +188,23 @@ LINUX_READ_DENY: tuple[str, ...] = (
     # in each monitor and OSD directory.
     "*.keyring",
     "*/keyring",
+    # DNSSEC private keys (K<zone>+<alg>+<id>.private).
+    "*.private",
+    # Postfix relay passwords (sasl_passwd and its sasl_passwd.db map).
+    "*/sasl_passwd*",
+    # cloud-init user and vendor data, the combined cloud-config, the
+    # sensitive instance data and the pickled data source: they carry
+    # passwords and keys of the first boot.
+    "*user-data*",
+    "*vendor-data*",
+    "/var/lib/cloud/*cloud-config.txt",
+    "/var/lib/cloud/*obj.pkl",
+    "*/instance-data-sensitive.json",
+    # Wi-Fi keys.
+    "*wpa_supplicant*",
+    # Web server password files and netrc logins.
+    "*htpasswd*",
+    "*/.netrc",
     # Any file or directory whose name says what it holds.
     "*secret*",
     "*credential*",

@@ -733,6 +733,48 @@ async def test_rest_malformed_assertion_returns_422(client: TestClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rest_create_with_reveal_secret_returns_422(client: TestClient) -> None:
+    """A Sensor always reads the default view, so ``reveal_secret`` in params is refused."""
+    await _seed_tenant_and_safe_op()
+    key = make_rsa_keypair("kid-reveal")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        result = client.post(
+            "/api/v1/sensors",
+            json={
+                "name": "reveal",
+                "connector_id": _SAFE_CONNECTOR,
+                "op_id": _SAFE_OP,
+                "params": {"reveal_secret": True},
+                "assertion": _ASSERTION,
+                "cadence_kind": "interval",
+                "interval_seconds": 60,
+            },
+            headers=headers,
+        )
+        assert result.status_code == 422, result.text
+        assert "reveal_secret" in result.text
+    async with get_sessionmaker()() as session:
+        assert (await session.execute(select(func.count()).select_from(Sensor))).scalar_one() == 0
+
+
+def test_sensor_create_schema_refuses_reveal_secret_also_when_false() -> None:
+    body = {
+        "name": "reveal",
+        "connector_id": _SAFE_CONNECTOR,
+        "op_id": _SAFE_OP,
+        "assertion": _ASSERTION,
+        "cadence_kind": "interval",
+        "interval_seconds": 60,
+    }
+    for flag in (True, False):
+        with pytest.raises(ValueError, match="reveal_secret"):
+            SensorCreate.model_validate({**body, "params": {"reveal_secret": flag}})
+    assert SensorCreate.model_validate({**body, "params": {"limit": 5}}).params == {"limit": 5}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "cadence_overrides",
     [

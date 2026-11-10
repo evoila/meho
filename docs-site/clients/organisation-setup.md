@@ -159,11 +159,16 @@ shared MEHO login or one shared token for Claude.
 
 ## What does not work
 
-Claude's remote connectors run in Anthropic's cloud. They need a server
-that is open on the public internet. A MEHO behind a VPN is not, and
-must not be. So the remote connector cannot reach it. Use the local
-extension or the Claude Code plugin instead. See
+Claude's remote connectors connect from Anthropic's cloud, not from the
+user's computer. They need a server that Anthropic can reach over the
+public internet. A MEHO behind a VPN is not, and must not be. So the
+remote connector cannot reach it. Use the local extension or the Claude
+Code plugin instead. See
 [Remote Custom Connector: not applicable](index.md#remote-custom-connector-not-applicable).
+
+Source: [Get started with custom connectors using remote
+MCP](https://support.claude.com/en/articles/11175166-getting-started-with-custom-connectors-using-remote-mcp),
+section "Network requirements" (read 2026-11-10).
 
 ## Check list for the admin
 

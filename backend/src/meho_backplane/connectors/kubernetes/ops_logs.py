@@ -85,6 +85,7 @@ __all__ = [
     "K8S_LOGS_RESPONSE_SCHEMA",
     "MAX_BODY_BYTES",
     "MAX_TAIL_LINES",
+    "ContainerNotFoundError",
     "LogLineTooLargeError",
     "LogWindowError",
     "MultiContainerAmbiguityError",
@@ -408,6 +409,26 @@ class MultiContainerAmbiguityError(ValueError):
         return list(self.args[1])
 
 
+class ContainerNotFoundError(LookupError):
+    """The caller named a container that the pod does not have.
+
+    Kept apart from :class:`MultiContainerAmbiguityError` so the error
+    says what went wrong: the name is wrong, not missing. The message
+    lists the valid names, and ``containers`` carries them too.
+    """
+
+    def __init__(self, pod: str, container: str, containers: list[str]) -> None:
+        listed = ", ".join(containers) if containers else "(none)"
+        super().__init__(
+            f"pod {pod!r} has no container named {container!r}; its containers are: {listed}",
+            containers,
+        )
+
+    @property
+    def containers(self) -> list[str]:
+        return list(self.args[1])
+
+
 async def resolve_pod_and_container(
     v1: client.CoreV1Api,
     namespace: str,
@@ -425,9 +446,10 @@ async def resolve_pod_and_container(
       prefix. ``candidates`` carries the matched names so the caller
       can surface a "did-you-mean".
     * :class:`MultiContainerAmbiguityError` -- pod has multiple
-      containers and ``container`` is ``None``, or ``container`` names
-      no container of the pod. ``containers`` carries the candidate
-      list.
+      containers and ``container`` is ``None``. ``containers`` carries
+      the candidate list.
+    * :class:`ContainerNotFoundError` -- ``container`` names no
+      container of the pod. ``containers`` carries the valid names.
 
     With ``include_init_containers=True`` the pod's init containers are
     valid ``container`` values and appear after the app containers in
@@ -468,7 +490,7 @@ async def resolve_pod_and_container(
         valid_names += [c.name for c in (pod.spec.init_containers or [])]
     if container is not None:
         if container not in valid_names:
-            raise MultiContainerAmbiguityError(pod.metadata.name, valid_names)
+            raise ContainerNotFoundError(pod.metadata.name, container, valid_names)
         return pod.metadata.name, container
 
     if len(container_names) == 1:
@@ -536,6 +558,8 @@ async def k8s_logs(
     * :class:`PodNotFoundError` -- prefix matched zero or many pods.
     * :class:`MultiContainerAmbiguityError` -- multi-container pod
       missing ``--container``.
+    * :class:`ContainerNotFoundError` -- ``--container`` names no
+      container of the pod.
     * :class:`LogWindowError` -- unusable ``since_time`` /
       ``until_time`` (bad time, or combined with ``since``).
     * :class:`LogLineTooLargeError` -- one line inside the window, or

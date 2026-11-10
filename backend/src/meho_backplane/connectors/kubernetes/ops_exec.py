@@ -488,6 +488,8 @@ async def k8s_exec(
     * :class:`ops_logs.PodNotFoundError` -- prefix matched zero/many pods.
     * :class:`ops_logs.MultiContainerAmbiguityError` -- multi-container
       pod missing ``--container``.
+    * :class:`ops_logs.ContainerNotFoundError` -- ``--container`` names
+      no container of the pod.
     * :class:`kubernetes_asyncio.client.ApiException` -- API errors
       (RBAC denial, pod not running, container not found).
     """

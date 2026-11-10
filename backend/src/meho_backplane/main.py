@@ -65,6 +65,7 @@ from meho_backplane.agents import (
 from meho_backplane.api.openapi_maturity import inject_maturity_extensions
 from meho_backplane.api.v1.addon_capability import router as api_v1_addon_capability_router
 from meho_backplane.api.v1.addon_pairing import router as api_v1_addon_pairing_router
+from meho_backplane.api.v1.agent_budgets import router as api_v1_agent_budgets_router
 from meho_backplane.api.v1.agent_grants import router as api_v1_agent_grants_router
 from meho_backplane.api.v1.agent_principals import (
     router as api_v1_agent_principals_router,
@@ -1296,6 +1297,7 @@ app.include_router(api_v1_broadcast_overrides_router)
 # ``show_agent`` because the grants router only matches paths under
 # its own ``/api/v1/agents/grants`` prefix.
 app.include_router(api_v1_agent_grants_router)
+app.include_router(api_v1_agent_budgets_router)
 # G11.1-T4 (#811) -- agent invocation surface. POST /agents/{name}/run
 # (sync block-and-return, or async handle on the timeout / async flag),
 # GET /agents/runs (list the tenant's runs, --work-ref filter; work_ref

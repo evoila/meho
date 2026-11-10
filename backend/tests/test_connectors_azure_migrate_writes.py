@@ -10,8 +10,11 @@ real connector, the token cache and the real retry rules of ``send``.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -21,8 +24,15 @@ import pytest
 import respx
 import structlog
 
-from meho_backplane.connectors.azure import AzureConnector, _http, _polling, migrate_writes
+from meho_backplane.connectors.azure import (
+    AzureConnector,
+    _http,
+    _polling,
+    migrate_import,
+    migrate_writes,
+)
 from meho_backplane.connectors.azure._errors import (
+    AzureConflictError,
     AzureForbiddenError,
     AzureRequestError,
     AzureUrlRefusedError,
@@ -92,6 +102,20 @@ def _no_waiting(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(_polling, "_sleep", AsyncMock())
     monkeypatch.setattr(_http, "_sleep", AsyncMock())
     yield
+
+
+@pytest.fixture(autouse=True)
+def _site_lock(monkeypatch: pytest.MonkeyPatch) -> dict[int, asyncio.Lock]:
+    """The PostgreSQL lock of an import site, as one ``asyncio.Lock`` per key."""
+    locks: dict[int, asyncio.Lock] = {}
+
+    @asynccontextmanager
+    async def fake(key: int, **_: Any) -> AsyncIterator[bool]:
+        async with locks.setdefault(key, asyncio.Lock()):
+            yield True
+
+    monkeypatch.setattr(migrate_import, "advisory_lock", fake)
+    return locks
 
 
 def _connector() -> AzureConnector:
@@ -422,20 +446,53 @@ async def test_a_job_without_a_usable_name_uploads_nothing() -> None:
     assert routes.upload.call_count == 0
 
 
+def _repeat_tag(key: str) -> str:
+    return f"{_tag()}-{hashlib.sha256(key.encode()).hexdigest()[:8]}"
+
+
 @pytest.mark.asyncio
-async def test_allow_repeat_sends_a_file_again() -> None:
+async def test_a_new_repeat_key_sends_a_file_again_under_its_own_record() -> None:
     with respx.mock(assert_all_called=False) as mock:
         routes = _Import(mock, tags={_tag(): JOB})
         result = await _connector().migrate_import_start(
-            operator(), AzureTargetStub(), {**IMPORT_PARAMS, "allow_repeat": True}
+            operator(), AzureTargetStub(), {**IMPORT_PARAMS, "repeat_key": "2026-11-10"}
         )
 
     assert routes.upload.call_count == 1
     assert result["outcome"] == "uploaded"
+    patch_body = json.loads(routes.site_patch.calls.last.request.content)
+    assert patch_body == {"tags": {_tag(): JOB, _repeat_tag("2026-11-10"): JOB}}
 
 
 @pytest.mark.asyncio
-async def test_a_job_that_never_got_its_file_gets_a_new_link() -> None:
+async def test_a_retry_with_the_same_repeat_key_after_a_lost_answer_uploads_nothing() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags={_tag(): "older-job", _repeat_tag("2026-11-10"): JOB})
+        result = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), {**IMPORT_PARAMS, "repeat_key": "2026-11-10"}
+        )
+
+    assert routes.import_uri.call_count == 0
+    assert routes.upload.call_count == 0
+    assert result["outcome"] == "already_sent"
+    assert result["job_name"] == JOB
+
+
+@pytest.mark.asyncio
+async def test_a_bad_repeat_key_sends_nothing() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock)
+        with pytest.raises(ValueError, match="repeat_key"):
+            await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "repeat_key": "a/b"}
+            )
+
+    assert routes.project.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_job_still_waiting_for_its_file_is_followed_and_not_sent_again() -> None:
+    # The first upload may still be under way, or its answer was lost.
     with respx.mock(assert_all_called=False) as mock:
         routes = _Import(mock, tags={_tag(): JOB})
         routes.job.mock(
@@ -448,8 +505,106 @@ async def test_a_job_that_never_got_its_file_gets_a_new_link() -> None:
             operator(), AzureTargetStub(), IMPORT_PARAMS
         )
 
+    assert routes.import_uri.call_count == 0
+    assert routes.upload.call_count == 0
+    assert routes.site_patch.call_count == 0
+    assert result["outcome"] == "earlier_upload_waiting"
+    assert result["state"] == "CompletedWithErrors"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_upload_drops_its_record_so_a_retry_uploads_again() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags={"owner": "example-team"})
+        routes.upload.respond(403)
+        with pytest.raises(AzureRequestError):
+            await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    bodies = [json.loads(call.request.content) for call in routes.site_patch.calls]
+    assert bodies == [
+        {"tags": {"owner": "example-team", _tag(): JOB}},
+        {"tags": {"owner": "example-team"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_imports_of_two_files_keep_both_records() -> None:
+    other = CSV + "extra-server,2,4096,Ubuntu Linux\n"
+    site_tags: dict[str, str] = {}
+
+    async def read_site(_: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0)  # let the other import run in between
+        return httpx.Response(200, json={"tags": dict(site_tags)})
+
+    def write_site(request: httpx.Request) -> httpx.Response:
+        site_tags.clear()
+        site_tags.update(json.loads(request.content)["tags"])
+        return httpx.Response(200, json={})
+
+    jobs = iter(["example-job-01", "example-job-02"])
+
+    def new_job(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"uri": LINK, "jobArmId": f"{JOBS_PATH}/{next(jobs)}"})
+
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags={})
+        routes.site_get.mock(side_effect=read_site)
+        routes.site_patch.mock(side_effect=write_site)
+        routes.import_uri.mock(side_effect=new_job)
+        _arm(mock, "GET", f"{JOBS_PATH}/example-job-01").respond(200, json=_finished_job())
+        _arm(mock, "GET", f"{JOBS_PATH}/example-job-02").respond(200, json=_finished_job())
+        connector = _connector()
+        await asyncio.gather(
+            connector.migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS),
+            connector.migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": other}
+            ),
+        )
+
+    assert set(site_tags) == {_tag(), _tag(other)}
+    assert sorted(site_tags.values()) == ["example-job-01", "example-job-02"]
+    assert routes.upload.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_overlapping_imports_of_one_file_upload_it_once() -> None:
+    site_tags: dict[str, str] = {}
+
+    def write_site(request: httpx.Request) -> httpx.Response:
+        site_tags.update(json.loads(request.content)["tags"])
+        return httpx.Response(200, json={})
+
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags={})
+        routes.site_get.mock(side_effect=lambda _: httpx.Response(200, json={"tags": site_tags}))
+        routes.site_patch.mock(side_effect=write_site)
+        routes.job.mock(return_value=httpx.Response(200, json=_finished_job()))
+        connector = _connector()
+        results = await asyncio.gather(
+            connector.migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS),
+            connector.migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS),
+        )
+
     assert routes.upload.call_count == 1
-    assert result["outcome"] == "uploaded"
+    assert sorted(r["outcome"] for r in results) == ["already_sent", "uploaded"]
+
+
+@pytest.mark.asyncio
+async def test_a_site_whose_lock_stays_busy_gets_nothing_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def busy(key: int, **_: Any) -> AsyncIterator[bool]:
+        yield False
+
+    monkeypatch.setattr(migrate_import, "advisory_lock", busy)
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock)
+        with pytest.raises(AzureConflictError, match="another import"):
+            await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    assert routes.site_get.call_count == 0
+    assert routes.upload.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -1091,7 +1246,9 @@ def test_the_import_schema_refuses_unknown_fields_and_a_bad_site() -> None:
 
     assert validate_params(schema, {**example, "upload_url": LINK})
     assert validate_params(schema, {**example, "site": "a/b"})
-    assert validate_params(schema, {**example, "allow_repeat": "yes"})
+    assert validate_params(schema, {**example, "repeat_key": "a/b"})
+    assert validate_params(schema, {**example, "allow_repeat": True})
+    assert not validate_params(schema, {**example, "repeat_key": "2026-11-10"})
 
 
 # ----------------------------------------------------------------------

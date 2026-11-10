@@ -76,14 +76,17 @@ _IMPORT_GUIDANCE: Final[dict[str, Any]] = {
     "output_shape": (
         "{site, site_id, collector, outcome, job_name, state, done, csv: {sha256, bytes, "
         "rows}, rows_read, rows_imported, error_count, warning_count, bad_rows: [{reason}], "
-        "bad_rows_truncated, poll_error}. outcome is uploaded, upload_unconfirmed or "
-        f"already_sent. {_TREAT_AS_DATA}"
+        "bad_rows_truncated, poll_error}. outcome is uploaded, upload_unconfirmed, "
+        "already_sent or earlier_upload_waiting (an earlier call recorded this file, and "
+        f"its job still waits for the file). {_TREAT_AS_DATA}"
     ),
     "next_step": (
         "If done is false or poll_error is set, call azure.migrate.job.list with the same "
         "project: do not send the file again. Send the same call again only after a lost "
         "answer: MEHO finds the first job by the file's SHA-256 and uploads nothing twice. "
-        "Set allow_repeat to true only to import the same file on purpose. Report bad_rows "
+        "If the job of earlier_upload_waiting still waits for its file after some minutes, "
+        "the file did not arrive: send the call again with a new repeat_key. Set a new "
+        "repeat_key also to import the same file on purpose. Report bad_rows "
         "to the person: those servers were not imported. Then call azure.migrate.machine.list "
         "to see the machines (source import)."
     ),

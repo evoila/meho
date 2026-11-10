@@ -11,9 +11,12 @@ never uploads the same file twice:
    safe to repeat).
 2. Look at the site's tags. MEHO writes one tag per uploaded file,
    ``meho-csv-<first 16 characters of the file's SHA-256>``, holding the job
-   name. When the tag is there, the file was already sent: MEHO reads that
-   job and follows it, and uploads nothing. ``allow_repeat: true`` skips this
-   check.
+   name. A ``repeat_key`` adds ``-<8 characters of its SHA-256>`` to the tag
+   name, so an import of the same file on purpose has its own record, and a
+   retry with the same key finds it. When the tag names a job that exists,
+   the file was already sent, or its upload may still be under way: MEHO
+   follows that job and uploads nothing. This holds also while the job still
+   waits for its file, because the upload's outcome is not known then.
 3. Ask the site for an upload link (``importUri``) and write the job name to
    the tag *before* the upload. If the tag cannot be written, nothing is
    uploaded.
@@ -21,8 +24,15 @@ never uploads the same file twice:
    The link is a secret: MEHO's Azure token is never sent to it, and the link
    is in no result, error, log or audit text. A lost answer after the upload
    does not fail the call: MEHO follows the job to see whether the file
-   arrived.
+   arrived. When Azure Storage clearly refuses the upload, the file did not
+   arrive: MEHO removes the tag, so the same call again uploads it.
 5. Follow the job until it ends or MEHO's wait is over.
+
+Steps 1 to 4 run under one PostgreSQL lock per import site, shared by every
+MEHO worker. Two imports to the same site then never read the tags at the
+same time, so neither erases the other's record, and the same file is never
+uploaded twice at once. When the lock stays busy, MEHO sends nothing and
+says so.
 
 The audit row of a call holds a hash of the parameters, never the file. The
 result names the file by its SHA-256, size and row count.
@@ -30,13 +40,23 @@ result names the file by its SHA-256, size and row count.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
+
+import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.http import json_payload_or_empty
-from meho_backplane.connectors.azure._errors import AzureNotFoundError, AzureUrlRefusedError
+from meho_backplane.connectors.azure._errors import (
+    AzureApiError,
+    AzureConflictError,
+    AzureNotFoundError,
+    AzureUrlRefusedError,
+)
 from meho_backplane.connectors.azure._http import send
 from meho_backplane.connectors.azure._paths import (
     MIGRATE_API_VERSION,
@@ -46,7 +66,11 @@ from meho_backplane.connectors.azure._paths import (
     OFFAZURE_IMPORT_SITE_PATH,
     OFFAZURE_IMPORT_URI_PATH,
 )
-from meho_backplane.connectors.azure.migrate_csv import PreparedCsv, prepare_csv
+from meho_backplane.connectors.azure.migrate_csv import (
+    REPEAT_KEY_PATTERN,
+    PreparedCsv,
+    prepare_csv,
+)
 from meho_backplane.connectors.azure.migrate_jobs import (
     WAITING_STATE,
     job_name_of,
@@ -63,11 +87,34 @@ from meho_backplane.connectors.azure.migrate_writes import (
     poll_until,
 )
 from meho_backplane.connectors.azure.session import AzureTargetLike
+from meho_backplane.db.advisory import advisory_lock
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.azure.connector import AzureConnector
 
 __all__ = ["import_start_impl"]
+
+_REPEAT_KEY_RE: Final[re.Pattern[str]] = re.compile(REPEAT_KEY_PATTERN)
+
+#: How long a call waits for another import to the same site to finish its upload.
+_LOCK_WAIT_SECONDS: Final[float] = 120.0
+
+
+def _record_key(prepared: PreparedCsv, repeat_key: object) -> str:
+    """The site tag that records this file, for this ``repeat_key`` (or none)."""
+    if repeat_key is None:
+        return prepared.tag_key
+    if not isinstance(repeat_key, str) or not _REPEAT_KEY_RE.fullmatch(repeat_key):
+        raise ValueError("repeat_key must be 1 to 64 letters, digits, dots, hyphens or _.")
+    return f"{prepared.tag_key}-{hashlib.sha256(repeat_key.encode('utf-8')).hexdigest()[:8]}"
+
+
+def _lock_key(site_id: str) -> int:
+    """The PostgreSQL lock key of one import site (63 bits, like the other lock keys)."""
+    digest = hashlib.blake2b(
+        f"meho:azure-migrate-import:{site_id.casefold()}".encode(), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 
 @dataclass
@@ -80,6 +127,7 @@ class _Import:
     project: Mapping[str, str]
     names: Mapping[str, str]
     prepared: PreparedCsv
+    record_key: str
 
     def _path(self, template: str, **extra: str) -> str:
         return site_path(self.target, template, **extra)
@@ -149,17 +197,29 @@ class _Import:
     async def known_job(self, tags: Mapping[str, str]) -> dict[str, Any] | None:
         """The job the tags name for this file, or ``None`` when there is none to follow.
 
-        A job that still waits for its file is not followed: the file did not
-        arrive, so the caller gets a new upload link.
+        A job that still waits for its file is followed too: its upload may
+        still be under way, or its answer was lost. Only a job that is gone
+        gets a new upload link.
         """
-        job = job_name_of(tags.get(self.prepared.tag_key))
+        job = job_name_of(tags.get(self.record_key))
         if job is None:
             return None
         try:
-            row = await read_job(self.connector, self.operator, self.target, self.names, job)
+            return await read_job(self.connector, self.operator, self.target, self.names, job)
         except AzureNotFoundError:
             return None
-        return None if row["state"].casefold() == WAITING_STATE else row
+
+    async def _write_tags(self, tags: Mapping[str, str]) -> None:
+        await send(
+            self.connector,
+            self.target,
+            "PATCH",
+            self.site_id,
+            operator=self.operator,
+            params={"api-version": OFFAZURE_API_VERSION},
+            json={"tags": dict(tags)},
+            repeatable=True,
+        )
 
     async def send_file(self, tags: dict[str, str]) -> tuple[str, bool]:
         """Get an upload link, record the job, upload. Returns the job and if Azure confirmed."""
@@ -184,19 +244,18 @@ class _Import:
             )
         # The record comes first: a retry after a lost answer finds the job and
         # does not upload again. When it cannot be written, nothing is uploaded.
-        await send(
-            self.connector,
-            self.target,
-            "PATCH",
-            self.site_id,
-            operator=self.operator,
-            params={"api-version": OFFAZURE_API_VERSION},
-            json={"tags": {**tags, self.prepared.tag_key: job}},
-            repeatable=True,
-        )
-        confirmed = await upload_file(
-            self.connector, self.operator, self.target, link, self.prepared.content
-        )
+        await self._write_tags({**tags, self.record_key: job})
+        try:
+            confirmed = await upload_file(
+                self.connector, self.operator, self.target, link, self.prepared.content
+            )
+        except AzureApiError:
+            # Azure Storage refused the file, so it did not arrive. Drop the
+            # record, so the same call again uploads it. A failed drop only
+            # means the retry follows the job that waits for its file.
+            with contextlib.suppress(AzureApiError, httpx.HTTPError):
+                await self._write_tags(tags)
+            raise
         return job, confirmed
 
     async def follow(self, job: str | None, outcome: str) -> dict[str, Any]:
@@ -243,6 +302,7 @@ async def import_start_impl(
 ) -> dict[str, Any]:
     """``azure.migrate.import.start``: import a CSV file of servers into a project."""
     project = project_params(params)
+    prepared = prepare_csv(params.get("csv"))
     run = _Import(
         connector,
         operator,
@@ -252,12 +312,29 @@ async def import_start_impl(
             "resource_group": project["resource_group"],
             "site": site_param(params, project["project"]),
         },
-        prepare_csv(params.get("csv")),
+        prepared,
+        _record_key(prepared, params.get("repeat_key")),
     )
-    tags = await run.ensure_site()
-    await run.ensure_collector()
-    known = None if params.get("allow_repeat") is True else await run.known_job(tags)
-    if known is not None:
-        return await run.follow(known["name"], "already_sent")
-    job, confirmed = await run.send_file(tags)
-    return await run.follow(job, "uploaded" if confirmed else "upload_unconfirmed")
+    async with advisory_lock(
+        _lock_key(run.site_id), subsystem="azure_migrate_import", wait_seconds=_LOCK_WAIT_SECONDS
+    ) as locked:
+        if not locked:
+            raise AzureConflictError(
+                f"Azure target {target.name!r}: another import to site "
+                f"{run.names['site']!r} is still uploading. MEHO sent nothing.",
+                http_status=409,
+                azure_error_code=None,
+                azure_message=None,
+                remediation="Send the same call again in a few minutes.",
+            )
+        tags = await run.ensure_site()
+        await run.ensure_collector()
+        known = await run.known_job(tags)
+        if known is None:
+            job, confirmed = await run.send_file(tags)
+            outcome = "uploaded" if confirmed else "upload_unconfirmed"
+        else:
+            job = known["name"]
+            waiting = known["state"].casefold() == WAITING_STATE
+            outcome = "earlier_upload_waiting" if waiting else "already_sent"
+    return await run.follow(job, outcome)

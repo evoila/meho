@@ -15,7 +15,11 @@ from __future__ import annotations
 from typing import Any, Final
 
 from meho_backplane.connectors.azure._model import TEXT_OR_NULL
-from meho_backplane.connectors.azure.migrate_csv import MAX_CSV_BYTES, MAX_CSV_ROWS
+from meho_backplane.connectors.azure.migrate_csv import (
+    MAX_CSV_BYTES,
+    MAX_CSV_ROWS,
+    REPEAT_KEY_PATTERN,
+)
 from meho_backplane.connectors.azure.migrate_jobs import IMPORT_SITE_PATTERN
 from meho_backplane.connectors.azure.migrate_schemas import (
     ASSESSMENT_LIST_RESPONSE,
@@ -111,12 +115,15 @@ IMPORT_START_PARAMS: Final[dict[str, Any]] = _schema(
         ),
     },
     site=_SITE,
-    allow_repeat={
-        "type": "boolean",
+    repeat_key={
+        "type": "string",
+        "pattern": REPEAT_KEY_PATTERN,
         "description": (
-            "Set true to import a file again that MEHO already sent to this site. Without "
-            "it, the same file (same SHA-256) is not uploaded twice: MEHO follows the first "
-            "job instead. Default false."
+            "Set a new key to import a file again that MEHO already sent to this site, for "
+            "example the date. Without it, the same file (same SHA-256) is not uploaded "
+            "twice: MEHO follows the first job instead. MEHO keeps one record per file and "
+            "key, so the same call with the same key after a lost answer uploads nothing "
+            "twice either."
         ),
     },
 )

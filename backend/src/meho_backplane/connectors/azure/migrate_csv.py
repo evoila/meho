@@ -22,13 +22,16 @@ import io
 from dataclasses import dataclass
 from typing import Any, Final
 
-__all__ = ["MAX_CSV_BYTES", "MAX_CSV_ROWS", "PreparedCsv", "prepare_csv"]
+__all__ = ["MAX_CSV_BYTES", "MAX_CSV_ROWS", "REPEAT_KEY_PATTERN", "PreparedCsv", "prepare_csv"]
 
 #: Azure's limit: servers per file and per project.
 MAX_CSV_ROWS: Final[int] = 20_000
 
 #: The largest file MEHO uploads (20,000 rows of about 400 bytes).
 MAX_CSV_BYTES: Final[int] = 8 * 1024 * 1024
+
+#: What a ``repeat_key`` may hold. It adds a part to the tag name of :attr:`PreparedCsv.tag_key`.
+REPEAT_KEY_PATTERN: Final[str] = r"^[A-Za-z0-9._-]{1,64}$"
 
 #: The first words of the four required columns (a ``*`` marks them in Azure's template).
 _REQUIRED_COLUMNS: Final[tuple[str, ...]] = ("server name", "cores", "memory", "os name")

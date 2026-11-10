@@ -61,6 +61,7 @@ _MEMBER_PAGE: Final[int] = 100
 GRANT_OPS: dict[str, tuple[tuple[str, ...], str | None, str | None]] = {
     "keycloak.group.member.add": (("user_id",), "group_id", "group_name"),
     "keycloak.role_mapping.assign": (("id",), None, None),
+    "keycloak.role_mapping.client.assign": (("id",), None, None),
     "keycloak.group.update_attributes": ((), "id", "name"),
 }
 

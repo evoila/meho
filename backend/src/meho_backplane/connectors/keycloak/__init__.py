@@ -43,6 +43,7 @@ from meho_backplane.connectors.keycloak import (
     op_classes,  # noqa: F401 -- declares the op classes
     ops_authflow_passkey,  # noqa: F401 -- the approval card of the passkey step op
     ops_login_check,  # noqa: F401
+    ops_write_account_preview,  # noqa: F401 -- the approval cards of the user account writes
     ops_write_preview,  # noqa: F401
     ops_write_realm_smtp,  # noqa: F401 -- refuses an inline SMTP password before approval
 )

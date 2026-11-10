@@ -118,11 +118,15 @@ approves it through the queue.
 | `group_write` | `keycloak.group.delete` | `DELETE .../groups/{group-id}` | destructive |
 | `realm_write` | `keycloak.realm.delete` | `DELETE /admin/realms/{realm}` | destructive |
 | `user_write` | `keycloak.user.logout` | `POST .../users/{id}/logout` | caution |
+| `account_write` | `keycloak.role_mapping.client.assign` | `POST .../users/{id}/role-mappings/clients/{client-id}` | dangerous |
+| `account_write` | `keycloak.role_mapping.client.remove` | `DELETE .../users/{id}/role-mappings/clients/{client-id}` | dangerous |
+| `account_write` | `keycloak.user.update` | `PUT .../users/{id}` | caution |
+| `account_write` | `keycloak.user.credential.delete` | `DELETE .../users/{id}/credentials/{credentialId}` | dangerous |
 | `user_login_check` | `keycloak.user.check_login` | `POST /realms/{realm}/protocol/openid-connect/token` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_approval_flow` | `.../authentication/flows` and `PUT .../clients/{id}` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_passkey_code_skip` | `.../authentication/flows` and `PUT /admin/realms/{realm}` | caution |
 
-Twenty-one write ops. The group column is the registered group key: use it
+Twenty-five write ops. The group column is the registered group key: use it
 as the `group` argument of `search_operations` (for example
 `group="realm_write"` finds `keycloak.realm.create`).
 

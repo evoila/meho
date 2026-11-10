@@ -142,3 +142,47 @@ def brand_fonts_dir() -> Path:
     from meho_ui.brand import fonts
 
     return fonts.fonts_dir()
+
+
+def static_mounts() -> tuple[tuple[str, Path], ...]:
+    """Return the console's static mount table, in registration order.
+
+    The console's assets no longer all live in this package: the brand
+    stylesheets and the webfonts are served straight out of ``meho-ui``
+    by mounts of their own. Anything that maps a ``/ui/static/...`` URL
+    to a file -- the app, and the guard tests -- needs the same table,
+    and a copy of it in a test is a copy that goes stale the first time
+    a mount is added.
+
+    Order matters and is not cosmetic. A Starlette mount miss does not
+    fall through to a later, more specific mount, so the two brand
+    prefixes have to be registered before the broad ``/ui/static`` one
+    or every brand URL 404s. ``test_ui_static_assets`` asserts the
+    running app's mount table matches this one, which is what keeps the
+    two from drifting apart.
+    """
+    return (
+        ("/ui/static/brand", brand_css_dir()),
+        ("/ui/static/fonts", brand_fonts_dir()),
+        ("/ui/static", static_root_dir()),
+    )
+
+
+def static_asset_path(url: str) -> Path | None:
+    """Map a ``/ui/static/...`` URL to the file the app serves for it.
+
+    Resolves through :func:`static_mounts` longest-prefix-first, the way
+    Starlette matches, so the answer is the file a browser would get.
+    Returns ``None`` for a URL outside ``/ui/static/``.
+
+    The returned path is not guaranteed to exist -- a caller that cares
+    (every current caller is a guard test) checks. A URL that names a
+    mount point rather than a file inside one resolves to that
+    directory, which is never servable.
+    """
+    for prefix, directory in sorted(static_mounts(), key=lambda m: -len(m[0])):
+        if url == prefix:
+            return directory
+        if url.startswith(f"{prefix}/"):
+            return directory / url[len(prefix) + 1 :]
+    return None

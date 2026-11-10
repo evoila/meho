@@ -68,7 +68,7 @@ one, that test fails and the constant must be promoted into
 :data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
 to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
 34 by the #3851 user logout, to 37 by the #3886 realm delete, to 45 by the login flow
-ops, and to 48 by the passkey step op) were
+ops, to 48 by the passkey step op, and to 49 by the user disable / enable PUT) were
 served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -102,8 +102,9 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_CLIENT_PROTOCOL_MAPPERS_PATH": ("POST",),
     "_CLIENT_SCOPES_PATH": ("GET", "POST"),
     "_USERS_PATH": ("GET", "POST"),
-    # Governed user delete (#3944): the delete plus its 404 read-back.
-    "_USER_PATH": ("GET", "DELETE"),
+    # Governed user delete (#3944): the delete plus its 404 read-back. The PUT
+    # is the user disable / enable write (#4940).
+    "_USER_PATH": ("GET", "PUT", "DELETE"),
     "_USER_ROLE_MAPPINGS_PATH": ("GET",),
     "_USER_ROLE_MAPPINGS_REALM_PATH": ("POST",),
     "_USER_RESET_PASSWORD_PATH": ("PUT",),
@@ -236,6 +237,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "PUT:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
         "PUT:/admin/realms/{realm}/clients/{client-uuid}",
         "PUT:/admin/realms/{realm}/groups/{group-id}",
+        "PUT:/admin/realms/{realm}/users/{user-id}",
         "PUT:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
         "PUT:/admin/realms/{realm}/users/{user-id}/reset-password",
     ]

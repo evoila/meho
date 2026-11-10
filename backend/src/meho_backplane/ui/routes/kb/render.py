@@ -81,21 +81,18 @@ _lock = threading.Lock()
 #: :data:`_PYGMENTS_CSS`.
 _FORMATTER = HtmlFormatter(nowrap=True, cssclass="kb-code")
 
-#: Pygments styles paired to the console's two DaisyUI 5 themes. The
-#: default/dark scope uses a dark-background style (light token colours);
-#: the ``meho-light`` scope keeps pygments' light ``default`` style (dark
-#: token colours). Both surfaces sit on ``var(--color-base-200)``, which
-#: the templates pin — so the code block follows the active theme instead
-#: of the dead DaisyUI 4 ``--b2`` variable that used to force a light
-#: background in both themes (#2452).
-_DARK_STYLE = "github-dark"
-_LIGHT_STYLE = "default"
-
-#: Selector the light-theme rules are scoped under. Higher specificity
-#: than the bare ``.kb-code`` default block, so it wins when the
-#: ``data-theme="meho-light"`` attribute is present and is inert
-#: otherwise.
-_LIGHT_SCOPE = '[data-theme="meho-light"] .kb-code'
+#: The pygments style for the console's one theme. ``default`` is
+#: pygments' light style -- dark token colours, which is what reads on the
+#: evoila theme's light surface. The block sits on
+#: ``var(--color-base-200)``, which the templates pin, rather than the dead
+#: DaisyUI 4 ``--b2`` variable that used to force a light background
+#: regardless of theme (#2452).
+#:
+#: One style, not two. The console carried a dark set under ``.kb-code``
+#: and a light override under a ``data-theme`` scope while it had two
+#: themes; with a single light theme the dark set was never selected, and
+#: shipping it meant every KB page carried a stylesheet it could not use.
+_STYLE = "default"
 
 
 def _style_defs(style: str, scope: str, *, tokens_only: bool) -> str:
@@ -125,16 +122,10 @@ def _style_defs(style: str, scope: str, *, tokens_only: bool) -> str:
     return "\n".join(kept)
 
 
-#: Cached, theme-scoped CSS for the ``kb-code`` formatter. Generated once
-#: at module load; safe to embed in a ``<style>`` block. Two blocks: the
-#: default/dark token colours under ``.kb-code`` and the light-theme
-#: overrides under ``[data-theme="meho-light"] .kb-code``.
-_PYGMENTS_CSS: str = "\n".join(
-    (
-        _style_defs(_DARK_STYLE, ".kb-code", tokens_only=False),
-        _style_defs(_LIGHT_STYLE, _LIGHT_SCOPE, tokens_only=True),
-    )
-)
+#: Cached CSS for the ``kb-code`` formatter. Generated once at module
+#: load; safe to embed in a ``<style>`` block. One block, scoped to
+#: ``.kb-code``.
+_PYGMENTS_CSS: str = _style_defs(_STYLE, ".kb-code", tokens_only=False)
 
 
 def _highlight_code(code: str, lang: str, attrs: str) -> str:
@@ -194,15 +185,14 @@ def render_markdown(body: str) -> Markup:
 
 
 def pygments_css() -> str:
-    """Return the theme-scoped CSS rules for the ``kb-code`` formatter.
+    """Return the CSS token-colour rules for the ``kb-code`` formatter.
 
     Callers inject this into a ``<style>`` block in the entry-detail
-    template. The string carries two token-colour rule sets: a
-    default/dark set under ``.kb-code`` and a ``[data-theme="meho-light"]
-    .kb-code`` override, so code blocks stay legible in both console
-    themes. The container background is deliberately omitted — the
-    template pins it to ``var(--color-base-200)`` so the block follows
-    the active theme. The string is pure CSS (no ``<style>`` wrapper) so
-    callers can compose it with other inline styles as needed.
+    template. One rule set, scoped to ``.kb-code``: the console has a
+    single light theme, so the second, dark-scoped set it used to carry
+    could never be selected. The container background is deliberately
+    omitted — the template pins it to ``var(--color-base-200)``. The
+    string is pure CSS (no ``<style>`` wrapper) so callers can compose it
+    with other inline styles as needed.
     """
     return _PYGMENTS_CSS

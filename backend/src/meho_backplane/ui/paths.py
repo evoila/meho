@@ -107,3 +107,38 @@ def ensure_static_dist_dir() -> Path:
     dist = static_dist_dir()
     dist.mkdir(parents=True, exist_ok=True)
     return dist
+
+
+def brand_css_dir() -> Path:
+    """Return the directory of brand stylesheets inside ``meho-ui``.
+
+    The shared theme, the plain token variables and the ``@font-face``
+    rules. Served at ``/ui/static/brand`` rather than copied into this
+    package: the brand package is the one copy of these files, and a
+    second copy here would drift from it the first time one side is
+    bumped and the other is not.
+
+    Resolved from the installed package, so it works in both deploy
+    shapes for the same reason :func:`templates_dir` does -- in the image
+    ``meho_ui`` sits beside ``meho_backplane`` in site-packages; in a
+    source checkout it sits in the virtualenv the backend runs from.
+    """
+    from meho_ui.brand import daisyui_theme_path
+
+    return daisyui_theme_path().parent
+
+
+def brand_fonts_dir() -> Path:
+    """Return the directory of webfonts and licences inside ``meho-ui``.
+
+    Served at ``/ui/static/fonts``, which is the URL
+    ``meho_ui.brand.fonts`` already writes into its own ``@font-face``
+    rules -- so the stylesheet resolves against this mount unaltered.
+
+    The licence files are served alongside the fonts deliberately: the
+    SIL Open Font License asks that its text travel with the fonts, and
+    a URL next to them is the plainest way to honour that.
+    """
+    from meho_ui.brand import fonts
+
+    return fonts.fonts_dir()

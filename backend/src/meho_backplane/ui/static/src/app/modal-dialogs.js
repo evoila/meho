@@ -45,7 +45,7 @@
 // the overridable ``component_scripts`` block, so it ships on every
 // console page regardless of what a surface template overrides. Plain
 // first-party JS (no Alpine, no inline script) to preserve the chassis
-// "zero inline script" CSP posture, mirroring theme.js.
+// "zero inline script" CSP posture, mirroring session-expiry.js.
 
 (function () {
   "use strict";

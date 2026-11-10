@@ -258,6 +258,39 @@ Two transport options were evaluated for the GCP REST connector (G3.7-T4, #845):
 
 ---
 
+### 13. Brand assets — **one shared package, and this repository stops building without credentials for it**
+
+The three MEHO web interfaces share one look. The design tokens, the light
+theme and the webfonts live in a single package rather than being copied into
+each app, so a colour or a radius is changed once.
+
+That package is **not published to a public index**. `meho-ui` is the first
+dependency of this repository that does not resolve from one. Until it is
+published, **a clone of `evoila/meho` builds only with credentials for the
+brand package's repository**, and so do CI and the image build.
+
+This is the part worth stating plainly, because it changes what this
+repository *is*. Before this decision it had zero git-style dependencies and
+no private registry or token anywhere in its build: anyone could clone it and
+build it. That is no longer true. The code stays Apache-2.0 and stays
+readable; it is the *build* that now needs access.
+
+The alternative — publishing the brand package — was considered and remains
+open. Nothing in it is commercially sensitive: brand tokens whose palette is
+published on the evoila website, OFL-licensed fonts, generic Jinja macros and
+CSS. If this cost is judged too high, publishing the package reverses it
+without touching anything here beyond the dependency's source.
+
+What this decision does **not** change: decisions #9 and #10 hold. The pages
+are still server-rendered from this backplane, there is still no SPA bundle
+and no Node toolchain in CI. The brand package ships CSS and fonts, not a
+frontend framework; the theme is plain custom properties, linked after the
+compiled bundle, and needs no build step of its own.
+
+Recorded here rather than only in a commit message, because the first person
+to hit it will be someone outside evoila whose build fails, and this register
+is where they will look.
+
 ## Reopening discussion
 
 (empty)

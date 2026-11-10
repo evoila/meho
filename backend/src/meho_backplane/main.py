@@ -261,7 +261,12 @@ from meho_backplane.ui.auth import (
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.csrf import CSRFMiddleware
 from meho_backplane.ui.fragment_guard import FragmentNavigationMiddleware
-from meho_backplane.ui.paths import ensure_static_dist_dir, static_root_dir
+from meho_backplane.ui.paths import (
+    brand_css_dir,
+    brand_fonts_dir,
+    ensure_static_dist_dir,
+    static_root_dir,
+)
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.security_headers import UIFramingHeadersMiddleware
 from meho_backplane.ui.static_files import RevalidateStaticFiles
@@ -1465,6 +1470,28 @@ app.include_router(mcp_router)
 # * UI router -- ``GET /ui/`` dashboard + the five
 #   ``GET /ui/{slug}`` surface stubs. All routes require a session;
 #   ``UISessionMiddleware`` redirects to login on miss.
+# * Brand assets -- the shared theme, token and font stylesheets, and the
+#   webfonts, served straight out of the installed ``meho-ui`` package.
+#   Mounted rather than copied into this tree: the package is the one copy
+#   of these files, and a second copy here would drift from it.
+#
+#   The font mount's path is not arbitrary. ``meho_ui.brand.fonts`` writes
+#   ``/ui/static/fonts/<file>`` into its own ``@font-face`` rules, so the
+#   stylesheet it ships resolves against this mount with no rewriting.
+#
+#   Mounted BEFORE the two routers for the same reason as ``/ui/static``:
+#   the session middleware exempts the ``/ui/static/`` prefix, so an
+#   unauthenticated browser can still load the login page's styling.
+app.mount(
+    "/ui/static/brand",
+    RevalidateStaticFiles(directory=str(brand_css_dir()), check_dir=False),
+    name="ui_brand",
+)
+app.mount(
+    "/ui/static/fonts",
+    RevalidateStaticFiles(directory=str(brand_fonts_dir()), check_dir=False),
+    name="ui_brand_fonts",
+)
 app.mount(
     "/ui/static",
     RevalidateStaticFiles(directory=str(static_root_dir()), check_dir=False),

@@ -25,15 +25,16 @@
     OFFLINE_URL,
     "/ui/static/src/pwa/manifest.webmanifest",
     "/ui/static/dist/tailwind.css",
-    "/ui/static/src/app/theme.js",
+    "/ui/static/brand/evoila-daisyui.css",
+    "/ui/static/brand/evoila-fonts.css",
     "/ui/static/src/brand/favicon.svg",
     "/ui/static/src/brand/icon-192.png",
     "/ui/static/src/brand/icon-512.png",
     "/ui/static/src/brand/icon-maskable-512.png",
     "/ui/static/src/brand/apple-touch-icon.png",
-    "/ui/static/src/fonts/schibsted-grotesk-latin-var.woff2",
-    "/ui/static/src/fonts/bricolage-grotesque-latin-var.woff2",
-    "/ui/static/src/fonts/ibm-plex-mono-latin-400.woff2",
+    "/ui/static/fonts/rubik-latin-var.woff2",
+    "/ui/static/fonts/lato-latin-400.woff2",
+    "/ui/static/fonts/ibm-plex-mono-latin-400.woff2",
   ];
 
   // True only for a file of the app shell. The one check that decides

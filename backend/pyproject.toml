@@ -147,6 +147,15 @@ dependencies = [
     # already installed through ``pydantic-ai-slim[bedrock]``; declared here
     # because the session store imports it directly.
     "boto3>=1.43.0",
+    # The shared brand package: the evoila design tokens, the light theme
+    # and the webfonts. One copy for all three MEHO web interfaces.
+    #
+    # First dependency of this repository that does not resolve from a
+    # public index. Until it is published, a clone builds only with
+    # credentials for its repository, and so do CI and the image build.
+    # A recorded choice, not an accident -- decision #13 in
+    # ``docs/decisions/locked-decisions.md``.
+    "meho-ui",
 ]
 
 [dependency-groups]
@@ -212,6 +221,9 @@ constraint-dependencies = ["httpcore2>=2.10.0"]
 
 [tool.uv.sources]
 meho-connector-kit = { path = "connector-kit", editable = true }
+# Pinned to a commit, not a branch: a floating ref would let the console's
+# appearance change without a commit here saying so.
+meho-ui = { git = "https://github.com/evoila-bosnia/meho-ui.git", rev = "533243615aacafbddddb58708b903c79b5d7f55a" }
 
 [build-system]
 requires = ["hatchling"]

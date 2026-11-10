@@ -271,8 +271,9 @@ All refusal envelopes carry `status` / `deleted=False` / `guidance` — the
 
 Right before an approved run of `record.delete` or `record.remove`, MEHO
 builds the preview card again against the nameserver and compares the
-record fields on it with the approved card
-(`operations/approval_object_check.py`). If the fields differ, if records
+record fields and the record values on it with the approved card
+(`operations/approval_object_check.py`). A delete with a pinned `rdata`
+compares only that value. If the fields or the values differ, if records
 appeared under a name the approved card showed as empty, or if the card
 does not build, the run is refused with `object_changed_since_approval`
 and nothing is changed on the nameserver.

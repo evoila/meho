@@ -1631,7 +1631,11 @@ The code is in `operations/approved_reveal.py`.
   approved run hold (same release, same target, same preview).
 - **MEHO keeps no value.** The run result stored on the request
   (`resume_result`) has no answer (`result: null`, `handle: null`,
-  `extras.secret_value_withheld: true`). The audit row of the read keeps
+  `extras.secret_value_withheld: true`). The result cache keeps nothing
+  either: for a `reveal_secret: true` run the dispatcher sets
+  `secret_reveal` in the reducer context, and the reducer returns the
+  answer whole, with no handle, also when it is over the JSONFlux limit.
+  The audit row of the read keeps
   fingerprints only, as for every reveal. Each fetch attempt writes one
   `approval.reveal` audit row with its outcome (`run` or the refusal
   code).

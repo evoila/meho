@@ -55,6 +55,7 @@ from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations import dispatcher as dispatcher_module
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
@@ -69,7 +70,9 @@ from meho_backplane.operations.approved_reveal import (
     fetch_approved_reveal,
     reveal_fetch_window,
 )
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
+from tests._result_store_helpers import MemoryResultStore
 
 # Assembled from fragments so gitleaks' built-in rules don't false-positive
 # on the test source.
@@ -156,14 +159,29 @@ async def _module_vault_read_handler(
     return {"data": {"password": _PASSWORD_SECRET, "username": "root"}, "version": 3}
 
 
-async def _register_vault_read(embedding_service: AsyncMock) -> None:
+_MANY_ROWS = 80
+
+
+async def _module_vault_read_many_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``vault.kv.read`` stand-in whose answer is a collection over the JSONFlux limit."""
+    rows = [{"name": f"key-{n}", "password": f"{_PASSWORD_SECRET}-{n}"} for n in range(_MANY_ROWS)]
+    return {"data": rows, "version": 3}
+
+
+async def _register_vault_read(
+    embedding_service: AsyncMock, handler: Any = _module_vault_read_handler
+) -> None:
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
         product="vault",
         version="1.x",
         impl_id="vault",
         op_id="vault.kv.read",
-        handler=_module_vault_read_handler,
+        handler=handler,
         summary="Read a KV v2 secret.",
         description="Read a secret.",
         parameter_schema={
@@ -364,6 +382,29 @@ async def test_after_the_fetch_the_request_row_holds_no_secret_value(
     async with get_sessionmaker()() as session:
         with pytest.raises(ResultAccessForbiddenError):
             await read_approval_result(session, operator=_REVIEWER, request_id=request_id)
+
+
+async def test_a_large_reveal_is_not_kept_in_the_result_cache(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reveal over the JSONFlux limit comes back whole and leaves no stored copy."""
+    store = MemoryResultStore()
+    monkeypatch.setattr(dispatcher_module, "_DEFAULT_REDUCER", JsonFluxReducer(store=store))
+    await _register_vault_read(stub_embedding_service, _module_vault_read_many_handler)
+
+    request_id = await _approved_reveal()
+    result = await fetch_approved_reveal(_make_operator(), request_id)
+    assert result.status == "ok", result.error
+    assert result.handle is None
+    assert len(result.result["data"]) == _MANY_ROWS
+    assert result.result["data"][-1]["password"] == f"{_PASSWORD_SECRET}-{_MANY_ROWS - 1}"
+
+    assert store.client.values == {}
+    assert _PASSWORD_SECRET not in _whole_row(await _request_row(request_id))
+    async with get_sessionmaker()() as fresh:
+        audit = (await fresh.execute(select(AuditLog))).scalars().all()
+    stored = json.dumps([(row.payload, row.raw_payload) for row in audit], default=str)
+    assert _PASSWORD_SECRET not in stored
 
 
 async def test_a_second_fetch_is_refused(

@@ -23,13 +23,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app
 from meho_backplane.session_store.models import AgentSessionRecord, AgentSessionUpload
 from meho_backplane.session_store.object_store import ObjectStoreError, set_object_store_for_testing
 from meho_backplane.session_store.retention import CLEANUP_PATH, cleanup_once
+from meho_backplane.session_store.upload_slots import upload_slot
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -481,6 +482,27 @@ async def test_too_large_an_archive_is_refused(
     resp = _upload(client, _transcript(_LINE_1))
     assert resp.status_code == 413
     assert resp.json()["detail"] == "session_archive_too_large"
+
+
+@pytest.mark.asyncio
+async def test_a_second_upload_of_one_person_at_the_same_time_is_429(
+    client: TestClient, store: _FakeStore
+) -> None:
+    alice = Operator(
+        sub="op-alice",
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
+    with upload_slot(alice):
+        busy = _upload(client, _transcript(_LINE_1))
+        other = _upload(client, _transcript(_LINE_1), session_id="other-person", sub="op-bob")
+    assert busy.status_code == 429
+    assert busy.json()["detail"] == "session_upload_already_running"
+    assert busy.headers["Retry-After"] == "60"
+    assert other.status_code == 200
+    assert _upload(client, _transcript(_LINE_1)).status_code == 200
 
 
 @pytest.mark.asyncio

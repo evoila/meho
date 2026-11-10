@@ -39,6 +39,7 @@ from meho_backplane.connectors._shared.system_operator import synthesise_system_
 from meho_backplane.connectors.argocd.connector import ArgoCdConnector
 from meho_backplane.connectors.azure.connector import AzureConnector
 from meho_backplane.connectors.entra.connector import EntraConnector
+from meho_backplane.connectors.freeipa.connector import FreeipaConnector, _FreeipaSession
 from meho_backplane.connectors.github.connector import GitHubRestConnector
 from meho_backplane.connectors.harbor.connector import HarborConnector
 from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
@@ -254,6 +255,18 @@ CASES: list[_Case] = [
         call=lambda c, t, op: c.auth_headers(t, op),
         readers=lambda c: c._readers,
         cached=lambda c, t: PhpipamConnector._key(t) in c._credentials,
+    ),
+    _Case(
+        name="freeipa",
+        secret=_BASIC,
+        make=lambda loader: FreeipaConnector(credentials_loader=loader),
+        warm=lambda c, t: c._sessions.__setitem__(
+            credential_cache_key(t),
+            _FreeipaSession(cookie="ipa_session=made-up", referer="https://made-up/ipa"),
+        ),
+        call=lambda c, t, op: c.auth_headers(t, op),
+        readers=lambda c: c._readers,
+        cached=lambda c, t: credential_cache_key(t) in c._sessions,
     ),
     _microsoft_case("azure", AzureConnector),
     _microsoft_case("entra", EntraConnector),

@@ -405,6 +405,45 @@ OFFAZURE_IMPORT_SITES_PATH: Final[str] = f"{_OFFAZURE}/importSites"
 #: ``GET``: the master sites of a resource group (a master site links the other sites).
 OFFAZURE_MASTER_SITES_PATH: Final[str] = f"{_OFFAZURE}/masterSites"
 
+# ---- migrate writes (Task #5094) ----
+#
+# The Azure Migrate writes use the same two API versions as the reads above.
+# The import path: make an import site and an import collector (they link the
+# project to the site), ask the site for an upload link, upload the CSV file,
+# and follow the import job.
+
+#: ``GET``: one assessment project (AssessmentProjectsOperations_Get). The
+#: import reads its region from it.
+MIGRATE_PROJECT_PATH: Final[str] = _MIGRATE_PROJECT
+
+#: ``PUT``: one import collector, the link between a project and an import
+#: site (ImportCollectorsOperations_Create).
+MIGRATE_IMPORT_COLLECTOR_PATH: Final[str] = f"{_MIGRATE_PROJECT}/importcollectors/{{collector}}"
+
+#: ``GET`` and ``PUT``: one group (GroupsOperations_Get and _Create).
+MIGRATE_GROUP_PATH: Final[str] = f"{_MIGRATE_PROJECT}/groups/{{group}}"
+
+#: ``POST``: add machines to a group or take them out (GroupsOperations_UpdateMachines).
+MIGRATE_GROUP_UPDATE_MACHINES_PATH: Final[str] = f"{MIGRATE_GROUP_PATH}/updateMachines"
+
+#: ``PUT``: one Azure VM assessment (AssessmentsOperations_Create). The same
+#: path as ``MIGRATE_ASSESSMENT_PATH``, which the reads use with ``GET``.
+MIGRATE_ASSESSMENT_WRITE_PATH: Final[str] = f"{MIGRATE_GROUP_PATH}/assessments/{{assessment}}"
+
+#: ``GET``, ``PUT`` and ``PATCH``: one import site (ImportSitesController_Get,
+#: _Create and _Update). The import keeps its record of the file it uploaded in
+#: the site's tags.
+OFFAZURE_IMPORT_SITE_PATH: Final[str] = f"{_OFFAZURE}/importSites/{{site}}"
+
+#: ``POST``: ask an import site for an upload link (ImportSitesController_ImportUri).
+OFFAZURE_IMPORT_URI_PATH: Final[str] = f"{OFFAZURE_IMPORT_SITE_PATH}/importUri"
+
+#: ``GET``: the import jobs of one import site (ImportJobsController_ListImportjobs).
+OFFAZURE_IMPORT_JOBS_PATH: Final[str] = f"{OFFAZURE_IMPORT_SITE_PATH}/importJobs"
+
+#: ``GET``: one import job (ImportJobsController_GetImportjob).
+OFFAZURE_IMPORT_JOB_PATH: Final[str] = f"{OFFAZURE_IMPORT_JOBS_PATH}/{{job}}"
+
 # ---- monitor (Task #5090) ----
 
 # ---- network (Task #5085) ----

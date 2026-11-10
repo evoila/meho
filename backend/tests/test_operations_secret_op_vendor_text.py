@@ -302,6 +302,12 @@ def test_the_422_validation_errors_are_withheld_but_stay_a_list() -> None:
     assert out.extras["validation_errors"] == [VENDOR_TEXT_WITHHELD]
 
 
+def test_the_no_trace_body_tag_does_not_hide_the_vendor_text() -> None:
+    assert not sends_secret(_PLAIN_OP, ["accounts", "no-trace-body"])
+    built = result_connector_http_422("op", _http_error(422, _json_body()), 1.0)
+    assert withhold_vendor_text(built, op_id=_PLAIN_OP, tags=["no-trace-body"]) is built
+
+
 def test_an_op_that_sends_no_secret_keeps_the_result_as_it_is() -> None:
     built = result_connector_http_422("op", _http_error(422, _json_body()), 1.0)
     assert withhold_vendor_text(built, op_id=_PLAIN_OP, tags=["accounts"]) is built

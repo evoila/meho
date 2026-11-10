@@ -2189,6 +2189,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#watch-an-azure-subscription-budget-policy-advisor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Watch an Azure subscription (budget, policy, Advisor)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-investigator-optional-deep-tier" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3210,6 +3221,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#watch-an-azure-subscription-budget-policy-advisor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Watch an Azure subscription (budget, policy, Advisor)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-investigator-optional-deep-tier" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3594,6 +3616,143 @@ meho<span class="w"> </span>dashboard<span class="w"> </span>import<span class="
 writes an audit row. The REST routes are
 <code>GET /api/v1/checks/dashboard-files/export?name=&lt;name&gt;</code> and
 <code>POST /api/v1/checks/dashboard-files/import</code>.</p>
+<h2 id="watch-an-azure-subscription-budget-policy-advisor">Watch an Azure subscription (budget, policy, Advisor)<a class="headerlink" href="#watch-an-azure-subscription-budget-policy-advisor" title="Permanent link">&para;</a></h2>
+<p>Three sensors and one dashboard for one Azure subscription. The file below
+is a dashboard file, so you import it in one step.</p>
+<p>What each sensor measures:</p>
+<table>
+<thead>
+<tr>
+<th>Sensor</th>
+<th>Value</th>
+<th>Degraded</th>
+<th>Critical</th>
+<th>Checked</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;dashboard&gt;-budget-used</code></td>
+<td>Highest percent used of the budgets, in the current budget period</td>
+<td>80 or more</td>
+<td>100 or more</td>
+<td>every day</td>
+</tr>
+<tr>
+<td><code>&lt;dashboard&gt;-policy-non-compliant</code></td>
+<td>Non-compliant resources now</td>
+<td>above the baseline</td>
+<td>more than 10 above the baseline</td>
+<td>every 6 hours</td>
+</tr>
+<tr>
+<td><code>&lt;dashboard&gt;-advisor-high-impact</code></td>
+<td>Open high-impact Advisor recommendations now</td>
+<td>above the baseline</td>
+<td>more than 10 above the baseline</td>
+<td>every day</td>
+</tr>
+</tbody>
+</table>
+<p>The baseline is the count on the day you make the sensor. Read it once:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>azure-arm-2026.10<span class="w"> </span>azure.policy.compliance.summary<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--target<span class="w"> </span>&lt;azure-target&gt;
+meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>azure-arm-2026.10<span class="w"> </span>azure.advisor.recommendation.list<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--target<span class="w"> </span>&lt;azure-target&gt;<span class="w"> </span>--params<span class="w"> </span><span class="s1">'{"impact": "High"}'</span>
+</code></pre></div>
+<p>Put the <code>non_compliant_resources</code> number and the Advisor <code>count</code> into the
+file as the <code>degraded</code> bounds (<code>12</code> and <code>3</code> below), and add 10 for the
+<code>critical</code> bounds (<code>22</code> and <code>13</code>). Save the file, then import it:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"meho-dashboard/1"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"dashboard"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-subscription-health"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"description"</span><span class="p">:</span><span class="w"> </span><span class="s2">"One Azure subscription: budget used in the current period, non-compliant resources and high-impact Advisor recommendations against their baseline."</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"notify_min_state"</span><span class="p">:</span><span class="w"> </span><span class="s2">"critical"</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">"sensors"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-subscription-health-budget-used"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"connector_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-arm-2026.10"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"op_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure.cost.budget.list"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"target"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-subscription"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"params"</span><span class="p">:</span><span class="w"> </span><span class="p">{},</span>
+<span class="w">      </span><span class="nt">"assertion"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">"select"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">"path"</span><span class="p">:</span><span class="w"> </span><span class="s2">"$.budgets[*].percent_used"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"aggregate"</span><span class="p">:</span><span class="w"> </span><span class="s2">"max"</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">"compare"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"threshold"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"op"</span><span class="p">:</span><span class="w"> </span><span class="s2">"gte"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"degraded"</span><span class="p">:</span><span class="w"> </span><span class="mi">80</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"critical"</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">"cadence_kind"</span><span class="p">:</span><span class="w"> </span><span class="s2">"interval"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"interval_seconds"</span><span class="p">:</span><span class="w"> </span><span class="mi">86400</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"severity"</span><span class="p">:</span><span class="w"> </span><span class="s2">"critical"</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-subscription-health-policy-non-compliant"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"connector_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-arm-2026.10"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"op_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure.policy.compliance.summary"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"target"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-subscription"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"params"</span><span class="p">:</span><span class="w"> </span><span class="p">{},</span>
+<span class="w">      </span><span class="nt">"assertion"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">"select"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">"path"</span><span class="p">:</span><span class="w"> </span><span class="s2">"$.non_compliant_resources"</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">"compare"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"threshold"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"op"</span><span class="p">:</span><span class="w"> </span><span class="s2">"gt"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"degraded"</span><span class="p">:</span><span class="w"> </span><span class="mi">12</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"critical"</span><span class="p">:</span><span class="w"> </span><span class="mi">22</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">"cadence_kind"</span><span class="p">:</span><span class="w"> </span><span class="s2">"interval"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"interval_seconds"</span><span class="p">:</span><span class="w"> </span><span class="mi">21600</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"severity"</span><span class="p">:</span><span class="w"> </span><span class="s2">"critical"</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-subscription-health-advisor-high-impact"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"connector_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-arm-2026.10"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"op_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure.advisor.recommendation.list"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"target"</span><span class="p">:</span><span class="w"> </span><span class="s2">"azure-subscription"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"params"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">"impact"</span><span class="p">:</span><span class="w"> </span><span class="s2">"High"</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">"assertion"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">"select"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">"path"</span><span class="p">:</span><span class="w"> </span><span class="s2">"$.count"</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">"compare"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"threshold"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"op"</span><span class="p">:</span><span class="w"> </span><span class="s2">"gt"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"degraded"</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"critical"</span><span class="p">:</span><span class="w"> </span><span class="mi">13</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">"cadence_kind"</span><span class="p">:</span><span class="w"> </span><span class="s2">"interval"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"interval_seconds"</span><span class="p">:</span><span class="w"> </span><span class="mi">86400</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"severity"</span><span class="p">:</span><span class="w"> </span><span class="s2">"critical"</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>dashboard<span class="w"> </span>import<span class="w"> </span>azure-health.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--map-target<span class="w"> </span>azure-subscription<span class="o">=</span>&lt;azure-target&gt;<span class="w"> </span>--dry-run
+meho<span class="w"> </span>dashboard<span class="w"> </span>import<span class="w"> </span>azure-health.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--map-target<span class="w"> </span>azure-subscription<span class="o">=</span>&lt;azure-target&gt;
+</code></pre></div>
+<p>Import finds a sensor by its name. So each sensor name starts with the
+dashboard name. To watch a second subscription, change the dashboard name
+in a copy of the file (for example <code>azure-sub-b-health</code>) and change the start
+of the three sensor names the same way. Otherwise the second import changes
+the sensors of the first subscription.</p>
+<p>A budget with no amount has no percent, and a sensor with no value shows
+<code>unknown</code>, never <code>ok</code>. The Python version of these recipes is
+<code>meho_backplane.connectors.azure.sensor_templates</code>.</p>
 <h2 id="the-investigator-optional-deep-tier">The investigator (optional deep tier)<a class="headerlink" href="#the-investigator-optional-deep-tier" title="Permanent link">&para;</a></h2>
 <p>When a dashboard's rollup crosses from green into a non-green state,
 MEHO can fire a <strong>diagnose-only</strong> agent investigation: affected

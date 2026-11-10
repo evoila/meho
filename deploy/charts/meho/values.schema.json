@@ -516,6 +516,60 @@
           "enum": ["true", "false"],
           "description": "Check a new knowledge entry for similar entries first; when some exist, nothing is written and the writer gets the list. Rendered into `KB_SIMILAR_CHECK`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/kb.md`."
         },
+        "sessionStore": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Agent session store settings. Each value is rendered into its `SESSION_STORE_*` variable; an empty value renders nothing, so MEHO uses its own default. The store is off until `endpoint`, `bucket` and `credentialsVaultPath` are all set. Limits match `backend/src/meho_backplane/session_store/config.py`. See `docs-site/guides/agent-sessions.md`.",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "pattern": "^(|https?://\\S+)$",
+              "description": "URL of the S3-compatible object storage. Rendered into `SESSION_STORE_ENDPOINT`."
+            },
+            "bucket": {
+              "type": "string",
+              "description": "The bucket for the session files. Rendered into `SESSION_STORE_BUCKET`."
+            },
+            "credentialsVaultPath": {
+              "type": "string",
+              "description": "Vault KV-v2 API path (`secret/data/...`) with `access_key_id` and `secret_access_key`. Rendered into `SESSION_STORE_CREDENTIALS_VAULT_PATH`."
+            },
+            "region": {
+              "type": "string",
+              "description": "Region name sent to the store. Rendered into `SESSION_STORE_REGION`. Empty: `us-east-1`."
+            },
+            "retentionDaysDefault": {
+              "type": "string",
+              "pattern": "^(|[1-9][0-9]*)$",
+              "description": "Days a tenant's sessions are kept when the tenant set no period; a whole number of at least 1. Rendered into `SESSION_STORE_RETENTION_DAYS_DEFAULT`. Empty: 90."
+            },
+            "maxUploadBytes": {
+              "type": "string",
+              "pattern": "^(|[1-9][0-9]*)$",
+              "description": "Largest compressed archive in bytes; a whole number of at least 1. Rendered into `SESSION_STORE_MAX_UPLOAD_BYTES`. Empty: 25 MiB."
+            },
+            "maxUnpackedBytes": {
+              "type": "string",
+              "pattern": "^(|[1-9][0-9]*)$",
+              "description": "Largest unpacked archive in bytes; a whole number of at least 1. Rendered into `SESSION_STORE_MAX_UNPACKED_BYTES`. Empty: 256 MiB."
+            },
+            "maxFiles": {
+              "type": "string",
+              "pattern": "^(|[1-9][0-9]*)$",
+              "description": "Most entries (files and folders) in one archive; a whole number of at least 1. Rendered into `SESSION_STORE_MAX_FILES`. Empty: 2000."
+            },
+            "cleanupEnabled": {
+              "type": "string",
+              "enum": ["", "true", "false"],
+              "description": "Run the cleanup job. Rendered into `SESSION_STORE_CLEANUP_ENABLED`. Empty: `true`."
+            },
+            "cleanupIntervalSeconds": {
+              "type": "string",
+              "pattern": "^(|[6-9][0-9]|[1-9][0-9]{2,})$",
+              "description": "Seconds between cleanup runs; a whole number of at least 60. Rendered into `SESSION_STORE_CLEANUP_INTERVAL_SECONDS`. Empty: 3600."
+            }
+          }
+        },
         "kbSharedTenantIds": {
           "type": "string",
           "pattern": "^ *([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12} *(, *[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12} *)*)?$",

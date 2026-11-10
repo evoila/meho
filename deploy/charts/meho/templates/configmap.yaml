@@ -322,3 +322,38 @@ data:
   BROADCAST_ANNOUNCEMENT_RETENTION_DAYS: {{ .Values.broadcastAnnouncement.retentionDays | quote }}
   BROADCAST_ANNOUNCEMENT_PRUNE_INTERVAL_SECONDS: {{ .Values.broadcastAnnouncement.pruneIntervalSeconds | quote }}
   BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED: {{ .Values.broadcastAnnouncement.pruneEnabled | quote }}
+  {{- /* Agent session store. A value renders only when it is set; an empty
+       value keeps MEHO's default from session_store/config.py. See
+       docs-site/guides/agent-sessions.md. */}}
+  {{- with .Values.config.sessionStore }}
+  {{- with .endpoint }}
+  SESSION_STORE_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  {{- with .bucket }}
+  SESSION_STORE_BUCKET: {{ . | quote }}
+  {{- end }}
+  {{- with .credentialsVaultPath }}
+  SESSION_STORE_CREDENTIALS_VAULT_PATH: {{ . | quote }}
+  {{- end }}
+  {{- with .region }}
+  SESSION_STORE_REGION: {{ . | quote }}
+  {{- end }}
+  {{- with .retentionDaysDefault }}
+  SESSION_STORE_RETENTION_DAYS_DEFAULT: {{ . | quote }}
+  {{- end }}
+  {{- with .maxUploadBytes }}
+  SESSION_STORE_MAX_UPLOAD_BYTES: {{ . | quote }}
+  {{- end }}
+  {{- with .maxUnpackedBytes }}
+  SESSION_STORE_MAX_UNPACKED_BYTES: {{ . | quote }}
+  {{- end }}
+  {{- with .maxFiles }}
+  SESSION_STORE_MAX_FILES: {{ . | quote }}
+  {{- end }}
+  {{- with .cleanupEnabled }}
+  SESSION_STORE_CLEANUP_ENABLED: {{ . | quote }}
+  {{- end }}
+  {{- with .cleanupIntervalSeconds }}
+  SESSION_STORE_CLEANUP_INTERVAL_SECONDS: {{ . | quote }}
+  {{- end }}
+  {{- end }}

@@ -80,7 +80,9 @@ _FREEIPA_HOST_NAME: Final[str] = (
 )
 _NEW_TARGET_ADDRESS: Final[str] = (
     "the address of a new target, stored in the registry; registering connects to nothing, "
-    "and later calls run that target's own operations"
+    "and later calls run that target's own operations. A machine login's call that no "
+    "person approved may pair it only with the new target's own credential path "
+    "(connectors/targets/register_secret_ref.py)"
 )
 NOT_CALLER_ADDRESSES: Final[Mapping[tuple[str, str], str]] = {
     ("azure.operation.status", "operation.poll_url"): (

@@ -49,6 +49,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("BACKPLANE_URL", _SITE)
+    monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-test-key-of-this-install")
     get_settings.cache_clear()
     first_start.reset_public_run_for_testing()
     yield

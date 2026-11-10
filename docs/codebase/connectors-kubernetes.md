@@ -1194,7 +1194,7 @@ The result has one part for each source. Each part has a `state`:
 | Part            | Source | Content |
 | --------------- | ------ | ------- |
 | `deployment`    | `AppsV1Api.list_namespaced_deployment` with `app.kubernetes.io/instance=<release>`; the one with a container named `backplane` | name, image, tag, digest, replicas. With a tag-only image the digest is the `imageID` of the `backplane` container of the running pods. |
-| `helm_chart`    | `HelmChart` object `helm.cattle.io/v1` (RKE2 installs) named `<release>`: in the install namespace, else the cluster's chart whose `spec.targetNamespace` is the install namespace | `chart_namespace`, chart, chart version, `values_hash` (sha256 of `valuesContent` and `set`). |
+| `helm_chart`    | `HelmChart` object `helm.cattle.io/v1` (RKE2 installs) named `<release>`: in the install namespace, else the cluster's chart whose `spec.targetNamespace` is the install namespace | `chart_namespace`, chart, chart version, `values_hash` (keyed HMAC-SHA256 of `valuesContent` and `set`, under the server key, so it cannot be computed again from guessed values). |
 | `helm_releases` | `CoreV1Api.list_namespaced_secret`, labels `owner=helm,name=<release>` | revision, status, Secret name, `modified_at`; `incomplete` is true when the page cap (10 pages of 200) was reached. |
 | `meho`          | only with `host` | `version`: the `/version` fields; `ready`: `ready`, `status`, `http_status`, `db_ahead`, and name and `ok` of each check. |
 
@@ -1284,8 +1284,13 @@ named pattern.
 closes that read-side gap with a pure, **structural** redactor
 (`redact_kubernetes_payload`): it recognises any `kind: Secret` object
 and replaces every `data` / `stringData` value with a fixed placeholder
-carrying a `sha256:` digest — key names kept — regardless of whether the
-value matches a pattern. It is the k8s sibling of the keycloak / rabbitmq
+carrying a short keyed fingerprint — key names kept — regardless of whether
+the value matches a pattern. The fingerprint is the string the redaction
+engine's `hash` action writes: `hmac-sha256:` and 12 hex characters of
+HMAC-SHA256 under the server key (`PARAMS_HASH_KEY`, see
+[`redaction.md`](redaction.md)). Two reads of the same value inside one
+install show the same marker, and the marker cannot be computed again from
+a guessed value. It is the k8s sibling of the keycloak / rabbitmq
 per-connector redactors (see [`redaction.md`](redaction.md)).
 
 The same walk masks the Helm values of a `kind: HelmChart` object (the
@@ -1318,7 +1323,7 @@ section), which also run this redactor as a second net.
 top-level field (a Secret's annotation keys show, but every annotation
 value is replaced by the placeholder); a `Secret` has no `.spec`. The redactor lets
 the projection surface a `data` / `string_data` **key inventory** (values
-redacted, digests attached) for a `kind: Secret` object instead — safe
+redacted, keyed fingerprints attached) for a `kind: Secret` object instead — safe
 *and* useful. Non-Secret CR rows gain neither field. The op remains
 `safe` / no-approval — the redaction, not a gate, is what keeps Secret
 values out of the answer.
@@ -1468,7 +1473,8 @@ a "200 but nothing happened" apply can be explained from the trace.
   response body first goes through the connector's structural Secret
   redactor (`redaction.py`, the same walk `k8s.cr.*` reads use). Every
   `data` / `stringData` value of a `kind: Secret` object, and every
-  annotation value on it, is replaced by a placeholder plus a digest;
+  annotation value on it, is replaced by a placeholder plus a keyed
+  fingerprint;
   key names stay. This covers a `k8s.apply` of a Secret
   manifest, a `k8s.cr.info` read of one, and the items of a
   `SecretList` (which carry no `kind` of their own). The normal body

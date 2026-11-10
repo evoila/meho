@@ -80,7 +80,7 @@
           "health"
         ],
         "summary": "First Start Destination",
-        "description": "The proof that this address serves this MEHO. Used by the DNS check only.",
+        "description": "The proof that this address serves this MEHO. Used by the DNS check only.\n\n404 when ``PARAMS_HASH_KEY`` is not set: the proof is made only with that key.",
         "operationId": "first_start_destination_first_start_destination_get",
         "parameters": [
           {

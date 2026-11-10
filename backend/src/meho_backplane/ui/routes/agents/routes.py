@@ -164,7 +164,7 @@ async def _run_stream_handler(
     token: str = Query(default="", max_length=4096),
     session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_run_operator_dep,
-) -> StreamingResponse:
+) -> Response:
     """``GET /ui/agents/{name}/run/stream`` -- cookie-authed SSE bridge."""
     validate_name(name)
     return await stream_run_events(

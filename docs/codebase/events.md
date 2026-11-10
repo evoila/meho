@@ -320,6 +320,37 @@ change-ticket field for scheduled triggers — as the dedupe key; a
 sibling Task, #2879, adds a first-class `dedupe_key` column, out of
 scope here.)
 
+### Coalescing — one unfinished run per cause
+
+An event payload can carry a `coalesce_key` (a string naming the cause,
+for example a Dashboard id and a cause group). When it is a non-empty
+string, the run key (`work_ref`) changes from the per-event form to:
+
+```
+event:{trigger_id}:c:{coalesce_key}
+```
+
+A key longer than 200 characters is replaced by the first 32 characters
+of its SHA-256 hex digest, so the run key stays short and stable. Keep
+this format exactly: the Dashboard follow-up work reads the Dashboard id
+and the cause group back from this run key.
+
+Before it fires with such a key, the matcher asks
+`agent.in_flight.has_in_flight_run(tenant_id, work_ref)`: is there an
+unfinished run (`pending`, `running` or `awaiting_approval`) with this
+`(tenant_id, work_ref)`? If yes, the event is skipped and logged as
+`event_trigger_coalesced` (event id, trigger id, key). A finished run
+does not block: the next event for the same cause starts a new run. A
+repeated delivery of a keyed event while its run works is skipped the
+same way. The checks investigator uses the same query for its own
+per-group check, so the two cannot drift.
+
+An event with no `coalesce_key` (or an empty or non-string one) keeps
+the per-event run key and the repeated-delivery check above. The self-
+trigger guard and the budget gate run as before. There is no limit on
+how many runs one trigger may have at once across different keys;
+budgets cap the spend.
+
 ### Storm controls
 
 - **Self-trigger guard**: a `kind=event` trigger never fires from the

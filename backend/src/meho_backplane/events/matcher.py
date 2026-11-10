@@ -74,11 +74,13 @@ so the check-then-fire dedupe never races itself in production.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.agent.in_flight import has_in_flight_run
 from meho_backplane.agent.invocation import AgentInvoker
 from meho_backplane.agent.run import prompt_is_effectively_empty
 from meho_backplane.db.engine import get_sessionmaker
@@ -106,6 +108,26 @@ _log = structlog.get_logger(__name__)
 #: ``event:{event_id}:{trigger_id}`` -- unique per (event, trigger) pair, so it
 #: doubles as the fire-dedupe key on ``agent_run_tenant_work_ref_idx``.
 _EVENT_WORK_REF_PREFIX = "event:"
+
+#: Longest ``coalesce_key`` used as is in a run key. A longer key is replaced by
+#: a short stable hash so the ``work_ref`` stays small.
+_COALESCE_KEY_MAX_LEN = 200
+
+
+def _coalesce_work_ref(trigger: ScheduledTrigger, event: EventOutbox) -> str | None:
+    """Return the keyed run key for *event*, or ``None`` when it has no key.
+
+    A non-empty string ``coalesce_key`` in the payload gives
+    ``event:{trigger_id}:c:{coalesce_key}``; a key over 200 characters is
+    replaced by its SHA-256 hex digest (first 32 characters).
+    """
+    key = event.payload.get("coalesce_key")
+    if not isinstance(key, str) or not key:
+        return None
+    if len(key) > _COALESCE_KEY_MAX_LEN:
+        key = hashlib.sha256(key.encode()).hexdigest()[:32]
+    return f"{_EVENT_WORK_REF_PREFIX}{trigger.id}:c:{key}"
+
 
 #: The ``_coerce_inputs`` render of an empty ``inputs`` dict. ``{}`` is
 #: non-whitespace, so ``prompt_is_effectively_empty`` reads it as a real prompt;
@@ -274,8 +296,24 @@ async def _fire_event_trigger(
         # event does not fire it and a later matching event re-attempts once
         # the operator fixes the cause.
         return False
-    work_ref = f"{_EVENT_WORK_REF_PREFIX}{event.event_id}:{trigger.id}"
-    if await _run_exists_for_work_ref(trigger.tenant_id, work_ref):
+    coalesce_ref = _coalesce_work_ref(trigger, event)
+    if coalesce_ref is not None:
+        # One unfinished run per (trigger, cause): a second event for the same
+        # cause, or a redelivery of the same event, while that run works is
+        # skipped. A finished run does not block.
+        if await has_in_flight_run(trigger.tenant_id, coalesce_ref):
+            _log.info(
+                "event_trigger_coalesced",
+                event_id=event.event_id,
+                trigger_id=str(trigger.id),
+                coalesce_key=event.payload.get("coalesce_key"),
+                work_ref=coalesce_ref,
+            )
+            return False
+        work_ref = coalesce_ref
+    else:
+        work_ref = f"{_EVENT_WORK_REF_PREFIX}{event.event_id}:{trigger.id}"
+    if coalesce_ref is None and await _run_exists_for_work_ref(trigger.tenant_id, work_ref):
         _log.info(
             "event_trigger_deduped",
             event_id=event.event_id,

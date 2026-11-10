@@ -667,3 +667,142 @@ async def test_cross_agent_completion_event_still_fires() -> None:
     runs = await _wait_for_runs(1)
     assert len(runs) == 1
     assert runs[0].work_ref == f"event:{event_id}:{trigger.id}"
+
+
+# ---------------------------------------------------------------------------
+# Coalescing -- one unfinished run per (trigger, coalesce_key)
+# ---------------------------------------------------------------------------
+
+
+async def _fire(event_id: int, invoker: AgentInvoker | None = None) -> int:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        event = await session.get(EventOutbox, event_id)
+        assert event is not None
+        return await fire_matching_triggers(event, invoker or _make_invoker())
+
+
+async def _set_all_run_status(status: AgentRunStatus) -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        for run in (await session.execute(select(AgentRun))).scalars().all():
+            run.status = status.value
+        await session.commit()
+
+
+async def _keyed_trigger() -> ScheduledTrigger:
+    def_id = await _seed_tenant_and_agent()
+    return await _create_event_trigger(
+        agent_definition_id=def_id,
+        event_filter={"agent_definition_id": str(_UPSTREAM_DEF_ID)},
+        inputs={"prompt": "follow up"},
+    )
+
+
+async def _keyed_event(key: object) -> int:
+    return await _publish_completed_event(
+        agent_definition_id=_UPSTREAM_DEF_ID, extra={"coalesce_key": key}
+    )
+
+
+async def test_same_key_while_first_run_works_starts_one_run() -> None:
+    """A second event with the same key is skipped while the first run is unfinished."""
+    trigger = await _keyed_trigger()
+    assert await _fire(await _keyed_event("host-1")) == 1
+    await _wait_for_runs(1)
+    await _set_all_run_status(AgentRunStatus.RUNNING)
+
+    with structlog.testing.capture_logs() as logs:
+        assert await _fire(await _keyed_event("host-1"), _make_no_call_invoker()) == 0
+
+    runs = await _all_runs()
+    assert len(runs) == 1
+    assert runs[0].work_ref == f"event:{trigger.id}:c:host-1"
+    coalesced = [entry for entry in logs if entry["event"] == "event_trigger_coalesced"]
+    assert len(coalesced) == 1
+    assert coalesced[0]["trigger_id"] == str(trigger.id)
+    assert coalesced[0]["coalesce_key"] == "host-1"
+
+
+async def test_awaiting_approval_run_still_blocks_same_key() -> None:
+    """A run that waits for approval is unfinished, so it blocks the same key."""
+    await _keyed_trigger()
+    assert await _fire(await _keyed_event("host-1")) == 1
+    await _wait_for_runs(1)
+    await _set_all_run_status(AgentRunStatus.AWAITING_APPROVAL)
+
+    assert await _fire(await _keyed_event("host-1"), _make_no_call_invoker()) == 0
+    assert len(await _all_runs()) == 1
+
+
+async def test_same_key_after_first_run_finished_starts_second_run() -> None:
+    """A finished run does not block: the next event for the cause starts a new run."""
+    await _keyed_trigger()
+    assert await _fire(await _keyed_event("host-1")) == 1
+    await _wait_for_runs(1)
+    await _set_all_run_status(AgentRunStatus.SUCCEEDED)
+
+    assert await _fire(await _keyed_event("host-1")) == 1
+    runs = await _wait_for_runs(2)
+    assert len(runs) == 2
+
+
+async def test_different_keys_start_two_runs() -> None:
+    """Events with different keys each start a run, even while the first works."""
+    await _keyed_trigger()
+    assert await _fire(await _keyed_event("host-1")) == 1
+    await _wait_for_runs(1)
+    await _set_all_run_status(AgentRunStatus.RUNNING)
+
+    assert await _fire(await _keyed_event("host-2")) == 1
+    runs = await _wait_for_runs(2)
+    assert len({r.work_ref for r in runs}) == 2
+
+
+async def test_redelivery_of_keyed_event_while_run_works_does_not_fire() -> None:
+    """The same keyed event delivered again while its run works starts nothing."""
+    await _keyed_trigger()
+    event_id = await _keyed_event("host-1")
+    assert await _fire(event_id) == 1
+    await _wait_for_runs(1)
+    await _set_all_run_status(AgentRunStatus.RUNNING)
+
+    assert await _fire(event_id, _make_no_call_invoker()) == 0
+    assert len(await _all_runs()) == 1
+
+
+async def test_long_key_is_replaced_by_a_stable_hash() -> None:
+    """A key over 200 characters gives a short, stable run key."""
+    trigger = await _keyed_trigger()
+    long_key = "x" * 500
+    assert await _fire(await _keyed_event(long_key)) == 1
+    runs = await _wait_for_runs(1)
+    ref = runs[0].work_ref
+    assert ref is not None
+    assert ref.startswith(f"event:{trigger.id}:c:")
+    assert long_key not in ref
+    assert len(ref) < 100
+    await _set_all_run_status(AgentRunStatus.RUNNING)
+
+    # The same long key maps to the same run key, so it coalesces.
+    assert await _fire(await _keyed_event(long_key), _make_no_call_invoker()) == 0
+    assert len(await _all_runs()) == 1
+
+
+async def test_key_at_limit_is_used_as_is() -> None:
+    """A key of exactly 200 characters is not hashed."""
+    trigger = await _keyed_trigger()
+    key = "k" * 200
+    assert await _fire(await _keyed_event(key)) == 1
+    runs = await _wait_for_runs(1)
+    assert runs[0].work_ref == f"event:{trigger.id}:c:{key}"
+
+
+@pytest.mark.parametrize("bad_key", ["", None, 7, ["a"]])
+async def test_empty_or_non_string_key_keeps_per_event_run_key(bad_key: object) -> None:
+    """An empty or non-string key is ignored: the run key stays per event."""
+    trigger = await _keyed_trigger()
+    event_id = await _keyed_event(bad_key)
+    assert await _fire(event_id) == 1
+    runs = await _wait_for_runs(1)
+    assert runs[0].work_ref == f"event:{event_id}:{trigger.id}"

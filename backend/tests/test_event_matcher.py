@@ -798,9 +798,22 @@ async def test_key_at_limit_is_used_as_is() -> None:
     assert runs[0].work_ref == f"event:{trigger.id}:c:{key}"
 
 
-@pytest.mark.parametrize("bad_key", ["", None, 7, ["a"]])
+async def test_key_with_outer_whitespace_coalesces() -> None:
+    """Spaces around the key are dropped, so a repeated event still finds its run."""
+    trigger = await _keyed_trigger()
+    assert await _fire(await _keyed_event("cause-a ")) == 1
+    runs = await _wait_for_runs(1)
+    assert runs[0].work_ref == f"event:{trigger.id}:c:cause-a"
+    await _set_all_run_status(AgentRunStatus.RUNNING)
+
+    assert await _fire(await _keyed_event("cause-a "), _make_no_call_invoker()) == 0
+    assert await _fire(await _keyed_event(" cause-a"), _make_no_call_invoker()) == 0
+    assert len(await _all_runs()) == 1
+
+
+@pytest.mark.parametrize("bad_key", ["", "   ", None, 7, ["a"]])
 async def test_empty_or_non_string_key_keeps_per_event_run_key(bad_key: object) -> None:
-    """An empty or non-string key is ignored: the run key stays per event."""
+    """An empty, blank or non-string key is ignored: the run key stays per event."""
     trigger = await _keyed_trigger()
     event_id = await _keyed_event(bad_key)
     assert await _fire(event_id) == 1

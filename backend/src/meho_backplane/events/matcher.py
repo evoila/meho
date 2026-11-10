@@ -119,11 +119,14 @@ def _coalesce_work_ref(trigger: ScheduledTrigger, event: EventOutbox) -> str | N
 
     A non-empty string ``coalesce_key`` in the payload gives
     ``event:{trigger_id}:c:{coalesce_key}``; a key over 200 characters is
-    replaced by its SHA-256 hex digest (first 32 characters).
+    replaced by its SHA-256 hex digest (first 32 characters). The key is
+    stripped first, because the invoker strips the work_ref it stores: the
+    lookup and the stored run must use the same key.
     """
     key = event.payload.get("coalesce_key")
-    if not isinstance(key, str) or not key:
+    if not isinstance(key, str) or not key.strip():
         return None
+    key = key.strip()
     if len(key) > _COALESCE_KEY_MAX_LEN:
         key = hashlib.sha256(key.encode()).hexdigest()[:32]
     return f"{_EVENT_WORK_REF_PREFIX}{trigger.id}:c:{key}"

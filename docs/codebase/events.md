@@ -330,7 +330,8 @@ string, the run key (`work_ref`) changes from the per-event form to:
 event:{trigger_id}:c:{coalesce_key}
 ```
 
-A key longer than 200 characters is replaced by the first 32 characters
+Spaces at the start and end of the key are removed first, because MEHO
+stores the run key without them. A key longer than 200 characters is replaced by the first 32 characters
 of its SHA-256 hex digest, so the run key stays short and stable. Keep
 this format exactly: the Dashboard follow-up work reads the Dashboard id
 and the cause group back from this run key.
@@ -345,7 +346,7 @@ repeated delivery of a keyed event while its run works is skipped the
 same way. The checks investigator uses the same query for its own
 per-group check, so the two cannot drift.
 
-An event with no `coalesce_key` (or an empty or non-string one) keeps
+An event with no `coalesce_key` (or an empty, blank or non-string one) keeps
 the per-event run key and the repeated-delivery check above. The self-
 trigger guard and the budget gate run as before. There is no limit on
 how many runs one trigger may have at once across different keys;

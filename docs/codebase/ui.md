@@ -2637,7 +2637,11 @@ Memory UI), Task [#879](https://github.com/evoila/meho/issues/879)
 
 The route resolves IDs to entries via a tenant-scoped + `source='memory'`
 filter so an operator can't smuggle a knowledge-base or audit-row UUID
-through the form. Per row, `MemoryRbacResolver.can_write` is re-checked
+through the form. Each row then passes `MemoryService.readable_entry`,
+the owner rule of `read_by_id` (expired rows pass, so a recently
+expired note can be extended). Another person's user-scoped note
+counts as `missing` and is never acted on, also for a `tenant_admin`.
+Per row, `MemoryRbacResolver.can_write` is re-checked
 before dispatch; the service's own `can_write` re-check still runs
 inside `forget` / `remember`. The route-side check exists so the
 result counts (`succeeded` / `denied` / `missing`) are honest in the

@@ -15,7 +15,7 @@ For every request whose path starts with ``/ui/`` (except the BFF
 auth surfaces themselves -- those routes set or clear the cookie and
 must be reachable unauthenticated):
 
-1. Read ``meho_session`` cookie.
+1. Read the ``__Host-meho_session`` cookie (exactly one value, or no session).
 2. Parse it as a UUID -- malformed values are treated as "no
    session" (no exception leaks; the operator just gets bounced to
    login).
@@ -114,10 +114,10 @@ from meho_backplane.sandbox_mode import (
 from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.revalidation import revalidate_read_session
 from meho_backplane.ui.auth.routes import (
-    SESSION_COOKIE_NAME,
     login_location,
     page_from_htmx_current_url,
 )
+from meho_backplane.ui.auth.session_cookie import read_session_cookie
 from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.auth.tenant import (
@@ -212,42 +212,6 @@ def _select_path(scope: Scope) -> str:
     """Return the ASGI scope's path, defaulting to ``/`` on missing values."""
     raw = scope.get("path")
     return raw if isinstance(raw, str) and raw else "/"
-
-
-def _extract_session_cookie(scope: Scope) -> str | None:
-    """Pull the ``meho_session`` cookie value out of the raw headers.
-
-    Avoids the cost of constructing a :class:`Request` object for the
-    happy-path of "no cookie, redirect to login". The cookie header
-    is iterated once; allocation stays in raw bytes until the cookie
-    is found.
-    """
-    headers = scope.get("headers")
-    if not isinstance(headers, list):
-        return None
-    cookie_name_bytes = SESSION_COOKIE_NAME.encode("ascii")
-    for name, value in headers:
-        if not isinstance(name, (bytes, bytearray)) or name != b"cookie":
-            continue
-        if not isinstance(value, (bytes, bytearray)):
-            continue
-        # The cookie header is ``name1=value1; name2=value2; ...``.
-        # We decode lazily on the match -- non-meho cookies stay as
-        # bytes.
-        value_bytes = bytes(value)
-        for chunk in value_bytes.split(b";"):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            if b"=" not in chunk:
-                continue
-            cookie_name, _, cookie_value = chunk.partition(b"=")
-            if cookie_name.strip() == cookie_name_bytes:
-                try:
-                    return cookie_value.decode("ascii")
-                except UnicodeDecodeError:
-                    return None
-    return None
 
 
 def _request_header(scope: Scope, name: bytes) -> bytes | None:
@@ -539,7 +503,7 @@ class UISessionMiddleware:
         # UUID, missing row, revoked, expired) collapses to "redirect
         # to login".
         log = structlog.get_logger(__name__)
-        cookie_value = _extract_session_cookie(scope)
+        cookie_value = read_session_cookie(scope)
         try:
             session_context = await _load_session_context(cookie_value, path=path)
         except TenantRemovedError:

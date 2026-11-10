@@ -192,7 +192,8 @@ them at once.
   grows in step with the file size. A string or key longer than 64,000
   characters (the longest field, a convention body) is refused with its
   path before the secret check runs. A long key is named by the path of its
-  mapping, never by itself. Nothing else is checked, as with a secret.
+  mapping, never by itself, also when it appears twice. Nothing else is
+  checked, as with a secret.
 - `!!binary`, `!!pairs`, `!!omap` and `!!set` values are refused and never
   built: each would hide its contents from the secret check and reach JSON
   as readable text. Nothing else is checked, as with a secret.
@@ -242,7 +243,10 @@ Builds the file from the live state (`application/yaml`, sent as
 on it: stored data that would be refused on import (a JWT in a target's
 `notes`, `extras.password`, a private key in a convention body) stops the
 export with 409 `settings_export_refused` and a `mistakes` list naming each
-path, never the value. Move the secret into OpenBao and export again. Tenants are sorted by id, conventions by slug, targets
+path, never the value. Move the secret into OpenBao and export again. A
+stored string or key longer than 64,000 characters (for example a long
+target `notes`) stops the export the same way, since the import refuses it;
+shorten it and export again. Tenants are sorted by id, conventions by slug, targets
 by name, and keys come in a fixed order, so the same state always gives the
 same `spec`. The export writes each value out each time it appears
 and never writes a YAML anchor or alias, so an exported file always imports

@@ -12,15 +12,21 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from typing import Any
 
 import pytest
 
-from meho_backplane.instance_settings import schema
+from meho_backplane.instance_settings import schema, service
 from meho_backplane.instance_settings.schema import (
     MAX_STRING_CHARS,
     find_over_long_strings,
     find_secret_shaped_values,
     parse_settings_file,
+)
+from meho_backplane.instance_settings.service import (
+    SettingsExportRefusedError,
+    dump_settings_yaml,
+    export_settings,
 )
 
 _HEAD = "apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n    - targets:\n"
@@ -176,3 +182,72 @@ def test_the_limit_covers_lists_and_nested_mappings() -> None:
         "`spec.aliases[1]` is longer than 64,000 characters; "
         "the settings file holds no text that long."
     ]
+
+
+def test_a_repeated_key_over_the_limit_is_not_checked_or_shown_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked: list[int] = []
+    secret_kind = schema._secret_kind
+    monkeypatch.setattr(
+        schema, "_secret_kind", lambda text: checked.append(len(text)) or secret_kind(text)
+    )
+    long_key = "k" * (MAX_STRING_CHARS + 1)
+    content = (
+        _HEAD + "        - name: t\n          product: ssh\n          host: h\n"
+        f"          extras:\n            ? {long_key}\n            : a\n"
+        f"            ? {long_key}\n            : b\n"
+    ).encode()
+
+    parsed = parse_settings_file(content)
+
+    assert parsed.model is None
+    assert parsed.mistakes == [
+        "Line 12: the key `<long key>` appears twice in the same block.",
+        "`spec.tenants[0].targets[0].extras` has a key name longer than 64,000 "
+        "characters; the settings file holds no text that long.",
+    ]
+    assert all(length <= MAX_STRING_CHARS for length in checked)
+
+
+def _patch_export_state(monkeypatch: pytest.MonkeyPatch, notes: str) -> None:
+    block = {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "policies": None,
+        "conventions": [],
+        "targets": [{"name": "t", "product": "ssh", "host": "h", "notes": notes}],
+    }
+
+    async def load_tenant_blocks(*_args: Any) -> dict[str, dict[str, Any]]:
+        return {block["id"]: block}
+
+    async def migration_head(*_args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(service, "load_tenant_blocks", load_tenant_blocks)
+    monkeypatch.setattr(service, "_migration_head", migration_head)
+
+
+async def test_the_export_refuses_a_stored_value_the_import_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_export_state(monkeypatch, "a" * (MAX_STRING_CHARS + 1))
+
+    with pytest.raises(SettingsExportRefusedError) as refused:
+        await export_settings(None, [])  # type: ignore[arg-type]
+
+    assert refused.value.mistakes == [
+        "`spec.tenants[0].targets[0].notes` is longer than 64,000 characters; "
+        "the settings file holds no text that long."
+    ]
+
+
+async def test_an_exported_long_value_at_the_limit_imports_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_export_state(monkeypatch, "a" * MAX_STRING_CHARS)
+
+    document = await export_settings(None, [])  # type: ignore[arg-type]
+    parsed = parse_settings_file(dump_settings_yaml(document).encode())
+
+    assert parsed.mistakes == []

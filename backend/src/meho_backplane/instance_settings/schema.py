@@ -231,14 +231,19 @@ def render_path(loc: tuple[int | str, ...] | list[int | str]) -> str:
     """Render a location tuple as ``spec.tenants[0].targets[3].host``.
 
     A key name that itself looks like a secret is shown as ``<redacted>``, so a
-    sentence about it never repeats it.
+    sentence about it never repeats it. A key name longer than
+    :data:`MAX_STRING_CHARS` is shown as ``<long key>`` and never checked.
     """
     out = ""
     for part in loc:
         if isinstance(part, int):
             out += f"[{part}]"
             continue
-        name = "<redacted>" if _secret_kind(str(part)) else str(part)
+        text = str(part)
+        if len(text) > MAX_STRING_CHARS:
+            name = "<long key>"
+        else:
+            name = "<redacted>" if _secret_kind(text) else text
         out += f".{name}" if out else name
     return out or "(file)"
 

@@ -2270,6 +2270,100 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Lessons in your own wiki">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#step-1-connect-the-wiki-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1: connect the wiki search
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-2-create-the-three-machine-logins" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2: create the three machine logins
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-3-store-the-client-secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3: store the client secrets
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-4-add-the-ci-calls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4: add the CI calls
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-each-login-can-and-cannot-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What each login can and cannot do
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-lesson-header" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The lesson header
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instance-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-changes-for-the-tenant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What changes for the tenant
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3028,6 +3122,100 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Lessons in your own wiki">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#step-1-connect-the-wiki-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1: connect the wiki search
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-2-create-the-three-machine-logins" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2: create the three machine logins
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-3-store-the-client-secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3: store the client secrets
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-4-add-the-ci-calls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4: add the CI calls
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-each-login-can-and-cannot-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What each login can and cannot do
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-lesson-header" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The lesson header
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instance-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-changes-for-the-tenant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What changes for the tenant
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3289,7 +3477,27 @@ metadata costs only an <code>updated_at</code> bump (no re-embed).</p>
 <p>A team can keep its lessons as pages in its own wiki: a Git repo of
 Markdown pages the team owns. Then a lesson lives
 in two places: the wiki is the source of truth, and MEHO keeps a copy.</p>
-<p>To set it up:</p>
+<p>Two one-way jobs keep the two equal. Both run in the CI of your wiki
+repo, and MEHO only answers their calls:</p>
+<ul>
+<li><strong>The import</strong> sends your wiki's pages into MEHO after each merge.</li>
+<li><strong>The export</strong> takes new lessons out of MEHO on a schedule. Your job
+  writes them into the wiki and opens a merge request there, and a
+  person reviews it.</li>
+</ul>
+<p>A third job, <strong>the drift check</strong>, compares the team rules in your wiki
+with the rules MEHO holds (the tenant's conventions). It fails when they
+differ.</p>
+<p>MEHO never reads your wiki by itself and holds no Git credentials.</p>
+<p>To set it up, follow the steps below:</p>
+<ol>
+<li><a href="#step-1-connect-the-wiki-search">Connect the wiki search</a>.</li>
+<li><a href="#step-2-create-the-three-machine-logins">Create the three machine logins in Keycloak</a>.</li>
+<li><a href="#step-3-store-the-client-secrets">Store each client secret in your wiki repo's CI</a>.</li>
+<li><a href="#step-4-add-the-ci-calls">Add the CI calls</a>, each with a dry run first.</li>
+<li><a href="#what-each-login-can-and-cannot-do">Check what each login can and cannot do</a>.</li>
+</ol>
+<h3 id="step-1-connect-the-wiki-search">Step 1: connect the wiki search<a class="headerlink" href="#step-1-connect-the-wiki-search" title="Permanent link">&para;</a></h3>
 <ol>
 <li>Load the wiki into a knowledge index and add it to MEHO as a docs
    collection (see <a href="#grounded-docs-search-add-on">Grounded docs search</a>).</li>
@@ -3298,7 +3506,333 @@ in two places: the wiki is the source of truth, and MEHO keeps a copy.</p>
    <code>policies</code> in the <a href="../settings-file/">settings file</a>. Leave it out or
    set it to <code>null</code> to keep lessons in MEHO only.</li>
 </ol>
-<p>What changes for the tenant:</p>
+<h3 id="step-2-create-the-three-machine-logins">Step 2: create the three machine logins<a class="headerlink" href="#step-2-create-the-three-machine-logins" title="Permanent link">&para;</a></h3>
+<p>Each job gets its own login: a Keycloak client that a program uses, not
+a person. Create each one in the MEHO realm with these client settings:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Client authentication</td>
+<td>On (a confidential client with a secret)</td>
+</tr>
+<tr>
+<td>Service accounts roles</td>
+<td>On (the client credentials grant)</td>
+</tr>
+<tr>
+<td>Standard flow</td>
+<td>Off</td>
+</tr>
+<tr>
+<td>Direct access grants</td>
+<td>Off</td>
+</tr>
+</tbody>
+</table>
+<p>Then add these mappers to the client. Each table differs only in the
+last row: the claim that limits the login to one job. Add the last row
+as a <strong>Hardcoded claim</strong> mapper with the claim JSON type <strong>boolean</strong>.</p>
+<p><strong>The import login</strong> (for example the client <code>meho-kb-import</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Mapper</th>
+<th>Claim</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Audience</td>
+<td><code>aud</code></td>
+<td>the backplane audience (the <code>KEYCLOAK_AUDIENCE</code> setting)</td>
+</tr>
+<tr>
+<td>Hardcoded claim</td>
+<td><code>tenant_id</code></td>
+<td>the one tenant the pages go to</td>
+</tr>
+<tr>
+<td>Hardcoded claim</td>
+<td><code>tenant_role</code></td>
+<td><code>read_only</code></td>
+</tr>
+<tr>
+<td>Hardcoded claim</td>
+<td><code>principal_kind</code></td>
+<td><code>service</code></td>
+</tr>
+<tr>
+<td>Hardcoded claim (boolean)</td>
+<td><code>kb_import_only</code></td>
+<td><code>true</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>The export login</strong> (for example the client <code>meho-kb-export</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Mapper</th>
+<th>Claim</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Audience</td>
+<td><code>aud</code></td>
+<td>the backplane audience</td>
+</tr>
+<tr>
+<td>Hardcoded claim</td>
+<td><code>tenant_id</code></td>
+<td>the one tenant to export</td>
+</tr>
+<tr>
+<td>Hardcoded claim</td>
+<td><code>tenant_role</code></td>
+<td><code>read_only</code></td>
+</tr>
+<tr>
+<td>Hardcoded claim</td>
+<td><code>principal_kind</code></td>
+<td><code>service</code></td>
+</tr>
+<tr>
+<td>Hardcoded claim (boolean)</td>
+<td><code>kb_export_only</code></td>
+<td><code>true</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>The drift check login</strong> (for example the client <code>meho-conventions-drift</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Mapper</th>
+<th>Claim</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Audience</td>
+<td><code>aud</code></td>
+<td>the backplane audience</td>
+</tr>
+<tr>
+<td>Hardcoded claim</td>
+<td><code>tenant_id</code></td>
+<td>the tenant whose rules are checked</td>
+</tr>
+<tr>
+<td>Hardcoded claim</td>
+<td><code>tenant_role</code></td>
+<td><code>read_only</code></td>
+</tr>
+<tr>
+<td>Hardcoded claim</td>
+<td><code>principal_kind</code></td>
+<td><code>service</code></td>
+</tr>
+<tr>
+<td>Hardcoded claim (boolean)</td>
+<td><code>conventions_drift_only</code></td>
+<td><code>true</code></td>
+</tr>
+</tbody>
+</table>
+<p>Give these clients no <code>meho_tenants</code> claim, so each login works in one
+tenant only. Use three clients, not one: a token that carries two of the
+limiting claims reaches no route at all.</p>
+<h3 id="step-3-store-the-client-secrets">Step 3: store the client secrets<a class="headerlink" href="#step-3-store-the-client-secrets" title="Permanent link">&para;</a></h3>
+<p>Copy each client's secret from Keycloak (the client's <strong>Credentials</strong>
+tab) into the CI secrets of your wiki repo, for example
+<code>MEHO_IMPORT_CLIENT_SECRET</code>, <code>MEHO_EXPORT_CLIENT_SECRET</code> and
+<code>MEHO_DRIFT_CLIENT_SECRET</code>. Never store them in MEHO, in the settings
+file or in the wiki pages.</p>
+<h3 id="step-4-add-the-ci-calls">Step 4: add the CI calls<a class="headerlink" href="#step-4-add-the-ci-calls" title="Permanent link">&para;</a></h3>
+<p>Start each job script with <code>set -euo pipefail</code>. Then a failed call
+fails the job, also when its answer goes on to <code>jq</code> through a pipe.
+Without it, <code>jq</code> gets no input, ends without an error, and the job
+passes while MEHO's copy stays old.</p>
+<p>Each job first gets a token with the client credentials grant. The
+example is for the import login; use the other client for the other
+jobs:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+
+<span class="nv">TOKEN</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-sf<span class="w"> </span>-d<span class="w"> </span><span class="nv">grant_type</span><span class="o">=</span>client_credentials<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">client_id</span><span class="o">=</span><span class="s2">"</span><span class="nv">$MEHO_IMPORT_CLIENT_ID</span><span class="s2">"</span><span class="w"> </span>-d<span class="w"> </span><span class="nv">client_secret</span><span class="o">=</span><span class="s2">"</span><span class="nv">$MEHO_IMPORT_CLIENT_SECRET</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$KEYCLOAK_ISSUER_URL</span><span class="s2">/protocol/openid-connect/token"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.access_token<span class="k">)</span>
+</code></pre></div>
+<p><strong>The import, after each merge to main.</strong> The job sends the wiki's
+product pages (<code>applies_to: product-and-version</code>, <code>status: confirmed</code>)
+as one <code>{"path", "content"}</code> object per page. Your job checks the pages
+for customer names, host names and addresses before it sends them; MEHO
+checks only for secrets. At most 1000 pages go in one request.</p>
+<div class="highlight"><pre><span></span><code>find<span class="w"> </span>products<span class="w"> </span>-name<span class="w"> </span><span class="s1">'*.md'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-r<span class="w"> </span>f<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">  </span>jq<span class="w"> </span>-n<span class="w"> </span>--arg<span class="w"> </span>path<span class="w"> </span><span class="s2">"</span><span class="nv">$f</span><span class="s2">"</span><span class="w"> </span>--rawfile<span class="w"> </span>content<span class="w"> </span><span class="s2">"</span><span class="nv">$f</span><span class="s2">"</span><span class="w"> </span><span class="s1">'{path: $path, content: $content}'</span>
+<span class="k">done</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-s<span class="w"> </span><span class="s1">'{pages: ., dry_run: true}'</span><span class="w"> </span>&gt;<span class="w"> </span>import.json
+
+curl<span class="w"> </span>-sf<span class="w"> </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$TOKEN</span><span class="s2">"</span><span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span>@import.json<span class="w"> </span><span class="s2">"</span><span class="nv">$MEHO_URL</span><span class="s2">/api/v1/kb/import"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">'.pages[] | select(.action == "skip")'</span>
+</code></pre></div>
+<p>Start with <code>dry_run: true</code>: MEHO runs every check and writes nothing.
+The answer lists each page as <code>create</code>, <code>update</code>, <code>unchanged</code> or <code>skip</code>,
+and says why a page is skipped. When the list looks right, set
+<code>dry_run: false</code>. The import is safe to run twice: an unchanged page
+writes nothing.</p>
+<p><strong>The export, on a schedule</strong> (for example once a day). The call
+changes nothing in MEHO. It returns the lessons that should go to the
+wiki, the pages to remove, and the entries it skipped, with the reason:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sf<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$TOKEN</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$MEHO_URL</span><span class="s2">/api/v1/kb/export"</span><span class="w"> </span>&gt;<span class="w"> </span>export.json
+jq<span class="w"> </span><span class="s1">'{page_count, remove_count, skipped}'</span><span class="w"> </span>export.json
+</code></pre></div>
+<p>For the first runs, only print the answer and do not commit. A person
+with the operator role can see the same with
+<code>meho kb export &lt;directory&gt; --dry-run</code>, which lists what would be added,
+changed and removed. When the lists look right, let the job write the
+pages into a folder of their own, commit them to a branch and open a
+merge request. The full job is in the
+<a href="https://github.com/evoila/meho/blob/main/docs/codebase/kb.md#meho-kb-export-and-the-call-from-the-ci-job">developer notes on the export</a>.</p>
+<p><strong>The drift check, after each merge to main.</strong> The job renders the team
+rules into a settings file that holds only <code>conventions</code> (all of kind
+<code>operational</code>), and sends it:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sf<span class="w"> </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$TOKEN</span><span class="s2">"</span><span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/yaml'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-binary<span class="w"> </span>@team-rules-settings.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$MEHO_URL</span><span class="s2">/api/v1/settings/conventions-drift"</span><span class="w"> </span>&gt;<span class="w"> </span>drift.json
+jq<span class="w"> </span>.<span class="w"> </span>drift.json
+jq<span class="w"> </span>-e<span class="w"> </span><span class="s1">'.in_sync'</span><span class="w"> </span>drift.json<span class="w"> </span>&gt;<span class="w"> </span>/dev/null
+</code></pre></div>
+<p>The check saves nothing. The answer lists the rules MEHO does not have
+(<code>added</code>), the rules that differ (<code>changed</code>) and the rules only MEHO has
+(<code>only_in_meho</code>). For the first runs, let the job only print the answer.
+When it is right, let the last line fail the job when anything differs.
+A person brings MEHO up to date with the
+<a href="../settings-file/">settings file</a> import.</p>
+<h3 id="what-each-login-can-and-cannot-do">What each login can and cannot do<a class="headerlink" href="#what-each-login-can-and-cannot-do" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Login</th>
+<th>Can</th>
+<th>Cannot</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Import (<code>kb_import_only</code>)</td>
+<td>Send pages to <code>POST /api/v1/kb/import</code> for its one tenant.</td>
+<td>Call any other route or any MCP tool (answer <code>403 kb_import_only_scope_violation</code>), read knowledge, sign in to the console.</td>
+</tr>
+<tr>
+<td>Export (<code>kb_export_only</code>)</td>
+<td>Read the export, <code>POST /api/v1/kb/export</code>, of its one tenant.</td>
+<td>Write anything, call any other route or any MCP tool (answer <code>403 kb_export_only_scope_violation</code>), sign in to the console.</td>
+</tr>
+<tr>
+<td>Drift check (<code>conventions_drift_only</code>)</td>
+<td>Send a settings file to <code>POST /api/v1/settings/conventions-drift</code> for its one tenant.</td>
+<td>Preview or import settings, call any other route or any MCP tool (answer <code>403 conventions_drift_only_scope_violation</code>), sign in to the console.</td>
+</tr>
+</tbody>
+</table>
+<p>The limiting claim takes rights away whatever role the token names. A
+value MEHO cannot read (a number, a list, <code>"yes"</code>) also limits the
+login. Only no claim, <code>false</code> or <code>"false"</code> leaves a login unlimited.</p>
+<h3 id="the-lesson-header">The lesson header<a class="headerlink" href="#the-lesson-header" title="Permanent link">&para;</a></h3>
+<p>Each wiki page starts with a YAML header. The import needs <code>type</code>,
+<code>applies_to</code> and <code>status</code>; the other fields are optional.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>What it says</th>
+<th>Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>type</code></td>
+<td>What kind of note it is</td>
+<td><code>fact</code>, <code>lesson</code>, <code>decision</code>, <code>rule</code>, <code>person-and-role</code>, <code>preference</code>, <code>observation</code></td>
+</tr>
+<tr>
+<td><code>applies_to</code></td>
+<td>What the note is about</td>
+<td><code>tenant</code>, <code>customer</code>, <code>target</code>, <code>product-and-version</code>, <code>team</code>, <code>person</code></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>How far you can trust it</td>
+<td><code>candidate</code>, <code>confirmed</code>, <code>disputed</code>, <code>replaced</code>, <code>retired</code></td>
+</tr>
+<tr>
+<td><code>product</code>, <code>version</code></td>
+<td>The product and version it is about</td>
+<td>text</td>
+</tr>
+<tr>
+<td><code>learned_at</code>, <code>confirmed_at</code>, <code>expires_at</code></td>
+<td>When it was learned, last confirmed, and when it runs out</td>
+<td>a date, or a date and time</td>
+</tr>
+<tr>
+<td><code>source</code>, <code>author</code>, <code>summary</code></td>
+<td>Where it comes from, who wrote it, one line about it</td>
+<td>text</td>
+</tr>
+<tr>
+<td><code>tags</code></td>
+<td>Words to find it by</td>
+<td>a list of text</td>
+</tr>
+</tbody>
+</table>
+<p>Who may set <code>status: confirmed</code>: only a reviewer (a person who can
+decide approvals in the tenant) or a tenant admin. MEHO refuses it from
+anyone else, also from the person who wrote the entry. A page imported
+from your wiki keeps the status a reviewer set there.
+The weekly upkeep never confirms a candidate. A candidate runs out after
+six months unless someone confirms it.</p>
+<h3 id="instance-settings">Instance settings<a class="headerlink" href="#instance-settings" title="Permanent link">&para;</a></h3>
+<p>Three chart values (Helm values) change how knowledge works on the whole
+instance:</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Default</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config.kbSharedTenantIds</code></td>
+<td><code>""</code> (nothing shared)</td>
+<td>Tenant ids, comma-separated, whose entries marked <code>shared</code> every tenant can read. Only the owner tenant can change them.</td>
+</tr>
+<tr>
+<td><code>config.knowledgeUpkeepEnabled</code></td>
+<td><code>"true"</code></td>
+<td>Runs the weekly upkeep: it merges duplicate entries, retires expired ones and writes one report per tenant (<code>meho audit query</code>, principal <code>system:knowledge-upkeep</code>).</td>
+</tr>
+<tr>
+<td><code>config.knowledgeUpkeepIntervalSeconds</code></td>
+<td><code>604800</code> (one week)</td>
+<td>How often the upkeep runs, from <code>60</code> to <code>604800</code> seconds.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="what-changes-for-the-tenant">What changes for the tenant<a class="headerlink" href="#what-changes-for-the-tenant" title="Permanent link">&para;</a></h3>
 <ul>
 <li><code>search_knowledge</code> and <code>meho kb search</code> also search the wiki. A wiki
   hit has <code>source: wiki</code>, its <code>collection</code> and its <code>source_url</code> (the link

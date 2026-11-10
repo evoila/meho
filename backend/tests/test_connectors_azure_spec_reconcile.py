@@ -128,6 +128,8 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "OFFAZURE_IMPORT_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
     "OFFAZURE_MASTER_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
     # monitor (Task #5090)
+    "METRICS_PATH": (("GET",), "METRICS_API_VERSION"),
+    "METRICS_BATCH_PATH": (("POST",), "METRICS_BATCH_API_VERSION"),
     # network (Task #5085)
     "VIRTUAL_NETWORKS_PATH": (("GET",), "NETWORK_API_VERSION"),
     "VIRTUAL_NETWORK_PATH": (("GET",), "NETWORK_API_VERSION"),
@@ -315,6 +317,8 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
         + "vmwaresites@2023-06-06",
         "# monitor (Task #5090)",
+        "GET:/{}/providers/microsoft.insights/metrics@2023-10-01",
+        "POST:/subscriptions/{}/metrics:getbatch@2024-02-01",
         "# network (Task #5085)",
         "GET:/subscriptions/{}/providers/microsoft.network/expressroutecircuits@2026-01-01",
         "GET:/subscriptions/{}/providers/microsoft.network/loadbalancers@2026-01-01",

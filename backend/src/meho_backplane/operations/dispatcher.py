@@ -587,7 +587,9 @@ async def _restore_saved_ingest_profiles(target: Any) -> None:
     A row whose key already has a class is skipped, so the read is cheap
     on the usual path. A database error is logged and the resolver runs
     on the classes this replica already has. A target without a product
-    slug is left to the resolver, which reports the miss.
+    slug is left to the resolver, which reports the miss. Only the built-in
+    rows and the rows of the target's tenant are read: the resolver sees no
+    other tenant's login setup.
     """
     from meho_backplane.operations.ingest.ingest_auth_store import (
         restore_ingested_profiled_connectors,
@@ -596,8 +598,11 @@ async def _restore_saved_ingest_profiles(target: Any) -> None:
     product = getattr(target, "product", None)
     if not isinstance(product, str) or not product:
         return
+    tenant_id = getattr(target, "tenant_id", None)
     try:
-        await restore_ingested_profiled_connectors(product=product)
+        await restore_ingested_profiled_connectors(
+            product=product, tenant_id=tenant_id if isinstance(tenant_id, uuid.UUID) else None
+        )
     except SQLAlchemyError:
         _log.warning("ingested_profile_restore_before_call_failed", exc_info=True)
 

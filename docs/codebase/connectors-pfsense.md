@@ -331,15 +331,19 @@ satellite mint), a #3197 preview-hash binding, and a mandatory blast-radius
 statement naming the exact object. Each acts on exactly one object by stable
 identity (`<tracker>` for a NAT rule, exact name for an alias / gateway,
 canonical network for a route, exact member token for an alias member — never
-by position), refuses fail-closed on a missing (`not_found`) / duplicated
-(`ambiguous`) identity or a live reference (`referenced`, naming every
-referrer, for `alias.delete` and `gateway.delete`), and read-back-verifies the
-result. `pfsense.alias.member.remove` is the odd one out: it is a
+by position). A missing identity (`not_found`) is a normal `ok` answer: the
+wanted state is already true. A duplicated identity (`ambiguous`) or a live
+reference (`referenced`, naming every referrer, for `alias.delete` and
+`gateway.delete`) is a refusal. A refusal changes nothing and **fails the
+call** (#5138): it raises `PfSenseRefusedError`, so the call gets
+`status: error`, the audit record says it failed, and an approved request shows
+`result_state: failed`. The message reads
+`pfsense.alias.delete refused (<code>): <why>`. Each delete is read-back-verified. `pfsense.alias.member.remove` is the odd one out: it is a
 **read-modify-write on a shared object**, not a delete — it removes ONE member
 from the alias's `<address>` (and its positionally-aligned `<detail>`) while
-keeping the alias and every other member, refuses `member_not_found` /
-`last_member` (never empties a shared alias into deletion — that is
-`alias.delete`'s job), and verifies the member is gone, the alias is retained,
+keeping the alias and every other member. `member_not_found` (the member is
+already gone) stays `ok`. `last_member` and `ambiguous` fail the call (never
+empties a shared alias into deletion — that is `alias.delete`'s job). It verifies the member is gone, the alias is retained,
 and the residual members survive. The 2 user writes (#3937) are
 `safety_level="dangerous"` / `requires_approval=True`: every call waits until a
 second person approves. See "User writes" below.
@@ -635,10 +639,13 @@ config libraries and `eval`s the text inside a function scope, so the config
 libraries populate the `$config` global and the fragment must pull it into
 scope (mirroring the shipped `gatewaystatus` script's `global $argv;`).
 
-**Guarded + idempotent.** A gateway whose `name` already exists, or a route
-whose canonical `network` already exists, is reported as
+**Guarded + idempotent.** A gateway whose `name` already exists with the same
+`interface` and address, or a route whose canonical `network` already exists
+with the same gateway, is reported as
 `{existed_before: true, applied: false, existing: <row>}` and stages **no**
-playback — never a duplicate. `pfsense.route.static.add` additionally requires
+playback — never a duplicate. When the existing gateway or route has other
+settings, the wanted state is not true: the add raises `PfSenseRefusedError`
+with code `conflict`, changes nothing, and the call fails (#5138). `pfsense.route.static.add` additionally requires
 the referenced gateway to already exist (pre-stage it with
 `pfsense.gateway.add`, whose `monitor_disable` flag suits a gateway whose
 upstream device is not up yet). A non-zero playback exit, or a silent
@@ -789,7 +796,8 @@ and no audit.
 - **A refusal fails the call (#5136).** Every refusal above (`conflict`,
   `ambiguous`, `unknown_interface`, `mgmt_path`, `mgmt_path_unknown`,
   `nat_associated`) changes nothing and raises
-  `PfSenseFilterRuleRefusedError`. The call then ends with `status: error`,
+  `PfSenseFilterRuleRefusedError`, a subclass of `PfSenseRefusedError`
+  (`refusal.py`), the error that every pfSense write raises (#5138). The call then ends with `status: error`,
   the audit record says it failed, and an approved request shows
   `result_state: failed`. The message reads
   `pfsense.filter.rule.add refused (<code>): <why>`. Before #5136 the
@@ -843,7 +851,9 @@ the account, its password, its groups and its certificates stay.
   egress-free `preview_operation` path) `current_state` is `null`.
 - **Refused before any change.** `not_found` (no user with this name),
   `ambiguous` (more than one), and `protected` (the built-in admin account:
-  `uid` 0 or `scope` `system`). The fragment checks "exactly one match, not
+  `uid` 0 or `scope` `system`). A refusal is a failed call (#5138): it raises
+  `PfSenseRefusedError`, so the call gets `status: error`, the audit record
+  says it failed, and an approved request shows `result_state: failed`. The fragment checks "exactly one match, not
   uid 0" again before it changes anything.
 - **Safe to run twice.** A user already in the wanted state returns
   `status: nothing_to_do`, `nothing_to_do: true`, and nothing is written.
@@ -1004,10 +1014,10 @@ Tests: `backend/tests/test_connectors_pfsense_topology.py`.
 - Task #3313: `pfsense.route.static.delete` + `pfsense.gateway.delete` +
   `pfsense.alias.member.remove` — the three teardown-inverse governed deletes
   that reverse a bring-up (retire a route / gateway; trim one member out of a
-  shared alias without deleting it). `gateway.delete` refuses fail-closed while
+  shared alias without deleting it). `gateway.delete` fails the call while
   any static route / gateway group / default-gateway setting still uses the
-  gateway; `alias.member.remove` refuses `last_member` so a shared alias is
-  never emptied into deletion.
+  gateway; `alias.member.remove` fails the call on `last_member` so a shared
+  alias is never emptied into deletion.
 - Task #3954: `pfsense.user.list` + `pfsense.route.static.list` — safe reads
   with an allow-list of fields, so nobody needs `pfsense.config.show` to check
   a user or a static route.

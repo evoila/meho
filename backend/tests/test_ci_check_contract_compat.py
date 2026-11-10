@@ -686,3 +686,195 @@ def test_script_fails_closed_on_a_broken_snapshot(tmp_path: Path) -> None:
     (root / compat.MCP_PATH).write_text("{not json")
     result = _run(root, _fake_oasdiff(tmp_path, 0))
     assert result.returncode == 2
+
+
+# ---------------------------------------------------------------------------
+# Helm values
+# ---------------------------------------------------------------------------
+
+_VALUES = "image:\n  tag: x\n  pullPolicy: IfNotPresent\ningress:\n  host: ''\nitems:\n  - a\n"
+
+
+def test_values_a_removed_key_is_breaking() -> None:
+    head = "image:\n  tag: x\ningress:\n  host: ''\nitems:\n  - a\n"
+    assert compat.values_breaking(_VALUES, head) == ["Helm value 'image.pullPolicy' removed"]
+
+
+def test_values_a_removed_section_lists_the_section_and_its_keys() -> None:
+    head = "image:\n  tag: x\n  pullPolicy: IfNotPresent\nitems:\n  - a\n"
+    assert compat.values_breaking(_VALUES, head) == [
+        "Helm value 'ingress' removed",
+        "Helm value 'ingress.host' removed",
+    ]
+
+
+def test_values_new_keys_a_changed_default_and_a_changed_list_are_not_breaking() -> None:
+    head = (
+        "image:\n  tag: y\n  pullPolicy: Always\n  extra: 1\n"
+        "ingress:\n  host: example.invalid\nitems:\n  - b\n  - c\nnew: {}\n"
+    )
+    assert compat.values_breaking(_VALUES, head) == []
+
+
+def test_values_an_empty_file_is_not_a_crash() -> None:
+    assert compat.values_breaking("", "") == []
+    assert compat.values_breaking(_VALUES, "") != []
+
+
+def test_values_schema_uses_the_input_rules() -> None:
+    base = {
+        "type": "object",
+        "properties": {"mode": {"type": "string", "enum": ["a", "b"]}, "gone": {"type": "string"}},
+    }
+    head = {
+        "type": "object",
+        "properties": {"mode": {"type": "string", "enum": ["a"]}},
+        "required": ["mode"],
+    }
+    found = compat.values_schema_breaking(base, head)
+    assert any("'gone' removed" in line for line in found)
+    assert any("'mode' is now required" in line for line in found)
+    assert any("enum" in line for line in found)
+    assert compat.values_schema_breaking(head, base) == []
+
+
+def _probe_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "probes": {
+                "type": "object",
+                "properties": {
+                    "liveness": {"$ref": "#/definitions/httpProbe"},
+                    "readiness": {"$ref": "#/definitions/httpProbe", "description": "kept"},
+                },
+            }
+        },
+        "definitions": {
+            "httpProbe": {
+                "type": "object",
+                "properties": {
+                    "scheme": {"type": "string", "enum": ["HTTP", "HTTPS"]},
+                    "port": {"type": "integer"},
+                },
+            }
+        },
+    }
+
+
+def test_values_schema_finds_a_change_inside_a_referenced_definition() -> None:
+    base = _probe_schema()
+    head = copy.deepcopy(base)
+    head["definitions"]["httpProbe"]["properties"]["scheme"]["enum"] = ["HTTP"]
+    del head["definitions"]["httpProbe"]["properties"]["port"]
+    head["definitions"]["httpProbe"]["required"] = ["scheme"]
+    found = compat.values_schema_breaking(base, head)
+    for probe in ("liveness", "readiness"):
+        where = f"Helm values schema.probes.{probe}"
+        assert f"{where}.scheme: enum value 'HTTPS' removed" in found
+        assert f"{where}: argument 'port' removed" in found
+        assert f"{where}: argument 'scheme' is now required" in found
+    assert compat.values_schema_breaking(head, base) == []
+    assert compat.values_schema_breaking(base, copy.deepcopy(base)) == []
+
+
+def test_values_schema_finds_a_ref_swapped_for_a_narrower_inline_schema() -> None:
+    base = _probe_schema()
+    head = copy.deepcopy(base)
+    head["properties"]["probes"]["properties"]["liveness"] = {
+        "type": "object",
+        "properties": {"scheme": {"type": "string", "enum": ["HTTP"]}},
+    }
+    found = compat.values_schema_breaking(base, head)
+    assert "Helm values schema.probes.liveness.scheme: enum value 'HTTPS' removed" in found
+    assert "Helm values schema.probes.liveness: argument 'port' removed" in found
+
+
+def test_values_schema_of_the_chart_finds_a_removed_probe_scheme() -> None:
+    base = json.loads((_REPO_ROOT / compat.VALUES_SCHEMA_PATH).read_text(encoding="utf-8"))
+    head = copy.deepcopy(base)
+    scheme = head["definitions"]["httpProbe"]["properties"]["httpGet"]["properties"]["scheme"]
+    scheme["enum"] = ["HTTP"]
+    found = compat.values_schema_breaking(base, head)
+    assert found
+    assert all("enum value 'HTTPS' removed" in line for line in found)
+    assert compat.values_schema_breaking(base, copy.deepcopy(base)) == []
+
+
+def test_inline_refs_keeps_sibling_keys_and_stops_on_a_cycle() -> None:
+    schema = {
+        "properties": {"tree": {"$ref": "#/definitions/node", "title": "t"}},
+        "definitions": {
+            "node": {"type": "object", "properties": {"child": {"$ref": "#/definitions/node"}}}
+        },
+    }
+    tree = compat.inline_refs(schema)["properties"]["tree"]
+    assert tree["title"] == "t"
+    assert tree["properties"]["child"] == {"$ref": "#/definitions/node"}
+
+
+def test_inline_refs_keeps_a_null_default() -> None:
+    schema = {"properties": {"a": {"type": ["string", "null"], "default": None}}}
+    assert compat.inline_refs(schema) == schema
+    assert compat.values_schema_breaking(schema, copy.deepcopy(schema)) == []
+
+
+def test_inline_refs_keeps_a_null_enum_value() -> None:
+    schema = {
+        "properties": {"scheme": {"$ref": "#/definitions/scheme"}},
+        "definitions": {"scheme": {"enum": ["HTTP", None]}},
+    }
+    assert compat.inline_refs(schema)["properties"]["scheme"] == {"enum": ["HTTP", None]}
+    assert compat.values_schema_breaking(schema, copy.deepcopy(schema)) == []
+
+
+def test_values_schema_fails_closed_on_a_ref_that_points_to_nothing() -> None:
+    base = {"properties": {"a": {"$ref": "#/definitions/missing"}}}
+    with pytest.raises(compat.CheckError, match="points to nothing"):
+        compat.values_schema_breaking(base, base)
+
+
+def _add_chart_files(root: Path, values: str, schema: dict[str, Any]) -> None:
+    (root / "deploy" / "charts" / "meho").mkdir(parents=True, exist_ok=True)
+    (root / compat.VALUES_PATH).write_text(values)
+    (root / compat.VALUES_SCHEMA_PATH).write_text(json.dumps(schema))
+
+
+def test_script_fails_on_a_removed_helm_value_and_allows_it_with_label_and_section(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path, _snap(_tool()))
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    _add_chart_files(root, "a: 1\nb: 2\n", schema)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "chart")
+    (root / compat.VALUES_PATH).write_text("a: 1\n")
+    oasdiff = _fake_oasdiff(tmp_path, 0)
+    blocked = _run(root, oasdiff)
+    assert blocked.returncode == 1
+    assert "Helm value 'b' removed" in blocked.stdout
+
+    body = tmp_path / "body.md"
+    body.write_text("## Breaking changes\n- stop setting `b`.\n")
+    allowed = _run(root, oasdiff, "--labels", "breaking-change", "--pr-body-file", str(body))
+    assert allowed.returncode == 0, allowed.stdout
+
+
+def test_script_fails_closed_on_broken_helm_values(tmp_path: Path) -> None:
+    root = _repo(tmp_path, _snap(_tool()))
+    _add_chart_files(root, "a: 1\n", {"type": "object"})
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "chart")
+    (root / compat.VALUES_PATH).write_text("a: [unclosed\n")
+    result = _run(root, _fake_oasdiff(tmp_path, 0))
+    assert result.returncode == 2
+    assert "could not run" in result.stdout
+
+
+def test_script_skips_helm_files_that_are_not_on_the_base_yet(tmp_path: Path) -> None:
+    root = _repo(tmp_path, _snap(_tool()))
+    _add_chart_files(root, "a: 1\n", {"type": "object"})
+    result = _run(root, _fake_oasdiff(tmp_path, 0))
+    assert result.returncode == 0, result.stdout
+    assert "Helm values check skipped" in result.stdout
+    assert "Helm schema check skipped" in result.stdout

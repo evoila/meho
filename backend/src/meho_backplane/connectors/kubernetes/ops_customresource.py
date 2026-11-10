@@ -218,7 +218,7 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     credential pattern). For a ``Secret`` the projection then surfaces
     the **redacted** ``data`` / ``string_data`` key inventory -- so the
     read answers "which keys does this Secret carry?" with a per-value
-    digest, never the bytes. The same walk replaces every annotation
+    keyed fingerprint, never the bytes. The same walk replaces every annotation
     value of a Secret with the placeholder (keys kept).
 
     A ``kind: HelmChart`` object (k3s / RKE2 ``helm.cattle.io/v1``) goes
@@ -412,7 +412,7 @@ _CR_ROW_ITEM_SCHEMA: dict[str, Any] = {
         "status_truncated": {"type": "boolean"},
         # Present only for a ``kind: Secret`` object (#3501): the redacted
         # ``data`` / ``stringData`` key inventory -- key names kept, every
-        # value replaced with a placeholder + SHA-256 digest.
+        # value replaced with a placeholder + keyed fingerprint.
         "data": {"type": "object"},
         "string_data": {"type": "object"},
     },

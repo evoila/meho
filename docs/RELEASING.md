@@ -859,9 +859,10 @@ Run step 1 as written (Tasks closed; **real** `success` on the
     PR-triggered, so check it on the PRs that carried migrations since
     the previous tag rather than on the `main` run.
 - [ ] **Contract diff since the previous tag is classified.** Each pull
-  request already ran the `compat-gates` workflow (job `REST API and MCP
-  tools compatibility`), which fails on a breaking change to the public
-  REST API (`/api/v1/`) or the MCP tools unless the pull request has the
+  request already ran the `compat-gates` workflow (job `REST API, MCP
+  tools and Helm values compatibility`), which fails on a breaking change
+  to the public REST API (`/api/v1/`), the MCP tools or the Helm values
+  unless the pull request has the
   `breaking-change` label and a `## Breaking changes` section
   ([`docs/codebase/compat-gates.md`](codebase/compat-gates.md)). Run it
   once more over the whole range, on the candidate commit:
@@ -874,8 +875,11 @@ Run step 1 as written (Tasks closed; **real** `success` on the
 
   A manual run has no label, so it fails on every break it finds; each
   one must have a `### Breaking changes` bullet. The gate does not cover
-  the CLI, the Helm values or the environment variables yet (Known
-  gap 2), so classify those by hand and record the result on #2661:
+  the CLI or the environment variables yet (Known gap 2), so classify
+  those by hand and record the result on #2661. The chart job `Lint +
+  template + kubeconform (PR build gate)` also keeps the golden renders in
+  `deploy/golden/` equal to the chart, so a diff of that folder since the
+  previous tag shows what changed in the installed objects:
 
   ```bash
   git diff "${RC_PREV}".."${RC_SHA}" -- docs-site/reference/cli.md docs-site/reference/maturity.md deploy/charts/meho/values.yaml
@@ -1081,14 +1085,17 @@ are left. Each is a follow-up task.
    without `--exclude`.** Once an rc exists, that returns the rc.
    This runbook already excludes rcs where it derives `PREV` (R1); the
    skill needs the same edit (tracked separately).
-2. **The compatibility gate covers only the REST API and the MCP
-   tools.** The `compat-gates` workflow
+2. **The compatibility gate covers only the REST API, the MCP tools and
+   the Helm values.** The `compat-gates` workflow
    ([`docs/codebase/compat-gates.md`](codebase/compat-gates.md)) checks
    the public OpenAPI snapshot with oasdiff and the committed MCP
    `tools/list` snapshot (`backend/contracts/mcp-tools-list.json`), and
-   a break needs the `breaking-change` label. Still missing: Helm golden
-   renders, an update-from-previous-tag job, an env-var registry
-   snapshot, and a check of the CLI verbs and flags. Until they exist,
+   a break needs the `breaking-change` label. It also compares the keys of
+   `deploy/charts/meho/values.yaml` and `values.schema.json`, and the chart
+   job keeps golden renders in `deploy/golden/`. The chart job also
+   upgrades from the last release, but only for the Helm install. Still
+   missing: an update-from-previous-tag test for the other install forms,
+   an env-var registry snapshot, and a check of the CLI verbs and flags. Until they exist,
    R3 classifies those by hand. The workflow also does not run in the
    merge queue (labels are not visible there), so it is not a required
    check yet.

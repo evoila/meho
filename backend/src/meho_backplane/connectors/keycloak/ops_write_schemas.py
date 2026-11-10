@@ -11,6 +11,28 @@ Carries the ``WRITE_OPS`` registration table, the per-group
 JSON-schema fragments. The handlers live in ``ops_write``; the connector
 imports ``WRITE_OPS`` + ``WHEN_TO_USE_WRITE_BY_GROUP`` (re-exported from
 ``ops_write``) for its ``register_operations`` walk.
+
+Risk levels of the identity writes
+==================================
+
+MEHO reads a person's tenant rights from the login token, and Keycloak
+builds that token. So a write that can change what goes into the token is
+a tenant-rights change, like ``keycloak.group.member.add`` and
+``keycloak.role_mapping.assign``. These writes are ``dangerous`` too:
+
+* ``keycloak.user.create`` -- the new user can carry a ``groups`` list and
+  attributes.
+* ``keycloak.client.create`` / ``keycloak.client.update`` -- a client
+  carries the mappers and scopes that fill the token.
+* ``keycloak.protocol_mapper.create`` -- a mapper decides the claims, also
+  ``tenant_id`` / ``tenant_role``.
+* ``keycloak.user.reset_password`` -- sets the password of any user of the
+  realm, so it lets someone sign in as that user.
+
+At ``dangerous``, only a MEHO-SA-Operator or a tenant admin may approve
+another person's request, and the single-operator self-approval switch
+(``APPROVAL_ALLOW_SELF_APPROVAL``) does not cover them
+(``operations/approval_queue.py``).
 """
 
 from __future__ import annotations
@@ -49,7 +71,9 @@ _WHEN_TO_USE_REALM_WRITE = (
 _WHEN_TO_USE_CLIENT_WRITE = (
     "Use to create a Keycloak client (``keycloak.client.create``) or "
     "update one (``keycloak.client.update``) — flows, redirect URIs, web "
-    "origins, mappers. Both require approval. Pass the "
+    "origins, mappers. Both are dangerous: a MEHO-SA-Operator or a tenant "
+    "admin must approve, because a client decides what goes into the login "
+    "token. Pass the "
     "ClientRepresentation under ``representation``. Updates key on the "
     "internal UUID — pass ``id`` directly, or pass ``client_id`` (the "
     "human clientId) for name→UUID resolution. Create is idempotent on a "
@@ -68,15 +92,17 @@ _WHEN_TO_USE_CLIENT_SCOPE_WRITE = (
 _WHEN_TO_USE_PROTOCOL_MAPPER_WRITE = (
     "Use to add a protocol mapper to a client "
     "(``keycloak.protocol_mapper.create``) — e.g. the ``tenant_id`` / "
-    "``tenant_role`` claim mappers the backplane row-scopes on. Requires "
-    "approval. Key on the client UUID (``id``) or pass ``client_id`` for "
+    "``tenant_role`` claim mappers the backplane row-scopes on. Dangerous: "
+    "a MEHO-SA-Operator or a tenant admin must approve. Key on the client "
+    "UUID (``id``) or pass ``client_id`` for "
     "resolution; pass the ProtocolMapperRepresentation under "
     "``representation``. Idempotent on a 409 already-exists."
 )
 
 _WHEN_TO_USE_USER_WRITE = (
     "Use to create a user (``keycloak.user.create``) or reset a user's "
-    "password (``keycloak.user.reset_password``). Both require approval. "
+    "password (``keycloak.user.reset_password``). Both are dangerous: a "
+    "MEHO-SA-Operator or a tenant admin must approve. "
     "The password is NEVER passed inline — supply ``password_secret_ref`` "
     "(a Vault KV-v2 path; optional ``password_secret_mount`` / "
     "``password_secret_key``) and the connector reads it from Vault under "
@@ -307,7 +333,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         response_schema=_WRITE_CONFIRM_SCHEMA,
         group_key="client_write",
         tags=("write", "client", "keycloak"),
-        safety_level="caution",
+        safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_CLIENT_WRITE,
@@ -352,7 +378,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         response_schema=_WRITE_CONFIRM_SCHEMA,
         group_key="client_write",
         tags=("write", "client", "keycloak"),
-        safety_level="caution",
+        safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_CLIENT_WRITE,
@@ -435,7 +461,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         response_schema=_WRITE_CONFIRM_SCHEMA,
         group_key="protocol_mapper_write",
         tags=("write", "protocol-mapper", "keycloak"),
-        safety_level="caution",
+        safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_PROTOCOL_MAPPER_WRITE,
@@ -475,7 +501,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         response_schema=_WRITE_CONFIRM_SCHEMA,
         group_key="user_write",
         tags=("write", "user", "keycloak"),
-        safety_level="caution",
+        safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_USER_WRITE,
@@ -517,7 +543,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         response_schema=_WRITE_CONFIRM_SCHEMA,
         group_key="user_write",
         tags=("write", "user", "keycloak"),
-        safety_level="caution",
+        safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_USER_WRITE,

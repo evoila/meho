@@ -9,6 +9,9 @@ runs it. These tests cover the two ways that run can fail:
 * MEHO may not read the password ref in Vault.
 * The Keycloak service account may not create users (HTTP 403).
 
+``keycloak.user.create`` runs at the ``dangerous`` risk level, so the person
+who approves is a tenant admin.
+
 In both cases the approve response says ``error``, the run has its own audit
 row with ``result_status: error`` under its real op id, the stored result
 points at that row, and no user is created.
@@ -154,7 +157,7 @@ def _approve(request_id: uuid.UUID, *, users_status: int) -> tuple[dict[str, Any
             key,
             fresh_sign_in=True,
             sub="approver",
-            tenant_role=TenantRole.OPERATOR.value,
+            tenant_role=TenantRole.TENANT_ADMIN.value,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:
@@ -319,7 +322,7 @@ def _approve_in_background(request_id: uuid.UUID, *, users_status: int) -> dict[
             key,
             fresh_sign_in=True,
             sub="approver",
-            tenant_role=TenantRole.OPERATOR.value,
+            tenant_role=TenantRole.TENANT_ADMIN.value,
             tenant_id=str(_TENANT_ID),
         )
         headers = {"Authorization": f"Bearer {token}"}

@@ -3090,7 +3090,7 @@ async def _build_proposed_effect(
         # (#1855). ``safety_level`` is op-identity metadata read straight
         # off the descriptor -- not recomputed -- so a parked ``dangerous``
         # op (e.g. ``keycloak.realm.create``) and a ``caution`` op (e.g.
-        # ``keycloak.user.create``) produce severity-distinguishable
+        # ``keycloak.realm.update``) produce severity-distinguishable
         # approval rows even when neither registers a preview builder.
         # Stamped here (rather than in the per-op preview hook) so it
         # rides the identifier-only default too, keeping the

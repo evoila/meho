@@ -384,7 +384,9 @@ digest hashes and the value fingerprints (`compute_audit_digest_hash`,
   no `paramsHashKey.secretName`), MEHO makes the key from `DATABASE_URL`
   under the same label. Then a new database password changes the key: new
   hashes do not match older ones, and a request that waits for approval at
-  that moment must be asked for again.
+  that moment must be asked for again. MEHO logs `params_hash_key_missing`
+  at start, and the first-start destination check does not run
+  ([first-start.md](first-start.md)).
 - **Requests made before the key was set.** With `PARAMS_HASH_KEY` set, the
   approval check also accepts the hash under the key made from
   `DATABASE_URL`, for the request's own params only. So a request made
@@ -981,8 +983,10 @@ preview of the waiting request:
 
 A value that could not be read is `None`, never a guess.
 
-`approve_request` and `approve_right` call `check_grant_approval` before
-the group rule. It refuses with `ApprovalRoleFloorError` (403):
+The group rule (`_check_approver_group`, used by `approve_request` and
+`approve_right`) calls `check_rights_change_approval`, then
+`check_grant_approval`. The second refuses with `ApprovalRoleFloorError`
+(403):
 
 - when the login or the group the change is for is unknown (the lookup
   failed when the request was parked). Nobody can approve such a request;
@@ -992,10 +996,8 @@ the group rule. It refuses with `ApprovalRoleFloorError` (403):
   it is another approver in this check;
 - for a group attribute change in the login realm, when the approver is in
   the group, or when MEHO could not read who is in the group;
-- in the login realm, when the approver is the requester, even for a
-  MEHO-SA-Operator;
-- in the login realm, when the approver is not a tenant admin (not a
-  platform admin for the platform admin group or role).
+- in the login realm, when the approver is not a platform admin for the
+  platform admin group or role.
 
 A request without the `grant` block, or with a group MEHO could not read,
 gets the strict rule. The decision audit row carries `grant_user_id`,
@@ -1026,6 +1028,46 @@ same check refuses the run:
   live card says login realm or platform admin where the saved one said
   no, or cannot say which it is.
 
+## The rights-change mark: another admin must approve
+
+A waiting request can carry one mark: "this is a change of rights"
+(`ApprovalRequest.rights_change`). No login approves its own rights
+change, at any risk level, in any group. An admin or a MEHO-SA-Operator, who may
+approve their own other changes, may not approve this one. The break-glass
+switch `APPROVAL_ALLOW_SELF_APPROVAL` does not clear the mark.
+
+**One check.** `Operator.may_approve_rights_change(requester_sub)`
+decides: not the requester, a person in a chosen tenant, and an admin
+(a `tenant_admin` role or a platform admin). It is used by:
+
+- `check_rights_change_approval` in `operations/grant_approval.py`, which
+  the group rule (`_check_approver_group`) runs first. So the approve and
+  the "may I approve?" sign (`approve_right`) give the same answer. The
+  refusal is one sentence, on every surface: "This is a change of rights.
+  Another admin must approve it." The REST detail is
+  `rights_change_required: <that sentence>`, and `may_approve_reason` is
+  `rights_change`.
+- run approvals (`RunApprovalService.approve`): a list with a rights-change
+  operation is refused for its requester and for anyone who is not an
+  admin (`rights_change_required`). A list knows the operation but not the
+  realm, so every registered group or role operation counts.
+
+**Who sets the mark.**
+
+- The park step (`create_pending_request`) sets it for a group or role
+  change in MEHO's own login realm (`grant_facts`, see above). A request
+  outside the login realm keeps the usual rules.
+- Any other caller passes `rights_change=True` to `create_pending_request`.
+  The category and label edits and the policy file import use this.
+
+A request parked before the column existed has no stored mark. It counts
+through the same `is_rights_change` check, so an upgrade weakens nothing.
+
+**Where the person sees it.** `ApprovalRequestView.rights_change` on REST.
+`meho approvals show` prints `Rights change: another admin must approve`,
+and the request window in the web interface shows the same sign
+(`data-approval-rights-change`).
+
 ## The "may I approve this?" answer (#3329)
 
 People see, for each request, whether they may approve it and why not.
@@ -1037,8 +1079,9 @@ interface only show it.
   `approve_request` in the same order: a machine login never approves
   (`not_a_person`), a `read_only` person without the `approver` flag
   cannot decide (`no_approval_access`), only a `pending` request can be
-  approved (`not_pending`), the group rule of #3328 (`own_change`,
-  `wrong_group`), and the role floor of the operation (`role_too_low`).
+  approved (`not_pending`), the group rule of #3328 (`rights_change`,
+  `own_change`, `wrong_group`), and the role floor of the operation
+  (`role_too_low`).
   Otherwise the answer is `ok`. For an own change that a
   MEHO-SA-Operator, a MEHO-Admin (or break-glass) may approve, the answer is yes with
   `own_change`. So is a web click on an own `caution` change that
@@ -2382,7 +2425,7 @@ run one at a time").
 The per-op preview hook is opt-in, so before #1855 a parked op with no
 registered builder carried only `{op_id, connector_id, target_id}` — a
 reviewer could not tell a `dangerous` op (e.g. `keycloak.realm.create`)
-from a `caution` op (e.g. `keycloak.user.create`) on the row alone.
+from a `caution` op (e.g. `keycloak.realm.update`) on the row alone.
 
 `dispatcher._build_proposed_effect` now stamps the catalog
 `descriptor.safety_level` onto **every** parked op's `proposed_effect`,

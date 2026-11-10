@@ -7120,6 +7120,13 @@ class ApprovalRequest(Base):
       refuses to run when it differs. NULL for a request with no target
       and on rows saved before this column. Added by migration ``0130``.
 
+    * ``rights_change`` -- Boolean nullable. The rights-change mark: ``True``
+      when the request changes who has rights (groups, roles, categories,
+      labels, the policy file). Then the requester can never approve it,
+      whatever their group, and another admin must
+      (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
+      NULL on every other request. Added by migration ``0153``.
+
     * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
       asked for the hidden values of the answer (``reveal_secret: true``;
       an agent is refused before the call waits). It is not a parameter of
@@ -7361,6 +7368,9 @@ class ApprovalRequest(Base):
     reveal_secret: Mapped[bool] = mapped_column(
         sa.Boolean(), nullable=False, default=False, server_default=sa.false()
     )
+    # The request changes who has rights: only another admin approves it.
+    # See the class docstring. Added by migration ``0153``.
+    rights_change: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until

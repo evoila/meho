@@ -241,7 +241,7 @@ ladder:
 | Tier | Behavior | Estate examples |
 |---|---|---|
 | `safe` | Read-class; executes under default-allow. | `winsrv.service.list`, `msad.user.get`, `wsfc.cluster.get`, `mssql.databases.list`, `hyperv.vms.list` |
-| `caution` | Recoverable write. Runs at once in the web interface; waits for approval when it comes with a token or from an agent. | `winsrv.service.restart`, `msad.group.add-member`, `wsfc.groups.move`, `mssql.backup.database`, `hyperv.export.vm` |
+| `caution` | Recoverable write. Runs at once in the web interface; waits for approval when it comes with a token or from an agent. | `winsrv.service.restart`, `msad.ou.create`, `wsfc.groups.move`, `mssql.backup.database`, `hyperv.export.vm` |
 | `dangerous` + approval | Disruptive or destructive; **parks for a human** before it runs. | `winsrv.power.reboot`, `winsrv.feature.remove`, `msad.user.delete`, `wsfc.nodes.evict`, `wsfc.groups.offline`, `mssql.databases.drop`, `mssql.backup.restore`, `hyperv.checkpoints.revert` |
 | `destructive` + approval | Permanent delete. You must preview it first and pass the preview hash to the call. The call then waits for approval, and the approval request shows what will be deleted. | `windns.record.remove` |
 

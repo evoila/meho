@@ -109,11 +109,23 @@ The script stops with exit code 2, and writes no sheet, when a data file
 is missing or has the wrong shape: an image of `images.txt` without its
 Trivy report (the script matches each report by its `ArtifactName`), a
 report for an image that is not in the list, `images.txt` without the
-MEHO image of the tag, a Trivy report without scanned targets,
-an SBOM without packages, an empty port list, a scan result list without
-rules, a tag or digest of the wrong form. So a sheet never says "no
-findings" for data it could not read. The template and the script must
-agree: a place without a value, or a value without a place, stops it too.
+MEHO image of the tag, a Trivy report without scanned targets that
+does not show the image was read, an SBOM without packages, an empty port
+list, a scan result list without rules, a tag or digest of the wrong form.
+So a sheet never says "no findings" for data it could not read. The
+template and the script must agree: a place without a value, or a value
+without a place, stops it too.
+
+An image with nothing to check is a passed scan, not a failed one (#6082).
+Some images, like busybox, have no operating system and no package files.
+For them Trivy writes a report without `Results`. The script accepts such a
+report only when its `Metadata` has the image ID (`ImageID`) and the layers
+(`DiffIDs`), so Trivy did read the image, and has no `OS`. The image gets
+a row of zeros, and a line under the table names it: Trivy found nothing
+in it to check. A report without `Results` and without the image ID or
+layers still stops the script. So does one that names an OS but has no
+`Results`: then Trivy did not check that OS's packages. When Trivy itself
+fails, it exits non-zero and the scan step stops before the script runs.
 
 ## Dependencies
 
@@ -125,7 +137,8 @@ agree: a place without a value, or a value without a place, stops it too.
   of `image.yml` uses. The JSON report has `SchemaVersion` 2, leaves out
   `Vulnerabilities` for a target without findings (Trivy
   `pkg/types/report.go`), and its `ArtifactName` is the reference that was
-  scanned (`pkg/fanal/image/remote.go`).
+  scanned (`pkg/fanal/image/remote.go`). It leaves out `Results` when the
+  image has no OS and no package files (seen with busybox 1.37 on v0.46.0).
 - Helm, pinned by version and sha256 in
   `deploy/linux-server/packaging/common.sh` of the tag, to pull and render
   the chart.

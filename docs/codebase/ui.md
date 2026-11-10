@@ -1821,6 +1821,9 @@ layer; the BFF mirrors this two ways. The drawer (`_drawer.html`)
 fail-soft); every write route additionally **hard-403s** a non-admin via
 `_require_topology_admin` (mirrors `connectors.operator.resolve_operator_or_403`,
 reusing the promoted `lift_operator_from_session` JWT-revalidation helper).
+After the role check the gate asks for a person (`ensure_ui_human`): a
+console session of a service or runner login gets 403
+`human_principal_required`, the same as on the REST graph writes.
 The same template serving both roles is the regression trap — the
 soft-hidden button is UX only; a forged POST still 403s.
 
@@ -2652,7 +2655,11 @@ Memory UI), Task [#879](https://github.com/evoila/meho/issues/879)
 
 The route resolves IDs to entries via a tenant-scoped + `source='memory'`
 filter so an operator can't smuggle a knowledge-base or audit-row UUID
-through the form. Per row, `MemoryRbacResolver.can_write` is re-checked
+through the form. Each row then passes `MemoryService.readable_entry`,
+the owner rule of `read_by_id` (expired rows pass, so a recently
+expired note can be extended). Another person's user-scoped note
+counts as `missing` and is never acted on, also for a `tenant_admin`.
+Per row, `MemoryRbacResolver.can_write` is re-checked
 before dispatch; the service's own `can_write` re-check still runs
 inside `forget` / `remember`. The route-side check exists so the
 result counts (`succeeded` / `denied` / `missing`) are honest in the
@@ -2787,9 +2794,12 @@ always an acceptable product (no dropdown / validator drift, no
 surprise 422 on a product the operator could pick).
 
 **RBAC posture.** All six routes in `forms_router.py` (create, edit and
-delete, modal and submit) depend on `resolve_operator_or_403`
-(the same rigorous tenant_admin write-gate T1's probe uses): a
-non-admin GET (modal) or POST/PATCH (submit) hits 403 server-side. The
+delete, modal and submit) depend on `resolve_human_admin_or_403`: the
+tenant_admin write-gate T1's probe uses (`resolve_operator_or_403`), then a
+person check (`ensure_ui_human`). A non-admin GET (modal) or POST/PATCH
+(submit) hits 403 server-side, and a console session of a service or
+runner login gets 403 `human_principal_required`, the same as on the REST
+target routes. The import routes in `import_router.py` use the same gate. The
 list / detail templates additionally hide the "Create target" / "Edit"
 buttons from non-admins (UX); the hide is not the security boundary.
 Because the in-process REST handler's own `Depends(require_role(...))`
@@ -2935,7 +2945,9 @@ preview and confirm is correctly PATCHed rather than re-CREATEd into a
 409.
 
 **RBAC + CSRF + isolation.** All three routes depend on
-`resolve_operator_or_403` (tenant_admin only; operators 403 server-side).
+`resolve_human_admin_or_403` (tenant_admin only; operators 403 server-side;
+a console session of a service or runner login gets 403
+`human_principal_required`).
 CSRF is enforced by the chassis `CSRFMiddleware` on the two `POST`
 routes. Cross-tenant isolation is two-layer: the existing-name lookup
 filters on `session_ctx.tenant_id`, and the in-process `create_target` /

@@ -90,8 +90,9 @@ When none covers the call, it calls `consult_and_record_run_approval`:
 - It never covers an operation with a delete sign (the same rule as the
   standing grants, `service_grants.delete_grant_reason`: the
   `destructive` level, the HTTP verb `DELETE`, the `destructive` tag, a
-  delete name or pattern) or an operation that connects to an address the
-  caller gives. Those wait for a person on each call.
+  delete name or pattern), an operation that connects to an address the
+  caller gives, or an operation that runs a command as root on the host.
+  Those wait for a person on each call.
 - It looks for a live row: same tenant, same token subject (`sub`), same
   run reference, approved, not revoked, not ended, before `expires_at`.
   The key is the `sub`, never a client name.
@@ -112,11 +113,58 @@ that is not on the list waits for approval as before.
 A multi-step operation is checked like with grants: the operation itself
 and each write step must be on the list.
 
+## Never covered: a command as root on the host
+
+The automation design decided that a call that runs a command as root on a
+host always needs its own approval, also inside a run. So a connector marks
+such operations with `declare_root_shell(op_ids)` (`op_classes.py`; the
+connector kit exports it). `is_root_shell(op_id)` reads the mark. It is
+separate from the op class, because an op id has only one class.
+
+- `RunApprovalService.request` refuses a list with a marked operation
+  (422): "runs a command as root on the host; a person approves each
+  call".
+- At call time the gate never lets a run approval clear a marked
+  operation. The call waits for its own approval.
+- For a service principal a marked operation waits at every risk level,
+  also `safe` (`_service_safety_gate_reason` in `_validate.py`). Without
+  this, a `safe` one such as `rke2.etcd-snapshot.save` would run at once
+  and never reach the run approval check.
+- Standing grants and single approvals keep their rules: a standing grant
+  can still cover a marked operation.
+
+Marked today: the writes of `linux-ssh` that run through its sudo helper
+(`linux.file.write`, `linux.service.control`, `linux.script.run`,
+`linux.sysctl.write`, `linux.firewall.load`, `linux.firewall.confirm`),
+the record and config writes of `bind9-ssh`, and the writes of
+`rke2-ssh` (`rke2.token.rotate`, `rke2.node.service.restart`,
+`rke2.node.config.update`, `rke2.etcd-snapshot.save`), and the writes of
+`pfsense-ssh`. The pfSense SSH login `admin` is root, and each pfSense
+write runs a `pfSsh.php playback` script: the gateway and static route
+adds, the filter rule add and delete, the user enable and disable, and
+the gateway, static route, alias, alias member and NAT deletes. A read with
+a fixed command, for example `linux.firewall.show` or `pfsense.diag.ping`,
+is not marked: it does not change the host.
+
+## Never covered: a call a person approves one by one
+
+A connector marks an operation with `declare_per_call_approval(op_ids)`
+(`op_classes.py`) when a person approves each of its calls.
+`needs_per_call_approval(op_id)` reads the mark. Neither a run approval nor
+a standing grant covers such an operation:
+
+- `RunApprovalService.request` refuses a list with a marked operation (422).
+- At call time the gate never lets a run approval or a standing grant clear
+  a marked operation.
+
+Marked today: `msad.group.add-member` and `msad.group.remove-member`. A group
+membership gives rights in the domain.
+
 ## REST
 
 | Verb | Path | Who |
 |---|---|---|
-| `POST` | `/api/v1/service-principals/run-approvals` | a service principal; others get 403 `service_principal_required`. 422 for a delete entry, a target kind the tenant does not allow, a bad expiry; 409 when the run already has a live request |
+| `POST` | `/api/v1/service-principals/run-approvals` | a service principal; others get 403 `service_principal_required`. 422 for a delete entry, an entry that runs a command as root on the host, a target kind the tenant does not allow, a bad expiry; 409 when the run already has a live request |
 | `GET` | `/api/v1/service-principals/run-approvals` | approvals access (`operator` role or `approver`); filters `principal_sub`, `status` |
 | `GET` | `.../{id}` | approvals access; 404 across tenants |
 | `POST` | `.../{id}/approve` | a person with approvals access and a fresh approval sign-in, like approving one request: a machine token gets 403 `human_principal_required`, a stored login token gets 401 with the RFC 9470 challenge. 409 when not pending; 403 `role_floor_required` when an entry needs a higher role; 403 `approval_group_required` when an entry's operation is `dangerous` (or `destructive`) and the person is not a MEHO-SA-Operator or a tenant admin, the same group rule as approving one request ([decision](../decisions/approval-groups-and-self-approval.md)); 422 when MEHO cannot find an entry's operation in the tenant, because its risk level is not known |
@@ -136,6 +184,6 @@ There is no MCP tool. Approving is a person's decision (v0.1-spec §7).
 ## Tests
 
 `tests/test_run_approvals.py` (call time, dispatch, revoke, end, expiry,
-destructive, tenants, target kinds), `tests/test_api_v1_run_approvals.py`
+destructive, root commands, tenants, target kinds), `tests/test_api_v1_run_approvals.py`
 (REST rules), `tests/migrations/test_migration_0143_add_run_approval.py`,
 `cli/internal/cmd/approvals/runs_test.go`.

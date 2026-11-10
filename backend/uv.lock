@@ -1742,7 +1742,7 @@ docs = [
 
 [[package]]
 name = "meho-connector-kit"
-version = "1.2"
+version = "1.3"
 source = { editable = "connector-kit" }
 
 [[package]]

@@ -12,6 +12,8 @@ checks are:
   ``GET /first-start/destination`` through ``BACKPLANE_URL`` with a random
   nonce and checks the proof in the answer. The proof is a keyed hash under
   a key of this install, so another server, or another MEHO, cannot give it.
+  The key comes from ``PARAMS_HASH_KEY`` only. Without it, the destination
+  route answers 404 and the DNS line is a ``warn`` that names the setting.
 * **Certificate** - MEHO opens a TLS connection to ``BACKPLANE_URL`` and
   checks the chain, the name and the end date (at least 30 days left).
 * **Clock** - the time of this process against the time Keycloak and
@@ -61,7 +63,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import structlog
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
@@ -193,15 +195,22 @@ async def check_dns(backplane_url: str) -> FirstStartLine:
     return _line("dns", "ok", f"The host name {host} resolves.")
 
 
-def _destination_key() -> bytes:
-    from meho_backplane.operations._validate import derive_install_key
+def _destination_key() -> bytes | None:
+    """The key of the destination proof, or ``None`` without ``PARAMS_HASH_KEY``."""
+    from meho_backplane.operations._validate import InstallKeyMissingError, derive_install_key
 
-    return derive_install_key(_DESTINATION_KEY_LABEL)
+    try:
+        return derive_install_key(_DESTINATION_KEY_LABEL)
+    except InstallKeyMissingError:
+        return None
 
 
-def _destination_proof(nonce: str) -> str:
-    """The proof this install gives for *nonce*."""
-    return hmac.new(_destination_key(), nonce.encode("ascii"), hashlib.sha256).hexdigest()
+def _destination_proof(nonce: str) -> str | None:
+    """The proof this install gives for *nonce*, or ``None`` without ``PARAMS_HASH_KEY``."""
+    key = _destination_key()
+    if key is None:
+        return None
+    return hmac.new(key, nonce.encode("ascii"), hashlib.sha256).hexdigest()
 
 
 async def _fetch_destination_proof(backplane_url: str, nonce: str) -> str | None:
@@ -229,7 +238,8 @@ async def check_destination(
 
     Runs after the certificate check, so a bad certificate gives one red
     line (the certificate), not two. A red DNS line from the resolve step
-    stays as it is.
+    stays as it is. Without ``PARAMS_HASH_KEY`` there is no proof to compare,
+    so the line is a ``warn`` and MEHO does not call the address.
     """
     site = _site_host_port(backplane_url)
     if site is None or not dns.ok:
@@ -243,8 +253,17 @@ async def check_destination(
             "Where it points is checked once the certificate check is green.",
         )
     nonce = secrets.token_hex(_NONCE_BYTES)
+    expected = _destination_proof(nonce)
+    if expected is None:
+        return _line(
+            "dns",
+            "warn",
+            f"The host name {host} resolves. Where it points is not checked, because "
+            "PARAMS_HASH_KEY is not set. Set it to at least 32 random characters "
+            "(chart: paramsHashKey.secretName).",
+        )
     proof = await _fetch_destination_proof(backplane_url, nonce)
-    if proof is None or not hmac.compare_digest(proof, _destination_proof(nonce)):
+    if proof is None or not hmac.compare_digest(proof, expected):
         return _line(
             "dns",
             "fail",
@@ -635,5 +654,11 @@ async def first_start() -> FirstStartResponse:
 async def first_start_destination(
     nonce: str = Query(pattern=_NONCE_PATTERN, description="32 hex characters"),
 ) -> DestinationProof:
-    """The proof that this address serves this MEHO. Used by the DNS check only."""
-    return DestinationProof(proof=_destination_proof(nonce))
+    """The proof that this address serves this MEHO. Used by the DNS check only.
+
+    404 when ``PARAMS_HASH_KEY`` is not set: the proof is made only with that key.
+    """
+    proof = _destination_proof(nonce)
+    if proof is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return DestinationProof(proof=proof)

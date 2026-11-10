@@ -33,6 +33,11 @@ Two surfaces:
   :func:`resolve_operator_or_403` to get the full Operator + 403
   on a non-admin call).
 
+* :func:`resolve_human_admin_or_403` -- :func:`resolve_operator_or_403`,
+  then a person. The target create, edit, delete and import pages use it:
+  a console session of a machine login (agent, service or runner) gets
+  403 ``human_principal_required``, the same as on the REST target routes.
+
 * :func:`resolve_operator_or_403` -- the FastAPI dependency the
   probe handler uses. Returns the full :class:`Operator` after
   asserting :class:`~meho_backplane.auth.operator.TenantRole.TENANT_ADMIN`;
@@ -50,6 +55,7 @@ from fastapi import HTTPException, Request, status
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.auth.human import ensure_ui_human
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
     SESSION_EXPIRED_DETAIL,
@@ -62,6 +68,7 @@ from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 __all__ = [
     "OperatorRoleProbe",
     "lift_operator_from_session",
+    "resolve_human_admin_or_403",
     "resolve_operator_or_403",
     "resolve_role_probe",
 ]
@@ -236,4 +243,19 @@ async def resolve_operator_or_403(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="re-probe requires tenant_admin",
         )
+    return operator
+
+
+async def resolve_human_admin_or_403(
+    request: Request,
+    session_ctx: UISessionContext | None = None,
+) -> Operator:
+    """FastAPI dependency: a tenant admin who is a person.
+
+    Used by the target write pages (create, edit, delete, import). They
+    call the REST target handlers as plain functions, so the person check
+    of the REST routes does not run there; this gate runs it.
+    """
+    operator = await resolve_operator_or_403(request, session_ctx)
+    ensure_ui_human(operator)
     return operator

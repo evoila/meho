@@ -553,7 +553,8 @@ It runs four read-only checks at the same time:
 - **Page title** of `https://<host>/`. It follows up to three redirects,
   and only when they stay on the same host over https. It reads at most
   64 KiB and returns only the title, the status, the `Server` header and
-  the path. Never the body.
+  the path. Never the body. The title search takes time in step with the
+  page size, also when a page repeats `<title>` with no closing tag.
 - **vSphere "about" answer.** A `RetrieveServiceContent` call on
   `https://<host>/sdk` (the same call the nmap `vmware-version` script
   sends). vCenter and ESXi answer it without a login with their name,

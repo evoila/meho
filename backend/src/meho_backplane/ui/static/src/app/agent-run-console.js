@@ -27,6 +27,9 @@
 //     markup would otherwise be parsed into live DOM by the swap (the same
 //     injection class the broadcast surface closed in PR #1044) --
 //     ``x-text`` bindings render every field inert.
+//   * Close the stream when a ``final`` or ``error`` frame arrives, so
+//     neither the browser nor the sse extension reconnects to a finished
+//     run (``closeStream``).
 //   * Track the run lifecycle the operator cares about: the ``run_id``
 //     (surfaced as a deep-link to the run detail, T3 #1830), the terminal
 //     status pill (``succeeded`` / ``failed`` from ``final`` / ``error``),
@@ -140,11 +143,13 @@ document.addEventListener("alpine:init", () => {
           title = "final output";
           body = this.stringify(frame.output);
           this.finalStatus = "succeeded";
+          this.closeStream();
           break;
         case "error":
           title = "error";
           body = typeof frame.error === "string" ? frame.error : this.stringify(frame.error);
           this.finalStatus = "failed";
+          this.closeStream();
           break;
         default:
           // Unknown kind: render it raw rather than dropping it, so a
@@ -178,10 +183,10 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    // The stream errors at end-of-run too (the server closes the
-    // connection after the terminal frame); only treat it as a real drop
-    // when no terminal status landed. Either way, mark the stream done so
-    // the connection dot stops pulsing "live".
+    // A terminal frame closes the stream (see ``closeStream``), so an
+    // error after one is not expected; only treat it as a real drop when
+    // no terminal status landed. Either way, mark the stream done so the
+    // connection dot stops pulsing "live".
     onStreamError() {
       this.connected = false;
       if (!this.finalStatus) {
@@ -272,15 +277,26 @@ document.addEventListener("alpine:init", () => {
     },
 
     // Close the EventSource the HTMX sse extension opened on the sink
-    // element. The extension stores the connection on the element under
-    // ``__htmx_internal_data`` (an internal contract), so we fall back to
-    // dispatching ``htmx:abort`` -- the documented way to tell the sse
-    // extension to close -- when the internal handle is not reachable.
+    // element, and keep it closed. Called on a ``final`` or ``error``
+    // frame and on cancel. The run token in the stream URL starts one run
+    // only, so a new connection can never show more of this run.
+    //
+    // Two things reconnect: the browser's EventSource reconnects by itself
+    // when the server ends the stream, and the sse extension (2.2.4) opens
+    // a new EventSource after a closed one errors. Removing
+    // ``sse-connect`` first stops the extension: its reconnect timer reads
+    // that attribute and does nothing when it is gone. ``close()`` then
+    // stops the browser. The extension stores the connection on the
+    // element under ``__htmx_internal_data`` (an internal contract), so we
+    // fall back to dispatching ``htmx:abort`` when that handle is not
+    // reachable.
     closeStream() {
       const sink = this.$root.querySelector('[hx-ext="sse"], [data-hx-ext="sse"]');
       if (!sink) {
         return;
       }
+      sink.removeAttribute("sse-connect");
+      sink.removeAttribute("data-sse-connect");
       const internal = sink.__htmx_internal_data;
       const source = internal && internal.sseEventSource;
       if (source && typeof source.close === "function") {

@@ -26,16 +26,18 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from meho_backplane.checks.assertions import AssertionSpec, CheckState
 from meho_backplane.db.models import SensorCadenceKind, SensorSeverity, SensorStatus
+from meho_backplane.operations._secret_values import REVEAL_SECRET_PARAM
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
 
 __all__ = [
     "SensorConnectorFit",
     "SensorCreate",
     "SensorListResponse",
+    "SensorParams",
     "SensorRead",
     "SensorResultListResponse",
     "SensorResultRead",
@@ -86,6 +88,27 @@ _RETRY_BACKOFF_SECONDS_MIN = 5
 _RETRY_BACKOFF_SECONDS_MAX = 300
 
 
+def _refuse_reveal_secret(params: dict[str, object]) -> dict[str, object]:
+    """Refuse Sensor params that carry ``reveal_secret``.
+
+    A Sensor runs on a schedule with no person at the call, and it stores
+    what it reads where operators, agents and service logins can see it.
+    So a Sensor always gets the default view with hidden values. The
+    runner also takes the flag off the params of a stored Sensor before
+    each run.
+    """
+    if REVEAL_SECRET_PARAM in params:
+        raise ValueError(
+            f"a sensor cannot use {REVEAL_SECRET_PARAM}; remove it from params. "
+            "A sensor always reads the default view, with secret values hidden"
+        )
+    return params
+
+
+#: The ``params`` of a Sensor: free-form, without ``reveal_secret``.
+SensorParams = Annotated[dict[str, object], AfterValidator(_refuse_reveal_secret)]
+
+
 class SensorCreate(BaseModel):
     """Request body for ``POST /api/v1/sensors``.
 
@@ -120,7 +143,7 @@ class SensorCreate(BaseModel):
     connector_id: Annotated[str, Field(min_length=1, max_length=_CONNECTOR_ID_MAX_LENGTH)]
     op_id: Annotated[str, Field(min_length=1, max_length=_OP_ID_MAX_LENGTH)]
     target: dict[str, object] | None = None
-    params: dict[str, object] = Field(default_factory=dict)
+    params: SensorParams = Field(default_factory=dict)
     assertion: AssertionSpec
     cadence_kind: SensorCadenceKind
     interval_seconds: Annotated[

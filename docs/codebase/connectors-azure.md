@@ -1441,6 +1441,31 @@ link:
 - The Azure sensor recipes read two of these fields by path, so they are
   contracts: `budgets[*].percent_used` and Advisor's `count`.
 
+### Sensor recipes
+
+`sensor_templates.py` holds three `POST /api/v1/sensors` bodies and one
+dashboard file (format `meho-dashboard/1`) that groups them. It follows
+`connectors/audit/sensor_template.py`.
+
+- Budget: `azure.cost.budget.list`, the `max` of `$.budgets[*].percent_used`,
+  degraded at 80 and critical at 100 (`gte`). It reads the current budget
+  period, because Azure resets the spend at each period. Every day.
+- Policy: `azure.policy.compliance.summary`, `$.non_compliant_resources`,
+  degraded above the baseline and critical above the baseline plus 10
+  (`gt`). Every 6 hours.
+- Advisor: `azure.advisor.recommendation.list` with `impact=High`, `$.count`,
+  the same baseline rule. Every day.
+- The baseline is a parameter (`baseline=`): the count on the day the sensor
+  is made. It must be a whole number, 0 or more.
+- In the dashboard file each sensor name starts with the dashboard name
+  (`<dashboard>-budget-used`). Import finds sensors by name, so two
+  subscriptions need two dashboard names and then share no sensor.
+- No budget, a budget with no percent, or a count Azure did not give is
+  `unknown`, not `ok`.
+- The how-to is in `docs-site/guides/sensors-quickstart.md`. Its JSON is
+  `azure_dashboard_recipe(policy_baseline=12, advisor_baseline=3)`. Lab proof
+  is still to do.
+
 Text from Azure (resource group and budget names, Advisor's problem and
 solution, price names) is data. The guidance for the AI says so.
 

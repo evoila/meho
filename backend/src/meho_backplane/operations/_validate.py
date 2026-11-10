@@ -61,6 +61,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "TOKEN_CALL_WAIT",
+    "InstallKeyMissingError",
     "InvalidOpSchemaError",
     "ParamsCheck",
     "compute_audit_digest_hash",
@@ -77,6 +78,7 @@ __all__ = [
     "register_params_check",
     "validate_params",
     "waits_only_for_token_call",
+    "warn_if_params_hash_key_missing",
 ]
 
 #: A check of one op's params that its JSON schema cannot express. It gets
@@ -103,6 +105,13 @@ _VALUE_FINGERPRINT_PREFIX: Final[bytes] = b"meho-secret-value-v1\x00"
 #: same person may approve such a request with a click in the web interface
 #: (:func:`~meho_backplane.operations.approval_queue._check_self_approval`).
 TOKEN_CALL_WAIT: Final[str] = "token_call"
+
+
+class InstallKeyMissingError(RuntimeError):
+    """``PARAMS_HASH_KEY`` is not set, so :func:`derive_install_key` has no key."""
+
+    def __init__(self) -> None:
+        super().__init__("PARAMS_HASH_KEY is not set")
 
 
 class InvalidOpSchemaError(Exception):
@@ -171,12 +180,38 @@ def _database_url_key() -> bytes:
 def derive_install_key(label: bytes) -> bytes:
     """Return a key of this install for one purpose, named by *label*.
 
-    The key is HMAC-SHA256 of *label* under the server key of
-    :func:`_params_hash_key`, so every pod of an install gets the same key
-    and no two labels share one. The first-start destination check uses it
+    The key is HMAC-SHA256 of *label* under the key made from
+    ``PARAMS_HASH_KEY``, so every pod of an install gets the same key and
+    no two labels share one. The first-start destination check uses it
     (:mod:`meho_backplane.first_start`).
+
+    It needs ``PARAMS_HASH_KEY``: it never uses the key made from
+    ``DATABASE_URL``. Without ``PARAMS_HASH_KEY`` it raises
+    :class:`InstallKeyMissingError`.
     """
-    return hmac.new(_params_hash_key(), label, hashlib.sha256).digest()
+    own_key = get_settings().params_hash_key
+    if not own_key:
+        raise InstallKeyMissingError
+    return hmac.new(_derive_key(own_key), label, hashlib.sha256).digest()
+
+
+def warn_if_params_hash_key_missing(params_hash_key: str) -> bool:
+    """Log one warning when *params_hash_key* is empty; return whether it is set.
+
+    Called at start with ``settings.params_hash_key``. MEHO still starts:
+    the params hashes then use the key made from ``DATABASE_URL``, and the
+    first-start destination check does not run.
+    """
+    if params_hash_key:
+        return True
+    _log.warning(
+        "params_hash_key_missing",
+        reason=(
+            "PARAMS_HASH_KEY is not set; params hashes use a key made from "
+            "DATABASE_URL, and the first-start destination check does not run"
+        ),
+    )
+    return False
 
 
 def _keyed_params_hash(params: Any) -> str:

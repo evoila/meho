@@ -384,7 +384,9 @@ digest hashes and the value fingerprints (`compute_audit_digest_hash`,
   no `paramsHashKey.secretName`), MEHO makes the key from `DATABASE_URL`
   under the same label. Then a new database password changes the key: new
   hashes do not match older ones, and a request that waits for approval at
-  that moment must be asked for again.
+  that moment must be asked for again. MEHO logs `params_hash_key_missing`
+  at start, and the first-start destination check does not run
+  ([first-start.md](first-start.md)).
 - **Requests made before the key was set.** With `PARAMS_HASH_KEY` set, the
   approval check also accepts the hash under the key made from
   `DATABASE_URL`, for the request's own params only. So a request made

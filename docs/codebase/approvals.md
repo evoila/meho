@@ -271,6 +271,12 @@ names (`proposed_effect.blast_radius.object`) with the live one
 - The card has no id or key: the live object must have the same fields,
   without counts and yes/no flags. pfSense alias, gateway and static-route
   deletes, DNS record deletes, a Vault secret path, a Kubernetes Secret.
+- The card lists the record values the call removes (children of kind
+  `record_value`: the BIND9 and Windows DNS delete and remove cards): the
+  live card must list the same values, in any order. `card_object` adds
+  them, sorted, to the object as `record_values`. So a delete approved for
+  value X is refused when the live value is Y. A BIND9 delete with a pinned
+  `rdata` removes only that value, so its other values do not count.
 - The card says the object is absent (`present: false`, an empty id, or a
   `match_count` of zero; the approver saw "nothing to delete"): the live
   card must say so too. An object that appeared under that name since the
@@ -384,7 +390,9 @@ digest hashes and the value fingerprints (`compute_audit_digest_hash`,
   no `paramsHashKey.secretName`), MEHO makes the key from `DATABASE_URL`
   under the same label. Then a new database password changes the key: new
   hashes do not match older ones, and a request that waits for approval at
-  that moment must be asked for again.
+  that moment must be asked for again. MEHO logs `params_hash_key_missing`
+  at start, and the first-start destination check does not run
+  ([first-start.md](first-start.md)).
 - **Requests made before the key was set.** With `PARAMS_HASH_KEY` set, the
   approval check also accepts the hash under the key made from
   `DATABASE_URL`, for the request's own params only. So a request made
@@ -2423,7 +2431,7 @@ run one at a time").
 The per-op preview hook is opt-in, so before #1855 a parked op with no
 registered builder carried only `{op_id, connector_id, target_id}` — a
 reviewer could not tell a `dangerous` op (e.g. `keycloak.realm.create`)
-from a `caution` op (e.g. `keycloak.user.create`) on the row alone.
+from a `caution` op (e.g. `keycloak.realm.update`) on the row alone.
 
 `dispatcher._build_proposed_effect` now stamps the catalog
 `descriptor.safety_level` onto **every** parked op's `proposed_effect`,

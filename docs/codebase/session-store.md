@@ -33,8 +33,18 @@ The code is in `backend/src/meho_backplane/session_store/` and
 
 ## Setup
 
+The operator guide page `docs-site/guides/agent-sessions.md` shows the
+setup. An operator sets the Helm values under `config.sessionStore`
+(`endpoint`, `bucket`, `credentialsVaultPath`, `region`,
+`retentionDaysDefault`, `maxUploadBytes`, `maxUnpackedBytes`, `maxFiles`,
+`cleanupEnabled`, `cleanupIntervalSeconds`). The chart renders each set
+value into its variable below (`templates/configmap.yaml`); an empty
+value renders nothing, so the default here applies. The chart test is
+`backend/tests/test_chart_session_store_values.py`.
+
 The store is off until three environment variables are set. Until then
-every session route answers `503 session_store_not_configured`.
+an upload, a download and a delete answer `503
+session_store_not_configured`.
 
 | Variable | Meaning |
 |---|---|
@@ -44,7 +54,7 @@ every session route answers `503 session_store_not_configured`.
 | `SESSION_STORE_REGION` | Region name sent to the store (default `us-east-1`) |
 | `SESSION_STORE_RETENTION_DAYS_DEFAULT` | Retention period of a tenant that set none (default 90) |
 | `SESSION_STORE_MAX_UPLOAD_BYTES` | Largest compressed archive (default 25 MiB) |
-| `SESSION_STORE_MAX_UNPACKED_BYTES` | Largest unpacked archive (default 256 MiB) |
+| `SESSION_STORE_MAX_UNPACKED_BYTES` | Largest unpacked archive (default 64 MiB) |
 | `SESSION_STORE_MAX_FILES` | Most entries (files and folders) in one archive (default 2000) |
 | `SESSION_STORE_CLEANUP_ENABLED` | Start the cleanup job (default `true`) |
 | `SESSION_STORE_CLEANUP_INTERVAL_SECONDS` | Time between cleanup runs (default 3600) |
@@ -52,7 +62,9 @@ every session route answers `503 session_store_not_configured`.
 The access keys are never a plain setting. MEHO reads them from Vault with
 its scheduler token (`VAULT_SCHEDULER_TOKEN`), for every call to the
 store, so a rotated key works at once. The token's policy must allow
-`read` on that path.
+`read` on that path. The built-in OpenBao's `meho-scheduler` policy
+allows `read` on `secret/data/services/session-store`, so a built-in
+install uses that path.
 
 The variables live in `session_store/config.py`, not in `settings.py`.
 
@@ -85,6 +97,7 @@ is two separate sessions.
 | `ObjectStore` / `S3ObjectStore` | `object_store.py` | Put, get and delete whole objects; boto3 in a worker thread |
 | `UploadPlan` | `plan.py` | The new tail of each file, or the conflicts |
 | `CheckedPart` | `secret_check.py` | The checked bytes of one file part, and whether the check was sure |
+| `PreparedUpload` | `prepare.py` | What the worker process returns: the new file states, the conflicts, and the archive of the checked tails |
 
 The tables come from migration `0152`.
 
@@ -96,6 +109,23 @@ The tables come from migration `0152`.
 gzip tar archive) and the fields `session_id`, `project`, `app`,
 `app_version`, `started_at`, `ended_at`, `state` (`open`, `ended` or
 `unfinished`) and `outcome`. Times need a time zone.
+
+MEHO takes one upload per person at a time, and at most four in all. More
+get `429 session_upload_already_running` or `429 session_uploads_busy`
+with `Retry-After: 60` (`upload_slots.py`). A retry of the same bytes is
+safe, so the uploader tries again later.
+
+MEHO first loads and locks the stored session. A session that another
+person started is `409 session_owned_by_another_person`. Then steps 1, 2
+and the secret check of step 4 run in one call in a worker process
+(`prepare.py`, `worker.py`), not on the server's event loop. So a large
+upload never holds up other requests. Each upload gets its own new
+worker process, which stops when the upload is done. At most two run at
+a time; a third upload waits for a free place. A worker thread would not
+be enough: the regular expressions of the secret check hold Python's
+interpreter lock for a whole search. When a worker process dies (for
+example, it runs out of memory), only that upload fails with `500`.
+Other uploads that run or wait at the same time go on as normal.
 
 1. **Unpack** (`archive.py`). Nothing goes to disk. MEHO refuses a link or
    device, a path with `..`, a leading `/`, a backslash or a control
@@ -119,9 +149,6 @@ gzip tar archive) and the fields `session_id`, `project`, `app`,
    writing, so it waits for a later upload. With `state` ended or
    unfinished, the last line is taken as it is. So the secret check
    always sees each line in one piece.
-
-   A session that another person started is `409
-   session_owned_by_another_person`.
 3. **No new bytes.** An upload with `state` ended or unfinished ends an open
    session (`state_changed`). Otherwise nothing changes (`unchanged`): a
    retry is safe. A late upload that says `open` never reopens an ended
@@ -235,6 +262,7 @@ configured.
   `cli/internal/cmd/sessions/`.
 - Tests: `backend/tests/test_session_store_api.py`,
   `backend/tests/test_session_store_units.py`,
+  `backend/tests/test_session_store_worker.py`,
   `backend/tests/migrations/test_migration_0152_create_agent_session_store.py`.
 - boto3 S3 client: <https://docs.aws.amazon.com/boto3/latest/reference/services/s3.html>
 - botocore `Config`: <https://docs.aws.amazon.com/botocore/latest/reference/config.html>

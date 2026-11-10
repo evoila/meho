@@ -11,10 +11,12 @@ browser:
 * ``POST /ui/keycloak/clients/{client_uuid}/protocol-mappers/create``
   -> ``keycloak.protocol_mapper.create``
 
-Both ops are registered ``requires_approval=True`` / ``safety_level="caution"``
-(:mod:`meho_backplane.connectors.keycloak.ops_write`). The protocol-mapper
-op is the one that wires the ``tenant_id`` / ``tenant_role`` claims the
-backplane row-scopes on.
+Both ops are registered ``requires_approval=True``
+(:mod:`meho_backplane.connectors.keycloak.ops_write`). The client-scope op is
+``safety_level="caution"``. The protocol-mapper op is
+``safety_level="dangerous"``: it wires the ``tenant_id`` / ``tenant_role``
+claims the backplane row-scopes on, so a MEHO-SA-Operator or a tenant admin
+must approve it.
 
 Why a session BFF, not a REST surface
 -------------------------------------
@@ -34,7 +36,7 @@ Confirm + CSRF
 Each write is reached from an explicit, unmissable confirm modal
 (``GET /ui/keycloak/client-scopes/create`` /
 ``GET /ui/keycloak/clients/{client_uuid}/protocol-mappers/create``) that
-names the ``caution`` safety level and the requires-approval handoff before
+names the op's safety level and the requires-approval handoff before
 the operator can POST. The modal mints a fresh CSRF token + re-sets the
 ``meho_csrf`` cookie (the ``mint_csrf_token`` / ``set_csrf_cookie`` pair) so
 the double-submit pair lines up after the HTMX swap rotated it; the confirm

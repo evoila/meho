@@ -161,6 +161,7 @@ from meho_backplane.db.models import Sensor
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
+from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
 from meho_backplane.operations.reducer import FullResultCapture, full_result_capture_var
@@ -460,13 +461,17 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
             # the shortened result, so the rule runs over every row.
             capture = FullResultCapture()
             token = full_result_capture_var.set(capture)
+            # A Sensor always reads the default view, with secret values
+            # hidden. The create, edit and import checks refuse
+            # ``reveal_secret``; a stored row that has it runs without it.
+            params, _ = split_reveal_secret(dict(snap.params))
             try:
                 result = await dispatch(
                     operator=operator,
                     connector_id=snap.connector_id,
                     op_id=snap.op_id,
                     target=resolved_target,
-                    params=snap.params,
+                    params=params,
                 )
             finally:
                 full_result_capture_var.reset(token)

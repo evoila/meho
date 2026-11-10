@@ -15,6 +15,12 @@ card again against the live system and compares the object with the card:
   record): the live object must have the same fields. Counts and yes/no
   flags do not count; they change on their own and do not say which
   object it is.
+* The card lists the record values the call removes (children of kind
+  ``record_value``, the DNS cards): the live card must list the same
+  values. The approver saw those values, and a delete by name removes
+  whatever values are there at run time. A card whose object pins one
+  value (``rdata``) removes only that value, so its other values do not
+  count.
 * The card says the object is absent (the approver saw "nothing to
   delete"): the live card must say so too. An object that appeared under
   that name since the request refuses the run. A card says "absent" with
@@ -63,6 +69,7 @@ __all__ = [
     "REASON_APPEARED",
     "REASON_CHANGED",
     "REASON_UNREADABLE",
+    "RECORD_VALUES_KEY",
     "card_object",
     "live_card",
     "object_changed_since_request",
@@ -78,6 +85,13 @@ IDENTITY_FIELDS: Final[tuple[str, ...]] = ("id", "key")
 #: The blast-radius field that counts the values the call removes. Zero
 #: means the object is absent, whatever its fields say.
 MATCH_COUNT_KEY: Final[str] = "match_count"
+
+#: The kind of a card child that is one record value the call removes.
+_RECORD_VALUE_KIND: Final[str] = "record_value"
+
+#: The field :func:`card_object` adds to the object: the sorted record
+#: values of the card, so they are part of what names the object.
+RECORD_VALUES_KEY: Final[str] = "record_values"
 
 #: Why a run was refused: the live object is not the one on the card.
 REASON_CHANGED: Final[str] = (
@@ -114,6 +128,11 @@ def card_object(proposed_effect: Mapping[str, Any] | None) -> Mapping[str, Any] 
     with ``present: false``, so :func:`object_identity` reads it as absent.
     The DNS cards state absence this way; their object names the record set
     and stays the same whether or not records are there.
+
+    The record values a card lists (children of kind ``record_value``) are
+    added to the object under :data:`RECORD_VALUES_KEY`, sorted, so a
+    changed value names another object. Not when the object pins one value
+    (``rdata``): then that value is what the call removes.
     """
     if not isinstance(proposed_effect, Mapping):
         return None
@@ -129,7 +148,25 @@ def card_object(proposed_effect: Mapping[str, Any] | None) -> Mapping[str, Any] 
     count = block.get(MATCH_COUNT_KEY)
     if isinstance(count, int) and not isinstance(count, bool) and count == 0:
         return {**obj, "present": False}
+    values = _record_values(block.get("children"))
+    if values and "rdata" not in obj:
+        return {**obj, RECORD_VALUES_KEY: values}
     return obj
+
+
+def _record_values(children: Any) -> list[dict[str, str]]:
+    """The ``record_value`` children of a card as sorted ``{type, rdata}`` pairs.
+
+    Sorted, so the order in which the system lists the values does not count.
+    """
+    if not isinstance(children, list):
+        return []
+    values = [
+        {"type": str(child.get("type")), "rdata": str(child.get("rdata"))}
+        for child in children
+        if isinstance(child, Mapping) and child.get("kind") == _RECORD_VALUE_KIND
+    ]
+    return sorted(values, key=lambda value: (value["type"], value["rdata"]))
 
 
 def object_identity(obj: Mapping[str, Any]) -> dict[str, Any] | None:

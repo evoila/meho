@@ -50,8 +50,9 @@ from dataclasses import dataclass
 import structlog
 from fastapi import HTTPException, Request, status
 
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.auth.human import ensure_ui_human
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
@@ -203,26 +204,6 @@ async def resolve_operator_or_403(
             detail="agent_write_requires_tenant_admin",
         )
     return operator
-
-
-def ensure_ui_human(operator: Operator) -> None:
-    """403 ``human_principal_required`` unless the console login is a person.
-
-    The console session holds the access token of its login. A token of an
-    agent, a service or a runner is refused, the same as on the REST
-    routes that carry ``require_human_principal``.
-    """
-    if is_human_principal(operator):
-        return
-    _log.info(
-        "ui_human_principal_required",
-        operator_sub=operator.sub,
-        principal_kind=operator.principal_kind.value,
-    )
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="human_principal_required",
-    )
 
 
 async def resolve_human_admin_or_403(

@@ -161,7 +161,7 @@ before returning. Seven verbs:
 
 | Verb | What it does | Throws |
 |---|---|---|
-| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False, may_set_curation_keys=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, checks the lesson header, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug; `LessonHeaderError` on a wrong header value; `KbSharedNotAllowedError`, `KbSharedSlugError` (shared scope) |
+| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False, may_set_curation_keys=None, may_confirm=True, expected_revision=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, checks the lesson header, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug; `LessonHeaderError` on a wrong header value; `KbSharedNotAllowedError`, `KbSharedSlugError` (shared scope) |
 | `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. Also finds a shared entry of another tenant. | – |
 | `get_revision(tenant_id, entry_id, revision_id)` | Exact retained read. Returns `KbEntryRevision` only when the revision belongs to the entry and both belong to the tenant; otherwise `None`, without saying why. | – |
 | `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0, order="slug")` | List entries; slug-sorted by default, `order="newest"` sorts by `updated_at`, newest first; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
@@ -445,7 +445,15 @@ Only a `tenant_admin` may set the curation keys
   (`source_kind`, the key the curated-slice search filter scopes to,
   and `shared`, see "Lesson header and shared scope";
   `KbReservedMetadataError`, `reason: reserved_metadata`). So an
-  operator's entry cannot look curated.
+  operator's entry cannot look curated;
+- drops those keys from the stored entry when it changes an entry, also
+  when the write sends no `metadata` (`_drop_review_marks`). A shared
+  entry stays private until a tenant admin shares it again.
+
+A caller that may not confirm (`create_entry(..., may_confirm=False)`;
+the MCP tool passes `lesson_header.py::may_confirm`) stores a
+`confirmed` entry as `candidate` when it changes it. So text that
+nobody reviewed never keeps the marks of an earlier review.
 
 An operator can still create new entries and change its own. A
 `tenant_admin` keeps the wiki-like rule on both surfaces.
@@ -620,6 +628,11 @@ sorted by path.
 
 #### The import login
 
+The step-by-step setup for an operator (all three machine logins, the
+client secrets and the CI calls) is in the operator guide:
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#lessons-in-your-own-wiki).
+This section keeps the code detail.
+
 The route admits a `tenant_admin`, or a login whose token carries the
 claim `kb_import_only: true` (`Operator.kb_import_only`,
 `auth/jwt.py::_extract_kb_import_only`). Such a login can do nothing
@@ -762,6 +775,9 @@ the round trip.
 
 #### The export login
 
+Setup steps for an operator:
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#step-2-create-the-three-machine-logins).
+
 The route admits an `operator` or a `tenant_admin`, or a login whose
 token carries the claim `kb_export_only: true`
 (`Operator.kb_export_only`, `auth/jwt.py::_extract_kb_export_only`).
@@ -893,7 +909,8 @@ job never confirms a candidate.
 A background job keeps the store clean. It runs once per
 `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default), counted from
 its last recorded run, and can be turned off with
-`KNOWLEDGE_UPKEEP_ENABLED=false`. On PostgreSQL an advisory lock lets
+`KNOWLEDGE_UPKEEP_ENABLED=false` (Helm: `config.knowledgeUpkeepEnabled`
+and `config.knowledgeUpkeepIntervalSeconds`). On PostgreSQL an advisory lock lets
 one replica at a time run it. Each run:
 
 1. **Merges duplicates.** Entries of one tenant with exactly the same
@@ -943,7 +960,8 @@ written only when every tenant committed.
 **Shared scope.** An entry with `shared: true` in its metadata is
 readable from every tenant on the instance, if its owner tenant is
 listed in `KB_SHARED_TENANT_IDS` (comma-separated tenant ids; empty by
-default, so nothing is shared). Only reading is shared:
+default, so nothing is shared; Helm: `config.kbSharedTenantIds`). Only
+reading is shared:
 
 - the entry stays in its owner tenant (`KbEntry.tenant_id` is the
   owner's id);

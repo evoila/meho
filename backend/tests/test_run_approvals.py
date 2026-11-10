@@ -10,6 +10,7 @@ A person approves the operation list of one automation run once. Then:
 * an unlisted call waits for approval, as before;
 * after a revoke, an end or the time limit, the next listed call waits;
 * a destructive call waits for a person, even when it is on the list;
+* a call that runs a command as root on the host waits too, also a safe one;
 * an approval in tenant A does nothing in tenant B;
 * a target kind entry works only with the tenant setting on.
 """
@@ -27,6 +28,7 @@ import pytest
 import structlog
 from sqlalchemy import select
 
+from meho_backplane import op_classes
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -50,6 +52,7 @@ from meho_backplane.operations.run_approval_schemas import (
     RunApprovalRead,
 )
 from meho_backplane.operations.run_approvals import (
+    ROOT_SHELL_REFUSAL,
     RunApprovalConflictError,
     RunApprovalGroupError,
     RunApprovalNotFoundError,
@@ -446,6 +449,199 @@ async def test_request_with_a_delete_operation_is_refused() -> None:
                 reason="build and clean up",
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# A command as root on the host (#6092)
+# ---------------------------------------------------------------------------
+
+_ROOT_OP = "linux.script.run"
+
+
+@pytest.fixture
+def root_op() -> Iterator[str]:
+    """Mark ``linux.script.run`` the way the linux-ssh connector does, for one test."""
+    saved = set(op_classes._ROOT_SHELL)
+    op_classes.declare_root_shell((_ROOT_OP,))
+    try:
+        yield _ROOT_OP
+    finally:
+        op_classes._ROOT_SHELL.clear()
+        op_classes._ROOT_SHELL.update(saved)
+
+
+@pytest.mark.asyncio
+async def test_request_with_a_root_command_is_refused(root_op: str) -> None:
+    with pytest.raises(RunApprovalValidationError) as refused:
+        await RunApprovalService().request(
+            _operator(),
+            RunApprovalCreate(
+                work_ref=_RUN,
+                entries=[
+                    RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP),
+                    RunApprovalEntry(connector_id="linux-ssh-1.x", op_id=root_op),
+                ],
+                reason="fix the host",
+            ),
+        )
+    assert "entries[1]" in refused.value.message
+    assert ROOT_SHELL_REFUSAL in refused.value.message
+
+
+@pytest.mark.asyncio
+async def test_request_without_a_root_command_is_accepted(root_op: str) -> None:
+    read = await RunApprovalService().request(
+        _operator(),
+        RunApprovalCreate(
+            work_ref=_RUN,
+            entries=[
+                RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP),
+                RunApprovalEntry(connector_id=_CONNECTOR, op_id=_DANGEROUS_OP),
+            ],
+            reason="build one VM",
+        ),
+    )
+    assert read.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_root_command_waits_even_when_it_is_on_the_list(run_ref: str, root_op: str) -> None:
+    # Written straight to the table, past the request check, as a row stored
+    # before the connector marked the operation would be.
+    approval_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as s:
+        s.add(
+            RunApproval(
+                id=approval_id,
+                tenant_id=_TENANT_A,
+                principal_sub=_PRINCIPAL,
+                work_ref=_RUN,
+                entries=[
+                    {"connector_id": _CONNECTOR, "op_id": root_op},
+                    {"connector_id": _CONNECTOR, "op_id": _WRITE_OP},
+                ],
+                reason="fix the host",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
+                approved_at=now,
+                approved_by_sub="person-approver",
+            )
+        )
+        await s.commit()
+
+    root = _descriptor(root_op, safety_level="dangerous")
+    assert (await _verdict(None, descriptor=root))[0] is PermissionVerdict.NEEDS_APPROVAL
+    assert await _use_rows(approval_id) == []
+    # The unmarked entry on the same list is still covered.
+    verdict, _ = await _verdict(None)
+    assert verdict is PermissionVerdict.AUTO_EXECUTE
+    assert len(await _use_rows(approval_id)) == 1
+
+
+_SNAPSHOT_OP = "rke2.etcd-snapshot.save"
+_RKE2_CONNECTOR = "rke2-ssh"
+
+
+def _snapshot_descriptor() -> EndpointDescriptor:
+    """The descriptor of ``rke2.etcd-snapshot.save``, from the connector's own op."""
+    from meho_backplane.connectors.rke2.ops_snapshot import SNAPSHOT_OPS
+
+    op = next(o for o in SNAPSHOT_OPS if o.op_id == _SNAPSHOT_OP)
+    return EndpointDescriptor(
+        product="rke2",
+        version="1.x",
+        impl_id=_RKE2_CONNECTOR,
+        op_id=op.op_id,
+        method=None,
+        source_kind="typed",
+        safety_level=op.safety_level,
+        requires_approval=op.requires_approval,
+        parameter_schema={},
+    )
+
+
+@pytest.fixture
+def snapshot_op() -> Iterator[str]:
+    """Mark ``rke2.etcd-snapshot.save`` the way the rke2-ssh connector does, for one test."""
+    saved = set(op_classes._ROOT_SHELL)
+    op_classes.declare_root_shell((_SNAPSHOT_OP,))
+    try:
+        yield _SNAPSHOT_OP
+    finally:
+        op_classes._ROOT_SHELL.clear()
+        op_classes._ROOT_SHELL.update(saved)
+
+
+@pytest.mark.asyncio
+async def test_safe_root_command_waits_even_when_it_is_on_the_list(
+    run_ref: str, snapshot_op: str
+) -> None:
+    # The snapshot save is "safe" and needs no approval flag, so only the
+    # mark makes it wait for a service login.
+    descriptor = _snapshot_descriptor()
+    assert descriptor.safety_level == "safe"
+    assert descriptor.requires_approval is False
+    approval_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as s:
+        s.add(
+            RunApproval(
+                id=approval_id,
+                tenant_id=_TENANT_A,
+                principal_sub=_PRINCIPAL,
+                work_ref=_RUN,
+                entries=[{"connector_id": _RKE2_CONNECTOR, "op_id": snapshot_op}],
+                reason="save a snapshot",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
+                approved_at=now,
+                approved_by_sub="person-approver",
+            )
+        )
+        await s.commit()
+
+    verdict, reason = await policy_gate(
+        operator=_operator(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_RKE2_CONNECTOR,
+    )
+
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL
+    assert reason is not None and "runs a command as root on the host" in reason
+    assert await _use_rows(approval_id) == []
+
+
+@pytest.mark.asyncio
+async def test_standing_grant_still_covers_a_safe_root_command(snapshot_op: str) -> None:
+    from meho_backplane.db.models import ServicePrincipalGrant
+
+    grant_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            ServicePrincipalGrant(
+                id=grant_id,
+                tenant_id=_TENANT_A,
+                principal_sub=_PRINCIPAL,
+                op_id=snapshot_op,
+                connector_id=_RKE2_CONNECTOR,
+                target_id=None,
+                reason="nightly snapshot",
+                created_by_sub="op-admin",
+            )
+        )
+        await s.commit()
+
+    verdict, reason = await policy_gate(
+        operator=_operator(),
+        descriptor=_snapshot_descriptor(),
+        target=None,
+        connector_id=_RKE2_CONNECTOR,
+    )
+
+    assert verdict is PermissionVerdict.AUTO_EXECUTE
+    assert reason == f"auto-granted by standing grant {grant_id}"
 
 
 # ---------------------------------------------------------------------------

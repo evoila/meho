@@ -211,7 +211,13 @@ blast-radius statement) → approval by a different person → audited resume. A
 bare dispatch is refused with `preview_binding_required`. The park-time blast radius
 (`ops_robot_delete_preview._harbor_robot_delete_preview`, params-derived — no
 live call) names the robot `{id, project, level}` + its project association,
-with `irreversibility="recreatable_new_secret"`. `classify_op` puts
+with `irreversibility="recreatable_new_secret"`. Right before the delete, the
+handler reads the robot (`GET /api/v2.0/robots/{robot_id}`) and checks it with
+`robot_scope.check_robot_in_project`: the robot must be `level=project` and
+every permission must be on the project named in the call. A system robot or a
+robot of another project raises `RobotOutsideProjectError`, and no `DELETE` is
+sent. So the delete removes only the robot of the project on the approval card.
+`classify_op` puts
 `robot.delete` in `write` (full-detail broadcast), unlike the `credential_mint`
 `robot.create`; the risk level does not change the broadcast redaction. Both forward the dispatched `operator`
 through `auth_headers` → `_load_credentials` for the operator-context Vault
@@ -387,8 +393,9 @@ extracts its own served set and folds the document's `basePath: /api/v2.0`
 onto every path key; template placeholders carry the vendor's own parameter
 names (`{project_name_or_id}` on the project detail / `/summary` routes,
 `{project_name}` / `{repository_name}` / `{reference}` on the repository
-sub-tree, `{robot_id}` on robot-delete). All 14 were served on the first armed
-run — no repoints, no exclusions. Standard:
+sub-tree, `{robot_id}` on the robot read and delete). All 14 were served on the
+first armed run — no repoints, no exclusions. The robot read before the delete
+(`GET /api/v2.0/robots/{robot_id}`) is the 15th. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## CLI verbs

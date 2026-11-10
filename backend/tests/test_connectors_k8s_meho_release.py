@@ -13,6 +13,7 @@ data.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -59,6 +60,7 @@ from meho_backplane.connectors.kubernetes.redaction import (
     REDACTED_PREFIX,
 )
 from meho_backplane.flight_recorder import capture
+from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.settings import get_settings
 
 _MOD = "meho_backplane.connectors.kubernetes.ops_meho_release"
@@ -341,6 +343,25 @@ def test_values_hash_is_stable_and_changes_with_values() -> None:
     assert a == values_hash({"set": {"x": "1"}, "valuesContent": "a: 1"})
     assert a != values_hash({"valuesContent": "a: 2", "set": {"x": "1"}})
     assert values_hash({}) != a
+
+
+def test_values_hash_is_keyed_not_a_plain_sha256() -> None:
+    spec = {"valuesContent": _VALUES_TEXT, "set": {"adminPassword": _SET_VALUE}}
+    material = json.dumps({"valuesContent": _VALUES_TEXT, "set": spec["set"]}, sort_keys=True)
+    plain = hashlib.sha256(material.encode()).hexdigest()
+    assert values_hash(spec) != plain
+    assert values_hash(spec) == compute_value_fingerprint(material.encode())
+
+
+def test_values_hash_changes_with_the_server_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = {"valuesContent": _VALUES_TEXT, "set": {"adminPassword": _SET_VALUE}}
+    monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-install-key-one")
+    get_settings.cache_clear()
+    first = values_hash(spec)
+    assert first == values_hash(spec)
+    monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-install-key-two")
+    get_settings.cache_clear()
+    assert values_hash(spec) != first
 
 
 # ---------------------------------------------------------------------------

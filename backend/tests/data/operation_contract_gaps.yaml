@@ -748,11 +748,9 @@ msad-ssh:
   msad.domain.replication:
     - llm_instructions
     - examples
-  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
   msad.group.add-member:
     - llm_instructions
     - examples
-    - requires_approval
   msad.group.delete:
     - llm_instructions
     - examples
@@ -765,11 +763,9 @@ msad-ssh:
   msad.group.members:
     - llm_instructions
     - examples
-  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
   msad.group.remove-member:
     - llm_instructions
     - examples
-    - requires_approval
   # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
   msad.ou.create:
     - llm_instructions

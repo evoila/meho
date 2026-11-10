@@ -35,10 +35,8 @@
 # hand. Both upload steps have continue-on-error: true, so an upload
 # problem never blocks the workflow.
 #
-# Per evoila-bosnia/MEHO.X#712: pip-audit and npm-audit jobs deferred
-# until pyproject.toml / package.json exist (their suppression lists
-# are deeply tied to MEHO.X's specific dependency graph; carrying
-# them over to an empty repo is signal decay).
+# The "Python dependency scan" job checks the Python packages in
+# backend/uv.lock with trivy. See the comments on that job.
 
 name: Security Scan
 
@@ -157,3 +155,49 @@ jobs:
           --config p/owasp-top-ten
           --error
           --severity ERROR
+
+  python-deps:
+    name: Python dependency scan
+    # Runs on every pull request, in the merge queue and on every push to
+    # main, with no path filter, so a change that touches only docs or
+    # .github/ is checked too. It is not a required check: a new advisory
+    # does not stop unrelated merges. The weekly security scan opens an
+    # issue for new advisories.
+    #
+    # A GitHub-hosted runner: a fresh machine per job, no slot on our own CI
+    # pool, and safe for fork pull requests without a fork guard. trivy only
+    # reads the lock file and runs no code from the pull request.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Least privilege: the job only checks out the repository.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Scan backend/uv.lock (trivy, fails on fixable CRITICAL/HIGH)
+        # Same action commit, severity filter, ignore-unfixed rule and
+        # exception file as the image scan in image.yml, so both scans use
+        # the same trivy version and the same rules.
+        #   - `scan-type: fs` + `scan-ref: backend/uv.lock` read only the lock
+        #     file, so only the Python packages are checked. trivy skips the
+        #     dev, docs and build groups, like the image build
+        #     (`uv sync --locked --no-dev`).
+        #   - `scanners: vuln` looks only for known security bugs (no secret
+        #     or misconfiguration scan).
+        #   - `format: table` prints the findings, with the package and the
+        #     fixed version, in the job log. Nothing is uploaded to the
+        #     Security tab, which keeps only the image and Semgrep results.
+        # A finding means: fix the package in backend/uv.lock, or add a dated
+        # exception to .trivyignore, on this pull request. The same finding
+        # fails the image scan on main after merge if it is not fixed.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: backend/uv.lock
+          scanners: vuln
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: '1'

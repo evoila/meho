@@ -6,7 +6,7 @@
 
   Swapped into ``#keycloak-drawer-container`` by a client detail's "Add
   protocol mapper" button (tenant_admin only). Confirming dispatches the
-  ``keycloak.protocol_mapper.create`` op -- a ``caution`` /
+  ``keycloak.protocol_mapper.create`` op -- a ``dangerous`` /
   ``requires_approval=True`` WRITE that wires the ``tenant_id`` /
   ``tenant_role`` claims the backplane row-scopes on -- so the safety gate is
   UNMISSABLE and the POST is reachable only by a tenant_admin.
@@ -44,12 +44,12 @@
       </form>
     </div>
 
-    {#- UNMISSABLE safety gate: a caution / requires-approval WRITE. -#}
+    {#- UNMISSABLE safety gate: a dangerous / requires-approval WRITE. -#}
     <div
       role="alert"
-      class="alert alert-warning mt-4 items-start"
+      class="alert alert-error mt-4 items-start"
       data-write-gate="confirm"
-      data-safety-level="caution"
+      data-safety-level="dangerous"
     >
       {{ icon("shield-check", class="size-5 shrink-0") }}
       <div>
@@ -57,10 +57,11 @@
         <p class="text-xs [overflow-wrap:anywhere]">
           This adds a protocol mapper to the client. It
           <span class="font-semibold">requires approval</span>: confirming
-          parks a request for a reviewer rather than executing immediately.
+          parks a request that a MEHO-SA-Operator or a tenant admin must
+          approve, because a mapper decides what goes into the login token.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
-          <span class="badge badge-warning badge-sm" data-write-safety>safety: caution</span>
+          <span class="badge badge-error badge-sm" data-write-safety>safety: dangerous</span>
           <span class="badge badge-outline badge-sm" data-write-requires-approval>requires approval</span>
         </div>
       </div>

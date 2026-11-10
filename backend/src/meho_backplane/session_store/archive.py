@@ -49,6 +49,10 @@ class ArchiveError(ValueError):
         super().__init__(message)
         self.reason = reason
 
+    def __reduce__(self) -> tuple[type[ArchiveError], tuple[str, str]]:
+        # The check runs in a worker process; the error comes back pickled.
+        return (type(self), (self.reason, str(self)))
+
 
 def _clean_path(name: str) -> str:
     path = name.removeprefix("./")

@@ -950,19 +950,22 @@ class-agnostic, so it still rejects a divergent profiled registration.
 
 Stamping an `ExecutionProfile` makes a connector **dispatchable** but must
 never **auto-enable** dispatch — that property is security-load-bearing.
-`ReviewService.record_profile_stamp(connector_id, *, tenant_id,
-connector_class)` (`ingest/service.py`) is the stamp seam:
+`ReviewService.record_login_setup(connector_id, *, tenant_id,
+connector_class)` (`ingest/service.py`) is the stamp seam;
+`record_profile_stamp` is a thin wrapper that returns `True` when the
+scope's calls use the new class:
 
 - It registers the `ProfiledRestConnector` (carrying the vetted profile)
-  under the connector's `(product, version, impl_id)` v2 key, making it
-  the resolved class for dispatch.
+  for the connector's `(product, version, impl_id)` key in the table of
+  its scope (see "Login setups are kept per tenant" below), making it the
+  resolved class for dispatch in that scope.
 - It does **not** touch any op's `is_enabled` or any group's
   `review_status`. Every ingested op stays `is_enabled=False` /
   `review_status='staged'` exactly as ingested.
 - It writes one `meho_connector_profile_stamp` (`OP_PROFILE_STAMP`) audit
-  row on the **first** stamp; a re-stamp of an already-registered triple
-  is idempotent (returns `False`, no duplicate row). Passing a non-profiled
-  class (`shim_kind != "profiled"`) raises `TypeError`.
+  row when the outcome is `registered` or `replaced`; a stamp of the same
+  login setup again is `unchanged` (no duplicate row). Passing a
+  non-profiled class (`shim_kind != "profiled"`) raises `TypeError`.
 
 The interlock that blocks dispatch is the same one that blocks a staged
 bare-shim op: `lookup_descriptor` (`operations/_lookup.py`) hard-filters
@@ -999,8 +1002,8 @@ per-op review gate above (stamping never enables an op).
 
 The path is idempotent and gated by construction: a `(product, version,
 impl_id)` triple already served by a hand-coded class — or an already-
-stamped profiled class — no-ops (logged at debug, not an error), because
-`record_profile_stamp` refuses to overwrite an occupied triple. The
+stamped profiled class with the same profile — no-ops (logged at debug,
+not an error). A key of a shipped profile is never replaced. The
 synthesised class's triple is derived from the connector_id
 (`parse_connector_id`), not the catalog's raw `product`, so it agrees with
 the registry key `record_profile_stamp` lands it under even when the raw
@@ -1388,8 +1391,10 @@ builds the profile via `ingest/ingest_profile.py::build_ingest_execution_profile
 fingerprint/`delegate`-probe/`none`-pagination defaults, since a non-catalog
 ingest names no version endpoint). The register phase then skips the bare shim
 (`register_ingested_operations(register_shim=False)`) so the triple is free, and
-`_stamp_profiled_connector` stamps the synthesised class through the same
-`record_profile_stamp` seam boot stamping uses. **Stamping never enables an
+`_stamp_profiled_connector` stamps the synthesised class through
+`record_ingested_login_setup`, which uses the same placement rules as the
+`record_login_setup` seam boot stamping uses, in the ingest's scope. The
+answer's `ingestion.login_setup` says what happened (see below). **Stamping never enables an
 op** — the `review_status='staged'` gate (#1971) stays the interlock, so the
 connector lands dispatchable-but-unreviewed (`kind="profiled-but-unreviewed"`)
 and the operator clears the gate per-op via the normal review/enable flow.
@@ -1400,29 +1405,36 @@ connector table in `connectors/registry.py` lives in memory. Before #5016 a
 restart dropped the stamped class: the ops stayed enabled, but every call
 failed with `no_connector` and the list showed `ingested-shim`. Now:
 
-* `_stamp_profiled_connector` first saves the choice through
+* `_stamp_profiled_connector` saves the choice through
+  `ReviewService.record_ingested_login_setup` and
   `ingest/ingest_auth_store.py::save_ingest_auth_profile` into the
-  `ingested_auth_profile` table (migration `0121`). One row per
+  `ingested_auth_profile` table (migration `0121`), in the same
+  transaction as the audit row. One row per
   `(tenant_id, product, version, impl_id)`. It holds the scheme name and the
   secret field **names** only, never values. A re-ingest with a login type
   replaces the row.
 * At start, `main.py` calls `restore_ingested_profiled_connectors()` right
   after the catalog stamp. It rebuilds the profile with
   `build_ingest_execution_profile` and stamps it through the same
-  `record_profile_stamp` step (audit sub `system:ingested-profile-restore`).
-  A key that already has a class is skipped, so a shipped profile or a
-  hand-written class keeps its key. A row that does not build a valid
-  profile is logged (`ingested_profile_restore_skipped`) and skipped.
+  `record_login_setup` step (audit sub `system:ingested-profile-restore`),
+  into the table of the row's own scope. A scope that already holds the
+  row's login type is skipped. A shipped profile or a hand-written class
+  keeps its key. A row that does not build a valid profile is logged
+  (`ingested_profile_restore_skipped`) and skipped.
 * A replica that was already running when another replica took the ingest
   catches up on the first call: before the dispatcher resolves the connector
   for an ingested op, it runs the same restore for the rows of the target's
-  product and builds any class it does not have yet. It does this before
+  product (the built-in rows and the rows of the target's tenant) and
+  builds any class it does not have yet. A scope whose saved login type
+  differs from the class in memory gets the saved one, with an audit row. It does this before
   the resolver runs, not only on a miss, so a replica that already holds
   another connector for the same product also loads the new one when the
   target prefers it (`preferred_impl_id`). A row whose key already has a
   class is skipped, so the read is one small query per call. Until the
   first call that replica's `meho connector list` still shows the old kind.
 * A connector delete removes the row, so the class does not come back.
+  After the commit it also removes the scope's class from memory: a
+  tenant's class from that tenant's table only.
   This also holds for a connector that has no operation rows (an API file
   with no paths, ingested with a login type): the delete removes the saved
   row and answers 204, instead of 404 for "nothing to delete".
@@ -1431,6 +1443,56 @@ failed with `no_connector` and the list showed `ingested-shim`. Now:
 
 A connector ingested with an older release has no saved row. Ingest it once
 more with the same `--auth-scheme` to save it.
+
+### Login setups are kept per tenant
+
+A login setup is the `ProfiledRestConnector` class built from a login type.
+`ingest/login_setup.py::place_login_setup` decides where it goes:
+
+* **Built-in scope** (`tenant_id=None`): the shared v2 table
+  (`connectors/registry.py`), so it applies to every tenant. A bare
+  stand-in on the key is replaced by it.
+* **Tenant scope**: the tenant's own table
+  (`registry.set_tenant_connector`, keyed on `(tenant_id, product, version,
+  impl_id)`), so it applies only to that tenant's calls. When the shared key
+  is free, a bare stand-in goes there, so target checks still know the
+  product and implementation; the stand-in cannot call the vendor.
+* The resolver reads the table as the target's tenant sees it
+  (`registry.connectors_for_tenant(target.tenant_id)`): the tenant's class
+  takes a key that is free or holds only a bare stand-in. A hand-written
+  class or a built-in login setup keeps its key for every tenant. Another
+  tenant's class is never a candidate.
+* A second login setup for the same scope and key replaces the first when
+  it differs. The `meho_connector_profile_stamp` audit row then has
+  `replaced: true` and names both login types (`previous_auth_scheme`,
+  `previous_secret_fields`, `auth_scheme`, `secret_fields`; field names
+  only). Every stamp row also names its scope (`tenant_scope`).
+* An ingest decides `registered`, `replaced` or `unchanged` from the
+  scope's saved login type, not from the memory of the replica that takes
+  the ingest (`ReviewService.record_ingested_login_setup`). It locks the
+  saved row, writes the new login type and the audit row with the old one
+  in one transaction, and commits. Only then do the scope's calls use the
+  new class. So a replica that holds an old class, or none, still reports
+  and audits the change against the saved choice. When the saved row
+  already holds the same login type but the replica's table does not
+  hold that class (for example, the row was saved while a built-in login
+  setup served the key, and that connector was deleted since), the answer
+  is `registered` or `replaced` from the table, with an audit row. So a
+  class never goes into the table without one.
+* Every stamp commits its audit row before the class is put into the
+  table. A failed audit write changes nothing in memory, and a retry does
+  the whole step again.
+* The ingest answer has `ingestion.login_setup` (`IngestionResultModel`):
+  `registered`, `replaced`, `unchanged`, `served_by_connector_code` (a
+  hand-written class serves the key) or `served_by_builtin_login_setup` (a
+  shipped or built-in login setup serves it). With the last two the login
+  type is saved but not used. `null` for an ingest without a login type.
+  The CLI prints it as `login_setup:` with a short note.
+* A connector delete in one tenant removes only that tenant's class. The
+  list, review and enable-time probes (`resolve_authoring_kind`,
+  `resolved_profiled_connector_class`, `resolved_auto_shim_class`) read the
+  connector's own scope, so a tenant's connector with its own login setup
+  shows as `profiled`.
 
 ### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
 

@@ -328,6 +328,21 @@ def _may_change_any_entry(operator: Operator) -> bool:
     return may_confirm(operator)
 
 
+def _refuse_confirm_without_review(operator: Operator, metadata: object, slug: str) -> None:
+    """Raise when *metadata* sets ``status: confirmed`` and *operator* may not confirm."""
+    if (
+        isinstance(metadata, dict)
+        and metadata.get("status") == "confirmed"
+        and not may_confirm(operator)
+    ):
+        raise McpPermissionDeniedError(
+            "add_to_knowledge: only a reviewer (a person who can decide approvals in this "
+            "tenant) or a tenant admin may set status confirmed. Save the entry as a "
+            "candidate; the weekly upkeep report lists used candidates for a reviewer.",
+            data={"reason": "confirm_needs_reviewer", "slug": slug},
+        )
+
+
 async def _add_to_knowledge_handler(
     operator: Operator,
     arguments: dict[str, Any],
@@ -365,17 +380,7 @@ async def _add_to_knowledge_handler(
     body: str = arguments["body"]
     metadata = arguments.get("metadata")
     expected_revision = _parse_expected_revision(arguments.get("expected_revision"))
-    if (
-        isinstance(metadata, dict)
-        and metadata.get("status") == "confirmed"
-        and not may_confirm(operator)
-    ):
-        raise McpPermissionDeniedError(
-            "add_to_knowledge: only a reviewer (a person who can decide approvals in this "
-            "tenant) or a tenant admin may set status confirmed. Save the entry as a "
-            "candidate; the weekly upkeep report lists used candidates for a reviewer.",
-            data={"reason": "confirm_needs_reviewer", "slug": slug},
-        )
+    _refuse_confirm_without_review(operator, metadata, slug)
     may_change_any = _may_change_any_entry(operator)
 
     service = KbService()
@@ -402,6 +407,7 @@ async def _add_to_knowledge_handler(
             actor_sub=operator.sub,
             own_entries_only=not may_change_any,
             may_set_curation_keys=operator.tenant_role == TenantRole.TENANT_ADMIN,
+            may_confirm=may_confirm(operator),
             expected_revision=expected_revision,
         )
     except (InvalidKbSlugError, LessonHeaderError) as exc:

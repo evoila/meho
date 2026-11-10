@@ -4,7 +4,7 @@
 """Local-dev wrapper around the backplane app: real app + ``/dev/login``.
 
 The ``/ui/*`` surface is gated by ``UISessionMiddleware`` — a session
-row in ``web_session`` referenced by the ``meho_session`` cookie, minted
+row in ``web_session`` referenced by the ``__Host-meho_session`` cookie, minted
 by the Keycloak BFF callback. Running a local Keycloak just to look at
 templates is absurd, so this wrapper imports the real ``app`` and bolts
 on one extra route OUTSIDE the ``/ui/`` prefix (so the middleware never
@@ -12,9 +12,10 @@ sees it):
 
     GET /dev/login  →  inserts a real ``web_session`` row (dev operator,
                        fixed dev tenant, dummy tokens), sets the
-                       ``meho_session`` cookie WITHOUT the ``Secure``
-                       attribute (plain-http localhost works in every
-                       browser, including Safari), 303-redirects to /ui/.
+                       ``__Host-meho_session`` cookie, 303-redirects to
+                       /ui/. The ``__Host-`` prefix needs ``Secure``, so
+                       use a browser that counts http://localhost as a
+                       secure origin.
 
 Everything past the cookie check is the production code path — same
 templates, same routes, same CSRF middleware.
@@ -39,6 +40,7 @@ from fastapi.responses import RedirectResponse
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.main import app
+from meho_backplane.ui.auth.session_cookie import SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import create_session
 
 DEV_OPERATOR_SUB = "dev-operator"
@@ -84,9 +86,10 @@ async def dev_login(return_to: str = "/ui/") -> RedirectResponse:
         return_to = "/ui/"
     response = RedirectResponse(return_to, status_code=303)
     response.set_cookie(
-        "meho_session",
+        SESSION_COOKIE_NAME,
         str(sess.id),
         httponly=True,
+        secure=True,
         samesite="lax",
         path="/",
         max_age=30 * 24 * 3600,

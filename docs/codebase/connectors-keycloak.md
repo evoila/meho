@@ -39,7 +39,7 @@ change worked (the new password is accepted, the old one refused) without a
 approval sign-in flow, and `keycloak.authflow.ensure_passkey_code_skip`
 changes the browser sign-in flow for passkeys. In total the connector
 registers 32 operations: 11 `safe` reads and 21 writes that wait for
-approval (11 `caution`, 6 `dangerous`, 4 `destructive`).
+approval (6 `caution`, 11 `dangerous`, 4 `destructive`).
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -314,12 +314,12 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 |---|---|---|
 | `keycloak.realm.create` | dangerous | `POST /admin/realms` |
 | `keycloak.realm.update` | caution | `PUT .../realms/{realm}` |
-| `keycloak.client.create` | caution | `POST .../realms/{realm}/clients` |
-| `keycloak.client.update` | caution | `PUT .../clients/{id}` |
+| `keycloak.client.create` | dangerous | `POST .../realms/{realm}/clients` |
+| `keycloak.client.update` | dangerous | `PUT .../clients/{id}` |
 | `keycloak.client_scope.create` | caution | `POST .../client-scopes` |
-| `keycloak.protocol_mapper.create` | caution | `POST .../clients/{id}/protocol-mappers/models` |
-| `keycloak.user.create` | caution | `POST .../realms/{realm}/users` |
-| `keycloak.user.reset_password` | caution | `PUT .../users/{id}/reset-password` |
+| `keycloak.protocol_mapper.create` | dangerous | `POST .../clients/{id}/protocol-mappers/models` |
+| `keycloak.user.create` | dangerous | `POST .../realms/{realm}/users` |
+| `keycloak.user.reset_password` | dangerous | `PUT .../users/{id}/reset-password` |
 | `keycloak.role_mapping.assign` | dangerous | `POST .../users/{id}/role-mappings/realm` |
 | `keycloak.group.create` | dangerous | `POST .../groups` (or `.../groups/{group-id}/children`) |
 | `keycloak.group.update_attributes` | dangerous | `PUT .../groups/{group-id}` |
@@ -333,6 +333,23 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
 | `keycloak.user.check_login` | caution | `POST /realms/{realm}/protocol/openid-connect/token` (see "Login test") |
+
+Five more writes are `dangerous` because they can change who gets which
+tenant rights. MEHO reads the rights from the login token, and these
+writes change what goes into it, or who can sign in as whom:
+
+- `user.create`: the new user can carry a `groups` list and attributes.
+- `client.create` and `client.update`: a client carries the mappers and
+  scopes that fill the token.
+- `protocol_mapper.create`: a mapper decides the claims, also `tenant_id`
+  and `tenant_role`.
+- `user.reset_password`: it sets the password of any user of the realm.
+
+At `dangerous`, only a MEHO-SA-Operator or a tenant admin may approve
+another person's request. The single-operator self-approval switch
+(`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them. The test
+`backend/tests/test_keycloak_identity_write_approvers.py` checks both rules
+against the registered levels.
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /

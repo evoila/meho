@@ -1019,6 +1019,11 @@ lines (indented JSON, an error message) and keeps the line breaks.
   server string through them. So the request the approver reads right
   before "Type yes" is the request the server holds: a subject or
   summary cannot overwrite the risk level line.
+- The audit commands (`meho audit show`, `query`, `recent`, `my-recent`,
+  `who-touched`, `replay`, `trace show`) pass every server string of the
+  human output through `SafeText`. A stored request path with control
+  codes shows as visible escapes, so each field stays on its own line
+  and reads as the server holds it.
 - `output.RenderError` passes the human error line through `SafeLines`,
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control

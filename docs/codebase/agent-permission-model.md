@@ -79,7 +79,10 @@ with `tenant_role=operator`. An agent registered earlier still has
 token gets 403 `insufficient_role` on every route that needs `tenant_admin`
 (connectors, targets, conventions, grants, tenant policies and the other
 admin routes). That work is for people. The check is in `_cap_agent_role`
-in `auth/jwt.py`.
+in `auth/jwt.py`. Vault reads the role from the token itself, not from
+MEHO. So MEHO does not send such a token to Vault: `vault_client_for_operator`
+in `auth/vault.py` refuses the login (`agent_role_capped`), and the agent
+must be registered again to read secrets.
 
 **Read scope for a service account (#4992).** A service account reads every
 target of its tenant. A person can narrow that: a read scope is a list of

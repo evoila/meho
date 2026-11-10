@@ -59,7 +59,6 @@ References
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -127,9 +126,19 @@ def parse_image(image: str) -> dict[str, str | None]:
 
 
 def values_hash(spec: dict[str, Any]) -> str:
-    """Return the sha256 of the values of a ``HelmChart`` spec (never the values)."""
+    """Return the keyed fingerprint of the values of a ``HelmChart`` spec (never the values).
+
+    HMAC-SHA256 under the server key
+    (:func:`~meho_backplane.operations._validate.compute_value_fingerprint`),
+    so equal values give equal hashes inside one install, and the hash
+    cannot be computed again from guessed values.
+    """
+    # Imported here, as in ops_secret_read: the operations package pulls in
+    # the database and auth layers, which this module does not need at import.
+    from meho_backplane.operations._validate import compute_value_fingerprint
+
     material = {"valuesContent": spec.get("valuesContent"), "set": spec.get("set")}
-    return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+    return compute_value_fingerprint(json.dumps(material, sort_keys=True).encode())
 
 
 def _unknown(exc: Exception) -> dict[str, Any]:

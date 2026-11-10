@@ -30,29 +30,42 @@ reads the v2 table.
 Duplicate registration on either layer raises :exc:`RuntimeError` —
 two modules claiming the same key is a programming bug, not a runtime
 condition, and should surface as a deploy failure.
+
+A third table holds the login setups a tenant chose at ingest
+(:func:`set_tenant_connector`). It is keyed on ``(tenant_id, product,
+version, impl_id)``, so a tenant's choice applies only to that tenant's
+calls. :func:`connectors_for_tenant` gives the v2 table as one tenant sees
+it: the tenant's class takes a key that is free or that holds only a bare
+stand-in. Hand-written classes and built-in login setups keep their key
+for every tenant.
 """
 
 import importlib
 import pkgutil
 from types import ModuleType
+from uuid import UUID
 
 import structlog
 
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, shim_kind
 
 __all__ = [
     "_eager_import_connectors",
     "all_connectors",
     "all_connectors_v2",
     "clear_registry",
+    "connectors_for_tenant",
     "deregister_connector_v2",
+    "deregister_tenant_connector",
     "get_connector",
     "get_connector_v2",
+    "get_tenant_connector",
     "list_connector_impls",
     "product_impl_id_round_trips",
     "register_connector",
     "register_connector_v2",
     "registered_product_tokens",
+    "set_tenant_connector",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -66,6 +79,10 @@ _REGISTRY: dict[str, type[Connector]] = {}
 # impl_id). v1 registrations land here as (product, "", "") so v2-aware
 # code can resolve every shipped connector uniformly.
 _REGISTRY_V2: dict[tuple[str, str, str], type[Connector]] = {}
+
+# Login setups a tenant chose at ingest. Key is (tenant_id, product,
+# version, impl_id). Never read without a tenant: see connectors_for_tenant.
+_TENANT_REGISTRY: dict[tuple[UUID, str, str, str], type[Connector]] = {}
 
 
 def register_connector(product: str, cls: type[Connector]) -> None:
@@ -444,7 +461,106 @@ def _import_connector_subpackages(pkg: ModuleType) -> None:
         importlib.import_module(f"{pkg.__name__}.{name}")
 
 
+def set_tenant_connector(
+    *,
+    tenant_id: UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+    cls: type[Connector],
+) -> type[Connector] | None:
+    """Register *cls* for one tenant's connector key, or replace the class there.
+
+    Returns the class it replaced on the key, or ``None``. The caller
+    decides whether a replace is wanted and audits it; this function only
+    keeps the table.
+
+    Raises :exc:`TypeError` when ``cls`` is not a :class:`Connector`
+    subclass, and :exc:`RuntimeError` when ``product`` does not round-trip
+    through the connector id (the same check as
+    :func:`register_connector_v2`).
+    """
+    if not (isinstance(cls, type) and issubclass(cls, Connector)):
+        raise TypeError(
+            f"connector class for tenant key (product={product!r}, version={version!r}, "
+            f"impl_id={impl_id!r}) must subclass Connector: {cls!r}"
+        )
+    _assert_product_impl_id_round_trips(product=product, version=version, impl_id=impl_id, cls=cls)
+    key = (tenant_id, product, version, impl_id)
+    previous = _TENANT_REGISTRY.get(key)
+    _TENANT_REGISTRY[key] = cls
+    _log.info(
+        "connector_registered_for_tenant",
+        tenant_id=str(tenant_id),
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        cls=cls.__name__,
+        replaced=previous.__name__ if previous is not None else None,
+    )
+    return previous
+
+
+def get_tenant_connector(
+    tenant_id: UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> type[Connector] | None:
+    """Return the class one tenant registered for a connector key, or ``None``."""
+    return _TENANT_REGISTRY.get((tenant_id, product, version, impl_id))
+
+
+def deregister_tenant_connector(
+    *,
+    tenant_id: UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> bool:
+    """Remove one tenant's class for a connector key. Returns whether one was removed.
+
+    Other tenants' classes for the same key stay.
+    """
+    cls = _TENANT_REGISTRY.pop((tenant_id, product, version, impl_id), None)
+    if cls is None:
+        return False
+    _log.info(
+        "connector_deregistered_for_tenant",
+        tenant_id=str(tenant_id),
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        cls=cls.__name__,
+    )
+    return True
+
+
+def connectors_for_tenant(tenant_id: UUID | None) -> dict[tuple[str, str, str], type[Connector]]:
+    """Return a snapshot of the v2 registry as one tenant sees it.
+
+    Starts from :func:`all_connectors_v2`. A class the tenant registered
+    with :func:`set_tenant_connector` takes its key when the key is free or
+    holds only a bare stand-in (``shim_kind == "bare"``). A hand-written
+    class or a built-in login setup keeps its key. Classes of other
+    tenants are never in the result. With ``tenant_id=None`` the result is
+    :func:`all_connectors_v2`.
+    """
+    view = dict(_REGISTRY_V2)
+    if tenant_id is None:
+        return view
+    for (owner, product, version, impl_id), cls in _TENANT_REGISTRY.items():
+        if owner != tenant_id:
+            continue
+        key = (product, version, impl_id)
+        shared = view.get(key)
+        if shared is None or shim_kind(shared) == "bare":
+            view[key] = cls
+    return view
+
+
 def clear_registry() -> None:
-    """Empty both registry layers. Test-only — never call from production code."""
+    """Empty every registry table. Test-only — never call from production code."""
     _REGISTRY.clear()
     _REGISTRY_V2.clear()
+    _TENANT_REGISTRY.clear()

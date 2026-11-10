@@ -33,6 +33,7 @@ import structlog
 from sqlalchemy import CursorResult, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations._audit import resolve_agent_session_id, work_ref_var
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
@@ -617,7 +618,8 @@ async def audit_profile_stamp(
     operator_tenant_id: UUID,
     connector_id: str,
     scope: ConnectorScope,
-    connector_class: str,
+    connector_class: type[Connector],
+    previous_class: type[Connector] | None = None,
 ) -> uuid.UUID:
     """Append one :class:`AuditLog` row for the first stamp of an ExecutionProfile.
 
@@ -638,20 +640,43 @@ async def audit_profile_stamp(
     (or an audit query) can see *when* and *by whom* the connector
     became dispatchable — distinct from the later per-op
     :data:`OP_EDIT_OP` rows that record the review-gate clearance.
+
+    The payload also names the scope (``tenant_scope``, ``None`` for the
+    built-in scope) and the login type: ``auth_scheme`` and the secret
+    field **names** (never values). When the stamp replaced the scope's
+    earlier login setup, *previous_class* is that class: ``replaced`` is
+    ``True`` and ``previous_auth_scheme`` / ``previous_secret_fields``
+    show the old login type next to the new one.
     """
+    payload: dict[str, Any] = {
+        "connector_id": connector_id,
+        "tenant_scope": str(scope.tenant_id) if scope.tenant_id is not None else None,
+        "product": scope.product,
+        "version": scope.version,
+        "impl_id": scope.impl_id,
+        "connector_class": connector_class.__name__,
+        **_login_type_fields(connector_class, prefix=""),
+        "replaced": previous_class is not None,
+    }
+    if previous_class is not None:
+        payload.update(_login_type_fields(previous_class, prefix="previous_"))
     return await write_audit_row(
         session,
         operator_sub=operator_sub,
         operator_tenant_id=operator_tenant_id,
         op_id=OP_PROFILE_STAMP,
-        payload={
-            "connector_id": connector_id,
-            "product": scope.product,
-            "version": scope.version,
-            "impl_id": scope.impl_id,
-            "connector_class": connector_class,
-        },
+        payload=payload,
     )
+
+
+def _login_type_fields(connector_class: type[Connector], *, prefix: str) -> dict[str, Any]:
+    """Return the login type of a login setup class as audit payload fields."""
+    profile = getattr(connector_class, "profile", None)
+    auth = getattr(profile, "auth", None)
+    return {
+        f"{prefix}auth_scheme": getattr(auth, "scheme", None),
+        f"{prefix}secret_fields": list(getattr(auth, "secret_fields", ()) or ()),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1005,11 +1030,15 @@ def enable_time_auto_shim_warnings(
     (:func:`_bare_shim_warning` / :func:`_profiled_unreviewed_warning`)
     to keep this dispatcher under the size budget.
     """
-    shim_class = resolved_auto_shim_class(product=scope.product, version=scope.version)
+    shim_class = resolved_auto_shim_class(
+        product=scope.product, version=scope.version, tenant_id=scope.tenant_id
+    )
     if shim_class is not None:
         return [_bare_shim_warning(connector_id, op_id, scope, shim_class)]
 
-    profiled_class = resolved_profiled_connector_class(product=scope.product, version=scope.version)
+    profiled_class = resolved_profiled_connector_class(
+        product=scope.product, version=scope.version, tenant_id=scope.tenant_id
+    )
     if profiled_class is not None:
         return [_profiled_unreviewed_warning(connector_id, op_id, scope, profiled_class)]
 

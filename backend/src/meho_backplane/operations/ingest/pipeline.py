@@ -133,6 +133,7 @@ from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
     run_llm_grouping,
 )
+from meho_backplane.operations.ingest.login_setup import LOGIN_SETUP_APPLIED, LoginSetupOutcome
 from meho_backplane.operations.ingest.op_allowlist import DroppedOp, apply_op_allowlist
 from meho_backplane.operations.ingest.openapi import (
     parse_openapi,
@@ -463,6 +464,7 @@ class IngestionPipelineResult:
                 DroppedOpModel(method=dropped.method, path=dropped.path)
                 for dropped in self.ingestion.dropped_ops
             ],
+            login_setup=self.ingestion.login_setup,
         )
         grouping_model: GroupingResultModel | None = None
         if self.grouping is not None:
@@ -1154,10 +1156,11 @@ class IngestionPipelineService:
         land, a dispatchable
         :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
         synthesised from the profile is stamped under the triple via
-        :meth:`ReviewService.record_profile_stamp`. Stamping registers the
+        :meth:`ReviewService.record_login_setup`. Stamping registers the
         class but never enables an op — the ``review_status='staged'`` gate
-        (#1971) stays the interlock. ``connector_registered`` then reflects
-        the stamp (``True`` on the first stamp of a fresh triple).
+        stays the interlock. ``login_setup`` on the result says what
+        happened to it, and ``connector_registered`` is ``True`` when the
+        scope's calls use the new class (``"registered"`` or ``"replaced"``).
         """
         register_shim = execution_profile is None
         aggregated_inserted = 0
@@ -1166,6 +1169,7 @@ class IngestionPipelineService:
         aggregated_safety_changes: list[SafetyChange] = []
         aggregated_dropped: list[DroppedOp] = []
         connector_registered = False
+        login_setup: LoginSetupOutcome | None = None
 
         for spec in specs:
             partial = await self._register_one_spec(
@@ -1186,18 +1190,16 @@ class IngestionPipelineService:
             connector_registered = connector_registered or partial.connector_registered
 
         if execution_profile is not None:
-            connector_registered = (
-                await self._stamp_profiled_connector(
-                    product=product,
-                    version=version,
-                    impl_id=impl_id,
-                    connector_id=connector_id,
-                    tenant_id=tenant_id,
-                    execution_profile=execution_profile,
-                    sessionmaker=sessionmaker,
-                )
-                or connector_registered
+            login_setup = await self._stamp_profiled_connector(
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                connector_id=connector_id,
+                tenant_id=tenant_id,
+                execution_profile=execution_profile,
+                sessionmaker=sessionmaker,
             )
+            connector_registered = login_setup in LOGIN_SETUP_APPLIED or connector_registered
 
         return IngestionResult(
             inserted_count=aggregated_inserted,
@@ -1208,6 +1210,7 @@ class IngestionPipelineService:
             safety_changes=tuple(aggregated_safety_changes),
             dropped_count=len(aggregated_dropped),
             dropped_ops=tuple(aggregated_dropped),
+            login_setup=login_setup,
         )
 
     async def _register_one_spec(
@@ -1278,7 +1281,7 @@ class IngestionPipelineService:
         tenant_id: UUID | None,
         execution_profile: ExecutionProfile,
         sessionmaker: async_sessionmaker[AsyncSession],
-    ) -> bool:
+    ) -> LoginSetupOutcome:
         """Save the login type, then stamp a profiled connector built from it.
 
         The non-catalog on-ramp (#2289) sibling of
@@ -1287,11 +1290,13 @@ class IngestionPipelineService:
         :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
         subclass carrying the profile and registers it under the triple via
         the review-gate-preserving
-        :meth:`ReviewService.record_profile_stamp` seam. Returns ``True`` when
-        a new profiled class was registered, ``False`` on the idempotent
-        no-op (the triple is already served by a stamped / hand-coded class).
-        The stamp writes a ``meho_connector_profile_stamp`` audit row under
-        the ingesting operator and never enables an op (#1971).
+        :meth:`ReviewService.record_login_setup` seam, in the table of the
+        ingest's scope: a tenant's login setup applies only to that tenant's
+        calls. Returns the
+        :data:`~meho_backplane.operations.ingest.login_setup.LoginSetupOutcome`.
+        A registered or replaced login setup writes a
+        ``meho_connector_profile_stamp`` audit row under the ingesting
+        operator; no stamp enables an op.
 
         The login type is saved first (#5016), so the class can be built
         again after a restart or on another replica
@@ -1312,7 +1317,7 @@ class IngestionPipelineService:
             product=product, version=version, impl_id=impl_id, profile=execution_profile
         )
         review_service = ReviewService(self._operator)
-        return await review_service.record_profile_stamp(
+        return await review_service.record_login_setup(
             connector_id, tenant_id=tenant_id, connector_class=connector_class
         )
 

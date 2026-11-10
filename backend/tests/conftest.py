@@ -830,7 +830,7 @@ def _isolate_global_registries() -> Iterator[None]:
     The backplane keeps mutable module-level registries that the app
     lifespan and ``@register_*`` decorators populate:
     ``mcp.registry._TOOLS`` / ``_RESOURCES``,
-    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``,
+    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2`` / ``_TENANT_REGISTRY``,
     ``operations.typed_register._TYPED_OP_REGISTRARS``,
     ``operations._preview._PREVIEW_BUILDERS`` / ``_PERMISSION_PREFLIGHTS``,
     ``operations._park_check._PARK_CHECKS``,
@@ -884,6 +884,7 @@ def _isolate_global_registries() -> Iterator[None]:
     resources = dict(mcp_reg._RESOURCES)
     connectors_v1 = dict(conn_reg._REGISTRY)
     connectors_v2 = dict(conn_reg._REGISTRY_V2)
+    tenant_connectors = dict(conn_reg._TENANT_REGISTRY)
     registrars = list(typed_reg._TYPED_OP_REGISTRARS)
     handler_cache = dict(handler_resolve._HANDLER_CACHE)
     instance_cache = dict(handler_resolve._CONNECTOR_INSTANCE_CACHE)
@@ -914,6 +915,8 @@ def _isolate_global_registries() -> Iterator[None]:
         conn_reg._REGISTRY.update(connectors_v1)
         conn_reg._REGISTRY_V2.clear()
         conn_reg._REGISTRY_V2.update(connectors_v2)
+        conn_reg._TENANT_REGISTRY.clear()
+        conn_reg._TENANT_REGISTRY.update(tenant_connectors)
         typed_reg._TYPED_OP_REGISTRARS[:] = registrars
         handler_resolve._HANDLER_CACHE.clear()
         handler_resolve._HANDLER_CACHE.update(handler_cache)

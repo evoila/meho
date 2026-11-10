@@ -434,6 +434,15 @@ const (
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
+// Defines values for IngestionResultModelLoginSetup.
+const (
+	IngestionResultModelLoginSetupRegistered                IngestionResultModelLoginSetup = "registered"
+	IngestionResultModelLoginSetupReplaced                  IngestionResultModelLoginSetup = "replaced"
+	IngestionResultModelLoginSetupServedByBuiltinLoginSetup IngestionResultModelLoginSetup = "served_by_builtin_login_setup"
+	IngestionResultModelLoginSetupServedByConnectorCode     IngestionResultModelLoginSetup = "served_by_connector_code"
+	IngestionResultModelLoginSetupUnchanged                 IngestionResultModelLoginSetup = "unchanged"
+)
+
 // Defines values for KbExportRemovalStatus.
 const (
 	KbExportRemovalStatusReplaced KbExportRemovalStatus = "replaced"
@@ -6909,16 +6918,22 @@ type IngestResponse struct {
 // likewise additive with empty defaults — “0“ / “[]“ for every
 // product that declares no ingest op allowlist.
 type IngestionResultModel struct {
-	ConnectorId         string               `json:"connector_id"`
-	ConnectorRegistered bool                 `json:"connector_registered"`
-	DroppedCount        *int                 `json:"dropped_count,omitempty"`
-	DroppedOps          *[]DroppedOpModel    `json:"dropped_ops,omitempty"`
-	InsertedCount       int                  `json:"inserted_count"`
-	OperationsGrouped   bool                 `json:"operations_grouped"`
-	SafetyChanges       *[]SafetyChangeModel `json:"safety_changes,omitempty"`
-	SkippedCount        int                  `json:"skipped_count"`
-	UpdatedCount        int                  `json:"updated_count"`
+	ConnectorId         string            `json:"connector_id"`
+	ConnectorRegistered bool              `json:"connector_registered"`
+	DroppedCount        *int              `json:"dropped_count,omitempty"`
+	DroppedOps          *[]DroppedOpModel `json:"dropped_ops,omitempty"`
+	InsertedCount       int               `json:"inserted_count"`
+
+	// LoginSetup What happened to the login setup of an ingest with a login type. registered: the scope's calls use it now. replaced: it replaced a different login setup of the same scope (audited with the old and the new login type). unchanged: the same login setup was already in place. served_by_connector_code / served_by_builtin_login_setup: hand-written connector code or a shipped or built-in login setup serves this connector for every tenant, so this login setup is saved but not used. A tenant's login setup applies only to that tenant's calls. Null for an ingest without a login type.
+	LoginSetup        *IngestionResultModelLoginSetup `json:"login_setup"`
+	OperationsGrouped bool                            `json:"operations_grouped"`
+	SafetyChanges     *[]SafetyChangeModel            `json:"safety_changes,omitempty"`
+	SkippedCount      int                             `json:"skipped_count"`
+	UpdatedCount      int                             `json:"updated_count"`
 }
+
+// IngestionResultModelLoginSetup What happened to the login setup of an ingest with a login type. registered: the scope's calls use it now. replaced: it replaced a different login setup of the same scope (audited with the old and the new login type). unchanged: the same login setup was already in place. served_by_connector_code / served_by_builtin_login_setup: hand-written connector code or a shipped or built-in login setup serves this connector for every tenant, so this login setup is saved but not used. A tenant's login setup applies only to that tenant's calls. Null for an ingest without a login type.
+type IngestionResultModelLoginSetup string
 
 // KbEntry One kb entry -- mirrors a row in the “documents“ table.
 //

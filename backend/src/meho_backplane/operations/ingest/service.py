@@ -133,6 +133,11 @@ from meho_backplane.operations.ingest.exceptions import (
     LegacyTenantConnectorCopyError,
 )
 from meho_backplane.operations.ingest.group_truth import build_group_advisory
+from meho_backplane.operations.ingest.login_setup import (
+    LOGIN_SETUP_APPLIED,
+    LoginSetupOutcome,
+    place_login_setup,
+)
 from meho_backplane.operations.ingest.parser import parse_connector_id
 from meho_backplane.operations.ingest.payload import (
     ConnectorReviewGroup,
@@ -222,6 +227,7 @@ def _authoring_kind_for_payload(
         version=scope.version,
         enabled_operation_count=enabled_op_count,
         has_code_shipped_op=has_code_shipped_op,
+        tenant_id=scope.tenant_id,
     )
 
 
@@ -1259,42 +1265,59 @@ class ReviewService:
         tenant_id: UUID | None,
         connector_class: type[Connector],
     ) -> bool:
-        """Stamp an :class:`ExecutionProfile` onto an ingested connector.
+        """Stamp an :class:`ExecutionProfile` onto a connector; ``True`` when calls use it.
 
-        G0.28-T5 (#1971). The review-gate interlock seam: stamping makes
-        the connector **dispatchable** (registers *connector_class* — a
-        :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
-        carrying the vetted profile — under the connector's ``(product,
-        version, impl_id)`` v2 key) but deliberately does **not** touch
-        any op's ``is_enabled`` / ``review_status``. Every op stays
-        ``is_enabled=False`` / ``review_status='staged'`` exactly as it
-        was ingested; dispatch against an unreviewed op is blocked by the
-        ``is_enabled`` filter in
-        :func:`~meho_backplane.operations._lookup.lookup_descriptor` just
-        as a staged bare-shim op is, until an operator clears the gate
-        per-op via :meth:`edit_op` (or connector-wide via
-        :meth:`enable_connector`). A stamp can therefore never auto-enable
-        dispatch — the security-load-bearing property of #1971.
+        Thin wrapper over :meth:`record_login_setup` for callers that need
+        only a yes/no (the boot-time catalog stamp). ``True`` when the
+        outcome is ``"registered"`` or ``"replaced"``.
+        """
+        outcome = await self.record_login_setup(
+            connector_id, tenant_id=tenant_id, connector_class=connector_class
+        )
+        return outcome in LOGIN_SETUP_APPLIED
 
-        Idempotent: a profiled connector already registered for the
-        triple is a no-op (returns ``False``, writes no audit row), so a
-        re-stamp does not double-audit. Returns ``True`` on the first
-        stamp, when the registration landed and an :data:`OP_PROFILE_STAMP`
-        audit row was written.
+    async def record_login_setup(
+        self,
+        connector_id: str,
+        *,
+        tenant_id: UUID | None,
+        connector_class: type[Connector],
+    ) -> LoginSetupOutcome:
+        """Put a login setup into the connector table of its scope and audit it.
+
+        The review-gate interlock seam: the login setup
+        (a :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+        carrying the vetted profile) makes the connector **dispatchable**
+        but deliberately does **not** touch any op's ``is_enabled`` /
+        ``review_status``. Every op stays as it was ingested; dispatch
+        against an unreviewed op is blocked by the ``is_enabled`` filter in
+        :func:`~meho_backplane.operations._lookup.lookup_descriptor` until
+        an operator clears the gate per op via :meth:`edit_op` (or
+        connector-wide via :meth:`enable_connector`). A stamp can never
+        enable dispatch.
+
+        Where the class goes is decided by
+        :func:`~meho_backplane.operations.ingest.login_setup.place_login_setup`:
+        the shared table for the built-in scope, the tenant's own table for
+        a tenant scope, so a tenant's login setup applies only to that
+        tenant's calls. The returned outcome says what happened:
+        ``"registered"``, ``"replaced"`` (a different login setup was in
+        place for the same scope), ``"unchanged"``, or
+        ``"served_by_connector_code"`` / ``"served_by_builtin_login_setup"``
+        when another class serves the key for every tenant and this login
+        setup is not used.
+
+        ``"registered"`` and ``"replaced"`` write one
+        :data:`OP_PROFILE_STAMP` audit row; a replace names the old and the
+        new login type. The other outcomes write none, so a repeated stamp
+        does not double-audit.
 
         Raises :class:`TypeError` when *connector_class* is not a
         ``ProfiledRestConnector`` — only a profiled class carries an
         ``ExecutionProfile`` to stamp; a bare shim or hand-coded class is
         a programming error here, not a review action.
-
-        The registration's audit row commits in the same transaction as
-        the v2-registry write would conceptually pair with; the v2
-        registry itself is a process-global, not a DB row, so the audit
-        row is the durable, attributable record of the dispatchability
-        change.
         """
         from meho_backplane.connectors.base import shim_kind
-        from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
 
         if shim_kind(connector_class) != "profiled":
             raise TypeError(
@@ -1304,38 +1327,31 @@ class ReviewService:
             )
 
         scope = self._resolve_scope(connector_id, tenant_id, allow_platform_admin_cross_tenant=True)
-        triple = (scope.product, scope.version, scope.impl_id)
-        if triple in all_connectors_v2():
-            # Already stamped (or a hand-coded/bare class occupies the
-            # key) — registering again would raise; treat as idempotent.
-            return False
-
-        register_connector_v2(
-            product=scope.product,
-            version=scope.version,
-            impl_id=scope.impl_id,
-            cls=connector_class,
-        )
-        sessionmaker = self._sessionmaker()
-        async with sessionmaker() as session:
-            await audit_profile_stamp(
-                session,
-                operator_sub=self._operator.sub,
-                operator_tenant_id=self._operator.tenant_id,
-                connector_id=connector_id,
-                scope=scope,
-                connector_class=connector_class.__name__,
-            )
-            await session.commit()
+        change = place_login_setup(scope, connector_class)
+        if change.outcome in LOGIN_SETUP_APPLIED:
+            sessionmaker = self._sessionmaker()
+            async with sessionmaker() as session:
+                await audit_profile_stamp(
+                    session,
+                    operator_sub=self._operator.sub,
+                    operator_tenant_id=self._operator.tenant_id,
+                    connector_id=connector_id,
+                    scope=scope,
+                    connector_class=connector_class,
+                    previous_class=change.previous,
+                )
+                await session.commit()
         _log.info(
             "connector_profile_stamped",
             connector_id=connector_id,
+            tenant_scope=str(scope.tenant_id) if scope.tenant_id is not None else None,
             product=scope.product,
             version=scope.version,
             impl_id=scope.impl_id,
             connector_class=connector_class.__name__,
+            outcome=change.outcome,
         )
-        return True
+        return change.outcome
 
     # -- public write API: state transitions ------------------------------
 

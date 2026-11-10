@@ -5,7 +5,9 @@
 
 Each function returns a ready ``POST /api/v1/sensors`` body (a fresh dict).
 :func:`azure_dashboard_recipe` returns the three sensors as one dashboard file
-(``meho dashboard import``).
+(``meho dashboard import``). Import finds a sensor by its name, so each
+dashboard names its sensors after itself: ``<dashboard>-budget-used`` and so
+on. Two subscriptions with two dashboard names then keep their own sensors.
 
 The three recipes and what each one measures:
 
@@ -149,12 +151,24 @@ def azure_dashboard_recipe(
     advisor_baseline: int,
     name: str = "azure-subscription-health",
 ) -> dict[str, Any]:
-    """The three sensors as one dashboard file, with a target placeholder."""
+    """The three sensors as one dashboard file, with a target placeholder.
+
+    The sensor names start with the dashboard name, so give each subscription
+    its own dashboard name.
+    """
     sensors = []
     for body in (
-        budget_sensor_template(target_name=TARGET_PLACEHOLDER),
-        policy_sensor_template(baseline=policy_baseline, target_name=TARGET_PLACEHOLDER),
-        advisor_sensor_template(baseline=advisor_baseline, target_name=TARGET_PLACEHOLDER),
+        budget_sensor_template(target_name=TARGET_PLACEHOLDER, name=f"{name}-budget-used"),
+        policy_sensor_template(
+            baseline=policy_baseline,
+            target_name=TARGET_PLACEHOLDER,
+            name=f"{name}-policy-non-compliant",
+        ),
+        advisor_sensor_template(
+            baseline=advisor_baseline,
+            target_name=TARGET_PLACEHOLDER,
+            name=f"{name}-advisor-high-impact",
+        ),
     ):
         body["target"] = TARGET_PLACEHOLDER
         sensors.append(body)

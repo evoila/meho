@@ -368,9 +368,9 @@ What each sensor measures:
 
 | Sensor | Value | Degraded | Critical | Checked |
 |---|---|---|---|---|
-| `azure-budget-used` | Highest percent used of the budgets, in the current budget period | 80 or more | 100 or more | every day |
-| `azure-policy-non-compliant` | Non-compliant resources now | above the baseline | more than 10 above the baseline | every 6 hours |
-| `azure-advisor-high-impact` | Open high-impact Advisor recommendations now | above the baseline | more than 10 above the baseline | every day |
+| `<dashboard>-budget-used` | Highest percent used of the budgets, in the current budget period | 80 or more | 100 or more | every day |
+| `<dashboard>-policy-non-compliant` | Non-compliant resources now | above the baseline | more than 10 above the baseline | every 6 hours |
+| `<dashboard>-advisor-high-impact` | Open high-impact Advisor recommendations now | above the baseline | more than 10 above the baseline | every day |
 
 The baseline is the count on the day you make the sensor. Read it once:
 
@@ -395,7 +395,7 @@ file as the `degraded` bounds (`12` and `3` below), and add 10 for the
   },
   "sensors": [
     {
-      "name": "azure-budget-used",
+      "name": "azure-subscription-health-budget-used",
       "connector_id": "azure-arm-2026.10",
       "op_id": "azure.cost.budget.list",
       "target": "azure-subscription",
@@ -417,7 +417,7 @@ file as the `degraded` bounds (`12` and `3` below), and add 10 for the
       "severity": "critical"
     },
     {
-      "name": "azure-policy-non-compliant",
+      "name": "azure-subscription-health-policy-non-compliant",
       "connector_id": "azure-arm-2026.10",
       "op_id": "azure.policy.compliance.summary",
       "target": "azure-subscription",
@@ -438,7 +438,7 @@ file as the `degraded` bounds (`12` and `3` below), and add 10 for the
       "severity": "critical"
     },
     {
-      "name": "azure-advisor-high-impact",
+      "name": "azure-subscription-health-advisor-high-impact",
       "connector_id": "azure-arm-2026.10",
       "op_id": "azure.advisor.recommendation.list",
       "target": "azure-subscription",
@@ -470,6 +470,12 @@ meho dashboard import azure-health.json \
 meho dashboard import azure-health.json \
   --map-target azure-subscription=<azure-target>
 ```
+
+Import finds a sensor by its name. So each sensor name starts with the
+dashboard name. To watch a second subscription, change the dashboard name
+in a copy of the file (for example `azure-sub-b-health`) and change the start
+of the three sensor names the same way. Otherwise the second import changes
+the sensors of the first subscription.
 
 A budget with no amount has no percent, and a sensor with no value shows
 `unknown`, never `ok`. The Python version of these recipes is

@@ -1457,6 +1457,9 @@ dashboard file (format `meho-dashboard/1`) that groups them. It follows
   the same baseline rule. Every day.
 - The baseline is a parameter (`baseline=`): the count on the day the sensor
   is made. It must be a whole number, 0 or more.
+- In the dashboard file each sensor name starts with the dashboard name
+  (`<dashboard>-budget-used`). Import finds sensors by name, so two
+  subscriptions need two dashboard names and then share no sensor.
 - No budget, a budget with no percent, or a count Azure did not give is
   `unknown`, not `ok`.
 - The how-to is in `docs-site/guides/sensors-quickstart.md`. Its JSON is

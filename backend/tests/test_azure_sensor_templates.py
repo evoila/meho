@@ -132,3 +132,17 @@ def test_dashboard_recipe_is_a_valid_dashboard_file_with_three_sensors() -> None
     assert parsed.sensors[1].assertion.compare.degraded == 3  # type: ignore[union-attr]
     for sensor in parsed.sensors:
         sensor.to_create(target_name="sub-a")
+
+
+def test_two_subscription_dashboards_do_not_share_sensor_names() -> None:
+    first = azure_dashboard_recipe(policy_baseline=3, advisor_baseline=1, name="azure-sub-a")
+    second = azure_dashboard_recipe(policy_baseline=5, advisor_baseline=2, name="azure-sub-b")
+    first_names = {s["name"] for s in first["sensors"]}
+    second_names = {s["name"] for s in second["sensors"]}
+    assert len(first_names) == len(second_names) == 3
+    assert not first_names & second_names
+    assert first_names == {
+        "azure-sub-a-budget-used",
+        "azure-sub-a-policy-non-compliant",
+        "azure-sub-a-advisor-high-impact",
+    }

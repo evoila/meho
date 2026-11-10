@@ -1695,8 +1695,12 @@ narrow-waist contract.
   `preview_operation` tool. Resolves the SAME op + target + params a
   real call would and returns the literal would-be request
   (`method` / `resolved_path` / `query` / redacted `body`) plus a
-  `preview_hash` **instead of dispatching** — nothing is sent, no audit
-  row is written. The summary also prints the plan (`proposed_effect`)
+  `preview_hash` **instead of dispatching** — nothing is sent and the
+  operation does not run, so no audit row is written for it. The HTTP
+  request itself is audited like any other request: by default it writes
+  one request row (`http.post:/api/v1/operations/preview`); with
+  `AUDIT_WRAPPER_ROWS_RETIRED=true` it writes none unless it is refused.
+  The summary also prints the plan (`proposed_effect`)
   when the preview has one, or the `plan_note` when it does not (#4028). The `preview_hash` is the binding a
   `safety_level='destructive'` op requires (#3197): the dispatcher
   fail-closes a destructive `call` with `status=denied` /

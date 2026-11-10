@@ -110,7 +110,12 @@ func newPreviewCmd() *cobra.Command {
 			"params a real call would, then returns the literal would-be HTTP " +
 			"request (`method` / `resolved_path` / `query` / redacted `body`) " +
 			"and a `preview_hash` INSTEAD of dispatching. Nothing is sent and " +
-			"no audit row is written.\n\n" +
+			"the operation does not run, so no audit row is written for it. " +
+			"The HTTP request itself is audited like any other request: by " +
+			"default it writes one request row " +
+			"(`http.post:/api/v1/operations/preview`). With " +
+			"AUDIT_WRAPPER_ROWS_RETIRED=true it writes no row, unless the " +
+			"request is refused.\n\n" +
 			"The `preview_hash` is the binding the destructive tier requires " +
 			"(#3197): a `safety_level='destructive'` op refuses to dispatch " +
 			"unless `meho operation call` carries a `--preview-hash` from a " +

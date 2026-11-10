@@ -11,8 +11,8 @@ render logic so neither module exceeds the chassis-wide ~600-line
 cap and the helpers stay unit-testable without a FastAPI
 :class:`Request` fixture for the projection paths.
 
-Route inventory (all tenant_admin-gated server-side via
-:func:`~meho_backplane.ui.routes.connectors.operator.resolve_operator_or_403`):
+Route inventory (all gated server-side to a tenant admin who is a person, via
+:func:`~meho_backplane.ui.routes.connectors.operator.resolve_human_admin_or_403`):
 
 * ``GET   /ui/connectors/create``        -- HTMX-loaded create modal.
 * ``POST  /ui/connectors/create``        -- create submit handler.
@@ -48,14 +48,14 @@ from meho_backplane.ui.routes.connectors.forms import (
     submit_delete,
     submit_edit,
 )
-from meho_backplane.ui.routes.connectors.operator import resolve_operator_or_403
+from meho_backplane.ui.routes.connectors.operator import resolve_human_admin_or_403
 
 __all__ = ["build_forms_router"]
 
 #: Module-level :class:`Depends` closures -- ruff B008 idiom matching
 #: the chassis dashboard / topology / memory routes.
 _require_session_dep = Depends(require_ui_session)
-_require_admin_dep = Depends(resolve_operator_or_403)
+_require_admin_dep = Depends(resolve_human_admin_or_403)
 _get_session_dep = Depends(get_session)
 
 #: Form-field length caps mirroring the

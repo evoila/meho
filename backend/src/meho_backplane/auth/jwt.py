@@ -1757,8 +1757,10 @@ def _cap_agent_role(principal_kind: PrincipalKind, tenant_role: TenantRole) -> T
     (connectors, targets, conventions, grants, tenant policies) is for
     people. MEHO registers new agents with ``tenant_role=operator``. An
     agent registered earlier still has ``tenant_admin`` in its token, so
-    MEHO reads that value as ``operator`` here. People, service logins
-    and runners keep the role their token carries.
+    MEHO reads that value as ``operator`` here, and marks the Operator
+    (:attr:`~meho_backplane.auth.operator.Operator.agent_role_capped`), so
+    MEHO does not send that token to Vault. People, service logins and
+    runners keep the role their token carries.
     """
     if principal_kind is PrincipalKind.AGENT and tenant_role is TenantRole.TENANT_ADMIN:
         return TenantRole.OPERATOR
@@ -1831,8 +1833,8 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     email = _extract_email(claims, sub)
     principal_kind = _extract_principal_kind(claims, settings)
     tenants = _extract_tenants(claims, settings, principal_kind)
-    tenant_id, tenant_role, approver = _start_tenant(claims, settings, tenants)
-    tenant_role = _cap_agent_role(principal_kind, tenant_role)
+    tenant_id, token_role, approver = _start_tenant(claims, settings, tenants)
+    tenant_role = _cap_agent_role(principal_kind, token_role)
     client_id = _extract_client_id(claims, settings, principal_kind)
     capabilities = _extract_capabilities(claims, settings)
     scopes = _extract_scopes(claims, settings)
@@ -1876,6 +1878,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             acr=acr,
             sid=sid,
             azp=_extract_azp(claims),
+            agent_role_capped=tenant_role is not token_role,
         )
     except pydantic.ValidationError as exc:
         # Field names only: the input values may hold personal data.

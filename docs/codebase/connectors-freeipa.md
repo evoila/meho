@@ -77,8 +77,14 @@ registrar stores every operation of `FREEIPA_TYPED_OPS` with
 4. The session is cached per credential (`credential_cache_key`: tenant,
    secret and host). The cache is read without a lock. A login takes the
    lock of its own credential only, so a login that hangs for one IPA server
-   never holds up a call for another credential or another tenant. A call as
-   MEHO's system identity never reads a cached session.
+   never holds up a call for another credential or another tenant. A cached
+   session goes to a caller only after that caller's own Vault read of the
+   target's secret passed once in this process (`SecretReaders`, see
+   [connectors-shared-secret-readers.md](connectors-shared-secret-readers.md)).
+   A caller whose read is refused gets no session. `invalidate_credentials`
+   drops the session and forgets who has read the secret, after a failed
+   login or a target change. A call as MEHO's system identity never reads a
+   cached session.
 5. A refused login answers 401 and names the reason in
    `X-IPA-Rejection-Reason` (for example `invalid-password`,
    `password-expired`, `user-locked`). The error message carries the reason.

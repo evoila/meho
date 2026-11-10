@@ -24,9 +24,9 @@ hard-gated to `tenant_admin`:
 | `GET /ui/keycloak/clients/{client_uuid}` | operator | Client-detail fragment (HTMX-swapped into a drawer container), keyed on the client's **internal UUID**. |
 | `GET /ui/keycloak/users` | operator | Full-page user list (`keycloak.user.list`, `safe`) + optional `?username=` filter. Write affordances soft-hidden from non-admins. |
 | `GET /ui/keycloak/users/create` | tenant_admin | Create-user confirm modal (CSRF token minted + cookie re-set). |
-| `POST /ui/keycloak/users/create` | tenant_admin | Dispatch `keycloak.user.create` (`caution`, requires approval). |
+| `POST /ui/keycloak/users/create` | tenant_admin | Dispatch `keycloak.user.create` (`dangerous`, requires approval). |
 | `GET /ui/keycloak/users/{user_uuid}/reset-password` | tenant_admin | Reset-password confirm modal. |
-| `POST /ui/keycloak/users/{user_uuid}/reset-password` | tenant_admin | Dispatch `keycloak.user.reset_password` (`caution`, requires approval). |
+| `POST /ui/keycloak/users/{user_uuid}/reset-password` | tenant_admin | Dispatch `keycloak.user.reset_password` (`dangerous`, requires approval). |
 | `GET /ui/keycloak/users/{user_uuid}/roles/assign` | tenant_admin | Role-assign confirm modal (a **privilege grant**; reads current roles via `keycloak.role_mapping.get`). |
 | `POST /ui/keycloak/users/{user_uuid}/roles/assign` | tenant_admin | Dispatch `keycloak.role_mapping.assign` (`dangerous`, requires approval). |
 
@@ -125,8 +125,8 @@ keycloak-local mirror of `connectors/operator.py::resolve_operator_or_403`
 with a keycloak-appropriate 403 `detail`), so a forged POST from a plain
 operator gets a hard `403` and never dispatches. The dispatch floor itself
 is operator-tier; this BFF-layer `tenant_admin` gate is layered on top for
-blast radius (create/reset are caution writes, role-assign is a privilege
-grant), the same pattern existing UI write routes use.
+blast radius (create, reset and role-assign are all `dangerous` writes),
+the same pattern existing UI write routes use.
 
 ## Authoring writes (T3, #1961)
 
@@ -142,12 +142,14 @@ stays small. `build_keycloak_router` includes the write router, so the whole
 | `GET/POST /ui/keycloak/client-scopes/create` | `keycloak.client_scope.create` |
 | `GET/POST /ui/keycloak/clients/{client_uuid}/protocol-mappers/create` | `keycloak.protocol_mapper.create` |
 
-Both ops register `safety_level="caution"` / `requires_approval=True`
-(`connectors/keycloak/ops_write_schemas.py`). The protocol-mapper op is the one that
-wires the `tenant_id` / `tenant_role` claims the backplane row-scopes on.
+Both ops register `requires_approval=True`
+(`connectors/keycloak/ops_write_schemas.py`). The client-scope op is
+`caution`. The protocol-mapper op is `dangerous`: it wires the `tenant_id` /
+`tenant_role` claims the backplane row-scopes on, so a MEHO-SA-Operator or a
+tenant admin must approve it.
 
 Each write is reached only from an explicit, unmissable confirm modal (the
-`GET` render) that names the caution safety level and the requires-approval
+`GET` render) that names the op's safety level and the requires-approval
 handoff before the operator can `POST`. The flow mirrors the merged
 `/ui/operations` Run modal exactly:
 

@@ -73,7 +73,7 @@ func newBudgetShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show <principal>",
 		Short: "Show the caps of an agent login and what is used so far (tenant_admin)",
-		Long: "show calls GET /api/v1/agents/budgets. It lists the caps of " +
+		Long: "show calls GET /api/v1/agent-budgets. It lists the caps of " +
 			"the daily, weekly and monthly window, and what the login has " +
 			"used so far in the current day, week and month. --window " +
 			"shows one window. <principal> is the login of the agent, for " +
@@ -82,7 +82,7 @@ func newBudgetShowCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			params := &api.ShowBudgetsApiV1AgentsBudgetsGetParams{PrincipalSub: args[0]}
+			params := &api.ShowBudgetsApiV1AgentBudgetsGetParams{PrincipalSub: args[0]}
 			if window != "" {
 				w, err := parseBudgetWindow(window)
 				if err != nil {
@@ -115,16 +115,16 @@ func newBudgetShowCmd() *cobra.Command {
 	return cmd
 }
 
-func getBudgets(ctx context.Context, backplaneURL string, params *api.ShowBudgetsApiV1AgentsBudgetsGetParams) (*api.ShowBudgetsApiV1AgentsBudgetsGetResponse, error) {
+func getBudgets(ctx context.Context, backplaneURL string, params *api.ShowBudgetsApiV1AgentBudgetsGetParams) (*api.ShowBudgetsApiV1AgentBudgetsGetResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
 	return retryOn401(ctx, authed,
-		func(ctx context.Context) (*api.ShowBudgetsApiV1AgentsBudgetsGetResponse, error) {
-			return authed.ShowBudgetsApiV1AgentsBudgetsGetWithResponse(ctx, params)
+		func(ctx context.Context) (*api.ShowBudgetsApiV1AgentBudgetsGetResponse, error) {
+			return authed.ShowBudgetsApiV1AgentBudgetsGetWithResponse(ctx, params)
 		},
-		func(r *api.ShowBudgetsApiV1AgentsBudgetsGetResponse) int { return r.StatusCode() },
+		func(r *api.ShowBudgetsApiV1AgentBudgetsGetResponse) int { return r.StatusCode() },
 	)
 }
 
@@ -162,7 +162,7 @@ func newBudgetSetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set <principal>",
 		Short: "Set the spend cap of an agent login for one window (tenant_admin)",
-		Long: "set calls PUT /api/v1/agents/budgets. Give --window and at " +
+		Long: "set calls PUT /api/v1/agent-budgets. Give --window and at " +
 			"least one of --token-limit, --cost-limit (USD) and " +
 			"--request-limit. A limit you leave out stays as it is. A limit " +
 			"of 0 stops the login from running at all. Example: meho agent " +
@@ -239,16 +239,16 @@ func buildBudgetSetBody(principal, window string, tokenLimit *int, costLimit *fl
 	}, nil
 }
 
-func putBudget(ctx context.Context, backplaneURL string, body api.AgentBudgetSet) (*api.SetBudgetApiV1AgentsBudgetsPutResponse, error) {
+func putBudget(ctx context.Context, backplaneURL string, body api.AgentBudgetSet) (*api.SetBudgetApiV1AgentBudgetsPutResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
 	return retryOn401(ctx, authed,
-		func(ctx context.Context) (*api.SetBudgetApiV1AgentsBudgetsPutResponse, error) {
-			return authed.SetBudgetApiV1AgentsBudgetsPutWithResponse(ctx, nil, body)
+		func(ctx context.Context) (*api.SetBudgetApiV1AgentBudgetsPutResponse, error) {
+			return authed.SetBudgetApiV1AgentBudgetsPutWithResponse(ctx, nil, body)
 		},
-		func(r *api.SetBudgetApiV1AgentsBudgetsPutResponse) int { return r.StatusCode() },
+		func(r *api.SetBudgetApiV1AgentBudgetsPutResponse) int { return r.StatusCode() },
 	)
 }
 
@@ -277,7 +277,7 @@ func newBudgetClearCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clear <principal>",
 		Short: "Remove the spend cap of an agent login for one window (tenant_admin)",
-		Long: "clear calls DELETE /api/v1/agents/budgets. It removes all " +
+		Long: "clear calls DELETE /api/v1/agent-budgets. It removes all " +
 			"three limits of the window --window, from now on. What the " +
 			"login has used so far is kept.",
 		Args:          cobra.ExactArgs(1),
@@ -292,7 +292,7 @@ func newBudgetClearCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			params := &api.ClearBudgetApiV1AgentsBudgetsDeleteParams{PrincipalSub: args[0], Window: w}
+			params := &api.ClearBudgetApiV1AgentBudgetsDeleteParams{PrincipalSub: args[0], Window: w}
 			resp, err := deleteBudget(cmd.Context(), backplaneURL, params)
 			if err != nil {
 				return renderRequestError(cmd, backplaneURL, err, jsonOut)
@@ -310,15 +310,15 @@ func newBudgetClearCmd() *cobra.Command {
 	return cmd
 }
 
-func deleteBudget(ctx context.Context, backplaneURL string, params *api.ClearBudgetApiV1AgentsBudgetsDeleteParams) (*api.ClearBudgetApiV1AgentsBudgetsDeleteResponse, error) {
+func deleteBudget(ctx context.Context, backplaneURL string, params *api.ClearBudgetApiV1AgentBudgetsDeleteParams) (*api.ClearBudgetApiV1AgentBudgetsDeleteResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
 	return retryOn401(ctx, authed,
-		func(ctx context.Context) (*api.ClearBudgetApiV1AgentsBudgetsDeleteResponse, error) {
-			return authed.ClearBudgetApiV1AgentsBudgetsDeleteWithResponse(ctx, params)
+		func(ctx context.Context) (*api.ClearBudgetApiV1AgentBudgetsDeleteResponse, error) {
+			return authed.ClearBudgetApiV1AgentBudgetsDeleteWithResponse(ctx, params)
 		},
-		func(r *api.ClearBudgetApiV1AgentsBudgetsDeleteResponse) int { return r.StatusCode() },
+		func(r *api.ClearBudgetApiV1AgentBudgetsDeleteResponse) int { return r.StatusCode() },
 	)
 }

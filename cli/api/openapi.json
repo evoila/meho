@@ -8518,14 +8518,14 @@
         }
       }
     },
-    "/api/v1/agents/budgets": {
+    "/api/v1/agent-budgets": {
       "get": {
         "tags": [
           "agent-budgets"
         ],
         "summary": "Show Budgets",
         "description": "Show the caps and the use so far of one principal (all windows, or one).",
-        "operationId": "show_budgets_api_v1_agents_budgets_get",
+        "operationId": "show_budgets_api_v1_agent_budgets_get",
         "parameters": [
           {
             "name": "principal_sub",
@@ -8587,7 +8587,7 @@
         ],
         "summary": "Set Budget",
         "description": "Set the limits of one window. A limit that is left out stays as it is.",
-        "operationId": "set_budget_api_v1_agents_budgets_put",
+        "operationId": "set_budget_api_v1_agent_budgets_put",
         "parameters": [
           {
             "name": "authorization",
@@ -8639,7 +8639,7 @@
         ],
         "summary": "Clear Budget",
         "description": "Remove all limits of one window. What is used so far is kept.",
-        "operationId": "clear_budget_api_v1_agents_budgets_delete",
+        "operationId": "clear_budget_api_v1_agent_budgets_delete",
         "parameters": [
           {
             "name": "principal_sub",
@@ -25638,7 +25638,7 @@
           "window"
         ],
         "title": "AgentBudgetSet",
-        "description": "Body of ``PUT /api/v1/agents/budgets``."
+        "description": "Body of ``PUT /api/v1/agent-budgets``."
       },
       "AgentDefinitionCreate": {
         "properties": {

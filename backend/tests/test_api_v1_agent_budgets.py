@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""REST tests for ``/api/v1/agents/budgets`` (set, show and clear a spend cap).
+"""REST tests for ``/api/v1/agent-budgets`` (set, show and clear a spend cap).
 
 * **Role** — only ``tenant_admin`` may call any route; ``operator`` gets 403.
 * **People only** — set and clear refuse a machine login (an agent cannot
   change its own cap), and the refusal is audited.
 * **The cap works** — a daily request cap of 1 set over REST lets the first
-  run start and refuses the second one.
+  hosted run start and refuses the second one with ``budget_exceeded``.
+* **Agent names** — an agent definition named ``budgets`` can still be shown
+  and deleted under ``/api/v1/agents/{name}``.
 * **Audit** — set and clear each write an audit row.
 * **Bad input** — a body without any limit, a negative limit and an unknown
   window are refused with 422.
@@ -26,29 +28,28 @@ from typing import Any
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
 
-from meho_backplane.agent.models import AgentTier
+from meho_backplane.agent.invocation import AgentInvoker, reset_agent_invoker_for_testing
+from meho_backplane.agent.run import PydanticAgentRun
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, BudgetWindowKind
+from meho_backplane.db.models import AgentDefinition, AuditLog, BudgetWindowKind, Tenant
 from meho_backplane.main import app
-from meho_backplane.operations.budget_enforcement import (
-    BudgetDecisionKind,
-    EnforcementContext,
-    evaluate_pre_run_budget,
-)
 from meho_backplane.operations.identity_budget import apply_consumption, get_remaining
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
+from ._vault_fakes import install_fake_vault
 
 _TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _TENANT_B = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
-_BASE = "/api/v1/agents/budgets"
+_BASE = "/api/v1/agent-budgets"
 _AGENT = "agent:pod-reader"
 
 
@@ -86,6 +87,35 @@ def _headers(
     extra: dict[str, Any] = {"principal_kind": kind} if kind else {}
     token = mint_token(key, sub=sub, tenant_role=role.value, tenant_id=str(tenant), **extra)
     return {"Authorization": f"Bearer {token}"}
+
+
+def _final_text(text: str) -> FunctionModel:
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart(text)])
+
+    return FunctionModel(fn)
+
+
+async def _seed_definition(name: str) -> None:
+    async with get_sessionmaker()() as session:
+        if await session.get(Tenant, _TENANT_A) is None:
+            session.add(Tenant(id=_TENANT_A, slug="tenant-a", name="Tenant tenant-a"))
+            await session.flush()
+        session.add(
+            AgentDefinition(
+                tenant_id=_TENANT_A,
+                name=name,
+                identity_ref=f"agent:{name}",
+                model_tier="standard",
+                system_prompt="You answer.",
+                toolset={},
+                turn_budget=5,
+                output_schema=None,
+                enabled=True,
+                created_by_sub="seed-admin",
+            )
+        )
+        await session.commit()
 
 
 _ENDPOINTS: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
@@ -222,43 +252,56 @@ def test_bad_body_is_422(client: TestClient, body: dict[str, Any]) -> None:
     assert response.status_code == 422, response.text
 
 
-def test_cap_of_one_request_refuses_the_second_run(client: TestClient) -> None:
-    """Daily request cap 1: the first run may start, the second is refused."""
+def test_cap_set_over_rest_lets_one_run_start_and_refuses_the_next(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daily request cap 1 set over REST: the first hosted run runs, the second gets 429."""
+    install_fake_vault(monkeypatch)
+    asyncio.run(_seed_definition("cap-one"))
+    reset_agent_invoker_for_testing(
+        AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: _final_text("done")))
+    )
     key = make_rsa_keypair("kid-cap")
-    sub = "agent:cap-one"
+    sub = "op-cap-one"
+    run_headers = _headers(key, role=TenantRole.OPERATOR, sub=sub)
+    try:
+        with respx.mock as r:
+            mock_discovery_and_jwks(r, public_jwks(key))
+            put = client.put(
+                _BASE,
+                headers=_headers(key),
+                json={"principal_sub": sub, "window": "daily", "request_limit": 1},
+            )
+            assert put.status_code == 200, put.text
+            first = client.post(
+                "/api/v1/agents/cap-one/run", json={"input": "go"}, headers=run_headers
+            )
+            second = client.post(
+                "/api/v1/agents/cap-one/run", json={"input": "go"}, headers=run_headers
+            )
+    finally:
+        reset_agent_invoker_for_testing(None)
+
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "succeeded"
+    assert second.status_code == 429, second.text
+    assert second.json()["detail"]["error"] == "budget_exceeded"
+
+
+def test_agent_named_budgets_is_still_reachable(client: TestClient) -> None:
+    """The cap routes do not hide an agent definition called ``budgets``."""
+    asyncio.run(_seed_definition("budgets"))
+    key = make_rsa_keypair("kid-name")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
-        put = client.put(
-            _BASE,
-            headers=_headers(key),
-            json={"principal_sub": sub, "window": "daily", "request_limit": 1},
-        )
-    assert put.status_code == 200, put.text
-
-    context = EnforcementContext(
-        degrade_threshold=0.8, global_kill_switch=False, disabled_tenants=frozenset()
-    )
-
-    async def _gate() -> BudgetDecisionKind:
-        async with get_sessionmaker()() as session:
-            decision = await evaluate_pre_run_budget(
-                session,
-                tenant_id=_TENANT_A,
-                principal_sub=sub,
-                requested_tier=AgentTier.TRIAGE,
-                context=context,
-            )
-        return decision.kind
-
-    async def _run_once() -> None:
-        async with get_sessionmaker()() as session, session.begin():
-            await apply_consumption(
-                session, tenant_id=_TENANT_A, principal_sub=sub, tokens=10, cost=Decimal("0.01")
-            )
-
-    assert asyncio.run(_gate()) is BudgetDecisionKind.ALLOW
-    asyncio.run(_run_once())
-    assert asyncio.run(_gate()) is BudgetDecisionKind.REFUSE
+        headers = _headers(key)
+        shown = client.get("/api/v1/agents/budgets", headers=headers)
+        assert shown.status_code == 200, shown.text
+        assert shown.json()["name"] == "budgets"
+        deleted = client.delete("/api/v1/agents/budgets", headers=headers)
+        assert deleted.status_code == 204, deleted.text
+        gone = client.get("/api/v1/agents/budgets", headers=headers)
+    assert gone.status_code == 404, gone.text
 
 
 def test_cap_holds_in_the_next_window_and_clear_removes_it(client: TestClient) -> None:

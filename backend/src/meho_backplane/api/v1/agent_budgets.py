@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``/api/v1/agents/budgets`` — set, show and clear the spend caps of an agent login.
+"""``/api/v1/agent-budgets`` — set, show and clear the spend caps of an agent login.
 
 MEHO checks the caps before every hosted agent run
 (:mod:`meho_backplane.operations.budget_enforcement`). This module is the
@@ -12,11 +12,11 @@ set means no cap on that value.
 Routes
 ------
 
-* ``GET /api/v1/agents/budgets?principal_sub=<sub>`` — the caps of the
+* ``GET /api/v1/agent-budgets?principal_sub=<sub>`` — the caps of the
   principal and what is used so far in the current day, week and month.
-* ``PUT /api/v1/agents/budgets`` — set one or more limits of one window.
+* ``PUT /api/v1/agent-budgets`` — set one or more limits of one window.
   A limit left out stays as it is.
-* ``DELETE /api/v1/agents/budgets?principal_sub=<sub>&window=<window>`` —
+* ``DELETE /api/v1/agent-budgets?principal_sub=<sub>&window=<window>`` —
   remove all limits of one window.
 
 Only ``tenant_admin`` may call them, the same as for agent grants. Set and
@@ -48,7 +48,7 @@ from meho_backplane.operations.identity_budget import (
 
 __all__ = ["router"]
 
-router = APIRouter(prefix="/api/v1/agents/budgets", tags=["agent-budgets"])
+router = APIRouter(prefix="/api/v1/agent-budgets", tags=["agent-budgets"])
 
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 _require_human = Depends(require_human_principal)
@@ -94,7 +94,7 @@ class AgentBudgetListResponse(BaseModel):
 
 
 class AgentBudgetSet(BaseModel):
-    """Body of ``PUT /api/v1/agents/budgets``."""
+    """Body of ``PUT /api/v1/agent-budgets``."""
 
     model_config = ConfigDict(extra="forbid")
 

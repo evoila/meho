@@ -314,7 +314,7 @@ pre-check) that produces a `BudgetDecision`:
 ### Setting the caps (REST + CLI)
 
 `api/v1/agent_budgets.py` is the only runtime caller of `set_limits`
-and `clear_limits`. Routes under `/api/v1/agents/budgets`:
+and `clear_limits`. Routes under `/api/v1/agent-budgets`:
 `GET ?principal_sub=` (the three windows with limits and use so far),
 `PUT` (set one or more limits of one window; a limit left out is kept)
 and `DELETE ?principal_sub=&window=` (clear all limits of the window).

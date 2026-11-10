@@ -68,7 +68,7 @@ one, that test fails and the constant must be promoted into
 :data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
 to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
 34 by the #3851 user logout, to 37 by the #3886 realm delete, to 45 by the login flow
-ops, and to 48 by the passkey step op) were
+ops, to 48 by the passkey step op, and to 50 by the one-time code ops) were
 served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -135,6 +135,9 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_AUTH_FLOW_COPY_PATH": ("POST",),
     "_AUTH_EXECUTION_CONFIG_PATH": ("POST",),
     "_AUTH_EXECUTION_RAISE_PRIORITY_PATH": ("POST",),
+    # One-time code ops: the realm's required actions and a user's credential types.
+    "_REQUIRED_ACTIONS_PATH": ("GET",),
+    "_USER_CREDENTIALS_PATH": ("GET",),
 }
 
 #: Dispatched constants deliberately outside the pinned Admin REST
@@ -199,6 +202,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/authentication/config/{id}",
         "GET:/admin/realms/{realm}/authentication/flows",
         "GET:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
+        "GET:/admin/realms/{realm}/authentication/required-actions",
         "GET:/admin/realms/{realm}/client-scopes",
         "GET:/admin/realms/{realm}/clients",
         "GET:/admin/realms/{realm}/clients/{client-uuid}",
@@ -215,6 +219,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/users",
         "GET:/admin/realms/{realm}/users/count",
         "GET:/admin/realms/{realm}/users/{user-id}",
+        "GET:/admin/realms/{realm}/users/{user-id}/credentials",
         "GET:/admin/realms/{realm}/users/{user-id}/groups",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings",
         "POST:/admin/realms",

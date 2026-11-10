@@ -108,6 +108,9 @@ _AUTH_EXECUTION_RAISE_PRIORITY_PATH = (
     "/admin/realms/{realm}/authentication/executions/{executionId}/raise-priority"
 )
 _IDENTITY_PROVIDERS_PATH = "/admin/realms/{realm}/identity-provider/instances"
+# One-time code ops: the realm's required actions and a user's credential types.
+_REQUIRED_ACTIONS_PATH = "/admin/realms/{realm}/authentication/required-actions"
+_USER_CREDENTIALS_PATH = "/admin/realms/{realm}/users/{user-id}/credentials"
 
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----
 

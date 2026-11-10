@@ -38,8 +38,11 @@ change worked (the new password is accepted, the old one refused) without a
 `keycloak.identity_provider.list` (read surface **eleven**) set up the
 approval sign-in flow, and `keycloak.authflow.ensure_passkey_code_skip`
 changes the browser sign-in flow for passkeys. In total the connector
-registers 32 operations: 11 `safe` reads and 21 writes that wait for
-approval (6 `caution`, 11 `dangerous`, 4 `destructive`).
+registers 34 operations: 12 `safe` reads and 22 writes that wait for
+approval (7 `caution`, 11 `dangerous`, 4 `destructive`).
+`keycloak.user.required_actions.update` makes a user set up a one-time code
+(OTP) at the next login, and `keycloak.user.otp_status` shows who has one
+(see "One-time code set-up").
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -100,6 +103,9 @@ fresh target with no asserted version still resolves.
   (`connectors/keycloak/ops_login_check.py`) — the login test op, its
   group text (`WHEN_TO_USE_LOGIN_CHECK_BY_GROUP`) and its approval card.
   It reuses `_read_password_from_vault` from `ops_write.py`.
+- `USER_REQUIRED_ACTION_OPS` + `keycloak_user_required_actions_update` +
+  `keycloak_user_otp_status` (`connectors/keycloak/ops_user_required_actions.py`)
+  — the one-time code ops and the approval card of the write.
 - `KeycloakWriteResult` (`connectors/keycloak/connector.py`) — the
   status + `Location` + `conflict` outcome of a mutating request;
   `created_uuid()` parses the new object's UUID out of `Location`.
@@ -333,6 +339,7 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
 | `keycloak.user.check_login` | caution | `POST /realms/{realm}/protocol/openid-connect/token` (see "Login test") |
+| `keycloak.user.required_actions.update` | caution | `PUT .../users/{user-id}` (see "One-time code set-up") |
 
 Five more writes are `dangerous` because they can change who gets which
 tenant rights. MEHO reads the rights from the login token, and these
@@ -568,6 +575,44 @@ for example at the end of an event or when someone leaves.
   broadcast feed it is a plain `write` (pinned in
   `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
 - CLI: `meho keycloak user logout (--id|--username)`.
+
+### One-time code set-up
+
+Two ops in `ops_user_required_actions.py`. The usual use is to make users
+set up a one-time code (OTP) app: Keycloak then asks for a code at every
+login.
+
+- `keycloak.user.required_actions.update` (caution, approval required,
+  group `user_write`). Params: the user (`id` or `username`) and an `add`
+  and/or a `remove` list of required action names, for example
+  `{"username": "alice", "add": ["CONFIGURE_TOTP"]}`.
+  - Keycloak's `PUT .../users/{id}` replaces the whole `requiredActions`
+    list. So the op reads the user, builds the new list (other actions
+    stay), and writes the full user back with `read_merge_write`.
+  - Each name in `add` must be an enabled required action of the realm
+    (`GET .../authentication/required-actions`). An unknown or disabled
+    name is refused before any write, and the error lists the allowed
+    names. A name in both lists is refused too.
+  - When the list would not change, nothing is written (`changed: false`).
+  - Answer: `{id, username, realm, changed, added, removed,
+    required_actions, unrequested_changes, read_back_checked}`.
+  - The approval card shows `{resource, username, id, realm, add, remove,
+    current_available[, current_required_actions,
+    resulting_required_actions]}`. When the user cannot be read at park
+    time, the card still shows the request.
+  - Two writers at the same time can overwrite each other: Keycloak has no
+    version check on a user.
+- `keycloak.user.otp_status` (safe read, group `user`). Params: `username`
+  (filter) and `max` (default 100, most 500). Keycloak's user list answers
+  a short form without `requiredActions` by default, so `keycloak.user.list`
+  cannot answer this. The op asks for the full form, then reads each
+  user's credentials (one request per user, eight at a time) and keeps
+  only whether a credential of type `otp` exists. Answer: `{rows: [{id,
+  username, enabled, required_actions, has_otp, otp_setup_pending}], total,
+  unknown, truncated}`. `has_otp` is `null` (unknown) when the credentials
+  of that user could not be read. `truncated` is `true` when more users
+  exist than `max`. No credential value, label or other credential field
+  is ever returned.
 
 ### Login test
 
@@ -847,6 +892,7 @@ use:
 | `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
+| `keycloak.user.required_actions.update` | `{resource, username, id, realm, add, remove, current_available[, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back}` (registered in `ops_authflow_passkey.py`) |
 | `keycloak.realm.update` | `{resource, realm, representation[, smtp_password_source, smtp_password_secret_ref]}` (registered in `ops_write_realm_smtp.py`) |

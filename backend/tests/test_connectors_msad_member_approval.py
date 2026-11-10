@@ -12,6 +12,9 @@ stored operations:
 * a person with a token and an agent wait too;
 * a ``caution`` write without the approval flag (``msad.ou.create``) still runs
   at once in the web interface, so the wait comes from the flag.
+* a service login with a matching standing grant or run approval still waits,
+  and a person can create neither for these two operations; the same grant or
+  run approval still covers ``msad.ou.create``.
 
 Fixture values are made up; no real host, user or id appears here.
 """
@@ -21,6 +24,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
@@ -31,11 +35,22 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.msad import MsadConnector, register_msad_typed_operations
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.db.models import ApprovalRequest, RunApproval, ServicePrincipalGrant
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
     reset_handler_cache,
+)
+from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
+from meho_backplane.operations.run_approvals import (
+    RunApprovalService,
+    RunApprovalValidationError,
+)
+from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
+from meho_backplane.operations.service_grants import (
+    GrantValidationError,
+    ServicePrincipalGrantService,
 )
 from meho_backplane.settings import get_settings
 
@@ -111,7 +126,9 @@ def _completed(payload: dict[str, Any]) -> Any:
     return proc
 
 
-async def _run(op_id: str, params: dict[str, Any], operator: Operator) -> tuple[Any, AsyncMock]:
+async def _run(
+    op_id: str, params: dict[str, Any], operator: Operator, target: _Target | None = None
+) -> tuple[Any, AsyncMock]:
     await register_msad_typed_operations()
     connector = get_or_create_connector_instance(MsadConnector)
     run_mock = AsyncMock(return_value=_completed({"ok": True}))
@@ -120,7 +137,7 @@ async def _run(op_id: str, params: dict[str, Any], operator: Operator) -> tuple[
             operator=operator,
             connector_id=_CONNECTOR_ID,
             op_id=op_id,
-            target=_Target(),
+            target=target or _Target(),
             params=params,
         )
     return result, run_mock
@@ -165,3 +182,118 @@ async def test_web_console_caution_write_without_the_flag_runs_at_once() -> None
 
     assert result.status == "ok", result.error
     run_mock.assert_awaited_once()
+
+
+_OU_CREATE = "msad.ou.create"
+_OU_PARAMS = {"name": "Servers", "path": "DC=example,DC=test"}
+_RUN_REF = "run-msad-0001"
+
+
+async def _add_grant(operator: Operator, op_id: str, target: _Target) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            ServicePrincipalGrant(
+                id=uuid.uuid4(),
+                tenant_id=operator.tenant_id,
+                principal_sub=operator.sub,
+                op_id=op_id,
+                connector_id=_CONNECTOR_ID,
+                target_id=target.id,
+                reason="directory automation",
+                created_by_sub="op-person",
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _MEMBER_OPS)
+async def test_standing_grant_does_not_clear_a_member_write(op_id: str) -> None:
+    # Written straight to the table, past the create check, as a row stored
+    # before the mark would be.
+    operator = _operator(kind=PrincipalKind.SERVICE)
+    target = _Target()
+    await _add_grant(operator, op_id, target)
+    await _add_grant(operator, _OU_CREATE, target)
+
+    result, run_mock = await _run(op_id, dict(_MEMBER_PARAMS), operator, target)
+
+    assert result.status == "awaiting_approval", result.error
+    run_mock.assert_not_awaited()
+    # The same kind of grant still covers a write without the mark.
+    result, run_mock = await _run(_OU_CREATE, dict(_OU_PARAMS), operator, target)
+    assert result.status == "ok", result.error
+    run_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _MEMBER_OPS)
+async def test_run_approval_does_not_clear_a_member_write(op_id: str) -> None:
+    operator = _operator(kind=PrincipalKind.SERVICE)
+    target = _Target()
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session:
+        session.add(
+            RunApproval(
+                id=uuid.uuid4(),
+                tenant_id=operator.tenant_id,
+                principal_sub=operator.sub,
+                work_ref=_RUN_REF,
+                entries=[
+                    {"connector_id": _CONNECTOR_ID, "op_id": op_id, "target_id": str(target.id)},
+                    {
+                        "connector_id": _CONNECTOR_ID,
+                        "op_id": _OU_CREATE,
+                        "target_id": str(target.id),
+                    },
+                ],
+                reason="directory automation",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
+                approved_at=now,
+                approved_by_sub="op-person",
+            )
+        )
+        await session.commit()
+
+    token = work_ref_var.set(_RUN_REF)
+    try:
+        result, run_mock = await _run(op_id, dict(_MEMBER_PARAMS), operator, target)
+        assert result.status == "awaiting_approval", result.error
+        run_mock.assert_not_awaited()
+        # The same run approval still covers a write without the mark.
+        result, run_mock = await _run(_OU_CREATE, dict(_OU_PARAMS), operator, target)
+        assert result.status == "ok", result.error
+        run_mock.assert_awaited_once()
+    finally:
+        work_ref_var.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _MEMBER_OPS)
+async def test_no_standing_grant_can_be_created_for_a_member_write(op_id: str) -> None:
+    with pytest.raises(GrantValidationError, match="a person approves each call"):
+        await ServicePrincipalGrantService().create(
+            _operator().tenant_id,
+            "op-person",
+            ServiceGrantCreate(
+                principal_sub="svc-msad",
+                op_id=op_id,
+                connector_id=_CONNECTOR_ID,
+                reason="directory automation",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _MEMBER_OPS)
+async def test_no_run_approval_can_list_a_member_write(op_id: str) -> None:
+    with pytest.raises(RunApprovalValidationError, match="a person approves each call"):
+        await RunApprovalService().request(
+            _operator(kind=PrincipalKind.SERVICE),
+            RunApprovalCreate(
+                work_ref=_RUN_REF,
+                entries=[RunApprovalEntry(connector_id=_CONNECTOR_ID, op_id=op_id)],
+                reason="directory automation",
+            ),
+        )

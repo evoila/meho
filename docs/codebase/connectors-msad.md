@@ -122,6 +122,12 @@ Keycloak connector. MEHO does not keep a list of admin groups for
 this: a group can be named by name, DN, GUID or SID, and groups can be nested,
 so such a list would miss cases.
 
+A person approves each call of these two. The connector marks them with
+`declare_per_call_approval` (`connectors/msad/op_classes.py`), so no standing
+grant of a service login and no run approval of an automation run covers them.
+MEHO refuses to create such a grant or run approval, and at call time a stored
+one does not clear the wait.
+
 The three `dangerous` ops (`user.delete`, `group.delete`, `computer.delete`) are
 `requires_approval=True` — a dispatch parks at `needs-approval` for a human
 decision (the rke2 write mold; the generic params-echo default (#1856) surfaces

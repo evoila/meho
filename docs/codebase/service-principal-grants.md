@@ -90,15 +90,18 @@ When a `SERVICE` op would park, the gate consults a live standing grant
 matched — the dispatcher and the composite sub-op gate both pass it; the
 gateway path is safe-only and never needs it). A match auto-approves the
 op and records the use; absent a match, the op parks for a human decision.
-Three kinds of op are refused **before** any grant lookup, so even a stale grant
+Four kinds of op are refused **before** any grant lookup, so even a stale grant
 row cannot auto-approve them: the `destructive` tier (the tier always
 parks for a human), an op that reads a credential (`classify_op` says
 `credential_read`; grant create refuses it with "A standing grant cannot
 cover OP: it shows a secret, so a person always approves it", and a wider
-grant never clears its wait; `credential_read_grant_reason`), and an op with a parameter marked
+grant never clears its wait; `credential_read_grant_reason`), an op with a parameter marked
 `x-meho-caller-address: true` (it connects to an address the caller
 gives; a grant never covers the address, so a person approves each call,
-and grant create refuses such a grant — `caller_address_grant_reason`).
+and grant create refuses such a grant — `caller_address_grant_reason`), and an
+op a connector marks with `declare_per_call_approval` (`op_classes.py`; today
+`msad.group.add-member` and `msad.group.remove-member`): a person approves each
+call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
 Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).

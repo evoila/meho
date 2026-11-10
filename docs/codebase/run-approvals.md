@@ -146,6 +146,20 @@ the gateway, static route, alias, alias member and NAT deletes. A read with
 a fixed command, for example `linux.firewall.show` or `pfsense.diag.ping`,
 is not marked: it does not change the host.
 
+## Never covered: a call a person approves one by one
+
+A connector marks an operation with `declare_per_call_approval(op_ids)`
+(`op_classes.py`) when a person approves each of its calls.
+`needs_per_call_approval(op_id)` reads the mark. Neither a run approval nor
+a standing grant covers such an operation:
+
+- `RunApprovalService.request` refuses a list with a marked operation (422).
+- At call time the gate never lets a run approval or a standing grant clear
+  a marked operation.
+
+Marked today: `msad.group.add-member` and `msad.group.remove-member`. A group
+membership gives rights in the domain.
+
 ## REST
 
 | Verb | Path | Who |

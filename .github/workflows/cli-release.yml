@@ -38,7 +38,10 @@
 #
 # After the `release` job, the `windows-check` job downloads each Windows
 # zip from the Release on a GitHub-hosted Windows runner, checks its hash
-# against SHA256SUMS and runs `meho.exe version`.
+# against SHA256SUMS and runs `meho.exe version`. Set the repository
+# variable MEHO_WINDOWS_ARM_CHECK to `skip` when the `windows-11-arm`
+# runner is not available: then only amd64 is checked, and the
+# `windows-arm-skipped` job asks for a check of arm64 by hand.
 #
 # After the `release` job, the `linux-download` job calls
 # linux-download.yml (#4734). It builds the download of install form 2,
@@ -500,14 +503,15 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    # amd64 always runs. arm64 needs the `windows-11-arm` runner. If the
+    # organisation does not allow that runner, the job would wait in the
+    # queue and never start. Then set the repository variable
+    # MEHO_WINDOWS_ARM_CHECK to `skip`: the matrix leaves arm64 out, and
+    # the `windows-arm-skipped` job says so in the summary.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: windows-latest
-          - arch: arm64
-            runner: windows-11-arm
+        include: ${{ fromJSON(vars.MEHO_WINDOWS_ARM_CHECK == 'skip' && '[{"arch":"amd64","runner":"windows-latest"}]' || '[{"arch":"amd64","runner":"windows-latest"},{"arch":"arm64","runner":"windows-11-arm"}]') }}
     steps:
       - name: Download, check the hash, unzip, run meho.exe version
         shell: pwsh
@@ -533,6 +537,33 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "meho.exe version failed" }
           if (-not $out.Contains($env:TAG)) { throw "meho.exe version does not name the tag $($env:TAG)" }
           "Windows $($env:ARCH): hash matches, ``meho.exe version`` names $($env:TAG)." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+  windows-arm-skipped:
+    name: Windows check (meho.exe arm64) skipped
+    # Runs only when the repository variable MEHO_WINDOWS_ARM_CHECK is
+    # `skip` (see `windows-check`). It writes why the arm64 check did not
+    # run, and that a person must check the arm64 zip by hand.
+    needs: release
+    if: vars.MEHO_WINDOWS_ARM_CHECK == 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Write why the arm64 check did not run
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo "### Windows arm64 check did not run"
+            echo ""
+            echo "The repository variable \`MEHO_WINDOWS_ARM_CHECK\` is \`skip\`,"
+            echo "because the \`windows-11-arm\` runner is not available."
+            echo ""
+            echo "Check \`meho_${TAG#v}_windows_arm64.zip\` by hand on an ARM"
+            echo "Windows machine: check its hash against \`SHA256SUMS\`, unzip it"
+            echo "and run \`meho.exe version\`. The output must name \`${TAG}\`."
+            echo "The steps are in docs-site/clients/cli.md, section Windows."
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   linux-download:
     name: Form-2 download (meho-linux-<version>-amd64.tar)

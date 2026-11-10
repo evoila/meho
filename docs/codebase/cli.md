@@ -2717,7 +2717,11 @@ After the `release` job, the `windows-check` job of `cli-release.yml`
 runs on GitHub-hosted runners (`windows-latest` for amd64,
 `windows-11-arm` for arm64). It downloads the zip and `SHA256SUMS` from
 the Release, checks the hash, unzips, and runs `meho.exe version`. It
-fails unless the output names the release tag. The `Go build (Windows)`
+fails unless the output names the release tag. If the organisation does
+not allow the `windows-11-arm` runner, set the repository variable
+`MEHO_WINDOWS_ARM_CHECK` to `skip`. Then only amd64 is checked, and the
+`windows-arm-skipped` job writes in the summary that a person must check
+the arm64 zip by hand. The `Go build (Windows)`
 step in `ci.yml` builds `./...` for both Windows targets on every pull
 request. The Go tests are not run on Windows (they do not compile there
 yet).

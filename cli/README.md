@@ -309,7 +309,9 @@ On Windows, download the `.zip` file in PowerShell and unzip it with
 `Expand-Archive`. The full steps are in the
 [install guide](../docs-site/clients/cli.md#windows). After a release,
 the `windows-check` job of `cli-release.yml` downloads each Windows zip,
-checks its hash and runs `meho.exe version`.
+checks its hash and runs `meho.exe version`. When the repository
+variable `MEHO_WINDOWS_ARM_CHECK` is `skip`, it checks only amd64, and
+the job summary asks for a check of the arm64 zip by hand.
 
 ### Verify signatures
 

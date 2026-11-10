@@ -131,7 +131,9 @@ def test_version_falls_back_to_unknown(client: TestClient, monkeypatch: pytest.M
     response = client.get("/version")
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    assert isinstance(body.pop("agent_switches"), dict)  # test_version_agent_switches.py
+    assert body == {
         "git_sha": "unknown",
         "build_date": "unknown",
         "chart_version": None,
@@ -147,7 +149,9 @@ def test_version_reads_env_vars(client: TestClient, monkeypatch: pytest.MonkeyPa
     response = client.get("/version")
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    assert isinstance(body.pop("agent_switches"), dict)  # test_version_agent_switches.py
+    assert body == {
         "git_sha": "abc1234",
         "build_date": "2026-05-09T12:00:00Z",
         "chart_version": "0.1.20260518-abc1234",
@@ -173,7 +177,9 @@ def test_version_treats_empty_env_as_unknown(
     response = client.get("/version")
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    assert isinstance(body.pop("agent_switches"), dict)  # test_version_agent_switches.py
+    assert body == {
         "git_sha": "unknown",
         "build_date": "unknown",
         "chart_version": None,

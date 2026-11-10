@@ -11793,6 +11793,7 @@ type VaultStatus struct {
 
 // VersionResponse “GET /version“ response body.
 type VersionResponse struct {
+	AgentSwitches     *map[string]bool    `json:"agent_switches,omitempty"`
 	BuildDate         string              `json:"build_date"`
 	ChartVersion      *string             `json:"chart_version"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`

@@ -126,7 +126,7 @@
           "version"
         ],
         "summary": "Version",
-        "description": "Return the build-identity payload and the installed connector packages.\n\nEach build field falls back to ``\"unknown\"`` when its env var is unset\nor empty, which keeps local development frictionless without ever\npretending an unknown build is a known one. ``connector_packages`` is\nempty for the plain public image.",
+        "description": "Return the build identity, the connector packages and the agent switches.\n\nEach build field falls back to ``\"unknown\"`` when its env var is unset\nor empty, which keeps local development frictionless without ever\npretending an unknown build is a known one. ``connector_packages`` is\nempty for the plain public image. ``agent_switches`` lists each\nagent-facing setting with its value.",
         "operationId": "version_version_get",
         "responses": {
           "200": {
@@ -43028,6 +43028,14 @@
             "type": "array",
             "title": "Connector Packages",
             "default": []
+          },
+          "agent_switches": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Agent Switches",
+            "default": {}
           }
         },
         "type": "object",

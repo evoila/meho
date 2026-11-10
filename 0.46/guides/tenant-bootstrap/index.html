@@ -3295,7 +3295,9 @@ v0.39.0 on) sends that list, and MEHO then takes the tenant from the
 meho<span class="w"> </span>keycloak<span class="w"> </span>user<span class="w"> </span>create<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>-f<span class="w"> </span>alice.json<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--password-secret-ref<span class="w"> </span>&lt;vault-path-of-the-password&gt;<span class="w"> </span>--temporary
 </code></pre></div>
-<p>This step waits for approval too (risk level <code>caution</code>).</p>
+<p>This step waits for approval too (risk level <code>dangerous</code>). A
+MEHO-SA-Operator or an admin must approve it, the same as the group
+steps.</p>
 <h2 id="step-5-put-each-person-in-exactly-one-group">Step 5: Put each person in exactly one group<a class="headerlink" href="#step-5-put-each-person-in-exactly-one-group" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>member<span class="w"> </span>add<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--username<span class="w"> </span>alice@acme.example<span class="w"> </span>--group-name<span class="w"> </span>MEHO-acme-Admins

@@ -278,6 +278,10 @@ func runReadApproved(cmd *cobra.Command, idArg, field, backplaneOverride string)
 	return writeFieldValue(cmd, r, field)
 }
 
+// statusTokenExpired is HTTP 401: the stored token has expired, so the
+// call is retried once after a refresh.
+const statusTokenExpired = 401
+
 // fetchApprovalResult reads GET /api/v1/approvals/{id}/result with one
 // retry after a token refresh. A 403 or 404 comes back as a structured
 // error, so the caller never mistakes it for a result.
@@ -288,7 +292,7 @@ func fetchApprovalResult(
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode() == http.StatusUnauthorized {
+	if resp.StatusCode() == statusTokenExpired {
 		if rerr := client.Refresh(ctx); rerr != nil {
 			return nil, rerr
 		}

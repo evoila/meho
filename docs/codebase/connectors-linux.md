@@ -234,7 +234,12 @@ connection files, `/etc/wireguard`, `/etc/ipsec.secrets`,
 `/etc/ipsec.d/private`, `/etc/sssd/sssd.conf`, `/var/lib/sss/secrets`,
 `/run/secrets`, any `*.key`, `*.keytab`, `*.p12`, `*.pfx`, `id_rsa`, `id_dsa`,
 `id_ecdsa`, `id_ed25519` or `.pgpass` file, every Ceph keyring (`*.keyring`
-and the bare `keyring` file of a monitor or OSD directory), every backup of
+and the bare `keyring` file of a monitor or OSD directory), DNSSEC
+`*.private` keys, the Postfix `sasl_passwd` file and its map, the cloud-init
+user and vendor data (`*user-data*`, `*vendor-data*`, the combined
+`cloud-config.txt`, `obj.pkl` under `/var/lib/cloud`, and
+`instance-data-sensitive.json`), `wpa_supplicant` files, `htpasswd` files,
+`.netrc`, every backup of
 `shadow` and `gshadow` (`shadow-`, `shadow.bak`, `shadow~`), and every path
 that contains `secret` or `credential`. The match ignores upper and lower
 case. Public files next to them (`/etc/passwd`, `*.pub`, `/etc/ssl/certs`,

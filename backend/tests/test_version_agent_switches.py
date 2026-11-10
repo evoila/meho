@@ -233,6 +233,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "sensor_runner_tick_interval_seconds",
         "service_grant_delete_shaped_patterns",
         "shutdown_drain_seconds",
+        "spaces_enabled",
         "test_amortize_typed_op_registrars",
         "test_fail_start_after_registration",
         "test_stub_descriptor_embedding",

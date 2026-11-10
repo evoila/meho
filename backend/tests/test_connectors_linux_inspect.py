@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import meho_backplane.connectors.linux  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors.linux import LINUX_OPS, LinuxSshConnector
 from meho_backplane.connectors.linux.ops import (
     LINUX_WHEN_TO_USE_BY_GROUP,

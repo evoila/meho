@@ -564,6 +564,13 @@ POLICY_ASSIGNMENTS_API_VERSION: Final[str] = "2026-07-01"
 #: role assignments that apply to a scope (Role Assignments - List For Scope).
 ROLE_ASSIGNMENTS_PATH: Final[str] = "/{scope}/providers/Microsoft.Authorization/roleAssignments"
 
+#: ``PUT`` / ``DELETE /{scope}/providers/Microsoft.Authorization/roleAssignments/{name}``:
+#: create or remove one role assignment (Role Assignments - Create / Delete).
+#: ``name`` is a GUID; the storage writes derive it, so a retry sends the same one.
+ROLE_ASSIGNMENT_PATH: Final[str] = (
+    "/{scope}/providers/Microsoft.Authorization/roleAssignments/{name}"
+)
+
 #: ``GET /{scope}/providers/Microsoft.Authorization/roleDefinitions``: the
 #: roles that can be assigned at a scope, to turn role ids into role names
 #: (Role Definitions - List).
@@ -620,6 +627,11 @@ BLOB_PATH: Final[str] = "/{container}/{blob}"
 #: The pinned spec files also have 2026-12-06, a date after this code was
 #: written; the lab proof checks which version the lab account accepts.
 BLOB_API_VERSION: Final[str] = "2026-10-06"
+
+#: ``POST /?restype=service&comp=userdelegationkey`` on the account's blob host:
+#: a key, signed by Azure, that MEHO signs one download link with (Get User
+#: Delegation Key). Only an Entra ID login may ask for it. The query part is fixed.
+USER_DELEGATION_KEY_PATH: Final[str] = "/?restype=service&comp=userdelegationkey"
 
 
 def subscription_path(subscription_id: str) -> str:

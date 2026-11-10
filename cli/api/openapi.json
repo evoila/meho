@@ -26611,6 +26611,11 @@
             "title": "Reveal Secret",
             "default": false
           },
+          "waits_for_requester": {
+            "type": "boolean",
+            "title": "Waits For Requester",
+            "default": false
+          },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
           },

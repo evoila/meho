@@ -376,6 +376,11 @@ class ApprovalRequestView(BaseModel):
     #: (``reveal_secret: true``). When ``True``, the approved run returns
     #: the secret values to the requester. Read off the row. Additive.
     reveal_secret: bool = False
+    #: ``True`` for a read that shows secret values (``reveal_secret`` on a
+    #: read). Approving it runs nothing: it runs only when the person who
+    #: asked gets the value. A client that lost the answer to its approve
+    #: reads this instead of waiting for a run. Additive.
+    waits_for_requester: bool = False
     status: ApprovalRequestStatus
     #: Run phase of an approved request (#3486): ``not_started`` /
     #: ``started`` / ``executed`` / ``failed`` / ``uncertain`` (#5025, MEHO
@@ -662,6 +667,7 @@ def _view(
         preview_hash=row.preview_hash,
         proposed_effect=row.proposed_effect,
         reveal_secret=bool(row.reveal_secret),
+        waits_for_requester=is_read_reveal(row),
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
         resume_outcome=_resume_outcome_view(row),

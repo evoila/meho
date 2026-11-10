@@ -1613,6 +1613,11 @@ The code is in `operations/approved_reveal.py`.
   background run. A write that asked for `reveal_secret` (for example a
   credential write) is not such a request: approving it runs it, as
   before.
+- **The request view says so too.** `ApprovalRequestView.waits_for_requester`
+  is `true` for such a request (`is_read_reveal`). When the answer to
+  `meho approvals approve --wait` is lost on the network, the CLI reads
+  the request again. For such a request it does not wait for a run, and
+  prints how the person who asked gets the value.
 - **The person who asked fetches the value.** `POST
   /api/v1/approvals/{id}/reveal` (`api/v1/approval_reveal.py`), the
   console's "Show value" button (`POST /ui/vault/read/reveal`) and `meho

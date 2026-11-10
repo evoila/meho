@@ -26,6 +26,15 @@ func waitsForRequester(d *api.DecideResponseBody) bool {
 	return d != nil && d.DispatchStatus != nil && *d.DispatchStatus == dispatchWaitingForRequester
 }
 
+// viewWaitsForRequester reports whether d is an approved read that shows
+// secret values and has not run: it runs only when the person who asked
+// gets the value.
+func viewWaitsForRequester(d *api.ApprovalRequestView) bool {
+	return d.Status == api.ApprovalRequestStatusApproved &&
+		d.WaitsForRequester != nil && *d.WaitsForRequester &&
+		d.ResultState != nil && *d.ResultState == api.ApprovalResultStateNotStarted
+}
+
 // requesterFetchNote says what happens after the approve of such a read.
 func requesterFetchNote(id string) string {
 	return fmt.Sprintf("Approved. The read did not run. Only the person who asked can get the value, "+

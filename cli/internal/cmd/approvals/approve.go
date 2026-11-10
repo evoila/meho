@@ -228,8 +228,10 @@ func runDecision(
 	}
 	endedWithoutResult := false
 	// An approved secret read runs only when the person who asked gets the
-	// value, so there is no run to wait for.
-	waiting := waitsForRequester(answer.decided())
+	// value, so there is no run to wait for. After a lost answer the
+	// request itself says so.
+	recoveredRead := lost && viewWaitsForRequester(detail)
+	waiting := waitsForRequester(answer.decided()) || recoveredRead
 	if opts.Wait && verb == "approve" && !waiting && !runHasResult(detail) {
 		detail, endedWithoutResult, err = waitForRun(cmd, client, requestID, answer.runID(), jsonOut)
 		if err != nil {
@@ -240,6 +242,9 @@ func runDecision(
 		return output.PrintJSON(cmd.OutOrStdout(), detail)
 	}
 	printDecision(cmd.OutOrStdout(), idArg, detail, answer.decided())
+	if recoveredRead {
+		fmt.Fprintln(cmd.OutOrStdout(), requesterFetchNote(idArg))
+	}
 	if !waiting {
 		printRunHint(cmd.OutOrStdout(), idArg, detail, endedWithoutResult)
 	}

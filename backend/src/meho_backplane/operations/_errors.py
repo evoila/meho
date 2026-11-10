@@ -2397,10 +2397,11 @@ _AUTH_FAILED_DOC_TAIL = (
 def _auth_failed_summary(
     *,
     stage: Literal["establish", "dispatch", "after_relogin", "call"],
-    status_code: int,
+    status_label: str,
     host: str,
     remediation: str,
     relogin: Literal["not_available", "attempted_failed", "reestablished"],
+    over_http: bool,
 ) -> str:
     """Compose the stage-aware operator-facing ``connector_auth_failed`` summary (#2400).
 
@@ -2420,19 +2421,31 @@ def _auth_failed_summary(
     * ``call`` -- a connector rejected a normal call on a live session with
       an auth/permission fault that a fresh login cannot fix (#3566), so no
       re-login was tried.
+
+    *status_label* is ``HTTP <status>`` when the connector got a real HTTP
+    status, else ``cause <cause>``. With ``over_http=False`` (a database
+    login, for example) the establish text says that the system refused
+    the login, not that an HTTP login was rejected (#6154).
     """
     if stage == "call":
         return (
             f"connector_auth_failed: the upstream rejected this call with an "
-            f"auth/permission fault (HTTP {status_code}) for {host}. "
+            f"auth/permission fault ({status_label}) for {host}. "
             f"{remediation} {_AUTH_FAILED_DOC_TAIL}"
         )
     if stage == "establish":
-        lead = (
-            f"connector_auth_failed: the login itself was rejected (HTTP "
-            f"{status_code}) for {host} -- the credential was refused at "
-            f"session establish."
-        )
+        if over_http:
+            lead = (
+                f"connector_auth_failed: the login itself was rejected "
+                f"({status_label}) for {host} -- the credential was refused at "
+                f"session establish."
+            )
+        else:
+            lead = (
+                f"connector_auth_failed: the system at {host} refused the login "
+                f"({status_label}) -- the credential was refused at session "
+                f"establish."
+            )
         if relogin == "attempted_failed":
             lead = (
                 f"{lead} This followed a forced re-login after a mid-session "
@@ -2442,14 +2455,14 @@ def _auth_failed_summary(
     if stage == "after_relogin":
         return (
             f"connector_auth_failed: the upstream returned an auth/session "
-            f"failure (HTTP {status_code}) for {host}. The session was already "
+            f"failure ({status_label}) for {host}. The session was already "
             f"re-logged-in and retried once on a session-expiry status, and the "
             f"fresh session was still rejected. {remediation} "
             f"{_AUTH_FAILED_DOC_TAIL}"
         )
     return (
         f"connector_auth_failed: the upstream returned an auth/session failure "
-        f"(HTTP {status_code}) for {host}. The connector reached the host but "
+        f"({status_label}) for {host}. The connector reached the host but "
         f"its per-request credential was rejected; this connector holds no "
         f"re-loginable session (no invalidate_session hook), so no re-login was "
         f"attempted. {remediation} If this persists after restaging, verify the "
@@ -2597,12 +2610,17 @@ def result_connector_auth_failed(
         remediation = _auth_scheme_remediation(target_name)
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
+    # #6154: a connector that does not use HTTP (a database login, for
+    # example) still passes a status code; the text then names its own
+    # cause instead of an HTTP status it never got.
+    over_http = exc.over_http if isinstance(exc, ConnectorAuthError) else True
     summary = _auth_failed_summary(
         stage=stage,
-        status_code=status_code,
+        status_label=f"HTTP {status_code}" if over_http else f"cause {cause}",
         host=host,
         remediation=remediation,
         relogin=relogin,
+        over_http=over_http,
     )
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"

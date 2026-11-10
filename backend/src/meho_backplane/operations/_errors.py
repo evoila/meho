@@ -2166,9 +2166,13 @@ def result_connector_http_403(
     ``claude-rdc-hetzner-dc#1138``).
 
     The cause is kept **connector-agnostic**: any upstream 403 means the
-    credential reached the upstream and was rejected on authorization,
-    not transport -- so the operator-facing ``error`` names the likely
-    insufficient-permission cause regardless of which connector raised.
+    upstream refused the call, not a transport fault. Most often the
+    account lacks a permission, but some vendors (NSX, for one) also
+    answer a wrong password or a locked account with 403. So the
+    operator-facing ``error`` claims no successful login and gives no
+    retry advice: it names both causes, points at ``upstream_message``,
+    and says to check the target's account first, because more calls
+    with a wrong password can lock the account (#6254).
     ``extras`` carries the machine-usable fields an agent can branch on
     without re-parsing a transport error: ``http_status`` (always
     ``403`` -- the dispatcher scopes this builder to that code; 401/429
@@ -2187,15 +2191,17 @@ def result_connector_http_403(
         if (value := response.headers.get(header)) is not None
     }
     summary = (
-        "connector_http_403: the upstream returned HTTP 403 Forbidden. The "
-        "target credential reached the upstream and was authenticated, but "
-        "may lack the permission this operation requires -- a credential "
-        "scope matter on the target, not a meho transport fault. Grant the "
-        "missing permission on the backing credential (for a GitHub App / "
-        "fine-grained PAT, the accepted permission is echoed in "
-        "extras.permission_headers when the upstream sent it) and retry. See "
-        "docs/codebase/error-message-shape.md for the dispatch error "
-        "convention."
+        "connector_http_403: the upstream returned HTTP 403 Forbidden -- it "
+        "refused this call. A 403 can mean that the target's account lacks a "
+        "permission this operation needs, or that its password is wrong or "
+        "the account is locked (some vendors answer a failed login with 403). "
+        "Read extras.upstream_message to see which. Do not retry yet: more "
+        "calls with a wrong password can lock the account, or keep it locked. "
+        "First check the target's account: its password, whether it is "
+        "locked, and its permissions (for a GitHub App / fine-grained PAT, "
+        "the accepted permission is echoed in extras.permission_headers when "
+        "the upstream sent it). See docs/codebase/error-message-shape.md for "
+        "the dispatch error convention."
     )
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"

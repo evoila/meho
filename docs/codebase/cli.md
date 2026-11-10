@@ -14,8 +14,8 @@ backplane's HTTP/JSON API, with the OpenAPI spec at the seam.
 
 As of G2.6-T5 the v0.1 trio is wired (`version`, `login`, `status`)
 and the multi-platform release pipeline ships every `v*` tag as
-four tarballs + `SHA256SUMS` to GitHub Releases via GoReleaser. Each
-tarball and `SHA256SUMS` ships with a matching `.cosign.bundle`
+four tarballs (Linux, macOS), two Windows zip files + `SHA256SUMS` to
+GitHub Releases via GoReleaser. Each archive and `SHA256SUMS` ships with a matching `.cosign.bundle`
 sigstore bundle (signature + Fulcio cert + Rekor proof) under the
 ADR 0006 identity-claim format. Server-driven subcommand discovery
 runs at every startup (empty manifest in v0.1; populated by
@@ -2526,7 +2526,9 @@ multi-arch runner pool. Every target uses:
 
 ### Archive layout
 
-Each `<os>/<arch>` target produces one tarball:
+Each `<os>/<arch>` target produces one tarball. Windows targets
+(`windows/amd64`, `windows/arm64`) produce a `.zip` file instead
+(one `format_overrides` entry), with `meho.exe` in place of `meho`:
 
 ```text
 meho_<version-no-leading-v>_<os>_<arch>.tar.gz
@@ -2606,7 +2608,7 @@ than reconstructed at tag time from commit messages.
 
 GoReleaser's `signs:` block runs after `archives:` and `checksum:`,
 so the `artifacts: all` glob covers every file destined for the
-GitHub Release — the four tarballs **and** the combined `SHA256SUMS`
+GitHub Release — the four tarballs, the two Windows zips **and** the combined `SHA256SUMS`
 file. Per artefact, cosign produces a single `.cosign.bundle` JSON
 file containing the signature, the Fulcio-issued certificate, and
 the Rekor transparency-log inclusion proof; the bundle file is
@@ -2704,10 +2706,21 @@ alone implies only `--skip=announce,publish,validate` — it does NOT
 skip the `signs:` block. We pass `--skip=sign` explicitly so the
 dry-run completes on a dev machine without cosign on PATH (and
 without the `id-token: write` permission that's only available in a
-real CI run). Snapshot builds therefore produce only tarballs +
+real CI run). Snapshot builds therefore produce only the archives (four tarballs, two zips) +
 `SHA256SUMS` under `cli/dist/`; the `.cosign.bundle` files are a
 tag-push-only artefact, produced by the CI workflow which omits
 `--skip=sign`.
+
+### Windows check
+
+After the `release` job, the `windows-check` job of `cli-release.yml`
+runs on GitHub-hosted runners (`windows-latest` for amd64,
+`windows-11-arm` for arm64). It downloads the zip and `SHA256SUMS` from
+the Release, checks the hash, unzips, and runs `meho.exe version`. It
+fails unless the output names the release tag. The `Go build (Windows)`
+step in `ci.yml` builds `./...` for both Windows targets on every pull
+request. The Go tests are not run on Windows (they do not compile there
+yet).
 
 ### Draft mode
 

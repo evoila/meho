@@ -5,7 +5,8 @@
 #
 # Locked artefact contract (Goal #11 — CLI release-distribution principle):
 #   On every `v*` tag push, build four single-static tarballs
-#   (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64), produce a
+#   (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64) and two zip
+#   archives (windows/amd64, windows/arm64), produce a
 #   combined SHA256SUMS file, and publish them as assets on a new
 #   GitHub Release (auto-published, `draft: false` since #1127) at
 #   https://github.com/evoila/meho/releases.
@@ -34,6 +35,10 @@
 # attach step uses softprops/action-gh-release (GitHub API, no `gh` CLI)
 # so it works on the self-hosted runner image, which ships without `gh`
 # (#3171).
+#
+# After the `release` job, the `windows-check` job downloads each Windows
+# zip from the Release on a GitHub-hosted Windows runner, checks its hash
+# against SHA256SUMS and runs `meho.exe version`.
 #
 # After the `release` job, the `linux-download` job calls
 # linux-download.yml (#4734). It builds the download of install form 2,
@@ -103,7 +108,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       # `contents: write` is required for GoReleaser to create the
-      # GitHub Release and upload the four tarballs + SHA256SUMS as
+      # GitHub Release and upload the archives + SHA256SUMS as
       # release assets. Scoped to this job only.
       contents: write
       # `id-token: write` mints a GitHub Actions OIDC token. Cosign
@@ -428,10 +433,10 @@ jobs:
             echo "### Artefacts"
             echo ""
             echo '```'
-            ls -1 cli/dist/*.tar.gz cli/dist/SHA256SUMS cli/dist/*.cosign.bundle "${RUNNER_TEMP}"/mcpb/*.mcpb "${RUNNER_TEMP}"/mcpb/SHA256SUMS-mcpb* 2>/dev/null || true
+            ls -1 cli/dist/*.tar.gz cli/dist/*.zip cli/dist/SHA256SUMS cli/dist/*.cosign.bundle "${RUNNER_TEMP}"/mcpb/*.mcpb "${RUNNER_TEMP}"/mcpb/SHA256SUMS-mcpb* 2>/dev/null || true
             echo '```'
             echo ""
-            echo "Each \`.tar.gz\` and the \`SHA256SUMS\` file has a matching"
+            echo "Each \`.tar.gz\`, each Windows \`.zip\` and the \`SHA256SUMS\` file has a matching"
             echo "\`.cosign.bundle\` (sigstore bundle: signature + Fulcio cert +"
             echo "Rekor proof, single JSON file)."
             echo ""
@@ -474,7 +479,7 @@ jobs:
             echo "actually downloaded (two-step trust chain)."
             echo ""
             echo "The release is **live** the moment this workflow ends"
-            echo "(auto-published, #1127) — verify the four tarballs +"
+            echo "(auto-published, #1127) — verify the four tarballs, the two Windows zips +"
             echo "bundles, the .mcpb asset and SHA256SUMS-mcpb are present and that"
             echo "\`meho version\` reports the expected tag."
             echo ""
@@ -482,6 +487,52 @@ jobs:
             echo "\`SHA256SUMS-linux\` and its \`.cosign.bundle\`, is attached later"
             echo "by the \`linux-download\` job (see docs/RELEASING.md)."
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  windows-check:
+    name: Windows check (meho.exe ${{ matrix.arch }})
+    # Downloads the Windows zip of this tag from the release that the
+    # `release` job created, checks its hash against SHA256SUMS, unzips it
+    # and runs `meho.exe version`. It fails unless the output names the
+    # release tag. GitHub-hosted runners: the repo is public, so they are
+    # free. Read-only: it needs no write permission.
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - name: Download, check the hash, unzip, run meho.exe version
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:TAG.TrimStart('v')
+          $zip = "meho_${version}_windows_$($env:ARCH).zip"
+          gh release download $env:TAG --pattern $zip --pattern SHA256SUMS
+          if ($LASTEXITCODE -ne 0) { throw "download failed" }
+          $line = Get-Content SHA256SUMS | Where-Object { $_ -match "\s$([regex]::Escape($zip))$" }
+          if (-not $line) { throw "$zip is not listed in SHA256SUMS" }
+          $expected = ($line -split '\s+')[0].ToLower()
+          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($expected -ne $actual) { throw "hash mismatch for ${zip}: expected $expected, got $actual" }
+          Expand-Archive -Path $zip -DestinationPath meho-win
+          $out = (& .\meho-win\meho.exe version) | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "meho.exe version failed" }
+          if (-not $out.Contains($env:TAG)) { throw "meho.exe version does not name the tag $($env:TAG)" }
+          "Windows $($env:ARCH): hash matches, ``meho.exe version`` names $($env:TAG)." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
 
   linux-download:
     name: Form-2 download (meho-linux-<version>-amd64.tar)

@@ -2677,6 +2677,19 @@ jobs:
         working-directory: cli
         run: go build ./...
 
+      - name: Go build (Windows)
+        # The release ships meho.exe for Windows (amd64 and arm64). Build
+        # both here, so a pull request that breaks the Windows build fails
+        # before release day. Builds the program only: the Go tests do not
+        # compile on Windows yet.
+        working-directory: cli
+        env:
+          GOOS: windows
+          CGO_ENABLED: "0"
+        run: |
+          GOARCH=amd64 go build ./...
+          GOARCH=arm64 go build ./...
+
       - name: govulncheck (Go dependency CVE scan)
         # Surfaces known CVEs in the CLI's Go dependency graph.
         # govulncheck does reachability analysis against the Go vuln DB

@@ -204,8 +204,8 @@ MEHO ships as five operator-facing artefacts:
   aliases (`k8s`, `vault`, `harbor`, `keycloak`, `argocd`, `gcloud`,
   `bind9`, `pfsense`, and more; the `vmware` and `nsx` aliases need the
   enterprise pack on the server), and admin/migration
-  tooling (`admin`, `migrate`). Released as multi-platform tarballs
-  (`linux/macOS × amd64/arm64`) on every `v*` tag, each individually
+  tooling (`admin`, `migrate`). Released as multi-platform archives
+  (`linux/macOS/Windows × amd64/arm64`) on every `v*` tag, each individually
   cosign-signed. Full command reference:
   [`docs/codebase/cli.md`](./docs/codebase/cli.md).
 - **Claude Desktop bundle** — `meho-claude-desktop-X.Y.Z.mcpb`, attached

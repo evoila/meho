@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.2",
+  "kit_version": "1.3",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -175,6 +175,13 @@
       ],
       "kind": "function",
       "returns": "str"
+    },
+    "declare_root_shell": {
+      "inputs": [
+        "op_ids: Iterable[str]"
+      ],
+      "kind": "function",
+      "returns": "None"
     },
     "is_acceptable_auth_model": {
       "inputs": [

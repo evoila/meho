@@ -29,8 +29,8 @@ changes* convention in the
 [CHANGELOG](https://github.com/evoila/meho/blob/main/CHANGELOG.md)).
 ### What CI checks today
 
-A check in CI stops a change that breaks the REST API or the MCP tools.
-It compares each pull request with the version on `main`:
+A check in CI stops a change that breaks the REST API, the MCP tools or
+the Helm values. It compares each pull request with the version on `main`:
 
 - **REST API:** the public paths under `/api/v1/`. The console paths
   under `/ui/` are not covered. Examples of a break: a removed path, a
@@ -38,13 +38,20 @@ It compares each pull request with the version on `main`:
 - **MCP tools:** the tool names, the surface a tool is listed on, and the
   input and output schemas. Examples of a break: a removed tool, a removed
   argument, a new required argument, a removed field in the result.
+- **Helm values:** the keys of `values.yaml` and the rules in
+  `values.schema.json`. Examples of a break: a removed key (an operator's
+  setting for it stops working), a new required value, a removed allowed
+  value. A second check keeps golden renders of the chart in
+  `deploy/golden/`, so a review sees what a chart change does to the
+  installed objects.
 
 A breaking change merges only on purpose. The pull request must have the
 `breaking-change` label and a *Breaking changes* section that says what a
 client must change. That text goes into the release notes.
 
-Not checked by CI yet: the Helm values, the update from the previous
-release, the CLI verbs and flags, and the environment variables. The full
+Not checked by CI yet: the CLI verbs and flags, and the environment
+variables. The update from the previous release is tested only for the
+Helm install, not for the other install forms. The full
 1.0 stability promise, with a deprecation window, is tracked in
 [evoila/meho#3861](https://github.com/evoila/meho/issues/3861).
 

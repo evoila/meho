@@ -52,6 +52,17 @@ they also bind the run:
 
 The decision audit row names the login the change is for and says whether
 it is the approver (:func:`grant_audit_fields`).
+
+The rights-change mark
+----------------------
+
+Every change of rights carries one mark (``ApprovalRequest.rights_change``):
+the changes above in MEHO's own login realm, and any other request
+that was parked with the mark. :func:`check_rights_change_approval` applies
+it: the requester never approves their own change of rights, whatever
+their group, at every risk level and with the break-glass switch on, and
+the approver is another admin
+(:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`).
 """
 
 from __future__ import annotations
@@ -72,15 +83,22 @@ __all__ = [
     "GRANT_REASON_CHANGED",
     "GRANT_REASON_STRICTER",
     "GRANT_REASON_UNREADABLE",
+    "RIGHTS_CHANGE_REFUSAL",
     "GrantFacts",
     "check_grant_approval",
+    "check_rights_change_approval",
     "grant_audit_fields",
     "grant_changed_since_request",
     "grant_facts",
+    "is_rights_change",
+    "is_rights_change_op",
     "register_grant_op",
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: The refusal of a rights-change approval, on every surface.
+RIGHTS_CHANGE_REFUSAL: Final[str] = "This is a change of rights. Another admin must approve it."
 
 #: Why a run was refused: the name now names another login or group.
 GRANT_REASON_CHANGED: Final[str] = (
@@ -189,6 +207,38 @@ def grant_facts(request: ApprovalRequest) -> GrantFacts | None:
     )
 
 
+def is_rights_change_op(op_id: str) -> bool:
+    """True when *op_id* always counts as a change of rights.
+
+    For a place that knows the operation but not the parked request (a run
+    approval list). The login realm is not known there, so every
+    registered operation counts.
+    """
+    return op_id in _GRANT_OPS
+
+
+def is_rights_change(request: ApprovalRequest) -> bool:
+    """True when *request* carries the rights-change mark.
+
+    A request parked before the ``rights_change`` column has no stored
+    mark, so a registered change in the login realm counts too.
+    """
+    if request.rights_change:
+        return True
+    facts = grant_facts(request)
+    return facts is not None and facts.login_realm
+
+
+def check_rights_change_approval(operator: Operator, request: ApprovalRequest) -> None:
+    """Refuse *operator* when *request* is a change of rights they may not approve."""
+    if is_rights_change(request) and not operator.may_approve_rights_change(request.principal_sub):
+        from meho_backplane.operations.approval_queue import RightsChangeApprovalError
+
+        raise RightsChangeApprovalError(
+            request.id, operator_sub=operator.sub, role=operator.tenant_role.value
+        )
+
+
 def _same_login(first: str | None, second: str) -> bool:
     if first is None:
         return False
@@ -241,13 +291,7 @@ def _check_who_the_change_is_for(
 def _check_login_realm_approver(
     operator: Operator, request: ApprovalRequest, facts: GrantFacts
 ) -> None:
-    """In the login realm: a second person who is a tenant admin, or a platform admin."""
-    if operator.sub == request.principal_sub:
-        raise _refusal(
-            request,
-            operator,
-            "it changes who has rights in MEHO's own login realm. A second person must approve it",
-        )
+    """In the login realm: a tenant admin, or a platform admin for the platform admin group."""
     if facts.platform_admin:
         if not operator.platform_admin:
             raise _refusal(

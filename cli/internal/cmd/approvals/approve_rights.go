@@ -34,6 +34,7 @@ const (
 	reasonOwnChange        = "own_change"
 	reasonWrongGroup       = "wrong_group"
 	reasonRoleTooLow       = "role_too_low"
+	reasonRightsChange     = "rights_change"
 	reasonNoApprovalAccess = "no_approval_access"
 	reasonNotAPerson       = "not_a_person"
 	reasonNotPending       = "not_pending"
@@ -111,6 +112,8 @@ func approveRightText(may *bool, reason *string) string {
 		return "no, another person's dangerous or destructive change needs a MEHO-SA-Operator or a MEHO-Admin"
 	case reasonRoleTooLow:
 		return "no, the operation needs a higher role than yours"
+	case reasonRightsChange:
+		return "no, it is a change of rights and another admin must approve it"
 	case reasonNoApprovalAccess:
 		return "no, your role cannot decide approval requests"
 	case reasonNotAPerson:

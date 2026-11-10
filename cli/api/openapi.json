@@ -26286,6 +26286,11 @@
             "type": "string",
             "nullable": true,
             "title": "May Approve Reason"
+          },
+          "rights_change": {
+            "type": "boolean",
+            "title": "Rights Change",
+            "default": false
           }
         },
         "type": "object",

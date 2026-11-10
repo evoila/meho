@@ -49,6 +49,7 @@ from meho_backplane.operations.grant_approval import (
     GRANT_REASON_CHANGED,
     GRANT_REASON_STRICTER,
     GRANT_REASON_UNREADABLE,
+    RIGHTS_CHANGE_REFUSAL,
     grant_changed_since_request,
 )
 from tests._oidc_jwt_helpers import APPROVAL_CLIENT_ID  # noqa: F401
@@ -284,7 +285,7 @@ async def test_an_sa_operator_cannot_approve_their_own_change_in_the_login_realm
             request_id, _person(_REQUESTER, role=TenantRole.OPERATOR, sa_operator=True), params
         )
 
-    assert "A second person must approve it" in exc.value.reason_text
+    assert exc.value.reason_text == RIGHTS_CHANGE_REFUSAL
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 
@@ -298,7 +299,7 @@ async def test_an_sa_operator_who_is_not_a_tenant_admin_cannot_approve_in_the_lo
             request_id, _person("person-sa", role=TenantRole.OPERATOR, sa_operator=True), params
         )
 
-    assert "tenant admin" in exc.value.reason_text
+    assert exc.value.reason_text == RIGHTS_CHANGE_REFUSAL
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 

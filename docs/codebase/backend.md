@@ -1293,26 +1293,25 @@ findings on the Security tab and the 30-day artefact instead of skipping
 the uploads. A red run means "bump the base-image digest (Dependabot
 docker PR) and re-push", not "this merge is blocked".
 
-**Pull-request scan of `backend/uv.lock` (`lock-scan` job).** On a pull
-request the image is built but not pushed, so the image scan cannot run
-there. The `lock-scan` job runs trivy in file-system mode on
-`backend/uv.lock` alone (`scan-type: fs`, `scanners: vuln`) with the same
-rules as the image scan: the same action commit, the same `.trivyignore`,
-`severity: CRITICAL,HIGH`, `ignore-unfixed: true` and `exit-code: '1'`.
-It prints the findings as a table in the job log; nothing is uploaded
-to the Security tab, so that tab keeps only the main/tag results. The
-job runs on `ubuntu-latest` with `permissions: contents: read`, does not
-depend on the build job, and needs no fork guard (trivy only reads the
-lock file; `backend/tests/test_ci_fork_runner_isolation.py` accepts
-hosted jobs). It is not a required check. `.trivyignore` is in
-`on.pull_request.paths`, so a pull request that only changes an
-exception runs the workflow too. What the lock scan does not cover: the
-Debian packages of the base image and anything else in the image that is
-not in the lock file (only the image scan on main and tags checks those);
-new findings for packages already on main (main still fails on its next
-run; the fix pull request now shows a passing scan before merge); and the
-few Windows-only packages in the lock file that the image never installs
-(a finding there fails the pull-request job while main passes).
+**Scan of `backend/uv.lock` (`python-deps` job in `security-scan.yml`).**
+The job "Python dependency scan" runs trivy in file-system mode on
+`backend/uv.lock` alone (`scan-type: fs`, `scanners: vuln`) on every pull
+request, in the merge queue and on every push to main, with no path
+filter. It uses the same rules as the image scan: the same action commit,
+the same `.trivyignore`, `severity: CRITICAL,HIGH`, `ignore-unfixed: true`
+and `exit-code: '1'`. It prints the findings, with the package and the
+fixed version, as a table in the job log; nothing is uploaded to the
+Security tab. The job runs on `ubuntu-latest` with
+`permissions: contents: read` and needs no fork guard (trivy only reads
+the lock file; `backend/tests/test_ci_fork_runner_isolation.py` accepts
+hosted jobs). It is not a required check. `image.yml` no longer has a
+lock scan and no longer runs for a change that only touches
+`.trivyignore`. What the lock scan does not cover: the Debian packages of
+the base image and anything else in the image that is not in the lock
+file (only the image scan on main and tags checks those). The other way
+round, the lock scan checks more than the image: it also checks the few
+Windows-only packages in the lock file that the image never installs. A
+finding in one of those fails this job while the image scan passes.
 
 **Action pin discipline (same rule as cosign).** Every third-party
 action in the new steps is SHA-pinned with the human-readable tag in

@@ -2093,3 +2093,139 @@ async def test_auth_jwt_role_write_read_list_and_config_against_dev_vault(
         operator_sub="op-jwt-config-read",
         expected_op_class="read",
     )
+
+
+# ---------------------------------------------------------------------------
+# userpass: a password MEHO makes and stores, and turning a login off and on
+# ---------------------------------------------------------------------------
+
+
+async def _dispatch_approved(
+    target: _VaultTarget, op_id: str, params: dict[str, Any], sub: str
+) -> Any:
+    """Run an approval-gated op as if a person had approved it."""
+    return await dispatch(
+        operator=_make_operator(sub=sub),
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=target,
+        params=params,
+        _approved=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_userpass_generated_password_is_only_in_kv_and_works_once(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """Create with ``generate_password``: the password is in KV and nowhere else."""
+    target, addr = vault_e2e
+    params = {
+        "username": "gen-user",
+        "generate_password": {"path": "labs/gen-user"},
+        "token_policies": ["default"],
+    }
+    first = await _dispatch_approved(target, "vault.auth.userpass.write", params, "op-gen-1")
+    assert first.status == "ok", first.error
+    assert first.result["credential_generated"] is True
+    assert first.result["stored_at"] == {
+        "mount": "secret",
+        "path": "labs/gen-user",
+        "field": "password",
+    }
+
+    root = _root_client(addr)
+    stored = root.secrets.kv.v2.read_secret_version(
+        path="labs/gen-user", mount_point="secret", raise_on_deleted_version=True
+    )["data"]["data"]["password"]
+    assert stored not in json.dumps(first.result)
+    login = root.auth.userpass.login(username="gen-user", password=stored, mount_point="userpass")
+    assert login["auth"]["client_token"]
+    row = await _assert_audited(
+        "vault.auth.userpass.write", operator_sub="op-gen-1", expected_op_class="credential_write"
+    )
+    assert stored not in json.dumps(row.payload, default=str)
+
+    # A second run changes nothing: same version in KV, same password.
+    second = await _dispatch_approved(target, "vault.auth.userpass.write", params, "op-gen-2")
+    assert second.status == "ok", second.error
+    assert second.result["written"] is False
+    again = root.secrets.kv.v2.read_secret_version(path="labs/gen-user", mount_point="secret")
+    assert again["data"]["metadata"]["version"] == 1
+    assert again["data"]["data"]["password"] == stored
+
+
+@pytest.mark.asyncio
+async def test_userpass_disable_blocks_login_and_enable_restores_it(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """Disable: the login fails. Enable: it works again. A repeat changes nothing."""
+    target, addr = vault_e2e
+    root = _root_client(addr)
+    password = "switch-user-pw-9f3a-test"
+    root.auth.userpass.create_or_update_user(
+        username="switch-user", password=password, policies=["default"], mount_point="userpass"
+    )
+    assert root.auth.userpass.login(
+        username="switch-user", password=password, mount_point="userpass"
+    )["auth"]["client_token"]
+
+    off = await _dispatch_approved(
+        target,
+        "vault.auth.userpass.disable",
+        {"username": "switch-user", "revoke_tokens": True},
+        "op-switch-off",
+    )
+    assert off.status == "ok", off.error
+    assert off.result["disabled"] is True
+    assert off.result["revoke_requested"] is True
+    with pytest.raises(hvac.exceptions.Forbidden):
+        root.auth.userpass.login(username="switch-user", password=password, mount_point="userpass")
+
+    off_again = await _dispatch_approved(
+        target, "vault.auth.userpass.disable", {"username": "switch-user"}, "op-switch-off-2"
+    )
+    assert off_again.result["changed"] is False
+
+    on = await _dispatch_approved(
+        target, "vault.auth.userpass.enable", {"username": "switch-user"}, "op-switch-on"
+    )
+    assert on.status == "ok", on.error
+    assert on.result["disabled"] is False
+    assert root.auth.userpass.login(
+        username="switch-user", password=password, mount_point="userpass"
+    )["auth"]["client_token"]
+
+
+@pytest.mark.asyncio
+async def test_userpass_disable_with_revoke_tokens_ends_an_open_token(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """The revoke path ``auth/<mount>/login/<user>/`` ends a token the user already holds."""
+    target, addr = vault_e2e
+    root = _root_client(addr)
+    password = "revoke-user-pw-9f3a-test"
+    root.auth.userpass.create_or_update_user(
+        username="revoke-user", password=password, policies=["default"], mount_point="userpass"
+    )
+    token = root.auth.userpass.login(
+        username="revoke-user", password=password, mount_point="userpass"
+    )["auth"]["client_token"]
+    holder = hvac.Client(url=addr, token=token)
+    assert holder.is_authenticated()
+
+    result = await _dispatch_approved(
+        target,
+        "vault.auth.userpass.disable",
+        {"username": "revoke-user", "revoke_tokens": True},
+        "op-revoke",
+    )
+    assert result.status == "ok", result.error
+    # Vault revokes in the background; allow a short wait.
+    import asyncio
+
+    for _ in range(20):
+        if not holder.is_authenticated():
+            break
+        await asyncio.sleep(0.25)
+    assert not holder.is_authenticated()

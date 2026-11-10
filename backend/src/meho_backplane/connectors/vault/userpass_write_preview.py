@@ -17,8 +17,9 @@ op_id                                         preview
 ``vault.auth.userpass.update_password``       ``{mount, username, sets_password}``
 ============================================  ==========================================
 
-Each builder reads only ``mount``, ``username`` and ``token_policies`` from
-the params. It never reads ``password``, so the value cannot reach the
+Each builder reads only ``mount``, ``username``, ``token_policies`` and the
+KV location of the password (``password_secret_ref``, ``generate_password``)
+from the params. It never reads ``password``, so the value cannot reach the
 stored approval request. ``sets_password`` only says that the call sets a
 new password. The builders do no network calls.
 """
@@ -37,6 +38,32 @@ def _mount_and_username(ctx: PreviewContext) -> tuple[str, str]:
     return mount, username
 
 
+def _credential_source_preview(ctx: PreviewContext) -> dict[str, Any]:
+    """Say where the password comes from. Shows a KV path, never a value."""
+    params = ctx.params
+    if isinstance(params.get("generate_password"), dict):
+        spec = params["generate_password"]
+        return {
+            "credential_source": "generated",
+            "stored_at": {
+                "mount": str(spec.get("mount") or "secret"),
+                "path": str(spec.get("path", "")).strip(),
+                "field": str(spec.get("field") or "password"),
+            },
+            "rotate": bool(params.get("rotate", False)),
+        }
+    if params.get("password_secret_ref"):
+        return {
+            "credential_source": "kv_path",
+            "stored_at": {
+                "mount": str(params.get("password_secret_mount") or "secret"),
+                "path": str(params["password_secret_ref"]).strip(),
+                "field": str(params.get("password_secret_key") or "password"),
+            },
+        }
+    return {"credential_source": "request"}
+
+
 async def _userpass_write_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview ``vault.auth.userpass.write`` — user, mount and policies, no password.
 
@@ -52,6 +79,7 @@ async def _userpass_write_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "username": username,
         "sets_password": True,
     }
+    preview.update(_credential_source_preview(ctx))
     if isinstance(raw_policies, list):
         preview["token_policies"] = [str(policy) for policy in raw_policies]
         preview["token_policies_change"] = "replace"

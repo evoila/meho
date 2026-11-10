@@ -81,11 +81,17 @@ from meho_backplane.connectors.vault.ops_auth_write_schemas import (
     VAULT_AUTH_USERPASS_UPDATE_PASSWORD_LLM_INSTRUCTIONS,
     VAULT_AUTH_USERPASS_UPDATE_PASSWORD_PARAMETER_SCHEMA,
     VAULT_AUTH_USERPASS_UPDATE_PASSWORD_RESPONSE_SCHEMA,
+)
+from meho_backplane.connectors.vault.ops_userpass_write_schemas import (
     VAULT_AUTH_USERPASS_WRITE_LLM_INSTRUCTIONS,
     VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA,
     VAULT_AUTH_USERPASS_WRITE_RESPONSE_SCHEMA,
 )
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
+from meho_backplane.connectors.vault.userpass_password import (
+    apply_credential_source,
+    select_credential_source,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -114,34 +120,45 @@ async def vault_auth_userpass_write(
     is forwarded as a kwarg so Vault's modern ``token_policies`` field is
     set (the legacy ``policies`` alias is left untouched).
 
-    The password is in the request params and is classified
-    ``credential_write`` -- redacted from the audit row (params_hash
-    only) and the broadcast feed (aggregate-only). The response is
-    value-free: it echoes the username, mount, and assigned policies,
-    never the password.
+    The password comes from exactly one of ``password`` (in the request),
+    ``password_secret_ref`` (read from a KV-v2 path) or ``generate_password``
+    (MEHO makes it and stores it in KV first; see
+    :mod:`~meho_backplane.connectors.vault.userpass_password`). The op is
+    classified ``credential_write`` -- redacted from the audit row
+    (params_hash only) and the broadcast feed (aggregate-only). The response
+    is value-free: it echoes the username, mount, assigned policies and
+    where a stored password lives, never the password.
     """
     username: str = str(params["username"]).strip()
-    password: str = str(params["password"])
     mount: str = str(params.get("mount", "userpass")).strip()
     token_policies = params.get("token_policies")
-
-    kwargs: dict[str, Any] = {
-        "username": username,
-        "password": password,
-        "mount_point": mount,
-    }
-    if token_policies is not None:
-        kwargs["token_policies"] = list(token_policies)
+    plan = select_credential_source(params)
+    inline = str(params["password"]) if plan.source == "request" else None
 
     async with vault_client_for_target(operator, target) as client:
         try:
-            await asyncio.to_thread(client.auth.userpass.create_or_update_user, **kwargs)
+            outcome = await apply_credential_source(
+                client,
+                plan,
+                username=username,
+                mount=mount,
+                token_policies=list(token_policies) if token_policies is not None else None,
+                inline_password=inline,
+            )
         except hvac.exceptions.InvalidPath as exc:
             raise VaultAuthBackendNotMountedError(
                 f"userpass auth backend not mounted at {mount!r}"
             ) from exc
 
-    result: dict[str, Any] = {"username": username, "mount": mount, "written": True}
+    result: dict[str, Any] = {
+        "username": username,
+        "mount": mount,
+        "written": outcome["changed"],
+        "credential_source": plan.source,
+        "credential_generated": outcome["credential_generated"],
+    }
+    if plan.location is not None:
+        result["stored_at"] = plan.location
     if token_policies is not None:
         result["token_policies"] = list(token_policies)
     return result
@@ -350,8 +367,10 @@ _AUTH_WRITE_OP_SPECS: tuple[dict[str, Any], ...] = (
         "description": (
             "Creates a new userpass user or updates an existing one's "
             "password and/or token policies (POST "
-            "/v1/auth/<mount>/users/<user>). The password rides in the "
-            "request params and is classified credential_write: redacted "
+            "/v1/auth/<mount>/users/<user>). The password comes from one "
+            "of password (in the request), password_secret_ref (read from "
+            "a KV path) or generate_password (MEHO makes it and stores it "
+            "in KV first). The op is classified credential_write: redacted "
             "from the audit row (params_hash only) and the broadcast feed "
             "(aggregate-only). Binding token_policies is a privilege "
             "assignment -- safety_level=dangerous, requires_approval=True. "

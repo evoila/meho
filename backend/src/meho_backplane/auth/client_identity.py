@@ -31,6 +31,12 @@ directly and call :func:`apply_client_block`: the MCP rows
 ``Operator``. For it, the login check of the request calls
 :func:`bind_request_client`, and the middleware reads the block back with
 :func:`request_client_block`.
+
+A web console page checks its token in the session middleware, which runs
+before the audit middleware resets the block. So that check keeps the
+block per session (:mod:`meho_backplane.ui.auth.revalidation`), the
+session context carries it, and the page dependency binds it again with
+:func:`bind_request_client_block`.
 """
 
 from __future__ import annotations
@@ -96,6 +102,12 @@ def bind_request_client(operator: Operator) -> None:
     """Keep the ``client`` block of *operator* for the REST request row."""
     if client_identity_enabled():
         _request_client.set(build_client_block(operator))
+
+
+def bind_request_client_block(block: dict[str, Any] | None) -> None:
+    """Keep a block that an earlier login check of this request built."""
+    if client_identity_enabled() and block is not None:
+        _request_client.set(block)
 
 
 def request_client_block() -> dict[str, Any] | None:

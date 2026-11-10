@@ -298,9 +298,16 @@ One helper builds the block: `auth/client_identity.py`. The writers:
   (`middleware.py:verify_jwt_and_bind`, and for the web console
   `ui/auth/refresh.py:_verify_session_token`) keeps the block in a context
   variable, and the middleware reads it. The middleware resets it at the
-  start of each request. A request without a checked login has no block;
-  this includes a console page view that did not check the stored token
-  again.
+  start of each request. A request without a checked login has no block.
+- A console page checks its stored token in the session middleware
+  (`ui/auth/revalidation.py:revalidate_read_session`), which runs before
+  the audit middleware's reset. So that check keeps the block per session,
+  next to the time of the last check. The session context
+  (`UISessionContext.client`) carries it, and the page dependency
+  `require_ui_session` binds it again. A page view that does not check the
+  token again (it was checked within the last few minutes) reuses the kept
+  block. With the switch on, the first page view after login checks the
+  token once to build the block.
 
 `meho audit show` prints it as `via: <client> (<channel>)` (`-` when the row
 has no block). The console audit detail shows it as "Via".

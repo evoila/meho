@@ -18,12 +18,14 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 import respx
+from cryptography.fernet import Fernet
 from httpx import ASGITransport
 from sqlalchemy import select
 
@@ -51,6 +53,12 @@ from meho_backplane.operations.approval_queue import (
     requester_of,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.auth import SESSION_COOKIE_NAME, revalidation
+from meho_backplane.ui.auth.session_store import (
+    DecryptedSession,
+    create_session,
+    reset_fernet_cache_for_testing,
+)
 
 from ._oidc_jwt_helpers import APPROVAL_CLIENT_ID as _APPROVAL_CLIENT
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -519,3 +527,94 @@ async def test_rest_approve_names_the_approver_client(
     assert token not in text
     assert _SID not in text
     assert "127.0.0.1" not in text
+
+
+# ---------------------------------------------------------------------------
+# A web console page, through the real middleware chain
+# ---------------------------------------------------------------------------
+
+_NOTICES_PATH = "/ui/runs/notices"
+
+
+@pytest.fixture
+def _web_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("UI_SESSION_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("UI_KEYCLOAK_CLIENT_ID", "meho-web")
+    monkeypatch.setenv("UI_KEYCLOAK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
+    get_settings.cache_clear()
+    reset_fernet_cache_for_testing()
+    revalidation.reset_read_revalidation_cache_for_testing()
+    yield
+    revalidation.reset_read_revalidation_cache_for_testing()
+    reset_fernet_cache_for_testing()
+
+
+@pytest.fixture
+def _token_checks(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
+    """Stand in for the session middleware's token check; count the checks."""
+    calls: list[uuid.UUID] = []
+
+    async def _check(
+        decrypted: DecryptedSession, *, expected_audience: str
+    ) -> tuple[DecryptedSession, Operator]:
+        calls.append(decrypted.id)
+        operator = _operator(sub=decrypted.operator_sub, azp="meho-web", web=True)
+        # The real check binds the block too, before the audit middleware runs.
+        bind_request_client(operator)
+        return decrypted, operator
+
+    monkeypatch.setattr(revalidation, "verify_access_token_with_refresh", _check)
+    return calls
+
+
+async def _web_page_rows(times: int) -> list[AuditLog]:
+    async with get_sessionmaker()() as session, session.begin():
+        web_session = await create_session(
+            session,
+            operator_sub="op-web",
+            tenant_id=_TENANT,
+            access_token="made-up-access-token",
+            refresh_token="made-up-refresh-token",
+            lifetime=timedelta(hours=1),
+        )
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="https://testserver",
+        cookies={SESSION_COOKIE_NAME: str(web_session.id)},
+    ) as ac:
+        for _ in range(times):
+            response = await ac.get(_NOTICES_PATH, follow_redirects=False)
+            assert response.status_code == 200, response.text
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(select(AuditLog).where(AuditLog.path == _NOTICES_PATH))
+        return list(rows.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_web_page_row_names_the_web_client(
+    switch_on: None, _web_env: None, _token_checks: list[uuid.UUID]
+) -> None:
+    rows = await _web_page_rows(times=2)
+
+    assert len(rows) == 2
+    for row in rows:
+        assert row.payload["client"] == {
+            "azp": "meho-web",
+            "channel": "web",
+            "principal_kind": "user",
+            "sid_hash": _SID_HASH,
+        }
+    # The second page view reuses the block of the first check.
+    assert len(_token_checks) == 1
+
+
+@pytest.mark.asyncio
+async def test_web_page_row_has_no_client_with_the_switch_off(
+    _web_env: None, _token_checks: list[uuid.UUID]
+) -> None:
+    rows = await _web_page_rows(times=1)
+
+    assert len(rows) == 1
+    assert "client" not in rows[0].payload
+    assert _token_checks == []

@@ -7252,7 +7252,9 @@ type KindFilterValue string
 //
 // For one tenant and window. Each ratio comes with its count and its
 // base, and is “null“ when the base is 0. The median time is in
-// seconds.
+// seconds. The flat hit rate and precision count every retrieval;
+// “search“ counts search hits only, and “recall“ only the entries
+// MEHO showed before an operation.
 type LearningMetrics struct {
 	FirstCorrectActionMedianSeconds *float32 `json:"first_correct_action_median_seconds"`
 	FirstCorrectActionSessions      int      `json:"first_correct_action_sessions"`
@@ -7262,9 +7264,21 @@ type LearningMetrics struct {
 	PrecisionJudged                 int      `json:"precision_judged"`
 	PrecisionPct                    *float32 `json:"precision_pct"`
 	PrecisionRight                  int      `json:"precision_right"`
-	RepeatMistakeFailures           int      `json:"repeat_mistake_failures"`
-	RepeatMistakePct                *float32 `json:"repeat_mistake_pct"`
-	RepeatMistakeRepeats            int      `json:"repeat_mistake_repeats"`
+
+	// Recall The hit rate and the precision over the retrievals of one channel.
+	//
+	// Each ratio comes with its count and its base, and is ``null`` when the
+	// base is 0.
+	Recall                RetrievalNumbers `json:"recall"`
+	RepeatMistakeFailures int              `json:"repeat_mistake_failures"`
+	RepeatMistakePct      *float32         `json:"repeat_mistake_pct"`
+	RepeatMistakeRepeats  int              `json:"repeat_mistake_repeats"`
+
+	// Search The hit rate and the precision over the retrievals of one channel.
+	//
+	// Each ratio comes with its count and its base, and is ``null`` when the
+	// base is 0.
+	Search RetrievalNumbers `json:"search"`
 }
 
 // LivenessResponse “GET /api/v1/health/live“ response body.
@@ -8561,7 +8575,9 @@ type ReflexReport struct {
 	//
 	// For one tenant and window. Each ratio comes with its count and its
 	// base, and is ``null`` when the base is 0. The median time is in
-	// seconds.
+	// seconds. The flat hit rate and precision count every retrieval;
+	// ``search`` counts search hits only, and ``recall`` only the entries
+	// MEHO showed before an operation.
 	Learning LearningMetrics     `json:"learning"`
 	Since    time.Time           `json:"since"`
 	Surfaces []SurfaceMetrics    `json:"surfaces"`
@@ -8914,6 +8930,19 @@ type RetrievalHit struct {
 	SourceId    string                 `json:"source_id"`
 	TenantId    openapi_types.UUID     `json:"tenant_id"`
 	UpdatedAt   time.Time              `json:"updated_at"`
+}
+
+// RetrievalNumbers The hit rate and the precision over the retrievals of one channel.
+//
+// Each ratio comes with its count and its base, and is “null“ when the
+// base is 0.
+type RetrievalNumbers struct {
+	HitRatePct        *float32 `json:"hit_rate_pct"`
+	HitRateRetrievals int      `json:"hit_rate_retrievals"`
+	HitRateUsed       int      `json:"hit_rate_used"`
+	PrecisionJudged   int      `json:"precision_judged"`
+	PrecisionPct      *float32 `json:"precision_pct"`
+	PrecisionRight    int      `json:"precision_right"`
 }
 
 // RetrieveRequest POST body for “/api/v1/retrieve“.

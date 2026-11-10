@@ -926,12 +926,15 @@ one replica at a time run it. Each run:
    memory entry that a session used in the last interval gets
    `confirmed_at` set to the time of that use. "Used" is defined in
    [reflex-adoption.md](reflex-adoption.md#learning-numbers): a search
-   gave the entry to a session, and the session then ran an operation
-   that succeeded.
+   gave the entry to a session, or MEHO showed it before an operation,
+   and the session then ran an operation that succeeded.
 4. **Lists used candidates for a reviewer**, with the number of
    different sessions and different targets that used each one. Copies
    of one story are not independent proof, so two searches in one
-   session count once.
+   session count once. Each candidate also gives how many sessions used
+   it after a search (`search_sessions`) and how many after MEHO showed
+   it before an operation (`recall_sessions`). A session can count in
+   both.
 5. **Measures** the four learning numbers for the interval.
 
 The job changes only metadata, through `kb/revisions.py::update_head_metadata`
@@ -948,7 +951,8 @@ retrievals older than 180 days.
 The payload lists what was merged (`merged`: slug and `into`), retired
 (`retired`), refreshed (`refreshed`) and what waits for a reviewer
 (`for_review`), each list at most 100 items with full counts
-(`merged_count` and so on), plus the four numbers (`numbers`). Read it
+(`merged_count` and so on), plus the four numbers (`numbers`). The
+report models are in `lessons/upkeep_report.py`. Read it
 with `meho audit query` and the principal `system:knowledge-upkeep`. A
 row with the totals goes to the system tenant
 `00000000-0000-0000-0000-000000005733`; the schedule reads it as the

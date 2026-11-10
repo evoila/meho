@@ -1272,7 +1272,7 @@ class MemoryRevision(Base):
 
 
 class LessonRetrieval(Base):
-    """One knowledge or memory entry that a search gave to an agent session.
+    """One knowledge or memory entry that a search or recall gave to an agent session.
 
     The weekly knowledge upkeep (:mod:`meho_backplane.lessons.upkeep`) and
     the learning numbers of ``meho audit reflex``
@@ -1291,6 +1291,9 @@ class LessonRetrieval(Base):
       ``None``.
     * ``expired`` -- whether the entry's ``expires_at`` had passed at that
       moment.
+    * ``channel`` -- how the entry reached the session: ``"search"`` (a
+      search tool returned it) or ``"recall"`` (MEHO showed it before an
+      operation).
     """
 
     __tablename__ = "lesson_retrieval"
@@ -1304,6 +1307,9 @@ class LessonRetrieval(Base):
     retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str | None] = mapped_column(Text, nullable=True)
     expired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    channel: Mapped[str] = mapped_column(
+        Text, nullable=False, default="search", server_default=sa.text("'search'")
+    )
 
     __table_args__ = (
         Index("lesson_retrieval_tenant_time_idx", "tenant_id", "retrieved_at"),

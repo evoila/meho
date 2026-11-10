@@ -87,6 +87,10 @@ NOT_CALLER_ADDRESSES: Final[Mapping[tuple[str, str], str]] = {
         "the poll URL an earlier Azure write returned; MEHO polls it only when it is "
         "on the target's own Azure host (check_poll_url)"
     ),
+    ("azure.storage.blob.link.create", "allowed_ip"): (
+        "the one IPv4 address Azure lets use the download link (the SAS sip field); "
+        "MEHO and the target never connect to it"
+    ),
     ("bind9.record.add", "fqdn"): _DNS_RECORD_NAME,
     ("bind9.record.delete", "fqdn"): _DNS_RECORD_NAME,
     ("bind9.record.get", "fqdn"): (

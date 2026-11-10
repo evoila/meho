@@ -10,6 +10,8 @@
 * An ingest compares the new login type with the scope's saved row, not
   with the memory of the replica that takes the ingest. Another replica
   may have saved another login type, or this replica may hold no class.
+* When the saved row already holds the login type but this replica's
+  table does not, the ingest puts the class in place with an audit row.
 
 The tests run against ``sqlite+aiosqlite`` through the autouse fixtures in
 :mod:`tests.conftest`. Names and secrets are made up.
@@ -31,11 +33,14 @@ from meho_backplane.operations.ingest import service as service_module
 from meho_backplane.operations.ingest.ingest_auth_store import (
     restore_ingested_profiled_connectors,
 )
+from meho_backplane.operations.ingest.service import ReviewService
 from tests.test_operations_login_setup_tenants import (  # noqa: F401 (autouse fixtures)
+    _CONNECTOR_ID,
     _PRODUCT,
     _TRIPLE,
     _clean_registry,
     _ingest,
+    _operator,
     _required_settings_env,
     _resolve,
     _scheme,
@@ -185,7 +190,7 @@ async def test_ingest_on_a_replica_without_the_class_keeps_the_old_login_type(
 
 
 @pytest.mark.asyncio
-async def test_same_login_type_on_a_replica_without_the_class_is_unchanged(
+async def test_same_login_type_on_a_replica_without_the_class_registers_with_an_audit_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant_a = uuid.uuid4()
@@ -196,7 +201,52 @@ async def test_same_login_type_on_a_replica_without_the_class_is_unchanged(
 
     result = await _ingest(monkeypatch, tenant_id=tenant_a, auth_scheme="basic")
 
-    assert result.ingestion.login_setup == "unchanged"
-    assert len(await _stamp_audit_payloads()) == 1
+    assert result.ingestion.login_setup == "registered"
+    payloads = await _stamp_audit_payloads()
+    assert len(payloads) == 2
+    assert payloads[-1]["tenant_scope"] == str(tenant_a)
+    assert payloads[-1]["replaced"] is False
     # The class is back in this replica's table.
     assert _scheme(await _resolve(tenant_a)) == "basic"
+
+
+@pytest.mark.asyncio
+async def test_same_saved_login_type_on_a_replica_with_another_class_replaces_with_an_audit_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_a = uuid.uuid4()
+    await _ingest(monkeypatch, tenant_id=tenant_a, auth_scheme="basic")
+    # Another replica saved static_header; this replica still holds basic.
+    await _save_on_another_replica("static_header", ["token"])
+
+    result = await _ingest(monkeypatch, tenant_id=tenant_a, auth_scheme="static_header")
+
+    assert result.ingestion.login_setup == "replaced"
+    assert _scheme(await _resolve(tenant_a)) == "static_header"
+    last = (await _stamp_audit_payloads())[-1]
+    assert last["replaced"] is True
+    assert last["previous_auth_scheme"] == "basic"
+    assert last["auth_scheme"] == "static_header"
+
+
+@pytest.mark.asyncio
+async def test_tenant_login_type_saved_while_a_built_in_one_served_is_audited_when_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_b = uuid.uuid4()
+    await _ingest(monkeypatch, tenant_id=None, auth_scheme="basic")
+    served = await _ingest(monkeypatch, tenant_id=tenant_b, auth_scheme="session_login")
+    assert served.ingestion.login_setup == "served_by_builtin_login_setup"
+    assert [p["tenant_scope"] for p in await _stamp_audit_payloads()] == [None]
+
+    await ReviewService(_operator(None)).delete_connector(_CONNECTOR_ID, tenant_id=None)
+    assert get_tenant_connector(tenant_b, *_TRIPLE) is None
+
+    result = await _ingest(monkeypatch, tenant_id=tenant_b, auth_scheme="session_login")
+
+    assert result.ingestion.login_setup == "registered"
+    assert result.ingestion.connector_registered is True
+    last = (await _stamp_audit_payloads())[-1]
+    assert last["tenant_scope"] == str(tenant_b)
+    assert last["auth_scheme"] == "session_login"
+    assert _scheme(await _resolve(tenant_b)) == "session_login"

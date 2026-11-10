@@ -1473,7 +1473,12 @@ A login setup is the `ProfiledRestConnector` class built from a login type.
   saved row, writes the new login type and the audit row with the old one
   in one transaction, and commits. Only then do the scope's calls use the
   new class. So a replica that holds an old class, or none, still reports
-  and audits the change against the saved choice.
+  and audits the change against the saved choice. When the saved row
+  already holds the same login type but the replica's table does not
+  hold that class (for example, the row was saved while a built-in login
+  setup served the key, and that connector was deleted since), the answer
+  is `registered` or `replaced` from the table, with an audit row. So a
+  class never goes into the table without one.
 * Every stamp commits its audit row before the class is put into the
   table. A failed audit write changes nothing in memory, and a retry does
   the whole step again.

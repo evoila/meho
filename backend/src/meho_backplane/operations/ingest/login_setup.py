@@ -37,6 +37,8 @@ An ingest decides between ``"registered"``, ``"replaced"`` and
 ``"unchanged"`` from the saved login type of the scope, not from this
 table, because another replica may have changed the saved login type
 (:meth:`~meho_backplane.operations.ingest.service.ReviewService.record_ingested_login_setup`).
+When the saved login type is the same but this table would change, the
+table's outcome counts, so the class is audited before it is used.
 """
 
 from __future__ import annotations

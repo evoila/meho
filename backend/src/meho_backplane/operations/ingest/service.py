@@ -94,6 +94,7 @@ from meho_backplane.operations.ingest._internals import (
     OP_ENABLE_GROUP,
     OP_ENABLE_READS,
     ConnectorScope,
+    LoginType,
     _UnsetType,
     apply_op_overrides,
     audit_profile_stamp,
@@ -140,6 +141,7 @@ from meho_backplane.operations.ingest.group_truth import build_group_advisory
 from meho_backplane.operations.ingest.ingest_auth_store import save_ingest_auth_profile
 from meho_backplane.operations.ingest.login_setup import (
     LOGIN_SETUP_APPLIED,
+    LoginSetupChange,
     LoginSetupOutcome,
     apply_login_setup,
     plan_login_setup,
@@ -301,6 +303,30 @@ def _require_login_setup_class(connector_class: type[Connector]) -> None:
             f"(shim_kind == 'profiled'); got {connector_class.__name__!r} "
             f"(shim_kind == {shim_kind(connector_class)!r})"
         )
+
+
+def _ingested_login_setup_outcome(
+    planned: LoginSetupChange,
+    previous: LoginType | None,
+    new_login_type: LoginType,
+) -> tuple[LoginSetupOutcome, LoginType | None]:
+    """Return the outcome of an ingest's login setup and the old login type for its audit row.
+
+    *planned* is what this replica's table would do, *previous* the
+    scope's saved login type before the ingest. A saved row with the same
+    login type is ``"unchanged"`` only when the table needs no change too;
+    else the table's outcome counts, so the class gets its audit row.
+    """
+    if planned.outcome in ("served_by_connector_code", "served_by_builtin_login_setup"):
+        return planned.outcome, None
+    if previous is None:
+        return "registered", None
+    if previous != new_login_type:
+        return "replaced", previous
+    if planned.outcome in LOGIN_SETUP_APPLIED:
+        old = login_type_of(planned.previous) if planned.previous is not None else None
+        return planned.outcome, old
+    return "unchanged", None
 
 
 class ReviewService:
@@ -1381,6 +1407,12 @@ class ReviewService:
         the scope's calls use the class. A failed commit changes nothing,
         so a retry saves, audits and applies again.
 
+        When the saved row already holds the same login type but this
+        replica's table does not hold the class yet, the outcome comes from
+        the table (``"registered"`` or ``"replaced"``) and the audit row is
+        written too, so the class is never put in place without one. This
+        covers a row that was saved while another class served the key.
+
         When hand-written code or a shipped login setup serves the key,
         the row is still saved and the outcome says the login setup is not
         used; no audit row is written.
@@ -1389,8 +1421,7 @@ class ReviewService:
         connector_class = synthesise_profiled_class(
             product=scope.product, version=scope.version, impl_id=scope.impl_id, profile=profile
         )
-        planned = plan_login_setup(scope, connector_class).outcome
-        new_login_type = login_type_of(connector_class)
+        planned = plan_login_setup(scope, connector_class)
         async with self._sessionmaker()() as session:
             previous = await save_ingest_auth_profile(
                 session,
@@ -1401,15 +1432,9 @@ class ReviewService:
                 profile=profile,
                 operator_sub=self._operator.sub,
             )
-            outcome: LoginSetupOutcome
-            if planned in ("served_by_connector_code", "served_by_builtin_login_setup"):
-                outcome = planned
-            elif previous is None:
-                outcome = "registered"
-            elif previous == new_login_type:
-                outcome = "unchanged"
-            else:
-                outcome = "replaced"
+            outcome, audit_previous = _ingested_login_setup_outcome(
+                planned, previous, login_type_of(connector_class)
+            )
             if outcome in LOGIN_SETUP_APPLIED:
                 await audit_profile_stamp(
                     session,
@@ -1418,7 +1443,7 @@ class ReviewService:
                     connector_id=connector_id,
                     scope=scope,
                     connector_class=connector_class,
-                    previous_login_type=previous if outcome == "replaced" else None,
+                    previous_login_type=audit_previous,
                 )
             await session.commit()
         apply_login_setup(scope, connector_class)

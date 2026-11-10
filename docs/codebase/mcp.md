@@ -1638,7 +1638,7 @@ the off state.
 * `get_tool` returns the registered tool. The hosted-run tools are built
   from it once, when the process starts, so they keep the full text.
 
-Two tools use it today:
+Two switches take text away while they are off:
 
 | Switch (off by default) | Tool | With the switch off |
 | --- | --- | --- |
@@ -1646,6 +1646,90 @@ Two tools use it today:
 | `TEAM_KNOWLEDGE_RECALL` | `call_operation`, `preview_operation` | No `team_knowledge` field in the `outputSchema` (`mcp/tools/_operation_recall.py`). |
 
 `tests/test_mcp_surface_conformance.py` checks both states of each switch.
+
+A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
+default) gives the biggest tools a short text while it is on. See "Short
+tool texts" below.
+
+## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
+
+The biggest tools on the default list have a short text. A session sees it
+only when the `MCP_SHORT_TOOL_TEXTS` switch is on (Helm:
+`config.mcpShortToolTexts`). It stays off until a model test shows it
+helps: a small model scores better, and Claude does not score worse.
+
+- **Off (default):** every tool shows its full text, byte for byte as
+  before.
+- **On:** 14 tools show a short description and short input texts. The
+  whole default list goes from 67,865 to 46,067 characters (32% less).
+  No other tool changes.
+
+What stays the same in both states:
+
+- The tools on the list, in every profile and surface.
+- The inputs each tool accepts. Only `description` strings change. Every
+  property, type, enum, default, limit and `required` list stays, so the
+  `tools/call` input check accepts and refuses the same calls.
+- The output schema and annotations.
+
+What a short text keeps: what the tool is for, when to call it, its
+arguments, and the rules that stop wrong calls. What it leaves out:
+return-shape details the output schema or the answer already gives,
+examples, and background. The full text stays the registered one, so
+the reference docs and the hosted-run tools keep it.
+
+How it works:
+
+- `mcp/short_texts.py` has `ShortText` (a description, and short texts per
+  input path such as `query.filter.value`; `None` drops an input's
+  description) and `with_short_text(short, then=...)`. The result is the
+  tool's `for_settings` function (see the section above).
+- `then` is a tool's other `for_settings` step. It runs first. So with
+  `KB_SIMILAR_CHECK` off, `add_to_knowledge` still has no `create_anyway`
+  input. The short text of the similar-entry check sits on
+  `create_anyway`, so it shows only while that input exists.
+- The short text keeps the tool's maturity label (`[beta]`).
+- The texts are in `mcp/tools/_short_tool_texts.py`.
+
+| Tool | Full | Short |
+| --- | ---: | ---: |
+| `query_topology` | 4,655 | 3,191 |
+| `meho_runbook_next` | 3,791 | 1,378 |
+| `add_to_knowledge` | 3,726 | 1,452 |
+| `result_query` | 3,491 | 2,496 |
+| `preview_operation` | 3,377 | 1,341 |
+| `read_docs` | 3,351 | 1,631 |
+| `search_operations` | 3,309 | 1,486 |
+| `meho_broadcast_recent` | 3,234 | 1,791 |
+| `call_operation` | 3,212 | 2,075 |
+| `meho_broadcast_announce` | 3,181 | 1,926 |
+| `search_knowledge` | 3,013 | 2,142 |
+| `list_targets` | 2,945 | 1,116 |
+| `search_docs` | 2,943 | 1,563 |
+| `meho_broadcast_watch` | 2,701 | 1,543 |
+
+Sizes are characters as `tests/test_mcp_tool_text_budget.py` counts them
+(name, description and input schema), with the similar-entry check off.
+The first ten are the ten biggest tools. The next four are needed to
+reach 30% less. `query_topology` and `result_query` stay larger because
+their input schemas are large.
+
+Tests:
+
+- `tests/test_mcp_short_tool_texts.py`: with the switch off, every listed
+  tool equals the tool as listed before; with it on, each changed tool is
+  shorter and takes the same inputs, and no other tool changes.
+- `tests/test_mcp_tool_text_budget.py`: with the switch on, the whole
+  default list is at most 47,000 characters and at least 30% smaller.
+- `tests/test_mcp_surface_conformance.py` runs every test in both states.
+- `tests/test_mcp_tool_profiles.py`: a profile shows the short texts only
+  with the switch on.
+- `/ready` shows the switch as `features.mcp.short_tool_texts`.
+
+How to measure it: run the same benchmark task set twice against one
+build, once with `MCP_SHORT_TOOL_TEXTS=false` and once with `true`, with a
+small model and with Claude. `/ready` tells which state a run used.
+Compare the task scores and the tokens used before the first answer.
 
 ## Empty optional text on read tools (#4110)
 

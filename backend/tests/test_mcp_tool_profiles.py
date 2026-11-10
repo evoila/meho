@@ -12,7 +12,9 @@ The client adds ``?profile=<name>`` to the MCP URL. These tests check:
 * ``tools/call`` refuses a tool outside the profile, and the handler does
   not run;
 * the session-start instructions name no tool the profile hides;
-* no profile keeps today's full list.
+* no profile keeps today's full list;
+* a profile shows the short tool texts when ``MCP_SHORT_TOOL_TEXTS`` is on,
+  and the full texts when it is off, with the same tools in both states.
 """
 
 from __future__ import annotations
@@ -47,7 +49,9 @@ from meho_backplane.mcp.registry import (
 )
 from meho_backplane.mcp.schemas import INVALID_REQUEST, PROTOCOL_VERSION
 from meho_backplane.mcp.server import McpInvalidParamsError, _session_instructions
+from meho_backplane.mcp.tools._short_tool_texts import CALL_OPERATION_SHORT
 from meho_backplane.runbooks.priming import RunbookPrimingResult
+from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -184,6 +188,26 @@ def test_profiles_are_much_smaller_than_the_full_list() -> None:
     for profile in TOOL_PROFILES:
         tools = all_tools_for(_operator(profile=profile))
         assert len(tools) * 2 <= len(full), profile
+
+
+@pytest.mark.parametrize("profile", sorted(TOOL_PROFILES))
+@pytest.mark.asyncio
+async def test_profile_follows_the_short_texts_switch(
+    profile: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same tools in both states; the short text only with the switch on."""
+    listed: dict[bool, dict[str, Any]] = {}
+    for short in (False, True):
+        monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "true" if short else "false")
+        get_settings.cache_clear()
+        result = await handle_tools_list(_operator(profile=profile), None)
+        listed[short] = {tool["name"]: tool for tool in result["tools"]}
+    assert set(listed[False]) == set(listed[True]) == TOOL_PROFILES[profile]
+    assert listed[True]["call_operation"]["description"] == CALL_OPERATION_SHORT.description
+    registered = get_tool("call_operation")
+    assert registered is not None
+    assert listed[False]["call_operation"]["description"] == registered[0].description
+    assert listed[True]["meho_status"] == listed[False]["meho_status"]
 
 
 # ---------------------------------------------------------------------------

@@ -92,6 +92,8 @@ from meho_backplane.mcp.registry import (
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.short_texts import with_short_text
+from meho_backplane.mcp.tools._short_tool_texts import RUNBOOK_NEXT_SHORT
 from meho_backplane.runbooks.engine import (
     PreviousStepNotVerifiedError,
     VerifyResponseMismatchError,
@@ -622,6 +624,7 @@ register_mcp_tool(
         feature="write_surfaces",
         name="meho_runbook_next",
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(RUNBOOK_NEXT_SHORT),
         description=_NEXT_DESCRIPTION,
         inputSchema={
             "type": "object",

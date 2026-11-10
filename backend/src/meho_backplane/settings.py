@@ -1464,6 +1464,13 @@ class Settings(BaseModel):
         the caller's newest Memory notes. When off, none of this is shown.
         It stays off until model tests show it helps. Env
         ``TEAM_KNOWLEDGE_RECALL``.
+    mcp_short_tool_texts:
+        Off by default. When on, the biggest tools on the default MCP tool
+        list send a short description and short input texts
+        (:mod:`meho_backplane.mcp.short_texts`). The inputs a tool accepts
+        stay the same. A small model keeps more of its context window for
+        the job. It stays off until model tests show it helps. Env
+        ``MCP_SHORT_TOOL_TEXTS``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -2347,6 +2354,7 @@ class Settings(BaseModel):
     mcp_require_session_id: bool = False
     mcp_topology_off_default_list: bool = False
     team_knowledge_recall: bool = False
+    mcp_short_tool_texts: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -3391,6 +3399,9 @@ def get_settings() -> Settings:
         ),
         team_knowledge_recall=parse_bool_env(
             os.environ.get("TEAM_KNOWLEDGE_RECALL"),
+        ),
+        mcp_short_tool_texts=parse_bool_env(
+            os.environ.get("MCP_SHORT_TOOL_TEXTS"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),

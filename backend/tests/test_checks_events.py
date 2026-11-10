@@ -29,7 +29,6 @@ from meho_backplane.checks.events import (
     CHECK_SENSOR_CHANGED,
     publish_dashboard_changed,
 )
-from meho_backplane.checks.investigate import investigate_on_transition, run_investigation
 from meho_backplane.checks.runner import _persist_outcome, _SensorSnapshot
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -215,7 +214,7 @@ async def test_switch_off_writes_no_check_rows() -> None:
     await _seed_dashboard([dash_member], memo="ok")
 
     await _persist_outcome(_snap(sid, name="s"), _outcome("critical"))
-    await investigate_on_transition(sensor_id=dash_member, tenant_id=_TENANT)
+    await inv.investigate_on_transition(sensor_id=dash_member, tenant_id=_TENANT)
     await _drain_investigations()
 
     assert await _rows() == []
@@ -289,7 +288,7 @@ async def test_worsening_edge_publishes_one_event_per_cause_group(
     await _seed_tenant()
     members = [_member("a", target={"name": "esx-1"}), _member("b", target=None)]
 
-    await run_investigation(tenant_id=_TENANT, dashboard=_dash(), members=members)
+    await inv.run_investigation(tenant_id=_TENANT, dashboard=_dash(), members=members)
 
     rows = await _rows(CHECK_DASHBOARD_CHANGED)
     assert len(rows) == 2
@@ -326,7 +325,7 @@ async def test_known_noise_group_is_published_with_flag(monkeypatch: pytest.Monk
         metadata={"source": "checks-investigator", "re_escalate": False},
     )
 
-    await run_investigation(tenant_id=_TENANT, dashboard=_dash(), members=[member])
+    await inv.run_investigation(tenant_id=_TENANT, dashboard=_dash(), members=[member])
 
     (row,) = await _rows(CHECK_DASHBOARD_CHANGED)
     assert row.payload["known_noise"] is True
@@ -341,7 +340,7 @@ async def test_recovery_edge_writes_one_row_without_cause_group(
     sid = await _seed_sensor(name="m", last_state="ok")
     await _seed_dashboard([sid], memo="critical")
 
-    await investigate_on_transition(sensor_id=sid, tenant_id=_TENANT)
+    await inv.investigate_on_transition(sensor_id=sid, tenant_id=_TENANT)
     await _drain_investigations()
 
     (row,) = await _rows(CHECK_DASHBOARD_CHANGED)
@@ -360,8 +359,8 @@ async def test_two_results_at_once_give_one_set_of_rows(monkeypatch: pytest.Monk
     await _seed_dashboard([a, b], memo="ok")
 
     await asyncio.gather(
-        investigate_on_transition(sensor_id=a, tenant_id=_TENANT),
-        investigate_on_transition(sensor_id=b, tenant_id=_TENANT),
+        inv.investigate_on_transition(sensor_id=a, tenant_id=_TENANT),
+        inv.investigate_on_transition(sensor_id=b, tenant_id=_TENANT),
     )
     await _drain_investigations()
 
@@ -381,7 +380,7 @@ async def test_publish_failure_does_not_stop_the_investigator(
 
     monkeypatch.setattr(inv, "publish_dashboard_changed", _boom)
     # Returns without raising; the group is still processed (no agent configured).
-    await run_investigation(tenant_id=_TENANT, dashboard=_dash(), members=[_member("a")])
+    await inv.run_investigation(tenant_id=_TENANT, dashboard=_dash(), members=[_member("a")])
     assert await _rows() == []
 
 

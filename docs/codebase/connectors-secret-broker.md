@@ -414,6 +414,12 @@ What MEHO does on the host:
   `/lib*`, `/tmp`, and `/usr` and `/var` outside the write roots).
 - On the host, the script resolves symbolic links and refuses a path that
   ends up outside the allowed places.
+- Root does not follow links in the owner's home. For a path inside the
+  owner's home, the folders, the temp file and the rename are all done as the
+  owner (`runuser -u <owner>`), not as root. Root writes only in the
+  root-owned write roots.
+- The pre-check before SSH is a fixed list of system trees. Any other absolute
+  path is decided only on the host, by the script.
 - The value travels only inside the SSH channel (standard input), through
   the same sudo helper as `linux.file.write`. It is never in the remote
   command line, a log line, or an error text. An error names only a short

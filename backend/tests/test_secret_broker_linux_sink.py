@@ -186,7 +186,12 @@ async def test_reading_a_linux_ref_fails_without_a_value() -> None:
 
 
 def _run_script(script: str, *, home: Path | None = None) -> subprocess.CompletedProcess[str]:
-    """Run *script* with the local bash. A fake ``getent`` answers with *home*."""
+    """Run *script* with the local bash.
+
+    A fake ``getent`` answers with *home*. A fake ``runuser`` writes its owner
+    argument to ``runuser.log`` next to the home, then runs the command (the
+    test user already is the owner).
+    """
     env = dict(os.environ)
     if home is not None:
         fake_bin = home.parent / f"{home.name}-bin"
@@ -194,6 +199,11 @@ def _run_script(script: str, *, home: Path | None = None) -> subprocess.Complete
         getent = fake_bin / "getent"
         getent.write_text(f"#!/bin/sh\necho 'x:x:1:1::{home}:/bin/sh'\n")
         getent.chmod(0o755)
+        runuser = fake_bin / "runuser"
+        runuser.write_text(
+            f'#!/bin/sh\necho "$2" >> "{fake_bin}/runuser.log"\nshift 3\nexec "$@"\n'
+        )
+        runuser.chmod(0o755)
         env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     return subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, check=False, env=env
@@ -273,6 +283,44 @@ def test_script_refuses_a_link_that_leads_out_of_the_home(tmp_path: Path) -> Non
     )
     assert proc.returncode == 6
     assert not (outside / "key").exists()
+
+
+@_NEEDS_LINUX
+def test_script_writes_inside_the_home_as_the_owner(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    owner = getpass.getuser()
+    target = home / "a" / "key"
+    proc = _run_script(build_secret_sink_script(str(target), owner, b"v"), home=home)
+    assert proc.returncode == 0, proc.stderr
+    log = home.parent / f"{home.name}-bin" / "runuser.log"
+    assert log.read_text().split() == [owner]
+
+
+@_NEEDS_LINUX
+def test_script_has_no_root_step_for_a_home_path() -> None:
+    script = build_secret_sink_script("/home/seat/key", "seat", b"v")
+    before_roots = script.split('if [ -n "$realhome" ]')[1].split("Write roots")[0]
+    assert "runuser -u" in before_roots
+    # Root-only steps come after the owner branch has exited.
+    owner_branch, _, root_part = script.partition("exit 0;;")
+    assert "install -d" not in owner_branch.split('if [ -n "$realhome" ]')[1]
+    assert "chown" not in owner_branch.split('if [ -n "$realhome" ]')[1]
+    assert "install -d" in root_part
+
+
+@_NEEDS_LINUX
+def test_script_does_not_follow_a_link_in_the_final_name(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    (home / "key").symlink_to(victim)
+    proc = _run_script(
+        build_secret_sink_script(str(home / "key"), getpass.getuser(), b"v"), home=home
+    )
+    assert victim.read_text() == "keep"
+    assert proc.returncode in (0, 6)
 
 
 @_NEEDS_LINUX

@@ -30,7 +30,13 @@ can never hold a home directory (``/proc``, ``/sys``, ``/dev``, ``/boot``,
 ``/bin``, ``/sbin``, ``/lib*``, ``/tmp``, and ``/usr`` and ``/var`` outside the
 write roots). The root script then resolves the real path (symbolic links
 included) and refuses it unless it is still under a write root or the owner's
-home. So a link inside a home directory cannot lead the write elsewhere.
+home.
+
+Links are not followed by root. For a path inside the owner's home, the folders,
+the temp file and the rename are all made **as the owner** (``runuser -u
+<owner>``), not as root. The owner controls those folders, so a link placed
+there can only affect what the owner can already change. Root writes only in
+the root-owned write roots.
 
 How the value travels
 =====================
@@ -104,6 +110,18 @@ _NEVER_ROOTS: tuple[str, ...] = (
     "/usr",
     "/var",
     "/tmp",
+)
+
+#: Runs as the owner (never as root) for a path inside the owner's home. The
+#: value comes on standard input; ``$1`` is the target path. Every folder,
+#: the temp file and the rename are made by the owner.
+_OWNER_WRITE_SCRIPT = (
+    'set -u; umask 077; real=$1; dir=$(dirname -- "$real"); '
+    'mkdir -p -m 0700 -- "$dir" || exit 4; '
+    'tmp=$(mktemp "$dir/.meho-sink.XXXXXX") || exit 4; '
+    'if ! base64 -d > "$tmp"; then rm -f "$tmp"; exit 4; fi; '
+    'if ! chmod 0600 "$tmp"; then rm -f "$tmp"; exit 4; fi; '
+    'if ! mv -f -T -- "$tmp" "$real"; then rm -f "$tmp"; exit 4; fi'
 )
 
 _SINK_OK = "===MEHO_SINK_OK==="
@@ -202,6 +220,7 @@ def build_secret_sink_script(path: str, owner: str, value: bytes) -> str:
     q_path = shlex.quote(path)
     q_owner = shlex.quote(owner)
     q_b64 = shlex.quote(base64.b64encode(value).decode("ascii"))
+    q_inner = shlex.quote(_OWNER_WRITE_SCRIPT)
     roots = " ".join(shlex.quote(r) for r in LINUX_WRITE_ROOTS)
     err = _SINK_ERR_PREFIX
     lines = [
@@ -217,13 +236,24 @@ def build_secret_sink_script(path: str, owner: str, value: bytes) -> str:
         f"for r in {roots}; do",
         '  case "$real" in "$r"/*) ok=1;; esac',
         "done",
+        'realhome=""',
         'if [ -n "$home" ] && [ "$home" != / ]; then',
         '  realhome="$(realpath -m -- "$home")"',
         '  case "$real" in "$realhome"/*) ok=1;; esac',
         "fi",
         f'[ "$ok" = 1 ] || {{ echo "{err}place===" >&2; exit 6; }}',
         'dir="$(dirname -- "$real")"',
-        # Make a missing parent directory with mode 0700 and the owner.
+        # Inside the owner's home the owner controls the folders. Root must not
+        # touch them: every step runs as the owner, so a link planted there can
+        # only hurt the owner.
+        'if [ -n "$realhome" ]; then',
+        '  case "$real" in "$realhome"/*)',
+        f'    printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$real" '
+        f'|| {{ echo "{err}write===" >&2; exit 4; }}',
+        f'    echo "{_SINK_OK}"; exit 0;;',
+        "  esac",
+        "fi",
+        # Write roots are root-owned folders: root writes there.
         'mk() { [ -d "$1" ] && return 0; mk "$(dirname -- "$1")" || return 1; '
         'install -d -m 0700 -o "$owner" -g "$grp" -- "$1"; }',
         f'mk "$dir" || {{ echo "{err}mkdir===" >&2; exit 4; }}',

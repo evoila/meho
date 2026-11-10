@@ -720,6 +720,21 @@ config:
   # `"true"`, the biggest tools on the default MCP tool list send a short
   # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
+  # -- Tenants whose knowledge entries marked `shared` every tenant on
+  # this instance can read. Comma-separated tenant ids. Rendered into
+  # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and
+  # no entry is shared. Only the owner tenant can change a shared entry.
+  # See `docs/codebase/kb.md`.
+  kbSharedTenantIds: ""
+  # -- The weekly knowledge upkeep job. It merges duplicate entries,
+  # retires expired ones and writes one report per tenant.
+  # `knowledgeUpkeepEnabled` is rendered into `KNOWLEDGE_UPKEEP_ENABLED`;
+  # `"false"` does not start the job. `knowledgeUpkeepIntervalSeconds` is
+  # rendered into `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS`: how often it runs,
+  # from 60 to 604800 seconds (one week, the default). See
+  # `docs/codebase/kb.md`.
+  knowledgeUpkeepEnabled: "true"
+  knowledgeUpkeepIntervalSeconds: 604800
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
   # authorization-code + PKCE grant server-side against the operator's

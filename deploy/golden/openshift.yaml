@@ -338,7 +338,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: c38df3e57cecad94cf83dea9729d351862e24b91f3098c4c6b5559552cb9a0f1
+        checksum/config: a72e6422f58c5c1fda9020aa6f8053bce940fd12503f4b60901a744608fc1a55
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -757,6 +757,12 @@ data:
   TEAM_KNOWLEDGE_RECALL: "false"
   KB_SIMILAR_CHECK: "false"
   MCP_SHORT_TOOL_TEXTS: "false"
+  # The shared knowledge scope and the weekly knowledge upkeep. Rendered
+  # always; the defaults match the backplane's own defaults (nothing
+  # shared, upkeep on, once a week).
+  KB_SHARED_TENANT_IDS: ""
+  KNOWLEDGE_UPKEEP_ENABLED: "true"
+  KNOWLEDGE_UPKEEP_INTERVAL_SECONDS: "604800"
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

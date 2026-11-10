@@ -1,5 +1,7 @@
 # Claude Code
 
+New here? Start with the [laptop guide](../install/laptop-tools.md).
+
 There are two ways to connect Claude Code to a MEHO backplane:
 
 - **The MEHO plugin (recommended)** — one command installs the MCP

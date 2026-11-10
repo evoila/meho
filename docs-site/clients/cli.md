@@ -1,5 +1,7 @@
 # The `meho` CLI
 
+New here? Start with the [laptop guide](../install/laptop-tools.md).
+
 The `meho` CLI is a single static Go binary and the **starting point**
 for connecting to a backplane. It runs on a VPN-connected workstation,
 verifies TLS against your operating system's trust store, and

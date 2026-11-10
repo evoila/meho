@@ -1,5 +1,7 @@
 # Connect clients
 
+New here? Start with the [laptop guide](../install/laptop-tools.md).
+
 You have a running backplane. This section wires operators and agents
 to it — **the CLI first**, then the MCP client matrix, then a
 symptom-first [troubleshooting page](troubleshooting.md) for the auth

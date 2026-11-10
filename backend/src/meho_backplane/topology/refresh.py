@@ -84,6 +84,7 @@ from meho_backplane.topology.history import (
     record_node_change,
 )
 from meho_backplane.topology.identity_mode import read_identity_mode, scope_for_discovered_node
+from meho_backplane.topology.refresh_read_scope import ensure_refresh_in_read_scope
 
 __all__ = ["RefreshResult", "refresh_target_topology"]
 
@@ -1248,7 +1249,13 @@ async def refresh_target_topology(
         result additionally carries ``no_populator_for_product`` +
         ``populated_products`` so the all-zero counts are readable as a
         coverage gap rather than a clean no-op (#2093).
+
+    Raises:
+        RefreshReadScopeDeniedError: *operator* is a service login and
+            *target* is outside its read scope. MEHO checks this first,
+            so the connector is not called.
     """
+    await ensure_refresh_in_read_scope(operator, target)
     started = time.perf_counter()
     target_id: uuid.UUID = target.id
     discovered_by = getattr(target, "product", "unknown")

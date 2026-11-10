@@ -569,6 +569,22 @@
               "description": "Seconds between cleanup runs; a whole number of at least 60. Rendered into `SESSION_STORE_CLEANUP_INTERVAL_SECONDS`. Empty: 3600."
             }
           }
+        },
+        "kbSharedTenantIds": {
+          "type": "string",
+          "pattern": "^ *([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12} *(, *[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12} *)*)?$",
+          "description": "Tenants whose knowledge entries marked `shared` every tenant on this instance can read. Comma-separated tenant ids (UUIDs). Rendered into `KB_SHARED_TENANT_IDS`. Default `\"\"`: no tenant may share. See `docs/codebase/kb.md`."
+        },
+        "knowledgeUpkeepEnabled": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Start the weekly knowledge upkeep job: it merges duplicate entries, retires expired ones and writes one report per tenant. Rendered into `KNOWLEDGE_UPKEEP_ENABLED`. Default `\"true\"`. See `docs/codebase/kb.md`."
+        },
+        "knowledgeUpkeepIntervalSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 604800,
+          "description": "How often the knowledge upkeep job runs, in seconds. Rendered into `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS`. Range [60, 604800]; default 604800 (one week), the same range the backplane accepts."
         }
       }
     },

@@ -2830,7 +2830,7 @@
           "topology"
         ],
         "summary": "Refresh",
-        "description": "Rediscover *target_name*'s topology and reconcile it into the graph.\n\nWraps :func:`~meho_backplane.topology.refresh.refresh_target_topology`.\n*target_name* is resolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` (alias-\naware, 404 with near-misses when nothing matches) \u2014 so a principal\ncan only ever refresh a target in their own tenant and the\nreconcile writes every row under ``operator.tenant_id``.\nCross-tenant refresh is impossible: there is no path by which a\ntarget id from another tenant reaches the service.\n\nThe refresh service writes its own domain-level ``audit_log`` row\n(``op_id=\"topology.refresh\"``, ``op_class=\"read\"``, the per-target\nnode/edge counts in ``payload``) and publishes one fail-open\nbroadcast event inside its own transaction; this route binds the\nsame op identity for the chassis HTTP-level audit row so both rows\nclassify consistently.\n\nConnector-resolution failures inside the service surface as\nstructured JSON rather than a bare 500 (#2092): a ``product`` no\nregistered connector supports returns 422 ``no_matching_connector``;\na resolution tie returns 409 ``ambiguous_connector`` with the\ncandidate ``(product, version, impl_id)`` triples.\n\nA target whose connector resolves but ships **no topology\npopulator** (the base ``discover_topology`` no-op) still returns\n200 with all-zero counts, but the body carries an explicit\n``no_populator_for_product`` slug plus the ``populated_products``\nthat do refresh meaningfully (#2093) \u2014 distinguishing the\ncoverage-gap no-op from a populator run that reconciled zero\nchanges (both fields null).",
+        "description": "Rediscover *target_name*'s topology and reconcile it into the graph.\n\nWraps :func:`~meho_backplane.topology.refresh.refresh_target_topology`.\n*target_name* is resolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` (alias-\naware, 404 with near-misses when nothing matches) \u2014 so a principal\ncan only ever refresh a target in their own tenant and the\nreconcile writes every row under ``operator.tenant_id``.\nCross-tenant refresh is impossible: there is no path by which a\ntarget id from another tenant reaches the service.\n\nThe refresh service writes its own domain-level ``audit_log`` row\n(``op_id=\"topology.refresh\"``, ``op_class=\"read\"``, the per-target\nnode/edge counts in ``payload``) and publishes one fail-open\nbroadcast event inside its own transaction; this route binds the\nsame op identity for the chassis HTTP-level audit row so both rows\nclassify consistently.\n\nConnector-resolution failures inside the service surface as\nstructured JSON rather than a bare 500 (#2092): a ``product`` no\nregistered connector supports returns 422 ``no_matching_connector``;\na resolution tie returns 409 ``ambiguous_connector`` with the\ncandidate ``(product, version, impl_id)`` triples.\n\nA target whose connector resolves but ships **no topology\npopulator** (the base ``discover_topology`` no-op) still returns\n200 with all-zero counts, but the body carries an explicit\n``no_populator_for_product`` slug plus the ``populated_products``\nthat do refresh meaningfully (#2093) \u2014 distinguishing the\ncoverage-gap no-op from a populator run that reconciled zero\nchanges (both fields null).\n\nA service login with a read scope refreshes only targets inside that\nscope. For any other target it gets 403 ``read_scope_denied``, and\nMEHO does not call the connector.",
         "operationId": "refresh_api_v1_topology_refresh__target_name__post",
         "parameters": [
           {
@@ -34399,6 +34399,19 @@
             },
             "type": "array",
             "title": "Dropped Ops"
+          },
+          "login_setup": {
+            "type": "string",
+            "enum": [
+              "registered",
+              "replaced",
+              "unchanged",
+              "served_by_connector_code",
+              "served_by_builtin_login_setup"
+            ],
+            "nullable": true,
+            "title": "Login Setup",
+            "description": "What happened to the login setup of an ingest with a login type. registered: the scope's calls use it now. replaced: it replaced a different login setup of the same scope (audited with the old and the new login type). unchanged: the same login setup was already in place. served_by_connector_code / served_by_builtin_login_setup: hand-written connector code or a shipped or built-in login setup serves this connector for every tenant, so this login setup is saved but not used. A tenant's login setup applies only to that tenant's calls. Null for an ingest without a login type."
           }
         },
         "type": "object",

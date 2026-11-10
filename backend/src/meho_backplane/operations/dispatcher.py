@@ -218,6 +218,13 @@ Detail payloads land in ``extras``. Codes:
   that is *not* classified here is ``net.http_probe``'s mid-chain redirect
   re-gate -- the prior hop answered, so that stays a ``status="ok"``
   ``blocked_redirect`` observation and never reaches the dispatcher.
+* ``probe_pool_busy`` -- a ``net.*`` handler raised
+  :exc:`~meho_backplane.connectors.net.probe_pool.ProbePoolBusyError`: the
+  caller's tenant already had its share of the probe pool in use, or the
+  probe waited in the pool's queue longer than its own timeout. No socket
+  was opened. ``extras`` carries ``tenant_share`` / ``detail`` /
+  ``exception_class``. Narrowed out of the generic arm the same way as
+  ``connector_probe_refused``.
 * ``connector_error`` -- the connector / handler raised any other
   exception (any :exc:`httpx.HTTPStatusError` whose status is none of
   403 / 422 / the auth-class set, any non-TLS :exc:`httpx.ConnectError`
@@ -320,6 +327,7 @@ from meho_backplane.operations._branches import (
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
     is_auth_failed_status,
+    is_probe_pool_busy,
     is_probe_refused,
     result_ambiguous_connector,
     result_announce_required,
@@ -347,6 +355,7 @@ from meho_backplane.operations._errors import (
     result_no_connector,
     result_preview_binding_required,
     result_preview_hash_mismatch,
+    result_probe_pool_busy,
     result_rate_limited,
     result_target_required,
     result_vault_credentials_read_error,
@@ -587,7 +596,9 @@ async def _restore_saved_ingest_profiles(target: Any) -> None:
     A row whose key already has a class is skipped, so the read is cheap
     on the usual path. A database error is logged and the resolver runs
     on the classes this replica already has. A target without a product
-    slug is left to the resolver, which reports the miss.
+    slug is left to the resolver, which reports the miss. Only the built-in
+    rows and the rows of the target's tenant are read: the resolver sees no
+    other tenant's login setup.
     """
     from meho_backplane.operations.ingest.ingest_auth_store import (
         restore_ingested_profiled_connectors,
@@ -596,8 +607,11 @@ async def _restore_saved_ingest_profiles(target: Any) -> None:
     product = getattr(target, "product", None)
     if not isinstance(product, str) or not product:
         return
+    tenant_id = getattr(target, "tenant_id", None)
     try:
-        await restore_ingested_profiled_connectors(product=product)
+        await restore_ingested_profiled_connectors(
+            product=product, tenant_id=tenant_id if isinstance(tenant_id, uuid.UUID) else None
+        )
     except SQLAlchemyError:
         _log.warning("ingested_profile_restore_before_call_failed", exc_info=True)
 
@@ -1985,13 +1999,15 @@ async def _run_branch_with_error_handling(
         # than in a dedicated ``except``: the exception type is only
         # resolvable through a deferred import (``is_probe_refused``), because
         # importing ``connectors.net`` at module scope would close a cycle
-        # back through ``operations/__init__``.
+        # back through ``operations/__init__``. A probe refused because its
+        # tenant's share of the probe pool was in use is narrowed the same way.
         duration_ms = _elapsed_ms(started)
-        exc_result = (
-            result_connector_probe_refused(op_id, exc, duration_ms)
-            if is_probe_refused(exc)
-            else result_connector_error(op_id, exc, duration_ms)
-        )
+        if is_probe_refused(exc):
+            exc_result = result_connector_probe_refused(op_id, exc, duration_ms)
+        elif is_probe_pool_busy(exc):
+            exc_result = result_probe_pool_busy(op_id, exc, duration_ms)
+        else:
+            exc_result = result_connector_error(op_id, exc, duration_ms)
         return await _audit_error_and_return(
             exc_result,
             audit_id=audit_id,

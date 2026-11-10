@@ -879,7 +879,11 @@ Run step 1 as written (Tasks closed; **real** `success` on the
   those by hand and record the result on #2661. The chart job `Lint +
   template + kubeconform (PR build gate)` also keeps the golden renders in
   `deploy/golden/` equal to the chart, so a diff of that folder since the
-  previous tag shows what changed in the installed objects:
+  previous tag shows what changed in the installed objects. The chart job
+  `Upgrade from the last release (Helm 4 server-side apply)` installs the
+  last release and upgrades it to the candidate chart; check that it is
+  green on the pull requests that changed the chart. To see the file
+  diffs:
 
   ```bash
   git diff "${RC_PREV}".."${RC_SHA}" -- docs-site/reference/cli.md docs-site/reference/maturity.md deploy/charts/meho/values.yaml

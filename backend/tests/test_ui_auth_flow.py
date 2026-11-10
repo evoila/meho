@@ -1653,15 +1653,9 @@ def test_full_login_round_trip_lets_authenticated_page_through(
         assert callback_response.status_code == 302
         # Final return_to is /ui/sentinel via the original deep link.
         assert callback_response.headers["location"] == "/ui/sentinel"
-        # 4. Now the sentinel is reachable. TestClient drops the
-        # ``Secure``-flagged cookie on the HTTP transport (the
-        # cookie jar will not send a Secure cookie over plain HTTP),
-        # so we manually replay it. The production redirect at
-        # https://meho.evba.lab is HTTPS-only and the browser sends
-        # the cookie without issue; this is purely a TestClient
-        # interaction quirk.
+        # 4. Now the sentinel is reachable. The HTTPS client keeps the
+        # session cookie from the callback and sends it once.
         cookie_value = callback_response.cookies[SESSION_COOKIE_NAME]
-        client.cookies.set(SESSION_COOKIE_NAME, cookie_value)
         page = client.get("/ui/sentinel")
 
     assert page.status_code == 200

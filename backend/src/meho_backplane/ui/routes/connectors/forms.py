@@ -48,7 +48,10 @@ every route here depends on
 :func:`~meho_backplane.ui.routes.connectors.operator.resolve_operator_or_403`,
 which lifts the full :class:`~meho_backplane.auth.operator.Operator`
 from the BFF session, re-validates the access token through the
-chassis JWT chain, and raises 403 for a non-admin caller. The list /
+chassis JWT chain, and raises 403 for a non-admin caller. The
+routers use its person-only form
+:func:`~meho_backplane.ui.routes.connectors.operator.resolve_human_admin_or_403`,
+so a console session of a machine login gets 403 too. The list /
 detail templates additionally hide the create / edit affordances from
 non-admins (UX), but a crafted POST / PATCH still hits the 403 -- the
 template hiding is not the security boundary.

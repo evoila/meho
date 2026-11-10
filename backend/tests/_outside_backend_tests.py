@@ -67,6 +67,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_dispatch_limits.py",
     "tests/test_chart_image_digest_pin.py",
     "tests/test_chart_image_registry.py",
+    "tests/test_chart_knowledge_settings_values.py",
     "tests/test_chart_mcp_resource_uri.py",
     "tests/test_chart_migrate_init_container.py",
     "tests/test_chart_migrate_job_no_sa.py",

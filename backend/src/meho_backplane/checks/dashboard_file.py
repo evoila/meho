@@ -71,6 +71,7 @@ from meho_backplane.db.models import (
     SensorStatus,
 )
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
+from meho_backplane.operations._secret_values import split_reveal_secret
 
 __all__ = [
     "DashboardImportConflictError",
@@ -144,7 +145,9 @@ def _file_sensor(row: Sensor) -> DashboardFileSensor:
         connector_id=row.connector_id,
         op_id=row.op_id,
         target=target_name(row.target),
-        params=dict(row.params),
+        # A file never carries ``reveal_secret``: a Sensor always reads the
+        # default view, with secret values hidden.
+        params=split_reveal_secret(dict(row.params))[0],
         assertion=AssertionSpec.model_validate(row.assertion),
         cadence_kind=SensorCadenceKind(row.cadence_kind),
         interval_seconds=row.interval_seconds,

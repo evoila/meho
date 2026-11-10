@@ -628,6 +628,11 @@ sorted by path.
 
 #### The import login
 
+The step-by-step setup for an operator (all three machine logins, the
+client secrets and the CI calls) is in the operator guide:
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#lessons-in-your-own-wiki).
+This section keeps the code detail.
+
 The route admits a `tenant_admin`, or a login whose token carries the
 claim `kb_import_only: true` (`Operator.kb_import_only`,
 `auth/jwt.py::_extract_kb_import_only`). Such a login can do nothing
@@ -770,6 +775,9 @@ the round trip.
 
 #### The export login
 
+Setup steps for an operator:
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#step-2-create-the-three-machine-logins).
+
 The route admits an `operator` or a `tenant_admin`, or a login whose
 token carries the claim `kb_export_only: true`
 (`Operator.kb_export_only`, `auth/jwt.py::_extract_kb_export_only`).
@@ -901,7 +909,8 @@ job never confirms a candidate.
 A background job keeps the store clean. It runs once per
 `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default), counted from
 its last recorded run, and can be turned off with
-`KNOWLEDGE_UPKEEP_ENABLED=false`. On PostgreSQL an advisory lock lets
+`KNOWLEDGE_UPKEEP_ENABLED=false` (Helm: `config.knowledgeUpkeepEnabled`
+and `config.knowledgeUpkeepIntervalSeconds`). On PostgreSQL an advisory lock lets
 one replica at a time run it. Each run:
 
 1. **Merges duplicates.** Entries of one tenant with exactly the same
@@ -951,7 +960,8 @@ written only when every tenant committed.
 **Shared scope.** An entry with `shared: true` in its metadata is
 readable from every tenant on the instance, if its owner tenant is
 listed in `KB_SHARED_TENANT_IDS` (comma-separated tenant ids; empty by
-default, so nothing is shared). Only reading is shared:
+default, so nothing is shared; Helm: `config.kbSharedTenantIds`). Only
+reading is shared:
 
 - the entry stays in its owner tenant (`KbEntry.tenant_id` is the
   owner's id);

@@ -931,6 +931,12 @@ data:
   # text, and the similar-entry check on a new knowledge entry.
   TEAM_KNOWLEDGE_RECALL: "false"
   KB_SIMILAR_CHECK: "false"
+  # The shared knowledge scope and the weekly knowledge upkeep. Rendered
+  # always; the defaults match the backplane's own defaults (nothing
+  # shared, upkeep on, once a week).
+  KB_SHARED_TENANT_IDS: ""
+  KNOWLEDGE_UPKEEP_ENABLED: "true"
+  KNOWLEDGE_UPKEEP_INTERVAL_SECONDS: "604800"
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

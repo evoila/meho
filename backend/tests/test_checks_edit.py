@@ -366,6 +366,7 @@ async def test_sensor_edit_hides_secret_named_params_in_audit(client: TestClient
         ({"status": "paused"}, 422, "extra"),
         ({"identity_sub": "someone-else"}, 422, "extra"),
         ({"interval_seconds": 1}, 422, "greater than or equal"),
+        ({"params": {"reveal_secret": True}}, 422, "reveal_secret"),
     ],
 )
 @pytest.mark.asyncio

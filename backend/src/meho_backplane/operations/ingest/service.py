@@ -109,6 +109,7 @@ from meho_backplane.operations.ingest._internals import (
     load_op,
     load_ops_in_groups,
     load_ops_outside_groups,
+    login_type_of,
     operator_disabled_op_ids,
     scope_has_groups,
     scope_has_rows,
@@ -117,7 +118,10 @@ from meho_backplane.operations.ingest._internals import (
     write_audit_row,
 )
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
-from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
+from meho_backplane.operations.ingest.connector_registration import (
+    resolve_authoring_kind,
+    synthesise_profiled_class,
+)
 from meho_backplane.operations.ingest.delete_connector import (
     DeleteConnectorResult,
     deregister_staged_auto_shims,
@@ -133,10 +137,12 @@ from meho_backplane.operations.ingest.exceptions import (
     LegacyTenantConnectorCopyError,
 )
 from meho_backplane.operations.ingest.group_truth import build_group_advisory
+from meho_backplane.operations.ingest.ingest_auth_store import save_ingest_auth_profile
 from meho_backplane.operations.ingest.login_setup import (
     LOGIN_SETUP_APPLIED,
     LoginSetupOutcome,
-    place_login_setup,
+    apply_login_setup,
+    plan_login_setup,
 )
 from meho_backplane.operations.ingest.parser import parse_connector_id
 from meho_backplane.operations.ingest.payload import (
@@ -161,6 +167,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
     from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.profile import ExecutionProfile
     from meho_backplane.db.models import EndpointDescriptor
     from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
 
@@ -282,6 +289,18 @@ async def _reading_tenant_settings(
         version=scope.version,
         impl_id=scope.impl_id,
     )
+
+
+def _require_login_setup_class(connector_class: type[Connector]) -> None:
+    """Raise :class:`TypeError` unless *connector_class* is a login setup class."""
+    from meho_backplane.connectors.base import shim_kind
+
+    if shim_kind(connector_class) != "profiled":
+        raise TypeError(
+            f"record_profile_stamp requires a ProfiledRestConnector "
+            f"(shim_kind == 'profiled'); got {connector_class.__name__!r} "
+            f"(shim_kind == {shim_kind(connector_class)!r})"
+        )
 
 
 class ReviewService:
@@ -1297,7 +1316,7 @@ class ReviewService:
         enable dispatch.
 
         Where the class goes is decided by
-        :func:`~meho_backplane.operations.ingest.login_setup.place_login_setup`:
+        :func:`~meho_backplane.operations.ingest.login_setup.plan_login_setup`:
         the shared table for the built-in scope, the tenant's own table for
         a tenant scope, so a tenant's login setup applies only to that
         tenant's calls. The returned outcome says what happened:
@@ -1309,28 +1328,20 @@ class ReviewService:
 
         ``"registered"`` and ``"replaced"`` write one
         :data:`OP_PROFILE_STAMP` audit row; a replace names the old and the
-        new login type. The other outcomes write none, so a repeated stamp
-        does not double-audit.
+        new login type. The audit row commits before the scope's calls use
+        the class, so a failed audit write changes nothing. The other
+        outcomes write none, so a repeated stamp does not double-audit.
 
         Raises :class:`TypeError` when *connector_class* is not a
         ``ProfiledRestConnector`` — only a profiled class carries an
         ``ExecutionProfile`` to stamp; a bare shim or hand-coded class is
         a programming error here, not a review action.
         """
-        from meho_backplane.connectors.base import shim_kind
-
-        if shim_kind(connector_class) != "profiled":
-            raise TypeError(
-                f"record_profile_stamp requires a ProfiledRestConnector "
-                f"(shim_kind == 'profiled'); got {connector_class.__name__!r} "
-                f"(shim_kind == {shim_kind(connector_class)!r})"
-            )
-
+        _require_login_setup_class(connector_class)
         scope = self._resolve_scope(connector_id, tenant_id, allow_platform_admin_cross_tenant=True)
-        change = place_login_setup(scope, connector_class)
+        change = plan_login_setup(scope, connector_class)
         if change.outcome in LOGIN_SETUP_APPLIED:
-            sessionmaker = self._sessionmaker()
-            async with sessionmaker() as session:
+            async with self._sessionmaker()() as session:
                 await audit_profile_stamp(
                     session,
                     operator_sub=self._operator.sub,
@@ -1338,9 +1349,89 @@ class ReviewService:
                     connector_id=connector_id,
                     scope=scope,
                     connector_class=connector_class,
-                    previous_class=change.previous,
+                    previous_login_type=(
+                        login_type_of(change.previous) if change.previous is not None else None
+                    ),
                 )
                 await session.commit()
+            apply_login_setup(scope, connector_class)
+        self._log_login_setup(connector_id, scope, connector_class, change.outcome)
+        return change.outcome
+
+    async def record_ingested_login_setup(
+        self,
+        connector_id: str,
+        *,
+        tenant_id: UUID | None,
+        profile: ExecutionProfile,
+    ) -> LoginSetupOutcome:
+        """Save the login type an ingest chose, audit it, then make calls use it.
+
+        Builds the login setup class from *profile*
+        (:func:`~meho_backplane.operations.ingest.connector_registration.synthesise_profiled_class`).
+
+        Like :meth:`record_login_setup`, but the outcome comes from the
+        scope's saved login type
+        (:func:`~meho_backplane.operations.ingest.ingest_auth_store.save_ingest_auth_profile`),
+        not from this replica's memory: another replica may have saved
+        another login type since this one loaded it. No saved row gives
+        ``"registered"``, the same login type ``"unchanged"``, another one
+        ``"replaced"``. The saved row and the audit row (with the old and
+        the new login type) commit in one transaction, and only then do
+        the scope's calls use the class. A failed commit changes nothing,
+        so a retry saves, audits and applies again.
+
+        When hand-written code or a shipped login setup serves the key,
+        the row is still saved and the outcome says the login setup is not
+        used; no audit row is written.
+        """
+        scope = self._resolve_scope(connector_id, tenant_id, allow_platform_admin_cross_tenant=True)
+        connector_class = synthesise_profiled_class(
+            product=scope.product, version=scope.version, impl_id=scope.impl_id, profile=profile
+        )
+        planned = plan_login_setup(scope, connector_class).outcome
+        new_login_type = login_type_of(connector_class)
+        async with self._sessionmaker()() as session:
+            previous = await save_ingest_auth_profile(
+                session,
+                tenant_id=scope.tenant_id,
+                product=scope.product,
+                version=scope.version,
+                impl_id=scope.impl_id,
+                profile=profile,
+                operator_sub=self._operator.sub,
+            )
+            outcome: LoginSetupOutcome
+            if planned in ("served_by_connector_code", "served_by_builtin_login_setup"):
+                outcome = planned
+            elif previous is None:
+                outcome = "registered"
+            elif previous == new_login_type:
+                outcome = "unchanged"
+            else:
+                outcome = "replaced"
+            if outcome in LOGIN_SETUP_APPLIED:
+                await audit_profile_stamp(
+                    session,
+                    operator_sub=self._operator.sub,
+                    operator_tenant_id=self._operator.tenant_id,
+                    connector_id=connector_id,
+                    scope=scope,
+                    connector_class=connector_class,
+                    previous_login_type=previous if outcome == "replaced" else None,
+                )
+            await session.commit()
+        apply_login_setup(scope, connector_class)
+        self._log_login_setup(connector_id, scope, connector_class, outcome)
+        return outcome
+
+    @staticmethod
+    def _log_login_setup(
+        connector_id: str,
+        scope: ConnectorScope,
+        connector_class: type[Connector],
+        outcome: LoginSetupOutcome,
+    ) -> None:
         _log.info(
             "connector_profile_stamped",
             connector_id=connector_id,
@@ -1349,9 +1440,8 @@ class ReviewService:
             version=scope.version,
             impl_id=scope.impl_id,
             connector_class=connector_class.__name__,
-            outcome=change.outcome,
+            outcome=outcome,
         )
-        return change.outcome
 
     # -- public write API: state transitions ------------------------------
 

@@ -61,6 +61,7 @@ __all__ = [
     "READ_HTTP_METHODS",
     "VALID_SAFETY_LEVELS",
     "ConnectorScope",
+    "LoginType",
     "apply_op_overrides",
     "audit_profile_stamp",
     "bulk_enable_read_ops",
@@ -72,6 +73,7 @@ __all__ = [
     "load_op",
     "load_ops_in_groups",
     "load_ops_outside_groups",
+    "login_type_of",
     "operator_disabled_op_ids",
     "scope_has_groups",
     "scope_has_rows",
@@ -619,7 +621,7 @@ async def audit_profile_stamp(
     connector_id: str,
     scope: ConnectorScope,
     connector_class: type[Connector],
-    previous_class: type[Connector] | None = None,
+    previous_login_type: LoginType | None = None,
 ) -> uuid.UUID:
     """Append one :class:`AuditLog` row for the first stamp of an ExecutionProfile.
 
@@ -644,9 +646,10 @@ async def audit_profile_stamp(
     The payload also names the scope (``tenant_scope``, ``None`` for the
     built-in scope) and the login type: ``auth_scheme`` and the secret
     field **names** (never values). When the stamp replaced the scope's
-    earlier login setup, *previous_class* is that class: ``replaced`` is
-    ``True`` and ``previous_auth_scheme`` / ``previous_secret_fields``
-    show the old login type next to the new one.
+    earlier login setup, *previous_login_type* is the old login type
+    (:func:`login_type_of`, or the scope's saved row before the change):
+    ``replaced`` is ``True`` and ``previous_auth_scheme`` /
+    ``previous_secret_fields`` show the old login type next to the new one.
     """
     payload: dict[str, Any] = {
         "connector_id": connector_id,
@@ -655,11 +658,11 @@ async def audit_profile_stamp(
         "version": scope.version,
         "impl_id": scope.impl_id,
         "connector_class": connector_class.__name__,
-        **_login_type_fields(connector_class, prefix=""),
-        "replaced": previous_class is not None,
+        **_login_type_fields(login_type_of(connector_class), prefix=""),
+        "replaced": previous_login_type is not None,
     }
-    if previous_class is not None:
-        payload.update(_login_type_fields(previous_class, prefix="previous_"))
+    if previous_login_type is not None:
+        payload.update(_login_type_fields(previous_login_type, prefix="previous_"))
     return await write_audit_row(
         session,
         operator_sub=operator_sub,
@@ -669,14 +672,21 @@ async def audit_profile_stamp(
     )
 
 
-def _login_type_fields(connector_class: type[Connector], *, prefix: str) -> dict[str, Any]:
-    """Return the login type of a login setup class as audit payload fields."""
+#: A login type: the auth scheme name and the secret field names (never values).
+LoginType = tuple[str | None, tuple[str, ...]]
+
+
+def login_type_of(connector_class: type[Connector]) -> LoginType:
+    """Return the login type of a login setup class."""
     profile = getattr(connector_class, "profile", None)
     auth = getattr(profile, "auth", None)
-    return {
-        f"{prefix}auth_scheme": getattr(auth, "scheme", None),
-        f"{prefix}secret_fields": list(getattr(auth, "secret_fields", ()) or ()),
-    }
+    return getattr(auth, "scheme", None), tuple(getattr(auth, "secret_fields", ()) or ())
+
+
+def _login_type_fields(login_type: LoginType, *, prefix: str) -> dict[str, Any]:
+    """Return *login_type* as audit payload fields."""
+    scheme, secret_fields = login_type
+    return {f"{prefix}auth_scheme": scheme, f"{prefix}secret_fields": list(secret_fields)}
 
 
 # ---------------------------------------------------------------------------

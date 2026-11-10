@@ -119,14 +119,12 @@ from meho_backplane.operations.ingest.catalog import (
 )
 from meho_backplane.operations.ingest.connector_registration import (
     check_version_covered_by_registered_class,
-    synthesise_profiled_class,
 )
 from meho_backplane.operations.ingest.exceptions import (
     LlmOutputInvalid,
     ProductImplIdMismatch,
     VersionMismatchError,
 )
-from meho_backplane.operations.ingest.ingest_auth_store import save_ingest_auth_profile
 from meho_backplane.operations.ingest.ingest_profile import build_ingest_execution_profile
 from meho_backplane.operations.ingest.job_phase import report_ingest_phase
 from meho_backplane.operations.ingest.llm_groups import (
@@ -1156,8 +1154,8 @@ class IngestionPipelineService:
         land, a dispatchable
         :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
         synthesised from the profile is stamped under the triple via
-        :meth:`ReviewService.record_login_setup`. Stamping registers the
-        class but never enables an op — the ``review_status='staged'`` gate
+        :meth:`ReviewService.record_ingested_login_setup`. Stamping registers
+        the class but never enables an op — the ``review_status='staged'`` gate
         stays the interlock. ``login_setup`` on the result says what
         happened to it, and ``connector_registered`` is ``True`` when the
         scope's calls use the new class (``"registered"`` or ``"replaced"``).
@@ -1282,7 +1280,7 @@ class IngestionPipelineService:
         execution_profile: ExecutionProfile,
         sessionmaker: async_sessionmaker[AsyncSession],
     ) -> LoginSetupOutcome:
-        """Save the login type, then stamp a profiled connector built from it.
+        """Save the login type and stamp a profiled connector built from it.
 
         The non-catalog on-ramp (#2289) sibling of
         :func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`:
@@ -1290,35 +1288,25 @@ class IngestionPipelineService:
         :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
         subclass carrying the profile and registers it under the triple via
         the review-gate-preserving
-        :meth:`ReviewService.record_login_setup` seam, in the table of the
-        ingest's scope: a tenant's login setup applies only to that tenant's
+        :meth:`ReviewService.record_ingested_login_setup` seam, in the table
+        of the ingest's scope: a tenant's login setup applies only to that tenant's
         calls. Returns the
         :data:`~meho_backplane.operations.ingest.login_setup.LoginSetupOutcome`.
         A registered or replaced login setup writes a
         ``meho_connector_profile_stamp`` audit row under the ingesting
         operator; no stamp enables an op.
 
-        The login type is saved first (#5016), so the class can be built
-        again after a restart or on another replica
+        The login type is saved, so the class can be built again
+        after a restart or on another replica
         (:func:`~meho_backplane.operations.ingest.ingest_auth_store.restore_ingested_profiled_connectors`).
-        A failed save stops the ingest before anything is registered, so a
-        retry saves and stamps again.
+        The outcome compares against the saved login type, and the saved
+        row and its audit row commit together before the class is used. A
+        failed commit stops the ingest before anything is registered, so a
+        retry saves, audits and stamps again.
         """
-        await save_ingest_auth_profile(
-            sessionmaker,
-            tenant_id=tenant_id,
-            product=product,
-            version=version,
-            impl_id=impl_id,
-            profile=execution_profile,
-            operator_sub=self._operator.sub,
-        )
-        connector_class = synthesise_profiled_class(
-            product=product, version=version, impl_id=impl_id, profile=execution_profile
-        )
-        review_service = ReviewService(self._operator)
-        return await review_service.record_login_setup(
-            connector_id, tenant_id=tenant_id, connector_class=connector_class
+        review_service = ReviewService(self._operator, sessionmaker=sessionmaker)
+        return await review_service.record_ingested_login_setup(
+            connector_id, tenant_id=tenant_id, profile=execution_profile
         )
 
     async def _run_grouping_phase(

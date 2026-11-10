@@ -1391,7 +1391,8 @@ builds the profile via `ingest/ingest_profile.py::build_ingest_execution_profile
 fingerprint/`delegate`-probe/`none`-pagination defaults, since a non-catalog
 ingest names no version endpoint). The register phase then skips the bare shim
 (`register_ingested_operations(register_shim=False)`) so the triple is free, and
-`_stamp_profiled_connector` stamps the synthesised class through the same
+`_stamp_profiled_connector` stamps the synthesised class through
+`record_ingested_login_setup`, which uses the same placement rules as the
 `record_login_setup` seam boot stamping uses, in the ingest's scope. The
 answer's `ingestion.login_setup` says what happened (see below). **Stamping never enables an
 op** — the `review_status='staged'` gate (#1971) stays the interlock, so the
@@ -1404,9 +1405,11 @@ connector table in `connectors/registry.py` lives in memory. Before #5016 a
 restart dropped the stamped class: the ops stayed enabled, but every call
 failed with `no_connector` and the list showed `ingested-shim`. Now:
 
-* `_stamp_profiled_connector` first saves the choice through
+* `_stamp_profiled_connector` saves the choice through
+  `ReviewService.record_ingested_login_setup` and
   `ingest/ingest_auth_store.py::save_ingest_auth_profile` into the
-  `ingested_auth_profile` table (migration `0121`). One row per
+  `ingested_auth_profile` table (migration `0121`), in the same
+  transaction as the audit row. One row per
   `(tenant_id, product, version, impl_id)`. It holds the scheme name and the
   secret field **names** only, never values. A re-ingest with a login type
   replaces the row.
@@ -1464,6 +1467,16 @@ A login setup is the `ProfiledRestConnector` class built from a login type.
   `replaced: true` and names both login types (`previous_auth_scheme`,
   `previous_secret_fields`, `auth_scheme`, `secret_fields`; field names
   only). Every stamp row also names its scope (`tenant_scope`).
+* An ingest decides `registered`, `replaced` or `unchanged` from the
+  scope's saved login type, not from the memory of the replica that takes
+  the ingest (`ReviewService.record_ingested_login_setup`). It locks the
+  saved row, writes the new login type and the audit row with the old one
+  in one transaction, and commits. Only then do the scope's calls use the
+  new class. So a replica that holds an old class, or none, still reports
+  and audits the change against the saved choice.
+* Every stamp commits its audit row before the class is put into the
+  table. A failed audit write changes nothing in memory, and a retry does
+  the whole step again.
 * The ingest answer has `ingestion.login_setup` (`IngestionResultModel`):
   `registered`, `replaced`, `unchanged`, `served_by_connector_code` (a
   hand-written class serves the key) or `served_by_builtin_login_setup` (a

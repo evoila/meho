@@ -7,8 +7,9 @@ A login setup is the
 :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector` class
 MEHO builds from the login type an operator picks at ingest
 (``meho connector ingest --auth-scheme <name>``), or from a profile shipped
-with the catalog. :func:`place_login_setup` decides where it goes and what
-the ingest answer says about it:
+with the catalog. :func:`plan_login_setup` decides where it goes and what
+the ingest answer says about it, and :func:`apply_login_setup` puts it
+there:
 
 * **Built-in scope** (``tenant_id`` is ``None``): the shared v2 table, so
   it applies to every tenant. A bare stand-in on the key is replaced.
@@ -19,8 +20,9 @@ the ingest answer says about it:
   to target checks; the stand-in cannot call the vendor.
 * A second login setup for the same scope and key replaces the first one
   when it differs (``"replaced"``), and is ``"unchanged"`` when it is the
-  same. The caller writes the audit row for ``"registered"`` and
-  ``"replaced"``.
+  same. The caller commits the audit row for ``"registered"`` and
+  ``"replaced"`` before it applies the change, so no call uses a login
+  setup without its audit row.
 * When hand-written connector code serves the shared key, or a shipped or
   built-in login setup does, the login setup is not used, and the outcome
   says so (``"served_by_connector_code"`` /
@@ -30,6 +32,11 @@ the ingest answer says about it:
 The functions here are synchronous: a replace has no ``await`` between
 removing the old class and adding the new one, so no call sees the key
 empty.
+
+An ingest decides between ``"registered"``, ``"replaced"`` and
+``"unchanged"`` from the saved login type of the scope, not from this
+table, because another replica may have changed the saved login type
+(:meth:`~meho_backplane.operations.ingest.service.ReviewService.record_ingested_login_setup`).
 """
 
 from __future__ import annotations
@@ -58,8 +65,9 @@ __all__ = [
     "LOGIN_SETUP_APPLIED",
     "LoginSetupChange",
     "LoginSetupOutcome",
+    "apply_login_setup",
     "current_login_setup",
-    "place_login_setup",
+    "plan_login_setup",
     "remove_login_setup",
 ]
 
@@ -101,55 +109,67 @@ def _replace_shared(key: tuple[str, str, str], cls: type[Connector]) -> None:
     register_connector_v2(product=product, version=version, impl_id=impl_id, cls=cls)
 
 
-def _place_builtin(key: tuple[str, str, str], cls: type[Connector]) -> LoginSetupChange:
+def _plan_builtin(key: tuple[str, str, str], cls: type[Connector]) -> LoginSetupChange:
     shared = get_connector_v2(*key)
-    if shared is None:
-        product, version, impl_id = key
-        register_connector_v2(product=product, version=version, impl_id=impl_id, cls=cls)
+    if shared is None or shim_kind(shared) == "bare":
         return LoginSetupChange("registered")
-    kind = shim_kind(shared)
-    if kind == "bare":
-        _replace_shared(key, cls)
-        return LoginSetupChange("registered")
-    if kind == "none":
+    if shim_kind(shared) == "none":
         return LoginSetupChange("served_by_connector_code")
     if _same_setup(shared, cls):
         return LoginSetupChange("unchanged")
     if key in shipped_profile_triples():
         return LoginSetupChange("served_by_builtin_login_setup")
-    _replace_shared(key, cls)
     return LoginSetupChange("replaced", previous=shared)
 
 
-def _place_for_tenant(
+def _plan_for_tenant(
     tenant_id: UUID, key: tuple[str, str, str], cls: type[Connector]
 ) -> LoginSetupChange:
-    product, version, impl_id = key
     shared = get_connector_v2(*key)
     if shared is not None:
         served = _served_outcome(shared)
         if served is not None:
             return LoginSetupChange(served)
-    else:
-        ensure_connector_class_registered(
-            product=product, version=version, impl_id=impl_id, base_url=None
-        )
-    existing = get_tenant_connector(tenant_id, product, version, impl_id)
+    existing = get_tenant_connector(tenant_id, *key)
     if _same_setup(existing, cls):
         return LoginSetupChange("unchanged")
-    set_tenant_connector(
-        tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, cls=cls
-    )
     if existing is None:
         return LoginSetupChange("registered")
     return LoginSetupChange("replaced", previous=existing)
 
 
-def place_login_setup(scope: ConnectorScope, cls: type[Connector]) -> LoginSetupChange:
-    """Put the login setup *cls* into the table of *scope*; see the module docstring."""
+def plan_login_setup(scope: ConnectorScope, cls: type[Connector]) -> LoginSetupChange:
+    """Return what :func:`apply_login_setup` would do for *cls*, without changing anything.
+
+    The caller commits the audit row of a ``"registered"`` or
+    ``"replaced"`` outcome first, then applies the change.
+    """
     if scope.tenant_id is None:
-        return _place_builtin(_key(scope), cls)
-    return _place_for_tenant(scope.tenant_id, _key(scope), cls)
+        return _plan_builtin(_key(scope), cls)
+    return _plan_for_tenant(scope.tenant_id, _key(scope), cls)
+
+
+def apply_login_setup(scope: ConnectorScope, cls: type[Connector]) -> None:
+    """Make *scope*'s calls use the login setup *cls*; see the module docstring.
+
+    Does nothing when another class serves the key for every tenant, or
+    when the scope already holds the same login setup.
+    """
+    key = _key(scope)
+    product, version, impl_id = key
+    change = plan_login_setup(scope, cls)
+    if change.outcome not in LOGIN_SETUP_APPLIED:
+        return
+    if scope.tenant_id is None:
+        _replace_shared(key, cls)
+        return
+    if get_connector_v2(*key) is None:
+        ensure_connector_class_registered(
+            product=product, version=version, impl_id=impl_id, base_url=None
+        )
+    set_tenant_connector(
+        tenant_id=scope.tenant_id, product=product, version=version, impl_id=impl_id, cls=cls
+    )
 
 
 def current_login_setup(

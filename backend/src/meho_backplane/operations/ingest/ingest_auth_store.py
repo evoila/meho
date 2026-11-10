@@ -17,7 +17,9 @@ class again from it:
 * :func:`save_ingest_auth_profile` runs on every real ingest with a login
   type. It stores the scheme name and the secret field **names** only, the
   same closed selection the ingest request accepts. No secret values, no
-  free-form login config.
+  free-form login config. It returns the old login type of the row,
+  so the ingest compares against the saved choice and writes the audit
+  row in the same transaction.
 * :func:`restore_ingested_profiled_connectors` runs at start (after the
   shipped catalog is stamped) and again, scoped to the target's product,
   before every call to an ingested operation resolves its connector. So a
@@ -53,11 +55,11 @@ from meho_backplane.connectors.profile import NAMED_AUTH_SCHEMES, ExecutionProfi
 from meho_backplane.connectors.registry import get_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import IngestedAuthProfile
+from meho_backplane.operations.ingest._internals import LoginType
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
 from meho_backplane.operations.ingest.connector_registration import synthesise_profiled_class
 from meho_backplane.operations.ingest.ingest_profile import build_ingest_execution_profile
 from meho_backplane.operations.ingest.login_setup import LOGIN_SETUP_APPLIED, current_login_setup
-from meho_backplane.operations.ingest.service import ReviewService
 
 __all__ = [
     "RESTORE_OPERATOR_SUB",
@@ -80,7 +82,7 @@ def _scope_filter(tenant_id: UUID | None) -> ColumnElement[bool]:
 
 
 async def save_ingest_auth_profile(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
     *,
     tenant_id: UUID | None,
     product: str,
@@ -88,34 +90,45 @@ async def save_ingest_auth_profile(
     impl_id: str,
     profile: ExecutionProfile,
     operator_sub: str,
-) -> None:
+) -> LoginType | None:
     """Insert or replace the saved login type for one connector scope.
 
     Keyed on ``(tenant_id, product, version, impl_id)``. A re-ingest with a
     login type replaces the scheme and field names, so the row always holds
-    the latest choice. Commits in its own session.
+    the latest choice. Returns the old login type of the row, or
+    ``None`` when the scope had no row. The row is locked until the
+    caller's transaction ends, so two ingests of one scope see each
+    other's change. Does not commit: the caller commits the row together
+    with its audit row.
     """
-    async with sessionmaker() as session:
-        stmt = select(IngestedAuthProfile).where(
+    stmt = (
+        select(IngestedAuthProfile)
+        .where(
             IngestedAuthProfile.product == product,
             IngestedAuthProfile.version == version,
             IngestedAuthProfile.impl_id == impl_id,
             _scope_filter(tenant_id),
         )
-        row = (await session.execute(stmt)).scalar_one_or_none()
-        if row is None:
-            row = IngestedAuthProfile(
-                tenant_id=tenant_id,
-                product=product,
-                version=version,
-                impl_id=impl_id,
-            )
-            session.add(row)
-        row.auth_scheme = profile.auth.scheme
-        row.secret_fields = list(profile.auth.secret_fields)
-        row.operator_sub = operator_sub
-        row.updated_at = datetime.now(UTC)
-        await session.commit()
+        .with_for_update()
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    previous: LoginType | None = None
+    if row is None:
+        row = IngestedAuthProfile(
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        )
+        session.add(row)
+    else:
+        previous = (row.auth_scheme, tuple(row.secret_fields))
+    row.auth_scheme = profile.auth.scheme
+    row.secret_fields = list(profile.auth.secret_fields)
+    row.operator_sub = operator_sub
+    row.updated_at = datetime.now(UTC)
+    await session.flush()
+    return previous
 
 
 def _restore_operator(tenant_id: UUID | None) -> Operator:
@@ -188,6 +201,9 @@ async def _restore_row(row: IngestedAuthProfile) -> bool:
             reason="invalid_profile",
         )
         return False
+    # Imported here: the service imports this module to save a login type.
+    from meho_backplane.operations.ingest.service import ReviewService
+
     connector_class = synthesise_profiled_class(
         product=row.product, version=row.version, impl_id=row.impl_id, profile=profile
     )

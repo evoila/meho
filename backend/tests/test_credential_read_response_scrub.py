@@ -14,8 +14,9 @@ These tests pin the contract:
 
 * the caller-bound answer of ``vault.kv.read`` hides every value under
   ``data`` by default and keeps the key names and ``version``;
-* ``params.reveal_secret=true`` from a person opts into the raw value AND
-  stamps the choice on the audit row (queryable), while ``reveal_secret``
+* ``params.reveal_secret=true`` from a person waits for another person's
+  approval; the approved run returns the raw value AND stamps the choice on
+  the audit row (queryable), while ``reveal_secret``
   never reaches the op's ``parameter_schema`` (it is stripped as a
   dispatch control) nor the ``params_hash``;
 * the audit row's ``raw_payload`` stores a keyed fingerprint in place of
@@ -48,6 +49,10 @@ from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
     reset_dispatcher_caches,
+)
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
 )
 from meho_backplane.settings import get_settings
 
@@ -165,6 +170,33 @@ async def _audit_row(op_id: str) -> AuditLog:
     return rows[0]
 
 
+async def _ok_rows(op_id: str) -> list[AuditLog]:
+    """The audit rows of the runs of *op_id*, without the rows of a wait for approval."""
+    async with get_sessionmaker()() as fresh:
+        rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    return [row for row in rows if row.payload.get("result_status") == "ok"]
+
+
+async def _reveal_after_approval() -> OperationResult:
+    """A person's reveal of ``vault.kv.read`` waits; another person approves and runs it."""
+    parked = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=None,
+        params={"path": "app/db", "reveal_secret": True},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+    assert _PASSWORD_SECRET not in parked.model_dump_json()
+    reviewer = _make_operator().model_copy(update={"sub": "reviewer-2467"})
+    async with get_sessionmaker()() as session:
+        approved = await approve_request(
+            session, UUID(parked.extras["approval_request_id"]), operator=reviewer
+        )
+        await session.commit()
+    return await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+
+
 # ---------------------------------------------------------------------------
 # Scrubbed by default
 # ---------------------------------------------------------------------------
@@ -231,22 +263,16 @@ async def test_credential_read_scrub_is_principal_independent(
 async def test_reveal_secret_true_returns_raw_and_stamps_audit(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """``reveal_secret=true`` -> raw value returned AND stamped on the audit row."""
+    """``reveal_secret=true`` -> after approval, raw value returned AND stamped on the audit row."""
     await _register_vault_read(stub_embedding_service)
 
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vault-1.x",
-        op_id="vault.kv.read",
-        target=None,
-        params={"path": "app/db", "reveal_secret": True},
-    )
+    result = await _reveal_after_approval()
     assert result.status == "ok", result.error
     # The caller opted in: the raw value comes back.
     assert result.result["data"]["password"] == _PASSWORD_SECRET
     assert result.result["data"]["username"] == "root"
 
-    row = await _audit_row("vault.kv.read")
+    (row,) = await _ok_rows("vault.kv.read")
     # The reveal is queryable on the audit row.
     assert row.payload["reveal_secret"] is True
     # raw_payload stores a fingerprint, also when the caller got the value.
@@ -275,25 +301,13 @@ async def test_reveal_secret_does_not_reach_op_schema_or_hash(
         target=None,
         params={"path": "app/db"},
     )
-    revealed = await dispatch(
-        operator=operator,
-        connector_id="vault-1.x",
-        op_id="vault.kv.read",
-        target=None,
-        params={"path": "app/db", "reveal_secret": True},
-    )
+    revealed = await _reveal_after_approval()
     # Neither dispatch 422'd on the strict schema.
     assert scrubbed.status == "ok", scrubbed.error
     assert revealed.status == "ok", revealed.error
 
-    # Both audit rows share one params_hash despite the differing reveal.
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (
-            (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.read")))
-            .scalars()
-            .all()
-        )
+    # Both run rows share one params_hash despite the differing reveal.
+    rows = await _ok_rows("vault.kv.read")
     assert len(rows) == 2
     hashes = {row.payload["params_hash"] for row in rows}
     assert len(hashes) == 1, "reveal choice must not perturb params_hash"

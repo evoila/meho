@@ -43,10 +43,13 @@ Route inventory (read-only, all GET)
   out-of-band" note, NOT a huge blob -- mirroring the operations
   launcher's handle branch.
 * ``GET /ui/vault/read`` -- the HTMX read partial. Dispatches
-  ``vault.kv.read`` and renders the secret. The values reach the
-  operator's browser (reveal-on-click + copy) but the BFF NEVER logs the
-  envelope ``result`` -- the deliberate, scoped un-redaction happens only
-  at the response template (see the redaction note below).
+  ``vault.kv.read`` with ``reveal_secret`` and renders the secret. A read
+  that shows secret values waits for a second person's approval, so the
+  partial first shows "waiting for approval" with a link to the request.
+  The values reach the operator's browser (reveal-on-click + copy) but
+  the BFF NEVER logs the envelope ``result`` -- the deliberate, scoped
+  un-redaction happens only at the response template (see the redaction
+  note below).
 * ``GET /ui/vault/versions`` -- the HTMX version-history partial.
   Dispatches ``vault.kv.versions`` and renders the per-version metadata
   table (created / deleted / destroyed). Never returns secret values.
@@ -464,9 +467,11 @@ async def _dispatch(
     responses by default so an agent transcript never receives the secret;
     the Vault console is an explicit reveal-on-click operator surface, so
     the read path passes ``reveal_secret=True`` to keep the secret reaching
-    the browser. The choice is stamped on the audit row, so a console reveal
-    is queryable. ``vault.kv.list`` / ``vault.kv.versions`` are value-free
-    and leave it ``False``.
+    the browser. Such a call waits for a second person's approval
+    (:mod:`meho_backplane.operations.credential_read`). The choice is
+    stamped on the audit row, so a console reveal is queryable.
+    ``vault.kv.list`` / ``vault.kv.versions`` are value-free and leave it
+    ``False``.
 
     The structured envelope is returned verbatim -- ``ok`` (carrying the
     result / handle) / ``error`` / ``denied`` all ride inside it (the

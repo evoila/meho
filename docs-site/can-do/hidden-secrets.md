@@ -27,7 +27,9 @@ More rules:
 - MEHO also finds secrets in free text, for example private key blocks
   and labels such as `DB_PASSWORD=`.
 - A person or a service principal can ask for the real value with
-  `reveal_secret: true`. An agent is refused.
+  `reveal_secret: true`. An agent is refused. When the operation reads a
+  secret, such as a Vault secret read, the request waits until a second
+  person approves it.
 - An operation that makes a new credential still gives it to the
   caller once.
 - A connector can mark a field that only looks secret, such as a date

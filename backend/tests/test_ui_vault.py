@@ -74,7 +74,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRFMiddleware
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
-from meho_backplane.ui.templating import reset_templating_for_testing
+from meho_backplane.ui.templating import get_templates, reset_templating_for_testing
 from tests._oidc_jwt_helpers import AUDIENCE as _DEFAULT_AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _DEFAULT_ISSUER
 from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
@@ -494,16 +494,15 @@ def test_vault_ui_list_handle_renders_metadata_not_blob(
 # ---------------------------------------------------------------------------
 
 
-def test_vault_ui_read_renders_values_reveal_gated_and_unlogged(
+def test_vault_ui_read_waits_for_approval_and_shows_no_value(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     _stub_embedding_service: AsyncMock,
 ) -> None:
-    """``GET /ui/vault/read`` renders the secret reveal-gated; the value is never logged.
+    """``GET /ui/vault/read`` asks to see the values, so it waits for approval.
 
-    The redaction invariant: the secret value reaches the response body
-    (reveal-on-click), but no secret value string is written to a log or
-    audit row during the request.
+    The partial says so and links to the request. No secret value reaches
+    the response body, a log record or a visible audit payload.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_vault_descriptor()
@@ -521,14 +520,12 @@ def test_vault_ui_read_renders_values_reveal_gated_and_unlogged(
         )
     assert response.status_code == 200, response.text
     body = response.text
-    # The secret render is present + reveal-gated.
-    assert 'data-vault-secret="ok"' in body
-    assert "data-vault-reveal" in body
-    assert "data-vault-secret-value" in body
-    # The value reaches the browser (the deliberate, scoped un-redaction).
-    assert _SECRET_VALUE in body
-    # The version chip renders.
-    assert "version 4" in body
+    # The read waits for a second person's approval; nothing ran yet.
+    assert 'data-vault-error="awaiting_approval"' in body
+    assert "data-approval-request-id" in body
+    assert "data-approval-deep-link" in body
+    assert 'data-vault-secret="ok"' not in body
+    assert _SECRET_VALUE not in body
     # REDACTION INVARIANT (1): the secret value must NOT appear in any
     # MEHO application log record emitted during the request -- the BFF
     # route logs only the op-id / status / handle-presence, never the
@@ -559,16 +556,11 @@ def test_vault_ui_read_renders_values_reveal_gated_and_unlogged(
     # concern, not this BFF's.)
     for payload in _audit_visible_payloads():
         assert _SECRET_VALUE not in payload, "secret value leaked into a visible audit payload"
-    # The BFF itself wrote no extra audit row beyond the dispatcher's
-    # single DISPATCH row.
-    assert _count_audit_rows() == audit_before + 1
+    # The BFF itself wrote no audit row; the rows are the dispatcher's.
+    assert _count_audit_rows() > audit_before
 
 
-def test_vault_ui_read_secret_value_does_not_break_out_of_x_data_attr(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    _stub_embedding_service: AsyncMock,
-) -> None:
+def test_vault_secret_value_does_not_break_out_of_x_data_attr() -> None:
     """A ``"``-containing secret value cannot break out of the ``x-data`` attribute.
 
     Regression for the reflected-XSS / attribute-breakout class fixed on PR
@@ -582,24 +574,17 @@ def test_vault_ui_read_secret_value_does_not_break_out_of_x_data_attr(
     initialiser.
 
     A KV value is operator-writable, so any tenant writer controls this
-    reflection point -- on a secrets console this is high severity.
+    reflection point -- on a secrets console this is high severity. The
+    console read waits for approval, so this renders the partial's value
+    branch directly.
     """
     payload = '"><img src=x onerror=alert(1)>'
-    _seed_tenant(_TENANT_A, "tenant-a")
-    _seed_vault_descriptor()
-    _register_vault(_stub_embedding_service)
-    install_fake_client(monkeypatch, secret={"breakout": payload}, kv_version=1)
-    client, mock = _client_with_role(
-        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    envelope = {"status": "ok", "result": {"data": {"breakout": payload}, "version": 1}}
+    body = (
+        get_templates()
+        .get_template("vault/_secret.html")
+        .render(error=None, envelope=envelope, mount="secret", path="app/db", target="")
     )
-    with caplog.at_level(logging.DEBUG), mock:
-        response = client.get(
-            "/ui/vault/read",
-            params={"mount": "secret", "path": _tenant_path(_TENANT_A, "app/db")},
-            headers={"HX-Request": "true"},
-        )
-    assert response.status_code == 200, response.text
-    body = response.text
     assert 'data-vault-secret="ok"' in body
 
     # The reveal-gated row is rendered with a SINGLE-quoted x-data initialiser
@@ -619,20 +604,6 @@ def test_vault_ui_read_secret_value_does_not_break_out_of_x_data_attr(
     # No live ``<img`` element reaches the markup at all (the payload's ``<``
     # is unicode-escaped inside the JS string, not emitted as a tag).
     assert "<img" not in body
-
-    # The redaction invariant still holds for this payload: it must not leak
-    # into any application log record (driver-level SQL echo excluded, as in
-    # the sibling read test).
-    _driver_loggers = ("aiosqlite", "sqlalchemy")
-    for record in caplog.records:
-        if record.name.split(".")[0] in _driver_loggers:
-            continue
-        assert payload not in record.getMessage(), (
-            f"secret value leaked into a log record message: {record.name}/{record.levelname}"
-        )
-    # ...and not into any audit-trail-visible payload.
-    for visible in _audit_visible_payloads():
-        assert payload not in visible, "secret value leaked into a visible audit payload"
 
 
 # ---------------------------------------------------------------------------

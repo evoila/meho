@@ -616,8 +616,11 @@ All nine register into operation group `kv`.
 `[REDACTED:secret_value]` (`operations/_secret_values.py`,
 `_VALUE_HIDING_OPS`). A person or a service principal who passes
 `reveal_secret: true` gets the values. An agent that passes it gets
-`denied`. The op is registered `safe`, so it runs at once with no
-approval. See
+`denied`. The op is registered `safe`, so a call without the flag runs at
+once with no approval. A call with the flag is at least `caution` and
+waits for a second person's approval (`operations/credential_read.py`).
+`vault.kv.list` and `vault.kv.compare` return no secret value, so they
+stay `safe` and run at once. See
 [redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals).
 
 **Folder delete (`vault.kv.folder.delete`, `ops_kv_folder.py`).** Soft-deletes

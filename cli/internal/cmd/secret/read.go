@@ -179,10 +179,10 @@ func runRead(
 // then maps the status to an exit code the same way dispatch.Render does.
 func renderNonOKToStderr(cmd *cobra.Command, r *dispatch.CallResult) error {
 	if r.Status == dispatch.StatusAwaitingApproval {
-		// vault.kv.read is not approval-gated, so this is not expected in
-		// practice; handle it defensively rather than mis-classifying it
-		// as an invalid status. Parked = no value, exit non-zero (unlike
-		// secret move's exit-0 park, there is nothing to hand back here).
+		// vault.kv.read with reveal_secret waits for a second person's
+		// approval, so a read lands here until someone approves it. Parked
+		// = no value, exit non-zero (unlike secret move's exit-0 park,
+		// there is nothing to hand back here).
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"meho: read parked at status=%s; no value written (%s)\n",
 			r.Status, dispatch.ParkedHint)

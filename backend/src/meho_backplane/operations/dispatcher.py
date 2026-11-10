@@ -433,6 +433,7 @@ from meho_backplane.operations.composite import (
     composite_depth_var,
     get_dispatch_child,
 )
+from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.operations.deny_reasons import (
     AGENT_REVEAL_REFUSED,
     POLICY_DENIED,
@@ -3932,6 +3933,16 @@ async def _dispatch_now(
                 target=target,
                 params_hash=params_hash,
                 started=started,
+            )
+        if reveal_secret:
+            # A credential read that shows the hidden values only on request
+            # (vault.kv.read) waits for approval when the call asks for them.
+            # The lookup applied the floor for a call without the flag.
+            descriptor.safety_level, descriptor.requires_approval = raise_for_credential_read(
+                op_id,
+                safety_level=descriptor.safety_level,
+                requires_approval=descriptor.requires_approval,
+                reveal_secret=True,
             )
         if not _approved:
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval

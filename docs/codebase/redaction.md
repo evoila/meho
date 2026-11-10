@@ -503,7 +503,10 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   principal's call waits for a person's approval, also when the policy
   gate would run it at once (`dispatcher._reveal_waits_for_approval` turns
   the `auto-execute` verdict into `needs-approval`); a person's call keeps
-  the verdict of the gate. The people's call
+  the verdict of the gate. On a credential read that hides its values by
+  default (`vault.kv.read`) the flag also raises the call to at least
+  `caution` with approval (`operations/credential_read.py`), so a
+  person's reveal waits for a second person too. The people's call
   sites are the `/ui` Vault console (`ui/routes/vault/routes.py`,
   reveal-on-click) and CLI `meho secret read`
   (`cli/internal/cmd/secret/read.go`).

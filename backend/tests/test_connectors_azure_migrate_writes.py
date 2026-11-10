@@ -813,6 +813,10 @@ def _assessment(status: str = "Completed", **over: Any) -> dict[str, Any]:
         "reservedInstance": "None",
         "azureHybridUseBenefit": "No",
         "scalingFactor": 1.0,
+        "azurePricingTier": "Standard",
+        "azureOfferCode": "MSAZR0003P",
+        "percentile": "Percentile95",
+        "timeRange": "Day",
         "numberOfMachines": 2,
         "suitabilitySummary": {"Suitable": 1, "ConditionallySuitable": 1},
         "monthlyComputeCost": 61.5,
@@ -913,6 +917,34 @@ async def test_an_existing_assessment_with_other_settings_is_not_changed() -> No
         )
         put = _arm(mock, "PUT", ASSESSMENT_PATH).respond(200, json={})
         with pytest.raises(ValueError, match=r"region, currency"):
+            await _connector().migrate_assessment_create(
+                operator(), AzureTargetStub(), ASSESSMENT_PARAMS
+            )
+
+    assert put.call_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("over", "named"),
+    [
+        ({"azureOfferCode": "MSAZR0023P"}, "azureOfferCode"),
+        ({"percentile": "Percentile50"}, "percentile"),
+        ({"timeRange": "Month"}, "timeRange"),
+        ({"azurePricingTier": "Basic"}, "azurePricingTier"),
+        ({"reservedInstance": "RI1Year"}, "pricing"),
+        ({"scalingFactor": 1.5}, "comfort_factor"),
+        ({"timeRange": None}, "timeRange"),
+    ],
+)
+async def test_an_existing_assessment_with_other_fixed_settings_is_not_accepted(
+    over: dict[str, Any], named: str
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        _arm(mock, "GET", ASSESSMENT_PATH).respond(200, json=_assessment(**over))
+        put = _arm(mock, "PUT", ASSESSMENT_PATH).respond(200, json={})
+        with pytest.raises(ValueError, match=rf"other settings \({named}\)"):
             await _connector().migrate_assessment_create(
                 operator(), AzureTargetStub(), ASSESSMENT_PARAMS
             )

@@ -61,6 +61,7 @@ from meho_backplane.connectors.azure._polling import (
 )
 from meho_backplane.connectors.azure.migrate_reads import read_assessment
 from meho_backplane.connectors.azure.migrate_rows import (
+    assessment_row,
     group_row,
     is_migrate_name,
     migrate_name_param,
@@ -425,35 +426,57 @@ def assessment_body(params: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+#: The parameter behind a setting of the body, for the error text. Other settings are fixed.
+_SETTING_NAMES: Final[Mapping[str, str]] = {
+    "azureLocation": "region",
+    "currency": "currency",
+    "sizingCriterion": "sizing",
+    "reservedInstance": "pricing",
+    "azureHybridUseBenefit": "hybrid_benefit",
+    "scalingFactor": "comfort_factor",
+}
+
+
+def _same_setting(have: object, want: object) -> bool:
+    if isinstance(want, float):
+        return (
+            isinstance(have, int | float)
+            and not isinstance(have, bool)
+            and abs(float(have) - want) <= 1e-6
+        )
+    return isinstance(have, str) and have.casefold() == str(want).casefold()
+
+
 def _differences(existing: Mapping[str, Any], body: Mapping[str, Any]) -> list[str]:
-    """The settings of an existing assessment row that differ from the wanted body."""
-    wanted = body["properties"]
-    pairs = (
-        ("region", existing.get("region"), wanted["azureLocation"]),
-        ("currency", existing.get("currency"), wanted["currency"]),
-        ("sizing", existing.get("sizing_criterion"), wanted["sizingCriterion"]),
-        ("pricing", existing.get("reserved_instance"), wanted["reservedInstance"]),
-        ("hybrid_benefit", existing.get("hybrid_benefit"), wanted["azureHybridUseBenefit"]),
-    )
-    found = [
-        name
-        for name, have, want in pairs
-        if not isinstance(have, str) or have.casefold() != str(want).casefold()
+    """The settings of an existing assessment that differ from the wanted body.
+
+    Every setting the body sends is compared with Azure's own field, so an
+    assessment with another offer, percentile or time range never counts
+    as the same.
+    """
+    raw = existing.get("properties")
+    have: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+    return [
+        _SETTING_NAMES.get(field, field)
+        for field, want in body["properties"].items()
+        if not _same_setting(have.get(field), want)
     ]
-    factor = existing.get("comfort_factor")
-    if not isinstance(factor, int | float) or abs(float(factor) - wanted["scalingFactor"]) > 1e-6:
-        found.append("comfort_factor")
-    return found
 
 
 async def _existing_assessment(
     connector: AzureConnector,
     operator: Operator,
     target: AzureTargetLike,
-    params: Mapping[str, Any],
+    names: Mapping[str, str],
 ) -> dict[str, Any] | None:
+    """Azure's own answer for the assessment, or ``None`` when there is none."""
     try:
-        return await read_assessment(connector, operator, target, params)
+        return await connector.arm_get(
+            target,
+            _paths(target, MIGRATE_ASSESSMENT_PATH, names),
+            operator=operator,
+            api_version=MIGRATE_API_VERSION,
+        )
     except AzureNotFoundError:
         return None
 
@@ -508,7 +531,7 @@ async def assessment_create_impl(
                 f"{names['group']!r} with other settings ({', '.join(differs)}). MEHO did "
                 "not change it. Use a new assessment name."
             )
-    row: dict[str, Any] | None = existing
+    row = None if existing is None else assessment_row(existing, group=names["group"])
     poll_error: str | None = None
     done = False
     try:

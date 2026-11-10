@@ -21,11 +21,37 @@ the rule already has in ``failed``, it only counts it as not added.
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from meho_backplane.connectors.freeipa.rpc import FreeipaCommandError
 
-__all__ = ["as_list", "check_done", "description_option", "result_dict"]
+if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.connectors.freeipa.rpc import FreeipaAnswer
+    from meho_backplane.connectors.freeipa.session import FreeipaTargetLike
+
+    class _Caller(Protocol):
+        """What :func:`add_members` and :func:`run_delete` use of the connector."""
+
+        async def call(
+            self,
+            target: FreeipaTargetLike,
+            operator: Operator,
+            command: str,
+            args: list[Any] | None = None,
+            options: dict[str, Any] | None = None,
+        ) -> FreeipaAnswer:
+            """Run one IPA command."""
+
+
+__all__ = [
+    "add_members",
+    "as_list",
+    "check_done",
+    "description_option",
+    "result_dict",
+    "run_delete",
+]
 
 #: The name of the error a write raises when FreeIPA did not do all of it.
 _NOT_DONE: Final[str] = "NotDone"
@@ -78,3 +104,53 @@ def description_option(params: dict[str, Any]) -> dict[str, Any]:
     """The ``description`` option, when the caller gave one."""
     description = params.get("description")
     return {"description": description} if description else {}
+
+
+async def add_members(
+    connector: _Caller,
+    operator: Operator,
+    target: FreeipaTargetLike,
+    command: str,
+    params: dict[str, Any],
+    members: dict[str, str],
+) -> dict[str, Any]:
+    """Run an add-member command on the object ``params["name"]``.
+
+    *members* maps each member parameter to the IPA option it is sent
+    as. Fails unless FreeIPA added every member sent.
+    """
+    sent = {option: list(params.get(key) or []) for key, option in members.items()}
+    options = {option: names or None for option, names in sent.items()}
+    answer = await connector.call(target, operator, command, [params["name"]], options)
+    result = result_dict(answer.result)
+    check_done(
+        command,
+        result.get("failed"),
+        result.get("completed"),
+        sum(len(names) for names in sent.values()),
+    )
+    return {"entry": result_dict(result.get("result")), "completed": result.get("completed")}
+
+
+async def run_delete(
+    connector: _Caller,
+    operator: Operator,
+    target: FreeipaTargetLike,
+    command: str,
+    name: str,
+    options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run a ``*_del`` command for one object; return what FreeIPA deleted, and its warnings.
+
+    The warnings are FreeIPA's messages, for example that it found no DNS
+    records to remove.
+    """
+    answer = await connector.call(target, operator, command, [name], options)
+    result = result_dict(answer.result)
+    check_done(command, result_dict(result.get("result")).get("failed"))
+    warnings = [
+        str(message["message"])
+        for message in as_list(result.get("messages"))
+        if isinstance(message, dict) and message.get("message")
+    ]
+    return {"deleted": as_list(result.get("value")), "warnings": warnings}

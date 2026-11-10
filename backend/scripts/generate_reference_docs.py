@@ -375,7 +375,8 @@ def render_connector_index() -> str:
         "",
         "MEHO has two kinds of connector, both first-class and "
         "indistinguishable to an agent. **Generic** connectors are built by "
-        "ingesting a vendor's protocol spec (OpenAPI, GraphQL, WSDL, proto); "
+        "ingesting a vendor's OpenAPI file (version 3.0 or 3.1; the command line "
+        "converts a Swagger 2.0 file first); "
         "**typed** connectors are hand-coded against a vendor SDK or "
         "transport where no usable spec exists. The **Kind** column is "
         "populated only where MEHO's published connector-spec catalog states "

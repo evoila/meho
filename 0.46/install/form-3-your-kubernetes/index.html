@@ -1064,6 +1064,34 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#notes-for-your-platform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Notes for your platform
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Notes for your platform">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#vks-vsphere-kubernetes-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        VKS (vSphere Kubernetes Service)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -3109,6 +3137,34 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#notes-for-your-platform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Notes for your platform
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Notes for your platform">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#vks-vsphere-kubernetes-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        VKS (vSphere Kubernetes Service)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -3171,6 +3227,8 @@ This chapter does not need it.</p>
 </table>
 <p>Everything else ships inside the Helm release: the activity-feed store
 (Valkey), the database migrations and the operations catalog.</p>
+<p>On VKS (vSphere Kubernetes Service), read the
+<a href="#vks-vsphere-kubernetes-service">VKS notes</a> first.</p>
 <h2 id="step-2-decide-the-hostname-and-the-certificate">Step 2: Decide the hostname and the certificate<a class="headerlink" href="#step-2-decide-the-hostname-and-the-certificate" title="Permanent link">&para;</a></h2>
 <p>MEHO serves one hostname, set as <code>ingress.host</code>. The chart derives the
 MCP audience from it. The MCP audience is the name every agent token
@@ -3347,6 +3405,62 @@ screen and not to a file, and no password goes into your shell history.</p>
 </code></pre></div>
 <p><strong>You now have a running MEHO and a logged-in operator.</strong> Go on with
 <a href="../setup-page/">the setup page and the settings file</a>.</p>
+<h2 id="notes-for-your-platform">Notes for your platform<a class="headerlink" href="#notes-for-your-platform" title="Permanent link">&para;</a></h2>
+<h3 id="vks-vsphere-kubernetes-service">VKS (vSphere Kubernetes Service)<a class="headerlink" href="#vks-vsphere-kubernetes-service" title="Permanent link">&para;</a></h3>
+<p>VKS is the Kubernetes that VMware Cloud Foundation (VCF) runs on a
+vSphere Supervisor. MEHO is tested on a VKS cluster with Kubernetes
+v1.35.5 on VCF 9.1. The chart needs no change for VKS. The steps above
+stay the same, with these differences:</p>
+<ul>
+<li><strong>The way in.</strong> VKS brings no ingress controller. The cluster admin
+  installs <a href="https://doc.traefik.io/traefik/">Traefik</a> from its Helm
+  chart first, in its own namespace <code>traefik</code>. Its Service of type
+  LoadBalancer gets an address from the Supervisor. Point your DNS name
+  to that address.</li>
+<li><strong>Storage.</strong> VKS makes one storage class for each vSphere storage
+  policy of the namespace, and marks none as the default. The cluster
+  admin sets the annotation
+  <code>storageclass.kubernetes.io/is-default-class: "true"</code> on one class.
+  Or you name a class in your values file
+  (<code>corePostgres.persistence.storageClass</code> and
+  <code>coreVault.persistence.storageClass</code>).</li>
+<li><strong>Rights.</strong> The kubeconfig from the Supervisor login
+  (<code>kubectl vsphere login</code>) is a cluster admin inside the VKS cluster.
+  MEHO needs less: an admin of one namespace is enough. For that, the
+  cluster admin makes the namespace and a Role with a RoleBinding for
+  the person who installs. Then leave out <code>--create-namespace</code> in
+  Step 4.</li>
+<li><strong>Pod security.</strong> MEHO runs under the strictest pod security rule
+  (<code>restricted</code>). You do not need to relax anything.</li>
+<li>
+<p><strong>The values.</strong> Use the example file
+  <a href="https://github.com/evoila/meho/blob/main/deploy/values-examples/values-vks.yaml"><code>values-vks.yaml</code></a>.
+  It sets Traefik as the way in with HTTPS only, turns on the web
+  console, and turns on the network rules of the built-in OpenBao and
+  Keycloak. Without these two rules, every pod in the cluster can reach
+  OpenBao and Keycloak. In your own <code>values.yaml</code> from Step 3, remove
+  the line <code>className: nginx</code>. Then pass both files in Step 4, the
+  example file first:</p>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--namespace<span class="w"> </span>meho<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>values-vks.yaml<span class="w"> </span>-f<span class="w"> </span>values.yaml
+</code></pre></div>
+</li>
+<li>
+<p><strong>vCenter and NSX.</strong> List their networks in
+  <code>networkPolicy.extraEgress</code>, as in Step 3. Without it, MEHO cannot
+  reach the vCenter it runs on.</p>
+</li>
+</ul>
+<div class="admonition warning">
+<p class="admonition-title">No firewall rule between the nodes</p>
+<p>Do not block the traffic from a worker node to its control plane,
+for example with an NSX firewall rule. If you do, the Supervisor
+rebuilds the worker nodes every few minutes.</p>
+</div>
+<p>One message is normal: right after the install, the Pods of PostgreSQL
+and OpenBao show the warning "unbound immediate PersistentVolumeClaims"
+for about 20 seconds. It goes away when vSphere has made the disks.</p>
 
 
 

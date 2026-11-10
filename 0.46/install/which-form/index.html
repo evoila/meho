@@ -3044,7 +3044,10 @@ steps for every form.</p>
 <p>Start at the first question and stop at the first "yes".</p>
 <ol>
 <li><strong>Do you run VMware vSphere or VMware Cloud Foundation (VCF)?</strong>
-   Yes: use form 1, the <a href="../form-1-vmware-appliance/">VMware appliance</a>.</li>
+   Yes: use form 1, the <a href="../form-1-vmware-appliance/">VMware appliance</a>.
+   If you want MEHO inside your own VKS cluster (vSphere Kubernetes
+   Service) instead, use form 3,
+   <a href="../form-3-your-kubernetes/#vks-vsphere-kubernetes-service">your Kubernetes</a>.</li>
 <li><strong>Do you run your own Kubernetes or OpenShift cluster, and may you
    install a Helm chart on it?</strong>
    Yes: use form 3, <a href="../form-3-your-kubernetes/">your Kubernetes</a>.</li>
@@ -3101,7 +3104,7 @@ steps for every form.</p>
 </tr>
 <tr>
 <td>3. Your Kubernetes</td>
-<td>Kubernetes 1.28 or newer on kind, and on RKE2 (the Kubernetes inside form 2).</td>
+<td>Kubernetes 1.28 or newer on kind, and on RKE2 (the Kubernetes inside form 2). VKS (vSphere Kubernetes Service) on VMware Cloud Foundation 9.1, with Kubernetes 1.35.</td>
 <td>Other Kubernetes that follow the standard, and OpenShift.</td>
 </tr>
 </tbody>

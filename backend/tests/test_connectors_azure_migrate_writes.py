@@ -80,7 +80,14 @@ ASSESSMENT_PARAMS = {
 
 @pytest.fixture(autouse=True)
 def _no_waiting(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Polls do not sleep: the tests move on at once."""
+    """Polls do not sleep, and the clock moves 5 s per read.
+
+    A poll that never finishes then runs out of wait time after a few
+    rounds instead of looping on the real clock. Tests that need a
+    different clock set their own.
+    """
+    clock = iter(range(0, 1_000_000, 5))
+    monkeypatch.setattr(migrate_writes, "_monotonic", lambda: float(next(clock)))
     monkeypatch.setattr(migrate_writes, "_sleep", AsyncMock())
     monkeypatch.setattr(_polling, "_sleep", AsyncMock())
     monkeypatch.setattr(_http, "_sleep", AsyncMock())

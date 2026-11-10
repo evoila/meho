@@ -280,7 +280,7 @@ async def _dispatch(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_write_ops_registration_set() -> None:
-    """WRITE_OPS carries the twenty-two write ops (the eighteen before, plus four account writes)."""
+    """WRITE_OPS carries the twenty-two write ops (eighteen, plus four account writes)."""
     op_ids = {op.op_id for op in WRITE_OPS}
     assert op_ids == set(EXPECTED_WRITE_OP_IDS)
     assert len(WRITE_OPS) == 22

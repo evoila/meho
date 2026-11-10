@@ -149,6 +149,11 @@ from meho_backplane.operations.approval_resume_checks import (
     preview_changed_since_request,
     target_changed_since_request,
 )
+from meho_backplane.operations.approved_reveal import (
+    is_read_reveal,
+    result_waiting_for_requester,
+    without_secret_values,
+)
 from meho_backplane.operations.grant_approval import (
     RIGHTS_CHANGE_REFUSAL,
     check_grant_approval,
@@ -2339,6 +2344,7 @@ async def resume_dispatch_after_approval(
     operator: Operator,
     request: ApprovalRequest,
     params: dict[str, Any] | None = None,
+    requester_fetch: bool = False,
 ) -> Any:
     """Re-hydrate the stored target and re-dispatch an approved op (#1503, G11.7-T1).
 
@@ -2405,11 +2411,19 @@ async def resume_dispatch_after_approval(
     hash must still build the same preview
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
+
+    A secret reveal (``reveal_secret`` on the row) does not run here on an
+    approve: the answer is :func:`result_waiting_for_requester`, and nothing
+    is claimed. Only the fetch of the person who asked runs it
+    (*requester_fetch*,
+    :func:`~meho_backplane.operations.approved_reveal.fetch_approved_reveal`).
     """
     # #5024: a stopping pod starts no new run. The claim stays free, so
     # nothing is used up and nothing was sent.
     if is_draining():
         return shutting_down_result(request.op_id)
+    if is_read_reveal(request) and not requester_fetch:
+        return result_waiting_for_requester(request)
     # The requester's reveal choice is on the request row, outside the
     # params and the hash (``create_pending_request``). It goes on the
     # params of the run only.
@@ -3100,7 +3114,9 @@ async def _dispatch_resume_with_bound_context(
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
     # winner, so the capture runs at most once; fail-soft, never breaks the
     # approve path.
-    await persist_resume_result(request.id, result, parked_op_id=request.op_id)
+    # A reveal keeps its values only in the answer to the person who asked.
+    stored = without_secret_values(result) if reveal_secret else result
+    await persist_resume_result(request.id, stored, parked_op_id=request.op_id)
     return result
 
 

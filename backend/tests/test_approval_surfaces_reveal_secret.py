@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import quote
 
 import pytest
@@ -33,7 +34,10 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.mcp.tools.approvals import _get_handler, _list_handler, _row_to_dict
+from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER
+from meho_backplane.ui.routes.approvals import run_watch
 from meho_backplane.ui.routes.approvals.render import project_request_to_view
+from meho_backplane.ui.templating import get_templates
 from tests.test_ui_approvals import (
     _RESOLVE_OPERATOR,
     _REVIEWER_SUB,
@@ -134,13 +138,13 @@ def test_mcp_list_and_get_return_the_reveal_choice() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_modal_of_a_pending_reveal_request_says_approving_returns_the_values() -> None:
+def test_modal_of_a_pending_reveal_request_says_the_requester_sees_the_values_once() -> None:
     body = _modal(_seed(reveal=True))
 
     assert _ROW_MARK in body
     assert "Returned to the requester" in body
     assert _GATE_MARK in body
-    assert "Approving returns the hidden values to the requester" in body
+    assert "Approving lets the requester see the hidden values once" in body
 
 
 def test_modal_of_a_decided_reveal_request_still_names_it() -> None:
@@ -183,3 +187,51 @@ def test_in_order_window_marks_only_the_reveal_step() -> None:
 
     assert response.status_code == 200, response.text
     assert response.text.count(_STEP_MARK) == 1
+
+
+# ---------------------------------------------------------------------------
+# Approving a read reveal starts no run
+# ---------------------------------------------------------------------------
+
+
+def test_console_approve_of_a_read_reveal_starts_no_run() -> None:
+    """The approve card says the requester can get the value; no background run starts."""
+    rid = _seed(
+        reveal=True,
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+        decided_at=datetime.now(UTC),
+    )
+    row = _load(rid)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    service = MagicMock(side_effect=AssertionError("no background run for a read reveal"))
+    with patch.object(run_watch, "get_operation_run_service", service):
+        state = asyncio.run(run_watch.start_approved_run(operator, row))
+
+    assert state["result_state"] == WAITING_FOR_REQUESTER
+    assert run_watch.live_run(row, None) == state
+    body = (
+        get_templates()
+        .get_template("approvals/_run_state.html")
+        .render(request=project_request_to_view(row), run=state, poll_seconds=5)
+    )
+    assert 'data-testid="approval-run-waiting-for-requester"' in body
+    assert "You do not see the value" in body
+    service.assert_not_called()
+
+
+def test_console_approve_of_a_plain_read_still_starts_its_run() -> None:
+    """A request without the flag runs on the approve, as before."""
+    rid = _seed(
+        reveal=False,
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+        decided_at=datetime.now(UTC),
+    )
+    row = _load(rid)
+    assert run_watch.live_run(row, None) == {
+        "result_state": "not_started",
+        "outcome": None,
+        "polling": False,
+        "run_id": None,
+    }

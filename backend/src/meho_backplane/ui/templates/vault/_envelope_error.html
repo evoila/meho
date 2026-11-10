@@ -13,9 +13,10 @@
       could still hit it).
     * ``status="awaiting_approval"`` -> the read asked to show secret
       values, so it waits for a second person's approval. Nothing ran yet.
-      The "Show value" button reads the approved result
-      (``/ui/vault/read/result``); ``extras.approval_status`` is set when
-      that page found no result yet.
+      After the approval, the "Show value" button runs the read once for
+      the person who asked (``POST /ui/vault/read/reveal``);
+      ``extras.approval_status`` is set when that page found the request
+      not approved yet.
     * the dispatcher's structured fault envelope (``status`` of
       ``"error"`` / ``"denied"``). The ONE special case is the per-tenant
       guard: a ``VaultTenantScopeError`` comes back as ``status="error"``
@@ -59,7 +60,8 @@
           <p class="text-xs [overflow-wrap:anywhere]">
             Showing the values of a secret needs the approval of a second
             person. The read has <span class="font-semibold">not</span> run yet.
-            After the approval, click "Show value".
+            After the approval, click "Show value". It works once, within a
+            short time after the approval.
           </p>
           {% if approval_status and approval_status not in ("pending", "approved") %}
             <p class="mt-1 text-xs font-semibold" data-approval-status="{{ approval_status }}">
@@ -74,7 +76,7 @@
             <button
               type="button"
               class="btn btn-sm mt-2 gap-1"
-              hx-get="/ui/vault/read/result?request_id={{ approval_id | urlencode }}"
+              hx-post="/ui/vault/read/reveal?request_id={{ approval_id | urlencode }}"
               hx-target="#vault-secret-region"
               hx-swap="innerHTML"
               data-vault-show-value

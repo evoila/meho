@@ -619,8 +619,11 @@ All nine register into operation group `kv`.
 `denied`. The op is registered `safe`, so a call without the flag runs at
 once with no approval. A call with the flag is at least `caution` and
 waits for a second person's approval (`operations/credential_read.py`).
-After the approval, the person who asked gets the value with "Show value"
-in the console or `meho secret read --approval <id> --field <name>`.
+Approving runs nothing. After the approval, the person who asked gets the
+value with "Show value" in the console or
+`meho secret read --approval <id> --field <name>`: the read runs then,
+once, within 15 minutes of the approval, and MEHO stores no value
+([approvals.md](approvals.md#an-approved-secret-read-runs-when-the-person-who-asked-fetches-it)).
 `vault.kv.list` and `vault.kv.compare` return no secret value, so they
 stay `safe` and run at once. See
 [redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals).

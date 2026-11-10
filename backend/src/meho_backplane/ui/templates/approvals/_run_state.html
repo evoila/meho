@@ -151,6 +151,18 @@
       long ago and stored no result. MEHO does not know if the change
       happened. Do not run it again. Check the target first.
     </p>
+  {% elif run and run.result_state == "waiting_for_requester" %}
+    {#- A secret reveal: the approve runs nothing. The person who asked
+        gets the value once, in their own answer. -#}
+    <span class="grid size-12 place-items-center rounded-full bg-success/15 text-success">
+      {{ icon("check", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Approved. The person who asked can now get the value.</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-waiting-for-requester">
+      The read of <span class="font-mono">{{ request.op_id }}</span> did not run.
+      It runs once, when the person who asked fetches the value, within a
+      short time. You do not see the value.
+    </p>
   {% elif run and run.result_state == "not_started" %}
     <span class="grid size-12 place-items-center rounded-full bg-info/15 text-info">
       {{ icon("clock", class="size-6") }}

@@ -71,6 +71,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.approval_rerun import rerun_failed_request
+from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER, fetch_approved_reveal
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.redaction import redact
 from meho_backplane.redaction.resolver import get_default_policy
@@ -473,7 +474,9 @@ async def test_reveal_returns_no_value_when_the_audit_row_cannot_commit(
 
     monkeypatch.setattr(audit_module, "write_audit_row", _raise_audit_commit)
 
-    result = await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+    result = await fetch_approved_reveal(
+        _operator(PrincipalKind.USER, sub="requester"), approved.id
+    )
 
     assert result.status == "error"
     assert (result.error or "").startswith("audit_commit_failed:")
@@ -757,7 +760,12 @@ async def _park_approve_and_run(op_id: str, *, reveal: bool) -> Any:
     async with get_sessionmaker()() as session:
         approved = await approve_request(session, request_id, operator=reviewer)
         await session.commit()
-    return await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+    answer = await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+    if answer.status != WAITING_FOR_REQUESTER:
+        return answer
+    # A read with a reveal runs only when the person who asked fetches it.
+    assert answer.result is None
+    return await fetch_approved_reveal(requester, request_id)
 
 
 async def test_reveal_choice_survives_the_wait_for_approval(
@@ -952,7 +960,11 @@ async def test_reveal_by_a_service_principal_waits_for_approval_on_a_read(
     async with get_sessionmaker()() as session:
         approved = await approve_request(session, request.id, operator=reviewer)
         await session.commit()
-    result = await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+    answer = await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+    assert answer.status == WAITING_FOR_REQUESTER
+    assert [value for value in _planted_values() if value in answer.model_dump_json()] == []
+
+    result = await fetch_approved_reveal(service, request.id)
 
     assert result.status == "ok", result.error
     assert result.result["data"]["password"] == _PASSWORD

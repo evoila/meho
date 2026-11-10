@@ -163,6 +163,7 @@ from meho_backplane.operations.approval_rerun import (
     rerun_failed_request,
 )
 from meho_backplane.operations.approval_rights import ApproveRight, approve_right
+from meho_backplane.operations.approved_reveal import is_read_reveal
 from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
@@ -1228,7 +1229,9 @@ async def approve_approval_request(
     # The decision is already committed + audited above; the exactly-one-
     # resumer claim (#2293) still guards the single execution, now won
     # inside the background task.
-    if body.async_:
+    # A secret reveal runs nothing on an approve (``approved_reveal``), so it
+    # needs no background run.
+    if body.async_ and not is_read_reveal(request):
         run_id = await get_operation_run_service().submit_approval_resume(
             operator, request, params=body.params
         )
@@ -1772,7 +1775,7 @@ async def decide_approval_request(
     # the claim is free (waiter gone), else it no-ops already_resumed —
     # so the run_id-is-not-None skip guard is gone: it was the source of
     # the silent-non-execution seam when the waiter had died.
-    if decision == "approved" and body.async_:
+    if decision == "approved" and body.async_ and not is_read_reveal(request):
         return await _decide_in_background(operator, request, body)
     if decision == "approved":
         dispatch_result = await _resume_dispatch_after_approval(

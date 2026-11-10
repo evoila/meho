@@ -71,6 +71,7 @@ from meho_backplane.api.v1.agent_principals import (
 )
 from meho_backplane.api.v1.agent_runs import router as api_v1_agent_runs_router
 from meho_backplane.api.v1.agents import router as api_v1_agents_router
+from meho_backplane.api.v1.approval_reveal import router as api_v1_approval_reveal_router
 from meho_backplane.api.v1.approvals import router as api_v1_approvals_router
 from meho_backplane.api.v1.ask_docs import router as api_v1_ask_docs_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
@@ -1390,6 +1391,8 @@ app.include_router(api_v1_checks_dashboard_files_router)
 # (T5) so a ``broadcast_watch`` operator session learns of pending
 # requests without polling. Operator-level; tenant-scoped via the JWT.
 app.include_router(api_v1_approvals_router)
+# The person who asked fetches the value of an approved secret reveal once.
+app.include_router(api_v1_approval_reveal_router)
 # #3151 -- operator-managed standing scoped auto-approval grants for
 # service principals (the persistent form of an approve decision).
 app.include_router(api_v1_service_grants_router)

@@ -121,6 +121,7 @@ from meho_backplane.operations.approval_rights import (
     approve_right,
     self_approval_confirmation,
 )
+from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.routes import login_location
@@ -443,6 +444,11 @@ async def _run_step(
     step.row = approved
     if status == "ok":
         step.outcome, step.detail = "approved", "Ran OK."
+    elif status == WAITING_FOR_REQUESTER:
+        step.outcome, step.detail = (
+            "approved",
+            "Approved. The person who asked can now get the value.",
+        )
     elif status == "already_resumed":
         await _wait_for_stored_result(step)
     elif (getattr(result, "extras", None) or {}).get("execution_outcome") == UNCERTAIN_OUTCOME:

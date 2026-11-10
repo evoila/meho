@@ -95,10 +95,12 @@ func newReadCmd() *cobra.Command {
 			"A read that shows a secret value waits for a second person's\n" +
 			"approval. Then the command writes no value, prints the request id\n" +
 			"on stderr and exits 4. After the approval, run\n" +
-			"`meho secret read --approval <id> --field <name>`: it reads the\n" +
-			"value of the approved read (only the person who sent the request\n" +
-			"can) and writes it to stdout the same way. Do not run the first\n" +
-			"command again: that sends a new request.\n\n" +
+			"`meho secret read --approval <id> --field <name>`: it runs the\n" +
+			"approved read and writes the value to stdout the same way. Only\n" +
+			"the person who sent the request can, once, and only within a short\n" +
+			"time after the approval (15 minutes by default). MEHO keeps no\n" +
+			"value. Do not run the first command again: that sends a new\n" +
+			"request.\n\n" +
 			"Exit codes mirror meho operation call: 0=ok, 1=error/denied,\n" +
 			"2=auth_expired, 3=unreachable, 4=unexpected or still waiting,\n" +
 			"5=not the person who sent the request.",
@@ -127,7 +129,7 @@ func newReadCmd() *cobra.Command {
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL from the most recent `meho login`)")
 	cmd.Flags().StringVar(&approvalID, "approval", "",
-		"id of an approved read request: write the --field value of its result instead of sending a new read")
+		"id of an approved read request: run it once and write its --field value instead of sending a new read")
 	if err := cmd.MarkFlagRequired("field"); err != nil {
 		panic(err) // programmer error: the flag is defined directly above
 	}
@@ -213,8 +215,8 @@ func renderNonOKToStderr(cmd *cobra.Command, r *dispatch.CallResult) error {
 	if r.Status == dispatch.StatusAwaitingApproval {
 		// vault.kv.read with reveal_secret waits for a second person's
 		// approval, so a read lands here until someone approves it. Parked
-		// = no value, exit non-zero. The approved run stores its result for
-		// the requester; --approval reads it.
+		// = no value, exit non-zero. After the approval, --approval runs the
+		// read once for the requester.
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"meho: read parked at status=%s; no value written (%s)\n",
 			r.Status, dispatch.ParkedHint)
@@ -239,9 +241,11 @@ func renderNonOKToStderr(cmd *cobra.Command, r *dispatch.CallResult) error {
 }
 
 // runReadApproved writes the --field value of an approved read request.
-// It reads the stored result via GET /api/v1/approvals/{id}/result, which
-// serves only the person who sent the request, and never sends a new read.
-// The pipe-only guard and the stdout/stderr split are the same as runRead.
+// It calls POST /api/v1/approvals/{id}/reveal: the backplane runs the
+// approved read once, for the person who sent the request only, and
+// within a short time after the approval. MEHO keeps no value, so the
+// command works once per approval. The pipe-only guard and the
+// stdout/stderr split are the same as runRead.
 func runReadApproved(cmd *cobra.Command, idArg, field, backplaneOverride string) error {
 	if stdoutIsTTY() {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(
@@ -262,12 +266,18 @@ func runReadApproved(cmd *cobra.Command, idArg, field, backplaneOverride string)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, false)
 	}
-	view, err := fetchApprovalResult(cmd.Context(), client, requestID)
+	view, err := fetchApprovedReveal(cmd.Context(), client, requestID)
 	if err != nil {
 		var apiErr *dispatch.APIResponseError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
-			return output.RenderError(cmd.ErrOrStderr(), output.InsufficientRole(
-				"not_request_owner: only the person who sent this request can read its value"), false)
+		if errors.As(err, &apiErr) {
+			switch apiErr.StatusCode {
+			case http.StatusForbidden:
+				return output.RenderError(cmd.ErrOrStderr(), output.InsufficientRole(
+					"not_request_owner: only the person who sent this request can read its value"), false)
+			case http.StatusConflict:
+				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(
+					"no value: "+revealRefusal(apiErr.Body)), false)
+			}
 		}
 		return renderRequestError(cmd, backplaneURL, err, false)
 	}
@@ -282,13 +292,13 @@ func runReadApproved(cmd *cobra.Command, idArg, field, backplaneOverride string)
 // call is retried once after a refresh.
 const statusTokenExpired = 401
 
-// fetchApprovalResult reads GET /api/v1/approvals/{id}/result with one
-// retry after a token refresh. A 403 or 404 comes back as a structured
-// error, so the caller never mistakes it for a result.
-func fetchApprovalResult(
+// fetchApprovedReveal calls POST /api/v1/approvals/{id}/reveal with one
+// retry after a token refresh. A non-2xx answer comes back as a
+// structured error, so the caller never mistakes it for a result.
+func fetchApprovedReveal(
 	ctx context.Context, client *api.AuthedClient, requestID uuid.UUID,
-) (*api.ApprovalResultView, error) {
-	resp, err := client.GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse(ctx, requestID, nil)
+) (*api.ApprovalRevealResult, error) {
+	resp, err := client.RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx, requestID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +306,7 @@ func fetchApprovalResult(
 		if rerr := client.Refresh(ctx); rerr != nil {
 			return nil, rerr
 		}
-		resp, err = client.GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse(ctx, requestID, nil)
+		resp, err = client.RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx, requestID, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -307,23 +317,28 @@ func fetchApprovalResult(
 	return resp.JSON200, nil
 }
 
-// approvedReadResult turns the stored result of an approval request into
-// the read result. It fails when the request is not a vault.kv.read, or
-// when no result is stored yet (the request still waits, or it was
-// rejected, expired or withdrawn).
-func approvedReadResult(v *api.ApprovalResultView) (*dispatch.CallResult, *output.StructuredError) {
-	if v.Result == nil {
-		return nil, output.Unexpected(fmt.Sprintf(
-			"no value yet: the request is %s; when it is approved, run this command again",
-			v.Status))
+// revealRefusal is the plain reason of a refused fetch: the "detail" of
+// the 409 answer ("reveal_<code>: <message>"), or the raw body.
+func revealRefusal(body string) string {
+	var parsed struct {
+		Detail string `json:"detail"`
 	}
-	raw, err := json.Marshal(*v.Result)
+	if err := json.Unmarshal([]byte(body), &parsed); err == nil && parsed.Detail != "" {
+		return parsed.Detail
+	}
+	return body
+}
+
+// approvedReadResult turns the answer of the reveal route into the read
+// result. It fails when the request is not a vault.kv.read.
+func approvedReadResult(v *api.ApprovalRevealResult) (*dispatch.CallResult, *output.StructuredError) {
+	raw, err := json.Marshal(v)
 	if err != nil {
-		return nil, output.Unexpected(fmt.Sprintf("encode stored result: %v", err))
+		return nil, output.Unexpected(fmt.Sprintf("encode reveal result: %v", err))
 	}
 	var r dispatch.CallResult
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, output.Unexpected(fmt.Sprintf("decode stored result: %v", err))
+		return nil, output.Unexpected(fmt.Sprintf("decode reveal result: %v", err))
 	}
 	if r.OpID != opKVRead {
 		return nil, output.Unexpected(fmt.Sprintf(

@@ -75,8 +75,8 @@
   Hidden values (``request.reveal_secret``)
     When the requester asked for the hidden values of the answer, the detail
     list says so (``data-approval-reveal-secret``), on every status, and the
-    consequence banner of a pending row says that approving returns them to
-    the requester (``data-approval-gate-reveal-secret``).
+    consequence banner of a pending row says that approving lets the
+    requester see them once (``data-approval-gate-reveal-secret``).
 
   Context:
     request               -- dict: id / op_id / connector_id / principal_sub /
@@ -769,8 +769,9 @@
         </p>
         {% if request.reveal_secret %}
           <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-approval-gate-reveal-secret>
-            Approving returns the hidden values to the requester: the answer
-            shows the secret values in clear text.
+            Approving lets the requester see the hidden values once: for a
+            read, it runs when they fetch the values, within a short time.
+            The answer shows the secret values in clear text to them only.
           </p>
         {% endif %}
         {% if out_of_order %}

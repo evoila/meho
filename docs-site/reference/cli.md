@@ -4675,7 +4675,7 @@ Pipe a single raw secret field to stdout (pipe-only, audited)
 meho secret read <mount> <path> | read --approval <id> [flags]
 ```
 
-- `--approval` — id of an approved read request: write the --field value of its result instead of sending a new read
+- `--approval` — id of an approved read request: run it once and write its --field value instead of sending a new read
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--field` — key within the secret's data map whose raw value is written to stdout (required)
 - `--target` — Vault target slug to dispatch against (resolved server-side)

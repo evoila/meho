@@ -65,6 +65,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -76,7 +77,7 @@ from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
 )
-from meho_backplane.ui.csrf import CSRFMiddleware
+from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import get_templates, reset_templating_for_testing
@@ -565,8 +566,8 @@ def test_vault_ui_read_waits_for_approval_and_shows_no_value(
     assert _count_audit_rows() > audit_before
 
 
-def _approve_and_run(request_id: str) -> None:
-    """A second person approves the waiting read; MEHO runs it."""
+def _approve(request_id: str) -> None:
+    """A second person approves the waiting read. The approve runs nothing."""
 
     async def _do() -> None:
         reviewer = Operator(
@@ -582,19 +583,31 @@ def _approve_and_run(request_id: str) -> None:
         result = await resume_dispatch_after_approval(
             operator=reviewer, request=approved, params=None
         )
-        assert result.status == "ok", result.error
+        assert result.status == WAITING_FOR_REQUESTER, result.error
+        assert _SECRET_VALUE not in result.model_dump_json()
 
     asyncio.run(_do())
+
+
+def _show_value(client: TestClient, request_id: str) -> Any:
+    """Click "Show value": the POST carries the CSRF token of the session."""
+    token = mint_csrf_token(str(client.cookies.get(SESSION_COOKIE_NAME)))
+    client.cookies.set(CSRF_COOKIE_NAME, token)
+    return client.post(
+        "/ui/vault/read/reveal",
+        params={"request_id": request_id},
+        headers={"X-CSRF-Token": token, "HX-Request": "true"},
+    )
 
 
 def test_vault_ui_read_shows_the_value_to_the_requester_after_approval(
     monkeypatch: pytest.MonkeyPatch,
     _stub_embedding_service: AsyncMock,
 ) -> None:
-    """Request, approval, then "Show value" gives the person who asked the secret.
+    """Request, approval, then "Show value" runs the read once for the person who asked.
 
-    Before the approval the button shows the waiting panel again. Another
-    person gets a 404, not the value.
+    Before the approval the button shows the waiting panel again. A second
+    click is refused with no value. Another person gets a 404, not the value.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_vault_descriptor()
@@ -612,31 +625,51 @@ def test_vault_ui_read_shows_the_value_to_the_requester_after_approval(
         )
         assert waiting.status_code == 200, waiting.text
         assert "data-vault-show-value" in waiting.text
+        assert 'hx-post="/ui/vault/read/reveal' in waiting.text
         match = re.search(r"data-approval-request-id>([0-9a-f-]{36})<", waiting.text)
         assert match is not None, waiting.text
         request_id = match.group(1)
 
-        early = client.get("/ui/vault/read/result", params={"request_id": request_id})
+        early = _show_value(client, request_id)
         assert early.status_code == 200, early.text
         assert 'data-vault-error="awaiting_approval"' in early.text
         assert 'data-approval-status="pending"' in early.text
         assert _SECRET_VALUE not in early.text
 
-        _approve_and_run(request_id)
+        _approve(request_id)
 
-        shown = client.get("/ui/vault/read/result", params={"request_id": request_id})
+        shown = _show_value(client, request_id)
         assert shown.status_code == 200, shown.text
         assert 'data-vault-secret="ok"' in shown.text
         assert _SECRET_VALUE in shown.text
         assert path in shown.text
 
+        again = _show_value(client, request_id)
+        assert again.status_code == 200, again.text
+        assert "reveal_already_used" in again.text
+        assert _SECRET_VALUE not in again.text
+
     other, other_mock = _client_with_role(
         tenant_id=_TENANT_A, operator_sub="op-someone-else", role=TenantRole.OPERATOR
     )
     with other_mock:
-        refused = other.get("/ui/vault/read/result", params={"request_id": request_id})
+        refused = _show_value(other, request_id)
     assert refused.status_code == 404
     assert _SECRET_VALUE not in refused.text
+
+
+def test_vault_ui_show_value_needs_the_csrf_token() -> None:
+    """The "Show value" POST uses up the permission, so it is CSRF-checked."""
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/vault/read/reveal",
+            params={"request_id": str(uuid.uuid4())},
+            headers={"HX-Request": "true"},
+        )
+    assert response.status_code == 403
 
 
 def test_vault_secret_value_does_not_break_out_of_x_data_attr() -> None:

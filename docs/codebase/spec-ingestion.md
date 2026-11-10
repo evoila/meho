@@ -621,13 +621,14 @@ The rule lives in one place, `operations/credential_read.py`
 - **`vault.kv.read` with `reveal_secret: true`.** The answer shows the
   values, so the dispatcher raises the call to at least `caution` with
   approval before the policy gate. A person's reveal waits for a second
-  person, the same as a service principal's. The approved run stores its
-  answer on the request, and only the person who asked can read it
-  (`GET /api/v1/approvals/{id}/result`). The Vault console's secret view
-  sends the flag, so it shows "waiting for approval" with a link to the
-  request and a "Show value" button (`/ui/vault/read/result`) that shows
-  the value after the approval. `meho secret read` prints the request id
-  and the command that gets the value after the approval:
+  person, the same as a service principal's. Approving runs nothing: the
+  read runs once when the person who asked fetches the value
+  (`POST /api/v1/approvals/{id}/reveal`, `operations/approved_reveal.py`),
+  and MEHO stores the result without the value. The Vault console's
+  secret view sends the flag, so it shows "waiting for approval" with a
+  link to the request and a "Show value" button
+  (`POST /ui/vault/read/reveal`). `meho secret read` prints the request
+  id and the command that gets the value after the approval:
   `meho secret read --approval <id> --field <name>`.
 
 #### Caller-address floor

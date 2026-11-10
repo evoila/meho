@@ -489,23 +489,20 @@ func TestSecretReadParkedNamesTheApprovalCommand(t *testing.T) {
 }
 
 // TestSecretReadApprovedWritesTheValue — after the approval, --approval
-// reads the stored result and writes only the field value. It sends no
-// new read.
+// runs the approved read once through the reveal route and writes only
+// the field value. It sends no new read.
 func TestSecretReadApprovedWritesTheValue(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
-		"GET /api/v1/approvals/" + approvalStubID + "/result": func(w http.ResponseWriter, r *http.Request) {
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(t, w, 200, map[string]any{
 				"approval_request_id": approvalStubID,
-				"status":              "approved",
-				"resumed":             true,
-				"reviewed_by":         "reviewer",
-				"decided_at":          "2026-11-10T12:00:00Z",
+				"status":              "ok",
+				"op_id":               opKVRead,
+				"error":               nil,
+				"audit_id":            nil,
 				"result": map[string]any{
-					"status": "ok", "op_id": opKVRead, "duration_ms": 3,
-					"result": map[string]any{
-						"data":    map[string]any{"password": "s3cr3t-p@ss", "user": "root"},
-						"version": 2,
-					},
+					"data":    map[string]any{"password": "s3cr3t-p@ss", "user": "root"},
+					"version": 2,
 				},
 			})
 		},
@@ -524,18 +521,14 @@ func TestSecretReadApprovedWritesTheValue(t *testing.T) {
 	}
 }
 
-// TestSecretReadApprovedStillWaiting — no stored result yet: no value,
-// a plain reason on stderr, exit 4.
+// TestSecretReadApprovedStillWaiting — not approved yet: the route
+// refuses (409), no value, the reason on stderr, exit 4.
 func TestSecretReadApprovedStillWaiting(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
-		"GET /api/v1/approvals/" + approvalStubID + "/result": func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(t, w, 200, map[string]any{
-				"approval_request_id": approvalStubID,
-				"status":              "pending",
-				"resumed":             false,
-				"reviewed_by":         nil,
-				"decided_at":          nil,
-				"result":              nil,
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 409, map[string]any{
+				"detail": "reveal_not_approved: The request is pending. " +
+					"The value can be fetched only after the approval.",
 			})
 		},
 	})
@@ -551,15 +544,43 @@ func TestSecretReadApprovedStillWaiting(t *testing.T) {
 	if out != "" {
 		t.Errorf("stdout must be empty; got %q", out)
 	}
-	if !strings.Contains(errOut, "no value yet: the request is pending") {
+	if !strings.Contains(errOut, "no value: reveal_not_approved: The request is pending") {
 		t.Errorf("stderr must say the request still waits; got %q", errOut)
+	}
+}
+
+// TestSecretReadApprovedUsedOnce — the second fetch is refused with a
+// clear reason and no value: the approval works once.
+func TestSecretReadApprovedUsedOnce(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 409, map[string]any{
+				"detail": "reveal_already_used: The value of this request was already fetched. " +
+					"Send a new read to see it again.",
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	withStdoutTTY(t, false)
+
+	out, errOut, err := runReadCmd(t,
+		"--approval", approvalStubID, "--field", "password", "--backplane", srv.URL)
+	if exitCodeOf(err) != 4 {
+		t.Fatalf("a used approval must exit 4; got %v", err)
+	}
+	if out != "" {
+		t.Errorf("stdout must be empty; got %q", out)
+	}
+	if !strings.Contains(errOut, "already fetched") {
+		t.Errorf("stderr must say the value was already fetched; got %q", errOut)
 	}
 }
 
 // TestSecretReadApprovedNotOwner — another person gets exit 5, no value.
 func TestSecretReadApprovedNotOwner(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
-		"GET /api/v1/approvals/" + approvalStubID + "/result": func(w http.ResponseWriter, r *http.Request) {
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(t, w, 403, map[string]any{"detail": "not_request_owner"})
 		},
 	})
@@ -577,19 +598,16 @@ func TestSecretReadApprovedNotOwner(t *testing.T) {
 	}
 }
 
-// TestSecretReadApprovedRejectsOtherOps — the stored result of another
+// TestSecretReadApprovedRejectsOtherOps — the result of another
 // operation is not written as a secret value.
 func TestSecretReadApprovedRejectsOtherOps(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
-		"GET /api/v1/approvals/" + approvalStubID + "/result": func(w http.ResponseWriter, r *http.Request) {
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(t, w, 200, map[string]any{
 				"approval_request_id": approvalStubID,
-				"status":              "approved",
-				"resumed":             true,
-				"result": map[string]any{
-					"status": "ok", "op_id": "vault.kv.put",
-					"result": map[string]any{"data": map[string]any{"password": "x"}},
-				},
+				"status":              "ok",
+				"op_id":               "vault.kv.put",
+				"result":              map[string]any{"data": map[string]any{"password": "x"}},
 			})
 		},
 	})

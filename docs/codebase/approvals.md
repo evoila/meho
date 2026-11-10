@@ -1598,6 +1598,47 @@ in `refusal`, and `status_code` `409` or `422`.
 the credential-write re-run tests in `tests/test_secret_values_hidden.py`
 and `tests/migrations/test_migration_0131_add_approval_request_reveal_secret.py`.
 
+## An approved secret read runs when the person who asked fetches it
+
+A read that asks to show secret values (`reveal_secret: true`, for
+example `vault.kv.read`) waits for a second person's approval. The
+approval is a one-time permission for the person who asked, not a run.
+The code is in `operations/approved_reveal.py`.
+
+- **Approving runs nothing.** Every approve surface (REST `/approve` and
+  `/decide`, the console approve card, the in-order page) goes through
+  `resume_dispatch_after_approval`. For such a request it answers with
+  `status: "waiting_for_requester"` and claims nothing. The answer to the
+  approving person holds no value. An `async` approve starts no
+  background run. A write that asked for `reveal_secret` (for example a
+  credential write) is not such a request: approving it runs it, as
+  before.
+- **The person who asked fetches the value.** `POST
+  /api/v1/approvals/{id}/reveal` (`api/v1/approval_reveal.py`), the
+  console's "Show value" button (`POST /ui/vault/read/reveal`) and `meho
+  secret read --approval <id>` call `fetch_approved_reveal`. It runs the
+  read through `resume_dispatch_after_approval(..., requester_fetch=True)`
+  and gives the value only in that one answer.
+- **Once, and only for a short time.** The fetch must win the one-resumer
+  claim, so a second fetch is refused (`reveal_already_used`). It must
+  come within `APPROVAL_REVEAL_FETCH_WINDOW_SECONDS` (default 900, 15
+  minutes) of the approval (`reveal_window_passed`). After that, the
+  person sends a new read. Such a request also never runs again with
+  "run again" (`state_secret_reveal`).
+- **Tied to the request.** Only the person who sent the request, in the
+  same tenant, may fetch (403 / 404). The stored params must still match
+  the stored hash (`reveal_params_changed`), and the usual checks of an
+  approved run hold (same release, same target, same preview).
+- **MEHO keeps no value.** The run result stored on the request
+  (`resume_result`) has no answer (`result: null`, `handle: null`,
+  `extras.secret_value_withheld: true`). The audit row of the read keeps
+  fingerprints only, as for every reveal. Each fetch attempt writes one
+  `approval.reveal` audit row with its outcome (`run` or the refusal
+  code).
+- A refused fetch answers 409 with `detail` `reveal_<code>: <message>`.
+  Codes: `not_a_reveal`, `not_approved`, `already_used`,
+  `window_passed`, `params_changed`.
+
 ## Surfacing the approved dispatch's result to the originating consumer (#3209)
 
 Before #3209 the result of the approved re-dispatch was visible **only** in

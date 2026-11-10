@@ -43196,6 +43196,12 @@
             "type": "boolean",
             "title": "Can Switch Tenant",
             "default": false
+          },
+          "client": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Client"
           }
         },
         "type": "object",

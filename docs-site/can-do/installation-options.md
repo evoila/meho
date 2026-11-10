@@ -11,9 +11,9 @@ After the install, the steps to use MEHO are the same.
 
 | Way | For whom | State |
 |---|---|---|
-| **Helm chart** on your Kubernetes or OpenShift | Teams that run their own Kubernetes | **Shipped.** You can use it today. |
-| **Linux install with a built-in Kubernetes** | Hyper-V, cloud VMs, physical servers, sites with no internet | **Shipped as a test version.** Each release has one download and one install script. Use it for tests and pilots. Ask evoila before you use it in production. |
-| **Appliance** (one OVA file for VMware) | VMware and VCF teams | **Planned.** Not released. The build script exists, but there is no download. Ask evoila. |
+| **Helm chart** on your Kubernetes or OpenShift | Teams that run their own Kubernetes | **Available.** You can use it today. |
+| **Linux install with a built-in Kubernetes** | Hyper-V, cloud VMs, physical servers, sites with no internet | **Available, in testing.** Each release has one download and one install script. Use it for tests and pilots. Ask evoila before you use it in production. |
+| **Appliance** (one OVA file for VMware) | VMware and VCF teams | **In progress, not released.** The build script exists, but there is no download. Ask evoila. |
 
 ## Product versions
 
@@ -25,9 +25,9 @@ After the install, the steps to use MEHO are the same.
 
 ## State
 
-- Helm chart: shipped.
-- Linux install: shipped, in testing.
-- Appliance: planned.
+- Helm chart: available.
+- Linux install: available, in testing.
+- Appliance: in progress, not released.
 
 ## Operator guide
 

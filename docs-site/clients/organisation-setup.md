@@ -60,8 +60,7 @@ the MEHO extension. On Enterprise, "Block all desktop extensions" also
 turns off the MEHO extension. Do not use it if people need MEHO in
 Desktop.
 
-The allowlist does not stop a person from changing the files of an
-installed local extension. That is why layer 1 matters most.
+Do not rely on the allowlist alone. Layer 1 matters most.
 
 Source: [Enabling and using the desktop extension
 allowlist](https://support.claude.com/en/articles/12592343-enabling-and-using-the-desktop-extension-allowlist)
@@ -94,8 +93,9 @@ can leave them on.
   Claude Code in Desktop (`isClaudeCodeForDesktopEnabled`) and local
   MCP servers (`isLocalDevMcpEnabled`). On Windows these are registry
   values. On macOS they are a configuration profile. The page does not
-  list organisation switches for Cowork or Claude Code in Desktop, so
-  use the device policy for those two.
+  list an organisation switch for Claude Code in Desktop, so use the
+  device policy for it. For Cowork, use the organisation switch above
+  or the device policy.
   Source: [Enterprise configuration for Claude
   Desktop](https://support.claude.com/en/articles/12622667-enterprise-configuration-for-claude-desktop)
   (read 2026-11-10).
@@ -107,7 +107,7 @@ can leave them on.
 
 For Claude Code on its own, use Claude Code's managed settings to set
 what it may run. Source: [Claude Code
-settings](https://docs.claude.com/en/docs/claude-code/settings) (read
+settings](https://code.claude.com/docs/en/settings) (read
 2026-11-10). See also [Claude Code](claude-code.md).
 
 ## Step 3: Prepare the machine
@@ -138,9 +138,11 @@ On Team and Enterprise plans, Anthropic does not use your chats to
 train its models by default. Enterprise owners can set their own
 retention period. Read the pages for the current rules and numbers:
 
-- [Do you train your models on my
-  conversations?](https://privacy.claude.com/en/articles/10440198)
-  (read 2026-11-10)
+- [Is my data used for model
+  training?](https://privacy.claude.com/en/articles/7996868-is-my-data-used-for-model-training)
+  (read 2026-11-10). It says commercial products, such as Claude for
+  Work and the API, are not used for training by default. Feedback you
+  send can be used.
 - [Custom data retention controls for Claude
   Enterprise](https://privacy.claude.com/en/articles/10440198-custom-data-retention-controls-for-claude-enterprise)
   (read 2026-11-10). It lists what retention does not cover.

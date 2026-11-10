@@ -117,6 +117,7 @@ login, and the target update route calls it after a target change
 | Keycloak | `_admin_tokens` | target |
 | Profiled (ingested) connectors | `_session_tokens` | credential |
 | Azure, Entra ID | `_credentials`, `_tokens` | target + secret / login + scope |
+| FreeIPA | `_sessions` | credential |
 | phpIPAM | `_credentials`, `_tokens` | credential / target + secret |
 
 The VMware connectors are not in this repo

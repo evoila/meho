@@ -22,8 +22,10 @@ Login
    target sets it, else ``host``.
 4. The session is cached per credential (``credential_cache_key``: tenant,
    secret and login host), with one lock per credential, so a login that
-   hangs never holds up another credential. A call that runs as MEHO's
-   system identity never reads a cached session.
+   hangs never holds up another credential. A cached session is handed to
+   a caller only after that caller's own Vault read of the target's secret
+   passed once (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
+   A call that runs as MEHO's system identity never reads a cached session.
 5. An expired session answers ``401``. The dispatcher then calls
    :meth:`FreeipaConnector.invalidate_session` with the rejected request and
    runs the call once more; the next call logs in again.
@@ -51,6 +53,7 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
+from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -160,6 +163,8 @@ class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
         # One lock per credential: a login that hangs for one IPA server never
         # holds up a call for another credential, or another tenant.
         self._session_locks: dict[tuple[str, ...], asyncio.Lock] = {}
+        # Who has read each target's secret: a cached session goes only to them.
+        self._readers = SecretReaders()
         self._credentials_loader: FreeipaCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
@@ -187,18 +192,24 @@ class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
     async def _session(self, target: FreeipaTargetLike, operator: Operator) -> _FreeipaSession:
         """Return the cached session for *target*, logging in on first use.
 
-        The cache is read without a lock. Only a login takes the lock of its
-        credential, and checks the cache again inside it, so many calls at
-        the same moment start one login.
+        A cached session goes only to a caller whose own Vault read of the
+        target's secret passed once in this process. A caller who has read
+        gets the session without a lock. Everyone else takes the lock of the
+        credential: a caller who has not read reads the secret once under
+        their own login, and a refused read raises. Many calls at the same
+        moment start one login.
         """
         cache_key = credential_cache_key(target)
         use_cache = not is_system_operator(operator)
         cached = self._sessions.get(cache_key)
-        if use_cache and cached is not None:
+        if use_cache and cached is not None and self._readers.has_read(target, operator):
             return cached
         async with self._session_locks.setdefault(cache_key, asyncio.Lock()):
             cached = self._sessions.get(cache_key)
             if use_cache and cached is not None:
+                await self._readers.ensure_read(
+                    target, operator, lambda: self._credentials_loader(target, operator)
+                )
                 return cached
             creds = await self._credentials_loader(target, operator)
             try:
@@ -211,6 +222,7 @@ class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
                 ) from exc
             session = await self._login(target, username, password)
             self._sessions[cache_key] = session
+            self._readers.record(target, operator)
             return session
 
     async def _login(
@@ -273,6 +285,17 @@ class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
             client = self._clients.get(self._client_cache_key(target)) if dropped else None
             if client is not None:
                 client.cookies.clear()
+
+    async def invalidate_credentials(self, target: FreeipaTargetLike) -> None:
+        """Drop the session of *target* and forget who has read its secret.
+
+        Called after a failed login and after a target change. The next call
+        of every caller reads the secret from Vault again, under their own
+        login.
+        """
+        await self.invalidate_session(target)
+        async with self._session_locks.setdefault(credential_cache_key(target), asyncio.Lock()):
+            self._readers.forget(target)
 
     # ------------------------------------------------------------------
     # Commands
@@ -596,4 +619,5 @@ class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
         """Forget every cached session, then close the HTTP clients."""
         self._sessions.clear()
         self._session_locks.clear()
+        self._readers.clear()
         await super().aclose()

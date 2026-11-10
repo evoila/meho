@@ -408,6 +408,12 @@ class Operator(BaseModel):
     tenant_chosen: bool = True
     #: The role comes from the platform admin group, not a role group (#5239).
     role_from_platform_admin: bool = False
+    #: An agent token that says ``tenant_admin``. MEHO acts with the
+    #: ``operator`` role for it (:func:`~meho_backplane.auth.jwt._cap_agent_role`).
+    #: Vault reads the role from the token itself, so
+    #: :func:`~meho_backplane.auth.vault.vault_client_for_operator` refuses a
+    #: Vault login for such a token. Only the token check sets it.
+    agent_role_capped: bool = False
     #: This call came from a person's web interface session (#3980). Only
     #: :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`
     #: sets it. No token claim, header or request field can set it, and REST

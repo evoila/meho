@@ -140,6 +140,7 @@ from meho_backplane.operations.approval_queue import (
     ParamsMismatchError,
     PreviewBindingMissingError,
     ResultAccessForbiddenError,
+    RightsChangeApprovalError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     WithdrawForbiddenError,
@@ -162,6 +163,7 @@ from meho_backplane.operations.approval_rerun import (
     rerun_failed_request,
 )
 from meho_backplane.operations.approval_rights import ApproveRight, approve_right
+from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.settings import get_settings
@@ -434,11 +436,13 @@ class ApprovalRequestView(BaseModel):
     #: Additive; a client that ignores it is unaffected.
     may_approve: bool | None = None
     #: Why the caller may or may not approve (#3329): ``ok``,
-    #: ``own_change``, ``wrong_group``, ``role_too_low``,
+    #: ``own_change``, ``wrong_group``, ``role_too_low``, ``rights_change``,
     #: ``no_approval_access``, ``not_a_person`` or ``not_pending``. With
     #: ``may_approve`` true, ``own_change`` means a self-approval is
     #: allowed. ``None`` when ``may_approve`` is ``None``.
     may_approve_reason: str | None = None
+    #: This is a change of rights: another admin must approve it.
+    rights_change: bool = False
 
 
 class ApprovalResultView(BaseModel):
@@ -685,6 +689,7 @@ def _view(
         ),
         may_approve=right.may_approve if right is not None else None,
         may_approve_reason=right.reason.value if right is not None else None,
+        rights_change=is_rights_change(row),
     )
 
 
@@ -714,6 +719,11 @@ def _approval_role_floor_http_error(exc: ApprovalRoleFloorError) -> HTTPExceptio
     Caught before the generic ``insufficient_role`` mapping of its parent
     class, so the detail names the role the operation needs.
     """
+    if isinstance(exc, RightsChangeApprovalError):
+        return HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"rights_change_required: {exc.reason_text}",
+        )
     return HTTPException(
         status_code=http_status.HTTP_403_FORBIDDEN,
         detail=f"role_floor_required: {exc}",

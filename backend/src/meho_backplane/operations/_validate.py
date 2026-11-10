@@ -43,6 +43,7 @@ from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.op_classes import is_root_shell
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations.caller_address import has_caller_address
@@ -448,6 +449,10 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
     ``caution`` op unattended — but never a ``destructive`` one (the grant
     lookup in :func:`~meho_backplane.operations.service_grants.consult_and_record_grant`
     refuses the tier before matching a row).
+    An op a connector marked with
+    :func:`~meho_backplane.op_classes.declare_root_shell` parks at every
+    level, also ``safe``: a standing grant can still cover it, a run
+    approval never does.
 
     Returns the park reason, or ``None`` when the op stays auto-execute.
     """
@@ -472,6 +477,13 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
         return (
             "safety_level=caution mutating op; service-principal mutations park "
             "unless a standing grant covers them (#3152)"
+        )
+    if is_root_shell(descriptor.op_id):
+        # A marked op waits at every level, so a run approval never clears it.
+        return (
+            f"safety_level={descriptor.safety_level}; the operation runs a command as "
+            "root on the host, so it waits for approval unless a standing grant "
+            "covers it"
         )
     return None
 

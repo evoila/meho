@@ -36,6 +36,9 @@ Rules that never change:
   never lets a run approval clear one.
 * An operation that connects to an address the caller gives is never
   covered either (a person approves each call).
+* An operation that a connector marks as running a command as root on the
+  host (:func:`~meho_backplane.op_classes.is_root_shell`) is never covered
+  either (a person approves each call).
 * A target kind entry (``target_product``) works only when the tenant
   setting ``run_approval_target_kinds_enabled`` is on.
 * One run (tenant, token subject, run reference) has at most one open
@@ -59,6 +62,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunApproval, Tenant
+from meho_backplane.op_classes import is_root_shell
+from meho_backplane.operations.grant_approval import RIGHTS_CHANGE_REFUSAL, is_rights_change_op
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.run_approval_schemas import (
     RunApprovalCreate,
@@ -74,6 +79,7 @@ from meho_backplane.operations.service_grants import (
 __all__ = [
     "DEFAULT_RUN_APPROVAL_HOURS",
     "MAX_RUN_APPROVAL_DAYS",
+    "ROOT_SHELL_REFUSAL",
     "RunApprovalConflictError",
     "RunApprovalError",
     "RunApprovalGroupError",
@@ -86,6 +92,10 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Why a run approval never covers an operation marked with
+#: :func:`~meho_backplane.op_classes.declare_root_shell`.
+ROOT_SHELL_REFUSAL = "runs a command as root on the host; a person approves each call"
 
 #: How long a run approval lasts when the request names no ``expires_at``.
 DEFAULT_RUN_APPROVAL_HOURS = 24
@@ -189,6 +199,11 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
     ):
         if "*" in value:
             return f"{field} must be an exact value, not a pattern (got {value!r})"
+    if is_root_shell(entry.op_id):
+        return (
+            f"op {entry.op_id!r} {ROOT_SHELL_REFUSAL}. A run approval never covers it: "
+            "leave it out of the list"
+        )
     product, version, impl_id = parse_connector_id(entry.connector_id)
     descriptor = await lookup_descriptor(
         tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, op_id=entry.op_id
@@ -204,8 +219,14 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
     )
 
 
-async def _check_approver_group(operator: Operator, entries: Sequence[dict[str, object]]) -> None:
+async def _check_approver_group(
+    operator: Operator, entries: Sequence[dict[str, object]], requester_sub: str
+) -> None:
     """Apply the approver-group rule of a single request to the whole list.
+
+    An entry that is a change of rights needs another admin
+    (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`),
+    the same check as a single request.
 
     A ``dangerous`` (or ``destructive``) operation of another principal may
     be approved only by the groups of
@@ -225,6 +246,13 @@ async def _check_approver_group(operator: Operator, entries: Sequence[dict[str, 
 
     for index, raw in enumerate(entries):
         entry = RunApprovalEntry.model_validate(raw)
+        if is_rights_change_op(entry.op_id) and not operator.may_approve_rights_change(
+            requester_sub
+        ):
+            raise RunApprovalGroupError(
+                f"rights_change_required: entries[{index}] ({entry.op_id!r}): "
+                f"{RIGHTS_CHANGE_REFUSAL}"
+            )
         product, version, impl_id = parse_connector_id(entry.connector_id)
         descriptor = await lookup_descriptor(
             tenant_id=operator.tenant_id,
@@ -425,7 +453,7 @@ class RunApprovalService:
                 denial = role_floor_denial(str(entry["op_id"]), operator.tenant_role)
                 if denial is not None:
                     raise RunApprovalRoleFloorError(f"role_floor_required: {denial}")
-            await _check_approver_group(operator, row.entries)
+            await _check_approver_group(operator, row.entries, row.principal_sub)
             row.approved_at = now
             row.approved_by_sub = operator.sub
             await session.commit()

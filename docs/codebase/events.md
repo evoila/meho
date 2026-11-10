@@ -1,8 +1,9 @@
 # Event-subscription trigger — transactional outbox + drain (G11.3-T3 #824)
 
-The third scheduler trigger shape: an agent run fires in response to a
-MEHO-internal event (an audit predicate match, a connector alert, or
-another agent run reaching a terminal state). The scheduler's cron +
+The third scheduler trigger shape: an agent run fires when another agent
+run finishes, or when an outside system sends an event to the inbound
+webhook (see [event-ingestion](../../docs-site/guides/event-ingestion.md)).
+The scheduler's cron +
 one-off paths fire on a *clock* boundary ([scheduler.md](scheduler.md));
 this path fires on an *event* boundary, which needs a different
 substrate.

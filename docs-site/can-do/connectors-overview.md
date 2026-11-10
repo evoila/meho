@@ -45,7 +45,7 @@ version ranges are on the [connector inventory](../reference/connectors.md).
 The enterprise pack is a commercial add-on. It brings the VMware and
 VCF connectors, and connectors for Fortinet and CrowdStrike products,
 as a signed package on top of the public image. It covers, for example,
-vCenter 8.0 and 9.x, NSX 4.x and 9.x, VCF 5.x and 9.x, HCX, Site
+vCenter 8.0 Update 1 or newer and 9.x, NSX 4.x and 9.x, VCF 5.x and 9.x, HCX, Site
 Recovery Manager and Cloud Director. To get the pack, contact evoila.
 
 ## State

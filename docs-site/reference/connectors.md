@@ -54,7 +54,7 @@ evoila's enterprise pack is a commercial add-on. It adds the VMware and VCF conn
 
 | Product | Connectors | Product versions | What it does |
 | --- | --- | --- | --- |
-| VMware vCenter and vSphere | `vmware-rest-9.0`, `vmware-rest-8.0` | 8.0, 9.x | Reads and manages virtual machines, hosts, clusters, storage and networks. |
+| VMware vCenter and vSphere | `vmware-rest-9.0`, `vmware-rest-8.0` | 8.0 Update 1 or newer, 9.x | Reads and manages virtual machines, hosts, clusters, storage and networks. |
 | VMware NSX | `nsx-rest-9.0`, `nsx-rest-4.2` | 4.x, 9.x | Reads and changes segments, gateways, firewall rules, load balancers and VPNs. |
 | VCF SDDC Manager | `sddc-rest-9.0`, `sddc-vcf5-5.0` | 5.x, 9.x | Reads workload domains, clusters and hosts, and runs VCF lifecycle tasks. |
 | VCF Installer and Cloud Builder | `installer-rest-9.1`, `installer-cb-5.0` | 5.x, 9.x | Checks a deployment plan and deploys a new VCF instance. |
@@ -79,7 +79,7 @@ evoila's enterprise pack is a commercial add-on. It adds the VMware and VCF conn
 
 ## Versions and how a connector is chosen
 
-**Supported versions** is the product-version range an implementation advertises. Where a product has more than one implementation — a modern and a legacy one, say — both are registered and MEHO resolves the right one per target from the target's fingerprint, so one estate spanning old and new versions just works. A connector can also state the target versions its operations work on. MEHO checks this range each time an operation runs (at dispatch time), also when the call names the connector itself. Outside the range, MEHO refuses the call with `unqualified_target_version`, and a Sensor on that connector can read `unknown`. So pick the connector whose version matches the target, for example `vmware-rest-8.0` for vCenter 8.0.x and `vmware-rest-9.0` for vCenter 9.0.x.
+**Supported versions** is the product-version range an implementation advertises. Where a product has more than one implementation — a modern and a legacy one, say — both are registered and MEHO resolves the right one per target from the target's fingerprint, so one estate spanning old and new versions just works. A connector can also state the target versions its operations work on. MEHO checks this range each time an operation runs (at dispatch time), also when the call names the connector itself. Outside the range, MEHO refuses the call with `unqualified_target_version`, and a Sensor on that connector can read `unknown`. So pick the connector whose version matches the target, for example `vmware-rest-8.0` for vCenter 8.0 Update 1 to Update 3 and `vmware-rest-9.0` for vCenter 9.0.x.
 
 ## Maturity and readiness
 

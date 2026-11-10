@@ -23,7 +23,7 @@ person's group in Keycloak.
 | --- | --- | --- | --- |
 | `MEHO-Readers` | `read_only` | – | Read only. |
 | `MEHO-Operators` | `operator` | – | Run actions. Risky changes wait until a second person approves. |
-| `MEHO-SA-Operators` | `operator` | – | Same as Operators for now. "SA" means self-approval. That rule comes later with [#3325](https://github.com/evoila/meho/issues/3325). |
+| `MEHO-SA-Operators` | `operator` | – | Same rights as Operators, and they may approve their own changes. "SA" means self-approval. Shipped in 0.44.0, see [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md). |
 | `MEHO-Admins` | `tenant_admin` | – | Manage the tenant. |
 | `MEHO-Approvers` | `read_only` | `approver` = `true` | Approve other people's changes. Cannot run actions. |
 

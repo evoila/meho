@@ -1,5 +1,7 @@
 # Claude Desktop
 
+New here? Start with the [laptop guide](../install/laptop-tools.md).
+
 Admins: read the [organisation setup page](organisation-setup.md) first.
 
 Claude Desktop reaches an internal MEHO backplane through a **local

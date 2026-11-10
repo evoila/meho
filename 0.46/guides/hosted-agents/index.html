@@ -3560,7 +3560,7 @@ gets, and which connectors it may use. You pass it with <code>--toolset</code>.<
 <td><code>meta_tools</code></td>
 <td>list of tool names</td>
 <td>The agent gets every tool marked "yes" in the "In the default set" column below.</td>
-<td>The agent gets <strong>no</strong> tools from the table below. It still gets <code>invoke_agent</code> (see the note under the table).</td>
+<td>The agent gets <strong>no</strong> tools.</td>
 </tr>
 <tr>
 <td><code>connectors</code></td>
@@ -3706,10 +3706,21 @@ agent may change only its own knowledge base entries. It cannot save a
 Memory note for the whole team, even when a tenant admin starts the run.</p>
 <div class="admonition note">
 <p class="admonition-title">One more tool: <code>invoke_agent</code></p>
-<p>Every hosted run also gets the <code>invoke_agent</code> tool. With it, the
-agent can start another agent definition in your tenant. The
-toolset does not turn this tool on or off, so it is not in the table
-above. Putting <code>invoke_agent</code> in <code>meta_tools</code> does nothing.</p>
+<p>With the <code>invoke_agent</code> tool, an agent can start another agent
+definition in your tenant as a child run. The agent gets this tool
+only when its <code>meta_tools</code> list names <code>invoke_agent</code>. Leaving out
+<code>meta_tools</code> does not add it.</p>
+<p>A child run gets at most what both definitions allow:</p>
+<ul>
+<li>Tools: only the tools on both <code>meta_tools</code> lists. A child with no
+  <code>meta_tools</code> list gets the default tools that the parent's list names.</li>
+<li>Connectors: only the connectors on both <code>connectors</code> lists. A
+  missing list means no limit, so the other list counts.</li>
+</ul>
+<p>So a parent that should hand work to a wider agent must itself name
+the tools and connectors that the child needs. When an agent login
+starts the run, the child must be a definition that login owns, the
+same rule as for a direct run.</p>
 </div>
 <h3 id="tools-a-hosted-agent-does-not-have">Tools a hosted agent does not have<a class="headerlink" href="#tools-a-hosted-agent-does-not-have" title="Permanent link">&para;</a></h3>
 <p>Some tools exist for MCP clients but not for hosted agents. Putting

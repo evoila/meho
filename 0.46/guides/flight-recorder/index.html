@@ -3251,6 +3251,10 @@ Two things worth knowing:</p>
   banner in the pane, a <code>withheld_from_agents</code> line in the CLI, and a
   <code>redaction_uncertain</code> field in the REST body, so you can see when a
   trace was withheld from agents.</li>
+<li><strong>An agent login on the same REST route gets the agent rules.</strong> It
+  gets a trace only when the tenant lets agents read traces
+  (<code>--agent-readable</code>, below), and never a redaction-uncertain trace.
+  In both cases the answer is the <code>200</code> empty state.</li>
 <li><strong>Absence is unambiguous.</strong> An audit row that does not exist, or lives
   in another tenant, returns <code>404</code> (never <code>403</code> — existence never leaks
   across tenants). An audit row that exists but has no captured trace —

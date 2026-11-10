@@ -3041,9 +3041,20 @@ directory. Passwords stay in the directory.</p>
   <a href="../../keycloak-realm/#the-console-admin">The console admin</a>.</li>
 <li>You have a read-only bind account in the directory.</li>
 <li>Keycloak can reach the directory (LDAPS on port 636, or LDAP with
-  StartTLS). If the directory uses an internal CA, Keycloak must trust
-  it.</li>
+  StartTLS).</li>
+<li>If the directory's certificate comes from your own CA, give Keycloak
+  that CA through the chart. Put the CA certificate (PEM) in a
+  ConfigMap in the MEHO namespace, set <code>coreKeycloak.trustedCaBundle</code>,
+  and run <code>helm upgrade</code>. Keycloak then trusts this CA for every
+  outgoing TLS call. Without it, <strong>Test connection</strong> in step 2 fails.</li>
 </ul>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>create<span class="w"> </span>configmap<span class="w"> </span>directory-ca<span class="w"> </span>--from-file<span class="o">=</span>ca.crt<span class="o">=</span>&lt;path<span class="w"> </span>to<span class="w"> </span>the<span class="w"> </span>CA<span class="w"> </span>file&gt;
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="nt">coreKeycloak</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">trustedCaBundle</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">configMapName</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">directory-ca</span>
+<span class="w">    </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ca.crt</span><span class="w">               </span><span class="c1"># default</span>
+</code></pre></div>
 <h2 id="1-pick-the-directory-groups">1. Pick the directory groups<a class="headerlink" href="#1-pick-the-directory-groups" title="Permanent link">&para;</a></h2>
 <p>You need one directory group per MEHO role. Pick one of two ways:</p>
 <ul>
@@ -3073,6 +3084,11 @@ LDAP providers</strong> (or <strong>Add new provider → LDAP</strong>).</p>
 <tbody>
 <tr>
 <td>General options</td>
+<td><strong>UI display name</strong></td>
+<td>a name you know the directory by, for example <code>Active Directory</code></td>
+</tr>
+<tr>
+<td></td>
 <td><strong>Vendor</strong></td>
 <td><code>Active Directory</code> (or your LDAP vendor)</td>
 </tr>
@@ -3085,6 +3101,11 @@ LDAP providers</strong> (or <strong>Add new provider → LDAP</strong>).</p>
 <td></td>
 <td><strong>Enable StartTLS</strong></td>
 <td>On only with <code>ldap://</code></td>
+</tr>
+<tr>
+<td></td>
+<td><strong>Use Truststore SPI</strong></td>
+<td><code>Always</code></td>
 </tr>
 <tr>
 <td></td>
@@ -3105,6 +3126,11 @@ LDAP providers</strong> (or <strong>Add new provider → LDAP</strong>).</p>
 <td>LDAP searching and updating</td>
 <td><strong>Edit mode</strong></td>
 <td><code>READ_ONLY</code></td>
+</tr>
+<tr>
+<td></td>
+<td><strong>Username LDAP attribute</strong></td>
+<td><code>sAMAccountName</code> (AD) or <code>userPrincipalName</code>; <code>uid</code> for most other LDAP directories</td>
 </tr>
 <tr>
 <td></td>
@@ -3138,6 +3164,13 @@ LDAP providers</strong> (or <strong>Add new provider → LDAP</strong>).</p>
 </tr>
 </tbody>
 </table>
+<p><strong>Username LDAP attribute</strong> is the name a person logs in with. For
+Active Directory, Keycloak fills in <code>cn</code>. Change it: <code>cn</code> is the
+display name, so two people can have the same one, and it changes when
+a person is renamed.</p>
+<p><strong>Use Truststore SPI</strong> <code>Always</code> makes Keycloak check the directory's
+certificate against the CAs it trusts, including
+<code>coreKeycloak.trustedCaBundle</code>.</p>
 <p><strong>Cache policy</strong> decides when a removal from a directory group takes
 effect. With the default cache, Keycloak keeps the old group of a
 person until its cache entry ends, so a removed person keeps MEHO
@@ -3223,6 +3256,8 @@ directory, not in Keycloak.</p>
 </tr>
 </tbody>
 </table>
+<p>Paste the filter as one line, exactly as it is here. No spaces and no
+line breaks.</p>
 <div class="highlight"><pre><span></span><code>(|(cn=MEHO-Readers)(cn=MEHO-Operators)(cn=MEHO-SA-Operators)(cn=MEHO-Admins)(cn=MEHO-Approvers))
 </code></pre></div>
 <p><strong>B. Your own names:</strong> one mapper per MEHO group, each bringing in
@@ -3323,7 +3358,9 @@ second step in Keycloak: a code from an authenticator app.</p>
    <code>... Conditional 2FA</code>).</li>
 <li>Set that conditional sub-flow to <strong>Required</strong>, and its <strong>OTP Form</strong>
    step to <strong>Required</strong>. If it also has a <strong>Condition - user
-   configured</strong> step, set that step to <strong>Disabled</strong>.</li>
+   configured</strong> step, set that step to <strong>Disabled</strong>. Keycloak 26.8
+   also shows a <strong>Condition - credential</strong> step there. Set it to
+   <strong>Disabled</strong> too.</li>
 <li><strong>Action → Bind flow</strong> → <strong>Browser flow</strong> → <strong>Save</strong>.</li>
 </ol>
 <p>Check <strong>Authentication → Required actions</strong>: <strong>Configure OTP</strong> must be

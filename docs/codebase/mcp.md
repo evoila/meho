@@ -143,6 +143,9 @@ for example "claude-code 2.1", next to the person.
 - **When.** A successful `initialize` request that gets a new
   `Mcp-Session-Id` from MEHO. A failed `initialize`, a notification, or
   a resumed session (the client sent its own session id) writes no row.
+  A session with no current tenant (a login with several tenants that
+  sent no `Meho-Tenant` header) writes no row either: no audit row may
+  name a tenant the person did not choose.
 - **What.** `event_class = security_event`, `method = MCP`,
   `path = /mcp/initialize`, `payload.op_id = mcp.session_open`. The
   payload also holds `client_name` and `client_version` (from
@@ -156,7 +159,7 @@ for example "claude-code 2.1", next to the person.
 - **Fail closed.** The row commits before the response goes back. If
   the write fails, the client gets a JSON-RPC internal error (`-32603`)
   and no session id, as for every other MCP audit write.
-- **Find the rows.** `meho audit list --op mcp.session_open`.
+- **Find the rows.** `meho audit query --op-id mcp.session_open`.
 
 **The client name is what the tool says about itself.** MEHO cannot
 check it. Any program with a valid login can send any name and version.

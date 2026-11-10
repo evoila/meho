@@ -1456,8 +1456,11 @@ async def _audit_session_open(
     *response* is returned as it is. The row commits before the response
     returns. If the write fails, the client gets a JSON-RPC internal error
     with no session id, as for every other MCP audit write.
+
+    A session with no current tenant (#5239) writes no row: its tenant
+    fields hold only a placeholder, and no audit row may name it.
     """
-    if issued is None or not get_settings().audit_client_identity:
+    if issued is None or not operator.tenant_chosen or not get_settings().audit_client_identity:
         return response
     client_info = (jrpc.params or {}).get("clientInfo")
     try:

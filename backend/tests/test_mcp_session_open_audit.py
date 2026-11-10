@@ -12,6 +12,7 @@ no row. With the switch off, nothing changes.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import patch
 from uuid import UUID
@@ -21,14 +22,17 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.audit_query import AuditQueryFilters, query_audit
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, RoleGroup, TenantMembership, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
+from meho_backplane.main import app
 from meho_backplane.mcp.audit import SESSION_OPEN_OP_ID, _clean_client_text
+from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, PROTOCOL_VERSION
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
+    build_operator,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
@@ -120,7 +124,7 @@ async def test_later_rows_of_the_session_share_its_session_id(
 async def test_audit_query_finds_the_row_by_op_id(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``meho audit list --op mcp.session_open`` filters on this ``op_id``."""
+    """``meho audit query --op-id mcp.session_open`` filters on this ``op_id``."""
     client, _op = client_with_operator
     post_mcp(client, _initialize({"name": "claude-desktop", "version": "1.0"}))
 
@@ -132,6 +136,59 @@ async def test_audit_query_finds_the_row_by_op_id(
             session=session,
         )
     assert [r.op_id for r in result.rows] == [SESSION_OPEN_OP_ID]
+
+
+@pytest.fixture
+def unchosen_client() -> Iterator[TestClient]:
+    """A login with several tenants that sent no ``Meho-Tenant`` header (#5239).
+
+    Its ``tenant_id`` is only a placeholder: the first tenant.
+    """
+    operator = build_operator(TenantRole.READ_ONLY).model_copy(
+        update={
+            "tenants": (
+                TenantMembership(
+                    tenant_id=OPERATOR_TENANT_ID, name="first", group=RoleGroup.READERS
+                ),
+                TenantMembership(
+                    tenant_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                    name="second",
+                    group=RoleGroup.OPERATORS,
+                ),
+            ),
+            "tenant_chosen": False,
+        },
+    )
+
+    async def _fake_verify() -> Operator:
+        return operator
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_session_without_a_chosen_tenant_writes_no_row(
+    unchosen_client: TestClient,
+) -> None:
+    """The placeholder tenant is never written to the audit log."""
+    response = post_mcp(unchosen_client, _initialize({"name": "claude-code", "version": "2.1.0"}))
+
+    assert response.status_code == 200
+    assert "result" in response.json()
+    assert response.headers.get("mcp-session-id")
+    assert await _session_open_rows() == []
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(AuditLog).where(AuditLog.tenant_id == OPERATOR_TENANT_ID),
+        )
+        assert list(result.scalars().all()) == []
 
 
 @pytest.mark.asyncio

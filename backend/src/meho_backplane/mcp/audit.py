@@ -76,7 +76,7 @@ from meho_backplane.request_usage.collector import current_request_id, note_requ
 __all__ = ["SESSION_OPEN_OP_ID", "write_mcp_audit_row", "write_mcp_session_open_row"]
 
 #: ``payload["op_id"]`` of the one row written when an MCP session starts
-#: (#6209). ``meho audit list --op mcp.session_open`` finds these rows.
+#: (#6209). ``meho audit query --op-id mcp.session_open`` finds these rows.
 SESSION_OPEN_OP_ID = "mcp.session_open"
 
 #: Longest client name, version or ``User-Agent`` kept on the session row.

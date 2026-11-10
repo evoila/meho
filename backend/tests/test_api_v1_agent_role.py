@@ -7,8 +7,8 @@ What these tests check:
 
 * MEHO registers a new agent in Keycloak with ``tenant_role=operator``.
 * An agent token that still says ``tenant_admin`` (an agent registered
-  earlier) is read as ``operator``. People and service logins keep the
-  role their token carries.
+  earlier) is read as ``operator``, and is marked so MEHO does not send it
+  to Vault. People and service logins keep the role their token carries.
 * So an agent token gets 403 ``insufficient_role`` on the tenant-admin
   write routes, one case per route family. A person with
   ``tenant_admin`` passes the same role check.
@@ -189,6 +189,8 @@ async def test_agent_token_acts_with_at_most_operator_rights(
         mock_discovery_and_jwks(router, public_jwks(key))
         operator = await verify_jwt_for_audience(f"Bearer {token}", expected_audience=AUDIENCE)
     assert operator.tenant_role is expected
+    # Only the capped agent token is marked; Vault then refuses it.
+    assert operator.agent_role_capped is (claimed is not expected)
 
 
 @pytest.mark.asyncio

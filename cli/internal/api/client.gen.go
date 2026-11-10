@@ -17761,6 +17761,18 @@ type ClientInterface interface {
 	// UiSensorsListUiSensorsGet request
 	UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiSettingsUiSettingsGet request
+	UiSettingsUiSettingsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSettingsExportUiSettingsExportGet request
+	UiSettingsExportUiSettingsExportGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSettingsImportApplyUiSettingsImportApplyPost request
+	UiSettingsImportApplyUiSettingsImportApplyPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSettingsImportPreviewUiSettingsImportPreviewPost request
+	UiSettingsImportPreviewUiSettingsImportPreviewPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiTenantPickerUiTenantGet request
 	UiTenantPickerUiTenantGet(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -25268,6 +25280,54 @@ func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx conte
 
 func (c *Client) UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiSensorsListUiSensorsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsUiSettingsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsUiSettingsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsExportUiSettingsExportGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsExportUiSettingsExportGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsImportApplyUiSettingsImportApplyPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsImportApplyUiSettingsImportApplyPostRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsImportPreviewUiSettingsImportPreviewPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsImportPreviewUiSettingsImportPreviewPostRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -49859,6 +49919,114 @@ func NewUiSensorsListUiSensorsGetRequest(server string, params *UiSensorsListUiS
 	return req, nil
 }
 
+// NewUiSettingsUiSettingsGetRequest generates requests for UiSettingsUiSettingsGet
+func NewUiSettingsUiSettingsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiSettingsExportUiSettingsExportGetRequest generates requests for UiSettingsExportUiSettingsExportGet
+func NewUiSettingsExportUiSettingsExportGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings/export")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiSettingsImportApplyUiSettingsImportApplyPostRequest generates requests for UiSettingsImportApplyUiSettingsImportApplyPost
+func NewUiSettingsImportApplyUiSettingsImportApplyPostRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings/import/apply")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiSettingsImportPreviewUiSettingsImportPreviewPostRequest generates requests for UiSettingsImportPreviewUiSettingsImportPreviewPost
+func NewUiSettingsImportPreviewUiSettingsImportPreviewPostRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings/import/preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiTenantPickerUiTenantGetRequest generates requests for UiTenantPickerUiTenantGet
 func NewUiTenantPickerUiTenantGetRequest(server string, params *UiTenantPickerUiTenantGetParams) (*http.Request, error) {
 	var err error
@@ -52997,6 +53165,18 @@ type ClientWithResponsesInterface interface {
 
 	// UiSensorsListUiSensorsGetWithResponse request
 	UiSensorsListUiSensorsGetWithResponse(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*UiSensorsListUiSensorsGetResponse, error)
+
+	// UiSettingsUiSettingsGetWithResponse request
+	UiSettingsUiSettingsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsUiSettingsGetResponse, error)
+
+	// UiSettingsExportUiSettingsExportGetWithResponse request
+	UiSettingsExportUiSettingsExportGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsExportUiSettingsExportGetResponse, error)
+
+	// UiSettingsImportApplyUiSettingsImportApplyPostWithResponse request
+	UiSettingsImportApplyUiSettingsImportApplyPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsImportApplyUiSettingsImportApplyPostResponse, error)
+
+	// UiSettingsImportPreviewUiSettingsImportPreviewPostWithResponse request
+	UiSettingsImportPreviewUiSettingsImportPreviewPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsImportPreviewUiSettingsImportPreviewPostResponse, error)
 
 	// UiTenantPickerUiTenantGetWithResponse request
 	UiTenantPickerUiTenantGetWithResponse(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*UiTenantPickerUiTenantGetResponse, error)
@@ -62537,6 +62717,90 @@ func (r UiSensorsListUiSensorsGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiSettingsUiSettingsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsUiSettingsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsUiSettingsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSettingsExportUiSettingsExportGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsExportUiSettingsExportGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsExportUiSettingsExportGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSettingsImportApplyUiSettingsImportApplyPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsImportApplyUiSettingsImportApplyPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsImportApplyUiSettingsImportApplyPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSettingsImportPreviewUiSettingsImportPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsImportPreviewUiSettingsImportPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsImportPreviewUiSettingsImportPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiTenantPickerUiTenantGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -68469,6 +68733,42 @@ func (c *ClientWithResponses) UiSensorsListUiSensorsGetWithResponse(ctx context.
 		return nil, err
 	}
 	return ParseUiSensorsListUiSensorsGetResponse(rsp)
+}
+
+// UiSettingsUiSettingsGetWithResponse request returning *UiSettingsUiSettingsGetResponse
+func (c *ClientWithResponses) UiSettingsUiSettingsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsUiSettingsGetResponse, error) {
+	rsp, err := c.UiSettingsUiSettingsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsUiSettingsGetResponse(rsp)
+}
+
+// UiSettingsExportUiSettingsExportGetWithResponse request returning *UiSettingsExportUiSettingsExportGetResponse
+func (c *ClientWithResponses) UiSettingsExportUiSettingsExportGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsExportUiSettingsExportGetResponse, error) {
+	rsp, err := c.UiSettingsExportUiSettingsExportGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsExportUiSettingsExportGetResponse(rsp)
+}
+
+// UiSettingsImportApplyUiSettingsImportApplyPostWithResponse request returning *UiSettingsImportApplyUiSettingsImportApplyPostResponse
+func (c *ClientWithResponses) UiSettingsImportApplyUiSettingsImportApplyPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsImportApplyUiSettingsImportApplyPostResponse, error) {
+	rsp, err := c.UiSettingsImportApplyUiSettingsImportApplyPost(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsImportApplyUiSettingsImportApplyPostResponse(rsp)
+}
+
+// UiSettingsImportPreviewUiSettingsImportPreviewPostWithResponse request returning *UiSettingsImportPreviewUiSettingsImportPreviewPostResponse
+func (c *ClientWithResponses) UiSettingsImportPreviewUiSettingsImportPreviewPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsImportPreviewUiSettingsImportPreviewPostResponse, error) {
+	rsp, err := c.UiSettingsImportPreviewUiSettingsImportPreviewPost(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsImportPreviewUiSettingsImportPreviewPostResponse(rsp)
 }
 
 // UiTenantPickerUiTenantGetWithResponse request returning *UiTenantPickerUiTenantGetResponse
@@ -80824,6 +81124,70 @@ func ParseUiSensorsListUiSensorsGetResponse(rsp *http.Response) (*UiSensorsListU
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsUiSettingsGetResponse parses an HTTP response from a UiSettingsUiSettingsGetWithResponse call
+func ParseUiSettingsUiSettingsGetResponse(rsp *http.Response) (*UiSettingsUiSettingsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsUiSettingsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsExportUiSettingsExportGetResponse parses an HTTP response from a UiSettingsExportUiSettingsExportGetWithResponse call
+func ParseUiSettingsExportUiSettingsExportGetResponse(rsp *http.Response) (*UiSettingsExportUiSettingsExportGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsExportUiSettingsExportGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsImportApplyUiSettingsImportApplyPostResponse parses an HTTP response from a UiSettingsImportApplyUiSettingsImportApplyPostWithResponse call
+func ParseUiSettingsImportApplyUiSettingsImportApplyPostResponse(rsp *http.Response) (*UiSettingsImportApplyUiSettingsImportApplyPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsImportApplyUiSettingsImportApplyPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsImportPreviewUiSettingsImportPreviewPostResponse parses an HTTP response from a UiSettingsImportPreviewUiSettingsImportPreviewPostWithResponse call
+func ParseUiSettingsImportPreviewUiSettingsImportPreviewPostResponse(rsp *http.Response) (*UiSettingsImportPreviewUiSettingsImportPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsImportPreviewUiSettingsImportPreviewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

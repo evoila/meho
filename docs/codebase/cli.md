@@ -1251,7 +1251,8 @@ path is kept as `ca_file` in `config.json` next to the backplane it belongs to.
 The root `PersistentPreRunE` trusts it again only when the command works against
 that backplane: a `--backplane` flag or a `meho login` naming another one does
 not get the CA, because it could vouch for a server that then receives
-credentials. The dynamic-command fetch runs before flags are parsed, so it gets
+credentials. `admin keycloak bootstrap-clients` takes its own server address and
+never gets it; it has `--keycloak-ca-bundle`. The dynamic-command fetch runs before flags are parsed, so it gets
 the CA on its own client (`discoveryClient`). A file that is gone only warns; the
 request then fails on the certificate.
 

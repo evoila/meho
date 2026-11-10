@@ -88,14 +88,17 @@ func Execute() error {
 // only when this command works against the backplane the file was
 // recorded for. A `--backplane` flag or a `meho login` that names
 // another backplane must not get that CA: it could vouch for a server
-// that then receives this person's credentials. The trust covers the
-// whole process, because the same install's Keycloak host needs it too.
+// that then receives this person's credentials. The same goes for a
+// command that takes its own server address, such as `admin keycloak
+// bootstrap-clients`, which sends the Keycloak admin password there and
+// has --keycloak-ca-bundle for its own CA. The trust covers the whole
+// process, because the same install's Keycloak host needs it too.
 //
 // A file that is gone only warns: the request that follows then fails
 // on the certificate with the transport's own message.
 func trustSavedCA(cmd *cobra.Command, args []string) {
 	cfg, err := auth.LoadConfig()
-	if err != nil || cfg.CAFile == "" {
+	if err != nil || cfg.CAFile == "" || takesItsOwnServer(cmd) {
 		return
 	}
 	if named := namedBackplane(cmd, args); named != "" && !sameBackplane(named, cfg.BackplaneURL) {
@@ -104,6 +107,12 @@ func trustSavedCA(cmd *cobra.Command, args []string) {
 	if err := auth.TrustCAFile(cfg.CAFile); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: the CA file from `meho login` is not usable: %v\n", err)
 	}
+}
+
+// takesItsOwnServer reports whether the command talks to a server the
+// command line names, which is not the saved backplane's install.
+func takesItsOwnServer(cmd *cobra.Command) bool {
+	return cmd.Flags().Lookup("keycloak-base-url") != nil
 }
 
 // namedBackplane is the backplane the command line names, or "" when

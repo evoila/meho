@@ -796,3 +796,43 @@ func TestDiscoveryClientUsesTheSavedCAWithoutTheProcess(t *testing.T) {
 		t.Error("the discovery client must not change the process-wide transport")
 	}
 }
+
+// `admin keycloak bootstrap-clients` sends the Keycloak admin password
+// to --keycloak-base-url, which no saved backplane vouches for. It uses
+// --keycloak-ca-bundle for its own CA and must not get the saved one.
+func TestSavedCAIsNotTrustedByTheKeycloakBootstrap(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	withTempXDG(t)
+	caPath := filepath.Join(t.TempDir(), "ca.crt")
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(srv.Close)
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	block := &pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.SaveConfig(auth.Config{BackplaneURL: srv.URL, CAFile: caPath}); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := setDynamicRegistrar(func(*cobra.Command) {})
+	t.Cleanup(restore)
+	args := []string{"admin", "keycloak", "bootstrap-clients"}
+	bootstrap, _, err := newRootCmdFor(args).Find(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.Name() != "bootstrap-clients" {
+		t.Fatalf("found %q", bootstrap.Name())
+	}
+
+	trustSavedCA(bootstrap, nil)
+
+	if http.DefaultTransport != originalTransport {
+		t.Fatal("the Keycloak bootstrap got the saved CA")
+	}
+	if _, err := http.Get(srv.URL); err == nil { //nolint:noctx,bodyclose
+		t.Fatal("the Keycloak server must not be trusted through the saved CA")
+	}
+}

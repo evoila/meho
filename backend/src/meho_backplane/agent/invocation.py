@@ -1616,10 +1616,11 @@ class AgentInvoker:
             agent_name = await _resolve_run_agent_name(
                 session, tenant_id=operator.tenant_id, row=row
             )
+            root_trigger = await _root_trigger(session, row)
             return _row_to_view(
                 row,
                 agent_name=agent_name,
-                show_output=run_output_visible_to(row, operator),
+                show_output=run_output_visible_to(row, operator, root_trigger=root_trigger),
             )
 
     async def cancel(self, operator: Operator, run_id: uuid.UUID) -> AgentRunSummary:
@@ -2045,16 +2046,38 @@ _AGENT_OWN_LOGIN_TRIGGERS: Final[frozenset[str]] = frozenset(
 )
 
 
-def run_output_visible_to(row: AgentRunRow, operator: Operator) -> bool:
+async def _root_trigger(session: AsyncSession, row: AgentRunRow) -> str:
+    """Return the trigger of the first run in *row*'s chain of parent runs.
+
+    A child run (``agent-invoked``) follows its ``parent_run_id`` up, at
+    most ``agent_invoke_max_depth`` steps. When a parent is missing or in
+    another tenant, the walk stops at the child, so the child keeps its
+    own ``agent-invoked`` trigger.
+    """
+    current = row
+    for _ in range(get_settings().agent_invoke_max_depth):
+        if current.trigger != AgentRunTrigger.AGENT_INVOKED.value or current.parent_run_id is None:
+            break
+        parent = await run_lifecycle.get_run(session, current.parent_run_id)
+        if parent is None or parent.tenant_id != row.tenant_id:
+            break
+        current = parent
+    return current.trigger
+
+
+def run_output_visible_to(row: AgentRunRow, operator: Operator, *, root_trigger: str) -> bool:
     """Whether *operator* may read the ``output`` and ``error`` of the run in *row*.
 
-    A direct run, and each child run it starts, acts for the person who
-    started it. Its output can hold that person's private memory notes,
-    so only that person reads its output and error. Other people in the
-    tenant see its state and token usage. A scheduled or event run acts
-    as the agent's own login, so everyone in the tenant reads it.
+    *root_trigger* is the trigger of the first run in the chain (see
+    :func:`_root_trigger`); for a run that is not a child it is the run's
+    own trigger. A direct run, and each child run under it, acts for the
+    person who started it. Its output can hold that person's private
+    memory notes, so only that person reads its output and error. Other
+    people in the tenant see its state and token usage. A scheduled or
+    event run, and each child run under it, acts as the agent's own
+    login, so everyone in the tenant reads it.
     """
-    return row.trigger in _AGENT_OWN_LOGIN_TRIGGERS or row.identity_sub == operator.sub
+    return root_trigger in _AGENT_OWN_LOGIN_TRIGGERS or row.identity_sub == operator.sub
 
 
 def _row_to_view(

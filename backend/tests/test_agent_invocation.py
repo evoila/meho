@@ -410,20 +410,86 @@ async def test_poll_by_a_second_operator_shows_state_but_not_output() -> None:
 
 
 @pytest.mark.parametrize(
-    ("trigger", "reader_sub", "visible"),
+    ("trigger", "root_trigger", "reader_sub", "visible"),
     [
-        (AgentRunTrigger.DIRECT, "op-starter", True),
-        (AgentRunTrigger.DIRECT, "op-colleague", False),
-        (AgentRunTrigger.AGENT_INVOKED, "op-starter", True),
-        (AgentRunTrigger.AGENT_INVOKED, "op-colleague", False),
-        (AgentRunTrigger.SCHEDULED, "op-colleague", True),
-        (AgentRunTrigger.EVENT, "op-colleague", True),
+        (AgentRunTrigger.DIRECT, AgentRunTrigger.DIRECT, "op-starter", True),
+        (AgentRunTrigger.DIRECT, AgentRunTrigger.DIRECT, "op-colleague", False),
+        (AgentRunTrigger.AGENT_INVOKED, AgentRunTrigger.DIRECT, "op-starter", True),
+        (AgentRunTrigger.AGENT_INVOKED, AgentRunTrigger.DIRECT, "op-colleague", False),
+        (AgentRunTrigger.AGENT_INVOKED, AgentRunTrigger.AGENT_INVOKED, "op-colleague", False),
+        (AgentRunTrigger.AGENT_INVOKED, AgentRunTrigger.SCHEDULED, "op-colleague", True),
+        (AgentRunTrigger.AGENT_INVOKED, AgentRunTrigger.EVENT, "op-colleague", True),
+        (AgentRunTrigger.SCHEDULED, AgentRunTrigger.SCHEDULED, "op-colleague", True),
+        (AgentRunTrigger.EVENT, AgentRunTrigger.EVENT, "op-colleague", True),
     ],
 )
-def test_run_output_visible_to(trigger: AgentRunTrigger, reader_sub: str, visible: bool) -> None:
+def test_run_output_visible_to(
+    trigger: AgentRunTrigger, root_trigger: AgentRunTrigger, reader_sub: str, visible: bool
+) -> None:
     """A run for a person shows its output to that person; an agent's own run to the tenant."""
     row = AgentRunRow(tenant_id=_TENANT_A, identity_sub="op-starter", trigger=trigger.value)
-    assert run_output_visible_to(row, _make_operator(sub=reader_sub)) is visible
+    operator = _make_operator(sub=reader_sub)
+    assert run_output_visible_to(row, operator, root_trigger=root_trigger.value) is visible
+
+
+async def _record_parent_and_child(
+    *, parent_trigger: AgentRunTrigger, starter: Operator, depth: int = 1
+) -> UUID:
+    """Record a parent run of *parent_trigger* and *depth* nested children; finish the last child.
+
+    Return the id of the last child. Its output is ``{"text": "child answer"}``.
+    """
+    await _seed_definition(name="child", toolset={"meta_tools": []})
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        parent = await run_lifecycle.create_run(
+            session,
+            tenant_id=starter.tenant_id,
+            identity_sub=starter.sub,
+            trigger=parent_trigger,
+            model_tier="cheap",
+        )
+        await session.commit()
+        parent_run_id = parent.id
+    child_def = await _resolve_child_definition(starter, "child")
+    assert child_def is not None
+    for _ in range(depth):
+        parent_run_id, _lease_owner = await _record_child_run(
+            operator=starter, definition=child_def, parent_run_id=parent_run_id
+        )
+    await _finalize_child_run(parent_run_id, output="child answer", error=None)
+    return parent_run_id
+
+
+@pytest.mark.parametrize("parent_trigger", [AgentRunTrigger.SCHEDULED, AgentRunTrigger.EVENT])
+@pytest.mark.parametrize("depth", [1, 2])
+async def test_poll_child_of_agent_own_run_shows_output_to_a_person(
+    parent_trigger: AgentRunTrigger, depth: int
+) -> None:
+    """A child run under a scheduled or event run shows its output to people in the tenant."""
+    agent = _make_operator(sub="svc-agent", principal_kind=PrincipalKind.AGENT)
+    child_run_id = await _record_parent_and_child(
+        parent_trigger=parent_trigger, starter=agent, depth=depth
+    )
+
+    view = await AgentInvoker().poll(_make_operator(sub="op-human"), child_run_id)
+    assert view.status is AgentRunStatus.SUCCEEDED
+    assert view.output == {"text": "child answer"}
+
+
+async def test_poll_child_of_direct_run_shows_output_only_to_the_starter() -> None:
+    """A child run under a direct run shows its output only to the person who started it."""
+    starter = _make_operator(sub="op-starter")
+    child_run_id = await _record_parent_and_child(
+        parent_trigger=AgentRunTrigger.DIRECT, starter=starter, depth=2
+    )
+
+    invoker = AgentInvoker()
+    colleague = await invoker.poll(_make_operator(sub="op-colleague"), child_run_id)
+    assert colleague.status is AgentRunStatus.SUCCEEDED
+    assert colleague.output is None
+    owner = await invoker.poll(starter, child_run_id)
+    assert owner.output == {"text": "child answer"}
 
 
 async def test_poll_unknown_handle_is_not_found() -> None:

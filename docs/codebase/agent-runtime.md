@@ -666,10 +666,12 @@ persisted definition (T2 `AgentDefinitionService`), and the durable run row
   started the run has returned, and even after the in-memory task is gone
   (worker restart). Cross-tenant / unknown ids raise `AgentRunNotFoundError`.
   `output` and `error` are set only when `run_output_visible_to` allows
-  it: a direct run (and each child run it starts) acts for the person who
+  it: a direct run (and each child run under it) acts for the person who
   started it, so only that person reads them; other people in the tenant
-  see the state and token usage. A scheduled or event run acts as the
-  agent's own login, so the whole tenant reads it. The REST poll, the MCP
+  see the state and token usage. A scheduled or event run (and each child
+  run under it) acts as the agent's own login, so the whole tenant reads
+  it. For a child run, `poll` follows `parent_run_id` up to the first run
+  to find which case applies. The REST poll, the MCP
   `meho_agents_run_status` tool and the console run page all use `poll`.
 - **`stream_events(operator, name, inputs)`** — drives the seam's
   `stream_events` inline (one connection = one run's lifetime), yielding

@@ -40,8 +40,15 @@ Check if you need this step. Use your own address.
     curl.exe -sS -o NUL https://meho.example.com/healthz; if ($LASTEXITCODE -eq 0) { "trusted" }
     ```
 
-If it prints `trusted`, go to [step 2](#step-2-install-the-meho-command-line).
-If it fails with `SSL certificate problem`, your site has its own CA. Then:
+If it fails with `SSL certificate problem`, your site has its own CA.
+
+If it prints `trusted`, your system already trusts the server. Ask your
+admin if your site uses its own CA anyway. Company laptops often trust
+it already. Then get `internal-ca.pem` (items 1 and 2 below) and skip
+item 3: the Claude tools still need the file in step 4. If your site
+uses a public CA, go to [step 2](#step-2-install-the-meho-command-line).
+
+If your site has its own CA:
 
 1. Ask your admin where the root CA file is. Save it as `internal-ca.pem`.
 2. Check the file before you trust it. Compare its fingerprint with one
@@ -62,7 +69,8 @@ If it fails with `SSL certificate problem`, your site has its own CA. Then:
 
 4. Run the check again. It must print `trusted`.
 
-Keep `internal-ca.pem`. Step 4 may need it. The long version, with the
+Keep `internal-ca.pem`. Step 4 needs it whenever your site has its own
+CA, also when your system already trusts that CA. The long version, with the
 reasons and more systems, is on
 [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store) and in
 [Claude Code](../clients/claude-code.md#before-you-start-trust-your-deployments-ca).
@@ -176,10 +184,16 @@ Pick one.
 
 ### Claude Code (the MEHO plugin)
 
-1. Install the plugin:
+1. Add the MEHO plugin list. Run this in your terminal:
 
     ```bash
     claude plugin marketplace add evoila/meho
+    ```
+
+    Then start Claude Code and run this command inside Claude Code, not
+    in the terminal:
+
+    ```text
     /plugin install meho@meho
     ```
 
@@ -193,19 +207,31 @@ Pick one.
     On Windows, Claude Code runs the plugin in Git Bash. The `~` folder is
     your user folder, for example `C:\Users\<you>\.config\meho\plugin.env`.
 
-3. If step 1 showed that your site has its own CA, add the path of
-   `internal-ca.pem` to the same file. The plugin runs on Node, and Node
-   does not read your system trust store:
+3. If your site has its own CA, add the path of `internal-ca.pem` to the
+   same file. Do this also when your system already trusts the CA. The
+   plugin runs on Node, and Node does not read your system trust store:
 
     ```bash
     MEHO_CA_CERT="$HOME/internal-ca.pem"
     ```
 
-4. Start Claude Code again. In Claude Code, run `/mcp`, pick `meho` and
+4. If your login has several tenants, name the one to work in. Add this
+   line to the same file, with your tenant name or ID:
+
+    ```bash
+    MEHO_TENANT="tenant-b"
+    ```
+
+    Claude does not read the tenant you chose with `meho tenants use` in
+    step 3. Without this line, MEHO lets Claude call only `meho_status`,
+    and step 5 cannot list the connectors. If your login has one tenant,
+    skip this.
+
+5. Start Claude Code again. In Claude Code, run `/mcp`, pick `meho` and
    log in in the browser.
 
-More options (several tenants, how long the login lasts, a manual
-setup) are on [Claude Code](../clients/claude-code.md).
+More options (another tenant, how long the login lasts, a manual setup)
+are on [Claude Code](../clients/claude-code.md#work-in-one-tenant).
 
 ### Claude Desktop (the `.mcpb` bundle)
 
@@ -215,8 +241,14 @@ setup) are on [Claude Code](../clients/claude-code.md).
 2. Open the file. Claude Desktop shows an install dialog.
 3. Fill in the dialog:
     - **MEHO MCP endpoint:** `https://meho.example.com/mcp`
-    - **Internal CA bundle:** pick `internal-ca.pem` if step 1 showed that
-      your site has its own CA. Otherwise leave it empty.
+    - **Internal CA bundle:** pick `internal-ca.pem` if your site has its
+      own CA, also when your system already trusts it. Otherwise leave it
+      empty.
+    - **Tenant:** if your login has several tenants, enter the tenant name
+      or ID. Claude does not read the tenant you chose with
+      `meho tenants use`. Without it, MEHO allows only `meho_status`, and
+      step 5 cannot list the connectors. If your login has one tenant,
+      leave it empty.
 4. Turn the extension on. Log in in the browser when it asks.
 
 To check the file before you install it, see
@@ -241,7 +273,8 @@ meho connector list
 ```
 
 If Claude says it has no MEHO tools, check that the plugin or the
-extension is on, and run step 3 again.
+extension is on, and run step 3 again. If Claude sees only `meho_status`,
+set the tenant as shown in step 4.
 
 ## Step 6: what MEHO can do, and how approvals work
 

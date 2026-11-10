@@ -166,6 +166,15 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "USER_DELEGATION_KEY_PATH": (("POST",), "BLOB_API_VERSION"),
 }
 
+#: Paths whose Azure spec file is not on the shelf yet. The public DNS file
+#: (``specification/dns/resource-manager/Microsoft.Network/dns/stable/2018-05-01/dns.json``
+#: in Azure/azure-rest-api-specs, MIT license) has to be added to the shelf repo
+#: and to its MANIFEST.md first. Until then the paths below are checked against
+#: Microsoft's published reference pages only (Task #5368). The check after the
+#: served compare fails the day the shelf serves them, so this list cannot go
+#: stale.
+_NOT_SHELVED_YET: tuple[str, ...] = ("/microsoft.network/dnszones",)
+
 _PARAMETER = re.compile(r"\{[^}]*\}")
 
 
@@ -185,6 +194,10 @@ def _path_constants() -> dict[str, str]:
         for name, value in vars(_paths).items()
         if name.endswith("_PATH") and isinstance(value, str) and value.startswith("/")
     }
+
+
+def _is_not_shelved_yet(key: str) -> bool:
+    return any(part in key for part in _NOT_SHELVED_YET)
 
 
 def _declared_op_ids() -> set[str]:
@@ -391,4 +404,14 @@ def test_every_path_is_in_the_pinned_azure_spec_files() -> None:
     anchor = require_shelf_spec(_SPEC_DIR, _ANCHOR_FILE)
     spec_dir = anchor.parents[len(Path(_ANCHOR_FILE).parts) - 1]
     served = _served_op_ids(spec_dir)
-    assert_op_ids_served(_declared_op_ids(), served, spec_label=f"{_SPEC_DIR} (Azure specs)")
+    declared = _declared_op_ids()
+    assert_op_ids_served(
+        {key for key in declared if not _is_not_shelved_yet(key)},
+        served,
+        spec_label=f"{_SPEC_DIR} (Azure specs)",
+    )
+    now_served = sorted(key for key in declared if _is_not_shelved_yet(key) and key in served)
+    assert not now_served, (
+        "These paths are on the shelf now. Remove them from _NOT_SHELVED_YET (and delete "
+        f"this check when the list is empty): {now_served}"
+    )

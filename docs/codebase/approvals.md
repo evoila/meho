@@ -964,6 +964,21 @@ self-approval (`self_approved`), which rule allowed it (`approval_rule`)
 and how the person proved they were present (`approval_auth`: channel
 `web` or `rest`, method `fresh_sign_in` or `one_time_code`).
 
+With `AUDIT_CLIENT_IDENTITY` on (off by default), approvals also name the
+login client (see the `client` block in [audit_query.md](audit_query.md)):
+
+- The request keeps the requester's `client` block in its stored effect
+  (`proposed_effect["client"]`). No new column. A request parked again for
+  an earlier requester (a step of a multi-step operation that waits again)
+  keeps none, because the caller is then the reviewer.
+- The `approval.decision` row of an approve adds `approver_azp` and
+  `approver_channel` (`web` or `token`) next to `approval_auth`.
+- For an approve over REST (`/approve` and `/decide`, so also `meho
+  approvals approve`), the row also keeps the `User-Agent` header, cut to
+  256 characters: `"approver_user_agent": {"value": "...",
+  "self_declared": true}`. The tool sends this text about itself, and MEHO
+  cannot check it.
+
 ## Changes of rights: the login is never its own approver
 
 `operations/grant_approval.py` checks the Keycloak writes that change who

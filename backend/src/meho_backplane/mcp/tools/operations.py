@@ -910,15 +910,18 @@ register_mcp_tool(
             "and never re-dispatches a past one. Covers ingested HTTP ops "
             "(`source_kind='ingested'`). A typed/composite op returns "
             '`status="unavailable"` (no single literal HTTP request), '
-            "except a destructive or approval-gated one: it returns "
+            "except a write: it returns "
             '`status="ok"`, `method="COMPOSITE"`, the redacted params and '
             "a `preview_hash`. It shows the plan as `proposed_effect` only "
             "when the plan can be built without contacting the target; "
             "otherwise `plan_shown` is false and `plan_note` says the plan "
-            "is shown on the approval request instead. An approval-gated op "
-            "that writes a credential (for example `vault.kv.put`) is NOT "
-            'previewable and stays `status="unavailable"`, so its secret '
-            "params never surface. Every preview whose op resolves (ok, "
+            "is shown on the approval request instead. A credential write "
+            "(for example `keycloak.user.reset_password`) with its own "
+            'safe preview returns `status="ok"` with `proposed_effect` '
+            "and no params copy: a secret value never shows. A credential "
+            "write with no safe preview of its own stays "
+            '`status="unavailable"`. A read-only typed op stays '
+            '`status="unavailable"`. Every preview whose op resolves (ok, '
             "unavailable, and the error statuses after the op lookup) also "
             "says the risk level and whether this call will wait for "
             "approval: `safety_level`, `requires_approval`, and "

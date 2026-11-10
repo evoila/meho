@@ -96,11 +96,12 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
-from meho_backplane.operations._preview import _SENSITIVE_CLASSES
+from meho_backplane.operations._preview import _SENSITIVE_CLASSES, has_preview_builder
 from meho_backplane.operations._preview_steps import preview_step_verdict
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
+    _is_mutating,
     params_check_errors,
     policy_gate,
     validate_params,
@@ -108,7 +109,12 @@ from meho_backplane.operations._validate import (
 from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
-__all__ = ["PARAMS_DIGEST_KEY", "compute_preview_hash", "preview_dispatch"]
+__all__ = [
+    "PARAMS_DIGEST_KEY",
+    "compute_preview_hash",
+    "is_credential_builder_op",
+    "preview_dispatch",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -226,36 +232,47 @@ def _invalid_op_schema_envelope(
     }
 
 
+def is_credential_builder_op(descriptor: EndpointDescriptor) -> bool:
+    """True for a credential-class op that has its own preview builder (#5074).
+
+    Such an op previews from its builder only. The params are never copied
+    into the preview, because a secret can ride in them.
+    """
+    return classify_op(descriptor.op_id) in _SENSITIVE_CLASSES and has_preview_builder(
+        descriptor.op_id
+    )
+
+
 def _is_previewable(descriptor: EndpointDescriptor) -> bool:
     """True when the op has a preview surface; else it previews as ``unavailable``.
 
     An ``source_kind='ingested'`` op has a literal would-be HTTP request. A
-    non-ingested (``typed`` / ``composite``) op has none, so it is previewable
-    only in a governed approval tier, via the synthetic preview
-    (:func:`._composite_preview.build_composite_preview`):
+    non-ingested (``typed`` / ``composite``) op has none, so it gets the
+    synthetic preview (:func:`._composite_preview.build_composite_preview`)
+    when it can change something:
 
-    * ``safety_level='destructive'`` (#3198) — unconditional: the
-      governed-delete gate refuses to park without a bound preview hash, so the
-      op MUST be previewable. Destructive ops are non-credential deletes.
-    * ``requires_approval`` (#3312), **except a credential-class op** — so the
-      calling agent reads the same park-time ``proposed_effect`` the approver
-      sees. A credential-class op (``classify_op`` ∈ the aggregate-only
-      :data:`~meho_backplane.operations._preview._SENSITIVE_CLASSES`) is
-      **excluded**: its secret rides in the request params, and the synthetic
-      preview's ``redacted_body`` slot is a safe view of the params
-      (:func:`~meho_backplane.operations._composite_preview.safe_params_view`),
-      not a place to carry a written secret at all. The park path suppresses
-      credential-class request detail for exactly this reason
-      (``build_proposed_effect`` step 3); mirror it here so a ``vault.kv.put`` /
-      ``k8s.secret.create`` preview never surfaces the written secret.
-      Single-sourced on ``classify_op``; the class set is imported, never
-      re-declared.
+    * ``safety_level='destructive'`` (#3198) -- unconditional: the
+      governed-delete gate refuses to park without a bound preview hash.
+    * a credential-class op (``classify_op`` in the aggregate-only
+      :data:`~meho_backplane.operations._preview._SENSITIVE_CLASSES`) with
+      its own preview builder (#5074). The builder owns the secret
+      discipline, and the preview never copies the params.
+    * any other non-credential op that is not a read, whether or not it
+      carries ``requires_approval`` (#3312, #5074). A call can wait for
+      approval for some callers only, so the flag alone is not the rule. A
+      ``safe`` typed op is a read and stays ``unavailable``.
+
+    A credential-class op with no builder of its own stays ``unavailable``:
+    its secret rides in the params, and the generic safe view cannot be
+    trusted to hide a connector-specific secret shape.
     """
     if descriptor.source_kind == "ingested":
         return True
     if descriptor.safety_level == "destructive":
         return True
-    return descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+    if classify_op(descriptor.op_id) in _SENSITIVE_CLASSES:
+        return has_preview_builder(descriptor.op_id)
+    return descriptor.requires_approval or _is_mutating(descriptor)
 
 
 def _refused_envelope(

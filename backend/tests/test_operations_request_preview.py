@@ -939,6 +939,9 @@ async def test_preview_credential_class_requires_approval_op_stays_unavailable(
     `unavailable` contract and never producing a `redacted_body` for them.
     """
     register_connector_v2(product="demo", version="", impl_id="", cls=_RecordingHttpConnector)
+    # The real k8s connector has its own preview builder (#5074); this test
+    # is about a credential op that has none.
+    _PREVIEW_BUILDERS.pop("k8s.secret.create", None)
     # op_id `k8s.secret.create` classifies as credential_write (allowlisted in
     # broadcast.events), regardless of the demo connector it is registered under.
     await register_typed_operation(

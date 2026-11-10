@@ -129,16 +129,18 @@ Two honest limits:
 
 - It covers **spec-ingested HTTP operations**. A typed or composite
   operation (like the Kubernetes ops here) has no single literal HTTP
-  request, so preview returns `status: "unavailable"` — that is the
-  expected answer, not a failure. The exception is a destructive or
-  approval-gated typed or composite operation. Its preview returns
+  request, so a read returns `status: "unavailable"` — that is the
+  expected answer, not a failure. The exception is a typed or composite
+  write (also one that waits for approval only for some callers). Its
+  preview returns
   `status: "ok"` with the params and a `preview_hash`. It shows the plan
   (`proposed_effect`) only when the plan does not need the target. When
   the plan needs the target, `plan_shown` is `false` and `plan_note`
-  says the plan is shown on the approval request. An approval-gated
-  operation that writes a credential (for example `vault.kv.put`) is
-  not previewable. It stays `status: "unavailable"`, so its secret
-  params never surface.
+  says the plan is shown on the approval request. A credential
+  write with its own safe preview (for example
+  `keycloak.user.reset_password`) shows only that plan and never copies
+  the params. A credential write with no safe preview of its own stays
+  `status: "unavailable"`.
 - It is available over MCP, REST (`POST /api/v1/operations/preview`),
   and the CLI (`meho operation preview <connector_id> <op_id>`).
 

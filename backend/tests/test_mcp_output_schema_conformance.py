@@ -804,7 +804,9 @@ def test_call_operation_rate_limited_envelope_conforms(
 def test_preview_operation_unavailable_envelope_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """A typed op has no literal HTTP request: ``status="unavailable"``.
+    """A typed read has no literal HTTP request: ``status="unavailable"``.
+
+    A typed write previews as ``ok`` (#5074), so this uses a read.
 
     A first-class non-ok envelope — exactly the kind of result shape a
     client-side validator rejects when the schema only imagined the
@@ -816,7 +818,7 @@ def test_preview_operation_unavailable_envelope_conforms(
         _call(
             client,
             "preview_operation",
-            {"connector_id": "topology-graph-1.x", "op_id": "topology.create_node"},
+            {"connector_id": "audit-integrity-1.x", "op_id": "audit.loose_rows"},
         ),
     )
     assert payload["status"] == "unavailable"

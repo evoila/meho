@@ -705,20 +705,22 @@ async def linux_write_registered() -> AsyncIterator[None]:
         ("linux.script.run", {"script": _SCRIPT_CANARY, "arguments": _ARG_CANARY}),
     ],
 )
-async def test_preview_credential_class_writes_are_unavailable_no_secret(
+async def test_preview_credential_class_writes_show_own_plan_no_secret(
     linux_write_registered: None, op_id: str, params: dict[str, Any]
 ) -> None:
-    """AC: preview_operation returns preview_unavailable for the credential writes."""
+    """The credential writes preview from their own builder, with no params copy (#5074)."""
     envelope = await preview_operation(
         _OPERATOR,
         {"connector_id": _CONNECTOR_ID, "op_id": op_id, "target": _TARGET_NAME, "params": params},
     )
-    assert envelope["status"] == "unavailable"
-    assert envelope["extras"]["reason"] == "not_ingested"
-    assert "redacted_body" not in envelope
-    # No secret rides in the envelope.
-    for leaked in (_CONTENT_CANARY, _SCRIPT_CANARY, _ARG_CANARY):
+    assert envelope["status"] == "ok", envelope
+    assert envelope["redacted_body"] is None
+    # No secret rides in the envelope. The script body is the one text that
+    # shows: it is the change the approver decides on, and it is not a secret
+    # value (the builder's own rule).
+    for leaked in (_CONTENT_CANARY, _ARG_CANARY):
         assert leaked not in str(envelope)
+    assert (_SCRIPT_CANARY in str(envelope)) == (op_id == "linux.script.run")
 
 
 @pytest.mark.asyncio

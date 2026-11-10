@@ -125,11 +125,13 @@ func newPreviewCmd() *cobra.Command {
 			"input faults (unknown op, invalid params, unresolvable target) ride " +
 			"the envelope as `status=\"error\"` — HTTP is 200. A typed/composite " +
 			"op with no single literal HTTP request to preview comes back " +
-			"`status=\"unavailable\"` (a destructive or approval-gated " +
-			"typed/composite op is the exception — it previews a param-bound " +
-			"request tuple). An approval-gated op that writes a credential " +
-			"(for example `vault.kv.put`) is not previewable and stays " +
-			"`status=\"unavailable\"`, so its secret params never surface.\n\n" +
+			"`status=\"unavailable\"` (a typed/composite write is the exception " +
+			"— it previews a param-bound request tuple, also when the call " +
+			"waits for approval only for some callers). A credential write " +
+			"(for example `keycloak.user.reset_password`) with its own safe " +
+			"preview shows only that plan, never the params. A credential " +
+			"write with no safe preview of its own stays " +
+			"`status=\"unavailable\"`.\n\n" +
 			"When the real call would be refused because the target's version " +
 			"is outside what the connector's catalog supports, and no other " +
 			"catalog of the same connector serves it, the preview is refused " +

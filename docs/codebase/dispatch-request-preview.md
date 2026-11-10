@@ -37,24 +37,28 @@ connector-boundary pipeline the response path uses.
 ## Scope
 
 In scope: the literal would-be request for an `source_kind='ingested'`
-op, redacted, returned without sending. Plus, for a non-ingested op in a
-governed approval tier (`safety_level='destructive'` #3198, or a
-**non-credential-class** `requires_approval` op #3312 — a credential-class op
-like `vault.kv.put` stays `unavailable` because its secret rides in the
-params), a **synthetic preview** — a params-bound projection (the hash
+op, redacted, returned without sending. Plus, for a non-ingested op that
+writes: `safety_level='destructive'` (#3198), or any other non-read op,
+with or without `requires_approval` (#3312, #5074), or a credential-class op
+that has its own preview builder (#5074, for example
+`keycloak.user.reset_password`). A credential-class op with no builder stays
+`unavailable` because its secret rides in the params. A `safe` typed op is a
+read and stays `unavailable`. The preview of such an op is a **synthetic preview** — a params-bound projection (the hash
 binding) plus the reused park-time `proposed_effect` (`_composite_preview.py`,
 egress-free). Its `redacted_body` is a safe view of the params, not a copy
-(see Redaction below).
+(see Redaction below). For a credential op the `redacted_body` is `null`: only
+the builder's plan shows, and `params_digest` keeps the hash bound to every
+value.
 
 Out of scope (honouring #1683's dispositions):
 
 - **No persisting the raw body.** `params_hash` stays the audit field.
 - **No replay.** Inspecting a *would-be* request only; re-dispatching a
   past audited request is a separate governance concern (Goal #1651).
-- **Non-ingested ops outside the governed tiers.** A `typed` / `composite`
-  op runs a Python handler (which may make zero or many HTTP calls) and has
-  no single literal HTTP request — unless it is `destructive` or a
-  non-credential-class `requires_approval` op (above), the preview returns
+- **Non-ingested read ops, and credential ops with no builder.** A `typed` /
+  `composite` op runs a Python handler (which may make zero or many HTTP
+  calls) and has no single literal HTTP request — unless it writes (above),
+  the preview returns
   `status="unavailable"` rather than fabricating one.
 - **Error-echo on the dispatch path** is deferred (see Known issues).
 
@@ -115,8 +119,9 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       a composite is refused here when the target is outside its
         │       connector's composite_supported_version_range)
         ├─ not previewable (see _is_previewable: ingested, OR destructive,
-        │       OR requires_approval AND not credential-class) ?
-        │       → status=unavailable (not_ingested)     ◄── governed tiers pass (#3198/#3312)
+        │       OR a non-read op that is not credential-class,
+        │       OR a credential-class op with its own preview builder) ?
+        │       → status=unavailable (not_ingested)     ◄── writes pass (#3198/#3312/#5074)
         ├─ validate_params → errors ? → status=error error_code=invalid_params
         │       (InvalidOpSchemaError ? → status=error error_code=invalid_op_schema, #3095)
         ├─ params_check_errors → a problem ? → status=error error_code=invalid_params
@@ -205,7 +210,7 @@ surfaces stay `OPERATOR`-gated at the route / tool layer.
 |---|---|---|
 | `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding). Every synthetic preview also carries `plan_shown` (#4028): `true` with `proposed_effect`, or `false` with a plain `plan_note` when the builder needs the target and declined (both unhashed). Plus the four governance fields below |
 | `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `unknown_connector` / `target_required` / `unqualified_target_version` / `target_connector_mismatch` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `refused_before_approval` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095; `unknown_op` carries `extras.connectors_with_op`, #4031). Every code except `unknown_op` / `unknown_connector` / `target_required` / `target_connector_mismatch` / `unqualified_target_version` also carries the four governance fields below |
-| `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested`, plus the four governance fields below |
+| `unavailable` | not an HTTP-ingested op **and** not a write that previews (a `safe` typed read, or a credential-class op with no preview builder of its own, stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested`, plus the four governance fields below |
 
 An ingested operation whose path names licences, with any HTTP method,
 answers `error` with `extras.error_code=license_read_off` and no

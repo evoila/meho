@@ -5,20 +5,22 @@
 
 The steps of :func:`upload_session`:
 
-1. Unpack the archive (:mod:`.archive`).
-2. Compare it with the stored session and find the new tail of each file
-   (:mod:`.plan`). A tail holds whole lines only. A changed stored part
-   is a conflict (``409``), and an upload of a session that another
-   person started is refused too.
+1. Load and lock the stored session. An upload of a session that another
+   person started is refused (``409``).
+2. In a worker process (:mod:`.worker`, :mod:`.prepare`): unpack the
+   archive (:mod:`.archive`), compare it with the stored session and find
+   the new tail of each file (:mod:`.plan`), check each tail for secrets
+   (:mod:`.secret_check`) and pack the checked tails into one archive.
+   A tail holds whole lines only. A changed stored part is a conflict
+   (``409``).
 3. With no new bytes: change only the state (open to ended or
    unfinished), or change nothing at all. A retry of the same bytes is
    safe.
-4. With new bytes: check each tail for secrets (:mod:`.secret_check`),
-   write one archive of the checked tails to the object storage (under
-   ``quarantine/`` when the check was not sure), then commit the index
-   row, the upload row and the audit row in one transaction. When the
-   commit fails, the archive is deleted again, so a session is stored
-   complete or not at all.
+4. With new bytes: write the archive of the checked tails to the object
+   storage (under ``quarantine/`` when the check was not sure), then
+   commit the index row, the upload row and the audit row in one
+   transaction. When the commit fails, the archive is deleted again, so a
+   session is stored complete or not at all.
 
 Every upload, also a refused or unchanged one, writes an audit row.
 """
@@ -37,14 +39,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.session_store.archive import read_archive, write_archive
 from meho_backplane.session_store.audit import add_audit_row, write_audit_row
 from meho_backplane.session_store.config import SessionStoreConfig
 from meho_backplane.session_store.models import AgentSessionRecord, AgentSessionUpload
 from meho_backplane.session_store.object_store import ObjectStore
-from meho_backplane.session_store.plan import UploadPlan, plan_upload, sha256_hex
+from meho_backplane.session_store.prepare import CheckedArchive, PreparedUpload, prepare_upload
 from meho_backplane.session_store.schemas import SessionUploadResult
-from meho_backplane.session_store.secret_check import check_part, ends_inside_private_key
+from meho_backplane.session_store.worker import run_in_worker
 
 __all__ = ["SessionConflictError", "UploadMeta", "object_key", "upload_session"]
 
@@ -108,25 +109,20 @@ def _next_state(current: str, requested: str, *, new_bytes: bool) -> str:
     return current
 
 
-async def _store_tails(
-    call: _Call, record_id: uuid.UUID, seq: int, plan: UploadPlan, uploaded: dict[str, bytes]
+async def _store_archive(
+    call: _Call, record_id: uuid.UUID, seq: int, archive: CheckedArchive
 ) -> _Stored:
-    checked: dict[str, bytes] = {}
-    files: dict[str, Any] = {}
-    redactions = 0
-    unclear = False
-    for path, (offset, tail) in plan.tails.items():
-        # The upload holds the whole file, so a key that starts in an
-        # earlier upload is seen in the stored part before the tail.
-        part = check_part(tail, inside_private_key=ends_inside_private_key(uploaded[path], offset))
-        checked[path] = part.content
-        redactions += sum(part.redactions.values())
-        unclear = unclear or part.unclear
-        files[path] = {"offset": offset, "added": len(tail), **plan.states[path].as_json()}
-    archive = write_archive(checked)
-    key = object_key(call.operator.tenant_id, record_id, seq, quarantined=unclear)
-    await call.store.put(key, archive)
-    return _Stored(seq, key, sha256_hex(archive), len(archive), unclear, redactions, files)
+    key = object_key(call.operator.tenant_id, record_id, seq, quarantined=archive.quarantined)
+    await call.store.put(key, archive.data)
+    return _Stored(
+        seq,
+        key,
+        archive.sha256,
+        len(archive.data),
+        archive.quarantined,
+        archive.redactions,
+        archive.files,
+    )
 
 
 def _apply_meta(record: AgentSessionRecord, meta: UploadMeta) -> None:
@@ -209,27 +205,31 @@ async def _load(
     return record, list(uploads)
 
 
-async def _plan_or_refuse(
+async def _prepare_or_refuse(
     call: _Call,
     record: AgentSessionRecord | None,
     uploads: list[AgentSessionUpload],
-    files: dict[str, bytes],
-) -> UploadPlan:
+    data: bytes,
+    config: SessionStoreConfig,
+) -> PreparedUpload:
     try:
         if record is not None and record.uploaded_by_sub != call.operator.sub:
             raise SessionConflictError("session_owned_by_another_person")
-        plan = plan_upload(
-            record.files if record is not None else {},
-            [u.files for u in uploads],
-            files,
+        prepared = await run_in_worker(
+            prepare_upload,
+            data,
+            max_files=config.max_files,
+            max_unpacked_bytes=config.max_unpacked_bytes,
+            stored=record.files if record is not None else {},
+            earlier=[u.files for u in uploads],
             final=call.meta.state in ("ended", "unfinished"),
         )
-        if plan.conflicts:
-            raise SessionConflictError("session_conflict", plan.conflicts)
+        if prepared.conflicts:
+            raise SessionConflictError("session_conflict", prepared.conflicts)
     except SessionConflictError as exc:
         await call.audit_refusal(exc)
         raise
-    return plan
+    return prepared
 
 
 def _add_upload_row(
@@ -252,14 +252,14 @@ def _add_upload_row(
 
 
 def _result(
-    meta: UploadMeta, state: str, outcome: str, plan: UploadPlan, stored: _Stored | None
+    meta: UploadMeta, state: str, outcome: str, prepared: PreparedUpload, stored: _Stored | None
 ) -> SessionUploadResult:
     return SessionUploadResult(
         session_id=meta.session_id,
         state=state,  # type: ignore[arg-type]
         outcome=outcome,  # type: ignore[arg-type]
         seq=stored.seq if stored else None,
-        new_bytes=plan.new_bytes,
+        new_bytes=prepared.new_bytes,
         quarantined=stored.quarantined if stored else False,
         redactions=stored.redactions if stored else 0,
     )
@@ -289,29 +289,27 @@ async def upload_session(
     path: str,
 ) -> SessionUploadResult:
     """Store one upload. Raises :class:`SessionConflictError` or ``ArchiveError``."""
-    files = read_archive(
-        data, max_files=config.max_files, max_unpacked_bytes=config.max_unpacked_bytes
-    )
     call = _Call(operator, meta, path, store)
     now = datetime.now(UTC)
     async with get_sessionmaker()() as session:
         record, uploads = await _load(session, call)
-        plan = await _plan_or_refuse(call, record, uploads, files)
+        prepared = await _prepare_or_refuse(call, record, uploads, data, config)
+        archive = prepared.archive
         created = record is None
         if record is None:
             record = _new_record(call.operator, meta, now)
             session.add(record)
-        new_state = _next_state(record.state, meta.state, new_bytes=bool(plan.tails))
-        if not plan.tails and not created and new_state == record.state:
+        new_state = _next_state(record.state, meta.state, new_bytes=archive is not None)
+        if archive is None and not created and new_state == record.state:
             call.audit(session, {"result": "unchanged"})
             await session.commit()
-            return _result(meta, record.state, "unchanged", plan, None)
+            return _result(meta, record.state, "unchanged", prepared, None)
 
         stored: _Stored | None = None
-        if plan.tails:
-            stored = await _store_tails(call, record.id, record.upload_count + 1, plan, files)
+        if archive is not None:
+            stored = await _store_archive(call, record.id, record.upload_count + 1, archive)
             _add_upload_row(session, record, stored, now)
-            record.files = {p: state.as_json() for p, state in plan.states.items()}
+            record.files = {p: state.as_json() for p, state in prepared.states.items()}
             record.upload_count = stored.seq
         _apply_meta(record, meta)
         record.state = new_state
@@ -323,14 +321,14 @@ async def upload_session(
                 "result": outcome,
                 "state": new_state,
                 "seq": stored.seq if stored else None,
-                "new_bytes": plan.new_bytes,
+                "new_bytes": prepared.new_bytes,
                 "archive_sha256": stored.sha256 if stored else None,
                 "quarantined": stored.quarantined if stored else False,
                 "redactions": stored.redactions if stored else 0,
             },
         )
         await _commit(session, call, stored)
-    return _result(meta, new_state, outcome, plan, stored)
+    return _result(meta, new_state, outcome, prepared, stored)
 
 
 async def _forget_archive(store: ObjectStore, key: str) -> None:

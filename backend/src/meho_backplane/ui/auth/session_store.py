@@ -20,7 +20,7 @@ The four entry points
   tokens; this module Fernet-encrypts both tokens and inserts the
   row. The returned :class:`DecryptedSession` carries the row's
   ``id`` -- the value the BFF middleware sets as the
-  ``meho_session`` cookie.
+  ``__Host-meho_session`` cookie.
 
 * :func:`load_session` -- hot-path lookup on every ``/ui/*`` request.
   Reads the row by PK, applies the revocation + expiry filter, and
@@ -470,7 +470,7 @@ async def load_session(
         ``last_seen_at`` update but does not commit; the caller's
         outer transaction owns the commit.
     cookie_id
-        Parsed UUID from the ``meho_session`` cookie. Malformed
+        Parsed UUID from the ``__Host-meho_session`` cookie. Malformed
         cookie values are the caller's problem -- parse them with
         :func:`uuid.UUID` and catch :class:`ValueError` upstream.
 
@@ -598,7 +598,7 @@ async def revoke_session(
         Open :class:`AsyncSession`. Flushes; the caller's outer
         transaction owns the commit.
     cookie_id
-        The ``meho_session`` cookie UUID.
+        The ``__Host-meho_session`` cookie UUID.
     """
     row = await session.get(WebSession, cookie_id)
     if row is None or row.revoked_at is not None:
@@ -747,7 +747,7 @@ async def rotate_refresh(
         (:func:`_commit_replay_side_effects`) and survive the
         caller's rollback on the propagating error.
     cookie_id
-        The session's UUID PK (the ``meho_session`` cookie value).
+        The session's UUID PK (the ``__Host-meho_session`` cookie value).
     presented_refresh
         The refresh token presented back to this rotation call.
         Compared bytes-for-bytes against the decrypted stored value.

@@ -315,7 +315,7 @@ open https://meho.example.com/ui/
 #    resource=https://meho.example.com/api + state=<random>.
 # 3. Operator authenticates at Keycloak.
 # 4. 302 → /ui/auth/callback?code=...&state=...
-# 5. Backplane sets the meho_session cookie (HttpOnly + Secure +
+# 5. Backplane sets the __Host-meho_session cookie (HttpOnly + Secure +
 #    SameSite=Strict + Path=/) and 302s to /ui/.
 # 6. Dashboard renders with the operator's identity in the header.
 ```

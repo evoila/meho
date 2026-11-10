@@ -53,7 +53,7 @@ Cookie stability (CSRF-desync guard)
 
 A refresh mutates **only** the encrypted token columns and
 ``expires_at`` inside the existing ``web_session`` row. The
-``meho_session`` cookie value (the row id) and the ``meho_csrf``
+``__Host-meho_session`` cookie value (the row id) and the ``meho_csrf``
 token (HMAC-keyed on that same session id,
 :func:`meho_backplane.ui.csrf.mint_csrf_token`) are untouched -- the
 refresh path performs zero ``Set-Cookie`` operations. Pages rendered

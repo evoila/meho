@@ -167,10 +167,12 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         "msad.group.delete",
         "msad.computer.delete",
     }
-    # The domain-build writes wait for approval too; the older caution
-    # writes do not (yet).
+    # The domain-build writes and the group membership writes wait for
+    # approval too; the other caution writes do not.
     build_writes = {
         "msad.group.create",
+        "msad.group.add-member",
+        "msad.group.remove-member",
         "msad.ou.grant-create-child",
         "msad.ou.revoke-create-child",
         "msad.domain.password-policy.set",
@@ -184,8 +186,6 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         "msad.user.set",
         "msad.user.enable",
         "msad.user.disable",
-        "msad.group.add-member",
-        "msad.group.remove-member",
         "msad.computer.join-prestage",
         "msad.computer.unjoin",
         "msad.ou.create",

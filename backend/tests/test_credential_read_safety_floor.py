@@ -92,6 +92,7 @@ def declared_password_read() -> Iterator[None]:
     saved = dict(op_classes._DECLARED)
     saved_safe_writes = set(op_classes._SAFE_WRITES)
     saved_root_shell = set(op_classes._ROOT_SHELL)
+    saved_per_call = set(op_classes._PER_CALL_APPROVAL)
     op_classes.declare_op_classes(credential_read=(_PASSWORD_READ,))
     try:
         yield
@@ -100,6 +101,7 @@ def declared_password_read() -> Iterator[None]:
         op_classes._DECLARED.update(saved)
         op_classes._SAFE_WRITES.update(saved_safe_writes)
         op_classes._ROOT_SHELL.update(saved_root_shell)
+        op_classes._PER_CALL_APPROVAL.update(saved_per_call)
 
 
 @pytest.fixture

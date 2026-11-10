@@ -39,6 +39,9 @@ Rules that never change:
 * An operation that a connector marks as running a command as root on the
   host (:func:`~meho_backplane.op_classes.is_root_shell`) is never covered
   either (a person approves each call).
+* An operation that a connector marks for per-call approval
+  (:func:`~meho_backplane.op_classes.needs_per_call_approval`) is never
+  covered either.
 * A target kind entry (``target_product``) works only when the tenant
   setting ``run_approval_target_kinds_enabled`` is on.
 * One run (tenant, token subject, run reference) has at most one open
@@ -62,7 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunApproval, Tenant
-from meho_backplane.op_classes import is_root_shell
+from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
 from meho_backplane.operations.grant_approval import RIGHTS_CHANGE_REFUSAL, is_rights_change_op
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.run_approval_schemas import (
@@ -203,6 +206,11 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
         return (
             f"op {entry.op_id!r} {ROOT_SHELL_REFUSAL}. A run approval never covers it: "
             "leave it out of the list"
+        )
+    if needs_per_call_approval(entry.op_id):
+        return (
+            f"op {entry.op_id!r}: a person approves each call. A run approval never "
+            "covers it: leave it out of the list"
         )
     product, version, impl_id = parse_connector_id(entry.connector_id)
     descriptor = await lookup_descriptor(

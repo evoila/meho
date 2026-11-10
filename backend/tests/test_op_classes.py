@@ -21,6 +21,7 @@ from meho_backplane.connectors.github.op_classes import TICKET_WRITE_OP_IDS
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.op_classes import (
     declare_op_classes,
+    declare_per_call_approval,
     declare_root_shell,
     declare_safe_writes,
     declared_op_class,
@@ -39,6 +40,7 @@ def fresh_registry() -> Iterator[None]:
     saved = dict(op_classes._DECLARED)
     saved_safe_writes = set(op_classes._SAFE_WRITES)
     saved_root_shell = set(op_classes._ROOT_SHELL)
+    saved_per_call = set(op_classes._PER_CALL_APPROVAL)
     op_classes._reset_declared_op_classes_for_testing()
     try:
         yield
@@ -47,6 +49,7 @@ def fresh_registry() -> Iterator[None]:
         op_classes._DECLARED.update(saved)
         op_classes._SAFE_WRITES.update(saved_safe_writes)
         op_classes._ROOT_SHELL.update(saved_root_shell)
+        op_classes._PER_CALL_APPROVAL.update(saved_per_call)
 
 
 def test_declared_class_wins_over_the_pattern_rules(fresh_registry: None) -> None:
@@ -138,6 +141,22 @@ def test_root_shell_mark_is_separate_from_the_op_class(fresh_registry: None) -> 
     assert op_classes.is_root_shell("example.script.run")
     assert declared_op_class("example.script.run") == "credential_write"
     assert not op_classes.is_root_shell("example.script.list")
+
+
+def test_per_call_approval_mark_is_separate_from_the_op_class(fresh_registry: None) -> None:
+    declare_op_classes(write=("example.group.add",))
+    declare_per_call_approval(("example.group.add",))
+    declare_per_call_approval(("example.group.add",))
+    assert op_classes.needs_per_call_approval("example.group.add")
+    assert declared_op_class("example.group.add") == "write"
+    assert not op_classes.needs_per_call_approval("example.group.list")
+
+
+def test_msad_marks_its_member_writes_at_import() -> None:
+    _eager_import_connectors()
+    assert op_classes.needs_per_call_approval("msad.group.add-member")
+    assert op_classes.needs_per_call_approval("msad.group.remove-member")
+    assert not op_classes.needs_per_call_approval("msad.group.create")
 
 
 def test_ssh_connectors_mark_their_root_writes_at_import() -> None:

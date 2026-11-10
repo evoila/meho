@@ -37,12 +37,14 @@ from typing import Final
 __all__ = [
     "DECLARABLE_OP_CLASSES",
     "declare_op_classes",
+    "declare_per_call_approval",
     "declare_root_shell",
     "declare_safe_writes",
     "declared_op_class",
     "declared_op_ids",
     "is_root_shell",
     "is_safe_write",
+    "needs_per_call_approval",
 ]
 
 #: The classes a connector may declare. ``credential_read``: the answer
@@ -57,6 +59,7 @@ DECLARABLE_OP_CLASSES: Final[frozenset[str]] = frozenset(
 _DECLARED: dict[str, str] = {}
 _SAFE_WRITES: set[str] = set()
 _ROOT_SHELL: set[str] = set()
+_PER_CALL_APPROVAL: set[str] = set()
 
 
 def declare_op_classes(
@@ -128,6 +131,22 @@ def is_root_shell(op_id: str) -> bool:
     return op_id in _ROOT_SHELL
 
 
+def declare_per_call_approval(op_ids: Iterable[str]) -> None:
+    """Mark *op_ids* as operations that a person approves call by call.
+
+    Neither a standing grant nor a run approval covers such an operation:
+    each call waits for its own approval. A connector calls this for an
+    operation whose call gives rights, for example adding a member to a
+    directory group. Safe to call twice with the same ids.
+    """
+    _PER_CALL_APPROVAL.update(op_ids)
+
+
+def needs_per_call_approval(op_id: str) -> bool:
+    """Return ``True`` when a connector marked *op_id* with :func:`declare_per_call_approval`."""
+    return op_id in _PER_CALL_APPROVAL
+
+
 def declared_op_ids(op_class: str) -> frozenset[str]:
     """Return every op id declared with *op_class*."""
     return frozenset(op_id for op_id, known in _DECLARED.items() if known == op_class)
@@ -138,3 +157,4 @@ def _reset_declared_op_classes_for_testing() -> None:
     _DECLARED.clear()
     _SAFE_WRITES.clear()
     _ROOT_SHELL.clear()
+    _PER_CALL_APPROVAL.clear()

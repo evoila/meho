@@ -62,7 +62,8 @@ session maker, the connector resolver.
   systems that did not answer. Calls that arrive during a run share that
   run's task instead of starting one more (`run_public_first_start_checks`).
   After a run ends, its result is kept for `_PUBLIC_RESULT_HOLD_S` (30)
-  seconds: calls in that time get it and start no run. The console page
+  seconds: calls in that time get it and start no run. A run that ended
+  with an error is not kept; the next call starts a new run. The console page
   does not use the kept result; it runs the checks on every load.
 - The console page `/ui/first-start` needs the `operator` role. It names the
   systems of the signed-in tenant that did not answer, and it uses the

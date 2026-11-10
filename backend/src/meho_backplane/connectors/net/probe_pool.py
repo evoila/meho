@@ -10,12 +10,13 @@ pool also runs the Vault login, so a burst of slow probes must never fill
 it.
 
 Each tenant gets a share of the pool: at most :data:`PROBE_TENANT_SHARE`
-probes at one time, running or waiting. The share is below the number of
-threads, so one tenant never holds every thread. A probe over its tenant's
-share is refused at once with :class:`ProbePoolBusyError` (error code
-``probe_pool_busy``); it does not wait in the queue. A probe that does wait
-in the queue counts that time against its own timeout: when it has waited
-longer than its timeout, it does not start and is refused the same way.
+probes in the pool at one time, running or waiting for a thread. The share
+is below the number of threads, so one tenant never holds every thread. A
+probe over its tenant's share waits for a free place in that share outside
+the pool, so it holds no thread while it waits. All time a probe waits, for
+its share and then for a thread, counts against its own timeout. When that
+time runs out, the probe does not start and is refused with
+:class:`ProbePoolBusyError` (error code ``probe_pool_busy``).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Final
@@ -39,7 +41,8 @@ __all__ = [
 #: Probe threads at one time. Well below the size of the default pool.
 PROBE_POOL_WORKERS: Final[int] = 4
 
-#: Probes one tenant may have in the pool at one time (running or waiting).
+#: Probes one tenant may have in the pool at one time (running or waiting
+#: for a thread). More probes of the tenant wait outside the pool.
 PROBE_TENANT_SHARE: Final[int] = 2
 
 #: The error code of a refused probe.
@@ -49,9 +52,11 @@ _POOL: Final[ThreadPoolExecutor] = ThreadPoolExecutor(
     max_workers=PROBE_POOL_WORKERS, thread_name_prefix="net-probe"
 )
 
-# Probes per tenant in the pool. The release runs on a pool thread, so a
-# lock guards the counts.
+# Probes per tenant in the pool, and the probes of each tenant that wait for
+# a place in its share (first come, first served). The release runs on a
+# pool thread, so a lock guards both.
 _IN_POOL: dict[UUID, int] = {}
+_WAITING: dict[UUID, deque[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]]] = {}
 _IN_POOL_LOCK: Final = threading.Lock()
 
 
@@ -69,19 +74,62 @@ class ProbePoolBusyError(RuntimeError):
         self.reason = reason
 
 
-def _take_slot(tenant_id: UUID) -> None:
+def _grant(waiter: asyncio.Future[None]) -> None:
+    if not waiter.done():
+        waiter.set_result(None)
+
+
+async def _take_slot(tenant_id: UUID, timeout: float) -> None:
+    """Take a place in the tenant's share; wait at most *timeout* seconds."""
     with _IN_POOL_LOCK:
         in_pool = _IN_POOL.get(tenant_id, 0)
-        if in_pool >= PROBE_TENANT_SHARE:
+        if in_pool < PROBE_TENANT_SHARE and not _WAITING.get(tenant_id):
+            _IN_POOL[tenant_id] = in_pool + 1
+            return
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[None] = loop.create_future()
+        entry = (loop, waiter)
+        _WAITING.setdefault(tenant_id, deque()).append(entry)
+    try:
+        async with asyncio.timeout(timeout):
+            await waiter
+    except BaseException as exc:
+        with _IN_POOL_LOCK:
+            queue = _WAITING.get(tenant_id, deque())
+            granted = entry not in queue
+            if not granted:
+                queue.remove(entry)
+                if not queue:
+                    _WAITING.pop(tenant_id, None)
+        if granted:
+            # A place was handed over just as the wait ended: give it on.
+            _release_slot(tenant_id)
+        if isinstance(exc, TimeoutError):
             raise ProbePoolBusyError(
-                f"this tenant already has {in_pool} network probes running or waiting, "
-                f"the most it may have at one time. Retry when one of them has ended."
-            )
-        _IN_POOL[tenant_id] = in_pool + 1
+                f"this tenant already had {PROBE_TENANT_SHARE} network probes running "
+                f"or waiting, and none ended within the probe's timeout of {timeout:g} "
+                f"seconds, so it did not start. Retry when one of them has ended."
+            ) from None
+        raise
 
 
 def _release_slot(tenant_id: UUID) -> None:
+    """Free a place in the tenant's share, or hand it to the next waiting probe.
+
+    Runs on a pool thread or on the event loop.
+    """
     with _IN_POOL_LOCK:
+        queue = _WAITING.get(tenant_id)
+        while queue:
+            loop, waiter = queue.popleft()
+            if not queue:
+                _WAITING.pop(tenant_id, None)
+            try:
+                loop.call_soon_threadsafe(_grant, waiter)
+            except RuntimeError:
+                # The waiter's event loop is closed; try the next one.
+                continue
+            return
         left = _IN_POOL.get(tenant_id, 1) - 1
         if left > 0:
             _IN_POOL[tenant_id] = left
@@ -107,13 +155,15 @@ async def run_blocking_probe[T](
     """Run the blocking *func* on the probe pool and return its result.
 
     *tenant_id* is the tenant the probe runs for; it counts against that
-    tenant's share. *timeout* is the probe's own timeout; a probe that waits
-    longer than that for a thread does not start. Raises
-    :class:`ProbePoolBusyError` in both cases.
+    tenant's share; over the share it waits outside the pool. *timeout* is
+    the probe's own timeout; a probe that waits longer than that, for its
+    share and for a thread together, does not start. Raises
+    :class:`ProbePoolBusyError` in that case.
     """
-    _take_slot(tenant_id)
+    started_at = time.monotonic()
+    await _take_slot(tenant_id, timeout)
     try:
-        future: Future[T] = _POOL.submit(_run_if_in_time, func, args, time.monotonic(), timeout)
+        future: Future[T] = _POOL.submit(_run_if_in_time, func, args, started_at, timeout)
     except BaseException:
         _release_slot(tenant_id)
         raise

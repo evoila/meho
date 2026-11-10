@@ -1769,7 +1769,7 @@ def _probe_pool_busy_error_type() -> type[BaseException] | None:
 
 
 def is_probe_pool_busy(exc: BaseException) -> bool:
-    """Whether *exc* is a ``net.*`` probe refused because its tenant's share was in use."""
+    """Whether *exc* is a ``net.*`` probe refused because it waited longer than its timeout."""
     exc_type = _probe_pool_busy_error_type()
     return exc_type is not None and isinstance(exc, exc_type)
 
@@ -1779,11 +1779,12 @@ def result_probe_pool_busy(
     exc: BaseException,
     duration_ms: float,
 ) -> OperationResult:
-    """A ``net.*`` probe did not run: its tenant's share of the probe pool was in use.
+    """A ``net.*`` probe did not run: it waited longer than its own timeout.
 
     Each tenant may have only a few blocking probes in the probe pool at one
-    time (``connectors/net/probe_pool.py``). No socket was opened, so this is
-    not a reachability answer; a Sensor on it reads ``unknown``.
+    time (``connectors/net/probe_pool.py``); more probes wait for a free
+    place up to their own timeout. No socket was opened, so this is not a
+    reachability answer; a Sensor on it reads ``unknown``.
     """
     from meho_backplane.connectors.net.probe_pool import PROBE_POOL_BUSY, PROBE_TENANT_SHARE
 
@@ -1791,8 +1792,9 @@ def result_probe_pool_busy(
     summary = (
         f"{PROBE_POOL_BUSY}: MEHO did not run this network probe, so this is NOT a "
         f"reachability answer. Each tenant may have {PROBE_TENANT_SHARE} slow network "
-        f"probes (net.ping, net.trace, net.path_mtu, net.tls_inspect) running or waiting "
-        f"at one time. Retry when the other probes have ended. See "
+        f"probes (net.ping, net.trace, net.path_mtu, net.tls_inspect) in the probe pool "
+        f"at one time; more probes wait for a free place up to their own timeout, and "
+        f"this one waited longer. Retry when the other probes have ended. See "
         f"docs/codebase/connectors-net-diagnostics.md."
     )
     if detail:

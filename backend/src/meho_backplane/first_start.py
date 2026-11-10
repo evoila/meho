@@ -631,11 +631,17 @@ async def run_public_first_start_checks() -> FirstStartResponse:
     Calls that arrive while a run is in progress share that run instead of
     starting one more. After the run ends, its result is kept for
     ``_PUBLIC_RESULT_HOLD_S`` seconds: calls in that time get it and start
-    no run. The first call after that starts a new run.
+    no run. The first call after that starts a new run. A run that ended
+    with an error is not kept: the next call starts a new run.
     """
     global _public_run
     if _public_run is None or (
-        _public_run.done() and time.monotonic() - _public_run_ended_at >= _PUBLIC_RESULT_HOLD_S
+        _public_run.done()
+        and (
+            _public_run.cancelled()
+            or _public_run.exception() is not None
+            or time.monotonic() - _public_run_ended_at >= _PUBLIC_RESULT_HOLD_S
+        )
     ):
         _public_run = asyncio.create_task(_public_run_once())
     return await asyncio.shield(_public_run)

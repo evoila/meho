@@ -276,19 +276,23 @@ default thread pool of the event loop:
 
 - The pool has `PROBE_POOL_WORKERS` (4) threads.
 - Each tenant may have `PROBE_TENANT_SHARE` (2) probes in the pool at one
-  time, running or waiting. The share is below the number of threads, so
-  one tenant never holds every thread.
-- A probe over its tenant's share does not wait. It fails at once with
-  `ProbePoolBusyError`, and the dispatcher returns the error code
-  `probe_pool_busy` (`is_probe_pool_busy` + `result_probe_pool_busy` in
-  `operations/_errors.py`). `extras` carries `tenant_share`, `detail` and
-  `exception_class`.
-- A probe that waits in the queue counts that time against its own
-  timeout (the per-echo timeout for `net.ping`, the per-hop timeout for
-  `net.trace`). When it waited longer, it does not start and fails with
-  the same error.
-- A slot is free again when the probe's thread ends, also when the caller
-  stopped waiting earlier.
+  time, running or waiting for a thread. The share is below the number of
+  threads, so one tenant never holds every thread.
+- A probe over its tenant's share waits for a free place in that share,
+  first come, first served. It waits outside the pool, so it holds no
+  thread. When a probe of the tenant ends, its place goes to the next
+  waiting probe. So several sensors of one tenant that are due at the same
+  time all run, two at a time.
+- All time a probe waits, for its share and then for a thread, counts
+  against its own timeout (the per-echo timeout for `net.ping`, the
+  per-hop timeout for `net.trace`). When that time runs out, the probe
+  does not start. It fails with `ProbePoolBusyError`, and the dispatcher
+  returns the error code `probe_pool_busy` (`is_probe_pool_busy` +
+  `result_probe_pool_busy` in `operations/_errors.py`). `extras` carries
+  `tenant_share`, `detail` and `exception_class`.
+- A place is free again when the probe's thread ends, also when the caller
+  stopped waiting earlier. A probe that is cancelled while it waits for
+  its share leaves the line.
 
 No socket was opened, so like `connector_probe_refused` this is not a
 reading: a Sensor on it reads `unknown`. Tests:

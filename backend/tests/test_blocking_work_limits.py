@@ -99,7 +99,7 @@ async def test_waiting_probes_leave_the_default_thread_pool_free() -> None:
     assert await asyncio.gather(*probes, queued) == ["done"] * (PROBE_POOL_WORKERS + 1)
 
 
-async def test_tenant_over_its_share_is_refused_and_another_tenant_still_runs() -> None:
+async def test_tenant_over_its_share_waits_and_is_refused_after_its_timeout() -> None:
     release = threading.Event()
     running: list[str] = []
 
@@ -117,8 +117,10 @@ async def test_tenant_over_its_share_is_refused_and_another_tenant_still_runs() 
     ]
     try:
         await _wait_until(lambda: len(running) == PROBE_TENANT_SHARE)
+        begin = time.monotonic()
         with pytest.raises(ProbePoolBusyError, match="probe_pool_busy"):
-            await run_blocking_probe(_silent_peer, "refused", tenant_id=busy_tenant, timeout=10)
+            await run_blocking_probe(_silent_peer, "refused", tenant_id=busy_tenant, timeout=0.2)
+        assert time.monotonic() - begin >= 0.2
         other = asyncio.create_task(
             run_blocking_probe(_silent_peer, "other", tenant_id=other_tenant, timeout=10)
         )
@@ -128,6 +130,58 @@ async def test_tenant_over_its_share_is_refused_and_another_tenant_still_runs() 
     assert await other == "other"
     assert await asyncio.gather(*held) == ["busy"] * PROBE_TENANT_SHARE
     assert "refused" not in running
+
+
+async def test_probes_over_the_share_wait_for_it_and_all_run() -> None:
+    running: list[int] = []
+    most_at_once: list[int] = []
+
+    def _short_probe() -> str:
+        running.append(1)
+        most_at_once.append(len(running))
+        time.sleep(0.05)
+        running.pop()
+        return "ok"
+
+    tenant = uuid.uuid4()
+    results = await asyncio.gather(
+        *(
+            run_blocking_probe(_short_probe, tenant_id=tenant, timeout=5)
+            for _ in range(PROBE_TENANT_SHARE + 1)
+        )
+    )
+    assert results == ["ok"] * (PROBE_TENANT_SHARE + 1)
+    assert max(most_at_once) <= PROBE_TENANT_SHARE
+
+
+async def test_cancelled_waiting_probe_gives_up_its_place_in_line() -> None:
+    release = threading.Event()
+    running: list[str] = []
+
+    def _silent_peer(name: str) -> str:
+        running.append(name)
+        release.wait(10)
+        return name
+
+    tenant = uuid.uuid4()
+    held = [
+        asyncio.create_task(run_blocking_probe(_silent_peer, "held", tenant_id=tenant, timeout=10))
+        for _ in range(PROBE_TENANT_SHARE)
+    ]
+    try:
+        await _wait_until(lambda: len(running) == PROBE_TENANT_SHARE)
+        waiting = asyncio.create_task(
+            run_blocking_probe(_silent_peer, "cancelled", tenant_id=tenant, timeout=10)
+        )
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+    finally:
+        release.set()
+    await asyncio.gather(*held)
+    assert await run_blocking_probe(_silent_peer, "next", tenant_id=tenant, timeout=1) == "next"
+    assert "cancelled" not in running
 
 
 async def test_tenant_gets_its_share_back_when_its_probes_end() -> None:
@@ -157,7 +211,7 @@ async def test_share_stays_in_use_until_a_cancelled_probe_ends() -> None:
         await asyncio.gather(*held, return_exceptions=True)
         # The threads still wait on their sockets, so the share is still in use.
         with pytest.raises(ProbePoolBusyError):
-            await run_blocking_probe(_silent_peer, tenant_id=tenant, timeout=10)
+            await run_blocking_probe(_silent_peer, tenant_id=tenant, timeout=0.2)
     finally:
         release.set()
     for _ in range(200):

@@ -320,6 +320,25 @@ async def test_repeated_public_calls_in_the_hold_time_start_one_run(
     assert calls == 4  # after the hold time, the next call runs again
 
 
+async def test_public_run_that_fails_is_not_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+    runs = 0
+
+    async def failing_once() -> first_start.FirstStartResponse:
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            raise RuntimeError("first run failed")
+        return first_start.FirstStartResponse(ok=True, checks=[])
+
+    monkeypatch.setattr(first_start, "run_first_start_checks", failing_once)
+    with pytest.raises(RuntimeError):
+        await first_start.run_public_first_start_checks()
+    result = await first_start.run_public_first_start_checks()
+    assert result.ok is True
+    assert runs == 2
+
+
 async def test_names_show_only_when_asked_and_only_for_the_tenant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

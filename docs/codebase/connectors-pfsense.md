@@ -67,7 +67,7 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (24 ops total). T1 shipped
+  composition function, and the `PFSENSE_OPS` tuple (28 ops total). T1 shipped
   `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
   appends `pfsense.dhcp.leases`; #3090 appends the two write ops via the
   `ops_write` module; #3232 appends the first two destructive deletes and #3313
@@ -79,7 +79,8 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   `pfsense.filter.rule.delete` via the `ops_filter_rule` module; #3937
   appends `pfsense.user.disable` and `pfsense.user.enable` via the
   `ops_user_write` module; #3965 appends `pfsense.diag.ping` via the
-  `ops_diag` module.
+  `ops_diag` module; #3993 appends the four VPN onboarding ops via the
+  `ops_openvpn` and `ops_openvpn_user` modules.
 
 - **Diagnostics** (`ops_diag.py`, #3965) — the handler `pfsense_diag_ping`,
   the input checks (`_validate_host`, `_validate_source`, `_validate_count`),
@@ -982,6 +983,68 @@ Tests: `backend/tests/test_connectors_pfsense_topology.py`.
   `known_hosts_insecure: true` turns the check off for that target, and MEHO
   logs a warning.
 
+## VPN onboarding (#3993)
+
+Four ops give a person VPN access on a pfSense firewall with OpenVPN servers
+in the mode `server_user` (users log in with a local user name and password;
+the user has no certificate). They are in the group `vpn`.
+
+| Op | What it does | Risk level |
+|---|---|---|
+| `pfsense.openvpn.address.next_free` | Finds the lowest address offset that is free on every user-login server. Read only. | `safe` |
+| `pfsense.openvpn.user.create` | Makes the user. The password is made on the firewall and written to Vault. | `dangerous`, approval |
+| `pfsense.openvpn.csc.sync` | Creates or extends client overrides (fixed address and pushed routes). Has a compare-only mode. | `caution` |
+| `pfsense.openvpn.user.delete` | Removes the user and the overrides with its name. | `dangerous`, approval |
+
+Code: `openvpn_config.py` (parsers and the rendered-file read, shared),
+`ops_openvpn.py` (next free address and the override sync),
+`ops_openvpn_user.py` (user create and delete). Checked against the pfSense
+2.7.2 sources `openvpn.inc`, `vpn_openvpn_csc.php` and
+`system_usermanager.php`.
+
+- **Next free address.** Two sources hold a client's fixed address, and they do
+  not always agree: the overrides in `config.xml` (`<openvpn><openvpn-csc>`) and
+  the rendered files under `/var/etc/openvpn/server*/csc/`. An address is used
+  when either source holds it. The op returns the lowest offset (counted from
+  the network address, starting at 2) that is free on every server, and the
+  address it gives on each one. No free offset: `status: exhausted`. No
+  user-login server: `no_user_auth_server`. A read that fails raises an error;
+  it never returns an empty answer. An override with an alias as tunnel
+  network cannot be counted and shows up in `warnings`.
+- **Override sync.** One entry per user and server: `name`, `server_vpnid`,
+  `tunnel_address` (needed for a new entry), `routes`. All entries are checked
+  first (server, address in range and free, no other address on an existing
+  entry); one refusal stops the whole call. With `compare_only` the call
+  returns the plan (`create`, `update`, `unchanged`, `refused` per entry) and
+  writes nothing. Otherwise it saves a rollback copy of `config.xml`
+  (`/cf/conf/meho-rollback-csc-sync-<time>.xml`, mode 0600; it is not removed
+  by MEHO), plays back one fragment, and reads `config.xml` again: success
+  only when the entries hold the wanted values and nothing else changed. It
+  never deletes, never removes a route (routes are only added), never changes
+  the address of an existing entry, and does not restart OpenVPN. The
+  fragment calls `openvpn_resync_csc()` for each entry, like the web page, so
+  the override lives in the configuration and survives a resync. An override
+  shared by several servers is not changed (`shared_entry`).
+- **User create.** The handler checks the Vault path against the tenant path
+  first. An existing user is left alone (`exists`). The fragment makes a
+  24-character password (letters and digits, `random_int`), sets it with
+  `local_user_set_password()`, adds the user to the group `all` and prints the
+  password once. The handler writes it to Vault (a patch of one field; a new
+  secret when the path does not exist). It is never in the answer, the
+  approval, an error or a log. When the Vault write fails, the user is removed
+  again. The broadcast class is `credential_mint`.
+- **User delete.** Refused for `not_found`, `ambiguous` and the built-in admin
+  account. It asks every enabled user-login server for its connected clients
+  (management socket, `status 2`) and refuses while the user is connected
+  (`connected`) or when that cannot be read (`connection_unknown`), unless
+  `force` is true. The approval card shows the user and the overrides that go
+  with it. Read-back checks that the user and its overrides are gone and
+  everything else is unchanged.
+- **Not covered here.** The per-user firewall rules: use
+  `pfsense.filter.rule.add` / `pfsense.filter.rule.delete` (#3850) for each
+  rule. A sync of tagged rules is not built. DNS host entries for VPN clients
+  (the web page also reloads the resolver) are not touched.
+
 ## References
 
 - Task #844 (this skeleton): G3.7-T1 PfSenseConnector skeleton.
@@ -1018,6 +1081,9 @@ Tests: `backend/tests/test_connectors_pfsense_topology.py`.
 - Task #3965: optional `descr` on `pfsense.gateway.add` /
   `pfsense.route.static.add`, and the read `pfsense.diag.ping`.
   FreeBSD `ping(8)`: https://man.freebsd.org/cgi/man.cgi?query=ping&sektion=8.
+- Task #3993: the VPN onboarding ops (`pfsense.openvpn.address.next_free`,
+  `pfsense.openvpn.csc.sync`, `pfsense.openvpn.user.create`,
+  `pfsense.openvpn.user.delete`).
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.
 - `SshConnector` adapter: `backend/src/meho_backplane/connectors/adapters/ssh.py`.

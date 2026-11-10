@@ -622,25 +622,47 @@ async def run_first_start_checks(
     return FirstStartResponse(ok=all(line.ok for line in lines), checks=lines)
 
 
+#: Seconds the public list keeps the result of its last run.
+_PUBLIC_RESULT_HOLD_S: float = 30.0
+
 _public_run: asyncio.Task[FirstStartResponse] | None = None
+_public_run_ended_at: float = 0.0
 
 
 def reset_public_run_for_testing() -> None:
-    """Forget a public run in progress."""
-    global _public_run
+    """Forget the public run and its kept result."""
+    global _public_run, _public_run_ended_at
     _public_run = None
+    _public_run_ended_at = 0.0
+
+
+async def _public_run_once() -> FirstStartResponse:
+    global _public_run_ended_at
+    try:
+        return await run_first_start_checks()
+    finally:
+        _public_run_ended_at = time.monotonic()
 
 
 async def run_public_first_start_checks() -> FirstStartResponse:
-    """The public list: counts only, and run again on every call.
+    """The public list: counts only, from at most one run per hold time.
 
     Calls that arrive while a run is in progress share that run instead of
-    starting one more. The next call after the run has ended starts a new
-    run, so a fix shows on the very next call.
+    starting one more. After the run ends, its result is kept for
+    ``_PUBLIC_RESULT_HOLD_S`` seconds: calls in that time get it and start
+    no run. The first call after that starts a new run. A run that ended
+    with an error is not kept: the next call starts a new run.
     """
     global _public_run
-    if _public_run is None or _public_run.done():
-        _public_run = asyncio.create_task(run_first_start_checks())
+    if _public_run is None or (
+        _public_run.done()
+        and (
+            _public_run.cancelled()
+            or _public_run.exception() is not None
+            or time.monotonic() - _public_run_ended_at >= _PUBLIC_RESULT_HOLD_S
+        )
+    ):
+        _public_run = asyncio.create_task(_public_run_once())
     return await asyncio.shield(_public_run)
 
 

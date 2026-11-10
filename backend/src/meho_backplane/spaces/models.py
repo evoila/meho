@@ -31,7 +31,7 @@ class Space(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("tenant.id"), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     owner_issuer: Mapped[str] = mapped_column(Text, nullable=False)
@@ -67,7 +67,7 @@ class SpaceMember(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("tenant.id"), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
     space_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("space.id"), nullable=False)
     member_issuer: Mapped[str] = mapped_column(Text, nullable=False)
     member_sub: Mapped[str] = mapped_column(Text, nullable=False)
@@ -104,7 +104,7 @@ class ResourceAssignment(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("tenant.id"), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
     space_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("space.id"), nullable=False)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)

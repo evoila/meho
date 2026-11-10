@@ -39,7 +39,7 @@ key, not the name.
   time. The current row is the one with `valid_to` empty.
 - `space_member` has a unique index on the current row of one person in one
   space, so there cannot be two.
-- Every row carries `tenant_id`. Every function in `spaces/store.py` takes
+- Every row carries `tenant_id` (no foreign key, like other per-tenant tables, so test cleanup can truncate `tenant`). Every function in `spaces/store.py` takes
   the tenant id and filters on it. A space or assignment of another tenant
   is "not found".
 - The callers commit.

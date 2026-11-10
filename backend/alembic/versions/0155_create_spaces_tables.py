@@ -46,7 +46,7 @@ def upgrade() -> None:
     op.create_table(
         "space",
         sa.Column("id", sa.Uuid(), primary_key=True, nullable=False),
-        sa.Column("tenant_id", sa.Uuid(), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column("tenant_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("kind", sa.Text(), nullable=False),
         sa.Column("owner_issuer", sa.Text(), nullable=False),
@@ -62,7 +62,7 @@ def upgrade() -> None:
     op.create_table(
         "space_member",
         sa.Column("id", sa.Uuid(), primary_key=True, nullable=False),
-        sa.Column("tenant_id", sa.Uuid(), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column("tenant_id", sa.Uuid(), nullable=False),
         sa.Column("space_id", sa.Uuid(), sa.ForeignKey("space.id"), nullable=False),
         sa.Column("member_issuer", sa.Text(), nullable=False),
         sa.Column("member_sub", sa.Text(), nullable=False),
@@ -90,7 +90,7 @@ def upgrade() -> None:
     op.create_table(
         "resource_assignment",
         sa.Column("id", sa.Uuid(), primary_key=True, nullable=False),
-        sa.Column("tenant_id", sa.Uuid(), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column("tenant_id", sa.Uuid(), nullable=False),
         sa.Column("space_id", sa.Uuid(), sa.ForeignKey("space.id"), nullable=False),
         sa.Column("kind", sa.Text(), nullable=False),
         # No foreign key: a deleted target keeps its assignment history.

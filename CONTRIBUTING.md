@@ -63,9 +63,28 @@ index.
 
 | Artefact | Language | Local-dev README |
 | --- | --- | --- |
-| Backplane | Python 3.14 + FastAPI | [`backend/README.md`](./backend/README.md) — `uv sync`, pytest layout |
+| Backplane | Python 3.14 + FastAPI | [`backend/README.md`](./backend/README.md) — `uv sync`, pytest layout, Python 3.14 auto-installed by uv |
 | Helm chart | YAML + Helm 3 | [`deploy/charts/meho/`](./deploy/charts/meho/) — `helm template`, `helm lint`; [`deploy/values-examples/README.md`](./deploy/values-examples/README.md) covers the install flow |
 | Operator CLI | Go 1.26.10+ | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
+
+### Python 3.14 + uv (backplane)
+
+The backplane requires **Python 3.14**. You do not need to pre-install it:
+
+- `.python-version` in `backend/` pins `3.14`.
+- [`uv`](https://docs.astral.sh/uv/) downloads Python 3.14 automatically on first `uv sync`.
+- CI pins `uv` to a fixed version so every runner resolves the same dependency set from `uv.lock`.
+
+Common commands (run from `backend/`):
+
+```bash
+uv sync                                              # install deps + Python 3.14
+uv run ruff check src/ tests/                        # lint
+uv run ruff format --check src/ tests/               # format check
+uv run mypy src/                                     # type-check
+uv run pytest -x                                     # unit tests
+uv run uvicorn meho_backplane.main:app --port 8000   # boot the app
+```
 
 To exercise the full deploy contract on your laptop, follow the
 **Deploy → Local (kind, ~5 min)** section in [`README.md`](./README.md).

@@ -28,11 +28,20 @@ The `src/`-layout convention prevents tests from accidentally
 importing the in-tree source — they only resolve the installed
 package.
 
+## Python version
+
+MEHO requires **Python 3.14**. The file `.python-version` pins `3.14`,
+and [`uv`](https://docs.astral.sh/uv/) downloads it automatically if it
+is not already installed — you do not need to pre-install Python 3.14
+yourself.
+
+CI pins `uv` to a fixed version so every runner resolves the same
+dependency set from `uv.lock`.
+
 ## Run locally
 
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.14. The file
-`.python-version` pins 3.14, so `uv sync` uses an installed 3.14 or
-downloads one. CI uses the same Python and pins uv to a fixed version.
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.14. `uv sync`
+uses the pinned `.python-version` (3.14) or downloads it automatically.
 
 ```bash
 cd backend/

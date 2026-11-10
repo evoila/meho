@@ -1950,7 +1950,105 @@ API description files. Open points for the lab proof:
 
 ## monitor
 
-Not built yet (Task #5090).
+The monitor family tells how busy Azure VMs really are, from Azure Monitor
+platform metrics (CPU use and free memory, one sample per hour, kept 93 days).
+Both operations are in the group `monitor`, are `safe` and need no approval:
+they only read.
+
+| Operation | Reads | Parameters |
+|---|---|---|
+| `azure.vm.metric.list` | the hourly CPU and free memory of one VM, and memory used when the memory size is known | `vm_id`; `from`, `to` (default: the last 7 days, at most 93) |
+| `azure.vm.utilization.summary` | CPU and memory use of many VMs: average, 95th percentile, maximum, samples, coverage | `vm_ids` or `resource_group` (default: every VM of the subscription); `days` (default 30, at most 93) |
+
+Code: `monitor.py` (group text, guidance for the AI, parameter schemas, the
+operation table and the mixin), `monitor_reads.py` (the single-VM body),
+`monitor_summary.py` (the summary body), `monitor_calls.py` (window and ID
+checks, the batch call, the memory size), `monitor_rows.py` (reading Azure's
+answer, the numbers) and `monitor_schemas.py` (the response schemas). The paths
+and API versions are in `_paths.py`, section `monitor`.
+
+### Missing samples are unknown, never zero
+
+Azure returns no point for an hour in which it has no sample, for example while
+a VM was deallocated. MEHO keeps such an hour as `null` (in
+`azure.vm.metric.list`) or leaves it out of every number (in the summary). It
+never counts an hour as zero use. The window is a whole number of hours that
+ends at the last full hour, so the number of samples expected is exactly
+`days x 24`.
+
+The summary gives each VM `samples_expected`, `samples_found` (the hours with a
+CPU sample), `coverage_percent` and `sufficient`. A VM below 80% coverage has
+`sufficient: false` and a `reason`. The `memory` block has its own coverage,
+`sufficient` and `reason`: a VM can have enough CPU samples and no memory
+samples (Azure does not always have them). The numbers are still shown when
+some samples exist; a caller must check `sufficient` before it sizes a VM.
+`sufficient` compares the sample counts, not the rounded `coverage_percent`:
+403 of 504 samples (79.96%) shows as 80.0 but is not sufficient.
+
+### The numbers
+
+- CPU average is the mean of the hourly averages. `p95_percent` is the
+  nearest-rank 95th percentile of the hourly averages. `maximum_percent` is the
+  highest hourly maximum.
+- Memory used is `100 x (1 - free memory / memory of the VM size)` per hour,
+  kept between 0 and 100. Its average and p95 come from the hourly average of
+  free memory. Its maximum comes from the hourly lowest free memory, which is
+  the peak of use. This is why MEHO asks Azure for the aggregations Average,
+  Minimum and Maximum.
+- `azure.vm.metric.list` gives each hour the average, lowest and highest free
+  memory in bytes (`memory_available_bytes_average`, `_minimum`, `_maximum`).
+  `memory_samples_found` counts the hours with a free-memory sample, also when
+  the memory size is unknown and memory used cannot be worked out.
+- The memory of a size comes from `azure.vm.size.list` logic (one Resource SKUs
+  read per region). When that read fails, or the size is not in it, the memory
+  numbers are `null` and `memory.reason` says why; the CPU numbers still count.
+  A missing login or role is never hidden this way: a 403 fails the call.
+- `method` in the result states all of this in a few sentences, together with
+  `window_from`, `window_to` and `interval`.
+
+### How the metrics are read
+
+- One VM: one `GET {vmId}/providers/Microsoft.Insights/metrics` on Resource
+  Manager (API version 2023-10-01, `timespan`, `interval=PT1H`), after the VM
+  and the memory of its size were read.
+- Many VMs: one paged VM list, one Resource SKUs read per region, then the
+  metrics batch read (`POST /subscriptions/{id}/metrics:getBatch`, API version
+  2024-02-01), 50 VMs per call, the VMs of one region and one type per call.
+  Nothing is read per VM. At most 1000 VMs are read per call; more are left
+  out and `truncated` and `omission` say so.
+- The batch read goes to the regional host `{region}.metrics.monitor.azure.com`
+  and needs a token for another API (`https://metrics.monitor.azure.com/.default`).
+  The token cache keeps one token per scope, so this token never goes to
+  Resource Manager and the Resource Manager token never goes to this host. MEHO
+  sends the token only to a region in which the target's own subscription has a
+  VM (the region name is checked to be letters and digits), through the same URL
+  check as every call. This read is proven for the public cloud only, so another
+  cloud is refused with a clear message.
+- When Azure does not answer one batch (a 5xx after the retries, throttling, a
+  lost connection), the VMs of that batch come back `sufficient: false` with a
+  reason that says the VM is unknown, not idle. `batches_failed` counts them.
+  A 403 (the login lacks the Monitoring Reader role) fails the whole call.
+- The login needs the Monitoring Reader role (or Reader) on the subscription.
+
+### Known limits
+
+- Platform metrics only. Memory use needs the platform metric Available Memory
+  Bytes, which Azure does not provide for every VM; such a VM has no memory
+  numbers.
+- The live proof against a real subscription is still to do (the lab proof of
+  the Task).
+
+### References
+
+- Metrics - List (2023-10-01):
+  <https://learn.microsoft.com/en-us/rest/api/monitor/metrics/list>
+- Metrics Data Plane - Batch (2024-02-01):
+  <https://learn.microsoft.com/en-us/rest/api/monitor/metrics-data-plane/batch>
+- Supported metrics of virtual machines:
+  <https://learn.microsoft.com/en-us/azure/azure-monitor/reference/supported-metrics/microsoft-compute-virtualmachines-metrics>
+- Pinned API description files: `Microsoft.Insights/Insights/stable/2023-10-01/metrics_API.json`
+  and `monitor/data-plane/Insights/stable/2024-02-01/metricBatch.json` in
+  <https://github.com/Azure/azure-rest-api-specs>.
 
 ## network
 

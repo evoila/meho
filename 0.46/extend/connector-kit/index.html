@@ -3398,6 +3398,10 @@ and must not touch the database.</p>
   <code>when_to_use</code> and <code>llm_instructions</code>. An agent picks your operation
   from these texts, so write them with care.</li>
 <li><code>embedding_service</code>: pass on the value MEHO hands to your function.</li>
+<li><strong>Tags:</strong> add the tag <code>no-trace-body</code> to an operation whose request
+  body must not be kept in the trace (for example an operation that runs
+  code with given inputs). It changes nothing else: not the risk level,
+  not the approval, and not the error text of the vendor.</li>
 </ul>
 <p><strong>An input that holds an address.</strong> Some operations connect to an
 address the caller gives: a URL, a host name, or a host and port. The

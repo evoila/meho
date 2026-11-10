@@ -227,7 +227,10 @@ func runDecision(
 		fmt.Fprintln(cmd.OutOrStdout(), lostAnswerNote)
 	}
 	endedWithoutResult := false
-	if opts.Wait && verb == "approve" && !runHasResult(detail) {
+	// An approved secret read runs only when the person who asked gets the
+	// value, so there is no run to wait for.
+	waiting := waitsForRequester(answer.decided())
+	if opts.Wait && verb == "approve" && !waiting && !runHasResult(detail) {
 		detail, endedWithoutResult, err = waitForRun(cmd, client, requestID, answer.runID(), jsonOut)
 		if err != nil {
 			return routeRequestError(cmd, backplaneURL, err, jsonOut)
@@ -237,7 +240,9 @@ func runDecision(
 		return output.PrintJSON(cmd.OutOrStdout(), detail)
 	}
 	printDecision(cmd.OutOrStdout(), idArg, detail, answer.decided())
-	printRunHint(cmd.OutOrStdout(), idArg, detail, endedWithoutResult)
+	if !waiting {
+		printRunHint(cmd.OutOrStdout(), idArg, detail, endedWithoutResult)
+	}
 	return nil
 }
 
@@ -263,6 +268,9 @@ func printDecision(w io.Writer, idArg string, detail *api.ApprovalRequestView, d
 	}
 	// An approve runs the operation; say how the run ended (#3543).
 	printRunOutcome(w, detail)
+	if waitsForRequester(decided) {
+		fmt.Fprintln(w, requesterFetchNote(idArg))
+	}
 }
 
 // postDecision calls POST /api/v1/approvals/{id}/decide via the

@@ -28,7 +28,9 @@ const inOrderHelp = "With --filter-work-ref REF --in-order, approve takes every 
 	"pending ones one by one. Each step is an ordinary single " +
 	"approval: it runs the operation at once and has its own audit " +
 	"row and its own checks. After each step it reads how the run " +
-	"ended. It goes on only when the run was OK. When the waiting " +
+	"ended. It goes on only when the run was OK, or when the step is a " +
+	"read that shows secret values: approving such a read runs nothing, " +
+	"and only the person who asked gets the value later. When the waiting " +
 	"requester runs the step instead, it waits for that run's stored " +
 	"result (up to two minutes) and goes on only when it was OK. It " +
 	"stops at the first run that failed or was denied, at a run whose " +
@@ -230,6 +232,14 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 		if item.ResultState != nil && *item.ResultState == api.ApprovalResultStateUncertain {
 			return &stepStop{detail: "approved earlier, but " + uncertainStopAdvice}
 		}
+		if item.RevealSecret != nil && *item.RevealSecret &&
+			item.ResultState != nil && *item.ResultState == api.ApprovalResultStateNotStarted {
+			return &stepStop{detail: fmt.Sprintf(
+				"approved earlier and not run yet. If it is a read that shows secret values, it runs "+
+					"only when the person who asked gets the value (meho secret read --approval %s), "+
+					"and this run cannot go past it before that. To go on now, approve the later "+
+					"steps by id", step.ID)}
+		}
 		return &stepStop{detail: fmt.Sprintf(
 			"approved earlier, but its run did not end OK (run: %s). An approval is used once, "+
 				"so this step cannot run again from here. Ask the requester to send it again",
@@ -287,6 +297,12 @@ func checkDispatch(resp *api.DecideApprovalRequestApiV1ApprovalsRequestIdDecideP
 		return nil, false
 	case "already_resumed":
 		return nil, true
+	case dispatchWaitingForRequester:
+		// A read that shows secret values: it changes nothing, so the steps
+		// after it may go on.
+		step.Outcome = stepApproved
+		step.Detail = requesterFetchNote(step.ID)
+		return nil, false
 	}
 	detail := fmt.Sprintf("approved, but the run ended with %q", status)
 	if resp.JSON200.DispatchError != nil && *resp.JSON200.DispatchError != "" {

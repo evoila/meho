@@ -1231,6 +1231,9 @@ Tests use fake servers only (`test_agent_model_backend_setting.py`). A
 run against a real OpenAI-compatible server is a separate step of the
 same work.
 
+Why MEHO picks the server itself, why there is no gateway and why a run
+never falls back: [model routing decision](../decisions/2026-11-10-model-routing.md).
+
 ## Per-tenant tier→Model resolver (G11.5-T1 #1075)
 
 The zero-arg `ModelFactory` shape was right for one-deploy → one-provider.

@@ -5,7 +5,9 @@
 
 The history rule: a change never edits a member or assignment row and never
 deletes one. It sets ``valid_to`` on the current row and adds a new row with
-the same time as ``valid_from``. Every function takes the tenant id and
+the same time as ``valid_from``. The end is one conditional ``UPDATE ...
+WHERE valid_to IS NULL``, so when two callers end the same row at once, only
+one of them ends it; the other finds no current row. Every function takes the tenant id and
 filters on it, so one tenant never sees or changes the rows of another. The
 callers commit.
 """
@@ -15,7 +17,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.spaces.models import ResourceAssignment, Space, SpaceMember
@@ -82,23 +84,27 @@ async def create_space(
     return space
 
 
-async def _open_member(
+async def _end_open_member(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     space_id: uuid.UUID,
     issuer: str,
     sub: str,
-) -> SpaceMember | None:
-    result = await session.scalars(
-        select(SpaceMember).where(
+    when: datetime,
+) -> bool:
+    ended = await session.scalars(
+        update(SpaceMember)
+        .where(
             SpaceMember.tenant_id == tenant_id,
             SpaceMember.space_id == space_id,
             SpaceMember.member_issuer == issuer,
             SpaceMember.member_sub == sub,
             SpaceMember.valid_to.is_(None),
         )
+        .values(valid_to=when)
+        .returning(SpaceMember.id)
     )
-    return result.first()
+    return ended.first() is not None
 
 
 async def set_member(
@@ -120,10 +126,7 @@ async def set_member(
     """
     await _require_space(session, tenant_id, space_id)
     when = now or _now()
-    current = await _open_member(session, tenant_id, space_id, member_issuer, member_sub)
-    if current is not None:
-        current.valid_to = when
-        await session.flush()
+    await _end_open_member(session, tenant_id, space_id, member_issuer, member_sub, when)
     row = SpaceMember(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -153,12 +156,9 @@ async def end_member(
 ) -> bool:
     """End the current membership. Returns False when the person had none."""
     await _require_space(session, tenant_id, space_id)
-    current = await _open_member(session, tenant_id, space_id, member_issuer, member_sub)
-    if current is None:
-        return False
-    current.valid_to = now or _now()
-    await session.flush()
-    return True
+    return await _end_open_member(
+        session, tenant_id, space_id, member_issuer, member_sub, now or _now()
+    )
 
 
 async def list_members(
@@ -214,21 +214,6 @@ async def assign(
     return row
 
 
-async def _current_assignment(
-    session: AsyncSession, tenant_id: uuid.UUID, assignment_id: uuid.UUID
-) -> ResourceAssignment:
-    row = await session.scalar(
-        select(ResourceAssignment).where(
-            ResourceAssignment.id == assignment_id,
-            ResourceAssignment.tenant_id == tenant_id,
-            ResourceAssignment.valid_to.is_(None),
-        )
-    )
-    if row is None:
-        raise AssignmentNotFoundError(str(assignment_id))
-    return row
-
-
 async def end_assignment(
     session: AsyncSession,
     *,
@@ -236,10 +221,25 @@ async def end_assignment(
     assignment_id: uuid.UUID,
     now: datetime | None = None,
 ) -> ResourceAssignment:
-    """End a current assignment. The row stays, with ``valid_to`` set."""
-    row = await _current_assignment(session, tenant_id, assignment_id)
-    row.valid_to = now or _now()
-    await session.flush()
+    """End a current assignment. The row stays, with ``valid_to`` set.
+
+    Raises :class:`AssignmentNotFoundError` when the row is not current, also
+    when another caller ended it a moment ago.
+    """
+    result = await session.scalars(
+        update(ResourceAssignment)
+        .where(
+            ResourceAssignment.id == assignment_id,
+            ResourceAssignment.tenant_id == tenant_id,
+            ResourceAssignment.valid_to.is_(None),
+        )
+        .values(valid_to=now or _now())
+        .returning(ResourceAssignment)
+        .execution_options(populate_existing=True)
+    )
+    row = result.first()
+    if row is None:
+        raise AssignmentNotFoundError(str(assignment_id))
     return row
 
 

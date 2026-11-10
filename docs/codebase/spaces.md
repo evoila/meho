@@ -37,6 +37,9 @@ key, not the name.
 - A change never edits a member or assignment row, and never deletes one.
 - It sets `valid_to` on the current row and adds a new row. Both use the same
   time. The current row is the one with `valid_to` empty.
+- Ending a row is one `UPDATE ... WHERE valid_to IS NULL`. When two callers
+  end or move the same row at once, only one of them ends it. The other one
+  gets "not found" (an assignment) or `False` (a member), and adds no row.
 - `space_member` has a unique index on the current row of one person in one
   space, so there cannot be two.
 - Every row carries `tenant_id` (no foreign key, like other per-tenant tables, so test cleanup can truncate `tenant`). Every function in `spaces/store.py` takes

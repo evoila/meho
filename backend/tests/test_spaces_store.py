@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -195,6 +196,46 @@ async def test_reassign_ends_the_old_row_and_adds_one(session: AsyncSession) -> 
     )
     current = await store.list_assignments(session, tenant_id=tenant)
     assert [a.id for a in current] == [new.id]
+    both = await store.list_assignments(session, tenant_id=tenant, include_history=True)
+    assert len(both) == 2
+
+
+async def _move(tenant: uuid.UUID, assignment_id: uuid.UUID, to: uuid.UUID) -> uuid.UUID | None:
+    async with get_sessionmaker()() as s:
+        try:
+            row = await store.reassign(
+                s,
+                tenant_id=tenant,
+                assignment_id=assignment_id,
+                to_space_id=to,
+                changed_by="admin-2",
+                reason="moved",
+                now=_T1,
+            )
+        except store.AssignmentNotFoundError:
+            await s.rollback()
+            return None
+        await s.commit()
+        return row.id
+
+
+async def test_two_moves_at_once_end_the_row_only_once(session: AsyncSession) -> None:
+    tenant = await _tenant(session, "t-race")
+    first = await _space(session, tenant, "lab-a")
+    second = await _space(session, tenant, "lab-b")
+    third = await _space(session, tenant, "lab-c")
+    old = await _assign(session, tenant, first)
+    await session.commit()
+
+    moved = await asyncio.gather(
+        _move(tenant, old.id, second),
+        _move(tenant, old.id, third),
+    )
+
+    winners = [m for m in moved if m is not None]
+    assert len(winners) == 1
+    current = await store.list_assignments(session, tenant_id=tenant)
+    assert [a.id for a in current] == winners
     both = await store.list_assignments(session, tenant_id=tenant, include_history=True)
     assert len(both) == 2
 

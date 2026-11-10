@@ -1893,3 +1893,149 @@ async def test_next_step_falsy_operation_result_preserved_in_forensics(
         assert row.state == "failed"
         assert isinstance(row.verify_response, dict)
         assert row.verify_response["actual"] == expected_actual
+
+
+# ---------------------------------------------------------------------------
+# Retry of a failed step (retry=True)
+# ---------------------------------------------------------------------------
+
+
+def _confirm(answer: str, *, retry: bool = False) -> NextStepRequest:
+    return NextStepRequest(
+        last_verified=True,
+        verify_response=ConfirmVerifyResponse(type="confirm", answer=answer),  # type: ignore[arg-type]
+        retry=retry,
+    )
+
+
+async def _start_failed_confirm_run(tenant_id: uuid.UUID) -> uuid.UUID:
+    """Start a two-step run and fail its first step with answer=no."""
+    await _seed_published_template(tenant_id, "d", body=_two_step_template())
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+    with pytest.raises(PreviousStepFailedError):
+        await run_service.next_step(tenant_id, OPERATOR, start.run_id, _confirm("no"))
+    return start.run_id
+
+
+async def _step_row(db_session: AsyncSession, run_id: uuid.UUID, step_id: str) -> Any:
+    db_session.expire_all()
+    return (
+        await db_session.scalars(
+            select(RunbookRunStepState)
+            .where(RunbookRunStepState.run_id == run_id)
+            .where(RunbookRunStepState.step_id == step_id)
+        )
+    ).one()
+
+
+@pytest.mark.asyncio
+async def test_retry_passes_and_run_goes_on(db_session: AsyncSession) -> None:
+    """A failed step is tried again, passes, and the run moves to the next step."""
+    tenant_id = uuid.uuid4()
+    run_id = await _start_failed_confirm_run(tenant_id)
+
+    resp = await RunbookRunService().next_step(
+        tenant_id, OPERATOR, run_id, _confirm("yes", retry=True)
+    )
+
+    assert isinstance(resp, CurrentStepResponse)
+    assert resp.current_step.id == "step-2"
+    first = await _step_row(db_session, run_id, "step-1")
+    assert first.state == "verified"
+    assert first.verified_at is not None
+    assert [a["passed"] for a in first.attempts] == [False, True]
+    assert (await _step_row(db_session, run_id, "step-2")).state == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_retry_that_fails_again_keeps_both_attempts(db_session: AsyncSession) -> None:
+    """A second failure leaves the step failed; the earlier result stays."""
+    tenant_id = uuid.uuid4()
+    run_id = await _start_failed_confirm_run(tenant_id)
+
+    with pytest.raises(PreviousStepFailedError):
+        await RunbookRunService().next_step(
+            tenant_id, OPERATOR, run_id, _confirm("escalate", retry=True)
+        )
+
+    row = await _step_row(db_session, run_id, "step-1")
+    assert row.state == "failed"
+    assert [a["passed"] for a in row.attempts] == [False, False]
+    assert row.attempts[0]["verify_response"]["answer"] == "no"
+    assert row.attempts[1]["verify_response"]["answer"] == "escalate"
+    assert all(a["at"] for a in row.attempts)
+
+
+@pytest.mark.asyncio
+async def test_retry_refused_for_non_assignee_and_aborted_run(db_session: AsyncSession) -> None:
+    """Only the assignee may retry, and an aborted run cannot be retried."""
+    tenant_id = uuid.uuid4()
+    run_id = await _start_failed_confirm_run(tenant_id)
+    run_service = RunbookRunService()
+
+    with pytest.raises(NotRunAssigneeError):
+        await run_service.next_step(tenant_id, OPERATOR_BETA, run_id, _confirm("yes", retry=True))
+    assert (await _step_row(db_session, run_id, "step-1")).state == "failed"
+
+    await run_service.abort_run(
+        tenant_id, OPERATOR, run_id, AbortRunRequest(reason="stop"), caller_is_admin=False
+    )
+    with pytest.raises(RunAlreadyTerminalError):
+        await run_service.next_step(tenant_id, OPERATOR, run_id, _confirm("yes", retry=True))
+
+
+@pytest.mark.asyncio
+async def test_failed_step_without_retry_still_refuses(db_session: AsyncSession) -> None:
+    """retry=False (the default) keeps today's behaviour: the failed step refuses."""
+    tenant_id = uuid.uuid4()
+    run_id = await _start_failed_confirm_run(tenant_id)
+
+    with pytest.raises(PreviousStepFailedError):
+        await RunbookRunService().next_step(tenant_id, OPERATOR, run_id, _confirm("yes"))
+
+    row = await _step_row(db_session, run_id, "step-1")
+    assert row.state == "failed"
+    assert len(row.attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_on_operation_call_step_runs_the_check_again(
+    db_session: AsyncSession,
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operation_call step fails, the cause is fixed, and the retry passes."""
+    await _seed_stub_op(stub_embedding_service)
+    tenant_id = uuid.uuid4()
+    await _seed_target(tenant_id, "n")
+    await _seed_published_template(tenant_id, "d", body=_op_call_template())
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    answers = [{"ok": False}, {"ok": True}]
+
+    async def _call(operator: Any, arguments: Any) -> Any:
+        return {"status": "success", "result": answers.pop(0)}
+
+    monkeypatch.setattr("meho_backplane.runbooks.run_service.call_operation", _call)
+
+    with pytest.raises(PreviousStepFailedError):
+        await run_service.next_step(
+            tenant_id, OPERATOR, start.run_id, NextStepRequest(last_verified=True)
+        )
+    resp = await run_service.next_step(
+        tenant_id, OPERATOR, start.run_id, NextStepRequest(last_verified=True, retry=True)
+    )
+
+    assert isinstance(resp, RunCompletedResponse)
+    row = await _step_row(db_session, start.run_id, "call-it")
+    assert row.state == "verified"
+    assert [a["passed"] for a in row.attempts] == [False, True]
+    assert row.attempts[0]["verify_response"]["actual"] == {"ok": False}

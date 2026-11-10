@@ -105,7 +105,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import structlog
 from sqlalchemy import func, or_, select
@@ -263,6 +263,7 @@ class _NextStepInputs:
     current_state: str
     run_target: str
     run_params: dict[str, Any]
+    retry: bool = False
 
 
 class RunbookRunService:
@@ -381,7 +382,10 @@ class RunbookRunService:
         (:class:`RunAlreadyTerminalError`) when the run is already
         completed or abandoned. Refuses
         (:class:`PreviousStepFailedError`) when the current step's state
-        is ``failed`` — the only forward path is :meth:`abort_run`.
+        is ``failed``, unless ``request.retry`` is set: then the check
+        of the failed step runs again. Each attempt is appended to the
+        step's ``attempts`` list; a failed result is never overwritten.
+        Without ``retry`` the only forward path is :meth:`abort_run`.
 
         For ``verify.type='operation_call'``: binds
         :data:`run_id_var` + :data:`step_id_var` around
@@ -419,7 +423,9 @@ class RunbookRunService:
         single-assignee / no-mutate-terminal invariants must hold at the
         moment of the write, not just at the start of the call.
         """
-        inputs = await self._load_next_step_inputs(tenant_id, operator_sub, run_id)
+        inputs = await self._load_next_step_inputs(
+            tenant_id, operator_sub, run_id, retry=request.retry
+        )
 
         # Dispatch the verify with NO session checked out.
         # ``template_body`` / ``current_step`` are pinned at start_run and
@@ -441,6 +447,8 @@ class RunbookRunService:
         tenant_id: uuid.UUID,
         operator_sub: str,
         run_id: uuid.UUID,
+        *,
+        retry: bool = False,
     ) -> _NextStepInputs:
         """Phase A: read everything the dispatch + write need, under session A.
 
@@ -460,10 +468,12 @@ class RunbookRunService:
             current_step_id = self._current_step_id_or_raise(run, step_states)
             current_state = step_states[current_step_id].state
 
-            if current_state == _STEP_FAILED:
-                raise PreviousStepFailedError(
-                    f"previous step {current_step_id!r} is in 'failed' state; abort the run",
-                )
+            retrying = current_state == _STEP_FAILED and retry
+            if current_state == _STEP_FAILED and not retry:
+                raise PreviousStepFailedError(_failed_message(current_step_id))
+            if retrying:
+                # The engine only checks a step that is in progress.
+                current_state = _STEP_IN_PROGRESS
 
             return _NextStepInputs(
                 run=run,
@@ -473,6 +483,7 @@ class RunbookRunService:
                 current_state=current_state,
                 run_target=run.target,
                 run_params=dict(run.params),
+                retry=retrying,
             )
 
     async def _write_next_step_outcome(
@@ -497,10 +508,8 @@ class RunbookRunService:
             run = await self._require_run_assignee(session_b, tenant_id, run_id, operator_sub)
             self._refuse_if_terminal(run)
             step_states = await _load_step_states(session_b, run_id)
-            if step_states[inputs.current_step_id].state == _STEP_FAILED:
-                raise PreviousStepFailedError(
-                    f"previous step {inputs.current_step_id!r} is in 'failed' state; abort the run",
-                )
+            if step_states[inputs.current_step_id].state == _STEP_FAILED and not inputs.retry:
+                raise PreviousStepFailedError(_failed_message(inputs.current_step_id))
 
             outcome = advance(
                 inputs.template_body,
@@ -545,6 +554,16 @@ class RunbookRunService:
             outcome.verify_response_persisted,
         )
 
+        # New list each time, so SQLAlchemy sees the change.
+        current_step_state.attempts = [
+            *cast("list[dict[str, Any]]", current_step_state.attempts or []),
+            {
+                "at": now.isoformat(),
+                "passed": outcome.kind != "failed",
+                "verify_response": persisted_response_dict,
+            },
+        ]
+
         if outcome.kind == "failed":
             current_step_state.state = _STEP_FAILED
             current_step_state.verify_response = persisted_response_dict
@@ -557,7 +576,8 @@ class RunbookRunService:
                 operator_sub=operator_sub,
             )
             raise PreviousStepFailedError(
-                f"step {current_step_id!r} verify did not pass; abort the run",
+                f"step {current_step_id!r} verify did not pass; fix the cause and retry "
+                f"the step, or abort the run",
             )
 
         current_step_state.state = _STEP_VERIFIED
@@ -1411,6 +1431,13 @@ def _template_body_from_row(row: RunbookTemplate) -> RunbookTemplateBody:
         description=row.description,
         target_kind=row.target_kind,
         steps=_steps_from_storage(row.steps),
+    )
+
+
+def _failed_message(step_id: str) -> str:
+    return (
+        f"previous step {step_id!r} is in 'failed' state; "
+        f"retry the step (retry=true) or abort the run"
     )
 
 

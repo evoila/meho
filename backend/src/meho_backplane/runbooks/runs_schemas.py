@@ -342,12 +342,18 @@ class NextStepRequest(BaseModel):
     ``confirm`` step or the engine's captured result for an
     ``operation_call`` step. ``None`` is valid only on the very first
     ``meho_runbook_next`` call (when no prior step exists to verify).
+
+    :attr:`retry` ``= True`` asks MEHO to run the check of a ``failed``
+    current step again. Without it, a ``failed`` step refuses to
+    advance, as before. On a step that is not ``failed`` the flag has
+    no effect.
     """
 
     model_config = ConfigDict(frozen=True)
 
     last_verified: bool
     verify_response: VerifyResponse | None = None
+    retry: bool = False
 
 
 class AbortRunRequest(BaseModel):

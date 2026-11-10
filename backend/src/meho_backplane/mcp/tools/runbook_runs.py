@@ -236,6 +236,10 @@ _NEXT_DESCRIPTION: Final[str] = (
     "on step 3. There is no overload, no parameter, no flag that returns "
     "more. The substrate is the authority on which step you can see; "
     "what you call `last_verified` is informational only.\n\n"
+    "RETRY: when a step failed, fix the cause and call again with "
+    "retry=true. The check runs again (a confirm step needs a new "
+    "verify_response). Every attempt is kept. Without retry, a failed "
+    "step refuses to advance.\n\n"
     "VERIFY SHAPES: every step's `verify` is one of two shapes.\n\n"
     '1. verify.type=\'confirm\': pass verify_response={"type": "confirm", '
     '"answer": "yes" | "no" | "escalate"}.\n'
@@ -340,7 +344,7 @@ _LIST_DESCRIPTION: Final[str] = (
     "filter accepts), equal values. current_step_state='failed' means "
     "the step's verify did "
     "not pass (answer no/escalate, or a mismatched operation_call "
-    "result); the only forward path for that run is meho_runbook_abort. "
+    "result); the forward paths are meho_runbook_next with retry=true, or meho_runbook_abort. "
     "To see the current step body of an in-progress run you OWN, call "
     "meho_runbook_next with last_verified=False to refresh (the "
     "substrate returns the current step)."
@@ -479,6 +483,7 @@ async def _next_handler(
             {
                 "last_verified": arguments["last_verified"],
                 "verify_response": arguments.get("verify_response"),
+                "retry": arguments.get("retry", False),
             }
         )
         response = await service.next_step(
@@ -639,6 +644,14 @@ register_mcp_tool(
                     ),
                 },
                 "verify_response": _VERIFY_RESPONSE_PROPERTY,
+                "retry": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true to run the check of a failed step again "
+                        "after the cause is fixed. Default false: a failed "
+                        "step refuses to advance."
+                    ),
+                },
             },
             "required": ["run_id", "last_verified"],
             "additionalProperties": False,

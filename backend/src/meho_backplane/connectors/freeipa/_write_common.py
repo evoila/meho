@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.freeipa.session import FreeipaTargetLike
 
     class _Caller(Protocol):
-        """What :func:`run_delete` uses of the connector."""
+        """What :func:`add_members` and :func:`run_delete` use of the connector."""
 
         async def call(
             self,
@@ -44,7 +44,14 @@ if TYPE_CHECKING:
             """Run one IPA command."""
 
 
-__all__ = ["as_list", "check_done", "description_option", "result_dict", "run_delete"]
+__all__ = [
+    "add_members",
+    "as_list",
+    "check_done",
+    "description_option",
+    "result_dict",
+    "run_delete",
+]
 
 #: The name of the error a write raises when FreeIPA did not do all of it.
 _NOT_DONE: Final[str] = "NotDone"
@@ -97,6 +104,32 @@ def description_option(params: dict[str, Any]) -> dict[str, Any]:
     """The ``description`` option, when the caller gave one."""
     description = params.get("description")
     return {"description": description} if description else {}
+
+
+async def add_members(
+    connector: _Caller,
+    operator: Operator,
+    target: FreeipaTargetLike,
+    command: str,
+    params: dict[str, Any],
+    members: dict[str, str],
+) -> dict[str, Any]:
+    """Run an add-member command on the object ``params["name"]``.
+
+    *members* maps each member parameter to the IPA option it is sent
+    as. Fails unless FreeIPA added every member sent.
+    """
+    sent = {option: list(params.get(key) or []) for key, option in members.items()}
+    options = {option: names or None for option, names in sent.items()}
+    answer = await connector.call(target, operator, command, [params["name"]], options)
+    result = result_dict(answer.result)
+    check_done(
+        command,
+        result.get("failed"),
+        result.get("completed"),
+        sum(len(names) for names in sent.values()),
+    )
+    return {"entry": result_dict(result.get("result")), "completed": result.get("completed")}
 
 
 async def run_delete(

@@ -32,8 +32,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.freeipa._write_common import (
+    add_members,
     as_list,
-    check_done,
     description_option,
     result_dict,
     run_delete,
@@ -119,31 +119,6 @@ def _expiry(text: str) -> dict[str, str]:
 class FreeipaIdentityWriteOps(_Base):
     """Handler methods of the user, group and role writes."""
 
-    async def _add_members(
-        self,
-        operator: Operator,
-        target: FreeipaTargetLike,
-        command: str,
-        params: dict[str, Any],
-        members: dict[str, str],
-    ) -> dict[str, Any]:
-        """Run an add-member command on the object ``params["name"]``.
-
-        *members* maps each member parameter to the IPA option it is sent
-        as. Fails unless FreeIPA added every member sent.
-        """
-        sent = {option: list(params.get(key) or []) for key, option in members.items()}
-        options = {option: names or None for option, names in sent.items()}
-        answer = await self.call(target, operator, command, [params["name"]], options)
-        result = result_dict(answer.result)
-        check_done(
-            command,
-            result.get("failed"),
-            result.get("completed"),
-            sum(len(names) for names in sent.values()),
-        )
-        return {"entry": result_dict(result.get("result")), "completed": result.get("completed")}
-
     async def user_create(
         self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -191,14 +166,14 @@ class FreeipaIdentityWriteOps(_Base):
     ) -> dict[str, Any]:
         """``freeipa.group.member.add``: ``group_add_member`` with users and groups."""
         members = {"users": "user", "groups": "group"}
-        return await self._add_members(operator, target, GROUP_ADD_MEMBER_COMMAND, params, members)
+        return await add_members(self, operator, target, GROUP_ADD_MEMBER_COMMAND, params, members)
 
     async def role_member_add(
         self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``freeipa.role.member.add``: ``role_add_member`` with four kinds of member."""
-        return await self._add_members(
-            operator, target, ROLE_ADD_MEMBER_COMMAND, params, _ROLE_MEMBERS
+        return await add_members(
+            self, operator, target, ROLE_ADD_MEMBER_COMMAND, params, _ROLE_MEMBERS
         )
 
     async def role_delete(

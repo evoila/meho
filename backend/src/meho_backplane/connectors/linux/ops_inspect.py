@@ -249,8 +249,10 @@ def build_journal_tail_command(params: dict[str, Any], max_bytes: int = _MAX_JOU
     if params.get("priority") is not None:
         parts += ["-p", validate_journal_priority(params["priority"])]
     cap = int(max_bytes)
-    # In the C locale awk counts bytes. Only the last line of a cut
-    # output has no line break, so only it brings the count over the cap.
+    # head keeps one byte more than the cap, so any output over the cap
+    # reaches awk with more than cap bytes, also when the cap ends right
+    # after a line break. In the C locale awk counts bytes and prints
+    # only the lines that fit the cap whole, then the cut marker.
     cut = (
         f"LC_ALL=C awk -v max={cap} "
         f"'{{ n += length($0) + 1; "
@@ -259,7 +261,7 @@ def build_journal_tail_command(params: dict[str, Any], max_bytes: int = _MAX_JOU
     return (
         f"command -v journalctl >/dev/null 2>&1 || exit {_NO_BINARY_EXIT}; "
         f"{{ {' '.join(parts)}; printf '\\n{_JOURNAL_RC_PREFIX}%s\\n' \"$?\"; }} "
-        f"| head -c {cap} | {cut}"
+        f"| head -c {cap + 1} | {cut}"
     )
 
 

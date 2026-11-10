@@ -145,7 +145,7 @@ def test_new_ops_declare_no_secret_parameter() -> None:
 def test_journal_command_default_is_bounded() -> None:
     cmd = build_journal_tail_command({})
     assert "journalctl -o json --all --no-pager -n 200;" in cmd
-    assert f"head -c {8 * 1024 * 1024} " in cmd
+    assert f"head -c {8 * 1024 * 1024 + 1} " in cmd
 
 
 def test_journal_command_caps_lines_at_the_log_tail_maximum() -> None:

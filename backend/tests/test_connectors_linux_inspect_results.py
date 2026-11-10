@@ -133,6 +133,31 @@ def test_journal_command_cut_keeps_whole_utf8_lines(tmp_path: Path, char: str) -
     assert rows[-1]["message"] == f"{len(rows) - 1} Größe überschritten — 磁盘已满"
 
 
+@_linux_only
+def test_journal_command_cap_right_after_a_line_break_is_truncated(tmp_path: Path) -> None:
+    lines = [_entry(i) for i in range(50)]
+    data = "".join(line + "\n" for line in lines).encode()
+    # The cap ends exactly after the line break of row 20.
+    cap = len("".join(line + "\n" for line in lines[:21]).encode())
+    assert data[cap - 1 : cap] == b"\n"
+    out = _run_journal(tmp_path, lines, rc=0, max_bytes=cap)
+    rows, truncated = parse_journal_output(out)
+    assert truncated is True
+    assert [r["message"] for r in rows] == [f"{i} nfsd: grace period ends" for i in range(21)]
+
+
+@_linux_only
+def test_journal_command_output_of_exactly_the_cap_is_whole(tmp_path: Path) -> None:
+    lines = [_entry(i) for i in range(5)]
+    body = "".join(line + "\n" for line in lines).encode()
+    # The whole output: the rows, a blank line, then the exit code line.
+    cap = len(body) + len(b"\nMEHO_JOURNAL_RC=0\n")
+    out = _run_journal(tmp_path, lines, rc=0, max_bytes=cap)
+    rows, truncated = parse_journal_output(out)
+    assert truncated is False
+    assert len(rows) == 5
+
+
 # ---------------------------------------------------------------------------
 # Stored results of the set reads
 # ---------------------------------------------------------------------------

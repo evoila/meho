@@ -188,9 +188,12 @@ and checks) and `ops_inspect_ops.py` (op rows).
   `--since=<quoted>`; `priority` is `0`-`7` or a syslog level name.
   The command prints the exit code of `journalctl` after its output,
   because a pipe returns only the exit code of its last command. The
-  output is cut at 8 MiB, and then `awk` (in the C locale, so it counts
-  bytes) drops the last line if it is not whole, so a cut never splits a
-  UTF-8 character. A cut ends with a cut marker and sets `truncated`. A
+  output is cut at 8 MiB (`head` keeps one byte more, so a cut right
+  after a line break is still seen), and then `awk` (in the C locale, so
+  it counts bytes) keeps only the lines that fit the cap whole, so a cut
+  never splits a UTF-8 character. The rows are oldest first, so a cut
+  drops the newest rows. A cut ends with a cut marker and sets
+  `truncated`. A
   message over 4096 characters is cut and its row has
   `message_truncated: true`. No `journalctl` (exit 127), a `journalctl`
   exit code other than 0, an output with neither the exit code nor the

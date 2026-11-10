@@ -107,7 +107,7 @@ _JOURNAL_TAIL_OP = LinuxOp(
         },
         "output_shape": (
             "{rows, total, truncated}; rows are {ts, unit, priority, message, "
-            "message_truncated}, oldest first. truncated means older rows were cut at the "
+            "message_truncated}, oldest first. truncated means the newest rows were cut at the "
             "byte cap; message_truncated means that message was cut at 4096 characters. "
             "If warning is set, the journal may be incomplete (for example the login can "
             "only see its own messages). Large answers spill to a result_query handle."

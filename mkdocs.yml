@@ -104,6 +104,7 @@ nav:
       - Topology: guides/topology.md
       - Broadcast: guides/broadcast.md
       - Memory and knowledge: guides/memory-and-knowledge.md
+      - Agent sessions: guides/agent-sessions.md
       - Audit forensics: guides/audit-forensics.md
       - The settings file: guides/settings-file.md
       - Flight recorder: guides/flight-recorder.md

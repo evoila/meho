@@ -50,6 +50,13 @@ Route inventory (read-only, all GET)
   the BFF NEVER logs the envelope ``result`` -- the deliberate, scoped
   un-redaction happens only at the response template (see the redaction
   note below).
+* ``GET /ui/vault/read/result`` -- the HTMX partial behind the "Show
+  value" button of a waiting read. It reads the stored result of the
+  approved read through
+  :func:`~meho_backplane.operations.approval_queue.read_approval_result`,
+  so only the person who asked can see it, and renders it like
+  ``/ui/vault/read``. While the request still waits it shows the waiting
+  panel again.
 * ``GET /ui/vault/versions`` -- the HTMX version-history partial.
   Dispatches ``vault.kv.versions`` and renders the per-version metadata
   table (created / deleted / destroyed). Never returns secret values.
@@ -117,6 +124,7 @@ form carries no tenant field for a caller to spoof.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Final
 
 import structlog
@@ -125,6 +133,12 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations.approval_queue import (
+    ApprovalNotFoundError,
+    ResultAccessForbiddenError,
+    read_approval_result,
+)
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
@@ -316,6 +330,19 @@ def build_vault_router() -> APIRouter:
         """
         return await _render_read(request, session, target, mount, path)
 
+    @router.get("/ui/vault/read/result", response_class=HTMLResponse)
+    async def vault_read_result(
+        request: Request,
+        session: UISessionContext = _require_operator,
+        request_id: uuid.UUID = Query(...),
+    ) -> HTMLResponse:
+        """Render the secret of an approved read for the person who asked.
+
+        Reveal-gated like ``/ui/vault/read``. While the request still waits,
+        the waiting panel comes back.
+        """
+        return await _render_read_result(request, session, request_id)
+
     @router.get("/ui/vault/versions", response_class=HTMLResponse)
     async def vault_versions(
         request: Request,
@@ -413,6 +440,60 @@ async def _render_read(
         "mount": mount.strip(),
         "path": path.strip(),
         "target": target.strip(),
+    }
+    return get_templates().TemplateResponse(request, "vault/_secret.html", context)
+
+
+async def _render_read_result(
+    request: Request,
+    session: UISessionContext,
+    request_id: uuid.UUID,
+) -> HTMLResponse:
+    """Render the stored result of an approved ``vault.kv.read`` for its requester.
+
+    :func:`read_approval_result` serves only the person who asked and
+    writes the ``approval.result`` audit row. A request of another person,
+    of another tenant, or of another operation is a 404, so this page shows
+    no other result. Without a stored result (the request still waits, or
+    it was rejected, expired or withdrawn) the waiting panel comes back
+    with the request status.
+    """
+    operator = await _resolve_operator(session)
+    try:
+        async with get_sessionmaker()() as db:
+            row = await read_approval_result(db, operator=operator, request_id=request_id)
+            await db.commit()
+    except (ApprovalNotFoundError, ResultAccessForbiddenError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="approval_request_not_found"
+        ) from exc
+    if row.op_id != _OP_READ:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="approval_request_not_found"
+        )
+    params = row.params or {}
+    envelope: dict[str, Any] = (
+        dict(row.resume_result)
+        if row.resume_result is not None
+        else {
+            "status": "awaiting_approval",
+            "extras": {"approval_request_id": str(row.id), "approval_status": row.status},
+        }
+    )
+    # Log ONLY non-secret fields, as in :func:`_dispatch`.
+    log.info(
+        "ui_vault_read_result",
+        approval_request_id=str(row.id),
+        approval_status=row.status,
+        status=envelope.get("status"),
+        tenant_id=str(operator.tenant_id),
+    )
+    context: dict[str, Any] = {
+        "error": None,
+        "envelope": envelope,
+        "mount": str(params.get("mount") or _DEFAULT_MOUNT),
+        "path": str(params.get("path") or ""),
+        "target": "",
     }
     return get_templates().TemplateResponse(request, "vault/_secret.html", context)
 

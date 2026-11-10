@@ -13,6 +13,9 @@
       could still hit it).
     * ``status="awaiting_approval"`` -> the read asked to show secret
       values, so it waits for a second person's approval. Nothing ran yet.
+      The "Show value" button reads the approved result
+      (``/ui/vault/read/result``); ``extras.approval_status`` is set when
+      that page found no result yet.
     * the dispatcher's structured fault envelope (``status`` of
       ``"error"`` / ``"denied"``). The ONE special case is the per-tenant
       guard: a ``VaultTenantScopeError`` comes back as ``status="error"``
@@ -48,6 +51,7 @@
     {%- set exc_class = extras.get("exception_class") -%}
     {%- if envelope.status == "awaiting_approval" -%}
       {%- set approval_id = extras.get("approval_request_id") -%}
+      {%- set approval_status = extras.get("approval_status") -%}
       <div role="alert" class="alert alert-info items-start" data-vault-error="awaiting_approval">
         {{ icon("clock", class="size-5 shrink-0") }}
         <div>
@@ -55,8 +59,29 @@
           <p class="text-xs [overflow-wrap:anywhere]">
             Showing the values of a secret needs the approval of a second
             person. The read has <span class="font-semibold">not</span> run yet.
+            After the approval, click "Show value".
           </p>
+          {% if approval_status and approval_status not in ("pending", "approved") %}
+            <p class="mt-1 text-xs font-semibold" data-approval-status="{{ approval_status }}">
+              The request is {{ approval_status }}, so the read did not run.
+            </p>
+          {% elif approval_status %}
+            <p class="mt-1 text-xs" data-approval-status="{{ approval_status }}">
+              No value yet: the request is {{ approval_status }}. Try again in a moment.
+            </p>
+          {% endif %}
           {% if approval_id %}
+            <button
+              type="button"
+              class="btn btn-sm mt-2 gap-1"
+              hx-get="/ui/vault/read/result?request_id={{ approval_id | urlencode }}"
+              hx-target="#vault-secret-region"
+              hx-swap="innerHTML"
+              data-vault-show-value
+            >
+              {{ icon("key-round", class="size-4") }}
+              Show value
+            </button>
             <p class="mt-1 text-xs opacity-70">
               Request id <code data-approval-request-id>{{ approval_id }}</code>
             </p>

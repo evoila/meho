@@ -24807,6 +24807,50 @@
         }
       }
     },
+    "/ui/vault/read/result": {
+      "get": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault Read Result",
+        "description": "Render the secret of an approved read for the person who asked.\n\nReveal-gated like ``/ui/vault/read``. While the request still waits,\nthe waiting panel comes back.",
+        "operationId": "vault_read_result_ui_vault_read_result_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/vault/versions": {
       "get": {
         "tags": [

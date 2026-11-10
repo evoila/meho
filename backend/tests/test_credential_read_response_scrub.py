@@ -50,8 +50,11 @@ from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.approval_queue import (
+    ResultAccessForbiddenError,
     approve_request,
+    read_approval_result,
     resume_dispatch_after_approval,
 )
 from meho_backplane.settings import get_settings
@@ -279,6 +282,57 @@ async def test_reveal_secret_true_returns_raw_and_stamps_audit(
     assert isinstance(row.raw_payload, dict)
     assert row.raw_payload["data"]["password"].startswith(_FINGERPRINT)
     assert _PASSWORD_SECRET not in str(row.raw_payload)
+
+
+async def test_requester_reads_the_revealed_value_after_approval(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The person who asked reads the value of the approved reveal; nobody else does."""
+    await _register_vault_read(stub_embedding_service)
+
+    result = await _reveal_after_approval()
+    assert result.status == "ok", result.error
+    (row,) = await _ok_rows("vault.kv.read")
+    request_id = UUID(row.payload["approval_request_id"])
+
+    async with get_sessionmaker()() as session:
+        stored = await read_approval_result(
+            session, operator=_make_operator(), request_id=request_id
+        )
+        await session.commit()
+    assert stored.resume_result is not None
+    assert stored.resume_result["status"] == "ok"
+    assert stored.resume_result["result"]["data"]["password"] == _PASSWORD_SECRET
+
+    reviewer = _make_operator().model_copy(update={"sub": "reviewer-2467"})
+    async with get_sessionmaker()() as session:
+        with pytest.raises(ResultAccessForbiddenError):
+            await read_approval_result(session, operator=reviewer, request_id=request_id)
+
+
+async def test_preview_of_a_reveal_reports_the_wait_of_the_real_call(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Preview and the real call agree: a reveal waits, a hidden read runs at once."""
+    await _register_vault_read(stub_embedding_service)
+    call = {
+        "operator": _make_operator(),
+        "connector_id": "vault-1.x",
+        "op_id": "vault.kv.read",
+        "target": None,
+    }
+
+    hidden = await preview_dispatch(**call, params={"path": "app/db"})
+    assert (hidden["safety_level"], hidden["requires_approval"]) == ("safe", False)
+    assert hidden["policy_verdict"] == "auto-execute"
+
+    revealed = await preview_dispatch(**call, params={"path": "app/db", "reveal_secret": True})
+    assert (revealed["safety_level"], revealed["requires_approval"]) == ("caution", True)
+    assert revealed["policy_verdict"] == "needs-approval"
+    assert revealed["status"] != "error", revealed
+
+    parked = await dispatch(**call, params={"path": "app/db", "reveal_secret": True})
+    assert parked.status == "awaiting_approval", parked.error
 
 
 async def test_reveal_secret_does_not_reach_op_schema_or_hash(

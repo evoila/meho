@@ -605,8 +605,10 @@ The rule lives in one place, `operations/credential_read.py`
   dispatch, the call contract, search, the operation read, the connector
   review and the console page show the same values, for typed and
   ingested reads, also when an override turned approval off and also for
-  a row stored before the floor. And in the dispatcher, for a call with
-  `reveal_secret: true` (below).
+  a row stored before the floor. And for a call with
+  `reveal_secret: true` (below): in the dispatcher and in the preview
+  (`raise_descriptor_for_reveal`), so the preview reports the level and
+  the wait of the real call.
 - **Reads that return no secret value.** A connector marks such a read in
   code with `declare_no_secret_value` (`op_classes.py`); the mark keeps
   the read at its own level. A spec import and a tenant override cannot
@@ -619,9 +621,14 @@ The rule lives in one place, `operations/credential_read.py`
 - **`vault.kv.read` with `reveal_secret: true`.** The answer shows the
   values, so the dispatcher raises the call to at least `caution` with
   approval before the policy gate. A person's reveal waits for a second
-  person, the same as a service principal's. The Vault console's secret
-  view sends the flag, so it shows "waiting for approval" with a link to
-  the request.
+  person, the same as a service principal's. The approved run stores its
+  answer on the request, and only the person who asked can read it
+  (`GET /api/v1/approvals/{id}/result`). The Vault console's secret view
+  sends the flag, so it shows "waiting for approval" with a link to the
+  request and a "Show value" button (`/ui/vault/read/result`) that shows
+  the value after the approval. `meho secret read` prints the request id
+  and the command that gets the value after the approval:
+  `meho secret read --approval <id> --field <name>`.
 
 #### Caller-address floor
 

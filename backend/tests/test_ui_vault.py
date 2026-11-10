@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -52,7 +53,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
@@ -60,6 +61,10 @@ from meho_backplane.connectors.vault.ops_sys import register_vault_sys_typed_ope
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup, Tenant
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -558,6 +563,80 @@ def test_vault_ui_read_waits_for_approval_and_shows_no_value(
         assert _SECRET_VALUE not in payload, "secret value leaked into a visible audit payload"
     # The BFF itself wrote no audit row; the rows are the dispatcher's.
     assert _count_audit_rows() > audit_before
+
+
+def _approve_and_run(request_id: str) -> None:
+    """A second person approves the waiting read; MEHO runs it."""
+
+    async def _do() -> None:
+        reviewer = Operator(
+            sub="op-reviewer",
+            raw_jwt="header.payload.signature",
+            tenant_id=_TENANT_A,
+            tenant_role=TenantRole.OPERATOR,
+            principal_kind=PrincipalKind.USER,
+        )
+        async with get_sessionmaker()() as session:
+            approved = await approve_request(session, uuid.UUID(request_id), operator=reviewer)
+            await session.commit()
+        result = await resume_dispatch_after_approval(
+            operator=reviewer, request=approved, params=None
+        )
+        assert result.status == "ok", result.error
+
+    asyncio.run(_do())
+
+
+def test_vault_ui_read_shows_the_value_to_the_requester_after_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """Request, approval, then "Show value" gives the person who asked the secret.
+
+    Before the approval the button shows the waiting panel again. Another
+    person gets a 404, not the value.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault(_stub_embedding_service)
+    install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE}, kv_version=4)
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    path = _tenant_path(_TENANT_A, "app/db")
+    with mock:
+        waiting = client.get(
+            "/ui/vault/read",
+            params={"mount": "secret", "path": path},
+            headers={"HX-Request": "true"},
+        )
+        assert waiting.status_code == 200, waiting.text
+        assert "data-vault-show-value" in waiting.text
+        match = re.search(r"data-approval-request-id>([0-9a-f-]{36})<", waiting.text)
+        assert match is not None, waiting.text
+        request_id = match.group(1)
+
+        early = client.get("/ui/vault/read/result", params={"request_id": request_id})
+        assert early.status_code == 200, early.text
+        assert 'data-vault-error="awaiting_approval"' in early.text
+        assert 'data-approval-status="pending"' in early.text
+        assert _SECRET_VALUE not in early.text
+
+        _approve_and_run(request_id)
+
+        shown = client.get("/ui/vault/read/result", params={"request_id": request_id})
+        assert shown.status_code == 200, shown.text
+        assert 'data-vault-secret="ok"' in shown.text
+        assert _SECRET_VALUE in shown.text
+        assert path in shown.text
+
+    other, other_mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub="op-someone-else", role=TenantRole.OPERATOR
+    )
+    with other_mock:
+        refused = other.get("/ui/vault/read/result", params={"request_id": request_id})
+    assert refused.status_code == 404
+    assert _SECRET_VALUE not in refused.text
 
 
 def test_vault_secret_value_does_not_break_out_of_x_data_attr() -> None:

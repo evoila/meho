@@ -539,17 +539,17 @@ host), exactly the un-governed footgun this connector exists to retire.
   `vault_credentials_read_error`. `#<field>` names the field within that
   secret. Each
   `ENV_NAME` must be a valid POSIX identifier, must not start with a digit,
-  must not collide with a reserved wrapper variable (`tmp` / `args` / `f`) or
-  with a name already declared in `env`, and the mapping is bounded (≤ 32
-  entries).
+  must not be a reserved name (see "Reserved env names" below) or a name
+  already declared in `env`, and the mapping is bounded (≤ 32 entries).
 - **Checked before the call waits for approval.** The `secret_env` schema
-  carries `propertyNames` (the POSIX name pattern) and `maxProperties: 32`.
-  The dispatcher checks the schema before the policy gate, so a bad name or
-  too many entries fail at once with `invalid_params`, and no approval is
-  asked for. The pattern ends with `(?![\s\S])`, not `$`, so a name with a
-  trailing newline also fails here. The handler (`_validate_secret_env`) still checks every rule at
-  run time. The reserved names, the clash with `env`, and the reference shape
-  are checked only there.
+  carries `propertyNames` (the POSIX name pattern and a `not` rule for the
+  reserved names) and `maxProperties: 32`.
+  The dispatcher checks the schema before the policy gate, so a bad or
+  reserved name or too many entries fail at once with `invalid_params`, and
+  no approval is asked for. The pattern ends with `(?![\s\S])`, not `$`, so a
+  name with a trailing newline also fails here. The handler
+  (`_validate_secret_env`) still checks every rule at run time. The clash
+  with `env` and the reference shape are checked only there.
 - **Resolution at execution time only.** The value is resolved when the handler
   runs — the `_approved=True` resume path (or a non-parking dispatch) — never at
   park time. Each field is read through the connector's single Vault seam
@@ -569,8 +569,38 @@ host), exactly the un-governed footgun this connector exists to retire.
   command is built or run (no partial execution). The error names the `ENV`
   and the `<vault-path>#<field>` reference — never a resolved value.
 
-`env` behaviour is unchanged. `secret_env` is `script.run`-scoped; the
-connector has no `command.run` verb to extend it to.
+`secret_env` is `script.run`-scoped; the connector has no `command.run` verb
+to extend it to.
+
+### Reserved env names (`env` and `secret_env`)
+
+The approver of `script.run` sees the script and the env **names**, not the
+env values. So an env value must not change which code runs. `env` and
+`secret_env` refuse the same reserved names:
+
+- the wrapper's own shell variables: `tmp`, `args`, `f`;
+- names that control how a shell starts or splits words: `ENV`,
+  `SHELLOPTS`, `BASHOPTS`, `PS4`, `IFS`, `GLOBIGNORE`, `CDPATH`,
+  `PROMPT_COMMAND`, `ZDOTDIR`, `HOME`;
+- bash variables whose assigned value bash evaluates as arithmetic:
+  `HISTCMD`, `OPTIND`, `RANDOM`, `SRANDOM`. An arithmetic value can run a
+  command, so the wrapper's own `export` line would run it;
+- names that control where commands and libraries are found: `PATH`,
+  `GCONV_PATH`;
+- Java start options: `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`,
+  `_JAVA_OPTIONS`;
+- every name that starts with `BASH_` (for example `BASH_ENV`), `LD_` (the
+  dynamic loader, for example `LD_PRELOAD`), `PYTHON`, `PERL`, `RUBY` or
+  `NODE_`.
+
+Names are case-sensitive, so `TMP` or `bash_env` stay allowed. Both schemas
+carry the list under `propertyNames` → `not`, so the dispatcher refuses a
+reserved name with `invalid_params` before the call waits for approval. The
+handler (`_check_env_name`, used by `_validate_env` and
+`_validate_secret_env`) checks the same list again at run time. The list
+lives in `_RESERVED_ENV_NAMES` and `_RESERVED_ENV_PREFIXES` in
+`connectors/linux/ops_write.py`. A script that needs one of these names sets
+it in its own body, where the approver reads it.
 
 ## Key types
 

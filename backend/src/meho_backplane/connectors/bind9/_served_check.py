@@ -5,30 +5,31 @@
 
 ``rndc reload`` answers "ok" even when it skips a zone. After
 ``bind9.config.apply_views`` the verify step therefore asks the server
-itself: for every staged file that holds a SOA record, find the zone
-and the view that use the file, run ``rndc zonestatus`` and compare the
-serial the server reports with the serial in the file.
+itself. For every staged file, it finds each zone and view that use the
+file. It reads the serial of the file with ``named-checkzone`` (BIND's
+own zone file parser), runs ``rndc zonestatus`` and compares the two
+serials as numbers. A staged zone file that no configured zone uses
+fails the check, because the server does not serve it.
 
 The check runs on the target inside the verify step of the atomic
-apply, so a mismatch rolls the whole change back.
+apply, so a failure rolls the whole change back.
 """
 
 from __future__ import annotations
 
 import base64
 import json
-import re
+import posixpath
 import shlex
 
-__all__ = ["build_served_serial_check", "soa_serial"]
+import dns.exception
+import dns.tokenizer
 
-_SOA_SERIAL = re.compile(
-    r"\bSOA\b\s+\S+\s+\S+\s*\(?\s*(?:;[^\n]*\n\s*)*(\d+)",
-    re.IGNORECASE,
-)
+__all__ = ["build_served_serial_check", "is_zone_file"]
 
 # Runs on the target with python3. Arguments: bind root, JSON object
-# that maps an absolute file path to its expected serial.
+# that maps the absolute path of each staged file to true when it is a
+# zone file (it must be used by a configured zone).
 _REMOTE_SCRIPT = r"""
 import json
 import posixpath
@@ -38,7 +39,7 @@ import sys
 import time
 
 bind_root = sys.argv[1]
-expected = json.loads(sys.argv[2])
+staged = json.loads(sys.argv[2])
 
 conf = subprocess.run(
     ["named-checkconf", "-p"], capture_output=True, text=True, check=True
@@ -74,24 +75,49 @@ for line in conf.splitlines():
     if view is not None and zone is None and depth <= view_depth:
         view = None
 
+
+def file_serial(zone_name, path):
+    run = subprocess.run(
+        ["named-checkzone", "-w", directory, zone_name, path],
+        capture_output=True,
+        text=True,
+    )
+    m = re.search(r"loaded serial (\d+)", run.stdout)
+    if run.returncode != 0 or m is None:
+        return None, (run.stdout + run.stderr).strip()
+    return int(m.group(1)), ""
+
+
+def served_serial(zone_name, zone_view):
+    cmd = ["rndc", "zonestatus", zone_name, "IN"]
+    if zone_view:
+        cmd.append(zone_view)
+    run = subprocess.run(cmd, capture_output=True, text=True)
+    m = re.search(r"^serial:\s*(\d+)", run.stdout, re.MULTILINE)
+    return int(m.group(1)) if m else None
+
+
 problems = []
-for path, want in sorted(expected.items()):
-    for zone_view, zone_name, zone_file in found:
-        if zone_file != path:
-            continue
-        cmd = ["rndc", "zonestatus", zone_name, "IN"]
-        if zone_view:
-            cmd.append(zone_view)
+for path, is_zone in sorted(staged.items()):
+    users = [(v, z) for v, z, f in found if f == path]
+    if not users:
+        if is_zone:
+            problems.append("file " + path + ": no configured zone uses this file")
+        continue
+    for zone_view, zone_name in users:
         label = zone_name + (" (view " + zone_view + ")" if zone_view else "")
+        want, error = file_serial(zone_name, path)
+        if want is None:
+            problems.append("zone " + label + ": named-checkzone cannot read " + path
+                            + ": " + error)
+            continue
         got = None
         for _ in range(10):
-            run = subprocess.run(cmd, capture_output=True, text=True)
-            m = re.search(r"^serial:\s*(\d+)", run.stdout, re.MULTILINE)
-            got = m.group(1) if m else None
-            if got == str(want):
+            got = served_serial(zone_name, zone_view)
+            if got == want:
                 break
             time.sleep(1)
-        if got != str(want):
+        if got != want:
             problems.append(
                 "zone " + label + ": file has serial " + str(want)
                 + ", server serves " + str(got)
@@ -103,26 +129,48 @@ if problems:
 """
 
 
-def soa_serial(content: str) -> str | None:
-    """Return the SOA serial in *content*, or ``None`` when it has no SOA record."""
-    match = _SOA_SERIAL.search(content)
-    return match.group(1) if match else None
+def _is_config_file_name(path: str) -> bool:
+    name = posixpath.basename(path)
+    return name == "named.conf" or name.startswith("named.conf.") or name.endswith(".conf")
+
+
+def is_zone_file(path: str, content: str) -> bool:
+    """Return ``True`` when *content* is a zone file with a SOA record.
+
+    The DNS tokenizer skips comments and handles ``(`` and quoted text,
+    so a SOA in a comment does not count. Config files (``named.conf``,
+    ``named.conf.*``, ``*.conf``) are never zone files. Content that the
+    tokenizer cannot read counts as a zone file, so the server-side check
+    still runs for it.
+    """
+    if _is_config_file_name(path):
+        return False
+    tokenizer = dns.tokenizer.Tokenizer(content)
+    try:
+        while not (token := tokenizer.get()).is_eof():
+            if token.is_identifier() and token.value.upper() == "SOA":
+                return True
+    except dns.exception.DNSException:
+        return True
+    return False
 
 
 def build_served_serial_check(
-    expected: dict[str, str],
+    staged: dict[str, bool],
     *,
     bind_root: str,
 ) -> str | None:
     """Build the shell command for the served-serial check.
 
-    *expected* maps the absolute path of a staged zone file to its SOA
-    serial. Returns ``None`` when it is empty (no zone file staged).
+    *staged* maps the absolute path of each staged file to ``True`` when
+    it is a zone file (see :func:`is_zone_file`). The server checks every
+    staged file that a configured zone uses, and fails for a zone file
+    that no zone uses. Returns ``None`` when no zone file is staged.
     """
-    if not expected:
+    if not any(staged.values()):
         return None
     script_b64 = base64.b64encode(_REMOTE_SCRIPT.encode("utf-8")).decode("ascii")
     return (
         f"printf %s {script_b64} | base64 -d "
-        f"| python3 - {shlex.quote(bind_root)} {shlex.quote(json.dumps(expected))}"
+        f"| python3 - {shlex.quote(bind_root)} {shlex.quote(json.dumps(staged))}"
     )

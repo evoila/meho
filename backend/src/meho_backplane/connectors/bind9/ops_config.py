@@ -100,6 +100,7 @@ References
 from __future__ import annotations
 
 import io
+import ipaddress
 import posixpath
 import secrets
 import shlex
@@ -111,7 +112,7 @@ import structlog.contextvars
 
 from meho_backplane.connectors._shared.vault_creds import strip_credential_value
 from meho_backplane.connectors.bind9._atomic import atomic_apply
-from meho_backplane.connectors.bind9._served_check import build_served_serial_check, soa_serial
+from meho_backplane.connectors.bind9._served_check import build_served_serial_check, is_zone_file
 from meho_backplane.connectors.bind9.ops import Bind9Op
 
 if TYPE_CHECKING:
@@ -737,8 +738,12 @@ async def bind9_config_apply_views(
        tree, runs ``named-checkconf -p > /dev/null``, ``rndc reload``,
        and the verify predicate; rolls back on any failure.
 
-    The verify predicate is caller-supplied as ``verify_fqdn`` (the
-    representative FQDN that must resolve through one of the new views).
+    The verify predicate first checks that the running server serves
+    the serial of every staged zone file in every view that uses it
+    (:mod:`._served_check`). Then the caller-supplied ``verify_fqdn``
+    (the representative FQDN that must resolve through one of the new
+    views) is dug, from ``verify_source`` when given, so a
+    split-horizon caller reaches the changed view.
     Omitting it falls back to ``named-checkconf > /dev/null`` (the
     same predicate ``apply_file`` uses); a deployed views change that
     parses but doesn't actually resolve is then a config-correctness
@@ -761,10 +766,20 @@ async def bind9_config_apply_views(
     """
     files: dict[str, str] = params["files"]
     verify_fqdn: str | None = params.get("verify_fqdn")
+    verify_source: str | None = params.get("verify_source")
     primary_param: str | None = params.get("primary_path")
 
     if not files:
         raise ValueError("bind9.config.apply_views requires a non-empty 'files' mapping")
+    if verify_source is not None:
+        if verify_fqdn is None:
+            raise ValueError("bind9.config.apply_views: verify_source needs verify_fqdn")
+        try:
+            verify_source = str(ipaddress.ip_address(verify_source))
+        except ValueError as exc:
+            raise ValueError(
+                f"bind9.config.apply_views: verify_source {verify_source!r} is not an IP address"
+            ) from exc
 
     bind_root = await _resolve_bind_root(connector, target, operator)
     # Pack first so a traversal input fails the op pre-stage with the
@@ -802,29 +817,34 @@ async def bind9_config_apply_views(
 
     sudo_password = await _sudo_password_for_target(connector, target, operator)
 
-    # Verify predicate: prefer a representative dig if the caller named
-    # one; otherwise fall back to the "config still parses live" check.
-    # A `+short` dig that resolves anything (the actual rdata is the
-    # caller's call to assert post-hoc) is a stronger signal than the
-    # parse check alone -- it proves the views are wired through to a
-    # resolver answer for the new tree, not just syntactically intact.
-    if verify_fqdn is not None:
-        quoted_fqdn = shlex.quote(verify_fqdn)
-        verify_cmd = f'[ -n "$(dig @localhost {quoted_fqdn} +short 2>/dev/null)" ]'
-    else:
-        verify_cmd = "named-checkconf > /dev/null"
-    # Ask the running server for the serial of every staged zone file.
-    # ``rndc reload`` answers ok even when it skips a zone.
+    # Verify predicate: the config still parses live. Then the running
+    # server must serve the serial of every staged zone file, in every
+    # view (``rndc reload`` answers ok even when it skips a zone). Then,
+    # when the caller named one, a representative dig must resolve. A
+    # `+short` dig that resolves anything (the actual rdata is the
+    # caller's call to assert post-hoc) proves the views are wired
+    # through to a resolver answer. ``verify_source`` sends the dig from
+    # that address of the server, so it reaches the view whose
+    # ``match-clients`` lists the address; without it the dig asks
+    # localhost and gets the view that matches localhost.
+    verify_cmd = "named-checkconf > /dev/null"
     served_check = build_served_serial_check(
         {
-            ensure_path_under_root(path, bind_root): serial
+            ensure_path_under_root(path, bind_root): is_zone_file(path, content)
             for path, content in files.items()
-            if (serial := soa_serial(content)) is not None
         },
         bind_root=bind_root,
     )
     if served_check is not None:
         verify_cmd = f"{verify_cmd} && {served_check}"
+    if verify_fqdn is not None:
+        quoted_fqdn = shlex.quote(verify_fqdn)
+        if verify_source is not None:
+            quoted_source = shlex.quote(verify_source)
+            dig = f"dig -b {quoted_source} @{quoted_source} {quoted_fqdn} +short"
+        else:
+            dig = f"dig @localhost {quoted_fqdn} +short"
+        verify_cmd = f'{verify_cmd} && [ -n "$({dig} 2>/dev/null)" ]'
 
     apply_result = await atomic_apply(
         connector,
@@ -896,6 +916,20 @@ BIND9_CONFIG_APPLY_VIEWS_PARAMETER_SCHEMA: dict[str, Any] = {
                 "/dev/null`` (the live-loaded config still parses)."
             ),
         },
+        "verify_source": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Optional, needs ``verify_fqdn``. An IP address of the "
+                "DNS server that the ``match-clients`` of the changed view "
+                "lists. The verify dig is sent from this address to this "
+                "address (``dig -b <addr> @<addr>``), so it reaches that "
+                "view. named must listen on the address. Without it the "
+                "dig asks localhost and gets the view that matches "
+                "localhost."
+            ),
+        },
     },
     "required": ["files"],
     "additionalProperties": False,
@@ -949,6 +983,11 @@ BIND9_CONFIG_APPLY_VIEWS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "verify_fqdn": (
             "Optional. A FQDN that must resolve through one of the new "
             "views post-reload. Strengthens the verify gate."
+        ),
+        "verify_source": (
+            "Optional, with verify_fqdn. In a split-horizon setup, an IP "
+            "address of the DNS server that the changed view matches. "
+            "The verify dig is sent from and to this address."
         ),
     },
     "output_shape": (
@@ -1477,7 +1516,9 @@ CONFIG_OPS: tuple[Bind9Op, ...] = (
             "``files`` mapping into a tar.gz archive, extracts it over "
             "the live bind tree, validates via ``named-checkconf -p``, "
             "reloads via ``rndc reload``, optionally verifies via a "
-            "representative ``dig`` against ``verify_fqdn``. " + _WRITE_WARNING
+            "checks that the server serves the serial of every staged "
+            "zone file, and optionally digs ``verify_fqdn`` (from "
+            "``verify_source`` when given). " + _WRITE_WARNING
         ),
         parameter_schema=BIND9_CONFIG_APPLY_VIEWS_PARAMETER_SCHEMA,
         response_schema=_BIND9_CONFIG_APPLY_VIEWS_RESPONSE_SCHEMA,

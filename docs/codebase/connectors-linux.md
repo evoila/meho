@@ -426,6 +426,21 @@ file stays as it was and the op returns `written: false`. A new file is
 created `0600` and owned by root. If a non-root service must read a new
 file, change its mode afterwards.
 
+### Put a secret in a file (`secret.move` to `linux:`)
+
+`linux.file.write` takes the file content as a parameter, so the caller must
+know it. It is the wrong tool for a secret. The secret broker has a `linux`
+store for this (write side only): `secret.move --to
+'linux:<target>/<absolute path>#<owner>'`. The file gets mode 0600 and the
+owner you name, and a missing parent directory gets mode 0700 and the same
+owner. It may also write inside the home directory of `<owner>`, which
+`linux.file.write` cannot. The value goes over the SSH channel's standard
+input through the same sudo helper as `file.write`, and never appears in a
+result, an audit row, a preview, a log line or an error. The ref grammar and
+the rules for allowed paths are in
+[connectors-secret-broker.md](connectors-secret-broker.md), "The `linux:`
+store". Code: `connectors/linux/secret_endpoint.py`.
+
 ### Root elevation
 
 Every write that needs root funnels through `_sudo.py`'s

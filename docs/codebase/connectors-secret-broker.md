@@ -268,6 +268,162 @@ The same move over MCP is `call_operation(connector_id="secret-broker-1.x",
 op_id="secret.move", params={"from": "keycloak:…#secret", "to": "vault:…#client_secret",
 "reason": "…"})`.
 
+## Ops example — a machine login for an agent seat
+
+An operator makes a machine login for an agent seat only through MEHO. A
+machine login is a Keycloak client that signs in without a person. An
+agent seat is a machine where an AI agent works with its own MEHO login.
+Nobody sees the client secret: not the operator, not the agent, not the
+result, not the audit row.
+
+The recipe is three governed calls. Each one waits for approval. Run them
+in order.
+
+**1. Create the client** with `keycloak.client.create` on the Keycloak
+target. Use this `representation`. Replace the three placeholders: the
+client id, the tenant id, and the MEHO audience (the audience your MEHO
+checks, `KEYCLOAK_AUDIENCE`). `tenant_role` is the tenant role the seat
+gets (`operator` is the usual choice).
+
+<!-- recipe:keycloak-client-representation -->
+```json
+{
+  "clientId": "<client-id>",
+  "enabled": true,
+  "publicClient": false,
+  "serviceAccountsEnabled": true,
+  "standardFlowEnabled": false,
+  "implicitFlowEnabled": false,
+  "directAccessGrantsEnabled": false,
+  "defaultClientScopes": ["basic", "roles", "web-origins", "acr"],
+  "protocolMappers": [
+    {
+      "name": "audience-mapper",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-audience-mapper",
+      "config": {
+        "included.custom.audience": "<audience>",
+        "id.token.claim": "false",
+        "access.token.claim": "true"
+      }
+    },
+    {
+      "name": "tenant-id-claim",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-hardcoded-claim-mapper",
+      "config": {
+        "claim.name": "tenant_id",
+        "claim.value": "<tenant-id>",
+        "jsonType.label": "String",
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "userinfo.token.claim": "false"
+      }
+    },
+    {
+      "name": "tenant-role-claim",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-hardcoded-claim-mapper",
+      "config": {
+        "claim.name": "tenant_role",
+        "claim.value": "operator",
+        "jsonType.label": "String",
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "userinfo.token.claim": "false"
+      }
+    },
+    {
+      "name": "principal-kind-claim",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-hardcoded-claim-mapper",
+      "config": {
+        "claim.name": "principal_kind",
+        "claim.value": "service",
+        "jsonType.label": "String",
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "userinfo.token.claim": "false"
+      }
+    }
+  ]
+}
+```
+
+The `defaultClientScopes` line is what puts `sub` into the token. The
+answer holds the client id and its internal id, never the secret.
+
+**2. Move the secret into Vault or OpenBao** (`secret.move`):
+
+```
+meho secret move \
+  --from 'keycloak:<keycloak-target>/<realm>/clients/<client-id>#secret' \
+  --to   'vault:tenants/<tenant-id>/<seat-name>#client_secret' \
+  --reason 'store the seat login secret'
+```
+
+**3. Optional: put the secret in a file on the seat's host** (`secret.move`
+to a `linux:` ref):
+
+```
+meho secret move \
+  --from 'vault:tenants/<tenant-id>/<seat-name>#client_secret' \
+  --to   'linux:<host-target>/home/<owner>/.config/meho/client-secret#<owner>' \
+  --reason 'place the seat login secret for the agent'
+```
+
+The file gets mode 0600 and the owner you name. See "The `linux:` store"
+below.
+
+The audit rows and the approval previews of the three calls show only the
+client id, the target names, and the paths.
+
+**Safe to run twice.** A second run changes nothing that matters. The client
+create answers `conflict` and leaves the client as it is. The two moves
+write the same value again. This holds as long as nobody rotated the
+secret in between. The recipe does not rotate a secret.
+
+## The `linux:` store (a file on a Linux host)
+
+`linux` is a **write-only** store (a sink). It puts a secret into a file on
+a host that a `linux-ssh` target reaches. Reading from a `linux:` ref
+fails with an error that names no value.
+
+```
+linux:<target>/<absolute path>#<owner>
+```
+
+- `<target>` is a `linux-ssh` target name (or alias).
+- `<absolute path>` is the file. One slash or two after the target both work.
+- `<owner>` is the Linux user who will own the file. A user name only:
+  lower-case letters, digits, `_` and `-`.
+- A ref has no spaces, because the `secret.move` parameter schema refuses
+  them.
+
+What MEHO does on the host:
+
+- It writes the value in one atomic step: a temp file, then a rename.
+- The file gets mode 0600 and the owner. A missing parent directory is made
+  with mode 0700 and the same owner.
+- Allowed places: the write roots of `linux.file.write` (`/etc`, `/var/lib`,
+  `/run`, `/opt`, `/srv`, `/usr/local`), or inside the home directory of
+  `<owner>`. MEHO reads that home directory from the host (`getent passwd`).
+- MEHO refuses these before it opens any SSH connection: a relative path,
+  `..`, a control character, and the system trees that can never hold a
+  home directory (`/proc`, `/sys`, `/dev`, `/boot`, `/bin`, `/sbin`,
+  `/lib*`, `/tmp`, and `/usr` and `/var` outside the write roots).
+- On the host, the script resolves symbolic links and refuses a path that
+  ends up outside the allowed places.
+- The value travels only inside the SSH channel (standard input), through
+  the same sudo helper as `linux.file.write`. It is never in the remote
+  command line, a log line, or an error text. An error names only a short
+  reason such as `place` or `owner`.
+
+Code: `backend/src/meho_backplane/connectors/linux/secret_endpoint.py`.
+Tests: `backend/tests/test_secret_broker_linux_sink.py`; the machine login
+itself is tested against a real Keycloak in
+`backend/tests/integration/test_service_principal_recipe.py`.
+
 ## Control flow
 
 A move dispatches through the standard typed-op path:
@@ -358,8 +514,8 @@ the posture and relies on the existing gate). The policy refinement
 - The handoff import does not support a store target with a pinned CA
   (`tls_ca_pin`) yet; it refuses such a target with a plain error.
 - vault-kv (source+sink) and keycloak (user-password sink #1578 +
-  client-secret source #3619, dual-dispatched under the one kind) are the
-  registered adapter kinds; further kinds are separate tasks reusing the
+  client-secret source #3619, dual-dispatched under the one kind) and linux
+  (a file on a host, sink only) are the registered adapter kinds; further kinds are separate tasks reusing the
   `SecretEndpoint` contract.
 - The vault adapter forwards the `ref` to hvac's `path=` and defaults the
   mount to `"secret"`; a non-default mount is a richer-ref-grammar

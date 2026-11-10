@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -499,10 +500,92 @@ func TestConfigAfterLogin_KeepsTenantOfSameBackplane(t *testing.T) {
 		auth.Config{BackplaneURL: "https://meho.example.test", Tenant: chosen}); err != nil {
 		t.Fatalf("SaveConfigAt: %v", err)
 	}
-	if got := configAfterLogin("https://meho.example.test"); got.Tenant == nil || *got.Tenant != *chosen {
+	if got := configAfterLogin("https://meho.example.test", ""); got.Tenant == nil || *got.Tenant != *chosen {
 		t.Errorf("same backplane: tenant = %+v; want lab-b", got.Tenant)
 	}
-	if got := configAfterLogin("https://other.example.test"); got.Tenant != nil || got.BackplaneURL != "https://other.example.test" {
+	if got := configAfterLogin("https://other.example.test", ""); got.Tenant != nil || got.BackplaneURL != "https://other.example.test" {
 		t.Errorf("other backplane: config = %+v; want no tenant", got)
 	}
+}
+
+// settingsExportBackplane answers the settings export and records what
+// each request selected.
+type settingsExportBackplane struct {
+	srv              *httptest.Server
+	tenantID, header string
+	requests         int
+}
+
+func newSettingsExportBackplane(t *testing.T) *settingsExportBackplane {
+	t.Helper()
+	bp := &settingsExportBackplane{}
+	bp.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bp.requests++
+		bp.tenantID = r.URL.Query().Get("tenant_id")
+		bp.header = r.Header.Get(api.TenantHeader)
+		_, _ = io.WriteString(w, "spec:\n  tenants:\n  - id: x\n    targets: []\n")
+	}))
+	t.Cleanup(bp.srv.Close)
+	return bp
+}
+
+// targets export must select the same tenant the header carries.
+func TestTargetsExportUsesTheEffectiveTenant(t *testing.T) {
+	const (
+		saved   = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+		fromEnv = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	)
+	xdg := withTempXDG(t)
+	t.Setenv(api.TenantEnv, "")
+	home, other := newSettingsExportBackplane(t), newSettingsExportBackplane(t)
+	stored := func(url string) auth.StoredToken {
+		return auth.StoredToken{
+			BackplaneURL: url, AccessToken: "eyJ.test.token", TokenType: "Bearer",
+			Expiry: time.Now().Add(time.Hour),
+		}
+	}
+	seedCreds(t, xdg, other.srv.URL, stored(other.srv.URL))
+	seedCreds(t, xdg, home.srv.URL, stored(home.srv.URL))
+	if err := auth.SaveConfig(auth.Config{
+		BackplaneURL: home.srv.URL,
+		Tenant:       &auth.Tenant{ID: saved, Name: "lab-a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, stderr, err := runMeho(t, "targets", "export"); err != nil {
+		t.Fatalf("saved tenant: %v (%s)", err, stderr)
+	}
+	if home.tenantID != saved || home.header != saved {
+		t.Errorf("saved tenant: tenant_id=%q header=%q", home.tenantID, home.header)
+	}
+
+	t.Run("MEHO_TENANT wins over the saved tenant", func(t *testing.T) {
+		t.Setenv(api.TenantEnv, fromEnv)
+		if _, stderr, err := runMeho(t, "targets", "export"); err != nil {
+			t.Fatalf("%v (%s)", err, stderr)
+		}
+		if home.tenantID != fromEnv || home.header != fromEnv {
+			t.Errorf("tenant_id=%q header=%q; want both %s", home.tenantID, home.header, fromEnv)
+		}
+	})
+
+	t.Run("a tenant name selects by header only", func(t *testing.T) {
+		t.Setenv(api.TenantEnv, "lab-b")
+		if _, stderr, err := runMeho(t, "targets", "export"); err != nil {
+			t.Fatalf("%v (%s)", err, stderr)
+		}
+		if home.tenantID != "" || home.header != "lab-b" {
+			t.Errorf("tenant_id=%q header=%q", home.tenantID, home.header)
+		}
+	})
+
+	t.Run("the saved tenant stays on its backplane", func(t *testing.T) {
+		if _, stderr, err := runMeho(t, "targets", "export", "--backplane", other.srv.URL); err != nil {
+			t.Fatalf("%v (%s)", err, stderr)
+		}
+		if other.requests != 1 || other.tenantID != "" || other.header != "" {
+			t.Errorf("requests=%d tenant_id=%q header=%q", other.requests, other.tenantID, other.header)
+		}
+	})
 }

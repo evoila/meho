@@ -120,6 +120,7 @@ from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.runners import build_runners_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.sensors import build_sensors_router
+from meho_backplane.ui.routes.settings import build_settings_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.tenant import build_tenant_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
@@ -200,6 +201,9 @@ def build_router() -> APIRouter:
     # Tenant picker + switch (#5240): literal ``/ui/tenant`` paths, ahead
     # of the stubs aggregate's placeholder ``/ui/{slug}``.
     router.include_router(build_tenant_router())
+    # The settings file (#4048): export, import with a preview, history, and
+    # the first login's landing page.
+    router.include_router(build_settings_router())
     # Surface routers ahead of stubs -- their concrete paths win
     # the match against the stubs' placeholder ``/ui/{slug}``.
     router.include_router(build_broadcast_router())

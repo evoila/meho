@@ -60,6 +60,7 @@ _AREA_LANDING_TEMPLATES = (
     "keycloak/index.html",
     "vault/index.html",
     "approvals/index.html",
+    "settings/index.html",
     "audit/index.html",
 )
 

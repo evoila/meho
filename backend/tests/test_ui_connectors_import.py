@@ -339,6 +339,28 @@ targets:
 # ---------------------------------------------------------------------------
 
 
+def test_build_plan_keeps_the_keys_of_an_exported_entry_as_columns() -> None:
+    """`meho targets export` entries reach the columns, not ``extras`` (#3649)."""
+    entry = {
+        "name": "alpha",
+        "product": _PRODUCT,
+        "host": "a.test",
+        "version": "8.0",
+        "verify_tls": False,
+        "tls_server_name": "a.internal",
+        "secret_field_map": {"username": "user"},
+        "flight_recorder_capture": True,
+        "extras": {},
+    }
+    body = build_plan([entry], set())[0].body
+    assert body.version == "8.0"
+    assert body.verify_tls is False
+    assert body.tls_server_name == "a.internal"
+    assert body.secret_field_map == {"username": "user"}
+    assert body.flight_recorder_capture is True
+    assert body.extras == {}
+
+
 def test_build_plan_classifies_create_and_update() -> None:
     """Existing names plan UPDATE; new names plan CREATE; order preserved."""
     entries = [

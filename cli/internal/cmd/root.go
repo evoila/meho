@@ -9,6 +9,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -53,6 +54,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/sensor"
 	serviceprincipal "github.com/evoila/meho/cli/internal/cmd/service-principal"
 	"github.com/evoila/meho/cli/internal/cmd/sessions"
+	"github.com/evoila/meho/cli/internal/cmd/settings"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/tenants"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
@@ -80,6 +82,64 @@ import (
 // unexpected → 4, generic → 1).
 func Execute() error {
 	return newRootCmdFor(os.Args[1:]).Execute()
+}
+
+// trustSavedCA trusts the CA file `meho login --ca-file` recorded, but
+// only when this command works against the backplane the file was
+// recorded for. A `--backplane` flag or a `meho login` that names
+// another backplane must not get that CA: it could vouch for a server
+// that then receives this person's credentials. The same goes for a
+// command that takes its own server address, such as `admin keycloak
+// bootstrap-clients`, which sends the Keycloak admin password there and
+// has --keycloak-ca-bundle for its own CA. The trust covers the whole
+// process, because the same install's Keycloak host needs it too.
+//
+// A file that is gone only warns: the request that follows then fails
+// on the certificate with the transport's own message.
+func trustSavedCA(cmd *cobra.Command, args []string) {
+	cfg, err := auth.LoadConfig()
+	if err != nil || cfg.CAFile == "" || takesItsOwnServer(cmd) {
+		return
+	}
+	if named := namedBackplane(cmd, args); named != "" && !sameBackplane(named, cfg.BackplaneURL) {
+		return
+	}
+	if err := auth.TrustCAFile(cfg.CAFile); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: the CA file from `meho login` is not usable: %v\n", err)
+	}
+}
+
+// takesItsOwnServer reports whether the command talks to a server the
+// command line names, which is not the saved backplane's install.
+func takesItsOwnServer(cmd *cobra.Command) bool {
+	return cmd.Flags().Lookup("keycloak-base-url") != nil
+}
+
+// namedBackplane is the backplane the command line names, or "" when
+// the command uses the saved one.
+func namedBackplane(cmd *cobra.Command, args []string) string {
+	if cmd.Name() == "login" && cmd.Parent() == cmd.Root() && len(args) > 0 {
+		return args[0]
+	}
+	if f := cmd.Flags().Lookup("backplane"); f != nil && f.Changed {
+		return f.Value.String()
+	}
+	return ""
+}
+
+// discoveryClient is the client for the dynamic-command fetch against
+// the saved backplane. That fetch runs while the command tree is built,
+// before flags are parsed, so it gets the saved CA on its own client
+// instead of the process-wide trust of trustSavedCA.
+func discoveryClient(cfg auth.Config) *http.Client {
+	if cfg.CAFile == "" {
+		return http.DefaultClient
+	}
+	client, err := auth.ClientTrustingCAFile(cfg.CAFile)
+	if err != nil {
+		return http.DefaultClient
+	}
+	return client
 }
 
 // newRootCmd builds the command tree for the process's own arguments.
@@ -171,6 +231,11 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// (`meho tenants flight-recorder-policy set`). Wraps PATCH
 	// /api/v1/tenants/flight-recorder-policy; tenant-scoped, tenant_admin.
 	root.AddCommand(tenants.NewRootCmd())
+
+	// `meho settings` -- export, import and history of the settings
+	// file (#4048). Static: it must work on the first day, before any
+	// target or dynamic command exists.
+	root.AddCommand(settings.NewRootCmd())
 	// #4901 -- agent session store admin verbs (list / show / delete).
 	// Wraps /api/v1/sessions; operator to read, tenant_admin to delete.
 	root.AddCommand(sessions.NewRootCmd())
@@ -763,7 +828,7 @@ func registerDynamicSubcommands(root *cobra.Command) {
 	// discovery.fetchTimeout cap applied internally. Using
 	// cobra.Command.Context() would be nicer but cobra hasn't
 	// constructed it yet at command-tree-build time.
-	manifest, err := discovery.Fetch(context.Background(), http.DefaultClient, cfg.BackplaneURL)
+	manifest, err := discovery.Fetch(context.Background(), discoveryClient(cfg), cfg.BackplaneURL)
 	if err != nil {
 		// Decoding failures (the only error class Fetch returns)
 		// are surfaced as a stderr warning but never abort.

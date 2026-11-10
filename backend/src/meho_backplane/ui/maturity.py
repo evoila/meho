@@ -93,6 +93,9 @@ SURFACE_FEATURE: dict[str, str] = {
     "vault": "write_surfaces",
     "approvals": "approvals",
     "grants": "approvals",
+    # The settings file (#4048): an import writes policies, conventions and
+    # targets in one go, so it carries the write tier, not the GA read plane.
+    "settings": "write_surfaces",
     "audit": "audit",
 }
 

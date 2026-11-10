@@ -204,17 +204,18 @@ tar xzf ${TARBALL}
 sudo install -m 0755 meho /usr/local/bin/meho
 ```
 
-With the self-signed certificate, install its authority in your
-workstation's system trust store first. The CLI checks TLS against that
-store, and `meho login` has no option for a certificate file. Use the
-file `meho-ca.crt` from Step 5. How to add it to the store is in
-[TLS and ingress](tls-ingress.md#your-workstation-os-trust-store).
-
-Then log in:
+With the self-signed certificate, name its authority when you log in:
+the file `meho-ca.crt` from Step 5. Later commands against this
+backplane keep trusting it:
 
 ```bash
-meho login https://meho.example.com
+meho login https://meho.example.com --ca-file meho-ca.crt
 ```
+
+With a certificate your workstation already trusts, leave `--ca-file`
+out. To trust a private CA for every program on the workstation, add it
+to the system trust store instead; see
+[TLS and ingress](tls-ingress.md#your-workstation-os-trust-store).
 
 !!! warning "`meho login` changes your default backplane"
 

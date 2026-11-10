@@ -99,6 +99,7 @@ __all__ = [
     "build_plan",
     "dump_settings_yaml",
     "export_settings",
+    "is_first_run",
     "list_history",
     "stored_secret_mistakes",
 ]
@@ -937,6 +938,21 @@ async def apply_import(
 
 def _view(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {block["id"]: block for block in spec.get("tenants", [])}
+
+
+async def is_first_run(session: AsyncSession) -> bool:
+    """True on an install with no settings revision and no target yet.
+
+    Reads the whole install, not one tenant: the console's first login lands
+    on the settings page until the first system or the first import exists.
+    """
+    has_revision = await session.scalar(select(InstanceSettingsRevision.id).limit(1))
+    if has_revision is not None:
+        return False
+    has_target = await session.scalar(
+        select(TargetORM.id).where(TargetORM.deleted_at.is_(None)).limit(1)
+    )
+    return has_target is None
 
 
 async def list_history(

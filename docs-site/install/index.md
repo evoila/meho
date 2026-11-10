@@ -284,13 +284,15 @@ Secret `meho-core-tls`:
 kubectl -n meho get secret meho-core-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > meho-ca.crt
 ```
 
-Then log in:
+Then log in. With that self-signed certificate, name the CA with
+`--ca-file`; later commands against this backplane keep trusting it:
 
 ```bash
-meho login https://meho.example.com
+meho login https://meho.example.com --ca-file meho-ca.crt
 ```
 
-This runs the OAuth device-code flow: the CLI prints a verification
+With a certificate your workstation already trusts, leave `--ca-file`
+out. This runs the OAuth device-code flow: the CLI prints a verification
 URL and code, you approve it in a browser, and the CLI stores the
 resulting token in your OS keyring.
 

@@ -26,9 +26,11 @@ Mapping rules (parity with ``import.go``)
 -----------------------------------------
 
 * **Known top-level keys** -- ``name``, ``aliases``, ``product``,
-  ``host``, ``port``, ``fqdn``, ``secret_ref``, ``auth_model``,
-  ``vpn_required``, ``notes``, ``preferred_impl_id``, ``extras`` -- map
-  1:1 to :class:`~meho_backplane.targets.schemas.TargetCreate` /
+  ``version``, ``host``, ``port``, ``fqdn``, ``secret_ref``,
+  ``secret_field_map``, ``auth_model``, ``verify_tls``, ``tls_ca_pin``,
+  ``tls_server_name``, ``vpn_required``, ``flight_recorder_capture``,
+  ``notes``, ``preferred_impl_id``, ``extras`` -- map 1:1 to
+  :class:`~meho_backplane.targets.schemas.TargetCreate` /
   :class:`~meho_backplane.targets.schemas.TargetUpdate` fields.
 * **Unknown keys** spill into the ``extras`` JSONB column (merged with
   an explicit ``extras:`` block when one is present in the YAML).

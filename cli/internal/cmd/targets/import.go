@@ -503,7 +503,9 @@ func mapEntry(entry map[string]any) (map[string]any, []string) {
 			fmt.Sprintf("unknown field %q: not a target column, stored in extras", k))
 	}
 
-	if len(extras) > 0 {
+	// An explicit `extras: {}` is kept: on --update it clears the stored
+	// map, the same as in the settings file.
+	if _, explicit := entry["extras"].(map[string]any); explicit || len(extras) > 0 {
 		body["extras"] = extras
 	}
 	return body, warnings

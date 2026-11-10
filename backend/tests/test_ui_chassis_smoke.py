@@ -84,6 +84,7 @@ from meho_backplane.ui.csrf import (
 )
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes import dashboard as dashboard_routes
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import (
     DEFAULT_AUDIENCE,
@@ -603,8 +604,19 @@ def test_dashboard_tray_shows_notice_for_read_only_role() -> None:
     assert "No operations recorded yet." not in fragment.text
 
 
-def test_dashboard_tray_renders_for_tenant_admin_role() -> None:
-    """A ``tenant_admin`` session is above the minimum and sees the tray."""
+def test_dashboard_tray_renders_for_tenant_admin_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``tenant_admin`` session is above the minimum and sees the tray.
+
+    The database here is empty, so without the patch this admin would land on
+    the settings page (#4048). That landing has its own tests.
+    """
+
+    async def _no_landing(_session: object) -> bool:
+        return False
+
+    monkeypatch.setattr(dashboard_routes, "lands_on_settings", _no_landing)
     session_id, jwks = _seed_role_session("tenant_admin")
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)

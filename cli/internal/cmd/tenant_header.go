@@ -18,6 +18,7 @@ import (
 // backplane request of the command sends the Meho-Work-Ref and
 // Meho-Tenant headers.
 func applyRequestContext(cmd *cobra.Command, args []string) error {
+	trustSavedCA(cmd, args)
 	if err := applyWorkRef(cmd, args); err != nil {
 		return err
 	}

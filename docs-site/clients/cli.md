@@ -117,6 +117,10 @@ curl -sf https://keycloak.example.com/realms/<realm>/.well-known/openid-configur
 meho login https://meho.example.com
 ```
 
+If the certificate comes from a private CA that is not in your OS trust
+store, add `--ca-file <pem>`. Later commands against this backplane keep
+trusting that CA; commands against another backplane do not.
+
 This runs the device-code flow: the CLI discovers the realm and the
 public `meho-cli` client id from the backplane's
 `/api/v1/auth-config` endpoint, prints a verification URL and code, you

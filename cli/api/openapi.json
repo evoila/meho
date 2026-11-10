@@ -14159,7 +14159,7 @@
           "ui"
         ],
         "summary": "Ui Dashboard",
-        "description": "Render ``GET /ui/`` for the authenticated operator.\n\nPer acceptance criterion 1 on #866: returns 200 with\n``<title>MEHO Operator Console`` plus the 3x2 grid + sidebar\nlinks to all five surfaces (the sidebar is inherited from\n``base.html``).\n\nThe handler also mints + sets the CSRF cookie so any subsequent\nHTMX ``hx-post`` / ``hx-delete`` from this page passes the\ndouble-submit check.",
+        "description": "Render ``GET /ui/`` for the authenticated operator.\n\nPer acceptance criterion 1 on #866: returns 200 with\n``<title>MEHO Operator Console`` plus the 3x2 grid + sidebar\nlinks to all five surfaces (the sidebar is inherited from\n``base.html``).\n\nThe handler also mints + sets the CSRF cookie so any subsequent\nHTMX ``hx-post`` / ``hx-delete`` from this page passes the\ndouble-submit check.\n\nOn a fresh install this is where every login ends up, so an admin is sent\nto the settings page instead (#4048); see\n:func:`~meho_backplane.ui.routes.settings.lands_on_settings`.",
         "operationId": "ui_dashboard_ui__get",
         "responses": {
           "200": {
@@ -14245,6 +14245,87 @@
             "description": "The token does not allow this tenant. Nothing changed.",
             "content": {
               "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/ui/settings": {
+      "get": {
+        "tags": [
+          "ui-settings"
+        ],
+        "summary": "Ui Settings",
+        "description": "``GET /ui/settings``.",
+        "operationId": "ui_settings_ui_settings_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/settings/export": {
+      "get": {
+        "tags": [
+          "ui-settings"
+        ],
+        "summary": "Ui Settings Export",
+        "description": "``GET /ui/settings/export``: the file, or the page with the reasons it was refused.",
+        "operationId": "ui_settings_export_ui_settings_export_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/ui/settings/import/preview": {
+      "post": {
+        "tags": [
+          "ui-settings"
+        ],
+        "summary": "Ui Settings Import Preview",
+        "description": "``POST /ui/settings/import/preview``: writes nothing.",
+        "operationId": "ui_settings_import_preview_ui_settings_import_preview_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/settings/import/apply": {
+      "post": {
+        "tags": [
+          "ui-settings"
+        ],
+        "summary": "Ui Settings Import Apply",
+        "description": "``POST /ui/settings/import/apply``: re-checks the file, then adds or updates.",
+        "operationId": "ui_settings_import_apply_ui_settings_import_apply_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           }
         }

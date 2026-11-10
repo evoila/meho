@@ -10,8 +10,8 @@ what changed.
 The design is the internal note `core.md` §5. The code is in
 `backend/src/meho_backplane/instance_settings/` (`schema.py`, `diff.py`,
 `service.py`) and `backend/src/meho_backplane/api/v1/instance_settings.py`.
-MEHO 0.45.0 ships the REST endpoints below. The command line and the
-console do not have the settings file yet.
+Operators use it through the [`meho settings` verbs](../../docs-site/reference/cli.md)
+and the console's settings page; see [Using the file](#using-the-file).
 
 Do not confuse this with `backend/src/meho_backplane/settings.py`: those are
 the environment variables, read once at start. They are never in the file.
@@ -23,6 +23,59 @@ the environment variables, read once at start. They are never in the file.
 - A full restore also needs the OpenBao backup, the generated Kubernetes
   Secrets and the PostgreSQL dump. The file alone is not a backup.
 - The first day (#3972) reads the systems to add from it.
+
+## Using the file
+
+### Command line
+
+The full reference is [`meho settings`](../../docs-site/reference/cli.md); the
+code is `cli/internal/cmd/settings/`.
+
+```bash
+meho settings export --out meho-settings.yaml
+meho settings import meho-settings.yaml --preview
+meho settings import meho-settings.yaml
+meho settings history
+```
+
+- `import` always shows the preview first: the mistakes as sentences, then the
+  diff per section, with "not in file" as information only. It then asks for a
+  yes; `--yes` skips the question, and closed stdin counts as no.
+- `--preview --json` prints the answer of `POST /api/v1/settings/import` as it
+  is, so a test can check it. An apply with `--json` needs `--yes`.
+- Exit codes come from `cli/internal/output/format.go`: 2 for a dead login, 3 for
+  an unreachable MEHO, 4 for a file with mistakes or an item that could not be
+  written, 5 for a role that may not do this. Answering no exits 0.
+- `meho targets export` writes `targets: [...]` for one tenant. It cuts the list
+  out of this file's export, so its entries are `spec.tenants[].targets` by
+  construction, and `meho targets import` reads them back. It needs the same
+  role as the export. A `platform_admin` with no tenant chosen passes `--tenant`.
+
+On a fresh install the certificate is still self-signed, so the first login
+names the CA: `meho login <url> --ca-file <ca.crt>`, with `ca.crt` of
+`<release>-core-tls` or the customer's CA. The CLI records the path in
+`config.json`, so later commands against this backplane trust it too; a command
+against another backplane does not. On Linux `SSL_CERT_FILE` works as
+well; on macOS and Windows use `--ca-file`.
+
+### Console
+
+`/ui/settings`, for `tenant_admin` and `platform_admin`, has an export button, an
+upload with the preview, an apply button, and the history. It calls the same code
+as the REST routes in-process, so it shows the same sentences. Its diff rows come
+from `diff_rows` in `ui/routes/settings.py`, the twin of `diffRows` in
+`cli/internal/cmd/settings/render.go`; both are tested against
+`cli/internal/cmd/settings/testdata/`, so the CLI and the console show the same
+preview for the same file.
+
+While the install has no settings revision and no target
+(`is_first_run` in `service.py`), `GET /ui/` sends an admin to this page, which
+offers two choices: fill in the form, or import a settings file. Once a target or
+a revision exists the dashboard is the landing page again. This holds in every
+install form. There is no page before login.
+
+The page is server-rendered in the existing page framework. It moves to the new
+web interface (#4037) after December.
 
 ## The file
 
@@ -95,8 +148,9 @@ spec:
   convention is new. `kind` cannot change on import, the same as on
   `PATCH /api/v1/conventions/{slug}`; delete the convention and import it
   again. The preamble budget check of the conventions routes applies.
-- `targets[]` — keyed by `name`; the keys of `TargetCreate`. `name`,
-  `product` and `host` are required. `extras` is a mapping with named keys. `secret_ref` is a path,
+- `targets[]` — keyed by `name`; the keys of `TargetCreate` (the same entry
+  shape as `meho targets export`). `name`, `product` and `host` are
+  required. `extras` is a mapping with named keys. `secret_ref` is a path,
   never a password: export leaves it out when MEHO can work it out from the
   name (`tenants/<tenant_id>/<name>`), and writes `secret_ref: null` for a
   target with no credential. An explicit `secret_ref` must sit under the
@@ -210,9 +264,8 @@ them at once.
 ## Who may call
 
 All four endpoints need a login; without a token they answer 401. There is
-no page before login. The first admin signs in and calls the endpoints with
-their own token. The console and the command line do not have the settings
-file yet.
+no page before login: the first admin from #4043 signs in and uses the
+settings page or `meho settings import`.
 
 | Caller | Export | Preview / import | History |
 |---|---|---|---|
@@ -280,6 +333,8 @@ When there are no mistakes, `diff` holds one entry per section — `tenants`,
   the dotted name (`flight_recorder.retention_days`);
 - `not_in_file`: `{tenant, key}` — information only; nothing is deleted.
   `tenants.not_in_file` is filled only for a `platform_admin`.
+
+This is the answer `meho settings import --preview --json` prints.
 
 ### `POST /api/v1/settings/import`
 

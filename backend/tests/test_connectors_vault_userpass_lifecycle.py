@@ -191,11 +191,9 @@ async def test_secret_ref_reads_kv_and_sets_it(fake: _Fake) -> None:
     result = await _write({"username": "alice", "password_secret_ref": "labs/alice"})
     assert fake.users["alice"]["_password"] == SENTINEL
     assert result["credential_source"] == "kv_path"
-    assert result["stored_at"] == {
-        "mount": "secret",
-        "path": "labs/alice",
-        "field": "password",
-    }
+    assert result["stored_mount"] == "secret"
+    assert result["stored_path"] == "labs/alice"
+    assert result["stored_field"] == "password"
     _no_secret(result)
 
 
@@ -256,7 +254,7 @@ async def test_generate_stores_in_kv_first_then_sets_the_login(fake: _Fake) -> N
     assert fake.kv_writes[0]["cas"] == 0
     assert result["credential_generated"] is True
     assert result["written"] is True
-    assert result["stored_at"]["path"] == "labs/alice"
+    assert result["stored_path"] == "labs/alice"
     _no_secret(result)
     assert stored not in json.dumps(result)
 
@@ -479,11 +477,9 @@ async def test_generated_password_reaches_only_kv_and_the_login(
     assert result.status == "ok", result.error
     stored = fake.kv[("secret", "labs/alice")][-1]["password"]
     assert fake.users["alice"]["_password"] == stored
-    assert result.result["stored_at"] == {
-        "mount": "secret",
-        "path": "labs/alice",
-        "field": "password",
-    }
+    assert result.result["stored_mount"] == "secret"
+    assert result.result["stored_path"] == "labs/alice"
+    assert result.result["stored_field"] == "password"
     assert result.result["credential_generated"] is True
     assert "REDACTED" not in json.dumps(result.result)
     async with get_sessionmaker()() as session:
@@ -534,7 +530,9 @@ async def test_preview_names_the_kv_path_for_a_generated_password() -> None:
         {"username": "alice", "generate_password": {"path": "labs/alice"}, "rotate": True},
     )
     assert preview["credential_source"] == "generated"
-    assert preview["stored_at"] == {"mount": "secret", "path": "labs/alice", "field": "password"}
+    assert preview["stored_mount"] == "secret"
+    assert preview["stored_path"] == "labs/alice"
+    assert preview["stored_field"] == "password"
     assert preview["rotate"] is True
 
 
@@ -546,4 +544,4 @@ async def test_preview_names_the_kv_path_for_a_password_reference() -> None:
         {"username": "alice", "password_secret_ref": "labs/alice", "password_secret_mount": "kv"},
     )
     assert preview["credential_source"] == "kv_path"
-    assert preview["stored_at"]["mount"] == "kv"
+    assert preview["stored_mount"] == "kv"

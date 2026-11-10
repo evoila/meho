@@ -158,12 +158,19 @@ def _write_kv(
     """Store the password. Keep the other fields; refuse a lost race (``cas``)."""
     data = dict(found[0]) if found else {}
     data[plan.field] = value
-    client.secrets.kv.v2.create_or_update_secret(
-        path=plan.path,
-        secret=data,
-        cas=found[1] if found else 0,
-        mount_point=plan.mount,
-    )
+    try:
+        client.secrets.kv.v2.create_or_update_secret(
+            path=plan.path,
+            secret=data,
+            cas=found[1] if found else 0,
+            mount_point=plan.mount,
+        )
+    except (hvac.exceptions.InvalidRequest, hvac.exceptions.InvalidPath) as exc:
+        raise PasswordSecretError(
+            f"could not store the password at KV {plan.mount!r} path {plan.path!r}: "
+            "check that the KV-v2 mount exists and that the secret is not "
+            "soft-deleted (undelete or destroy it, then run again)"
+        ) from exc
 
 
 def _user_policies(client: Any, username: str, mount: str) -> list[str] | None:

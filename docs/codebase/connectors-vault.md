@@ -362,7 +362,7 @@ target registration) is documented in
 
   The result never holds the password. It says `credential_source`
   (`request`, `kv_path` or `generated`), `credential_generated` and
-  `stored_at` (`{mount, path, field}`). These key names avoid the words
+  `stored_mount`, `stored_path` and `stored_field`. These key names avoid the words
   `password`, `secret` and `token` on purpose: the result redaction hides
   values under such keys. The approval preview shows the same location, not
   the value.

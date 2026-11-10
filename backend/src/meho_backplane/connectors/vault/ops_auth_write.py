@@ -158,7 +158,9 @@ async def vault_auth_userpass_write(
         "credential_generated": outcome["credential_generated"],
     }
     if plan.location is not None:
-        result["stored_at"] = plan.location
+        result["stored_mount"] = plan.location["mount"]
+        result["stored_path"] = plan.location["path"]
+        result["stored_field"] = plan.location["field"]
     if token_policies is not None:
         result["token_policies"] = list(token_policies)
     return result

@@ -2128,18 +2128,18 @@ async def test_userpass_generated_password_is_only_in_kv_and_works_once(
     first = await _dispatch_approved(target, "vault.auth.userpass.write", params, "op-gen-1")
     assert first.status == "ok", first.error
     assert first.result["credential_generated"] is True
-    assert first.result["stored_at"] == {
-        "mount": "secret",
-        "path": "labs/gen-user",
-        "field": "password",
-    }
+    assert first.result["stored_mount"] == "secret"
+    assert first.result["stored_path"] == "labs/gen-user"
+    assert first.result["stored_field"] == "password"
 
     root = _root_client(addr)
     stored = root.secrets.kv.v2.read_secret_version(
         path="labs/gen-user", mount_point="secret", raise_on_deleted_version=True
     )["data"]["data"]["password"]
     assert stored not in json.dumps(first.result)
-    login = root.auth.userpass.login(username="gen-user", password=stored, mount_point="userpass")
+    login = _root_client(addr).auth.userpass.login(
+        username="gen-user", password=stored, mount_point="userpass"
+    )
     assert login["auth"]["client_token"]
     row = await _assert_audited(
         "vault.auth.userpass.write", operator_sub="op-gen-1", expected_op_class="credential_write"
@@ -2166,7 +2166,7 @@ async def test_userpass_disable_blocks_login_and_enable_restores_it(
     root.auth.userpass.create_or_update_user(
         username="switch-user", password=password, policies=["default"], mount_point="userpass"
     )
-    assert root.auth.userpass.login(
+    assert _root_client(addr).auth.userpass.login(
         username="switch-user", password=password, mount_point="userpass"
     )["auth"]["client_token"]
 
@@ -2180,7 +2180,9 @@ async def test_userpass_disable_blocks_login_and_enable_restores_it(
     assert off.result["disabled"] is True
     assert off.result["revoke_requested"] is True
     with pytest.raises(hvac.exceptions.Forbidden):
-        root.auth.userpass.login(username="switch-user", password=password, mount_point="userpass")
+        _root_client(addr).auth.userpass.login(
+            username="switch-user", password=password, mount_point="userpass"
+        )
 
     off_again = await _dispatch_approved(
         target, "vault.auth.userpass.disable", {"username": "switch-user"}, "op-switch-off-2"
@@ -2192,7 +2194,7 @@ async def test_userpass_disable_blocks_login_and_enable_restores_it(
     )
     assert on.status == "ok", on.error
     assert on.result["disabled"] is False
-    assert root.auth.userpass.login(
+    assert _root_client(addr).auth.userpass.login(
         username="switch-user", password=password, mount_point="userpass"
     )["auth"]["client_token"]
 
@@ -2208,7 +2210,7 @@ async def test_userpass_disable_with_revoke_tokens_ends_an_open_token(
     root.auth.userpass.create_or_update_user(
         username="revoke-user", password=password, policies=["default"], mount_point="userpass"
     )
-    token = root.auth.userpass.login(
+    token = _root_client(addr).auth.userpass.login(
         username="revoke-user", password=password, mount_point="userpass"
     )["auth"]["client_token"]
     holder = hvac.Client(url=addr, token=token)

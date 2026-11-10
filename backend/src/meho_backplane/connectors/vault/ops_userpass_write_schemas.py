@@ -157,17 +157,17 @@ VAULT_AUTH_USERPASS_WRITE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "True when this call made a new password and stored it.",
         },
-        "stored_at": {
-            "type": "object",
-            "description": (
-                "Where the password is stored (mount, path, field). Present "
-                "unless the password came in the request. Never the value."
-            ),
-            "properties": {
-                "mount": {"type": "string", "description": "KV-v2 mount."},
-                "path": {"type": "string", "description": "KV-v2 path."},
-                "field": {"type": "string", "description": "Field that holds the password."},
-            },
+        "stored_mount": {
+            "type": "string",
+            "description": "KV-v2 mount that holds the password.",
+        },
+        "stored_path": {
+            "type": "string",
+            "description": "KV-v2 path that holds the password. Never the value.",
+        },
+        "stored_field": {
+            "type": "string",
+            "description": "Field in that KV secret that holds the password.",
         },
     },
     "required": ["username", "written"],
@@ -216,8 +216,8 @@ VAULT_AUTH_USERPASS_WRITE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "On success: {'username': ..., 'mount': ..., 'token_policies': "
         "[...], 'written': bool, 'credential_source': ..., "
-        "'credential_generated': bool, 'stored_at': {mount, path, "
-        "field}} -- never the password. On failure: a "
+        "'credential_generated': bool, 'stored_mount': ..., "
+        "'stored_path': ..., 'stored_field': ...} -- never the password. On failure: a "
         "connector_error OperationResult with extras.exception_class "
         "naming the failure class ('VaultAuthBackendNotMountedError' when "
         "userpass is not enabled at the mount)."
@@ -225,6 +225,15 @@ VAULT_AUTH_USERPASS_WRITE_LLM_INSTRUCTIONS: dict[str, Any] = {
     # Credential-class ops get no default scalar copy when token_policies
     # spills; these value-free fields stay inline (#3633).
     "result_scalars": {
-        "keys": ["username", "mount", "written", "credential_source", "credential_generated"]
+        "keys": [
+            "username",
+            "mount",
+            "written",
+            "credential_source",
+            "credential_generated",
+            "stored_mount",
+            "stored_path",
+            "stored_field",
+        ]
     },
 }

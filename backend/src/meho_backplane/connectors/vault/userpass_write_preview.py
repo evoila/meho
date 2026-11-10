@@ -45,21 +45,17 @@ def _credential_source_preview(ctx: PreviewContext) -> dict[str, Any]:
         spec = params["generate_password"]
         return {
             "credential_source": "generated",
-            "stored_at": {
-                "mount": str(spec.get("mount") or "secret"),
-                "path": str(spec.get("path", "")).strip(),
-                "field": str(spec.get("field") or "password"),
-            },
+            "stored_mount": str(spec.get("mount") or "secret"),
+            "stored_path": str(spec.get("path", "")).strip(),
+            "stored_field": str(spec.get("field") or "password"),
             "rotate": bool(params.get("rotate", False)),
         }
     if params.get("password_secret_ref"):
         return {
             "credential_source": "kv_path",
-            "stored_at": {
-                "mount": str(params.get("password_secret_mount") or "secret"),
-                "path": str(params["password_secret_ref"]).strip(),
-                "field": str(params.get("password_secret_key") or "password"),
-            },
+            "stored_mount": str(params.get("password_secret_mount") or "secret"),
+            "stored_path": str(params["password_secret_ref"]).strip(),
+            "stored_field": str(params.get("password_secret_key") or "password"),
         }
     return {"credential_source": "request"}
 

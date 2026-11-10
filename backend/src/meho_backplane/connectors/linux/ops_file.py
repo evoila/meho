@@ -255,6 +255,21 @@ async def _read_opened_file(
     return output
 
 
+def _is_zero_length_pseudo_read(output: ReadOutput) -> bool:
+    """Return ``True`` when a ``/proc`` or ``/sys`` file read back with no content.
+
+    These files always report size 0, so empty content is not "the file
+    is empty": the kernel gave nothing (an unused feature, a missing
+    privilege). An empty regular file is not marked; its ``size_bytes`` is 0.
+    """
+    path = output.real_path
+    return bool(
+        path is not None
+        and output.content == ""
+        and (path.startswith("/proc/") or path.startswith("/sys/"))
+    )
+
+
 async def linux_file_read(
     connector: LinuxSshConnector,
     target: Target,
@@ -285,6 +300,7 @@ async def linux_file_read(
         "truncated": truncated if output.real_path is not None else False,
         "size_bytes": output.size_bytes,
         "exists": output.exists,
+        "zero_length": _is_zero_length_pseudo_read(output),
     }
 
 
@@ -325,7 +341,11 @@ _FILE_READ_OP = LinuxOp(
         "and files that hold keys, tokens or password hashes are refused. "
         "Content is capped at ``max_bytes`` (default 65536, hard cap "
         "1048576) via ``head -c``. Returns ``{path, content, truncated, "
-        "size_bytes, exists}``; a missing file reports ``exists=false`` "
+        "size_bytes, exists, zero_length}``; ``zero_length`` is true when a "
+        "``/proc`` or ``/sys`` file read back with no content (those always "
+        "report size 0, so it is the kernel's empty answer, not an empty file; "
+        "an empty regular file has ``size_bytes=0`` and ``zero_length=false``); "
+        "a missing file reports ``exists=false`` "
         "with empty content rather than erroring, so a first-boot "
         "completion sentinel that was never written is a legible signal."
     ),
@@ -358,6 +378,7 @@ _FILE_READ_OP = LinuxOp(
             "truncated": {"type": "boolean"},
             "size_bytes": {"type": ["integer", "null"]},
             "exists": {"type": "boolean"},
+            "zero_length": {"type": "boolean"},
         },
         "required": ["path", "content", "truncated", "exists"],
         "additionalProperties": True,
@@ -379,8 +400,9 @@ _FILE_READ_OP = LinuxOp(
             "max_bytes": "Optional content cap; defaults to 65536.",
         },
         "output_shape": (
-            "Flat dict ``{path, content, truncated, size_bytes, exists}``. "
-            "``exists=false`` means the file was absent."
+            "Flat dict ``{path, content, truncated, size_bytes, exists, zero_length}``. "
+            "``exists=false`` means the file was absent; ``zero_length=true`` means "
+            "a ``/proc`` or ``/sys`` file gave no content."
         ),
     },
 )

@@ -124,6 +124,13 @@ const (
 	BroadcastOverrideCreateScopeFieldTargetName BroadcastOverrideCreateScopeField = "target_name"
 )
 
+// Defines values for BudgetWindowKind.
+const (
+	BudgetWindowKindDaily   BudgetWindowKind = "daily"
+	BudgetWindowKindMonthly BudgetWindowKind = "monthly"
+	BudgetWindowKindWeekly  BudgetWindowKind = "weekly"
+)
+
 // Defines values for CandidateHintConfidence.
 const (
 	CandidateHintConfidenceHigh   CandidateHintConfidence = "high"
@@ -1086,6 +1093,90 @@ type AffectedSensorModel struct {
 	Id       openapi_types.UUID `json:"id"`
 	Name     string             `json:"name"`
 	TenantId openapi_types.UUID `json:"tenant_id"`
+}
+
+// AgentBudgetListResponse The caps of one principal, one entry for each window.
+type AgentBudgetListResponse struct {
+	Budgets []AgentBudgetRead `json:"budgets"`
+}
+
+// AgentBudgetRead The caps of one window and what is used so far in it.
+//
+// A “null“ limit means no cap on that value. “*_remaining“ is
+// “null“ when the limit is “null“, and can be negative when a run
+// went over the cap. Costs are in USD.
+type AgentBudgetRead struct {
+	CostConsumed      float32  `json:"cost_consumed"`
+	CostLimit         *float32 `json:"cost_limit"`
+	CostRemaining     *float32 `json:"cost_remaining"`
+	PrincipalSub      string   `json:"principal_sub"`
+	RequestLimit      *int     `json:"request_limit"`
+	RequestsConsumed  int      `json:"requests_consumed"`
+	RequestsRemaining *int     `json:"requests_remaining"`
+	TokenLimit        *int     `json:"token_limit"`
+	TokensConsumed    int      `json:"tokens_consumed"`
+	TokensRemaining   *int     `json:"tokens_remaining"`
+
+	// Window Closed vocabulary of budget-window granularities.
+	//
+	// Each :class:`IdentityBudget` row is keyed in part on a
+	// :class:`BudgetWindowKind` — the budget answers "what's the cap for
+	// this principal *per day / per week / per month*". The runtime
+	// increments one row per active window-kind on every successful run
+	// (one daily bucket, one weekly bucket, one monthly bucket).
+	//
+	// The vocabulary is intentionally closed (three values). A fourth
+	// granularity would require both a code change and an Alembic
+	// migration (the
+	// :class:`~meho_backplane.db.models.IdentityBudget.window_kind`
+	// column carries a DB-level CHECK constraint backed by this enum),
+	// which is the cheapest way to prevent drift between the DB row, the
+	// consumption service, and the enforcement gate (G11.5-C3-b, #1080).
+	//
+	// Members:
+	//
+	// * :attr:`DAILY` — buckets start at 00:00 UTC and last 24 hours.
+	// * :attr:`WEEKLY` — ISO-week buckets, starting Monday 00:00 UTC.
+	// * :attr:`MONTHLY` — calendar-month buckets, starting the 1st at
+	//   00:00 UTC.
+	Window      BudgetWindowKind `json:"window"`
+	WindowEnd   time.Time        `json:"window_end"`
+	WindowStart time.Time        `json:"window_start"`
+}
+
+// AgentBudgetSet Body of “PUT /api/v1/agent-budgets“.
+type AgentBudgetSet struct {
+	// CostLimit Cost cap in USD
+	CostLimit *float32 `json:"cost_limit"`
+
+	// PrincipalSub Login of the agent, e.g. agent:pod-reader
+	PrincipalSub string `json:"principal_sub"`
+	RequestLimit *int   `json:"request_limit"`
+	TokenLimit   *int   `json:"token_limit"`
+
+	// Window Closed vocabulary of budget-window granularities.
+	//
+	// Each :class:`IdentityBudget` row is keyed in part on a
+	// :class:`BudgetWindowKind` — the budget answers "what's the cap for
+	// this principal *per day / per week / per month*". The runtime
+	// increments one row per active window-kind on every successful run
+	// (one daily bucket, one weekly bucket, one monthly bucket).
+	//
+	// The vocabulary is intentionally closed (three values). A fourth
+	// granularity would require both a code change and an Alembic
+	// migration (the
+	// :class:`~meho_backplane.db.models.IdentityBudget.window_kind`
+	// column carries a DB-level CHECK constraint backed by this enum),
+	// which is the cheapest way to prevent drift between the DB row, the
+	// consumption service, and the enforcement gate (G11.5-C3-b, #1080).
+	//
+	// Members:
+	//
+	// * :attr:`DAILY` — buckets start at 00:00 UTC and last 24 hours.
+	// * :attr:`WEEKLY` — ISO-week buckets, starting Monday 00:00 UTC.
+	// * :attr:`MONTHLY` — calendar-month buckets, starting the 1st at
+	//   00:00 UTC.
+	Window BudgetWindowKind `json:"window"`
 }
 
 // AgentDefinitionCreate POST body -- the inputs “create“ consumes. Pydantic v2 strict.
@@ -3845,6 +3936,30 @@ type BudgetStatus struct {
 	// OversizeSlugs Dropped slugs that do not fit the budget even as the only entry. The other dropped slugs fit alone but lost the room to higher-priority entries.
 	OversizeSlugs []string `json:"oversize_slugs"`
 }
+
+// BudgetWindowKind Closed vocabulary of budget-window granularities.
+//
+// Each :class:`IdentityBudget` row is keyed in part on a
+// :class:`BudgetWindowKind` — the budget answers "what's the cap for
+// this principal *per day / per week / per month*". The runtime
+// increments one row per active window-kind on every successful run
+// (one daily bucket, one weekly bucket, one monthly bucket).
+//
+// The vocabulary is intentionally closed (three values). A fourth
+// granularity would require both a code change and an Alembic
+// migration (the
+// :class:`~meho_backplane.db.models.IdentityBudget.window_kind`
+// column carries a DB-level CHECK constraint backed by this enum),
+// which is the cheapest way to prevent drift between the DB row, the
+// consumption service, and the enforcement gate (G11.5-C3-b, #1080).
+//
+// Members:
+//
+//   - :attr:`DAILY` — buckets start at 00:00 UTC and last 24 hours.
+//   - :attr:`WEEKLY` — ISO-week buckets, starting Monday 00:00 UTC.
+//   - :attr:`MONTHLY` — calendar-month buckets, starting the 1st at
+//     00:00 UTC.
+type BudgetWindowKind string
 
 // CallOperationBody Request body for the “POST /api/v1/operations/call“ route.
 //
@@ -12060,6 +12175,25 @@ type HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ClearBudgetApiV1AgentBudgetsDeleteParams defines parameters for ClearBudgetApiV1AgentBudgetsDelete.
+type ClearBudgetApiV1AgentBudgetsDeleteParams struct {
+	PrincipalSub  string           `form:"principal_sub" json:"principal_sub"`
+	Window        BudgetWindowKind `form:"window" json:"window"`
+	Authorization *string          `json:"authorization,omitempty"`
+}
+
+// ShowBudgetsApiV1AgentBudgetsGetParams defines parameters for ShowBudgetsApiV1AgentBudgetsGet.
+type ShowBudgetsApiV1AgentBudgetsGetParams struct {
+	PrincipalSub  string            `form:"principal_sub" json:"principal_sub"`
+	Window        *BudgetWindowKind `form:"window,omitempty" json:"window,omitempty"`
+	Authorization *string           `json:"authorization,omitempty"`
+}
+
+// SetBudgetApiV1AgentBudgetsPutParams defines parameters for SetBudgetApiV1AgentBudgetsPut.
+type SetBudgetApiV1AgentBudgetsPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListAgentPrincipalsApiV1AgentPrincipalsGetParams defines parameters for ListAgentPrincipalsApiV1AgentPrincipalsGet.
 type ListAgentPrincipalsApiV1AgentPrincipalsGetParams struct {
 	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -13777,6 +13911,9 @@ type PairAddonApiV1AddonsPairingsPostJSONRequestBody = PairAddonRequest
 
 // DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody defines body for DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut for application/json ContentType.
 type DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody = DeclareCapabilitiesRequest
+
+// SetBudgetApiV1AgentBudgetsPutJSONRequestBody defines body for SetBudgetApiV1AgentBudgetsPut for application/json ContentType.
+type SetBudgetApiV1AgentBudgetsPutJSONRequestBody = AgentBudgetSet
 
 // RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody defines body for RegisterAgentPrincipalApiV1AgentPrincipalsPost for application/json ContentType.
 type RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody = AgentPrincipalCreate
@@ -16185,6 +16322,17 @@ type ClientInterface interface {
 	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost request
 	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ClearBudgetApiV1AgentBudgetsDelete request
+	ClearBudgetApiV1AgentBudgetsDelete(ctx context.Context, params *ClearBudgetApiV1AgentBudgetsDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowBudgetsApiV1AgentBudgetsGet request
+	ShowBudgetsApiV1AgentBudgetsGet(ctx context.Context, params *ShowBudgetsApiV1AgentBudgetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetBudgetApiV1AgentBudgetsPutWithBody request with any body
+	SetBudgetApiV1AgentBudgetsPutWithBody(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetBudgetApiV1AgentBudgetsPut(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListAgentPrincipalsApiV1AgentPrincipalsGet request
 	ListAgentPrincipalsApiV1AgentPrincipalsGet(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -18029,6 +18177,54 @@ func (c *Client) ListStepEventsApiV1AddonsPairingsNameEventsGet(ctx context.Cont
 
 func (c *Client) HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClearBudgetApiV1AgentBudgetsDelete(ctx context.Context, params *ClearBudgetApiV1AgentBudgetsDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearBudgetApiV1AgentBudgetsDeleteRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowBudgetsApiV1AgentBudgetsGet(ctx context.Context, params *ShowBudgetsApiV1AgentBudgetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowBudgetsApiV1AgentBudgetsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetBudgetApiV1AgentBudgetsPutWithBody(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetBudgetApiV1AgentBudgetsPutRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetBudgetApiV1AgentBudgetsPut(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetBudgetApiV1AgentBudgetsPutRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -26172,6 +26368,209 @@ func NewHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostRequest(server strin
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewClearBudgetApiV1AgentBudgetsDeleteRequest generates requests for ClearBudgetApiV1AgentBudgetsDelete
+func NewClearBudgetApiV1AgentBudgetsDeleteRequest(server string, params *ClearBudgetApiV1AgentBudgetsDeleteParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-budgets")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal_sub", runtime.ParamLocationQuery, params.PrincipalSub); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "window", runtime.ParamLocationQuery, params.Window); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowBudgetsApiV1AgentBudgetsGetRequest generates requests for ShowBudgetsApiV1AgentBudgetsGet
+func NewShowBudgetsApiV1AgentBudgetsGetRequest(server string, params *ShowBudgetsApiV1AgentBudgetsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-budgets")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal_sub", runtime.ParamLocationQuery, params.PrincipalSub); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.Window != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "window", runtime.ParamLocationQuery, *params.Window); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSetBudgetApiV1AgentBudgetsPutRequest calls the generic SetBudgetApiV1AgentBudgetsPut builder with application/json body
+func NewSetBudgetApiV1AgentBudgetsPutRequest(server string, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetBudgetApiV1AgentBudgetsPutRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewSetBudgetApiV1AgentBudgetsPutRequestWithBody generates requests for SetBudgetApiV1AgentBudgetsPut with any type of body
+func NewSetBudgetApiV1AgentBudgetsPutRequestWithBody(server string, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-budgets")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -51422,6 +51821,17 @@ type ClientWithResponsesInterface interface {
 	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse request
 	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse, error)
 
+	// ClearBudgetApiV1AgentBudgetsDeleteWithResponse request
+	ClearBudgetApiV1AgentBudgetsDeleteWithResponse(ctx context.Context, params *ClearBudgetApiV1AgentBudgetsDeleteParams, reqEditors ...RequestEditorFn) (*ClearBudgetApiV1AgentBudgetsDeleteResponse, error)
+
+	// ShowBudgetsApiV1AgentBudgetsGetWithResponse request
+	ShowBudgetsApiV1AgentBudgetsGetWithResponse(ctx context.Context, params *ShowBudgetsApiV1AgentBudgetsGetParams, reqEditors ...RequestEditorFn) (*ShowBudgetsApiV1AgentBudgetsGetResponse, error)
+
+	// SetBudgetApiV1AgentBudgetsPutWithBodyWithResponse request with any body
+	SetBudgetApiV1AgentBudgetsPutWithBodyWithResponse(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetBudgetApiV1AgentBudgetsPutResponse, error)
+
+	SetBudgetApiV1AgentBudgetsPutWithResponse(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetBudgetApiV1AgentBudgetsPutResponse, error)
+
 	// ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse request
 	ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListAgentPrincipalsApiV1AgentPrincipalsGetResponse, error)
 
@@ -53353,6 +53763,75 @@ func (r HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ClearBudgetApiV1AgentBudgetsDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentBudgetRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ClearBudgetApiV1AgentBudgetsDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClearBudgetApiV1AgentBudgetsDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowBudgetsApiV1AgentBudgetsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentBudgetListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowBudgetsApiV1AgentBudgetsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowBudgetsApiV1AgentBudgetsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SetBudgetApiV1AgentBudgetsPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentBudgetRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SetBudgetApiV1AgentBudgetsPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetBudgetApiV1AgentBudgetsPutResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -63253,6 +63732,41 @@ func (c *ClientWithResponses) HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPo
 	return ParseHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse(rsp)
 }
 
+// ClearBudgetApiV1AgentBudgetsDeleteWithResponse request returning *ClearBudgetApiV1AgentBudgetsDeleteResponse
+func (c *ClientWithResponses) ClearBudgetApiV1AgentBudgetsDeleteWithResponse(ctx context.Context, params *ClearBudgetApiV1AgentBudgetsDeleteParams, reqEditors ...RequestEditorFn) (*ClearBudgetApiV1AgentBudgetsDeleteResponse, error) {
+	rsp, err := c.ClearBudgetApiV1AgentBudgetsDelete(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearBudgetApiV1AgentBudgetsDeleteResponse(rsp)
+}
+
+// ShowBudgetsApiV1AgentBudgetsGetWithResponse request returning *ShowBudgetsApiV1AgentBudgetsGetResponse
+func (c *ClientWithResponses) ShowBudgetsApiV1AgentBudgetsGetWithResponse(ctx context.Context, params *ShowBudgetsApiV1AgentBudgetsGetParams, reqEditors ...RequestEditorFn) (*ShowBudgetsApiV1AgentBudgetsGetResponse, error) {
+	rsp, err := c.ShowBudgetsApiV1AgentBudgetsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowBudgetsApiV1AgentBudgetsGetResponse(rsp)
+}
+
+// SetBudgetApiV1AgentBudgetsPutWithBodyWithResponse request with arbitrary body returning *SetBudgetApiV1AgentBudgetsPutResponse
+func (c *ClientWithResponses) SetBudgetApiV1AgentBudgetsPutWithBodyWithResponse(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetBudgetApiV1AgentBudgetsPutResponse, error) {
+	rsp, err := c.SetBudgetApiV1AgentBudgetsPutWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetBudgetApiV1AgentBudgetsPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetBudgetApiV1AgentBudgetsPutWithResponse(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetBudgetApiV1AgentBudgetsPutResponse, error) {
+	rsp, err := c.SetBudgetApiV1AgentBudgetsPut(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetBudgetApiV1AgentBudgetsPutResponse(rsp)
+}
+
 // ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse request returning *ListAgentPrincipalsApiV1AgentPrincipalsGetResponse
 func (c *ClientWithResponses) ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListAgentPrincipalsApiV1AgentPrincipalsGetResponse, error) {
 	rsp, err := c.ListAgentPrincipalsApiV1AgentPrincipalsGet(ctx, params, reqEditors...)
@@ -69082,6 +69596,105 @@ func ParseHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest PairedAddonRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseClearBudgetApiV1AgentBudgetsDeleteResponse parses an HTTP response from a ClearBudgetApiV1AgentBudgetsDeleteWithResponse call
+func ParseClearBudgetApiV1AgentBudgetsDeleteResponse(rsp *http.Response) (*ClearBudgetApiV1AgentBudgetsDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClearBudgetApiV1AgentBudgetsDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentBudgetRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowBudgetsApiV1AgentBudgetsGetResponse parses an HTTP response from a ShowBudgetsApiV1AgentBudgetsGetWithResponse call
+func ParseShowBudgetsApiV1AgentBudgetsGetResponse(rsp *http.Response) (*ShowBudgetsApiV1AgentBudgetsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowBudgetsApiV1AgentBudgetsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentBudgetListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetBudgetApiV1AgentBudgetsPutResponse parses an HTTP response from a SetBudgetApiV1AgentBudgetsPutWithResponse call
+func ParseSetBudgetApiV1AgentBudgetsPutResponse(rsp *http.Response) (*SetBudgetApiV1AgentBudgetsPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetBudgetApiV1AgentBudgetsPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentBudgetRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

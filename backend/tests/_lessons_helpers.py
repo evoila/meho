@@ -58,6 +58,7 @@ async def seed_retrieval(
     status: str | None = None,
     expired: bool = False,
     entry_tenant_id: uuid.UUID | None = None,
+    channel: str = "search",
 ) -> None:
     async with get_sessionmaker()() as session:
         session.add(
@@ -70,6 +71,7 @@ async def seed_retrieval(
                 retrieved_at=at,
                 status=status,
                 expired=expired,
+                channel=channel,
             )
         )
         await session.commit()

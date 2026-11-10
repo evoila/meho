@@ -35196,6 +35196,12 @@
           "first_correct_action_sessions": {
             "type": "integer",
             "title": "First Correct Action Sessions"
+          },
+          "search": {
+            "$ref": "#/components/schemas/RetrievalNumbers"
+          },
+          "recall": {
+            "$ref": "#/components/schemas/RetrievalNumbers"
           }
         },
         "type": "object",
@@ -35210,10 +35216,12 @@
           "precision_judged",
           "precision_right",
           "first_correct_action_median_seconds",
-          "first_correct_action_sessions"
+          "first_correct_action_sessions",
+          "search",
+          "recall"
         ],
         "title": "LearningMetrics",
-        "description": "The four numbers that show whether stored lessons help.\n\nFor one tenant and window. Each ratio comes with its count and its\nbase, and is ``null`` when the base is 0. The median time is in\nseconds."
+        "description": "The four numbers that show whether stored lessons help.\n\nFor one tenant and window. Each ratio comes with its count and its\nbase, and is ``null`` when the base is 0. The median time is in\nseconds. The flat hit rate and precision count every retrieval;\n``search`` counts search hits only, and ``recall`` only the entries\nMEHO showed before an operation."
       },
       "LivenessResponse": {
         "properties": {
@@ -37971,6 +37979,47 @@
         ],
         "title": "RetrievalHit",
         "description": "One document in a ranked retrieval response.\n\nFrozen pydantic v2 model: the retrieve helper builds these once\nand the API surface (T5) returns them unchanged. The per-signal\nscores + ranks are carried for observability -- callers tuning\nembedding model choice want to see whether the top hit had\ncontributions from both signals or just one.\n\n``fused_score`` is the RRF score the documents are sorted by;\n``bm25_score`` and ``cosine_score`` are the raw per-signal\nscores (None if the document didn't appear in that signal's\ntop-:data:`CANDIDATE_LIMIT`). Likewise ``bm25_rank`` /\n``cosine_rank`` are the 1-based ranks (1 = best) the document\nheld in each signal's list, None when absent.\n\n``created_at`` / ``updated_at`` mirror the persisted\n:class:`~meho_backplane.db.models.Document` columns so downstream\nconsumers (memory ``search_memory``, kb search projections) can\nsurface real write-time / mtime values instead of substituting a\nplaceholder. The retriever already issues a full ``SELECT * FROM\ndocuments WHERE id IN (...)`` for each top-fused row, so carrying\nthe columns through is a free pass-through, not an extra query."
+      },
+      "RetrievalNumbers": {
+        "properties": {
+          "hit_rate_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Hit Rate Pct"
+          },
+          "hit_rate_retrievals": {
+            "type": "integer",
+            "title": "Hit Rate Retrievals"
+          },
+          "hit_rate_used": {
+            "type": "integer",
+            "title": "Hit Rate Used"
+          },
+          "precision_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Precision Pct"
+          },
+          "precision_judged": {
+            "type": "integer",
+            "title": "Precision Judged"
+          },
+          "precision_right": {
+            "type": "integer",
+            "title": "Precision Right"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hit_rate_pct",
+          "hit_rate_retrievals",
+          "hit_rate_used",
+          "precision_pct",
+          "precision_judged",
+          "precision_right"
+        ],
+        "title": "RetrievalNumbers",
+        "description": "The hit rate and the precision over the retrievals of one channel.\n\nEach ratio comes with its count and its base, and is ``null`` when the\nbase is 0."
       },
       "RetrieveRequest": {
         "properties": {

@@ -162,6 +162,56 @@ async def test_precision_leaves_out_wrong_and_stale_entries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hit_rate_and_precision_are_split_by_channel() -> None:
+    """Search hits and entries shown before an operation are counted apart."""
+    service = KbService()
+    right, _ = await service.create_entry(TENANT, "right", "a", {"status": "confirmed"})
+    disputed, _ = await service.create_entry(TENANT, "disputed", "b", {"status": "disputed"})
+    used_session, idle_session = uuid.uuid4(), uuid.uuid4()
+    # Search: one used and right, one not used and disputed now.
+    await seed_retrieval(tenant_id=TENANT, entry_id=right.id, session_id=used_session, at=_at(0))
+    await seed_retrieval(tenant_id=TENANT, entry_id=disputed.id, session_id=idle_session, at=_at(0))
+    # Shown before an operation: one used and right, one used and since deleted.
+    for entry_id in (right.id, uuid.uuid4()):
+        await seed_retrieval(
+            tenant_id=TENANT,
+            entry_id=entry_id,
+            session_id=used_session,
+            at=_at(1),
+            channel="recall",
+        )
+    await seed_dispatch(tenant_id=TENANT, session_id=used_session, at=_at(5))
+
+    numbers = await _numbers()
+
+    assert (numbers.hit_rate_used, numbers.hit_rate_retrievals) == (3, 4)
+    assert (numbers.precision_right, numbers.precision_judged) == (2, 3)
+    assert numbers.search.hit_rate_used == 1
+    assert numbers.search.hit_rate_retrievals == 2
+    assert numbers.search.hit_rate_pct == 50.0
+    assert (numbers.search.precision_right, numbers.search.precision_judged) == (1, 2)
+    assert numbers.search.precision_pct == 50.0
+    assert numbers.recall.hit_rate_used == 2
+    assert numbers.recall.hit_rate_retrievals == 2
+    assert numbers.recall.hit_rate_pct == 100.0
+    assert (numbers.recall.precision_right, numbers.recall.precision_judged) == (1, 1)
+    assert numbers.recall.precision_pct == 100.0
+
+
+@pytest.mark.asyncio
+async def test_a_channel_with_no_retrievals_reads_none() -> None:
+    session_id = uuid.uuid4()
+    await seed_retrieval(tenant_id=TENANT, entry_id=uuid.uuid4(), session_id=session_id, at=_at(0))
+
+    numbers = await _numbers()
+
+    assert numbers.search.hit_rate_retrievals == 1
+    assert numbers.recall.hit_rate_retrievals == 0
+    assert numbers.recall.hit_rate_pct is None
+    assert numbers.recall.precision_pct is None
+
+
+@pytest.mark.asyncio
 async def test_time_to_first_correct_action_on_a_known_system() -> None:
     earlier, newcomer, unknown = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     # Another session worked on TARGET before: TARGET is known.
@@ -203,3 +253,14 @@ async def test_the_reflex_report_carries_the_learning_numbers() -> None:
         )
     assert report.learning.hit_rate_used == 1
     assert report.model_dump(mode="json")["learning"]["hit_rate_pct"] == 100.0
+    learning = report.model_dump(mode="json")["learning"]
+    assert learning["search"]["hit_rate_pct"] == 100.0
+    assert learning["recall"]["hit_rate_pct"] is None
+    assert set(learning["recall"]) == {
+        "hit_rate_pct",
+        "hit_rate_retrievals",
+        "hit_rate_used",
+        "precision_pct",
+        "precision_judged",
+        "precision_right",
+    }

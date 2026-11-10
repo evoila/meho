@@ -65,11 +65,14 @@ misleading `0.0`. `ReflexReport.learning` is a `LearningMetrics`
 its count and base, `None` when the base is 0. They are not split by
 surface: each one is about agent sessions.
 
-### `LessonRetrieval` (`lesson_retrieval` table, migration `0145`)
+### `LessonRetrieval` (`lesson_retrieval` table, migrations `0145` and `0154`)
 
 One row for each knowledge or memory entry that `search_knowledge` (a
-search, or a read by `slug`) or `search_memory` gave to a session
-(`meho_backplane.lessons.retrievals`). It keeps the reading tenant, the
+search, or a read by `slug`) or `search_memory` gave to a session, or
+that MEHO showed in the `team_knowledge` block before an operation
+([recall.md](recall.md)) (`meho_backplane.lessons.retrievals`). The
+`channel` column says which: `search` or `recall`. Rows from before
+migration `0154` read `search`. It keeps the reading tenant, the
 store (`kb` or `memory`), the entry id and its owner tenant, the
 session id, the time, and the entry's header `status` and whether it had
 expired at that moment. A search records the exact entry it returned,
@@ -77,7 +80,7 @@ by slug and owner tenant, so a shared entry is not mixed up with the
 caller's own entry of the same slug. A read by `slug` records the entry
 the read returned: the caller's own entry first, else a shared one.
 A call without a session id is not recorded.
-Recording never fails the search. The entry id has no foreign key, so a
+Recording never fails the search or the operation. The entry id has no foreign key, so a
 row stays when its entry is deleted. The upkeep job deletes rows older
 than 180 days.
 
@@ -142,6 +145,13 @@ so this is the feedback MEHO already has.
    now. It was stale when it had expired, or had `status: replaced` or
    `retired`, at the search. A deleted entry cannot be judged and is left
    out (`precision_judged` is the base).
+
+   The hit rate and the precision come three times: over all
+   retrievals (the flat fields above), over search hits only
+   (`learning.search`), and over the entries shown before an operation
+   only (`learning.recall`). Each of the two has the same six fields:
+   `hit_rate_pct`, `hit_rate_retrievals`, `hit_rate_used`,
+   `precision_pct`, `precision_judged`, `precision_right`.
 7. **time to the first correct action on a known system**
    (`first_correct_action_median_seconds`) — for each session whose first
    successful operation in the window ran on a known target, the seconds
@@ -152,7 +162,8 @@ so this is the feedback MEHO already has.
    event or retrieval.
 
 `meho audit reflex` prints them in a `[learning]` block after the
-surfaces.
+surfaces. Under the hit rate and the precision it prints two more lines:
+"after a search" and "shown before an op".
 
 ## Control flow
 
@@ -193,8 +204,8 @@ a per-surface table (or `--json` for the raw envelope). Nil ratios read
   even when the operation had nothing to do with the entry. So the hit
   rate is an upper bound. Reads through the `meho://kb/...` and
   `meho://memory/...` resources are not recorded; only the two search
-  tools are. When recall before an operation ships, its entries can be
-  recorded with the same `record_*_retrievals` helpers.
+  tools and the `team_knowledge` block before an operation are. The
+  Memory notes of the start text are not recorded either.
 - **Precision needs a person or the upkeep job to mark entries.** It
   counts only what the header says: `disputed`, `replaced`, `retired`
   and the expiry. An entry nobody marked counts as right.

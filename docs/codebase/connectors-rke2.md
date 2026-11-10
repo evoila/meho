@@ -157,7 +157,7 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
 
 - **`Rke2SshConnector`** (`connector.py`) — `SshConnector` subclass. Class
   attributes: `product="rke2"`, `version="1.x"`, `impl_id="rke2-ssh"`.
-  Inherits the per-target asyncssh connection pool, `_auth_config`,
+  Inherits the asyncssh connection pool (one login per caller and target), `_auth_config`,
   `_run_command`, `_assert_reachable`, and `aclose()` from the adapter.
   Ships `fingerprint`, `probe`, `execute`, `about`, `posture_show`,
   `service_status`, `config_get`, the write and snapshot shims

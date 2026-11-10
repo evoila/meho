@@ -2965,6 +2965,56 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#meho-agent-budget" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho agent budget
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho agent budget">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-agent-budget-clear" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho agent budget clear
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-agent-budget-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho agent budget set
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-agent-budget-show" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho agent budget show
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-agent-create" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -10247,6 +10297,56 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#meho-agent-budget" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho agent budget
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho agent budget">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-agent-budget-clear" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho agent budget clear
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-agent-budget-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho agent budget set
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-agent-budget-show" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho agent budget show
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-agent-create" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -17414,6 +17514,40 @@
 <p>Manage agent definitions, runs and grants (list / show / create / edit / delete / run / grant)</p>
 <div class="highlight"><pre><span></span><code>meho agent
 </code></pre></div>
+<h3 id="meho-agent-budget"><code>meho agent budget</code><a class="headerlink" href="#meho-agent-budget" title="Permanent link">&para;</a></h3>
+<p>Set, show and clear the spend caps of an agent login (tenant_admin)</p>
+<div class="highlight"><pre><span></span><code>meho agent budget
+</code></pre></div>
+<h4 id="meho-agent-budget-clear"><code>meho agent budget clear</code><a class="headerlink" href="#meho-agent-budget-clear" title="Permanent link">&para;</a></h4>
+<p>Remove the spend cap of an agent login for one window (tenant_admin)</p>
+<div class="highlight"><pre><span></span><code>meho agent budget clear &lt;principal&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from <code>meho login</code>)</li>
+<li><code>--json</code> — emit raw AgentBudgetRead JSON</li>
+<li><code>--window</code> — daily | weekly | monthly (required)</li>
+</ul>
+<h4 id="meho-agent-budget-set"><code>meho agent budget set</code><a class="headerlink" href="#meho-agent-budget-set" title="Permanent link">&para;</a></h4>
+<p>Set the spend cap of an agent login for one window (tenant_admin)</p>
+<div class="highlight"><pre><span></span><code>meho agent budget set &lt;principal&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from <code>meho login</code>)</li>
+<li><code>--cost-limit</code> — cost cap for the window, in USD</li>
+<li><code>--json</code> — emit raw AgentBudgetRead JSON</li>
+<li><code>--request-limit</code> — cap on the number of runs in the window</li>
+<li><code>--token-limit</code> — token cap for the window</li>
+<li><code>--window</code> — daily | weekly | monthly (required)</li>
+</ul>
+<h4 id="meho-agent-budget-show"><code>meho agent budget show</code><a class="headerlink" href="#meho-agent-budget-show" title="Permanent link">&para;</a></h4>
+<p>Show the caps of an agent login and what is used so far (tenant_admin)</p>
+<div class="highlight"><pre><span></span><code>meho agent budget show &lt;principal&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from <code>meho login</code>)</li>
+<li><code>--json</code> — emit raw AgentBudgetListResponse JSON</li>
+<li><code>--window</code> — show one window only: daily | weekly | monthly</li>
+</ul>
 <h3 id="meho-agent-create"><code>meho agent create</code><a class="headerlink" href="#meho-agent-create" title="Permanent link">&para;</a></h3>
 <p>Create one agent definition (tenant_admin)</p>
 <div class="highlight"><pre><span></span><code>meho agent create &lt;name&gt; [flags]

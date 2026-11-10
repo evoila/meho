@@ -2619,6 +2619,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#step-8-set-a-spend-cap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 8 — Set a spend cap
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#what-can-go-wrong-here" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3358,6 +3369,17 @@
     <span class="md-ellipsis">
       
         Step 7 — Check what the agent did
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-8-set-a-spend-cap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 8 — Set a spend cap
       
     </span>
   </a>
@@ -4112,6 +4134,46 @@ it:</p>
 <p><code>meho audit query</code> needs the <code>operator</code> role. <code>meho audit replay</code> needs
 <code>tenant_admin</code>. The
 <a href="../audit-forensics/">audit forensics guide</a> explains all filters.</p>
+<h2 id="step-8-set-a-spend-cap">Step 8 — Set a spend cap<a class="headerlink" href="#step-8-set-a-spend-cap" title="Permanent link">&para;</a></h2>
+<p>MEHO checks a spend cap before every run. You can cap three things for
+one window (a day, a week, or a month):</p>
+<ul>
+<li>the tokens the agent uses;</li>
+<li>the cost in US dollars;</li>
+<li>the number of runs.</li>
+</ul>
+<p>A cap belongs to a login. A scheduled run, and a run as the agent, use
+the agent's login (<code>agent:&lt;name&gt;</code>). A run you start by hand uses your
+own login, so your own cap applies to it.</p>
+<p>Set a cap with <code>meho agent budget set</code>. You need the <code>tenant_admin</code>
+role, and you must be a person. An agent cannot change its own cap.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>budget<span class="w"> </span><span class="nb">set</span><span class="w"> </span>agent:pod-reader<span class="w"> </span>--window<span class="w"> </span>daily<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cost-limit<span class="w"> </span><span class="m">5</span><span class="w"> </span>--request-limit<span class="w"> </span><span class="m">200</span>
+</code></pre></div>
+<p>A limit you leave out stays as it was. A limit of <code>0</code> stops the agent
+from running at all. A cap stays in force in every later window until
+you change or remove it.</p>
+<p>Show the caps and what the agent has used so far in the current day,
+week, and month:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>budget<span class="w"> </span>show<span class="w"> </span>agent:pod-reader
+</code></pre></div>
+<p>Remove all limits of one window (what the agent has used is kept):</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>budget<span class="w"> </span>clear<span class="w"> </span>agent:pod-reader<span class="w"> </span>--window<span class="w"> </span>daily
+</code></pre></div>
+<p>When a run would start and a cap is already reached, MEHO refuses the
+run with <code>budget_exceeded</code>. The error says which window and which limit
+was reached. No run is created. The agent can run again when the next
+window starts, or when you raise or clear the cap.</p>
+<p>Two details:</p>
+<ul>
+<li>A run in progress counts as one request. So runs that start at the
+  same time cannot all pass a request cap.</li>
+<li>MEHO counts the tokens and the cost of a run after it ends. A run can
+  go over a token or cost cap while it runs. The next run is then
+  refused.</li>
+</ul>
+<p>Every change of a cap writes an audit row (<code>agent.budget.set</code> and
+<code>agent.budget.clear</code>).</p>
 <h2 id="what-can-go-wrong-here">What can go wrong here<a class="headerlink" href="#what-can-go-wrong-here" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4161,6 +4223,11 @@ it:</p>
 <td>The run fails with <code>turn budget exhausted</code></td>
 <td>The agent used all its turns.</td>
 <td>Raise <code>--turn-budget</code> with <code>meho agent edit</code>, or make the task smaller.</td>
+</tr>
+<tr>
+<td>A run is refused with <code>budget_exceeded</code></td>
+<td>The agent's login has reached a spend cap.</td>
+<td>Run <code>meho agent budget show agent:&lt;name&gt;</code>, then raise the cap with <code>meho agent budget set</code> or remove it with <code>meho agent budget clear</code>.</td>
 </tr>
 <tr>
 <td>The run fails right away and the error names a runbook</td>

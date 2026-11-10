@@ -126,7 +126,12 @@ separate from the op class, because an op id has only one class.
   call".
 - At call time the gate never lets a run approval clear a marked
   operation. The call waits for its own approval.
-- Standing grants and single approvals keep their rules.
+- For a service principal a marked operation waits at every risk level,
+  also `safe` (`_service_safety_gate_reason` in `_validate.py`). Without
+  this, a `safe` one such as `rke2.etcd-snapshot.save` would run at once
+  and never reach the run approval check.
+- Standing grants and single approvals keep their rules: a standing grant
+  can still cover a marked operation.
 
 Marked today: the writes of `linux-ssh` that run through its sudo helper
 (`linux.file.write`, `linux.service.control`, `linux.script.run`,

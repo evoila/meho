@@ -17,7 +17,8 @@ list. These tests check that:
 * a credential read counts as governed, so registration stores the raised
   level and a re-ingest never lowers a stricter stored row;
 * the floor also holds at every lookup (dispatch, the call contract,
-  search, the operation read, the connector review and the console page),
+  search, the operation read, the connector review, the console page and
+  the preview),
   for a typed and an ingested read stored as ``safe``, also after an
   override that turned approval off;
 * a read marked as one that returns no secret value stays ``safe``: the
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -44,6 +46,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, OperationPolicyOverride
 from meho_backplane.operations._contract import _find_descriptor
 from meho_backplane.operations._lookup import lookup_descriptor
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import _FusedEntry, _hydrate_hits
 from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.operations.ingest import (
@@ -401,6 +404,22 @@ async def _every_surface(
     ops = [*payload.ungrouped_ops, *(op for group in payload.groups for op in group.ops)]
     (reviewed,) = [op for op in ops if op.op_id == op_id]
     seen["connector review"] = (reviewed.safety_level, reviewed.requires_approval)
+
+    previewed = await preview_dispatch(
+        operator=operator,
+        connector_id=f"{impl_id}-{version}",
+        op_id=op_id,
+        target=SimpleNamespace(
+            id=uuid.uuid4(),
+            name=f"{product}-target",
+            product=product,
+            fingerprint=SimpleNamespace(version="1.0"),
+            preferred_impl_id=impl_id,
+        ),
+        params={"id": "1"},
+    )
+    assert "safety_level" in previewed, (previewed.get("error"), previewed.get("extras"))
+    seen["preview"] = (previewed["safety_level"], previewed["requires_approval"])
     return seen
 
 
@@ -418,7 +437,7 @@ async def test_unmarked_credential_read_is_caution_with_approval_on_every_surfac
     seen = await _every_surface(key, descriptor_id, _admin(uuid.uuid4()))
 
     assert seen == dict.fromkeys(seen, ("caution", True))
-    assert len(seen) == 6
+    assert len(seen) == 7
 
 
 @pytest.mark.asyncio

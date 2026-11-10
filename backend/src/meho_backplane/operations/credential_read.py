@@ -22,18 +22,28 @@ MEHO applies the floor in three places:
   (:func:`~meho_backplane.operations.op_policy.effective_policy_map`). So it
   holds for typed and ingested operations, for a row stored before the
   floor existed, and when an override turns approval off;
-* when a call asks for ``reveal_secret``, in the dispatcher, before the
-  policy gate. So ``vault.kv.read`` with the flag waits for approval.
+* when a call asks for ``reveal_secret``
+  (:func:`raise_descriptor_for_reveal`): in the dispatcher before the
+  policy gate, and in the preview before it reports the risk level and the
+  policy verdict. So ``vault.kv.read`` with the flag waits for approval,
+  and its preview says so.
 """
 
 from __future__ import annotations
 
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.op_classes import returns_no_secret_value
 
-__all__ = ["has_credential_read_floor", "raise_for_credential_read"]
+if TYPE_CHECKING:
+    from meho_backplane.db.models import EndpointDescriptor
+
+__all__ = [
+    "has_credential_read_floor",
+    "raise_descriptor_for_reveal",
+    "raise_for_credential_read",
+]
 
 FLOOR_SAFETY_LEVEL: Final[str] = "caution"
 
@@ -88,3 +98,23 @@ def raise_for_credential_read(
     if _SAFETY_RANK.get(safety_level, 0) < _SAFETY_RANK[FLOOR_SAFETY_LEVEL]:
         safety_level = FLOOR_SAFETY_LEVEL
     return safety_level, True
+
+
+def raise_descriptor_for_reveal(descriptor: EndpointDescriptor, *, reveal_secret: bool) -> None:
+    """Apply the floor of a ``reveal_secret`` call to *descriptor*, in place.
+
+    The lookup applied the floor for a call without the flag. A read that
+    shows its hidden values only on request (``vault.kv.read``) gets the
+    floor when the call asks for them. The dispatcher and the preview both
+    call this, so the preview reports the level and the wait that the real
+    call gets. *descriptor* is the detached row of one lookup, so the change
+    is never written back.
+    """
+    if not reveal_secret:
+        return
+    descriptor.safety_level, descriptor.requires_approval = raise_for_credential_read(
+        descriptor.op_id,
+        safety_level=descriptor.safety_level,
+        requires_approval=descriptor.requires_approval,
+        reveal_secret=True,
+    )

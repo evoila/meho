@@ -98,6 +98,7 @@ from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
 from meho_backplane.operations._preview_steps import preview_step_verdict
+from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -105,6 +106,7 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
@@ -809,6 +811,11 @@ async def preview_dispatch(
     if isinstance(resolved, dict):
         return resolved  # the op or the target did not resolve (see _resolve_descriptor)
     descriptor, connector_id = resolved
+    # ``reveal_secret`` is a dispatch control, not an op param: the
+    # dispatcher strips it before the schema check and the hash, and a call
+    # that asks for the hidden values of a secret read gets the floor.
+    params, reveal_secret = split_reveal_secret(params)
+    raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
     envelope = await _park_check_envelope(
         operator=operator,
         descriptor=descriptor,

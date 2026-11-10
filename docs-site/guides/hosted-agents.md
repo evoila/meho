@@ -132,7 +132,7 @@ gets, and which connectors it may use. You pass it with `--toolset`.
 
 | Field | Type | If you leave it out | If it is an empty list `[]` |
 |---|---|---|---|
-| `meta_tools` | list of tool names | The agent gets every tool marked "yes" in the "In the default set" column below. | The agent gets **no** tools from the table below. It still gets `invoke_agent` (see the note under the table). |
+| `meta_tools` | list of tool names | The agent gets every tool marked "yes" in the "In the default set" column below. | The agent gets **no** tools. |
 | `connectors` | list of connector ids, for example `k8s-1.x` | No connector limit. The agent may use any connector in your tenant. Grants and approvals still apply. | The agent may use **no** connector. Every `call_operation` is refused. |
 
 More rules:
@@ -187,10 +187,22 @@ Memory note for the whole team, even when a tenant admin starts the run.
 
 !!! note "One more tool: `invoke_agent`"
 
-    Every hosted run also gets the `invoke_agent` tool. With it, the
-    agent can start another agent definition in your tenant. The
-    toolset does not turn this tool on or off, so it is not in the table
-    above. Putting `invoke_agent` in `meta_tools` does nothing.
+    With the `invoke_agent` tool, an agent can start another agent
+    definition in your tenant as a child run. The agent gets this tool
+    only when its `meta_tools` list names `invoke_agent`. Leaving out
+    `meta_tools` does not add it.
+
+    A child run gets at most what both definitions allow:
+
+    - Tools: only the tools on both `meta_tools` lists. A child with no
+      `meta_tools` list gets the default tools that the parent's list names.
+    - Connectors: only the connectors on both `connectors` lists. A
+      missing list means no limit, so the other list counts.
+
+    So a parent that should hand work to a wider agent must itself name
+    the tools and connectors that the child needs. When an agent login
+    starts the run, the child must be a definition that login owns, the
+    same rule as for a direct run.
 
 ### Tools a hosted agent does not have
 

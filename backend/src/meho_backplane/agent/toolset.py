@@ -120,6 +120,16 @@ and the hosted-only ``read_context_resource``
 ``meta_tools`` list names them. An omitted ``meta_tools`` does not add them,
 so existing definitions keep their surface; such a tool is reported
 ``not_in_allow_list``.
+
+Child runs (``invoke_agent``)
+=============================
+
+``invoke_agent`` is not in the catalog: :mod:`meho_backplane.agent.run`
+adds it when the runtime can start child runs and the spec's
+``meta_tools`` list names it (:func:`toolset_admits_invoke_agent`). An
+omitted or empty list does not add it. A child run gets at most what both
+specs allow: :func:`narrow_child_toolset` limits the child's spec by the
+parent's, and a grandchild is limited by that result in turn.
 """
 
 from __future__ import annotations
@@ -166,6 +176,7 @@ from meho_backplane.operations.meta_tools import (
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "INVOKE_AGENT",
     "META_TOOL_NAMES",
     "OPT_IN_META_TOOL_NAMES",
     "RUNBOOK_EXECUTION_META_TOOL_NAMES",
@@ -173,8 +184,10 @@ __all__ = [
     "MetaToolSpec",
     "ToolsetResolution",
     "capability_versions",
+    "narrow_child_toolset",
     "resolve_agent_tools",
     "resolve_agent_toolset",
+    "toolset_admits_invoke_agent",
     "toolset_admits_runbook_execution",
 ]
 
@@ -428,6 +441,79 @@ def toolset_admits_runbook_execution(toolset: dict[str, Any] | None) -> bool:
     return bool(frozenset(requested) & RUNBOOK_EXECUTION_META_TOOL_NAMES)
 
 
+#: The name of the child-run tool. It is not in the catalog: the run adds it
+#: only when the spec's ``meta_tools`` list names it.
+INVOKE_AGENT = "invoke_agent"
+
+
+def toolset_admits_invoke_agent(toolset: dict[str, Any] | None) -> bool:
+    """Return ``True`` when *toolset*'s ``meta_tools`` list names ``invoke_agent``.
+
+    ``invoke_agent`` is opt-in like the tools in
+    :data:`OPT_IN_META_TOOL_NAMES`: no spec, an omitted list, or a list
+    without the name gives no child-run tool. A mis-shaped spec answers
+    ``False``; :func:`resolve_agent_tools` raises for it when the run builds
+    its agent.
+    """
+    if toolset is None:
+        return False
+    try:
+        requested = _extract_str_list(toolset, "meta_tools")
+    except ValueError:
+        return False
+    return requested is not None and INVOKE_AGENT in requested
+
+
+def _default_tool_names() -> frozenset[str]:
+    """The names an omitted ``meta_tools`` list stands for."""
+    return META_TOOL_NAMES - OPT_IN_META_TOOL_NAMES
+
+
+def _narrow_list(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
+    """Return the connector ids both lists allow; ``None`` means no limit."""
+    if parent is None:
+        return child
+    if child is None:
+        return list(parent)
+    return [item for item in child if item in parent]
+
+
+def narrow_child_toolset(
+    parent: dict[str, Any] | None,
+    child: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return *child*'s toolset spec limited to what *parent*'s spec allows.
+
+    A child run gets at most what both specs allow:
+
+    * ``meta_tools`` -- the tools on both lists. An omitted list stands for
+      the default set (every catalog tool except the opt-in ones), and
+      ``invoke_agent`` stays only when both lists name it.
+    * ``connectors`` -- the connector ids on both lists. An omitted list
+      means no limit, so the other list counts.
+
+    Other keys of *child* stay as they are. The result is a spec, so the
+    child always resolves through :func:`resolve_agent_toolset`.
+
+    Raises:
+        ValueError: when a ``meta_tools`` or ``connectors`` field is present
+            but not a list of strings.
+    """
+    parent_spec = parent or {}
+    child_spec = dict(child or {})
+    parent_tools = _extract_str_list(parent_spec, "meta_tools")
+    child_tools = _extract_str_list(child_spec, "meta_tools")
+    if parent_tools is not None or child_tools is not None:
+        allowed = frozenset(parent_tools) if parent_tools is not None else _default_tool_names()
+        wanted = child_tools if child_tools is not None else sorted(_default_tool_names())
+        child_spec["meta_tools"] = [name for name in wanted if name in allowed]
+    child_spec["connectors"] = _narrow_list(
+        _extract_str_list(parent_spec, "connectors"),
+        _extract_str_list(child_spec, "connectors"),
+    )
+    return child_spec
+
+
 def _extract_str_list(spec: dict[str, Any], key: str) -> list[str] | None:
     """Return *spec[key]* as a list of strings, or ``None`` if absent.
 
@@ -666,7 +752,9 @@ def resolve_agent_toolset(
     # log it once so a definition author sees the typo / version gap.
     missing: tuple[str, ...] = ()
     if requested_names is not None:
-        missing = tuple(name for name in requested_names if name not in META_TOOL_NAMES)
+        missing = tuple(
+            name for name in requested_names if name not in META_TOOL_NAMES and name != INVOKE_AGENT
+        )
         for name in missing:
             _log.warning(
                 "agent_toolset_unknown_meta_tool",

@@ -91,6 +91,11 @@ def stub_embedding_service() -> AsyncMock:
     return service
 
 
+#: A parent that may start child runs. A child gets only the tools both
+#: lists allow, so the parent also names the tools its child uses.
+_PARENT_TOOLSET = {
+    "meta_tools": ["invoke_agent", "list_operation_groups", "search_operations", "call_operation"]
+}
 _GROUPS = ToolCallPart("list_operation_groups", {"connector_id": "vault-1.x"})
 _CALL = ToolCallPart(
     "call_operation",
@@ -287,7 +292,7 @@ async def test_calls_to_unknown_tools_are_audited_and_fail_the_run() -> None:
 async def test_child_run_rows_carry_the_child_run_id(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    await _seed_definition(name="parent")
+    await _seed_definition(name="parent", toolset=_PARENT_TOOLSET)
     await _seed_definition(name="child", system_prompt="CHILD: you read secrets.")
     await _seed_echo_op(stub_embedding_service)
 
@@ -335,7 +340,7 @@ async def test_child_error_rows_do_not_replace_the_parent_row_after_cutover(
     monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
     monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true")
     get_settings.cache_clear()
-    await _seed_definition(name="parent")
+    await _seed_definition(name="parent", toolset=_PARENT_TOOLSET)
     await _seed_definition(name="child", system_prompt="CHILD: you read secrets.")
 
     invoker = _composing_invoker(_parent_invokes_child(child_step))

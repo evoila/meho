@@ -1894,10 +1894,22 @@ async def _resolve_child_definition(
     structured :class:`~pydantic_ai.ModelRetry`. Mirrors
     :meth:`AgentInvoker._load_definition` but returns ``None`` instead of
     raising, per the resolver protocol.
+
+    The owner rule is the same as for a direct run: an agent login resolves
+    only the definitions whose ``identity_ref`` is its own client id. A
+    person resolves any enabled definition of the tenant.
     """
     service = AgentDefinitionService()
     entry = await service.get(operator.tenant_id, agent_name)
     if entry is None or not entry.enabled:
+        return None
+    if operator.principal_kind is PrincipalKind.AGENT and entry.identity_ref != operator.client_id:
+        _log.info(
+            "agent_invoke_child_not_owned",
+            agent=agent_name,
+            client_id=operator.client_id,
+            tenant_id=str(operator.tenant_id),
+        )
         return None
     return AgentInvoker._to_agent_definition(entry)
 

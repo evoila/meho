@@ -252,6 +252,18 @@ claim for audit parent-linkage (#3446), is never matched against this table).
    | `destructive` | `needs-approval` (#3980) |
    | unknown | `deny` (fail-closed) |
 
+   The switch `AGENT_GRANT_REQUIRED` (#6189) changes this step for an
+   agent login. Other logins never reach this table.
+
+   | `AGENT_GRANT_REQUIRED` | No matching row |
+   |---|---|
+   | `off` (default) | the table above, as before |
+   | `observe` | the table above, and MEHO logs `agent_no_grant_would_deny` (agent, op id, target, risk level) for each call that `on` would refuse |
+   | `on` | `deny` on every risk level, also `safe`. The reason starts with `agent_no_grant:`, names the agent and the op, and says how an admin adds a grant. `result_denied` returns `error_code="agent_no_grant"`, and the audit row of the refusal has `reason_code="agent_no_grant"`. Steps 4 and 5 are skipped: nothing can loosen a `deny`. |
+
+   A matching row works as before, also with the switch on. Any other
+   value of the switch stops MEHO at start.
+
 4. **Apply safety-level ceiling.** A row's verdict can only tighten to the
    op's ceiling, never loosen beyond it:
 

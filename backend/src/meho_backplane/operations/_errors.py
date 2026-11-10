@@ -47,7 +47,12 @@ from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
-from meho_backplane.operations.deny_reasons import READ_SCOPE_DENIED, deny_reason_code
+from meho_backplane.operations.deny_reasons import (
+    AGENT_NO_GRANT,
+    READ_SCOPE_DENIED,
+    deny_reason_code,
+    is_agent_no_grant,
+)
 from meho_backplane.operations.uncertain_outcome import (
     UNCERTAIN_ADVICE,
     UNCERTAIN_OUTCOME,
@@ -717,7 +722,9 @@ def result_denied(
     source and any ceilings that were applied so an agent can diagnose
     the refusal without human intervention. ``error_code`` is ``denied``,
     or :data:`READ_SCOPE_DENIED_CODE` when the reason starts with that
-    code (the gate's stable marker for a read-scope refusal).
+    code (the gate's stable marker for a read-scope refusal), or
+    ``agent_no_grant`` when an agent has no grant and the
+    ``AGENT_GRANT_REQUIRED`` switch is on (#6189).
 
     ``reason_code`` says which rule refused the call
     (:mod:`~meho_backplane.operations.deny_reasons`). When the caller does
@@ -728,6 +735,8 @@ def result_denied(
     error_code = "denied"
     if reason.startswith(f"{READ_SCOPE_DENIED_CODE}:"):
         error_code = READ_SCOPE_DENIED_CODE
+    elif is_agent_no_grant(reason):
+        error_code = AGENT_NO_GRANT
     return OperationResult(
         status="denied",
         op_id=op_id,

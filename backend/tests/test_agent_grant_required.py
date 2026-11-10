@@ -1,0 +1,452 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""The switch ``AGENT_GRANT_REQUIRED``: no grant, no rights for agent logins (#6189).
+
+* ``off`` (default): an agent with no matching grant gets the risk-level
+  default, as before.
+* ``observe``: the same verdict, plus one ``agent_no_grant_would_deny``
+  log line for each call that ``on`` would refuse.
+* ``on``: ``deny`` on every risk level, with the code ``agent_no_grant``,
+  on every path that reads agent grants: the dispatcher, the preview, a
+  direct hosted-agent run and the docs tools' target check.
+* A matching row works as before. People and service accounts are not
+  touched.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+from sqlalchemy import select
+from structlog.testing import capture_logs
+
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.permissions import resolve_verdict
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AgentPermission, AuditLog, PermissionVerdict, Tenant
+from meho_backplane.docs_search.target_scope import TargetDeniedError, _check_target_access
+from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._errors import result_denied
+from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations.deny_reasons import (
+    AGENT_GRANT_DENIED,
+    AGENT_NO_GRANT,
+    deny_reason_code,
+)
+from meho_backplane.settings import get_settings
+from tests.test_agent_invocation import _make_operator as _make_person_for_run
+from tests.test_agent_invocation import _seed_definition, _seed_echo_op
+from tests.test_agent_refusal_audit_reason import _refusal, _run_call
+from tests.test_operations_dispatcher import (
+    _FakeTarget,
+    _module_handler_returning_dict,
+    _NoOpVaultConnector,
+)
+
+_TENANT = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
+_AGENT = "agent:grant-test"
+_AGENT_SUB = "99999999-9999-9999-9999-999999999999"
+_LEVELS = ("safe", "caution", "dangerous", "destructive")
+_DEFAULT = {
+    "safe": PermissionVerdict.AUTO_EXECUTE,
+    "caution": PermissionVerdict.NEEDS_APPROVAL,
+    "dangerous": PermissionVerdict.NEEDS_APPROVAL,
+    "destructive": PermissionVerdict.NEEDS_APPROVAL,
+}
+
+
+@pytest.fixture(autouse=True)
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.delenv("AGENT_GRANT_REQUIRED", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_state() -> Iterator[None]:
+    clear_registry()
+    reset_dispatcher_caches()
+    yield
+    clear_registry()
+    reset_dispatcher_caches()
+
+
+@pytest.fixture
+def stub_embedding_service() -> AsyncMock:
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+    return service
+
+
+def _switch(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    monkeypatch.setenv("AGENT_GRANT_REQUIRED", mode)
+    get_settings.cache_clear()
+
+
+def _operator(
+    kind: PrincipalKind = PrincipalKind.AGENT, role: TenantRole = TenantRole.OPERATOR
+) -> Operator:
+    agent = kind is PrincipalKind.AGENT
+    return Operator(
+        sub=_AGENT_SUB if agent else "person-1",
+        name="Grant Test",
+        email=None,
+        raw_jwt="<test-jwt>",
+        tenant_id=_TENANT,
+        tenant_role=role,
+        principal_kind=kind,
+        client_id=_AGENT if agent else None,
+    )
+
+
+async def _grant(op_pattern: str, verdict: str, target_scope: str | None = None) -> None:
+    async with get_sessionmaker()() as session:
+        if await session.get(Tenant, _TENANT) is None:
+            session.add(Tenant(id=_TENANT, slug="t-grant", name="Tenant grant"))
+        session.add(
+            AgentPermission(
+                tenant_id=_TENANT,
+                principal_sub=_AGENT,
+                op_pattern=op_pattern,
+                verdict=verdict,
+                target_scope=target_scope,
+                created_by_sub="admin",
+            )
+        )
+        await session.commit()
+
+
+async def _resolve(
+    safety_level: str,
+    *,
+    operator: Operator | None = None,
+    op_id: str = "vault.kv.read",
+    target_id: Any = None,
+) -> tuple[PermissionVerdict, str]:
+    async with get_sessionmaker()() as session:
+        return await resolve_verdict(
+            session=session,
+            operator=operator or _operator(),
+            op_id=op_id,
+            safety_level=safety_level,
+            target_id=target_id,
+        )
+
+
+# --- Settings -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("raw", "mode"), [(None, "off"), ("", "off"), (" ON ", "on")])
+def test_switch_values(monkeypatch: pytest.MonkeyPatch, raw: str | None, mode: str) -> None:
+    if raw is not None:
+        _switch(monkeypatch, raw)
+    assert get_settings().agent_grant_required == mode
+
+
+def test_unknown_switch_value_stops_the_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    _switch(monkeypatch, "strict")
+    with pytest.raises(ValueError, match="AGENT_GRANT_REQUIRED must be one of"):
+        get_settings()
+
+
+# --- Resolver: three states x four risk levels, no matching row ------------------
+
+
+@pytest.mark.parametrize("level", _LEVELS)
+@pytest.mark.parametrize("mode", ["off", "observe"])
+async def test_no_grant_keeps_the_default_when_off_or_observe(
+    monkeypatch: pytest.MonkeyPatch, mode: str, level: str
+) -> None:
+    _switch(monkeypatch, mode)
+    with capture_logs() as logs:
+        verdict, reason = await _resolve(level)
+    assert verdict is _DEFAULT[level]
+    assert "safety_level default" in reason
+    would_deny = [e for e in logs if e["event"] == "agent_no_grant_would_deny"]
+    if mode == "off":
+        assert would_deny == []
+    else:
+        assert would_deny == [
+            {
+                "event": "agent_no_grant_would_deny",
+                "log_level": "info",
+                "agent": _AGENT,
+                "tenant_id": str(_TENANT),
+                "op_id": "vault.kv.read",
+                "target_id": None,
+                "safety_level": level,
+            }
+        ]
+
+
+@pytest.mark.parametrize("level", [*_LEVELS, "unknown-level"])
+async def test_no_grant_is_denied_on_every_level_when_on(
+    monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    _switch(monkeypatch, "on")
+    verdict, reason = await _resolve(level)
+    assert verdict is PermissionVerdict.DENY
+    assert reason.startswith("agent_no_grant: ")
+    assert _AGENT in reason
+    assert "'vault.kv.read'" in reason
+    assert f"meho agent grant create --principal {_AGENT}" in reason
+    assert "console under Agents" in reason
+
+
+@pytest.mark.parametrize("level", _LEVELS)
+async def test_matching_row_works_as_before_when_on(
+    monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    _switch(monkeypatch, "on")
+    await _grant("*", "auto-execute")
+    with capture_logs() as logs:
+        verdict, reason = await _resolve(level)
+    # The risk-level ceiling still applies: only ``safe`` runs at once.
+    assert verdict is _DEFAULT[level]
+    assert "permission row" in reason
+    assert not [e for e in logs if e["event"] == "agent_no_grant_would_deny"]
+
+
+async def test_deny_row_stays_a_grant_refusal_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    _switch(monkeypatch, "on")
+    await _grant("vault.kv.*", "deny")
+    verdict, reason = await _resolve("safe")
+    assert verdict is PermissionVerdict.DENY
+    assert deny_reason_code(reason) == AGENT_GRANT_DENIED
+
+
+async def test_role_ceiling_still_applies_to_a_matching_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, "on")
+    await _grant("*", "auto-execute")
+    verdict, reason = await _resolve("safe", operator=_operator(role=TenantRole.READ_ONLY))
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL
+    assert "role ceiling" in reason
+
+
+async def test_row_for_another_op_or_target_does_not_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, "on")
+    await _grant("nsx.*", "auto-execute")
+    await _grant("vault.kv.*", "auto-execute", target_scope=str(uuid.uuid4()))
+    verdict, reason = await _resolve("safe", target_id=uuid.uuid4())
+    assert verdict is PermissionVerdict.DENY
+    assert reason.startswith("agent_no_grant: ")
+
+
+@pytest.mark.parametrize("kind", [PrincipalKind.USER, PrincipalKind.SERVICE])
+async def test_other_logins_are_not_touched(
+    monkeypatch: pytest.MonkeyPatch, kind: PrincipalKind
+) -> None:
+    _switch(monkeypatch, "on")
+    verdict, _ = await _resolve("safe", operator=_operator(kind))
+    assert verdict is PermissionVerdict.AUTO_EXECUTE
+
+
+# --- Codes ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "agent_no_grant: agent agent:a has no grant",
+        "agent agent:a acting for person-1: agent_no_grant: agent agent:a has no grant",
+    ],
+)
+def test_refusal_maps_to_agent_no_grant(reason: str) -> None:
+    assert deny_reason_code(reason) == AGENT_NO_GRANT
+    result = result_denied("vault.kv.read", reason, 1.0)
+    assert result.extras["error_code"] == AGENT_NO_GRANT
+    assert result.extras["reason_code"] == AGENT_NO_GRANT
+
+
+def test_other_refusals_keep_their_codes() -> None:
+    result = result_denied("vault.kv.read", "verdict=deny; source=permission row", 1.0)
+    assert result.extras["error_code"] == "denied"
+    assert result.extras["reason_code"] == AGENT_GRANT_DENIED
+
+
+# --- Dispatcher and preview -----------------------------------------------------
+
+
+async def _register_op(
+    stub: AsyncMock, op_id: str = "vault.kv.get", *, requires_approval: bool = False
+) -> None:
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=op_id,
+        handler=_module_handler_returning_dict,
+        summary="Read op.",
+        description="A safe read.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=requires_approval,
+        when_to_use=None,
+        embedding_service=stub,
+    )
+
+
+async def _dispatch(operator: Operator, op_id: str = "vault.kv.get") -> Any:
+    return await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+
+async def _audit_rows(op_id: str) -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        result = await session.execute(select(AuditLog).where(AuditLog.path == op_id))
+        return list(result.scalars())
+
+
+async def test_dispatch_refuses_an_agent_with_no_grant(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    _switch(monkeypatch, "on")
+    await _register_op(stub_embedding_service)
+
+    result = await _dispatch(_operator())
+
+    assert result.status == "denied"
+    assert result.extras["error_code"] == AGENT_NO_GRANT
+    assert result.extras["reason_code"] == AGENT_NO_GRANT
+    (row,) = await _audit_rows("vault.kv.get")
+    assert row.policy_decision == "deny"
+    assert row.payload["error"]["reason_code"] == AGENT_NO_GRANT
+
+
+@pytest.mark.parametrize("kind", [PrincipalKind.USER, PrincipalKind.SERVICE])
+async def test_dispatch_lets_people_and_services_run_as_before(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock, kind: PrincipalKind
+) -> None:
+    _switch(monkeypatch, "on")
+    await _register_op(stub_embedding_service)
+
+    result = await _dispatch(_operator(kind))
+
+    assert result.status == "ok", result.error
+
+
+async def test_requires_approval_does_not_turn_the_refusal_into_a_wait(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    _switch(monkeypatch, "on")
+    await _register_op(stub_embedding_service, "vault.kv.flagged", requires_approval=True)
+
+    result = await _dispatch(_operator(), "vault.kv.flagged")
+
+    assert result.status == "denied"
+    assert result.extras["error_code"] == AGENT_NO_GRANT
+
+
+async def test_preview_says_deny_with_the_same_code(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    _switch(monkeypatch, "on")
+    await _register_op(stub_embedding_service)
+
+    envelope = await preview_dispatch(
+        operator=_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.get",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert envelope["policy_verdict"] == "deny", envelope
+    assert envelope["policy_reason"].startswith("agent_no_grant: ")
+
+
+# --- Direct hosted-agent run ----------------------------------------------------
+
+
+async def test_direct_run_is_refused_when_the_agent_has_no_grant(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    """The person may run the op; the run's agent has no grant, so the call is refused."""
+    _switch(monkeypatch, "on")
+    await _seed_definition()
+    await _seed_echo_op(stub_embedding_service)
+
+    row = _refusal(await _run_call())
+
+    assert row.policy_decision == "deny"
+    assert row.actor_sub == "agent:reader"
+    assert row.payload["error"]["reason_code"] == AGENT_NO_GRANT
+    assert row.payload["error"]["error_code"] == AGENT_NO_GRANT
+    assert "agent_no_grant: agent agent:reader" in row.payload["error"]["reason"]
+
+
+async def test_direct_run_person_alone_runs_the_op(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    """Control: the same person calling the op outside a run is not refused."""
+    _switch(monkeypatch, "on")
+    await _seed_echo_op(stub_embedding_service)
+
+    result = await dispatch(
+        operator=_make_person_for_run(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+
+
+# --- Docs tools' target check ---------------------------------------------------
+
+
+async def test_docs_target_check_refuses_an_agent_with_no_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, "on")
+    row: Any = SimpleNamespace(id=uuid.uuid4(), name="docs-target")
+
+    async with get_sessionmaker()() as session:
+        with pytest.raises(TargetDeniedError) as caught:
+            await _check_target_access(
+                session, _operator(), row, op_id="meho.docs.search", query="docs-target"
+            )
+        # A person is not checked against agent grants.
+        await _check_target_access(
+            session,
+            _operator(PrincipalKind.USER),
+            row,
+            op_id="meho.docs.search",
+            query="docs-target",
+        )
+
+    detail: Any = caught.value.detail
+    assert detail["reason"].startswith("agent_no_grant: ")
+    assert deny_reason_code(detail["reason"]) == AGENT_NO_GRANT
+
+
+async def test_docs_target_check_allows_with_the_switch_off() -> None:
+    row: Any = SimpleNamespace(id=uuid.uuid4(), name="docs-target")
+    async with get_sessionmaker()() as session:
+        await _check_target_access(
+            session, _operator(), row, op_id="meho.docs.search", query="docs-target"
+        )

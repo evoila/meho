@@ -467,7 +467,8 @@ async def test_poll_child_of_agent_own_run_shows_output_to_a_person(
     parent_trigger: AgentRunTrigger, depth: int
 ) -> None:
     """A child run under a scheduled or event run shows its output to people in the tenant."""
-    agent = _make_operator(sub="svc-agent", principal_kind=PrincipalKind.AGENT)
+    # The agent login owns the child definition (its identity_ref is "agent:child").
+    agent = _make_operator(sub="agent:child", principal_kind=PrincipalKind.AGENT)
     child_run_id = await _record_parent_and_child(
         parent_trigger=parent_trigger, starter=agent, depth=depth
     )

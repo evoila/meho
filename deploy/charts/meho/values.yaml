@@ -1578,6 +1578,16 @@ coreKeycloak:
     caBundle:
       configMapName: ""
       key: ca.crt
+  # -- A private CA that Keycloak trusts for every outgoing TLS call, also
+  # with the company login off. Use it when an AD or LDAP directory (LDAPS
+  # or StartTLS) has a certificate from your own CA. A ConfigMap in the
+  # release namespace with the CA certificate (PEM), for example
+  # `kubectl create configmap directory-ca --from-file=ca.crt=<CA file>`.
+  # Empty `configMapName` = off. With `companyLogin.caBundle` too, Keycloak
+  # trusts both. Keycloak keeps trusting the usual public CAs.
+  trustedCaBundle:
+    configMapName: ""
+    key: ca.crt
 
 coreVault:
   # -- Built-in OpenBao, the password safe (ADR 0008). When on, the install

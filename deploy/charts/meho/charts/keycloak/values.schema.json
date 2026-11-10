@@ -375,6 +375,20 @@
         }
       }
     },
+    "trustedCaBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A private CA (PEM in a ConfigMap) that Keycloak trusts for every outgoing TLS call, for example an LDAPS directory. Empty `configMapName` = off.",
+      "properties": {
+        "configMapName": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "ingress": {
       "type": "object",
       "additionalProperties": false,

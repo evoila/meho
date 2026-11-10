@@ -1067,6 +1067,15 @@
             },
             "required": ["discoveryUrl", "clientId", "clientSecret"]
           }
+        },
+        "trustedCaBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "A private CA that Keycloak trusts for every outgoing TLS call, also with the company login off: for example an AD or LDAP directory over LDAPS. A ConfigMap in the release namespace with the CA certificate (PEM). Empty `configMapName` = off. With `companyLogin.caBundle` too, `KC_TRUSTSTORE_PATHS` lists both files.",
+          "properties": {
+            "configMapName": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
         }
       }
     },

@@ -135,6 +135,7 @@ from pydantic import (
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from meho_backplane.agent.in_flight import has_in_flight_run
 from meho_backplane.agent.invocation import (
     AgentDisabledError,
     AgentInvocationError,
@@ -164,7 +165,6 @@ from meho_backplane.checks.rollup import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentDefinition,
-    AgentRun,
     AgentRunStatus,
     CheckDashboard,
     CheckDashboardSensor,
@@ -218,15 +218,6 @@ _INVESTIGATOR_SUB = "__checks_investigator__"
 #: outlives the sync timeout (converts to async). A dumb constant, same posture
 #: as the runner's fixed bounds.
 _POLL_INTERVAL_SECONDS = 5.0
-
-#: The three non-terminal ``agent_run`` statuses. An in-flight run in any of
-#: these states for the same ``(tenant_id, work_ref)`` suppresses a duplicate
-#: fire (an ``awaiting_approval`` run is still in flight -- do not re-fire it).
-_NON_TERMINAL_STATUSES: tuple[AgentRunStatus, ...] = (
-    AgentRunStatus.PENDING,
-    AgentRunStatus.RUNNING,
-    AgentRunStatus.AWAITING_APPROVAL,
-)
 
 #: The three terminal ``agent_run`` statuses the bounded poll waits for.
 _TERMINAL_STATUSES: frozenset[AgentRunStatus] = frozenset(
@@ -1225,7 +1216,7 @@ async def _investigate_group(
                 tenant_id=str(tenant_id),
             )
             return
-        if await _has_in_flight_run(tenant_id, work_ref):
+        if await has_in_flight_run(tenant_id, work_ref):
             _log().info(
                 "checks_investigation_skipped_in_flight",
                 work_ref=work_ref,
@@ -1414,27 +1405,6 @@ def _is_falsey(value: object) -> bool:
     if value is False:
         return True
     return isinstance(value, str) and value.strip().lower() == "false"
-
-
-async def _has_in_flight_run(tenant_id: uuid.UUID, work_ref: str) -> bool:
-    """Return ``True`` iff a non-terminal run already covers this work_ref.
-
-    Rides ``agent_run_tenant_work_ref_idx`` on ``(tenant_id, work_ref)`` so a
-    second transition for the same correlated group does not duplicate an
-    in-flight investigation.
-    """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        stmt = (
-            select(AgentRun.id)
-            .where(
-                AgentRun.tenant_id == tenant_id,
-                AgentRun.work_ref == work_ref,
-                AgentRun.status.in_([s.value for s in _NON_TERMINAL_STATUSES]),
-            )
-            .limit(1)
-        )
-        return (await session.execute(stmt)).first() is not None
 
 
 async def _load_investigator_definition(tenant_id: uuid.UUID, name: str) -> tuple[str, str] | None:

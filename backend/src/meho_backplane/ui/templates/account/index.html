@@ -141,13 +141,48 @@
     </div>
   </div>
 
+  {# ---------- Install hint (installable app) ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm" data-field="install-hint">
+    <div class="card-body space-y-3">
+      <h2 class="card-title text-base">Install MEHO as an app</h2>
+      <p class="text-xs opacity-60">
+        Install MEHO on your phone or laptop. It opens in its own window,
+        on the approvals page. You still need the VPN to load pages.
+      </p>
+      <dl class="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+        <div>
+          <dt class="meho-overline mb-1">iPhone and iPad (Safari)</dt>
+          <dd>Tap Share, then Add to Home Screen.</dd>
+        </div>
+        <div>
+          <dt class="meho-overline mb-1">Android (Chrome)</dt>
+          <dd>Open the menu (three dots), then tap Install app or Add to Home screen.</dd>
+        </div>
+        <div>
+          <dt class="meho-overline mb-1">Laptop (Chrome or Edge)</dt>
+          <dd>Click the install icon at the right end of the address bar, then Install.</dd>
+        </div>
+        <div>
+          <dt class="meho-overline mb-1">Mac (Safari)</dt>
+          <dd>Choose File, then Add to Dock.</dd>
+        </div>
+      </dl>
+    </div>
+  </div>
+
+  {# ---------- Approval notifications (only with WEB_PUSH_ENABLED) ---------- #}
+  {% if push_public_key %}
+  {% include "account/_push.html" %}
+  {% endif %}
+
   {# ---------- Revoke-others confirm modal ---------- #}
   <dialog id="account-revoke-others-modal" class="modal">
     <div class="modal-box">
       <h3 class="text-lg font-semibold">Revoke all other sessions?</h3>
       <p class="py-2 text-sm opacity-80">
-        Every other device signed in to your account will be signed out on
-        its next request. The device you are using now stays signed in.
+        Every other device signed in to your account, in any tenant, will be
+        signed out on its next request. The device you are using now stays
+        signed in.
       </p>
       <div class="modal-action">
         <form method="dialog">
@@ -171,4 +206,10 @@
     </form>
   </dialog>
 </section>
+{% endblock %}
+
+{% block scripts %}
+{% if push_public_key %}
+<script src="/ui/static/src/app/push-subscribe.js" defer></script>
+{% endif %}
 {% endblock %}

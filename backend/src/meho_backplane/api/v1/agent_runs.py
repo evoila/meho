@@ -186,6 +186,31 @@ class AgentRunStatusResponse(BaseModel):
             "Null when the agent is itself the subject."
         ),
     )
+    input_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Input tokens the model read and did not take from its prompt cache. "
+            "Null until the run has succeeded."
+        ),
+    )
+    output_tokens: int | None = Field(
+        default=None,
+        description="Tokens the model wrote. Null until the run has succeeded.",
+    )
+    cache_read_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Input tokens read from the model's prompt cache; 0 when the provider "
+            "reports no cache. Null until the run has succeeded."
+        ),
+    )
+    cache_write_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Input tokens written to the model's prompt cache; 0 when the provider "
+            "reports no cache. Null until the run has succeeded."
+        ),
+    )
 
 
 class AgentRunSummaryResponse(BaseModel):
@@ -458,6 +483,10 @@ async def get_run_status(
         agent_name=view.agent_name,
         identity_sub=view.identity_sub,
         identity_act=view.identity_act,
+        input_tokens=view.input_tokens,
+        output_tokens=view.output_tokens,
+        cache_read_tokens=view.cache_read_tokens,
+        cache_write_tokens=view.cache_write_tokens,
     )
 
 

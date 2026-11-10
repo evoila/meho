@@ -21,6 +21,13 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHART_DIR = _REPO_ROOT / "deploy" / "charts" / "meho"
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",

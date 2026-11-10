@@ -1,8 +1,9 @@
 # Satellite write path is a scoped hybrid, not a per-customer install (decision)
 
 **Status:** decided — operator determination of record; governs the satellite write path
+**Shipped:** in 0.32.0.
 **Date:** 2026-08-29
-**Goal:** governed remote mutations — reachability prerequisite of the management-plane-lockdown Goal (evoila-bosnia/meho-internal#234)
+**Goal:** governed remote mutations — reachability prerequisite of the management-plane-lockdown Goal
 **Initiative:** [#2901](https://github.com/evoila/meho/issues/2901) — satellite write path, security-review-first design
 **Composes with:** [#3183](https://github.com/evoila/meho/issues/3183) (delete-shaped operations — mandatory-human-approval + preview-hash + blast-radius + dedicated safety tier)
 **Design:** [docs/research/2901-satellite-write-path.md](../research/2901-satellite-write-path.md) (threat model T1–T8, the four mechanisms, `file:line` grounding)
@@ -40,7 +41,7 @@ sufficient alone; the security comes from the composition (design doc §3):
   duplicates the entire control plane (Postgres, policy, approvals, audit,
   Keycloak) per customer and contradicts "no hand-managed satellite inventory at
   fleet scale."
-- The management-plane-lockdown Goal (evoila-bosnia/meho-internal#234) names the
+- The management-plane-lockdown Goal names the
   **satellite write path** — not a per-customer install — as its keystone: its
   enforcement stages cannot deny operator-direct reach anywhere the central
   instance does not dial directly until governed remote mutations exist.
@@ -104,7 +105,7 @@ always knows a capability was granted and can detect a missing report.
 - `dangerous` / delete-shaped → **never minted to a satellite** in this rollout;
   stays central-or-break-glass per #3183.
 
-Stages (a domain moves one at a time, mirroring #234's ratchet): **Stage 0**
+Stages (a domain moves one at a time, mirroring the lockdown Goal's ratchet): **Stage 0**
 reads only (today) → **Stage 1** one idempotent reversible class, one environment,
 per-write human approval mandatory → **Stage 2** the enumerated class list,
 `AUTO_EXECUTE` for the idempotent subset only → **Stage 3** standing capability
@@ -136,8 +137,8 @@ Three sub-points are recorded here as recommendations, resolved on PR review:
 - **Delete-shaped remote writes are out.** Governed remote deletes, if ever
   needed, are a separate future decision built on #3183 — explicitly not this
   rollout.
-- Consumer scenarios in the meho-automation design doc
-  (evoila-bosnia/meho-internal#223) are updated to match under the implementation
+- Consumer scenarios in the automation add-on's design doc
+  are updated to match under the implementation
   Tasks, not here.
 
 ## Amendment (2026-08-31) — dispatch flight recorder cross-reference
@@ -152,8 +153,8 @@ today and grants no new capability.
 
 **Satellite-executed dispatches are not traced today.** The flight recorder's
 capture scope is opened exactly once, inside the central dispatcher's
-`_execute_and_audit` (`operations/dispatcher.py:706` `begin_dispatch_capture` /
-`:730` `end_dispatch_capture`), keyed on the central `audit_log.id`. A satellite
+`_execute_and_audit` (`operations/dispatcher.py`, `begin_dispatch_capture` /
+`end_dispatch_capture`), keyed on the central `audit_log.id`. A satellite
 runner does **not** go through that path: it executes a minted work item off-net
 through `runner/executor.py` (`execute_work_item` → `_invoke`), which — per that
 module's docstring — "reuses the chassis's DB-free handler-resolution primitives

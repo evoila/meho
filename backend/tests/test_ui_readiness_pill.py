@@ -307,28 +307,36 @@ async def test_snapshot_timeout_bounds_a_blocking_sync_probe() -> None:
     with ``ready=False`` and the synthetic ``timeout`` check, NOT block
     for the probe's full sleep.
 
-    This test FAILS on the pre-thread fix (the ``time.sleep`` blocks the
+    This test FAILS on the pre-thread fix (the blocking wait holds the
     loop for its full duration, so ``elapsed`` >> the bound) and PASSES
     once sync probes are off-loaded to a thread.
     """
 
+    # Set when the test ends, so the blocked probe thread stops then and
+    # does not keep running for 3 s after the test.
+    release_probe = threading.Event()
+
     def _slow_sync_probe() -> ProbeResult:
-        time.sleep(3)  # blocking I/O surrogate; >> the 0.2s bound below
+        # Blocks like I/O, far longer than the 0.2s bound below.
+        release_probe.wait(timeout=3)
         return ProbeResult(name="slow_sync", ok=True)
 
     register_probe("slow_sync", _slow_sync_probe)
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    snapshot = await readiness_snapshot(max_age_s=0, timeout_s=0.2)
-    elapsed = loop.time() - started
+    try:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        snapshot = await readiness_snapshot(max_age_s=0, timeout_s=0.2)
+        elapsed = loop.time() - started
 
-    assert snapshot["ready"] is False
-    assert snapshot["checks"] == [
-        {"name": "timeout", "ok": False, "detail": "readiness probe sweep exceeded 0.2s"}
-    ]
-    # Returned on the timeout bound, not after the sync probe's 3s sleep.
-    # The whole point: a blocking sync probe must not stall the loop.
-    assert elapsed < 1.0, f"blocking sync probe should bail at the bound, took {elapsed:.2f}s"
+        assert snapshot["ready"] is False
+        assert snapshot["checks"] == [
+            {"name": "timeout", "ok": False, "detail": "readiness probe sweep exceeded 0.2s"}
+        ]
+        # Returned on the timeout bound, not after the sync probe's 3s wait.
+        # The whole point: a blocking sync probe must not stall the loop.
+        assert elapsed < 1.0, f"blocking sync probe should bail at the bound, took {elapsed:.2f}s"
+    finally:
+        release_probe.set()
 
 
 async def test_snapshot_timeout_is_not_cached() -> None:
@@ -553,7 +561,7 @@ async def test_non_dashboard_pill_is_starting_when_sync_probe_blocks(
     test.
 
     Discriminator against the pre-thread fix: with the loop blocked by
-    the sync ``time.sleep``, ``wait_for`` never gets to fire, so the
+    the blocking sync probe, ``wait_for`` never gets to fire, so the
     probe runs to completion and reports ``ok=True`` -- the pill would
     render green **"ready"**. Post-fix the bound fires and the verdict is
     not-ready -- yellow **"starting"**. The wall-clock assertion adds the
@@ -564,8 +572,12 @@ async def test_non_dashboard_pill_is_starting_when_sync_probe_blocks(
 
     monkeypatch.setattr(ui_middleware, "_READINESS_TIMEOUT_S", 0.1)
 
+    # Set when the test ends, so the blocked probe thread stops then and
+    # does not keep running for 10 s after the test.
+    release_probe = threading.Event()
+
     def _blocking_sync_probe() -> ProbeResult:
-        time.sleep(10)  # >> the 0.1s bound; blocks the loop pre-fix
+        release_probe.wait(timeout=10)  # >> the 0.1s bound; blocks the loop pre-fix
         return ProbeResult(name="docs_backends", ok=True)
 
     register_probe("docs_backends", _blocking_sync_probe)
@@ -603,6 +615,7 @@ async def test_non_dashboard_pill_is_starting_when_sync_probe_blocks(
             response = await client.get("/ui/memory")
     finally:
         mock.stop()
+        release_probe.set()
     elapsed = loop.time() - started
 
     assert response.status_code == 200, response.text

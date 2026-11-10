@@ -620,6 +620,28 @@ func TestPrintQueryTableShowsPrincipalNameAlongsideSub(t *testing.T) {
 	}
 }
 
+// TestPrintQueryTableShowsActor — the PRINCIPAL column names the agent
+// that acted for the person (#5773).
+func TestPrintQueryTableShowsActor(t *testing.T) {
+	actor := "agent:reader"
+	var buf bytes.Buffer
+	printQueryTable(&buf, &api.AuditQueryResult{
+		Rows: []api.AuditEntry{
+			{
+				Ts:           mustTS(t, "2026-05-13T15:42:11Z"),
+				PrincipalSub: "alice-sub",
+				ActorSub:     &actor,
+				OpId:         "vault.kv.read",
+				OpClass:      "read",
+				ResultStatus: "denied",
+			},
+		},
+	})
+	if out := buf.String(); !strings.Contains(out, "alice-sub via agent:reader") {
+		t.Errorf("PRINCIPAL column did not show the actor: %s", out)
+	}
+}
+
 // mustTS parses s as RFC3339, failing the test on error. The
 // generated client's `Ts` field is `time.Time`; fixtures use the
 // helper so callers don't repeat the parse-or-fatal pattern.

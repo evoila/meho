@@ -47,6 +47,7 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import DecryptedSession
 from meho_backplane.ui.auth.tenant import (
     TENANT_PICKER_PATH,
@@ -182,7 +183,7 @@ async def _settle_single_tenant(decrypted: DecryptedSession, operator: Operator)
     )
     _log.info(
         "ui_tenant_single_choice_saved",
-        session_id=str(decrypted.id),
+        session_ref=session_ref(decrypted.id),
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
     )
@@ -288,7 +289,7 @@ async def _switch(request: Request, session_ctx: UISessionContext) -> Response:
             raise
         _log.info(
             "ui_tenant_switch_refused",
-            session_id=str(session_ctx.session_id),
+            session_ref=session_ref(session_ctx.session_id),
             operator_sub=session_ctx.operator_sub,
             reason=str(exc.detail).split(":", 1)[0],
         )
@@ -303,7 +304,7 @@ async def _switch(request: Request, session_ctx: UISessionContext) -> Response:
     _bind_switch_audit(operator, old_tenant=old_tenant)
     _log.info(
         "ui_tenant_switched",
-        session_id=str(session_ctx.session_id),
+        session_ref=session_ref(session_ctx.session_id),
         operator_sub=operator.sub,
         from_tenant_id=old_tenant,
         to_tenant_id=str(operator.tenant_id),

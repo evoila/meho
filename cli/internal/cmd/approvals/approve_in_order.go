@@ -84,6 +84,9 @@ type inOrderStep struct {
 	SafetyLevel string `json:"safety_level,omitempty"`
 	Outcome     string `json:"outcome"`
 	Detail      string `json:"detail,omitempty"`
+	// SelfApproval is the self-approval line when this run approved the
+	// person's own change (#3329), else empty.
+	SelfApproval string `json:"self_approval,omitempty"`
 }
 
 // inOrderResult is the --json output of an in-order run.
@@ -154,7 +157,7 @@ func runInOrder(cmd *cobra.Command, opts inOrderOpts) error {
 
 	res := inOrderResult{WorkRef: opts.WorkRef, Warnings: groupWarnings(items)}
 	for _, w := range res.Warnings {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", w)
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", output.SafeText(w))
 	}
 	r := &inOrderRunner{
 		cmd: cmd, client: client, opts: opts, in: bufio.NewReader(cmd.InOrStdin()),
@@ -192,10 +195,14 @@ func runInOrder(cmd *cobra.Command, opts inOrderOpts) error {
 		return nil
 	}
 	if stop.err != nil {
-		return routeRequestError(cmd, backplaneURL, stop.err, opts.JSONOut)
+		return routeApproveError(cmd, backplaneURL, stop.err, opts.JSONOut)
 	}
 	return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(stopMessage(res)), opts.JSONOut)
 }
+
+// uncertainStopAdvice ends a stop line for a step whose outcome MEHO does
+// not know (#5025). It never says "send it again".
+const uncertainStopAdvice = "MEHO does not know if the change happened. Do not run it again. Check the target first"
 
 type inOrderRunner struct {
 	cmd    *cobra.Command
@@ -219,6 +226,9 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 		}
 		if item.ResultState != nil && *item.ResultState == api.ApprovalResultStateStarted {
 			return &stepStop{detail: "approved earlier; " + fmt.Sprintf(stepNotEnded, step.ID)}
+		}
+		if item.ResultState != nil && *item.ResultState == api.ApprovalResultStateUncertain {
+			return &stepStop{detail: "approved earlier, but " + uncertainStopAdvice}
 		}
 		return &stepStop{detail: fmt.Sprintf(
 			"approved earlier, but its run did not end OK (run: %s). An approval is used once, "+
@@ -247,6 +257,7 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 	if err != nil {
 		return &stepStop{detail: "the approval was refused: " + err.Error(), err: err}
 	}
+	step.SelfApproval = selfApprovalLine(resp.JSON200)
 	stop, claimedElsewhere := checkDispatch(resp, step)
 	if claimedElsewhere {
 		return r.waitForStoredResult(ctx, item.Id, step)
@@ -281,6 +292,11 @@ func checkDispatch(resp *api.DecideApprovalRequestApiV1ApprovalsRequestIdDecideP
 	if resp.JSON200.DispatchError != nil && *resp.JSON200.DispatchError != "" {
 		detail += ": " + *resp.JSON200.DispatchError
 	}
+	// MEHO does not know if the change happened (#5025): the advice is to
+	// check the target, never to send it again.
+	if resp.JSON200.DispatchExecutionOutcome != nil && *resp.JSON200.DispatchExecutionOutcome == uncertainOutcome {
+		return &stepStop{detail: detail + ". " + uncertainStopAdvice}, false
+	}
 	return &stepStop{detail: detail + ". An approval is used once, so this step cannot run again " +
 		"from here. Ask the requester to send it again"}, false
 }
@@ -303,6 +319,8 @@ func (r *inOrderRunner) waitForStoredResult(ctx context.Context, id uuid.UUID, s
 				step.Outcome = stepApproved
 				step.Detail = "the waiting requester ran it; ran OK"
 				return nil
+			case api.ApprovalResultStateUncertain:
+				return &stepStop{detail: "approved, but " + uncertainStopAdvice}
 			case api.ApprovalResultStateFailed:
 				return &stepStop{detail: "approved, but the run by the waiting requester failed. An approval " +
 					"is used once, so this step cannot run again from here. Ask the requester to send it again"}
@@ -338,7 +356,7 @@ func (r *inOrderRunner) confirm(ctx context.Context, item *api.ApprovalRequestVi
 	if level == "" {
 		level = "of unknown risk level"
 	}
-	showRequest(w, fmt.Sprintf("Step %d of %d is %s. Approving it runs it at once.", step.Step, r.total, level), detail)
+	showRequest(w, fmt.Sprintf("Step %d of %d is %s. Approving it runs it at once.", step.Step, r.total, output.SafeText(level)), detail)
 	return askYes(r.in, w, fmt.Sprintf("Type yes to approve step %d and go on. Anything else stops here: ", step.Step)), nil
 }
 
@@ -394,11 +412,15 @@ func printInOrderStep(w io.Writer, step inOrderStep, total int) {
 	if level == "" {
 		level = "-"
 	}
-	fmt.Fprintf(w, "step %d/%d  %-8s %-11s %s  %s", step.Step, total, step.Outcome, level, step.OpID, step.ID)
+	fmt.Fprintf(w, "step %d/%d  %-8s %-11s %s  %s", step.Step, total, step.Outcome,
+		output.SafeText(level), output.SafeText(step.OpID), step.ID)
 	if step.Detail != "" {
-		fmt.Fprintf(w, "  (%s)", step.Detail)
+		fmt.Fprintf(w, "  (%s)", output.SafeText(step.Detail))
 	}
 	fmt.Fprintln(w)
+	if step.SelfApproval != "" {
+		fmt.Fprintf(w, "  %s\n", step.SelfApproval)
+	}
 }
 
 func printInOrderSummary(w io.Writer, res inOrderResult) {
@@ -410,10 +432,10 @@ func printInOrderSummary(w io.Writer, res inOrderResult) {
 			}
 		}
 		if approved == 0 {
-			fmt.Fprintf(w, "\nNothing to approve: every step of %s already ran OK.\n", res.WorkRef)
+			fmt.Fprintf(w, "\nNothing to approve: every step of %s already ran OK.\n", output.SafeText(res.WorkRef))
 			return
 		}
-		fmt.Fprintf(w, "\nDone: approved %d step(s) of %s in order.\n", approved, res.WorkRef)
+		fmt.Fprintf(w, "\nDone: approved %d step(s) of %s in order.\n", approved, output.SafeText(res.WorkRef))
 		return
 	}
 	for _, s := range res.Steps {
@@ -421,7 +443,7 @@ func printInOrderSummary(w io.Writer, res inOrderResult) {
 			printInOrderStep(w, s, len(res.Steps))
 		}
 	}
-	fmt.Fprintf(w, "\n%s\n", stopMessage(res))
+	fmt.Fprintf(w, "\n%s\n", output.SafeText(stopMessage(res)))
 }
 
 // stopMessage names the step the run stopped at and the steps it did

@@ -30,6 +30,10 @@ type manyResult struct {
 	Outcome string                   `json:"outcome"`
 	Detail  string                   `json:"detail,omitempty"`
 	Request *api.ApprovalRequestView `json:"request,omitempty"`
+	// decided is the /decide answer; it says whether the approve was a
+	// self-approval (#3329). The --json output has the same facts in
+	// request (reviewed_by and principal_sub).
+	decided *api.DecideResponseBody
 }
 
 // runApproveMany approves several requests in one run, with one approval
@@ -85,15 +89,17 @@ func runApproveMany(cmd *cobra.Command, idArgs []string, reason string, jsonOut 
 				res.Outcome, res.Detail = manySkipped, "you did not type yes"
 				break
 			}
-			if _, err := sendDecide(ctx, client, id, body, signIn, isDestructive(detail)); err != nil {
+			resp, err := sendDecide(ctx, client, id, body, signIn, isDestructive(detail))
+			if err != nil {
 				printManySummary(cmd, results, jsonOut)
 				var noBrowser *auth.NoBrowserError
 				if errors.As(err, &noBrowser) {
 					return output.RenderError(cmd.ErrOrStderr(), noBrowserError(noBrowser.URL), jsonOut)
 				}
-				return routeRequestError(cmd, backplaneURL, err, jsonOut)
+				return routeApproveError(cmd, backplaneURL, err, jsonOut)
 			}
 			res.Outcome = manyApproved
+			res.decided = resp.JSON200
 			res.Request, err = fetchDetail(ctx, client, id)
 			if err != nil {
 				return routeRequestError(cmd, backplaneURL, err, jsonOut)
@@ -110,7 +116,7 @@ func runApproveMany(cmd *cobra.Command, idArgs []string, reason string, jsonOut 
 
 func printManyResult(w io.Writer, res manyResult) {
 	if res.Outcome == manyApproved && res.Request != nil {
-		printDecision(w, res.ID, res.Request)
+		printDecision(w, res.ID, res.Request, res.decided)
 		return
 	}
 	fmt.Fprintf(w, "approval_request %s skipped: %s\n", res.ID, res.Detail)

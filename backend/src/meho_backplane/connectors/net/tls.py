@@ -41,13 +41,12 @@ This op inherits the three T1 foundations verbatim:
   verification is off by design, so the cert is data, not a failure.
 
 ``safety_level="safe"`` + ``requires_approval=False``: a read-only
-handshake that sends no application bytes, so the probe allowlist is the
-sole floor (same posture as ``net.tcp_check``).
+handshake that sends no application bytes; the allow-list limits where
+checks can connect (same as ``net.tcp_check``).
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import ipaddress
 import select
@@ -71,6 +70,7 @@ from meho_backplane.connectors.net.ops import (
     _MAX_TIMEOUT_SECONDS,
     _clamp_timeout,
 )
+from meho_backplane.connectors.net.probe_pool import run_blocking_probe
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -498,13 +498,42 @@ def _run_until_ready(sock: socket.socket, deadline: float, action: Any) -> Any:
         select.select(read_fds, write_fds, [], remaining)
 
 
+def _connect_before_deadline(host: str, port: int, deadline: float) -> socket.socket:
+    """Connect to the first address of *host* that answers, within one deadline.
+
+    Every address gets only the time that is left, so a host with many
+    addresses never takes longer than the deadline in total.
+    """
+    last_error: OSError = TimeoutError("tls connect timed out")
+    for family, socktype, proto, _name, sockaddr in socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM
+    ):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("tls connect timed out")
+        sock: socket.socket | None = None
+        try:
+            # A family this host cannot use fails here; the next address is tried.
+            sock = socket.socket(family, socktype, proto)
+            sock.settimeout(remaining)
+            # The full address keeps the flow info and scope id of an IPv6 address.
+            sock.connect(sockaddr)
+        except OSError as exc:
+            if sock is not None:
+                sock.close()
+            last_error = exc
+        else:
+            return sock
+    raise last_error
+
+
 def _blocking_tls_inspect(
     host: str, port: int, server_name: str, timeout: float
 ) -> tuple[list[x509.Certificate], str, str]:
     """Open an unverified TLS handshake and return (chain, protocol, cipher).
 
     Runs off the event loop (the caller wraps it in
-    :func:`asyncio.to_thread`). The context disables verification
+    :func:`run_blocking_probe`). The context disables verification
     (``VERIFY_NONE``) so a self-signed / expired / mismatched cert
     completes the handshake and is returned for inspection rather than
     rejected. The full presented chain is pulled via
@@ -513,7 +542,7 @@ def _blocking_tls_inspect(
     Connect and handshake share one ``deadline`` derived from *timeout*.
     """
     deadline = time.monotonic() + timeout
-    raw = socket.create_connection((host, port), timeout=timeout)
+    raw = _connect_before_deadline(host, port, deadline)
     try:
         context = SSL.Context(SSL.TLS_CLIENT_METHOD)  # NOSONAR(S4423) — probe negotiates whatever the appliance offers; protocol version is reported output  # noqa: E501  # fmt: skip
         context.set_verify(SSL.VERIFY_NONE)  # NOSONAR(S4830) — inspection-only handshake; verification-off is the op's purpose (module docstring)  # noqa: E501  # fmt: skip
@@ -585,8 +614,14 @@ async def net_tls_inspect(
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
     try:
-        chain, protocol, cipher = await asyncio.to_thread(
-            _blocking_tls_inspect, host, port, server_name, timeout
+        chain, protocol, cipher = await run_blocking_probe(
+            _blocking_tls_inspect,
+            host,
+            port,
+            server_name,
+            timeout,
+            tenant_id=operator.tenant_id,
+            timeout=timeout,
         )
     except (OSError, SSL.Error) as exc:
         # Every connect/handshake failure is the product, not an error:
@@ -629,7 +664,7 @@ async def register_net_tls_inspect_operation(
     natural key as the keystone
     (``product="net", version="1.x", impl_id="net-probe"``), so both ops
     share the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``safe``
-    + ``requires_approval=False`` — the probe allowlist is the only floor.
+    + ``requires_approval=False`` — the allow-list limits where checks can connect.
     """
     await register_typed_operation(
         product="net",

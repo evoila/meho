@@ -101,6 +101,32 @@ def test_passkeys_do_not_use_the_old_discoverable_credential_field(
     assert "webAuthnPolicyRequireResidentKey" not in realm
 
 
+def test_events_are_kept_for_180_days_without_admin_event_details(
+    realm: dict[str, Any],
+) -> None:
+    # Who logged in, and who changed the realm, must be answerable later.
+    # The request body of an admin event can hold a secret, so it is not kept.
+    assert realm["eventsEnabled"] is True
+    assert realm["eventsExpiration"] == 180 * 24 * 3600
+    assert realm["adminEventsEnabled"] is True
+    assert realm["adminEventsDetailsEnabled"] is False
+    assert realm["attributes"]["adminEventsExpiration"] == str(180 * 24 * 3600)
+
+
+def test_wrong_passwords_lock_an_account_for_a_short_time(realm: dict[str, Any]) -> None:
+    assert realm["bruteForceProtected"] is True
+    # The lock always ends by itself: nobody is locked out for good.
+    assert realm["permanentLockout"] is False
+    assert realm["failureFactor"] == 5
+    assert realm["waitIncrementSeconds"] == 60
+    assert realm["maxFailureWaitSeconds"] == 600
+    assert realm["maxDeltaTimeSeconds"] == 12 * 3600
+
+
+def test_access_token_lifetime_is_written_down(realm: dict[str, Any]) -> None:
+    assert realm["accessTokenLifespan"] == 300
+
+
 def test_browser_session_limits_match_the_console(realm: dict[str, Any]) -> None:
     # The login server keeps a browser session for 1 hour without use and
     # 10 hours at most: the same as the console's own session (#5518).

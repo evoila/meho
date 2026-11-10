@@ -204,6 +204,7 @@ async def test_bulk_import_default_dry_run_returns_plan_and_writes_nothing(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 async def test_bulk_import_human_apply_lands_all_edges(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811

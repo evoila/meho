@@ -15,9 +15,9 @@ Covers ``PATCH /api/v1/tenants/mail-recipient-policy``
   ``tenant_admin`` -> 200.
 * Tenant isolation: a PATCH writes only the caller's own tenant.
 * Audit: an applied change writes one ``audit_log`` row; a no-op binds none.
-* Cache invalidation (the load-bearing one): a PATCH is reflected by the next
-  :func:`resolve_tenant_recipient_allowlist` **without** a cache reset or
-  restart -- proving the handler evicts the resolver's per-tenant cache.
+* Takes effect at once (the load-bearing one): a PATCH is reflected by the
+  next :func:`resolve_tenant_recipient_allowlist` with no reset or restart,
+  also when the resolver already read the old value before the PATCH.
 
 Drives the production ``meho_backplane.main:app`` so the real middleware chain
 (RequestContext -> Audit -> router) is exercised. DB is the autouse per-test
@@ -37,10 +37,7 @@ from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.connectors.mail.tenant_policy import (
-    reset_tenant_mail_policy_cache_for_testing,
-    resolve_tenant_recipient_allowlist,
-)
+from meho_backplane.connectors.mail.tenant_policy import resolve_tenant_recipient_allowlist
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Tenant
 from meho_backplane.main import app
@@ -63,7 +60,7 @@ _TENANT_B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 @pytest.fixture(autouse=True)
 def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin every env var :class:`Settings` requires + isolate the resolver cache."""
+    """Pin every env var :class:`Settings` requires."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", _ISSUER)
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", _AUDIENCE)
     monkeypatch.setenv("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300")
@@ -75,11 +72,9 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
     get_settings.cache_clear()
     clear_jwks_cache()
-    reset_tenant_mail_policy_cache_for_testing()
     yield
     get_settings.cache_clear()
     clear_jwks_cache()
-    reset_tenant_mail_policy_cache_for_testing()
 
 
 def _token(
@@ -274,20 +269,19 @@ async def test_applied_change_writes_audit_row(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cache invalidation (load-bearing) — reflected without a cache reset
+# Takes effect at once (load-bearing) — the next resolve sees the PATCH
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_patch_evicts_resolver_cache(client: TestClient) -> None:
+async def test_patch_governs_the_next_resolve(client: TestClient) -> None:
+    """A resolve that ran before the PATCH does not shield the old value."""
     await _seed_tenants()  # tenant A allowlist NULL -> inherit
-    # Prime the resolver cache with the pre-PATCH (inherit) value.
     assert await resolve_tenant_recipient_allowlist(_TENANT_A) is None
-    key = make_rsa_keypair("kid-cache")
+    key = make_rsa_keypair("kid-next-resolve")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = _patch(client, _token(key), {"mail_recipient_allowlist": "ops.test"})
     assert resp.status_code == 200, resp.text
-    # No reset_...() call here — the route must have evicted the cache itself.
     resolved = await resolve_tenant_recipient_allowlist(_TENANT_A)
     assert resolved == (frozenset(), frozenset({"ops.test"}))

@@ -17,11 +17,13 @@ This module is the k8s per-connector redactor (the same shape as
 ``connectors/keycloak/redaction.py`` and ``connectors/rabbitmq/redact.py``):
 a pure, structural walk that recognises a ``Secret`` by its ``kind`` and
 replaces **every** ``data`` / ``stringData`` value with a fixed
-placeholder carrying a truncated SHA-256 digest -- regardless of whether
+placeholder carrying a short keyed fingerprint -- regardless of whether
 the value matches any pattern. Key names are preserved so a read still
-answers "which keys does this Secret carry?"; the digest lets a caller
-correlate two reads of the same value without ever seeing the bytes (the
-same ``sha256:`` convention the redaction engine's ``hash`` action uses).
+answers "which keys does this Secret carry?"; the fingerprint lets a
+caller correlate two reads of the same value without ever seeing the
+bytes. It is the string the redaction engine's ``hash`` action writes
+(``hmac-sha256:`` plus 12 hex characters of HMAC-SHA256 under the server
+key), so it cannot be computed again from a guessed value.
 
 Where it runs
 =============
@@ -30,10 +32,10 @@ Applied inside the connector's own read path, before the value reaches
 the JSONFlux reducer / result handle, the audit row, or the broadcast
 feed. It is wired into ``ops_customresource.custom_resource_row``, which
 ``k8s.cr.list`` / ``k8s.cr.info`` share, for any object whose ``kind`` is
-``Secret``. Those two ops cannot read core Secrets: their ``group``
-param must not be empty, and the custom-object API builds
-``/apis/{group}/...`` paths, not the core ``/api/v1`` path. The way to
-look at core Secrets is ``k8s.secret.list`` / ``k8s.secret.info``
+``Secret``. Those two ops read core objects too: with ``group=""`` they
+read the core ``/api/v1`` path, so ``plural="secrets"`` returns core
+Secrets, and this walk masks their values. The dedicated way to look at
+core Secrets is ``k8s.secret.list`` / ``k8s.secret.info``
 (``ops_secret_list.py``). They build their answer from names only and
 run this walk over it as a second net.
 
@@ -43,6 +45,17 @@ before the body reaches the recorder, so a ``k8s.apply`` of a Secret or
 a ``k8s.cr.*`` read of one never records a value either. On a Secret
 the walk also replaces every ``metadata.annotations`` value (keys kept),
 because deploy tools can copy the whole manifest into an annotation.
+
+The walk also masks the values of a ``kind: HelmChart`` object (the k3s /
+RKE2 ``helm.cattle.io/v1`` resource, and the items of a ``HelmChartList``).
+Its ``spec.valuesContent`` text and every value of its ``spec.set`` map
+are the Helm values of an install, which often hold passwords. Each is
+replaced by the same placeholder plus fingerprint; the ``set`` keys stay. A
+``HelmChart`` made with ``kubectl apply`` also carries its whole manifest,
+values included, in the last-applied annotation, so every
+``metadata.annotations`` value of a chart is replaced too (keys kept),
+as on a Secret. So a ``k8s.meho.release.info`` read of the MEHO chart, or
+a ``k8s.cr.info`` of any ``HelmChart``, records and returns no values text.
 
 Note on the current CR projection: ``custom_resource_row`` otherwise
 keeps only ``metadata`` + bounded ``.spec`` / ``.status`` excerpts and
@@ -57,10 +70,14 @@ unaffected: it returns only a Vault ``secret_ref`` + a SHA-256, never a
 
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
+from meho_backplane.redaction.engine import hash_replacement
+
 __all__ = [
+    "HELM_CHART_KIND",
+    "HELM_CHART_LIST_KIND",
+    "HELM_CHART_VALUE_FIELDS",
     "LAST_APPLIED_ANNOTATION",
     "REDACTED_PREFIX",
     "SECRET_DATA_FIELDS",
@@ -82,9 +99,10 @@ SECRET_KIND = "Secret"
 SECRET_LIST_KIND = "SecretList"
 
 #: The annotation ``kubectl apply`` writes with the full last manifest. On
-#: a Secret it repeats every ``data`` / ``stringData`` value. The walk
-#: redacts every annotation value on a Secret (this one included); the CR
-#: row projection also leaves this one out on every kind.
+#: a Secret it repeats every ``data`` / ``stringData`` value, and on a
+#: HelmChart its Helm values. The walk redacts every annotation value on a
+#: Secret and on a HelmChart (this one included); the CR row projection
+#: also leaves this one out on every kind.
 LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 
 #: The two maps on a ``Secret`` whose values are secret material:
@@ -93,28 +111,43 @@ LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 #: an in-flight apply could still surface).
 SECRET_DATA_FIELDS: tuple[str, ...] = ("data", "stringData")
 
-#: Fixed marker written in place of a Secret value. Non-empty (rather
-#: than dropping the key) so a caller sees a value *existed*; carries the
-#: digest so two reads of the same value are correlatable.
-REDACTED_PREFIX = "[REDACTED:k8s-secret"
+#: The ``kind`` of the k3s / RKE2 ``helm.cattle.io/v1`` chart object and of
+#: its list envelope. Its items carry no ``kind`` of their own either.
+HELM_CHART_KIND = "HelmChart"
+HELM_CHART_LIST_KIND = "HelmChartList"
 
-#: Hex characters of the SHA-256 kept in the placeholder -- mirrors the
-#: redaction engine's ``hash`` action (``sha256:<first-12-hex>``).
-_DIGEST_HEX_CHARS = 12
+#: The two ``spec`` fields of a ``HelmChart`` that hold Helm values:
+#: ``valuesContent`` (one YAML text) and ``set`` (a map of single values).
+HELM_CHART_VALUE_FIELDS: tuple[str, ...] = ("valuesContent", "set")
+
+#: The ``kind`` of a kind-less item, by the ``kind`` of its list envelope.
+_LIST_ITEM_KINDS: dict[str, str] = {
+    SECRET_LIST_KIND: SECRET_KIND,
+    HELM_CHART_LIST_KIND: HELM_CHART_KIND,
+}
+
+#: Fixed marker written in place of a Secret value. Non-empty (rather
+#: than dropping the key) so a caller sees a value *existed*; carries a
+#: keyed fingerprint so two reads of the same value are correlatable.
+REDACTED_PREFIX = "[REDACTED:k8s-secret"
 
 
 def redact_secret_value(value: Any) -> str:
-    """Return the fixed placeholder + truncated SHA-256 digest for *value*.
+    """Return the fixed placeholder + short keyed fingerprint for *value*.
 
-    The digest is taken over the value **as stored** -- base64 text for a
-    ``data`` entry, plaintext for a ``stringData`` entry -- so it is
-    stable across reads of the same Secret. A non-string value (a
-    malformed Secret) is coerced with ``str`` before hashing so the walk
-    never raises on unexpected shapes.
+    The fingerprint is the redaction engine's ``hash`` action string
+    (:func:`~meho_backplane.redaction.engine.hash_replacement`):
+    ``hmac-sha256:`` and 12 hex characters of HMAC-SHA256 under the
+    server key. It is taken over the value **as stored** -- base64 text
+    for a ``data`` entry, plaintext for a ``stringData`` entry -- so it is
+    stable across reads of the same Secret inside one install. Without
+    the server key it cannot be computed again from a guessed value, so a
+    short or common value stays hidden. A non-string value (a malformed
+    Secret) is coerced with ``str`` before hashing so the walk never
+    raises on unexpected shapes.
     """
-    encoded = (value if isinstance(value, str) else str(value)).encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()[:_DIGEST_HEX_CHARS]
-    return f"{REDACTED_PREFIX};sha256:{digest}]"
+    text = value if isinstance(value, str) else str(value)
+    return f"{REDACTED_PREFIX};{hash_replacement(text)}]"
 
 
 def redact_kubernetes_payload(value: Any) -> Any:
@@ -130,19 +163,28 @@ def redact_kubernetes_payload(value: Any) -> Any:
     tools can copy the whole manifest into an annotation (for example
     :data:`LAST_APPLIED_ANNOTATION`), so no annotation value on a Secret
     is shown.
+    A mapping whose ``kind`` is :data:`HELM_CHART_KIND` (or a kind-less
+    item of a :data:`HELM_CHART_LIST_KIND` envelope) gets its
+    ``spec.valuesContent`` and every ``spec.set`` value replaced the same
+    way (:data:`HELM_CHART_VALUE_FIELDS`); the ``set`` keys stay. Its
+    ``metadata.annotations`` values are replaced like a Secret's, because
+    the last-applied annotation repeats the whole chart, values included.
     Every other value is walked so a ``Secret`` nested inside a
     ``List``-kind envelope or a ``k8s.cr.list`` ``items`` array is still
     caught. Scalars pass through unchanged. The input is never mutated --
     a new structure is returned, so a half-redacted object can never be
     left aliased elsewhere.
     """
-    return _walk(value, in_secret_list=False)
+    return _walk(value, implied_kind=None)
 
 
-def _walk(value: Any, *, in_secret_list: bool) -> Any:
+def _walk(value: Any, *, implied_kind: str | None) -> Any:
     if isinstance(value, dict):
         kind = value.get("kind")
-        is_secret = kind == SECRET_KIND or (kind is None and in_secret_list)
+        if kind is None:
+            kind = implied_kind
+        is_secret = kind == SECRET_KIND
+        is_chart = kind == HELM_CHART_KIND
         out: dict[Any, Any] = {}
         for key, item in value.items():
             if is_secret and key in SECRET_DATA_FIELDS and isinstance(item, dict):
@@ -150,24 +192,44 @@ def _walk(value: Any, *, in_secret_list: bool) -> Any:
                     inner_key: redact_secret_value(inner_val)
                     for inner_key, inner_val in item.items()
                 }
-            elif is_secret and key == "metadata" and isinstance(item, dict):
-                out[key] = _redact_secret_metadata(item)
+            elif (is_secret or is_chart) and key == "metadata" and isinstance(item, dict):
+                out[key] = _redact_metadata(item)
+            elif is_chart and key == "spec" and isinstance(item, dict):
+                out[key] = _redact_chart_spec(item)
             elif key == "items" and isinstance(item, list):
-                out[key] = [_walk(entry, in_secret_list=kind == SECRET_LIST_KIND) for entry in item]
+                item_kind = _LIST_ITEM_KINDS.get(kind) if isinstance(kind, str) else None
+                out[key] = [_walk(entry, implied_kind=item_kind) for entry in item]
             else:
-                out[key] = _walk(item, in_secret_list=False)
+                out[key] = _walk(item, implied_kind=None)
         return out
     if isinstance(value, list):
-        return [_walk(item, in_secret_list=False) for item in value]
+        return [_walk(item, implied_kind=None) for item in value]
     return value
 
 
-def _redact_secret_metadata(metadata: dict[Any, Any]) -> dict[Any, Any]:
-    """Copy a Secret's ``metadata`` with every annotation value redacted.
+def _redact_chart_spec(spec: dict[Any, Any]) -> dict[Any, Any]:
+    """Copy a ``HelmChart`` ``spec`` with every Helm value redacted.
+
+    ``valuesContent`` becomes one placeholder. ``set`` keeps its keys and
+    gets a placeholder per value. The other fields are walked as usual.
+    """
+    out: dict[Any, Any] = {}
+    for key, item in spec.items():
+        if key not in HELM_CHART_VALUE_FIELDS or item is None:
+            out[key] = _walk(item, implied_kind=None)
+        elif isinstance(item, dict):
+            out[key] = {inner_key: redact_secret_value(val) for inner_key, val in item.items()}
+        else:
+            out[key] = redact_secret_value(item)
+    return out
+
+
+def _redact_metadata(metadata: dict[Any, Any]) -> dict[Any, Any]:
+    """Copy a Secret's or HelmChart's ``metadata`` with every annotation value redacted.
 
     Annotation keys stay, so a read still shows which annotations exist.
     """
-    out: dict[Any, Any] = _walk(metadata, in_secret_list=False)
+    out: dict[Any, Any] = _walk(metadata, implied_kind=None)
     annotations = out.get("annotations")
     if isinstance(annotations, dict):
         out["annotations"] = {key: redact_secret_value(value) for key, value in annotations.items()}

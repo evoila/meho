@@ -1,0 +1,159 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  One row of the approvals decision history (#1827, #5110).
+
+  Included by ``_history_rows.html`` for each request, and returned on its
+  own by ``GET /ui/approvals/{id}/row``. While the run of an approved
+  request is going (``req.live.polling``), the row asks again every
+  ``poll_seconds`` seconds and is swapped in place; a final state drops
+  the ``hx-*`` attributes, so the asking stops. ``hx-target`` and
+  ``hx-include`` are set here because the history region above sets its
+  own, and htmx passes those down to the rows.
+
+  The row links to the detail modal (``hx-get /ui/approvals/{id}`` into
+  the shared ``#meho-approvals-modal-container``): a pending row offers
+  Approve/Deny there; a decided row renders read-only. No ``params`` /
+  ``params_hash`` are projected onto the row.
+
+  A row on the "outcome unknown" list (#5026, ``req.outcome_unknown`` set)
+  gets a second line: the target (``req.target_name``, else
+  ``req.target_id``), when the latest run started, and what to check.
+
+  Phone layout (#6000): below the ``sm`` width the row stacks. The text
+  wraps instead of being cut, so the person sees who asks for what, and the
+  Review / View button fills the row width as a large touch target. From
+  ``sm`` up the row is one line, as before. A pending row the person may
+  approve (``req.waiting_for_me``, Pending tab only) carries a "Waiting for
+  you" badge; the route puts those rows first.
+
+  Context variables:
+    req               -- dict: the projected request; ``req.live`` is where
+                         its run is now (``run_watch.live_run``), or None
+    status_pill_class -- dict[str, str]: status -> DaisyUI badge modifier
+    result_state_pill -- dict[str, tuple[str, str]]: run state -> (label,
+                         badge modifier) (#3543)
+    poll_seconds      -- int: how often a running row asks again
+-#}
+{% from "_references.html" import subject %}
+{%- set live = req.live -%}
+{%- set run_state = live.result_state if live else req.result_state -%}
+<li class="flex flex-col items-stretch gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+  id="approval-row-{{ req.id }}"
+  {% if req.get("waiting_for_me") %}data-waiting-for-me{% endif %}
+  {% if live and live.polling %}
+  hx-get="/ui/approvals/{{ req.id }}/row"
+  hx-trigger="every {{ poll_seconds }}s"
+  hx-target="this"
+  hx-swap="outerHTML"
+  hx-include="this"
+  {% endif %}
+>
+  <div class="min-w-0 space-y-1">
+    <div class="flex flex-wrap items-center gap-2">
+      {% if req.get("waiting_for_me") %}
+        <span class="badge badge-sm badge-primary">Waiting for you</span>
+      {% endif %}
+      <span
+        class="badge badge-sm {{ status_pill_class.get(req.status, 'badge-ghost') }}"
+        aria-label="Status {{ req.status }}"
+      >{{ req.status }}</span>
+      {#- Run state of an approved request (#3543): "approved" alone does
+          not say whether the change landed. -#}
+      {% if run_state %}
+        {% set run_label, run_class = result_state_pill.get(run_state, (run_state, "badge-ghost")) %}
+        <span
+          class="badge badge-sm {{ run_class }}"
+          data-result-state="{{ run_state }}"
+          aria-label="Run state {{ run_label }}"
+        >{{ run_label }}</span>
+      {% endif %}
+      {#- Outcome unknown (#5026): a person checked the target and wrote
+          down what they found, or a run started long ago and stored no
+          result, so someone must check it. -#}
+      {#- The list state wins over an earlier check: a check covers one
+          reason and one run, so a request can be back on the list. An
+          uncertain run already has its own run-state badge. -#}
+      {% if req.outcome_unknown %}
+        {% if req.outcome_unknown.reason == "started_no_result" %}
+          <span
+            class="badge badge-sm badge-warning"
+            data-outcome-unknown="{{ req.outcome_unknown.reason }}"
+          >no result: check it</span>
+        {% endif %}
+      {% elif req.outcome_check %}
+        <span
+          class="badge badge-sm badge-neutral"
+          data-outcome-check="{{ req.outcome_check.verdict }}"
+        >{{ "checked: it happened" if req.outcome_check.verdict == "happened" else "checked: it did not happen" }}</span>
+      {% endif %}
+      <p class="min-w-0 font-mono text-sm [overflow-wrap:anywhere] sm:truncate">{{ req.op_id }}</p>
+      {#- Chain step (#3596): this pending request is step k of N pending
+          requests under one change ticket. -#}
+      {% if req.chain %}
+        <span class="badge badge-sm badge-info shrink-0" data-approval-chain-step="{{ req.chain.step }}">Step {{ req.chain.step }} of {{ req.chain.total }}</span>
+      {% endif %}
+    </div>
+    <p class="text-xs text-base-content/55 [overflow-wrap:anywhere] sm:truncate">
+      <span>{{ req.connector_id }}</span>
+      <span aria-hidden="true">&middot;</span>
+      <span>requested by {{ subject(req.requester) }}</span>
+      {% if req.status == "pending" %}
+        {% if req.created_at %}
+          <span aria-hidden="true">&middot;</span>
+          <time datetime="{{ req.created_at }}">{{ req.created_at }}</time>
+        {% endif %}
+      {% elif req.status == "withdrawn" %}
+        {#- Withdrawn (#4987): the sender took it back; no reviewer. -#}
+        <span aria-hidden="true">&middot;</span>
+        <span>withdrawn by the sender</span>
+        {% if req.withdrawn_at %}
+          <span aria-hidden="true">&middot;</span>
+          <time datetime="{{ req.withdrawn_at }}">{{ req.withdrawn_at }}</time>
+        {% endif %}
+        {% if req.withdraw_reason %}
+          <span aria-hidden="true">&middot;</span>
+          <span>{{ req.withdraw_reason }}</span>
+        {% endif %}
+      {% else %}
+        {% if req.reviewer %}
+          <span aria-hidden="true">&middot;</span>
+          <span>by {{ subject(req.reviewer) }}</span>
+        {% endif %}
+        {% if req.decided_at %}
+          <span aria-hidden="true">&middot;</span>
+          <time datetime="{{ req.decided_at }}">{{ req.decided_at }}</time>
+        {% endif %}
+      {% endif %}
+      {% if req.work_ref %}
+        <span aria-hidden="true">&middot;</span>
+        <span class="font-mono">{{ req.work_ref }}</span>
+      {% endif %}
+    </p>
+    {#- Outcome unknown (#5026): what to check, where, and since when. The
+        time is the start of the latest run (a re-run, else the first run),
+        the time the minutes of the list count from. -#}
+    {% if req.outcome_unknown %}
+      <p class="text-xs" data-testid="approval-outcome-unknown-row" data-outcome-unknown-reason="{{ req.outcome_unknown.reason }}">
+        <span>target {% if req.target_name %}<span class="font-medium">{{ req.target_name }}</span>{% elif req.target_id %}<span class="font-mono">{{ req.target_id }}</span>{% else %}none{% endif %}</span>
+        {% if req.outcome_unknown.run_started_at %}
+          <span aria-hidden="true">&middot;</span>
+          <span>run started <time datetime="{{ req.outcome_unknown.run_started_at }}" class="font-mono">{{ req.outcome_unknown.run_started_at }}</time></span>
+        {% endif %}
+        <span aria-hidden="true">&middot;</span>
+        <span>{{ req.outcome_unknown.advice }}</span>
+      </p>
+    {% endif %}
+  </div>
+  <button
+    type="button"
+    class="btn btn-md w-full shrink-0 sm:btn-sm sm:w-auto {% if req.status == 'pending' %}btn-primary{% else %}btn-ghost{% endif %}"
+    hx-get="/ui/approvals/{{ req.id }}"
+    hx-target="#meho-approvals-modal-container"
+    hx-swap="innerHTML"
+    aria-label="{% if req.status == 'pending' %}Review{% else %}View{% endif %} approval request for {{ req.op_id }}"
+  >
+    {% if req.status == "pending" %}Review{% else %}View{% endif %}
+  </button>
+</li>

@@ -65,6 +65,7 @@ def _mint_mcp_token(
     tenant_role: str = DEFAULT_TENANT_ROLE,
     principal_kind: str | None = None,
     runner_id: str | None = None,
+    extra_claims: dict[str, Any] | None = None,
 ) -> str:
     """Mint a JWT signed by *private_key* with the given audience.
 
@@ -94,6 +95,8 @@ def _mint_mcp_token(
             payload["principal_kind"] = principal_kind
         if runner_id is not None:
             payload["runner_id"] = runner_id
+        if extra_claims:
+            payload.update(extra_claims)
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}
         token: bytes | str = jwt.encode(header, payload, private_key)
         return token.decode("ascii") if isinstance(token, bytes) else token
@@ -270,6 +273,51 @@ def test_token_with_mcp_audience_is_accepted(
     body = response.json()
     assert body["id"] == 4
     assert body["result"] == {}
+
+
+def test_person_token_call_operation_is_never_a_web_session(
+    client: TestClient,
+    keypair: Any,
+    jwks: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3980: ``call_operation`` over MCP with a person's token never counts as the web interface.
+
+    The token carries a ``web_session`` claim and the request a matching
+    header; neither reaches the Operator, so the call follows the token
+    rule (only ``safe`` operations run at once).
+    """
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.mcp.tools import operations as operation_tools
+
+    seen: list[Operator] = []
+
+    async def _fake_call(operator: Operator, _arguments: dict[str, Any]) -> dict[str, Any]:
+        seen.append(operator)
+        return {"status": "ok", "op_id": "stub.op", "duration_ms": 1.0, "result": {}}
+
+    monkeypatch.setattr(operation_tools, "call_operation", _fake_call)
+    with respx.mock as router:
+        _mock_discovery_and_jwks(router, jwks)
+        token = _mint_mcp_token(keypair, extra_claims={"web_session": True})
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "call_operation",
+                    "arguments": {"connector_id": "stub-1.x", "op_id": "stub.op"},
+                },
+            },
+            headers={"Authorization": f"Bearer {token}", "Web-Session": "true"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert len(seen) == 1
+    assert seen[0].principal_kind.value == "user"
+    assert seen[0].web_session is False
 
 
 def test_runner_kind_token_is_rejected_at_mcp(

@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.auth.agent_admission import (
     AGENT_IDENTITY_REQUIRED,
+    NOT_AN_AGENT_REMEDIATION,
     AgentIdentityRequiredError,
     resolve_agent_admission,
 )
@@ -290,8 +291,9 @@ def test_person_on_the_mcp_wire_gets_agent_identity_required(
     error = resp.json()["error"]
     assert error["code"] == INVALID_PARAMS
     assert error["data"]["code"] == AGENT_IDENTITY_REQUIRED
-    assert "meho agent-principal register" in error["data"]["remediation"]
-    assert "hosted agent run" in error["data"]["remediation"]
+    # #5770: a person cannot become an agent from their own session, so the
+    # remediation tells them to skip the step.
+    assert error["data"]["remediation"] == NOT_AN_AGENT_REMEDIATION
 
 
 # ---------------------------------------------------------------------------

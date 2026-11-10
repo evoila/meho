@@ -20,7 +20,7 @@ unit:
   still in the documents table and visible to the read path.
 * **Bulk action dispatch** -- :func:`apply_bulk_action` looks up
   memories by their ``Document.id`` (tenant-scoped + ``source='memory'``
-  filtered), gates each candidate against
+  filtered, and only rows the operator may read), gates each candidate against
   :class:`MemoryRbacResolver.can_write`, and routes to
   :meth:`MemoryService.forget` (delete) or
   :meth:`MemoryService.remember` (extend, body unchanged with a fresh
@@ -66,7 +66,7 @@ from meho_backplane.memory import (
     MemoryService,
     PermissionDeniedError,
 )
-from meho_backplane.memory._internal import MEMORY_SOURCE, document_to_entry
+from meho_backplane.memory._internal import MEMORY_SOURCE
 
 __all__ = [
     "BULK_ACTIONS",
@@ -294,16 +294,21 @@ def parse_extend_duration(raw: str | None) -> timedelta:
 
 
 async def _fetch_entries_by_ids(
+    service: MemoryService,
     operator: Operator,
     ids: list[uuid.UUID],
 ) -> dict[uuid.UUID, MemoryEntry]:
-    """Resolve *ids* to :class:`MemoryEntry` rows in *operator*'s tenant.
+    """Resolve *ids* to the :class:`MemoryEntry` rows *operator* may read.
 
     Tenant-scoped + ``source='memory'`` filtered so an operator cannot
     smuggle a non-memory document ID (a knowledge-base row, an audit
-    row) into the bulk form and have the route mutate it. Returns a
-    dict keyed by ID so callers can report per-ID outcomes without a
-    second lookup; IDs absent from the dict are the "missing" bucket.
+    row) into the bulk form and have the route mutate it. Each row then
+    passes :meth:`MemoryService.readable_entry`, the owner rule of
+    ``read_by_id``: a user-scoped note of another person is left out.
+    Expired rows stay in, so a recently expired note can be extended.
+    Returns a dict keyed by ID so callers can report per-ID outcomes
+    without a second lookup; IDs absent from the dict are the
+    "missing" bucket.
     """
     if not ids:
         return {}
@@ -317,7 +322,8 @@ async def _fetch_entries_by_ids(
             )
         )
         docs = list(result.scalars().all())
-    return {doc.id: document_to_entry(doc) for doc in docs}
+    entries = {doc.id: service.readable_entry(operator, doc, include_expired=True) for doc in docs}
+    return {doc_id: entry for doc_id, entry in entries.items() if entry is not None}
 
 
 async def _bulk_delete_one(
@@ -390,12 +396,13 @@ async def apply_bulk_action(
 
     Resolution + RBAC posture:
 
-    1. **Tenant filter** -- ``_fetch_entries_by_ids`` only returns rows
-       whose ``tenant_id == operator.tenant_id`` AND
-       ``source='memory'``. Rows the operator's tenant cannot see (or
-       isn't a memory row) are silently missing -- counted under
-       ``missing`` so the flash banner reports them, but never acted
-       on.
+    1. **Tenant and owner filter** -- ``_fetch_entries_by_ids`` only
+       returns rows whose ``tenant_id == operator.tenant_id`` AND
+       ``source='memory'``, and that the operator may read (the owner
+       rule of ``MemoryService.read_by_id``). Other rows (another
+       tenant's, another person's user-scoped note, a non-memory row)
+       are silently missing -- counted under ``missing`` so the flash
+       banner reports them, but never acted on.
     2. **Per-row RBAC re-check** -- :class:`MemoryRbacResolver` is
        consulted on each row. The service's ``forget`` / ``remember``
        call also re-checks; the route-side check filters the bulk into
@@ -417,11 +424,11 @@ async def apply_bulk_action(
     if action == "extend" and extend_duration is None:
         raise HTTPException(status_code=422, detail="bulk_extend_requires_duration")
 
-    entries_by_id = await _fetch_entries_by_ids(operator, ids)
-    missing = len(ids) - len(entries_by_id)
-
     rbac = MemoryRbacResolver()
     service = MemoryService(rbac=rbac)
+    entries_by_id = await _fetch_entries_by_ids(service, operator, ids)
+    missing = len(ids) - len(entries_by_id)
+
     anchor = now if now is not None else datetime.now(UTC)
     new_expires_at = anchor + extend_duration if extend_duration else None
 

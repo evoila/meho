@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import time
 import warnings
 from collections.abc import Iterator
@@ -268,6 +269,38 @@ def _default_database_url(
             warnings.warn(f"closing the test database engines failed: {exc!r}", stacklevel=1)
     reset_engine_for_testing()
     get_settings.cache_clear()
+    # Delete the copy now. The retention policy keeps tmp_path folders of
+    # failed tests, so a copy per test would fill the disk (a full run copied
+    # about 24 GB). A failed test's own files stay; only this copy goes.
+    db_path.unlink(missing_ok=True)
+    for sidecar in ("-wal", "-shm", "-journal"):
+        (tmp_path / f"default.db{sidecar}").unlink(missing_ok=True)
+
+
+@pytest.fixture(autouse=True)
+def _reset_structlog_logger_cache() -> Iterator[None]:
+    """Make every module-level structlog logger rebuild itself for each test.
+
+    With ``cache_logger_on_first_use=True`` a logger keeps the processors of
+    its first use. A test that captures log lines (``structlog.testing``)
+    would then miss a logger that an earlier test in the same process used
+    under another setup. Dropping the cached ``bind`` on each lazy proxy
+    makes it read the current setup again.
+    """
+    _drop_cached_structlog_loggers()
+    yield
+    _drop_cached_structlog_loggers()
+
+
+def _drop_cached_structlog_loggers() -> None:
+    from structlog._config import BoundLoggerLazyProxy
+
+    for name, module in tuple(sys.modules.items()):
+        if module is None or not name.startswith(("meho_backplane", "meho_connector_kit")):
+            continue
+        for value in tuple(vars(module).values()):
+            if isinstance(value, BoundLoggerLazyProxy):
+                value.__dict__.pop("bind", None)
 
 
 @pytest.fixture(autouse=True)
@@ -797,9 +830,10 @@ def _isolate_global_registries() -> Iterator[None]:
     The backplane keeps mutable module-level registries that the app
     lifespan and ``@register_*`` decorators populate:
     ``mcp.registry._TOOLS`` / ``_RESOURCES``,
-    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``,
+    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2`` / ``_TENANT_REGISTRY``,
     ``operations.typed_register._TYPED_OP_REGISTRARS``,
     ``operations._preview._PREVIEW_BUILDERS`` / ``_PERMISSION_PREFLIGHTS``,
+    ``operations._park_check._PARK_CHECKS``,
     and the dispatcher's per-process caches
     ``operations._handler_resolve._HANDLER_CACHE`` /
     ``_CONNECTOR_INSTANCE_CACHE``. None had a process-wide per-test
@@ -841,6 +875,7 @@ def _isolate_global_registries() -> Iterator[None]:
     from meho_backplane.connectors import registry as conn_reg
     from meho_backplane.mcp import registry as mcp_reg
     from meho_backplane.operations import _handler_resolve as handler_resolve
+    from meho_backplane.operations import _park_check as park_check_reg
     from meho_backplane.operations import _preview as preview_reg
     from meho_backplane.operations import dispatcher, set_default_reducer
     from meho_backplane.operations import typed_register as typed_reg
@@ -849,6 +884,7 @@ def _isolate_global_registries() -> Iterator[None]:
     resources = dict(mcp_reg._RESOURCES)
     connectors_v1 = dict(conn_reg._REGISTRY)
     connectors_v2 = dict(conn_reg._REGISTRY_V2)
+    tenant_connectors = dict(conn_reg._TENANT_REGISTRY)
     registrars = list(typed_reg._TYPED_OP_REGISTRARS)
     handler_cache = dict(handler_resolve._HANDLER_CACHE)
     instance_cache = dict(handler_resolve._CONNECTOR_INSTANCE_CACHE)
@@ -866,6 +902,7 @@ def _isolate_global_registries() -> Iterator[None]:
     # + restore them with the other process-global registries.
     preview_builders = dict(preview_reg._PREVIEW_BUILDERS)
     permission_preflights = dict(preview_reg._PERMISSION_PREFLIGHTS)
+    park_checks = dict(park_check_reg._PARK_CHECKS)
     default_reducer = dispatcher._DEFAULT_REDUCER
     try:
         yield
@@ -878,6 +915,8 @@ def _isolate_global_registries() -> Iterator[None]:
         conn_reg._REGISTRY.update(connectors_v1)
         conn_reg._REGISTRY_V2.clear()
         conn_reg._REGISTRY_V2.update(connectors_v2)
+        conn_reg._TENANT_REGISTRY.clear()
+        conn_reg._TENANT_REGISTRY.update(tenant_connectors)
         typed_reg._TYPED_OP_REGISTRARS[:] = registrars
         handler_resolve._HANDLER_CACHE.clear()
         handler_resolve._HANDLER_CACHE.update(handler_cache)
@@ -887,6 +926,8 @@ def _isolate_global_registries() -> Iterator[None]:
         preview_reg._PREVIEW_BUILDERS.update(preview_builders)
         preview_reg._PERMISSION_PREFLIGHTS.clear()
         preview_reg._PERMISSION_PREFLIGHTS.update(permission_preflights)
+        park_check_reg._PARK_CHECKS.clear()
+        park_check_reg._PARK_CHECKS.update(park_checks)
         set_default_reducer(default_reducer)
 
 
@@ -1311,3 +1352,47 @@ def result_reducer_cls() -> type[Any]:
     from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 
     return JsonFluxReducer
+
+
+@pytest.fixture
+def person_token_writes_run_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a person's token call run a non-safe op at once, as before #3980.
+
+    Every MCP and REST call comes with a token, so since #3980 a person's
+    ``caution`` or ``dangerous`` op waits for approval. A suite that checks
+    the shape of an executed write uses this fixture to skip that wait.
+    ``destructive`` and ``requires_approval`` ops still wait. The token rule
+    itself is pinned in ``test_operations_dispatcher.py``.
+    """
+    from meho_backplane.operations import _validate
+
+    monkeypatch.setattr(_validate, "_person_park_reason", lambda _operator, _descriptor: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_similar_kb_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Let a new kb slug find no similar entries, unless a test asks for the real search.
+
+    With ``KB_SIMILAR_CHECK`` on, every kb create on MCP, REST and the
+    console first searches for similar entries (``kb/similar.py``). That
+    search needs PostgreSQL,
+    and the default test database is SQLite. So most tests get an empty
+    result; the other parts of the check (slug, header, existing slug)
+    still run. A test of the search itself requests
+    :func:`real_similar_check` and mocks ``retrieve`` there.
+    """
+    if "real_similar_check" in request.fixturenames:
+        return
+
+    async def _none(*_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr("meho_backplane.kb.similar.find_similar_entries", _none)
+
+
+@pytest.fixture
+def real_similar_check() -> None:
+    """Opt out of :func:`_no_similar_kb_entries`: run the real similar-entries search."""

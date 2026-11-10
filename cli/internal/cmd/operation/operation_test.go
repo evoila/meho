@@ -603,8 +603,7 @@ func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
 }
 
 // TestErrOpErrorIsSentinel — verifies the sentinel exists + is
-// distinct, so callers (and main) can switch on it. Mirrors the
-// retrieval sibling's errEvalGate test.
+// distinct, so callers (and main) can switch on it.
 func TestErrOpErrorIsSentinel(t *testing.T) {
 	if errOpError == nil {
 		t.Fatalf("errOpError should be a non-nil sentinel")
@@ -627,6 +626,18 @@ func TestPrettyJSONRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(got, `"a"`) || !strings.Contains(got, `"b"`) {
 		t.Errorf("prettyJSON should preserve keys; got %q", got)
+	}
+}
+
+// TestPrettyJSONKeepsLargeIntegers — an integer above 2^53 keeps every
+// digit in the human render of `operation call` and `run-status`.
+func TestPrettyJSONKeepsLargeIntegers(t *testing.T) {
+	got, err := prettyJSON(json.RawMessage(`{"id":9007199254740993}`))
+	if err != nil {
+		t.Fatalf("prettyJSON: %v", err)
+	}
+	if !strings.Contains(got, "9007199254740993") {
+		t.Errorf("prettyJSON changed the number; got %q", got)
 	}
 }
 

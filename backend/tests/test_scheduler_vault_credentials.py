@@ -883,3 +883,32 @@ async def test_verify_healthy_periodic_token_no_warning(fake_kv_any_token: _Fake
     events = [e["event"] for e in logs]
     assert "scheduler_vault_token_will_expire" not in events
     assert "scheduler_vault_token_verified" in events
+
+
+# --- read_service_secret (session store keys, #4901) ------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_service_secret_returns_every_field(fake_kv: _FakeKvV2) -> None:
+    fake_kv.read_result = {
+        "data": {"data": {"access_key_id": "made-up-id", "secret_access_key": "made-up-key"}}
+    }
+    fields = await vc.read_service_secret("secret/data/meho/session-store", check="t")
+    assert fields == {"access_key_id": "made-up-id", "secret_access_key": "made-up-key"}
+    assert fake_kv.last_read == {"path": "meho/session-store", "mount_point": "secret"}
+
+
+@pytest.mark.asyncio
+async def test_read_service_secret_missing_path_is_none(fake_kv: _FakeKvV2) -> None:
+    fake_kv.read_raises = hvac.exceptions.InvalidPath()
+    assert await vc.read_service_secret("secret/data/meho/session-store", check="t") is None
+    fake_kv.read_raises = None
+    fake_kv.read_result = {"data": "not a mapping"}
+    assert await vc.read_service_secret("secret/data/meho/session-store", check="t") is None
+
+
+@pytest.mark.asyncio
+async def test_read_service_secret_unreachable_vault_raises(fake_kv: _FakeKvV2) -> None:
+    fake_kv.read_raises = requests.exceptions.ConnectionError()
+    with pytest.raises(vc.SchedulerVaultBrokerError):
+        await vc.read_service_secret("secret/data/meho/session-store", check="t")

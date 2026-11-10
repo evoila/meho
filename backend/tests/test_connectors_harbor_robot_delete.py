@@ -128,19 +128,33 @@ class _FakeClient:
 class _RecordingHarborConnector(HarborConnector):
     """A HarborConnector whose HTTP transport is canned + recorded.
 
-    Overrides the IO seams the ``robot_delete`` handler reaches — ``_http_client``
-    (the pooled DELETE client) and ``auth_headers`` (credential read) — so the
+    Overrides the IO seams the ``robot_delete`` handler reaches — ``_get_json``
+    (the robot read before the delete), ``_http_client`` (the pooled DELETE
+    client) and ``auth_headers`` (credential read) — so the
     resume path runs offline. A subclass (not a duck type) so the resolver's
     bound-method rebind + the ``_CONNECTOR_INSTANCE_CACHE`` seeding behave exactly
     as in production; the base ``robot_delete`` runs unchanged against the fakes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, robot_project: str = _PROJECT, robot_level: str = "project") -> None:
         super().__init__()
         self.delete_calls: list[tuple[str, str]] = []
+        self.read_paths: list[str] = []
+        self.robot = {
+            "id": _ROBOT_ID,
+            "name": f"robot${robot_project}+ci",
+            "level": robot_level,
+            "permissions": [{"kind": "project", "namespace": robot_project, "access": []}],
+        }
 
     async def _http_client(self, target: Any) -> _FakeClient:  # type: ignore[override]
         return _FakeClient(self)
+
+    async def _get_json(  # type: ignore[override]
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> dict[str, Any]:
+        self.read_paths.append(path)
+        return self.robot
 
     async def auth_headers(self, target: Any, operator: Operator) -> dict[str, str]:  # type: ignore[override]
         return {}
@@ -376,6 +390,44 @@ async def test_full_governed_flow_preview_park_approve_resume(_stub_embedding: A
     assert resume.result["id"] == _ROBOT_ID
     assert len(recorder.delete_calls) == 1
     assert recorder.delete_calls[0][0] == "DELETE"
+
+
+@pytest.mark.parametrize(
+    ("robot_project", "robot_level"),
+    [
+        pytest.param("other-team", "project", id="robot-of-another-project"),
+        pytest.param(_PROJECT, "system", id="system-robot"),
+    ],
+)
+async def test_approved_delete_refuses_a_robot_outside_the_approved_project(
+    _stub_embedding: AsyncMock, robot_project: str, robot_level: str
+) -> None:
+    """The card says "a robot of project P": a robot elsewhere is not deleted, no DELETE is sent."""
+    recorder = _RecordingHarborConnector(robot_project=robot_project, robot_level=robot_level)
+    await _bootstrap(recorder, _stub_embedding)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = _args()
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok", preview
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+
+    assert resume.status == "error", resume
+    assert resume.error == "connector_error: RobotOutsideProjectError"
+    assert recorder.read_paths == [f"/api/v2.0/robots/{_ROBOT_ID}"]
+    assert recorder.delete_calls == [], "no DELETE may reach Harbor"
 
 
 # ===========================================================================

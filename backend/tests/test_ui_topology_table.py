@@ -62,7 +62,15 @@ from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
+from tests._ui_role_helpers import allow_ui_operator_role
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
@@ -418,7 +426,8 @@ def test_table_sort_by_name_ascending_is_default() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         response = client.get("/ui/topology")
-    body = response.text
+    # Only the page body: the head names "apple-touch-icon".
+    body = response.text.split("</head>", 1)[1]
     assert body.index("apple") < body.index("banana"), (
         "expected ascending name sort to place 'apple' before 'banana'"
     )
@@ -434,7 +443,8 @@ def test_table_sort_by_name_descending_inverts_order() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         response = client.get("/ui/topology?sort=name&direction=desc")
-    body = response.text
+    # Only the page body: the head names "apple-touch-icon".
+    body = response.text.split("</head>", 1)[1]
     assert body.index("banana") < body.index("apple")
 
 

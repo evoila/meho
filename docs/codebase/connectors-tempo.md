@@ -39,7 +39,7 @@ Source: `backend/src/meho_backplane/connectors/tempo/`.
   `tempo-metrics`).
 - **`assert_tempo_read_only` / `TempoReadOnlyError`** (`read_only.py`) — the
   pure read-only gate (no I/O) and its violation type. Raised for a non-GET
-  method or a path outside `/api`.
+  method, a path outside `/api`, or a path with a `..` segment.
 - **`TempoTenantRequiredError`** (`connector.py`) — raised when a query returns
   `401` and no `tenant` was supplied (Tempo's multi-tenant "no org id" case),
   so the operator gets an actionable "pass a tenant" message rather than a bare
@@ -93,8 +93,9 @@ curated op — it is reachable through `tempo.get` if ever needed.
 
 ### Read-only gate (no push/delete blocklist, unlike loki)
 
-`assert_tempo_read_only` permits only `GET` and only paths under `/api`. It
-carries **no** segment blocklist, and deliberately so: Tempo exposes no
+`assert_tempo_read_only` permits only `GET` and only paths under `/api`, and
+it refuses a `..` segment, so a passthrough path cannot climb out of `/api`.
+It carries **no** segment blocklist, and deliberately so: Tempo exposes no
 state-changing endpoint that is both a `GET` and under `/api`. Its lifecycle
 mutators (`/flush`, `/shutdown`) are `POST` and live outside `/api` entirely, so
 the path scope already excludes them; the tenant-overrides writes under
@@ -145,8 +146,8 @@ pinned vendor artifact on the `tempo-2.x` spec shelf — is a follow-up, mirrori
 the loki split (connector #2235 / reconcile lane #2991): Grafana Tempo publishes
 no OpenAPI for its HTTP API, so the lane would pin the vendor's documented API
 reference (`docs/sources/tempo/api_docs/_index.md`, AGPL-3.0) on a `tempo-2.x`
-shelf dir in the private consumer spec-shelf repo (`evoila-bosnia/claude-rdc-hetzner-dc`,
-`docs/tempo-2.x/`) and extract its route list. That shelf pin lives in a
+shelf dir in the consumer spec-shelf repo (`docs/tempo-2.x/`) and extract its
+route list. That shelf pin lives in a
 separate repo and arms the dormant lane, exactly as the vcf-fleet lane awaits
 its shelf pin.
 
@@ -170,7 +171,7 @@ base `Target` model does not carry as a column, held in the forward-compat
 
 ## Known issues
 
-- `ops.py` (~594 lines) and `connector.py` (~527 lines) sit above the
+- `ops.py` (~594 lines) and `connector.py` (~533 lines) sit above the
   code-quality warn threshold (400) but below the block threshold (600); the op
   metadata is verbose by nature. Split if either approaches 600.
 - `tempo.metrics_query_range` requires the target's metrics-generator

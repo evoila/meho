@@ -129,18 +129,20 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 import structlog
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from meho_backplane.connectors.base import Connector, shim_kind
-from meho_backplane.connectors.registry import all_connectors_v2
+from meho_backplane.connectors.registry import connectors_for_tenant
 
 __all__ = [
     "AmbiguousConnectorResolution",
     "NoMatchingConnector",
     "ResolutionLabel",
+    "connector_serves_target",
     "resolve_connector",
     "resolve_connector_or_label",
 ]
@@ -328,7 +330,7 @@ def resolve_connector(target: Any) -> type[Connector]:
     target_version = resolve_target_version(target)
     preferred_impl_id = getattr(target, "preferred_impl_id", None)
 
-    candidates = _filter_candidates(product, target_version)
+    candidates = _filter_candidates(product, target_version, _target_tenant(target))
 
     if not candidates:
         raise NoMatchingConnector(
@@ -580,8 +582,34 @@ def resolve_target_version(target: Any) -> str | None:
     return None
 
 
-def _filter_candidates(product: str, target_version: str | None) -> list[_Candidate]:
-    """Enumerate v2 registry entries matching ``product`` and target version."""
+def connector_serves_target(product: str, version: str, impl_id: str, target: Any) -> bool:
+    """Return whether the connector registered as *(product, version, impl_id)* fits *target*.
+
+    The same match :func:`resolve_connector` uses to build its candidate
+    list: the target's product is *product*, and the target's version is
+    inside the connector's ``supported_version_range`` (a connector with no
+    range, or a wildcard entry, fits every version). The tie-break does not
+    run, so ``True`` does not mean the resolver picks this connector.
+    """
+    if getattr(target, "product", None) != product:
+        return False
+    key = (product, version, impl_id)
+    return any(
+        (c.product, c.version, c.impl_id) == key
+        for c in _filter_candidates(product, resolve_target_version(target), _target_tenant(target))
+    )
+
+
+def _target_tenant(target: Any) -> UUID | None:
+    """Return the target's tenant, or ``None`` when it carries none."""
+    tenant_id = getattr(target, "tenant_id", None)
+    return tenant_id if isinstance(tenant_id, UUID) else None
+
+
+def _filter_candidates(
+    product: str, target_version: str | None, tenant_id: UUID | None
+) -> list[_Candidate]:
+    """Enumerate the registry entries *tenant_id* sees that match ``product`` and version."""
     out: list[_Candidate] = []
     parsed_target_version: Version | None
     if target_version is not None:
@@ -592,7 +620,7 @@ def _filter_candidates(product: str, target_version: str | None) -> list[_Candid
     else:
         parsed_target_version = None
 
-    for key, cls in all_connectors_v2().items():
+    for key, cls in connectors_for_tenant(tenant_id).items():
         entry_product, entry_version, entry_impl_id = key
         if entry_product != product:
             continue

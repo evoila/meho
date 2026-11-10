@@ -159,8 +159,9 @@ other way round.
 
 ```bash
 # Fire the incident-triage agent on any critical, firing alert.
+# --agent-definition takes the definition's UUID (`meho agent show incident-triage`).
 meho scheduler create --kind event \
-  --agent-definition incident-triage \
+  --agent-definition <definition-uuid> \
   --event-filter '{"status": "firing", "labels": {"severity": "critical"}}'
 ```
 
@@ -213,7 +214,8 @@ dispatch, on the audit ledger.
 | Symptom | What it means | Fix |
 |---|---|---|
 | Deliveries return `401` | The slug is wrong, the source is paused, the source has no secret yet, or the signature or secret did not verify — the answer is the same for all of them on purpose, and the reason is never returned. | Confirm the slug and that the source is active with a secret set, then re-check the sender's secret and signature header against the source's `auth_strategy`. The server log names the reason. |
-| Ingest returns `200` but no agent run fires | The event was accepted but no `event` trigger's filter matched it. | Compare the trigger's `--event-filter` against the lifted top-level fields; test with a broader filter first. |
+| Deliveries return `503 secret_unavailable` | MEHO could not read the source's secret from Vault. Intake reads it with the check-runner identity, so that role's policy must cover `secret/data/tenants/+/event-sources/*`. | Give the check-runner Vault role read access to the event-source secrets ([`docs/cross-repo/vault-provisioning.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md)). |
+| Ingest returns `202` (or `200` for a repeat of the same delivery) but no agent run fires | The event was accepted but no `event` trigger's filter matched it. | Compare the trigger's `--event-filter` against the lifted top-level fields; test with a broader filter first. |
 | One alert fires many agent runs | A filter is too broad (in the limit, `{}` matches everything). | Tighten the filter to the fields and source `kind` you mean. |
 | A source registered but ingest still fails closed | It was registered without a secret. | Set the secret with an update before pointing the sender at it. |
 

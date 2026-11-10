@@ -513,6 +513,10 @@ async def test_file_read_reads_a_symlink_whose_target_passes_the_check() -> None
         "/etc/ssh/ssh_host_ed25519_key",
         "/etc/ceph/ceph.client.admin.keyring",
         "/var/lib/app/credentials.json",
+        "/etc/bind/keys/Kexample.com.+013+12345.private",
+        "/etc/postfix/sasl_passwd",
+        "/var/lib/cloud/instance/user-data.txt",
+        "/etc/wpa_supplicant/wpa_supplicant.conf",
     ],
 )
 async def test_file_read_refuses_a_real_path_that_fails_the_check(real_path: str) -> None:
@@ -1226,6 +1230,44 @@ def test_confine_read_path_refuses_secret_files_by_name(path: str) -> None:
         confine_read_path(path)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("/etc/bind/keys/Kexample.com.+013+12345.private", id="dnssec-private-key"),
+        pytest.param("/var/lib/bind/Kexample.com.+008+54321.private", id="dnssec-private-key-var"),
+        pytest.param("/etc/postfix/sasl_passwd", id="postfix-sasl-passwd"),
+        pytest.param("/etc/postfix/sasl_passwd.db", id="postfix-sasl-passwd-map"),
+        pytest.param("/var/lib/cloud/instance/user-data.txt", id="cloud-init-user-data"),
+        pytest.param("/var/lib/cloud/instances/i-1/user-data.txt.i", id="cloud-init-user-data-i"),
+        pytest.param("/var/lib/cloud/seed/nocloud/user-data", id="cloud-init-seed-user-data"),
+        pytest.param("/var/lib/cloud/instance/vendor-data.txt", id="cloud-init-vendor-data"),
+        pytest.param("/var/lib/cloud/instance/cloud-config.txt", id="cloud-init-cloud-config"),
+        pytest.param("/var/lib/cloud/instance/obj.pkl", id="cloud-init-obj-pkl"),
+        pytest.param("/run/cloud-init/instance-data-sensitive.json", id="cloud-init-sensitive"),
+        pytest.param("/etc/wpa_supplicant/wpa_supplicant.conf", id="wpa-supplicant"),
+        pytest.param("/etc/wpa_supplicant.conf", id="wpa-supplicant-etc"),
+        pytest.param("/etc/nginx/.htpasswd", id="htpasswd"),
+        pytest.param("/var/lib/app/.netrc", id="netrc"),
+    ],
+)
+def test_confine_read_path_refuses_more_secret_file_formats(path: str) -> None:
+    with pytest.raises(PathConfinementError, match="keys, tokens or password hashes"):
+        confine_read_path(path)
+
+
+def test_confine_read_path_keeps_cloud_init_status_files() -> None:
+    # The first-boot checks read these; they hold no secret.
+    for path in (
+        "/var/lib/cloud/instance/boot-finished",
+        "/var/lib/cloud/data/status.json",
+        "/var/lib/cloud/data/result.json",
+        "/run/cloud-init/instance-data.json",
+        "/var/log/cloud-init.log",
+        "/etc/postfix/main.cf",
+    ):
+        assert confine_read_path(path) == path
+
+
 @pytest.mark.parametrize("pattern", LINUX_READ_DENY)
 def test_every_deny_pattern_still_matches_its_own_path(pattern: str) -> None:
     # A pattern with capital letters must not go dead when the path is lowered.
@@ -1330,6 +1372,7 @@ _WRITE_OP_IDS: frozenset[str] = frozenset(
         "linux.script.run",
         "linux.sysctl.write",
         "linux.firewall.load",
+        "linux.firewall.confirm",
     }
 )
 
@@ -1337,7 +1380,7 @@ _EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS
 
 
 def test_linux_ops_count_matches_expected() -> None:
-    # about + seven read verbs + five write verbs = thirteen.
+    # about + seven read verbs + six write verbs = fourteen.
     assert len(LINUX_OPS) == len(_EXPECTED_OP_IDS)
 
 
@@ -1365,7 +1408,10 @@ def test_linux_read_ops_all_safe_read_only_no_approval() -> None:
 
 
 def test_linux_write_ops_carry_the_correct_tier() -> None:
-    """AC: the four dangerous writes require approval; service.control is caution.
+    """AC: the four dangerous writes require approval; two writes are caution.
+
+    ``service.control`` runs at once in the web interface. ``firewall.confirm``
+    is ``caution`` but always waits for approval, as the contract check asks.
 
     No write op is registered ``destructive`` (so the destructive-tier
     blast-radius builder gate does not apply here), and none carries the
@@ -1379,8 +1425,10 @@ def test_linux_write_ops_carry_the_correct_tier() -> None:
 
     assert by_id["linux.service.control"].safety_level == "caution"
     assert by_id["linux.service.control"].requires_approval is False
+    assert by_id["linux.firewall.confirm"].safety_level == "caution"
+    assert by_id["linux.firewall.confirm"].requires_approval is True
 
-    for op_id in _WRITE_OP_IDS - {"linux.service.control"}:
+    for op_id in _WRITE_OP_IDS - {"linux.service.control", "linux.firewall.confirm"}:
         op = by_id[op_id]
         assert op.safety_level == "dangerous", f"{op.op_id!r} must be dangerous"
         assert op.requires_approval is True, f"{op.op_id!r} must require approval"

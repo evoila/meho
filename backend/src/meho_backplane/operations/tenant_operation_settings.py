@@ -45,7 +45,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup, TenantOperationSetting
+from meho_backplane.db.models import (
+    AuditEventClass,
+    EndpointDescriptor,
+    OperationGroup,
+    TenantOperationSetting,
+)
 from meho_backplane.operations._lookup import parse_connector_id
 
 __all__ = [
@@ -262,6 +267,8 @@ async def _audit(
         operator_tenant_id=operator.tenant_id,
         op_id=OP_TENANT_OPERATION_SETTING,
         payload=payload,
+        # A settings change, not a run (#5864).
+        event_class=AuditEventClass.CONFIG_CHANGE,
     )
 
 

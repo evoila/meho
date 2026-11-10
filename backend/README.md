@@ -321,12 +321,12 @@ publishes its findings to the Security tab and the 30-day artefact — so a red
 run's CVE list is one click away. Treat a red run as "bump the base-image
 digest and re-run"; the build ships nothing until the scan is clean.
 
-**Pull requests get a scan of the Python packages.** The `lock-scan` job in
-the same workflow runs trivy on `backend/uv.lock` alone, with the same rules
+**Pull requests get a scan of the Python packages.** The `python-deps` job in
+`security-scan.yml` runs trivy on `backend/uv.lock` alone, with the same rules
 as the image scan: the same action version, the same `.trivyignore`
 exceptions, CRITICAL/HIGH only, only findings that have a fix, and it fails
-on a finding. It runs on every pull request that changes `backend/`,
-`image.yml` or `.trivyignore`, on a GitHub-hosted runner, without waiting
+on a finding. It runs on every pull request, in the merge queue and on every
+push to main, with no path filter, on a GitHub-hosted runner, without waiting
 for the image build. The findings are in the job log. It is not a required
 check. So a dependency fix or a new exception is proven on its own pull
 request, not by the next run on main. Run the same check locally with:
@@ -336,7 +336,7 @@ trivy fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
   --ignorefile .trivyignore --exit-code 1 backend/uv.lock
 ```
 
-What the lock scan does not see: the Debian packages of the base image, and
+What the Python package scan does not see: the Debian packages of the base image, and
 anything else in the image that is not in the lock file. Only the image scan
 on main and tags checks those. It does check the few Windows-only packages in
 the lock file that the image never installs, so a finding in one of them

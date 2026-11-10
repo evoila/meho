@@ -62,3 +62,25 @@ def test_configuration_is_locked() -> None:
             engine.conn.execute("SET enable_external_access=true")
     finally:
         engine.close()
+
+
+def test_connection_uses_one_thread() -> None:
+    """Each engine runs on one worker thread, and on duckdb 2.0+ one I/O thread.
+
+    ``result_query`` opens a new engine for every query. duckdb 2.0 starts a
+    pool of I/O threads per connection, sized by the CPU count, unless
+    ``async_threads`` is set when the connection opens.
+    """
+    with QueryEngine() as engine:
+        assert engine.query("SELECT current_setting('threads') AS t") == [{"t": 1}]
+        if int(duckdb.__version__.split(".", 1)[0]) >= 2:
+            rows = engine.query("SELECT current_setting('async_threads') AS t")
+            assert rows == [{"t": 1}]
+
+
+def test_registering_a_name_again_replaces_the_rows() -> None:
+    """A second ``register`` under the same name replaces the table."""
+    with QueryEngine() as engine:
+        engine.register("items", [{"qty": 2}, {"qty": 3}])
+        engine.register("items", [{"qty": 7}])
+        assert engine.query("SELECT SUM(qty) AS total FROM items") == [{"total": 7}]

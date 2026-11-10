@@ -81,6 +81,9 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 def _operator(sub: str = "user-b", *, tenant_id: UUID = _TENANT) -> Operator:
+    # The announce gate checks only a call that runs at once. A person's
+    # ``caution`` call runs at once only in the web interface; with a token
+    # it waits for approval first (#3980).
     return Operator(
         sub=sub,
         name=sub,
@@ -89,6 +92,7 @@ def _operator(sub: str = "user-b", *, tenant_id: UUID = _TENANT) -> Operator:
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
+        web_session=True,
     )
 
 

@@ -7,14 +7,21 @@
 // that Claude Code injects as session context.
 //
 // `meho` is stubbed: a fake `meho` on a controlled PATH dispatches on its
-// first arg and prints a per-subcommand fixture the test writes. No live
+// first arg, logs its arguments, and prints a per-subcommand fixture the test writes. No live
 // backplane, no CLI build. The fixtures let the suite assert the one contract
 // this task pins — the recent-activity window excludes `__sensor__`
 // (sensor-principal) rows and stays full of real activity via
 // filter-then-truncate — plus the hook's fail-open guarantees.
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +45,8 @@ writeFileSync(
     // Fixture dir is passed by env, not derived from $0: PATH resolution
     // (and `timeout`) exec the stub with argv[0]=\"meho\", so $0 is not a path.
     'd="${MEHO_STUB_DIR:-/nonexistent}"',
+    // Record every call's arguments so a test can check what the hook asked for.
+    'printf "%s\\n" "$*" >> "$d/argv.log"',
     'case "$1" in',
     '  status) [ -f "$d/status.txt" ] && cat "$d/status.txt" ;;',
     '  audit)  [ -f "$d/audit.txt" ]  && cat "$d/audit.txt" ;;',
@@ -91,6 +100,7 @@ function seedFixtures({ status, audit, list, kb }) {
   for (const name of ["status", "audit", "list", "kb"]) {
     rmSync(join(STUB_DIR, `${name}.txt`), { force: true });
   }
+  rmSync(join(STUB_DIR, "argv.log"), { force: true });
   if (status !== undefined) writeFileSync(join(STUB_DIR, "status.txt"), status);
   if (audit !== undefined) writeFileSync(join(STUB_DIR, "audit.txt"), audit);
   if (list !== undefined) writeFileSync(join(STUB_DIR, "list.txt"), list);
@@ -169,6 +179,27 @@ test("the other digest sections are untouched by the activity filter", () => {
   assert.ok(res.stdout.includes("memory-note-alpha"), res.stdout);
   assert.match(res.stdout, /## Recent MEHO knowledge/, res.stdout);
   assert.ok(res.stdout.includes("kb-entry-gamma"), res.stdout);
+});
+
+// The arguments of each `meho` call the hook made, one string per call.
+function stubCalls() {
+  const log = join(STUB_DIR, "argv.log");
+  return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
+}
+
+test("the knowledge section asks for the newest entries, not the first by slug", () => {
+  seedFixtures({
+    status: "health=ok\n",
+    kb: "kb-entry-newest\n",
+  });
+  const res = runHook();
+  assert.equal(res.status, 0, res.stderr);
+  const kbCalls = stubCalls().filter((args) => args.startsWith("kb "));
+  assert.equal(kbCalls.length, 1, `expected one kb call, got ${JSON.stringify(kbCalls)}`);
+  assert.match(kbCalls[0], /^kb list\b/, kbCalls[0]);
+  assert.match(kbCalls[0], /--order newest\b/, kbCalls[0]);
+  assert.match(kbCalls[0], /--limit 8\b/, kbCalls[0]);
+  assert.match(res.stdout, /## Recent MEHO knowledge/, res.stdout);
 });
 
 test("fail-open: no `meho` on PATH => silent, exit 0", () => {

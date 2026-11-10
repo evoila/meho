@@ -98,6 +98,7 @@ _COVERED_TOOLS: frozenset[str] = frozenset(
         "meho_topology_delete_node",
         "meho_topology_unannotate",
         "meho_targets_register",
+        "meho_targets_update",
         "preview_operation",
         "query_audit",
         "query_topology",
@@ -633,6 +634,7 @@ def test_search_operations_admin_scores_conform(
     assert all("fused_score" in hit for hit in payload["hits"])
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 def test_call_operation_ok_envelope_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
@@ -662,6 +664,7 @@ def test_call_operation_ok_envelope_conforms(
     assert payload["delivery"] == "complete"
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 def test_call_operation_over_wire_ceiling_keeps_completed_status(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
@@ -1030,6 +1033,7 @@ async def test_meho_automation_list_conforms(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 async def test_topology_annotate_and_unannotate_conform(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
@@ -1059,6 +1063,7 @@ async def test_topology_annotate_and_unannotate_conform(
     assert removed == {"edge_id": annotated["edge_id"]}
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 def test_topology_create_node_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
@@ -1076,6 +1081,7 @@ def test_topology_create_node_conforms(
     assert payload["source"] == "curated"
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 async def test_topology_delete_node_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
@@ -1090,6 +1096,7 @@ async def test_topology_delete_node_conforms(
     assert payload == {"node_id": str(node_id), "kind": "vault-role", "name": "doomed"}
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 async def test_topology_bulk_import_dry_run_and_apply_conform(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
@@ -1166,6 +1173,7 @@ async def test_topology_annotate_parked_branch_conforms(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("person_token_writes_run_at_once")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 async def test_meho_targets_register_executed_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811

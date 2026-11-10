@@ -100,6 +100,7 @@ from meho_backplane.memory.service import MemoryService
 
 if TYPE_CHECKING:  # pragma: no cover -- typing-only imports
     from meho_backplane.auth.operator import Operator
+    from meho_backplane.operations.identity_budget import TokenUsage
 
 __all__ = [
     "MAX_ESCALATIONS_PER_FIRING",
@@ -517,7 +518,9 @@ def make_policy_persisting_hooks(
         *,
         output: Any,
         error: str | None,
+        usage: TokenUsage | None = None,
     ) -> None:
+        # The harness has no run row to store the child's token counts on.
         if error is not None:
             # A failed child loop has no PolicyDecision to persist.
             # The cheap tier's loop already sees the failure as a

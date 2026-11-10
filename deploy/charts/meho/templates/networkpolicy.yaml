@@ -47,6 +47,18 @@ spec:
           protocol: TCP
     {{- end }}
   egress:
+    {{- if .Values.corePostgres.enabled }}
+    # Built-in PostgreSQL (#4047). Selectors match
+    # `corePostgres.selectorLabels`; `postgresCIDR` is not used.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 5432
+          protocol: TCP
+    {{- else }}
     # PostgreSQL — locked to the operator-supplied CIDR. Defaults to a /32
     # placeholder so the chart fails-closed on a misconfigured value rather
     # than silently allowing a wide subnet.
@@ -56,6 +68,20 @@ spec:
       ports:
         - port: 5432
           protocol: TCP
+    {{- end }}
+    {{- if .Values.coreVault.enabled }}
+    # Built-in OpenBao (#4047). Selectors match `coreVault.selectorLabels`;
+    # the pod listens on 8200 whatever the Service port. `vaultCIDR` is not
+    # used.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: openbao
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 8200
+          protocol: TCP
+    {{- else }}
     # Vault — operator-supplied CIDR; default-deny otherwise.
     - to:
         - ipBlock:
@@ -63,6 +89,7 @@ spec:
       ports:
         - port: 8200
           protocol: TCP
+    {{- end }}
     {{- if .Values.coreKeycloak.enabled }}
     # Built-in Keycloak (#4591): the backplane calls its Service for
     # discovery, keys, tokens and the Admin REST API. A NetworkPolicy

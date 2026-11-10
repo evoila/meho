@@ -1,8 +1,8 @@
 # Add-on pairing
 
 The pairing handshake + identity plane — the foundation of the add-on
-pairing contract (Initiative #2900, Task #3025). It lets a sibling add-on
-product (first consumers: meho-automation, meho-ssp) pair once with the
+pairing contract. It lets a sibling add-on
+product (the first one is meho-automation) pair once with the
 backplane and become a first-class, governed peer, while an **unpaired**
 backplane stays byte-identical to a never-paired one.
 
@@ -164,7 +164,8 @@ unit with pairing health. Key types:
   `NegotiatedContract`, and `ContractSkewError` (carries a stable machine
   `code` + the diagnostic versions).
 - `meho_backplane.operations.addon_pairing.AddonPairingService` — the single
-  lifecycle path (`pair` / `unpair` / `list_` / `get` / `heartbeat`).
+  lifecycle path (`pair` / `unpair` / `list_` / `get` / `get_by_client_id` /
+  `heartbeat`).
   Stateless, method-scoped sessions; Keycloak-first on both mutating paths
   (mirrors `AgentPrincipalService` / `runner_principals`). Errors:
   `AddonAlreadyPairedError`, `AddonNotPairedError`.
@@ -180,7 +181,8 @@ unit with pairing health. Key types:
   intake, `extra="forbid"`), `CapabilityDeclarationResponse` (declared set +
   derived `active`), `ActiveCapabilityRead` (the tenant-wide activation unit).
 - `meho_backplane.operations.addon_capability.AddonCapabilityService` — the
-  capability lifecycle path (`declare` / `list_declared` / `active_capabilities`).
+  capability lifecycle path (`declare` / `list_declared` / `active_capabilities` /
+  `active_meta_tool_families`).
 - `meho_backplane.db.models.AddonCapability` — table `addon_capability`;
   unique `(pairing_id, kind, name)`, `kind` CHECK, `pairing_id` FK with
   `ON DELETE CASCADE`; migration `0081`.
@@ -281,16 +283,17 @@ keep their separate role gates.
   self-service writes resolve the pairing by the caller's
   `service_account_sub` and match the requested name via the shared
   `resolve_owned_pairing` guard (see **Object-level write authorization**), so
-  a same-tenant service token can no longer heartbeat or re-declare another
-  paired add-on. A pre-#3027 pairing whose `service_account_sub` is `NULL`
+  a same-tenant service token can heartbeat or re-declare only its own
+  pairing. An older pairing whose `service_account_sub` is `NULL`
   fails closed (cannot self-serve until it re-pairs), matching the step-event
   subscription's stance.
-- **Console is read-only**: pair / unpair are REST-only. Console write
-  actions (a pair/unpair button behind CSRF) are a follow-up.
+- **Console is read-only**: pair and unpair run over REST and the
+  `meho addon` CLI verbs. Console write actions (a pair/unpair button
+  behind CSRF) are a follow-up.
 - **Paired-surface activation (#3029) is the first real consumer of the
   capability-activation plumbing.** The `automation` meta-tool family (MCP), the
   `meho automation` CLI verbs, and the `/ui/automation` console panel are all
-  gated on activation state — see "Paired-surface activation" below. A generic
+  gated on activation state — see "Paired-surface activation" above. A generic
   tenant-wide `GET /api/v1/addons/capabilities` list surface (beyond the
   automation-scoped `GET /api/v1/automation`) is still a follow-up.
 - Keycloak client provisioning is now duplicated three ways (agent, runner,

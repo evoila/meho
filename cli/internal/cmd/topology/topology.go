@@ -103,7 +103,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "topology",
-		Short: "Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / diff / history / annotate / unannotate / list-edges)",
+		Short: "Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / diff / history / annotate / unannotate / bulk-import / list-edges)",
 		Long: "Operate the tenant-scoped topology graph wired by G9.1 + " +
 			"G9.2 + G9.3. Refresh a target's discovered topology, walk " +
 			"what depends on a node (dependents), walk what a node " +

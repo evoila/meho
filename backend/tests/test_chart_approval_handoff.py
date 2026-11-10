@@ -5,10 +5,11 @@
 
 Every credential-write operation that must wait for approval needs
 ``APPROVAL_HANDOFF_ENCRYPTION_KEY``. Without it MEHO denies the operation
-(#3537). The chart keeps ``approvalHandoff`` off by default, because a
-bring-your-own-Secret install must point it at a Secret first. So the
-default render must not stay silent: it must print a warning in the
-install notes.
+(#3537). With no built-in core part on, the chart keeps ``approvalHandoff``
+off by default, because a bring-your-own-Secret install must point it at a
+Secret first. So that render must not stay silent: it must print a warning
+in the install notes. With a built-in part on it is on by default
+(``test_chart_core_wiring.py``).
 
 ``helm template`` does not print ``NOTES.txt``, so the notes are rendered
 through a throwaway ConfigMap in a temporary copy of the chart. That runs
@@ -34,6 +35,13 @@ _ENV_NAME = "APPROVAL_HANDOFF_ENCRYPTION_KEY"
 _WARNING = "WARNING: approvalHandoff.enabled=false"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -109,7 +117,7 @@ def _render_notes(tmp_path: Path, *extra: str) -> str:
 
 
 def test_default_install_renders_no_key_and_warns(tmp_path: Path) -> None:
-    """Default values: no key env, so the install notes must warn about it."""
+    """Bring-your-own defaults: no key env, so the install notes must warn about it."""
     assert _ENV_NAME not in {entry["name"] for entry in _backplane_env()}
     notes = _render_notes(tmp_path)
     assert _WARNING in notes
@@ -134,7 +142,7 @@ def test_enabled_install_wires_key_from_secret_and_does_not_warn(tmp_path: Path)
 
 
 def test_enabled_without_secret_name_fails_at_render() -> None:
-    """Turning custody on without a Secret name is refused by the schema."""
+    """Turning custody on without a Secret name or a built-in part is refused."""
     result = _helm_template(_CHART_DIR, "--set", "approvalHandoff.enabled=true")
     assert result.returncode != 0
     assert "approvalHandoff" in result.stderr

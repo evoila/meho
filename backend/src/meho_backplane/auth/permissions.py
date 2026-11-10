@@ -38,31 +38,32 @@ most restrictive across all three:
    ``safety_level`` default.
 
 3. **Op-requirement gate.** The op's ``safety_level`` drives the
-   minimum default verdict (used when no row matches) and a ceiling on
-   how permissive a grant can be. The default and the ceiling are
-   *distinct*: a ``dangerous`` op defaults to ``deny`` (no grant ⇒
-   denied), but an explicit grant *is* honoured up to the
-   ``needs-approval`` ceiling — i.e. "destructive = deny **unless
-   granted**" (#820), and even when granted a destructive op is never
-   ``auto-execute``d (it always lands on human approval). Tenant/
-   operator config can tighten (make a ``caution`` op ``deny``) but not
-   loosen past the ceiling (cannot make a ``dangerous`` op
-   ``auto-execute``).
+   default verdict (used when no row matches) and a ceiling on how
+   permissive a row can be. The rule (#3980, decision
+   ``approval-groups-and-self-approval.md``): an agent runs only ``safe``
+   operations at once; every other level waits for a person's approval.
+   A row can make an agent stricter (``deny``), but never lets a non-safe
+   op run at once.
 
    Safety-level defaults (no matching permission row):
 
    * ``safe`` → ``auto-execute``
    * ``caution`` → ``needs-approval``
-   * ``dangerous`` → ``deny``
+   * ``dangerous`` → ``needs-approval``
+   * ``destructive`` → ``needs-approval`` (the call must still carry the
+     preview hash before it can wait, #3197)
+   * an unknown level → ``deny`` (fail closed)
 
    Safety-level ceilings (hard upper-bound on what a row can grant):
 
    * ``safe`` — no ceiling (any verdict is valid).
-   * ``caution`` — ceiling is ``needs-approval``; ``auto-execute``
-     from a row is tightened to ``needs-approval``.
-   * ``dangerous`` — ceiling is ``needs-approval``; a grant of
-     ``auto-execute`` is tightened to ``needs-approval`` (the op stays
-     human-gated), while the *default* (no grant) remains ``deny``.
+   * ``caution``, ``dangerous``, ``destructive`` — ceiling is
+     ``needs-approval``; ``auto-execute`` from a row is tightened to
+     ``needs-approval``.
+
+   The same rule holds for a person's call made with a token
+   (:mod:`meho_backplane.operations._validate`); only the web interface
+   counts as a person.
 
 Role-gate interaction
 ---------------------
@@ -127,37 +128,30 @@ _log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 #: Default verdict when no AgentPermission row matches, keyed by
-#: safety_level value. ``safe`` → auto-execute, ``caution`` →
-#: needs-approval, ``dangerous`` → deny, ``destructive`` → deny.
-#: Unknown safety_level falls back to deny (fail-closed).
+#: safety_level value (#3980). ``safe`` → auto-execute; ``caution``,
+#: ``dangerous`` and ``destructive`` → needs-approval: they wait for a
+#: person's approval. Unknown safety_level falls back to deny (fail-closed).
 _SAFETY_DEFAULT: dict[str, PermissionVerdict] = {
     "safe": PermissionVerdict.AUTO_EXECUTE,
     "caution": PermissionVerdict.NEEDS_APPROVAL,
-    "dangerous": PermissionVerdict.DENY,
-    "destructive": PermissionVerdict.DENY,
+    "dangerous": PermissionVerdict.NEEDS_APPROVAL,
+    "destructive": PermissionVerdict.NEEDS_APPROVAL,
 }
 
 #: Hard upper-bound ceiling for each safety_level.  A permission row
 #: carrying a verdict more permissive than the ceiling is tightened
 #: to the ceiling value.  ``safe`` has no ceiling (any verdict is
 #: valid -- the ``None`` sentinel is handled in ``_apply_ceiling``).
-#: ``dangerous`` is capped at ``needs-approval`` (not ``deny``) so an
-#: explicit grant *is* honoured -- "deny **unless granted**" (#820) --
-#: while a granted dangerous op still lands on human approval rather
-#: than auto-executing. The *default* (no grant) for ``dangerous``
-#: stays ``deny`` via ``_SAFETY_DEFAULT``.
-#:
-#: ``destructive`` (#3183) is the exception to "deny unless granted":
-#: its ceiling is ``deny``, so *no* AgentPermission grant can lift an
-#: agent principal off ``deny`` — the tier is non-grantable for agents
-#: by construction (default deny + deny ceiling). Governed execution of
-#: a destructive op is a human decision on the non-agent approval path
-#: (#3197 / #3198), never an agent verdict.
+#: Every other level is capped at ``needs-approval``, so no row lets an
+#: agent run a non-safe op at once (#3980). ``destructive`` waits for a
+#: person's approval under the group rules, after the preview check
+#: (#3197); it is still never grantable, because a row can only make it
+#: stricter. Agents never approve.
 _SAFETY_CEILING: dict[str, PermissionVerdict | None] = {
     "safe": None,
     "caution": PermissionVerdict.NEEDS_APPROVAL,
     "dangerous": PermissionVerdict.NEEDS_APPROVAL,
-    "destructive": PermissionVerdict.DENY,
+    "destructive": PermissionVerdict.NEEDS_APPROVAL,
 }
 
 # Verdict ordering: lower index = more permissive. Used to compare

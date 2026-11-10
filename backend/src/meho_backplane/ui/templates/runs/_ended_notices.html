@@ -1,0 +1,56 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  "The run has ended" notices (#5110). Answer of ``GET /ui/runs/notices``.
+
+  ``run-notices.js`` adds this answer to ``#meho-run-notices`` in the
+  corner of every console page. Each notice carries ``data-run-ended`` so
+  the script stops asking for that run. A run the person may not see gets
+  only a hidden marker (``data-run-notice-drop``), which the script removes.
+  The Close button is handled by the script (no inline script here).
+
+  Not tied to approvals: a notice links to the approval request only when
+  ``notice.approval_request_id`` is set.
+
+  Context:
+    notices -- list[dict]: run_id / op_id / state / label / alert_class /
+               approval_request_id (or None)
+    dropped -- list[str]: run ids to stop asking for, without a notice
+-#}
+{% from "_icons.html" import icon %}
+{% for notice in notices %}
+  <div
+    role="status"
+    class="alert {{ notice.alert_class }} items-start shadow-lg"
+    data-run-notice
+    data-run-ended="{{ notice.run_id }}"
+    data-run-state="{{ notice.state }}"
+  >
+    {{ icon("check" if notice.state == "executed" else "ban", class="size-5 shrink-0") }}
+    <div class="min-w-0">
+      <h4 class="text-sm font-semibold">The run has ended: {{ notice.label }}</h4>
+      <p class="truncate font-mono text-xs">{{ notice.op_id }}</p>
+    </div>
+    <div class="flex gap-1">
+      {% if notice.approval_request_id %}
+        <button
+          type="button"
+          class="btn btn-sm"
+          hx-get="/ui/approvals/{{ notice.approval_request_id }}"
+          hx-target="#meho-approvals-modal-container"
+          hx-swap="innerHTML"
+        >View request</button>
+      {% endif %}
+      <button
+        type="button"
+        class="btn btn-sm btn-ghost btn-square"
+        data-run-notice-close
+        aria-label="Close this notice"
+      >{{ icon("x", class="size-4") }}</button>
+    </div>
+  </div>
+{% endfor %}
+{% for run_id in dropped %}
+  <span hidden data-run-ended="{{ run_id }}" data-run-notice-drop></span>
+{% endfor %}

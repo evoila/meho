@@ -42,6 +42,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_basic_credentials,
 )
 from meho_backplane.connectors.harbor import HarborConnector
+from meho_backplane.connectors.harbor.robot_scope import RobotOutsideProjectError
 from meho_backplane.connectors.harbor.session import load_credentials_from_vault
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import AuthModel
@@ -124,6 +125,29 @@ _TARGET = _StubTarget(
     port=443,
     secret_ref="targets/harbor/harbor-test",
 )
+
+
+def _robot_body(robot_id: int, project: str) -> dict[str, object]:
+    """Harbor's ``GET /robots/{id}`` body for a project robot of *project*."""
+    return {
+        "id": robot_id,
+        "name": f"robot${project}+ci",
+        "level": "project",
+        "permissions": [
+            {
+                "kind": "project",
+                "namespace": project,
+                "access": [{"resource": "repository", "action": "push"}],
+            }
+        ],
+    }
+
+
+def _mock_robot_read(mock: respx.MockRouter, robot_id: int, project: str) -> None:
+    """Harbor answers the read before the delete with a robot of *project*."""
+    mock.get(f"https://harbor.test.invalid/api/v2.0/robots/{robot_id}").mock(
+        return_value=respx.MockResponse(200, json=_robot_body(robot_id, project))
+    )
 
 
 def _make_operator(raw_jwt: str = "op.robot.harbor.jwt") -> Operator:
@@ -431,6 +455,7 @@ async def test_robot_delete_sends_delete_to_harbor_and_returns_synthetic_result(
     )
     connector = _make_connector()
     with respx.mock(assert_all_called=True) as mock:
+        _mock_robot_read(mock, 42, "myproject")
         mock.delete("https://harbor.test.invalid/api/v2.0/robots/42").mock(
             return_value=respx.MockResponse(200)
         )
@@ -457,6 +482,7 @@ async def test_robot_delete_reads_credential_under_operator_identity(
     operator = _make_operator()
 
     with respx.mock() as mock:
+        _mock_robot_read(mock, 7, "proj")
         mock.delete("https://harbor.test.invalid/api/v2.0/robots/7").mock(
             return_value=respx.MockResponse(200)
         )
@@ -484,6 +510,7 @@ async def test_robot_delete_sends_basic_auth_header(
         return respx.MockResponse(200)
 
     with respx.mock() as mock:
+        _mock_robot_read(mock, 7, "proj")
         mock.delete("https://harbor.test.invalid/api/v2.0/robots/7").mock(side_effect=_capture)
         await connector.robot_delete(_make_operator(), _TARGET, {"project": "proj", "id": 7})
 
@@ -502,14 +529,92 @@ async def test_robot_delete_raises_on_http_error(
         secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
     )
     connector = _make_connector()
-    with respx.mock() as mock:
-        mock.delete("https://harbor.test.invalid/api/v2.0/robots/99").mock(
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://harbor.test.invalid/api/v2.0/robots/99").mock(
             return_value=respx.MockResponse(404)
+        )
+        delete_route = mock.delete("https://harbor.test.invalid/api/v2.0/robots/99").mock(
+            return_value=respx.MockResponse(200)
         )
         with pytest.raises(httpx.HTTPStatusError):
             await connector.robot_delete(
                 _make_operator(), _TARGET, {"project": "myproject", "id": 99}
             )
+    assert not delete_route.called, "a robot MEHO cannot read is not deleted"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_robot_delete_raises_when_harbor_refuses_the_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """robot_delete() propagates httpx.HTTPStatusError from the DELETE itself."""
+    install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+    connector = _make_connector()
+    with respx.mock() as mock:
+        _mock_robot_read(mock, 99, "myproject")
+        mock.delete("https://harbor.test.invalid/api/v2.0/robots/99").mock(
+            return_value=respx.MockResponse(500)
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await connector.robot_delete(
+                _make_operator(), _TARGET, {"project": "myproject", "id": 99}
+            )
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "robot",
+    [
+        pytest.param(_robot_body(7, "other-project"), id="other-project"),
+        pytest.param(
+            {"id": 7, "name": "robot$ci", "level": "system", "permissions": []},
+            id="system-robot",
+        ),
+        pytest.param(
+            {
+                **_robot_body(7, "proj"),
+                "level": "system",
+            },
+            id="system-level-with-project-permission",
+        ),
+        pytest.param(
+            {
+                **_robot_body(7, "proj"),
+                "permissions": [
+                    {"kind": "project", "namespace": "proj", "access": []},
+                    {"kind": "project", "namespace": "other-project", "access": []},
+                ],
+            },
+            id="second-project",
+        ),
+        pytest.param({**_robot_body(7, "proj"), "permissions": []}, id="no-permissions"),
+        pytest.param({"id": 7, "name": "robot$x"}, id="no-level"),
+    ],
+)
+async def test_robot_delete_refuses_a_robot_outside_the_named_project(
+    monkeypatch: pytest.MonkeyPatch, robot: dict[str, object]
+) -> None:
+    """A robot of another project, or a system robot, is not deleted: no DELETE is sent."""
+    install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+    connector = _make_connector()
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://harbor.test.invalid/api/v2.0/robots/7").mock(
+            return_value=respx.MockResponse(200, json=robot)
+        )
+        delete_route = mock.delete("https://harbor.test.invalid/api/v2.0/robots/7").mock(
+            return_value=respx.MockResponse(200)
+        )
+        with pytest.raises(RobotOutsideProjectError, match="not a project robot of project"):
+            await connector.robot_delete(_make_operator(), _TARGET, {"project": "proj", "id": 7})
+    assert not delete_route.called, "no DELETE may reach Harbor"
     await connector.aclose()
 
 
@@ -599,6 +704,7 @@ async def test_dispatch_typed_threads_operator_into_robot_delete(
     operator = _make_operator()
 
     with respx.mock() as mock:
+        _mock_robot_read(mock, 9, "p")
         mock.delete("https://harbor.test.invalid/api/v2.0/robots/9").mock(
             return_value=respx.MockResponse(200)
         )
@@ -644,6 +750,7 @@ async def test_robot_ops_never_leak_credential_or_jwt_in_logs(
                 },
             )
         )
+        _mock_robot_read(mock, 1, "p")
         mock.delete("https://harbor.test.invalid/api/v2.0/robots/1").mock(
             return_value=respx.MockResponse(200)
         )

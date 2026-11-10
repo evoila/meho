@@ -49,7 +49,9 @@ the machine that runs `build.sh` downloads the CIS content of
 ComplianceAsCode from GitHub once (about 180 MB, kept in the cache). The
 scan's result list is `meho-appliance-<version>-cis.txt` in the out-dir;
 `[WARN]` lines in the build output name failing rules that are in neither
-`cis/not-applicable.md` nor `cis/exceptions.md`.
+`cis/not-applicable.md` nor `cis/exceptions.md`, and the build stops at
+step 3. Fix each rule in `cis/harden.sh`, or add it to `cis/exceptions.md`
+with its reason, then go on with `--from-step 3`.
 
 When a step fails, the build VM stays in vCenter. Fix the cause and go on
 from that step with `--from-step N` (2 the form-2 install, 3 the appliance

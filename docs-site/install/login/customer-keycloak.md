@@ -5,7 +5,10 @@ Keycloak stays in front: it checks who the person is. MEHO's built-in
 Keycloak sends people to yours, gets back their groups, and puts each
 person into the matching MEHO group.
 
-MEHO always ships its own Keycloak. You do not replace it with yours.
+In this recipe, MEHO keeps its built-in Keycloak, and yours stays in
+front of it. To use your Keycloak in place of the built-in one
+(`coreKeycloak.enabled: false`), follow
+[Keycloak realm setup](../keycloak-realm.md) instead.
 
 **What stays where:**
 
@@ -15,8 +18,8 @@ MEHO always ships its own Keycloak. You do not replace it with yours.
 | Passwords, MFA, login checks | Tenant and role, from the MEHO group |
 | Which of your groups may use MEHO | The tokens that MEHO accepts |
 
-MEHO accepts only tokens from its own Keycloak. A token from your
-Keycloak does not work at MEHO directly.
+In this setup, MEHO accepts only tokens from its built-in Keycloak. A
+token from your Keycloak does not work at MEHO directly.
 
 On MEHO's side you set this up with Helm values
 (`coreKeycloak.companyLogin`), not by hand in the Keycloak admin
@@ -182,9 +185,11 @@ yours.
   Keycloak reads your groups only at that login: a session the person
   already has with MEHO's Keycloak keeps its group until it ends. To
   cut access at once, also end their sessions in MEHO's Keycloak
-  (**Users → the person → Sessions → Sign out**).
-- **MEHO accepts only tokens from its own Keycloak.** A token issued by
-  your Keycloak is refused.
+  (**Users → the person → Sessions → Sign out**), and revoke any session
+  of type **Offline**. An offline login, for example of Claude Code,
+  lasts up to 48 hours without use.
+- **MEHO accepts only tokens from its built-in Keycloak.** A token
+  issued by your Keycloak is refused.
 
 ## Lab test
 

@@ -135,7 +135,7 @@ manual fail-loud check — lives in
   custody, rotation, runbook, degraded mode),
   [`scripts/setup/mint-review-app-token.sh`](../../scripts/setup/mint-review-app-token.sh)
   (installation-token minting, fail-loud), this record.
-- Skill side (`evoila-bosnia/meho-internal`,
+- Skill side (the private planning repo,
   `.claude/skills/auto-review-pr/SKILL.md` and
   `auto-implement-initiative/SKILL.md`): the COMMENT-state fallback is
   described as an explicitly degraded mode, and the formal-review path

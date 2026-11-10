@@ -14,12 +14,12 @@ Proxmox VE exposes a broad, uniform REST surface, so the connector does not
 hand-curate per-endpoint ops. Instead it ships a generic `<METHOD> <path>`
 passthrough plus a small identity/task surface:
 
-| op_id | safety | approval | endpoint |
-|---|---|---|---|
-| `proxmox.about` | safe | no | `GET /version` + `GET /nodes` |
-| `proxmox.api.get` | safe | no | `GET`/`HEAD <path>` (allowlisted) |
-| `proxmox.task.status` | safe | no | `GET /nodes/{node}/tasks/{upid}/status` |
-| `proxmox.api.write` | dangerous | **yes** | `POST`/`PUT`/`DELETE <path>` (allowlisted) |
+| op_id | group | safety | approval | endpoint |
+|---|---|---|---|---|
+| `proxmox.about` | `proxmox-identity` | safe | no | `GET /version` + `GET /nodes` |
+| `proxmox.api.get` | `proxmox-api-read` | safe | no | `GET`/`HEAD <path>` (allowlisted) |
+| `proxmox.task.status` | `proxmox-tasks` | safe | no | `GET /nodes/{node}/tasks/{upid}/status` |
+| `proxmox.api.write` | `proxmox-api-write` | dangerous | **yes** | `POST`/`PUT`/`DELETE <path>` (allowlisted) |
 
 The agent composes the relative path (`cluster/resources`,
 `nodes/pve/qemu/100/status/start`, …); the connector prepends the constant
@@ -56,10 +56,16 @@ fields:
   because ticket auth is **not** CSRF-exempt, `_write_json` attaches the
   `CSRFPreventionToken` header on every write.
 
-Token material wins when both are stored. Credentials (and, for ticket auth,
-the minted session) are cached under the tenant-unique `(tenant_id, id)` key;
-the system-operator fast-path carve-out re-runs the loader for
-background/operator-less callers (fail-closed).
+Token material wins when both are stored. Credentials are cached under the
+tenant-unique `(tenant_id, target.id)` key. A cached entry goes only to a
+caller whose own Vault read of the target's secret passed once in this
+process (`SecretReaders`); any other caller runs the loader under their own
+login first. The system operator is never recorded, so it always runs the
+loader (fail-closed). For ticket auth, the minted session is cached per
+credential (`credential_cache_key`: tenant, secret and login host), so two
+targets that share one credential share one ticket.
+`invalidate_credentials` drops the cached credentials, the list of callers
+whose read passed, and the ticket.
 
 ### Passthrough allowlist (two layers)
 
@@ -83,9 +89,9 @@ parameter.
 `proxmox.api.write` registers `safety_level="dangerous"`,
 `requires_approval=True`. The dispatcher's policy gate routes a USER-principal
 dispatch to the human approve-queue (`awaiting_approval`) and floors an agent
-dispatch to needs-approval; the handler runs only on the `_approved=True`
-resume path. No bypass, no hard-deny — the descriptor flag is the only knob
-the connector controls.
+dispatch to needs-approval (an agent refusal stays a refusal); the handler
+runs only on the `_approved=True` resume path. The connector adds no refusal
+of its own — the descriptor flag is the only knob the connector controls.
 
 ### Async writes → UPID → task poll
 
@@ -93,8 +99,9 @@ Most Proxmox writes run as background tasks and return a `UPID` string.
 `proxmox.api.write` returns `{data, upid, node}` (parsing the UPID's second
 colon field as the node). The agent follows it with `proxmox.task.status`
 (`wait=true`), which polls `GET /nodes/{node}/tasks/{upid}/status` until
-`status == "stopped"` (terminal) or the bounded timeout, returning the
-`exitstatus` (`OK` on success).
+`status == "stopped"` (terminal) or the bounded timeout
+(`poll_timeout_seconds`, default 300, at most 1800), returning the
+`exitstatus` (`OK` on success) and `timed_out`.
 
 ### Fingerprint / probe
 
@@ -113,11 +120,15 @@ connector-level TLS handling.
 ## Dependencies
 
 - `connectors/adapters/http.py` — pooled `httpx` client, retry, per-target TLS
-  trust, SSRF guard.
+  trust, the target address check.
 - `connectors/_shared/vault_creds.py` — `load_vault_secret_data`,
   `strip_credential_value`, the two-phase Vault error contract.
 - `connectors/_shared/system_operator.py` — `synthesise_system_operator` /
   `is_system_operator`.
+- `connectors/_shared/secret_readers.py` — `SecretReaders`, the callers whose
+  own Vault read passed.
+- `connectors/_shared/cache_key.py` — `target_cache_key` /
+  `credential_cache_key`.
 - `operations/typed_register.py` — `register_typed_operation`; the registrar is
   queued in `__init__.py`.
 - Registry v2 dual registration (versioned + wildcard) in `__init__.py`.
@@ -155,8 +166,9 @@ instead of against a live cluster. The declared set is captured from live
 handler execution (a `_get_json`-recording subclass), so an inline path edit
 flows into the reconcile automatically; the generic `proxmox.api.get` /
 `proxmox.api.write` passthroughs carry no hand-coded path and are excluded. The
-schema is pinned on the operator's spec-shelf (`docs/proxmox-8.4/`, AGPL-3.0);
-the lane skips cleanly where the shelf is not provisioned. Standard:
+schema is pinned on the operator's spec-shelf (`docs/proxmox-8.4/`, AGPL-3.0),
+found through the `MEHO_CONSUMER_DOCS_ROOT` env var; the lane skips cleanly
+where the shelf is not provisioned. Standard:
 [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## References

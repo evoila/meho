@@ -9,8 +9,8 @@ sorted relative-path order, and find every slug claimed by two or more
 files before any write. Those files are reported as conflicts and not
 written, so filesystem listing order never decides which file wins and
 an existing entry with a conflicting slug stays unchanged. Direct
-create (:meth:`KbService.create_entry`) is a different, explicit
-last-write-wins path.
+create (:meth:`KbService.create_entry`) is a different path: it names
+the revision the writer read and refuses a stale write.
 
 Each written entry gets a ``directory`` provenance block (relative
 path, one ``ingested_at`` per run) via :mod:`meho_backplane.kb.provenance`.
@@ -41,6 +41,8 @@ from meho_backplane.kb.schemas import (
     KbIngestConflict,
     KbIngestionResult,
 )
+from meho_backplane.kb.shared import check_may_share, refuse_shared_slug
+from meho_backplane.lesson_header import add_candidate_expiry
 from meho_backplane.retrieval.indexer import compute_body_hash
 from meho_backplane.settings import get_settings
 
@@ -242,21 +244,23 @@ async def _ingest_one(
     else:
         action = "updated"
 
+    # The tenant must be allowed to write this slug and this ``shared`` value,
+    # also in a dry run, so the preview shows the same errors a real run would.
+    check_may_share(tenant_id, record.metadata)
+    await refuse_shared_slug(tenant_id, slug)
     if dry_run:
         return action
-
-    enriched_metadata = stamp_provenance(
-        record.metadata,
-        source_kind="directory",
-        relative_path=record.relative_path,
-        ingested_at=ingested_at,
-    )
 
     await write_entry(
         tenant_id=tenant_id,
         slug=slug,
         body=record.body,
-        metadata_for=lambda _existing: enriched_metadata,
+        metadata_for=lambda existing: stamp_provenance(
+            add_candidate_expiry(record.metadata, existing=existing, now=ingested_at),
+            source_kind="directory",
+            relative_path=record.relative_path,
+            ingested_at=ingested_at,
+        ),
     )
     return action
 

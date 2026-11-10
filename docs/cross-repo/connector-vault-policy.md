@@ -24,9 +24,20 @@ The credential-read leaf of the dispatch chain is wired in
 session loader. The *shape* of "what Vault must grant" — which secret
 subtree, which templated path, which identity claim — is a property of
 that chassis code, so it is documented here and changes in lock-step
-with it. The actual Vault configuration lives on the consumer side
-(`evoila-bosnia/claude-rdc-hetzner-dc`
-in the dogfood case); this page is the spec that side reads.
+with it. The actual Vault configuration lives on the consumer side;
+this page is the spec that side reads.
+
+**Built-in OpenBao.** With the built-in OpenBao
+(`coreVault.enabled: true`, the chart default since 0.45.0), the setup
+Job writes the per-tenant policies of
+[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md),
+so the per-operator recipe of §2–§4 is not used there. A `tenant_admin`
+can write, delete and remove KV secrets under the tenant path. The other
+grants of §6 (token roles, login roles, policies, identity tokens) are in
+no tenant policy. The built-in role `meho-admin` has every right; only
+tokens of members of `MEHO-Platform-Admins` can log in with it. A vault
+target names the role its calls use (`vault_role`,
+[`vault-provisioning.md`](./vault-provisioning.md) §8).
 
 This runbook is the **per-target-secret** companion to
 [`vault-provisioning.md`](./vault-provisioning.md). That doc provisions
@@ -40,7 +51,7 @@ role.
 
 When an operator calls an op against a target, the dispatcher forwards
 the operator's already-validated Keycloak JWT to
-[`vault_client_for_operator(operator)`](../../backend/src/meho_backplane/auth/vault.py#L198),
+[`vault_client_for_operator(operator)`](../../backend/src/meho_backplane/auth/vault.py),
 which logs in to Vault's JWT/OIDC auth method on the `meho-mcp` role and
 reads the target's `secret_ref` as a KV-v2 secret. The role and mount
 are not hard-coded — they come from settings
@@ -60,7 +71,7 @@ the whole point of the operator-context decision: per-operator RBAC
 deploy prerequisite — **if the policy attached to `meho-mcp` does not
 grant the operator read on the target's path, the read returns Vault
 403 and the connector raises
-[`VaultRoleDeniedError`](../../backend/src/meho_backplane/auth/vault.py#L99)**
+[`VaultRoleDeniedError`](../../backend/src/meho_backplane/auth/vault.py)**
 (surfaced to the caller as a clean auth failure, never a 5xx).
 
 ## 1. Secret layout — where per-target vendor credentials live
@@ -74,7 +85,7 @@ reads and uses it server-side.
 
 Recommended convention: put per-target secrets under a `targets/`
 subtree of the existing KV-v2 mount (default mount `secret`,
-[`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py#L92)),
+[`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)),
 keyed by the operator identity segment the templated policy scopes on
 (see §2):
 
@@ -272,7 +283,7 @@ Expected outcomes:
 - **`permission denied` (HTTP 403)** → the §2 policy is missing,
   mis-scoped, or the operator's entity-alias `name` does not match the
   `<op-sub>` segment. This is the exact failure that surfaces as
-  [`VaultRoleDeniedError`](../../backend/src/meho_backplane/auth/vault.py#L99)
+  [`VaultRoleDeniedError`](../../backend/src/meho_backplane/auth/vault.py)
   from the connector. Fix §2 (policy) or §3 (identity), not the
   connector.
 - **`No value found at secret/data/targets/...`** → the secret itself
@@ -347,8 +358,8 @@ path prefix: `vault.kv.put` / `vault.kv.patch` write the value under
 `<mount>/data/<path>` (`create`/`update` there for `put`; `read`/`update`
 for `patch`, which reads the secret before it writes), while `vault.kv.delete`'s
 version soft-delete (`POST <mount>/delete/<path>`) is authorized by
-`update` on the **`/delete/`** path — *not* the data path (evoila/meho#3274,
-lab-verified in claude-rdc-hetzner-dc#2814). Add **both** stanzas below
+`update` on the **`/delete/`** path — *not* the data path (evoila/meho#3274).
+Add **both** stanzas below
 alongside the §2 read grants (they are *additive* — keep all):
 
 ```hcl
@@ -553,7 +564,7 @@ caveat). The contract a deploy must satisfy is therefore:
 | Read (`vault.kv.read`, credential resolution) | Operator's OIDC-federated token | `read` on `secret/data/…/{{identity…}}/*` (§2) |
 | Write (`vault.kv.put`) | Operator's OIDC-federated token (dispatcher at park; **reviewer** on approved re-dispatch) | `create` + `update` on `secret/data/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.kv.patch`) | same | `read` + `update` on `secret/data/…/{{identity…}}/*` (§6.1); it reads before it writes and never needs `create` |
-| Write (`vault.kv.delete` version soft-delete) | same | `update` on the data path (§6.1) |
+| Write (`vault.kv.delete` version soft-delete) | same | `update` on `secret/delete/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.kv.metadata.delete` permanent removal) | same | `read` + `delete` on `secret/metadata/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.kv.folder.delete` soft-delete a folder) | same | `list` + `read` on `secret/metadata/…/{{identity…}}/*` and `update` on `secret/delete/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.token.role.write` create or change a token role) | same | `create` + `update` on `auth/token/roles/<role>` (§6.4) |
@@ -707,8 +718,8 @@ secret/data/tenants/<tenant_id>/<register_as>
 `<tenant_id>` is the caller's tenant. `<register_as>` is the target name
 the caller passes. You cannot choose another path, for two reasons:
 
-- `meho targets create --name <register_as>` without a `secret_ref`
-  reads this same path. That is how the staged kubeconfig reaches the new
+- `meho targets add <register_as>` without a `secret_ref` reads this
+  same path. That is how the staged kubeconfig reaches the new
   target.
 - The tenant-scope guard (on by default) refuses a Vault write outside
   `secret/tenants/<tenant_id>/`. A path such as `secret/meho/...` would be
@@ -804,6 +815,7 @@ Notes:
 - **The trust on the other side stays.** Deleting the role stops new
   tokens. The system that trusted those tokens keeps its own trust
   setting until someone removes it there.
+
 ### 6.8 Make a token from a role and store it (`vault.token.create_and_store`)
 
 `vault.token.create_and_store` makes a Vault token from a token role and
@@ -901,7 +913,7 @@ v0.x — see the carve-out in
 - Federation-chain provisioning (auth method, role, KV mount):
   [`vault-provisioning.md`](./vault-provisioning.md)
 - Implementation that consumes this config:
-  [`backend/src/meho_backplane/auth/vault.py`](../../backend/src/meho_backplane/auth/vault.py#L198)
+  [`backend/src/meho_backplane/auth/vault.py`](../../backend/src/meho_backplane/auth/vault.py)
   (role/mount from `vault_oidc_role` / `vault_oidc_mount_path`)
 - Connector secret-ref convention (k8s `kubeconfig` field):
   [`kubernetes-onboarding.md`](./kubernetes-onboarding.md)

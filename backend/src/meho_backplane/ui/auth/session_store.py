@@ -20,7 +20,7 @@ The four entry points
   tokens; this module Fernet-encrypts both tokens and inserts the
   row. The returned :class:`DecryptedSession` carries the row's
   ``id`` -- the value the BFF middleware sets as the
-  ``meho_session`` cookie.
+  ``__Host-meho_session`` cookie.
 
 * :func:`load_session` -- hot-path lookup on every ``/ui/*`` request.
   Reads the row by PK, applies the revocation + expiry filter, and
@@ -470,7 +470,7 @@ async def load_session(
         ``last_seen_at`` update but does not commit; the caller's
         outer transaction owns the commit.
     cookie_id
-        Parsed UUID from the ``meho_session`` cookie. Malformed
+        Parsed UUID from the ``__Host-meho_session`` cookie. Malformed
         cookie values are the caller's problem -- parse them with
         :func:`uuid.UUID` and catch :class:`ValueError` upstream.
 
@@ -598,7 +598,7 @@ async def revoke_session(
         Open :class:`AsyncSession`. Flushes; the caller's outer
         transaction owns the commit.
     cookie_id
-        The ``meho_session`` cookie UUID.
+        The ``__Host-meho_session`` cookie UUID.
     """
     row = await session.get(WebSession, cookie_id)
     if row is None or row.revoked_at is not None:
@@ -611,24 +611,26 @@ async def list_active_sessions(
     session: AsyncSession,
     *,
     operator_sub: str,
-    tenant_id: uuid.UUID,
 ) -> list[ActiveSessionRow]:
-    """Return one operator's active sessions for the Account surface.
+    """Return one person's active sessions, in every tenant, for the Account page.
 
-    Backs the operator-console Account page's active-session list
-    (G10.11-T1 #1892). Filters to the **calling operator's own** rows:
-    ``operator_sub`` AND ``tenant_id`` both match, ``revoked_at IS NULL``,
-    and ``expires_at > now()`` -- the same liveness predicate
-    :func:`load_session` applies, so the list shows exactly the sessions
-    that would still authenticate. Ordered ``last_seen_at DESC`` so the
-    most-recently-active device sorts first.
+    Backs the operator-console Account page's active-session list. Filters
+    to the **calling person's own** rows: ``operator_sub`` matches,
+    ``revoked_at IS NULL``, and ``expires_at > now()`` -- the same liveness
+    predicate :func:`load_session` applies, so the list shows exactly the
+    sessions that would still authenticate. Ordered ``last_seen_at DESC``
+    so the most-recently-active device sorts first.
 
-    The ``(operator_sub, tenant_id)`` pair is supplied by the caller from
-    the **validated** :class:`UISessionContext`, never from a client form
-    field -- the listing must never be steerable to another operator's
-    sessions. The ``operator_sub`` filter rides
-    ``web_session_operator_sub_idx`` (the index the model was given
-    specifically for this surface).
+    The list is not limited to the current tenant. A tenant switch
+    changes the tenant on the same row, and :func:`load_session` accepts
+    a session in any tenant, so a session of the same person in another
+    tenant is still that person's device. Each row carries its
+    ``tenant_id`` so the page can show it.
+
+    ``operator_sub`` is supplied by the caller from the **validated**
+    :class:`UISessionContext`, never from a client form field -- the
+    listing must never be steerable to another person's sessions. The
+    filter rides ``web_session_operator_sub_idx``.
 
     Returns :class:`ActiveSessionRow` projections (timestamps + identity
     only) -- the Fernet-encrypted token columns are never read.
@@ -644,7 +646,6 @@ async def list_active_sessions(
         select(WebSession)
         .where(
             WebSession.operator_sub == operator_sub,
-            WebSession.tenant_id == tenant_id,
             WebSession.revoked_at.is_(None),
         )
         .order_by(WebSession.last_seen_at.desc())
@@ -670,18 +671,18 @@ async def revoke_other_sessions(
     session: AsyncSession,
     *,
     operator_sub: str,
-    tenant_id: uuid.UUID,
     keep_session_id: uuid.UUID,
 ) -> int:
-    """Soft-delete every active session for this operator except *keep_session_id*.
+    """Soft-delete every active session of this person except *keep_session_id*.
 
-    Backs the Account page's "revoke all other sessions" action
-    (G10.11-T1 #1892): the operator kills every device but the one they
-    are currently using. Scoped to the caller's own ``operator_sub`` AND
-    ``tenant_id`` (supplied from the validated session context, never a
-    form field) so the action can never touch another operator's rows.
-    The current session (``keep_session_id``) is excluded so the
-    operator is **not** logged out by this action.
+    Backs the Account page's "revoke all other sessions" action: the
+    person signs out every device but the one they are using now. Scoped
+    to the caller's own ``operator_sub`` (supplied from the validated
+    session context, never a form field), in **every tenant**: a session
+    that switched to another tenant is the same row and still opens the
+    console, so it is signed out too. The action never touches another
+    person's rows. The current session (``keep_session_id``) is excluded
+    so the person is **not** logged out by this action.
 
     Idempotent and additive: already-revoked rows are skipped
     (``revoked_at IS NULL`` filter), so re-running revokes nothing new.
@@ -692,7 +693,6 @@ async def revoke_other_sessions(
     result = await session.execute(
         select(WebSession).where(
             WebSession.operator_sub == operator_sub,
-            WebSession.tenant_id == tenant_id,
             WebSession.revoked_at.is_(None),
             WebSession.id != keep_session_id,
         )
@@ -747,7 +747,7 @@ async def rotate_refresh(
         (:func:`_commit_replay_side_effects`) and survive the
         caller's rollback on the propagating error.
     cookie_id
-        The session's UUID PK (the ``meho_session`` cookie value).
+        The session's UUID PK (the ``__Host-meho_session`` cookie value).
     presented_refresh
         The refresh token presented back to this rotation call.
         Compared bytes-for-bytes against the decrypted stored value.

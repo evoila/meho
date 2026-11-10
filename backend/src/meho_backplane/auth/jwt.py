@@ -913,23 +913,37 @@ def _extract_tenants(
 _GROUPS_CLAIM_NAME: str = "groups"
 
 
-def _role_groups_in_token(claims: Any, settings: Settings) -> list[str]:
-    """Return the configured role groups the token's ``groups`` claim names.
+def _group_key(name: str) -> str:
+    """Return the form of a group name that MEHO compares.
 
     The group-membership mapper can send plain names or full paths
-    (``/MEHO-Operators``), so a leading ``/`` is dropped on both sides
-    before comparing. Each group is listed once, in the order
-    :attr:`Settings.jwt_role_groups` lists them, so the 401 message and
-    the log event are stable.
+    (``/MEHO-Operators``), so a leading ``/`` is dropped. Upper and lower
+    case do not count: ``meho-operators`` is the same group as
+    ``MEHO-Operators``.
+    """
+    return name.lstrip("/").casefold()
+
+
+def _role_groups_in_token(claims: Any, settings: Settings) -> list[str]:
+    """Return the role groups the token's ``groups`` claim names.
+
+    A token group is a role group when :func:`_group_key` gives the same
+    key as a name in :attr:`Settings.jwt_role_groups`. Each group is
+    listed once, in the order of that setting, with the name as the
+    token spells it, so the 401 message and the log event are stable and
+    show the names the admin sees in Keycloak.
     """
     raw = claims.get(_GROUPS_CLAIM_NAME)
     if not isinstance(raw, list):
         return []
-    names = {item.lstrip("/") for item in raw if isinstance(item, str)}
+    names: dict[str, str] = {}
+    for item in raw:
+        if isinstance(item, str):
+            names.setdefault(_group_key(item), item.lstrip("/"))
     found: list[str] = []
     for group in settings.jwt_role_groups:
-        name = group.lstrip("/")
-        if name in names and name not in found:
+        name = names.pop(_group_key(group), None)
+        if name is not None:
             found.append(name)
     return found
 
@@ -978,10 +992,10 @@ def _is_service_account_token(claims: Any, settings: Settings) -> bool:
     test (security review S11), and only then to the ``user`` default. That
     backstop matters: a prefix-marker false negative is safe **only**
     because the shape test catches the client-credentials token it missed —
-    on its own it is *not* safe, because for a mutating ``caution`` /
-    ``dangerous`` op the #3152 gate auto-executes a ``user``-classified
-    principal instead of parking it (only ``requires_approval`` and the
-    ``destructive`` tier park for a ``user``). A false positive, conversely,
+    on its own it is *not* safe, because a ``user``-classified principal
+    in the web interface runs a ``caution`` op at once, where a service
+    principal waits unless a standing grant covers the op (#3152, #3980).
+    A false positive, conversely,
     would silently upgrade an ordinary user into the unattended-dispatch
     surface, so this marker must stay a positive prefix signal only. An
     empty configured prefix disables *this* marker; the shape test still
@@ -1034,7 +1048,7 @@ def _is_client_credentials_token(claims: Any) -> bool:
 
     Fail-closed by construction: it returns ``True`` only on that positive
     shape. An interactive human token always carries a session claim, so it
-    is never upgraded — the human-``user`` default-allow is preserved. A
+    is never upgraded — it stays a ``user``. A
     degenerate token with no client-identity claim stays ``user`` too (the
     absence of session claims alone never upgrades).
     """
@@ -1433,6 +1447,80 @@ def _extract_approver(claims: Any, settings: Settings) -> bool:
     return False
 
 
+#: The claim that marks a login that may only import knowledge (#5728).
+KB_IMPORT_ONLY_CLAIM: str = "kb_import_only"
+#: The claim that marks a login that may only export knowledge (#5730).
+KB_EXPORT_ONLY_CLAIM: str = "kb_export_only"
+
+
+def _extract_kb_import_only(claims: Any) -> bool:
+    """Return whether the token may only import knowledge (#5728).
+
+    See :func:`_extract_limiting_flag` for how the value is read.
+    """
+    return _extract_limiting_flag(claims, KB_IMPORT_ONLY_CLAIM)
+
+
+def _extract_kb_export_only(claims: Any) -> bool:
+    """Return whether the token may only export knowledge (#5730).
+
+    See :func:`_extract_limiting_flag` for how the value is read.
+    """
+    return _extract_limiting_flag(claims, KB_EXPORT_ONLY_CLAIM)
+
+
+def _extract_limiting_flag(claims: Any, claim_name: str) -> bool:
+    """Read a claim that limits the login to one route.
+
+    The claim comes from a hardcoded claim mapper on the client.
+    No claim, ``false`` or ``"false"`` gives ``False``. ``true`` or
+    ``"true"`` gives ``True``. Any other value also gives ``True``: the
+    flag takes rights away, so a value MEHO cannot read must keep the
+    login limited, not free it. Such a value is logged under
+    ``malformed_<claim_name>_claim``.
+    """
+    raw = claims.get(claim_name)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
+        return raw.strip().lower() == "true"
+    structlog.get_logger(__name__).warning(
+        f"malformed_{claim_name}_claim",
+        claim_name=claim_name,
+        reason="not_a_boolean",
+    )
+    return True
+
+
+#: The claim that marks a login that may only run the conventions drift check.
+CONVENTIONS_DRIFT_ONLY_CLAIM: str = "conventions_drift_only"
+
+
+def _extract_conventions_drift_only(claims: Any) -> bool:
+    """Return whether the token may only run the conventions drift check.
+
+    Read like ``kb_import_only``: no claim, ``false`` or ``"false"`` gives
+    ``False``; ``true`` or ``"true"`` gives ``True``. Any other value also
+    gives ``True``, because the flag takes rights away. Such a value is
+    logged under ``malformed_conventions_drift_only_claim``.
+    """
+    raw = claims.get(CONVENTIONS_DRIFT_ONLY_CLAIM)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
+        return raw.strip().lower() == "true"
+    structlog.get_logger(__name__).warning(
+        "malformed_conventions_drift_only_claim",
+        claim_name=CONVENTIONS_DRIFT_ONLY_CLAIM,
+        reason="not_a_boolean",
+    )
+    return True
+
+
 def _tenants_claim_malformed(claims: Any, settings: Settings) -> bool:
     """Return ``True`` when the ``meho_tenants`` claim is there but not all good.
 
@@ -1495,8 +1583,8 @@ def _extract_self_approver(
     * The token has no ``meho_tenants`` claim (a site with one tenant
       and the older mappers): the flag is on when the ``groups`` claim
       names the group ``JWT_SELF_APPROVER_GROUP`` (default
-      ``MEHO-SA-Operators``). A leading ``/`` is ignored on both sides,
-      the same as in the one-group check. A ``groups`` claim that is not
+      ``MEHO-SA-Operators``). A leading ``/`` and upper or lower case do
+      not count, the same as in the one-group check. A ``groups`` claim that is not
       a list, or has an entry that is not a string, gives ``False`` and
       logs ``malformed_groups_claim``.
 
@@ -1521,8 +1609,8 @@ def _extract_self_approver(
             "malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="entry_not_a_string"
         )
         return False
-    names = {item.lstrip("/") for item in raw}
-    return settings.jwt_self_approver_group.lstrip("/") in names
+    names = {_group_key(item) for item in raw}
+    return _group_key(settings.jwt_self_approver_group) in names
 
 
 def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
@@ -1593,6 +1681,52 @@ def _extract_azp(claims: Any) -> str | None:
     return azp if isinstance(azp, str) and azp else None
 
 
+#: Longest address the ``email`` claim may hold (RFC 3696 errata 1690).
+_MAX_EMAIL_LENGTH: int = 320
+
+
+def _email_problem(email: str) -> str | None:
+    """Return why *email* is not usable as an address, or ``None`` if it is.
+
+    Checks only the shape: an ``@`` with text on both sides, no
+    whitespace or control characters, and not too long. Reserved domains
+    such as ``.local`` or ``.test`` pass on purpose (#5561): the address
+    is never mailed, so whether it is deliverable does not matter.
+    """
+    if len(email) > _MAX_EMAIL_LENGTH:
+        return "too_long"
+    if any(ch.isspace() or not ch.isprintable() for ch in email):
+        return "whitespace_or_control"
+    local, at, domain = email.rpartition("@")
+    if not at:
+        return "no_at_sign"
+    if not local or not domain:
+        return "empty_part"
+    return None
+
+
+def _extract_email(claims: Any, sub: str) -> str | None:
+    """Read the ``email`` claim: soft identity for audit rows and the UI.
+
+    An absent claim gives ``None``. A malformed value is dropped (``None``)
+    with an ``email_claim_dropped`` warning naming the reason, and the token
+    stays valid (#5561): a directory's email format must not decide who can
+    use MEHO. The address itself is not logged.
+    """
+    email = claims.get("email")
+    if email is None:
+        return None
+    if isinstance(email, str):
+        reason = _email_problem(email)
+        if reason is None:
+            return email
+    else:
+        reason = "non_string"
+    log = structlog.get_logger(__name__)
+    log.warning("email_claim_dropped", claim_name="email", reason=reason, sub=sub)
+    return None
+
+
 def _start_tenant(
     claims: Any, settings: Settings, tenants: tuple[TenantMembership, ...]
 ) -> tuple[UUID, TenantRole, bool]:
@@ -1623,8 +1757,10 @@ def _cap_agent_role(principal_kind: PrincipalKind, tenant_role: TenantRole) -> T
     (connectors, targets, conventions, grants, tenant policies) is for
     people. MEHO registers new agents with ``tenant_role=operator``. An
     agent registered earlier still has ``tenant_admin`` in its token, so
-    MEHO reads that value as ``operator`` here. People, service logins
-    and runners keep the role their token carries.
+    MEHO reads that value as ``operator`` here, and marks the Operator
+    (:attr:`~meho_backplane.auth.operator.Operator.agent_role_capped`), so
+    MEHO does not send that token to Vault. People, service logins and
+    runners keep the role their token carries.
     """
     if principal_kind is PrincipalKind.AGENT and tenant_role is TenantRole.TENANT_ADMIN:
         return TenantRole.OPERATOR
@@ -1659,11 +1795,11 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     """Project the validated claims into the public :class:`Operator` shape.
 
     A signature-valid JWT can still carry malformed claim values — most
-    notably an ``email`` that fails the ``EmailStr`` validator on
-    :class:`Operator`, or a tenant claim shape that the issuer hasn't
-    been configured to populate. The security contract is that *every*
-    failure to materialise a trusted operator from a token surfaces as
-    401 — never an unhandled 500 — but the failure *reason* must be
+    notably a tenant claim shape that the issuer hasn't been configured
+    to populate. A malformed ``email`` is not one of them: it is dropped
+    with a warning and the token stays valid (#5561). The security
+    contract is that *every* failure to materialise a trusted operator
+    from a token surfaces as 401 — never an unhandled 500 — but the failure *reason* must be
     distinguishable in logs so on-call doesn't have to guess between a
     misconfigured issuer, a tampered token, and a legitimate
     ``tenant_role`` the v0.2 enum doesn't yet model.
@@ -1673,7 +1809,8 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     detail token (``missing_tenant_claim`` / ``malformed_tenant_claim``
     / ``missing_tenant_role_claim`` / ``unknown_tenant_role``) so the
     bare ``invalid_token`` fallback is reserved for unexpected
-    pydantic validation failures (the malformed-email regression case).
+    pydantic validation failures, logged as ``operator_validation_failed``
+    with the failing fields.
     The one-group check (``multiple_role_groups``, #4594) runs before
     them: a person in two login groups carries a ``tenant_role`` Keycloak
     picked at random, so the tenant extractors would accept it.
@@ -1693,11 +1830,11 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     """
     sub = _extract_sub(claims)
     name = claims.get("name")
-    email = claims.get("email")
+    email = _extract_email(claims, sub)
     principal_kind = _extract_principal_kind(claims, settings)
     tenants = _extract_tenants(claims, settings, principal_kind)
-    tenant_id, tenant_role, approver = _start_tenant(claims, settings, tenants)
-    tenant_role = _cap_agent_role(principal_kind, tenant_role)
+    tenant_id, token_role, approver = _start_tenant(claims, settings, tenants)
+    tenant_role = _cap_agent_role(principal_kind, token_role)
     client_id = _extract_client_id(claims, settings, principal_kind)
     capabilities = _extract_capabilities(claims, settings)
     scopes = _extract_scopes(claims, settings)
@@ -1720,7 +1857,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
         return Operator(
             sub=sub,
             name=name if isinstance(name, str) else None,
-            email=email if isinstance(email, str) else None,
+            email=email,
             raw_jwt=raw_jwt,
             tenant_id=tenant_id,
             tenant_role=tenant_role,
@@ -1730,6 +1867,9 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             scopes=scopes,
             platform_admin=platform_admin,
             approver=approver,
+            kb_import_only=_extract_kb_import_only(claims),
+            kb_export_only=_extract_kb_export_only(claims),
+            conventions_drift_only=_extract_conventions_drift_only(claims),
             runner_id=runner_id,
             tenants=tenants,
             self_approver=self_approver,
@@ -1738,8 +1878,16 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             acr=acr,
             sid=sid,
             azp=_extract_azp(claims),
+            agent_role_capped=tenant_role is not token_role,
         )
     except pydantic.ValidationError as exc:
+        # Field names only: the input values may hold personal data.
+        log = structlog.get_logger(__name__)
+        log.warning(
+            "operator_validation_failed",
+            fields=sorted({".".join(str(part) for part in err["loc"]) for err in exc.errors()}),
+            sub=sub,
+        )
         raise _http_401("invalid_token") from exc
 
 

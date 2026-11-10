@@ -79,6 +79,7 @@ from meho_backplane.operations.ingest._internals import ConnectorScope
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
 from meho_backplane.operations.ingest.connector_users import TenantFilter, find_connector_users
 from meho_backplane.operations.ingest.exceptions import ConnectorInUseError, ConnectorNotFoundError
+from meho_backplane.operations.ingest.login_setup import remove_login_setup
 from meho_backplane.operations.ingest.parser import parse_connector_id
 
 __all__ = [
@@ -143,12 +144,15 @@ class StagedConnectorDelete:
     not the parsed one) to pop **after** the caller's commit
     succeeds; ``audit_payload`` is the JSON-safe dict for the
     ``meho_connector_delete`` audit row the caller writes into the
-    same transaction.
+    same transaction. ``login_setup_scope`` is the scope whose saved
+    login type the delete removed; its login setup class is removed from
+    memory after the commit too, for that scope only.
     """
 
     result: DeleteConnectorResult
     audit_payload: dict[str, Any]
     shim_keys: tuple[tuple[str, str, str], ...]
+    login_setup_scope: ConnectorScope | None = None
 
 
 def _auto_shim_keys_for_triple(
@@ -486,6 +490,7 @@ async def _stage_rowless_delete(
             scope, result, deleted_group_keys=[], auth_profile_deleted=profile_deleted
         ),
         shim_keys=shim_keys,
+        login_setup_scope=scope if profile_deleted else None,
     )
 
 
@@ -594,6 +599,7 @@ async def stage_connector_delete(
             scope, result, deleted_group_keys=group_keys, auth_profile_deleted=profile_deleted
         ),
         shim_keys=shim_keys,
+        login_setup_scope=scope if profile_deleted else None,
     )
 
 
@@ -608,6 +614,13 @@ def deregister_staged_auto_shims(
     :func:`deregister_connector_v2` and moves on. Runs strictly after
     the row-delete transaction commits so a failed commit never
     leaves the registry ahead of the database.
+
+    When the delete removed the scope's saved login type, the scope's
+    login setup class goes too (:func:`remove_login_setup`): a tenant's
+    class from that tenant's table only, so a delete in one tenant never
+    changes how another tenant's calls log in.
     """
+    if staged.login_setup_scope is not None:
+        remove_login_setup(staged.login_setup_scope)
     for product, version, impl_id in staged.shim_keys:
         deregister_connector_v2(product=product, version=version, impl_id=impl_id)

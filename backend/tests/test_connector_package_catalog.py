@@ -229,10 +229,10 @@ def test_spec_and_profile_of_a_package_row_are_read_from_its_folder(
     assert "scheme: basic" in load_entry_profile(entry)
     validate_shipped_artifacts(catalog)
 
-    fixture = catalog.get("_fixture", "1.0")
-    assert fixture is not None, "the built-in fixture row still reads from MEHO's own packages"
-    assert "/things" in load_entry_spec(fixture)
-    assert "scheme: basic" in load_entry_profile(fixture)
+    builtin = catalog.get("mehoauto", "0.1.0")
+    assert builtin is not None, "the built-in row still reads from MEHO's own packages"
+    assert builtin.source_package is None
+    assert "scheme: oauth2_mint" in load_entry_profile(builtin)
 
 
 def test_catalog_ingest_route_uses_the_package_spec(acme_package: Path) -> None:

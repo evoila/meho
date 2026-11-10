@@ -19,6 +19,9 @@
 //     floor: an empty `--allowlist=""` denies all mail for the tenant, a value
 //     restricts it, `--clear` inherits the floor. It can never widen past the
 //     floor, which the backplane still applies at send time.
+//   - `meho tenants model-prices list|set|remove` — GET / PATCH
+//     /api/v1/tenants/model-prices (#5853). Prices for agent models MEHO has no
+//     price for; see model_prices.go.
 //
 // The verb builds a **sparse** JSON body (only the fields the operator set)
 // rather than the generated `TenantFlightRecorderPolicyUpdate` struct: that
@@ -55,13 +58,15 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tenants",
-		Short: "Choose the current tenant and operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)",
+		Short: "Choose the current tenant and operate per-tenant policy (flight-recorder capture, mail-recipient allowlist, model prices)",
 		Long: "Choose the tenant you work in (`meho tenants use`), and manage the policy of " +
-			"that tenant — the flight-recorder capture policy and the mail-recipient allowlist.",
+			"that tenant — the flight-recorder capture policy, the mail-recipient allowlist and the " +
+			"prices of agent models MEHO has no price for.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newFlightRecorderPolicyCmd())
 	cmd.AddCommand(newMailRecipientPolicyCmd())
+	cmd.AddCommand(newModelPricesCmd())
 	cmd.AddCommand(newUseCmd())
 	return cmd
 }

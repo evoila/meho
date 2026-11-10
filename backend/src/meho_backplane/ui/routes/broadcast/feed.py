@@ -77,7 +77,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.auth.tenant import PAGE_TENANT_FORM_FIELD
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.templating import get_templates
@@ -348,7 +348,9 @@ async def _render_fragment(
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 guard
 #: (a function call in a default argument position is disallowed except
 #: for the FastAPI-blessed call sites in ``extend-immutable-calls``).
-_require_ui_session_dep = Depends(require_ui_session)
+#: The ``operator`` floor of the REST broadcast and feed reads: a ``read_only``
+#: session gets ``403 operator_required`` before the handler runs.
+_require_ui_operator_dep = Depends(require_ui_operator)
 _get_raw_session_dep = Depends(get_raw_session)
 
 
@@ -376,7 +378,7 @@ def build_feed_router() -> APIRouter:
                 "(no sidebar / top bar / filter bar)."
             ),
         ),
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
         db_session: AsyncSession = _get_raw_session_dep,
     ) -> HTMLResponse:
         """``GET /ui/broadcast[?op_class=&principal=&target=&op_id=&wall=1]``.
@@ -404,7 +406,7 @@ def build_feed_router() -> APIRouter:
         principal: str = Query(default="", max_length=256),
         target: str = Query(default="", max_length=256),
         op_id: str = Query(default="", max_length=256),
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
         db_session: AsyncSession = _get_raw_session_dep,
     ) -> HTMLResponse:
         """``GET /ui/broadcast/feed[?op_class=&principal=&target=&op_id=]``.

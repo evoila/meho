@@ -32,6 +32,11 @@ The registry filter (``required_role``) hides these tools from
 ``tools/list`` for non-admins. The service layer does not re-check
 roles — it trusts the caller.
 
+``meho_agents_grant_create`` also needs a person, as on REST: its handler
+calls :func:`~meho_backplane.mcp.human_only.ensure_human_mcp_caller`
+first, so an agent, service or runner login gets
+``human_principal_required``.
+
 In-process call pattern
 =======================
 
@@ -67,6 +72,7 @@ from meho_backplane.agents.grant_schemas import (
 )
 from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
@@ -231,6 +237,12 @@ async def _create_grant_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
+    ensure_human_mcp_caller(
+        operator,
+        "meho_agents_grant_create",
+        "A person creates an agent grant in the operator console, or with the CLI: "
+        "`meho agent grant create --principal <sub> --op <pattern> --verdict <v>`.",
+    )
     try:
         payload = AgentGrantCreate.model_validate(arguments)
     except ValidationError as exc:

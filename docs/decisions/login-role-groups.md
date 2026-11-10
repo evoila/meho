@@ -1,6 +1,8 @@
 # People get their tenant and role from one of five login groups (decision)
 
 **Status:** decided — product owner, 2026-10-19
+**Self-approval for MEHO-SA-Operators:** shipped in 0.44.0. See [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md).
+**Superseded in part by:** [configurable policy](2026-11-09-configurable-policy.md) (proposed, waits for the owner's confirmation). It replaces rule 1 "One group per person": a login keeps exactly one base level (read-only, operator or admin), and may have any number of custom roles on top. The rest of this record stays.
 **Issue:** [#4590](https://github.com/evoila/meho/issues/4590)
 **Initiative:** [#3959](https://github.com/evoila/meho/issues/3959) — people log in with their company account, and their group decides their tenant and role
 **Used by:** `meho admin keycloak bootstrap-clients`, the built-in Keycloak setup ([#4040](https://github.com/evoila/meho/issues/4040)), the company login recipes under #3959 ([`docs-site/install/login/`](../../docs-site/install/login/index.md))
@@ -37,7 +39,11 @@ each site has one tenant, so all five groups carry the same
    a login with `401 multiple_role_groups` and names the groups
    ([#4594](https://github.com/evoila/meho/issues/4594)). The check
    reads the `groups` claim and the group names in `JWT_ROLE_GROUPS`
-   (default: the five groups above).
+   (default: the five groups above). Upper and lower case do not
+   count, so `meho-operators` is the same group as `MEHO-Operators`.
+   A token with the `meho_tenants` list (see "More than one tenant"
+   below) is checked by the group attributes in that list instead, so
+   there the group names do not matter.
 2. **No group, no access.** A person in none of the five groups gets
    no `tenant_id`. MEHO refuses the login with
    `401 missing_tenant_claim`.

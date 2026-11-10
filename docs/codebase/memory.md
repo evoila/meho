@@ -7,7 +7,8 @@
 
 The memory service is the persistent, RBAC-gated key-value layer that
 backs both the REST surface (`/api/v1/memory/...`) and the MCP meta-
-tools (`add_to_memory`, `search_memory`, `meho_memory_promote`, plus
+tools (`add_to_memory`, `search_memory`, `meho_memory_promote` (operator
+plane: needs `tenant_admin` and the `mcp:admin` scope), plus
 the resource templates `meho://memory/id/{document_uuid}` and
 `meho://memory/{scope}/{slug}`). All memory
 rows are stored in the shared `documents` table under
@@ -20,13 +21,15 @@ table.
 The package is intentionally narrow in mutation surface: there are
 five scopes (`user`, `user-tenant`, `user-target`, `tenant`,
 `target`), one verb per CRUD shape (`remember`, `recall`, `forget`,
-`list_memories`, `search_memories`, `promote`), and one RBAC matrix
-(`MemoryRbacResolver`). Every transition is sized to fit inside one
+`list_memories`, `search_memories`, `promote`), one RBAC matrix
+(`MemoryRbacResolver`), and one promotion check (`assert_can_promote`). Every transition is sized to fit inside one
 session boundary.
 
-Three transports — the REST router under `/api/v1/memory`, the MCP
-`add_to_memory` / `search_memory` meta-tools, and the CLI `meho
-memory` verb — all funnel through the same tenant-scoped
+Four callers — the REST router under `/api/v1/memory`, the MCP
+`add_to_memory` / `search_memory` meta-tools, the top-level CLI verbs
+`meho remember` / `recall` / `forget` / `list` / `promote` (they call
+REST), and the operator console (`POST /ui/memory/create`) — all use
+the same tenant-scoped
 `MemoryService` that owns the RBAC matrix and the substrate I/O.
 
 ## Key types
@@ -38,11 +41,11 @@ Closed enum of the five scopes. Each value drives the
 
 | scope            | natural-key encoding                          | who can read           | who can write              |
 | ---------------- | --------------------------------------------- | ---------------------- | -------------------------- |
-| `user`           | `user:<sub>:<slug>`                           | owning operator only   | owning operator only       |
-| `user-tenant`    | `user-tenant:<sub>:<slug>`                    | owning operator only   | owning operator only       |
-| `user-target`    | `user-target:<sub>:<target_name>:<slug>`      | owning operator only   | owning operator only       |
+| `user`           | `user:<sub>:<slug>`                           | owning operator only   | owning operator, not `read_only` |
+| `user-tenant`    | `user-tenant:<sub>:<slug>`                    | owning operator only   | owning operator, not `read_only` |
+| `user-target`    | `user-target:<sub>:<target_name>:<slug>`      | owning operator only   | owning operator, not `read_only` |
 | `tenant`         | `tenant:<slug>`                               | every tenant operator  | `tenant_admin` only        |
-| `target`         | `target:<target_name>:<slug>`                 | every tenant operator  | `tenant_admin` only        |
+| `target`         | `target:<target_name>:<slug>`                 | every tenant operator  | every operator, not `read_only` |
 
 The colon-joined encoding is the reason `MemoryEntryCreate.slug`
 pydantic-rejects colon-bearing slugs — without the guard the rsplit
@@ -97,7 +100,7 @@ Singleton-style service: holds a `MemoryRbacResolver` and a
 `structlog` logger; opens a fresh `AsyncSession` per method. No
 shared cursor / connection state across calls. Public methods:
 `remember`, `recall`, `read_by_id`, `forget`, `list_memories`,
-`search_memories`, `promote`.
+`search_memories`, `promote`, `revisions`.
 
 ### `resolve_default_expires_at` (`memory/ttl.py`)
 
@@ -180,10 +183,18 @@ The three semantic branches are:
 
 | Caller shape | `expires_at_was_set` | `explicit_expires_at` | Resolver returns |
 |---|---|---|---|
+| Field omitted, `metadata.expires_at` is a date (REST; lesson header) | `False` | (n/a) | the header date |
 | Field omitted, `scope=user` | `False` | (n/a) | `now + memory_user_default_ttl_days` |
 | Field omitted, non-`user` scope | `False` | (n/a) | `None` |
 | Field present, value `null` (CLI `--persist`) | `True` | `None` | `None` |
 | Field present, value `<ISO-8601>` | `True` | the parsed datetime | the parsed datetime |
+
+The header row comes first: a note that carries `expires_at` in its
+lesson header keeps that date when it moves from knowledge to memory.
+An explicit `expires_at` (or `ttl`), also an explicit `null`, still
+wins over the header. A header value that is not a date is left to the
+header check, which refuses the write. The MCP `add_to_memory` tool has
+no `metadata` argument, so only REST passes a header.
 
 Why this matters: before G0.9.1-T3 (#775) the MCP path always passed
 `expires_at` explicitly to `MemoryService.remember` — including
@@ -202,24 +213,52 @@ operator console persisted `expires_at = null` and the expiry sweeper
 
 1. Validate `slug` (auto-generated 12-char hex if absent) and reject
    target-scoped writes without a `target_name`.
-2. Check RBAC: `tenant_admin` for `tenant` / `target` writes;
-   any operator for the three user-flavoured scopes.
+2. Check RBAC: `read_only` can write no scope. `tenant` writes need
+   `tenant_admin`. Any other operator can write the three user-flavoured
+   scopes and `target`.
 3. Compute `source_id` via `encode_source_id`.
-4. Build merged `doc_metadata` (caller keys + service-owned
-   `scope` / `user_sub` / `target_name` / `expires_at`).
-5. Call `meho_backplane.retrieval.indexer.index_document`, which
-   upserts the row (insert-or-update on the
+4. Check the caller `metadata` as a lesson header
+   (`meho_backplane/lesson_header.py`, the same header as knowledge;
+   see `kb.md`, "Lesson header and shared scope"). A wrong value raises
+   `LessonHeaderError` (a `ValueError`: REST `422`, MCP invalid params).
+   The names `slug`, `provenance` and `kind` are refused; `scope` is
+   overwritten with the real scope. Then build merged `doc_metadata`
+   (caller keys + service-owned `scope` / `user_sub` / `target_name` /
+   `expires_at`).
+5. Write the row and its revision in one transaction
+   (`memory/revisions.py::write_entry`). It locks the head row on
+   PostgreSQL (`SELECT ... FOR UPDATE`), so writes to the same entry run
+   one after the other; then it calls
+   `meho_backplane.retrieval.indexer.index_document` with that session,
+   which upserts the row (insert-or-update on the
    `(tenant_id, source, source_id)` unique index) and computes the
    384-dim embedding inline.
-6. SELECT the row back and project to `MemoryEntry` via
-   `document_to_entry`, which pulls `created_at` / `updated_at`
-   straight from the ORM row.
+6. In the same transaction, add a revision (`add_revision`): one
+   `memory_revision` row with the body and metadata, unless the newest
+   revision already has the same body and metadata. When anything fails,
+   neither the row nor the revision is saved. A write that clashes with
+   another one (a first write of the same entry, or a taken revision
+   number) runs again, at most three times. `promote` adds the revision
+   of the new target row in its own transaction too; `forget`, the
+   expiry sweeper and a moving promote delete the revisions of the
+   entries they delete.
+7. Project the row to `MemoryEntry` via `document_to_entry`, which pulls
+   `created_at` / `updated_at` straight from the ORM row, and lifts
+   `source` out of the metadata (`MemoryEntry.source`, `None` when the
+   writer gave none).
+
+`MemoryService.revisions(operator, document_id)` returns the retained
+versions, oldest first, under the same read rules as `read_by_id`
+(`None` for a missing, foreign, other-owner or expired row). There is
+no REST or MCP route for it yet.
 
 ### Read path — direct (`recall` / `list_memories`)
 
 `recall` is a natural-key SELECT; `list_memories` pulls a wider
 candidate window (`limit * 4`, min 200) ordered by `updated_at
-DESC`, then post-filters through the RBAC matrix on `user_sub`. Both
+DESC`, then post-filters through the RBAC matrix on `user_sub`. Its
+`target_name` argument keeps only the notes of that target, in SQL;
+recall before an operation uses it ([recall.md](recall.md)). Both
 paths project via `document_to_entry`, so the returned timestamps
 are the real DB column values.
 
@@ -243,6 +282,9 @@ Contract for `meho://memory/id/{document_uuid}`:
   equals the natural key this operator would build for it (so for
   user scopes the owner is checked through the key, not only through
   metadata); the row has not expired.
+* The checks after the load live in `MemoryService.readable_entry`.
+  The console bulk route (`POST /ui/memory/bulk`) uses it too, with
+  `include_expired=True`.
 * Every miss returns `None`: unknown id, deleted row, other tenant,
   other owner, non-memory row, broken row, expired row. The MCP
   handler also maps a malformed id to the same answer. The wire error
@@ -293,7 +335,8 @@ candidate slot from one they may see.
    * the per-principal predicate: a user-scoped kind needs
      `metadata->>'user_sub' = principal`; tenant and target kinds are
      shared across the tenant;
-   * the expiry predicate (below).
+   * the expiry predicate (below);
+   * the search filters, when the caller gave any (#5726, below).
 4. The service maps each hit to a bounded `MemoryEntrySearchHit`
    (`_hit_to_search_result`): it cuts the body to a query snippet with
    `query_snippet` and numbers the hits with `rank`. It does **not**
@@ -302,6 +345,21 @@ candidate slot from one they may see.
 
 "No match" and "only rows you may not see" give the same answer: an
 empty `hits` list, with no count.
+
+**Search filters (#5726).** MCP `search_memory` takes the same lesson
+header filters as `search_knowledge`: `product`, `version`, `status`
+(exact value), `tags` (every listed tag), `confirmed_after` /
+`confirmed_before` (the header `confirmed_at`) and `updated_after` /
+`updated_before` (the last write, the row's `updated_at`). The tool
+turns them into `metadata_filters` and a `TimeWindow`
+(`retrieval/time_window.py`) and `search_memories` passes both to the
+same `retrieve` call. They run in the candidate SQL next to the
+eligibility rule, so they only narrow what the caller may see, and a
+filtered-out row never takes a candidate slot. A memory without a
+readable `confirmed_at` is left out by a confirmed limit. The rules
+and the time format are in [`kb.md`](./kb.md#search-filters-5726).
+The tag filter of `list_memories` (`tag`, one tag) is unchanged. The
+REST route and `meho recall` do not take these filters yet.
 
 **Expiry predicate (PostgreSQL 16).** It uses the database's `now()`,
 never a client clock, and runs for every `source='memory'` row in
@@ -389,12 +447,38 @@ only with a lowered limit or very long slugs or target names. There is
 no Memory-specific store, handle, or query grammar: the next step after
 a hit is always the selected read on its `locator`.
 
+### Retrievals and the weekly upkeep
+
+`search_memory` records each hit it delivers to a session in the
+`lesson_retrieval` table (`lessons/retrievals.py`; see
+[reflex-adoption.md](reflex-adoption.md#learning-numbers)). The weekly
+knowledge upkeep (`lessons/upkeep.py`, see
+[kb.md](kb.md#weekly-upkeep-lessonsupkeeppy)) sets `confirmed_at` again on a
+memory entry with `status: confirmed` that a session used. That write
+adds a revision with `written_by_sub = system:knowledge-upkeep`. The
+upkeep does not merge or retire memory entries: the expiry sweeper above
+already deletes expired ones.
+
+Only a reviewer or a tenant admin may write `status: confirmed` on a
+memory entry (`MemoryService.remember`, the rule of
+[kb.md](kb.md#lesson-header-and-shared-scope-lesson_headerpy-kbsharedpy)). Any other caller, such as an agent, gets
+a permission refusal (REST 403) and nothing is written.
+
 ### Promote path
 
-Tenant-admin-only widening of a row's scope (`user → user-tenant →
-tenant` etc.). Implemented as an insert-then-delete inside one
-transaction, idempotent against re-runs via a `promoted_from`
-marker.
+Widening of a row's scope along two ladders: `user → user-tenant →
+tenant` and `user → user-target → target`. One step at a time. A step
+to `tenant` or `target` needs `tenant_admin`; a step to `user-tenant`
+or `user-target` needs any role except `read_only`
+(`memory/rbac.py:assert_can_promote`). The target row is inserted in one
+transaction, and the source row is deleted in the same transaction only
+with `move` (`--move` on the CLI); otherwise the source stays. The
+target row never expires. A re-run returns the existing target row,
+matched by its `promoted_from` marker. If the new slug already holds a
+row that did not come from this source, MEHO answers 409. A step to
+`target` by a role below `tenant_admin` raises `NotImplementedError`
+(REST answers 501), because per-target access checks are not built.
+On MCP, `meho_memory_promote` needs `tenant_admin` for every step.
 
 ## Dependencies
 
@@ -436,7 +520,7 @@ marker.
 ## Known issues
 
 * **`onupdate` on `Document.updated_at` fires only on ORM UPDATEs.**
-  Raw-SQL updates against PG bypass the SQLAlchemy hook. The memory
+  Raw-SQL updates against PG skip the SQLAlchemy hook. The memory
   write paths go through the ORM-backed `index_document`, so the
   hook fires; ad-hoc admin SQL would not.
 * **No async-indexer fan-out.** Every `remember` blocks on the
@@ -450,7 +534,7 @@ marker.
   `tests/acceptance/test_g51_memory_canary.py`.
 * **The expiry sweeper still compares strings.** `memory/expiry.py`
   deletes rows by a text `<` against `now()` in ISO form. That is only
-  right for UTC values; search no longer depends on it, because the
+  right for UTC values; search does not depend on it, because the
   search SQL parses the timestamp itself.
 * The MCP `add_to_memory` body field underwent a rename
   `content` -> `body` to align with `add_to_knowledge` and the REST
@@ -461,7 +545,8 @@ marker.
   compatibility shim. v0.6.x accepts both fields: `body` is canonical
   and wins when both are supplied; `content` is a deprecated alias
   that fires a structured `add_to_memory_field_deprecated` warning
-  log line with `replacement="body"`. The shim is dropped in v0.7.
+  log line with `replacement="body"`. MEHO still accepts the `content`
+  alias.
 * Non-`user` scopes have no default-TTL gate by design (per #624's
   narrow scope). A future Task widening it should change the
   `scope is not MemoryScope.USER` branch in `memory/ttl.py` and add
@@ -476,8 +561,8 @@ marker.
 * T3 #423 — MCP meta-tools.
 * Goal #221 — Foundational substrate; parents the v0.3.x stream.
 * Initiative #772 — G0.9.1 v0.3.2 dogfood hardening.
-* Task #775 (G0.9.1-T3) — apply default-TTL injection on the MCP
-  `add_to_memory` path; lifts the resolver into `memory/ttl.py`.
+* The default TTL on the MCP `add_to_memory` path; the resolver lives
+  in `memory/ttl.py`.
 * Task #624 (G5.2-T2) — original default-TTL contract for the REST
   surface.
 * #3741 — Memory eligibility before ranking, `POST /api/v1/memory/search`,
@@ -496,7 +581,7 @@ marker.
 
 See also: [`untrusted-text-envelope.md`](./untrusted-text-envelope.md)
 — both memory resources serve `body`, and `search_memory` serves each
-`snippet`, inside the `<<UNTRUSTED_AGENT_TEXT` guard envelope (stored
-prompt-injection hardening at the LLM-facing read boundary).
+`snippet`, inside the `<<UNTRUSTED_AGENT_TEXT` guard envelope, so the
+model reads stored text as data, not as instructions.
 [`result-delivery.md`](./result-delivery.md) — the shared wire limits
 and `delivery` states the search response and the selected read use.

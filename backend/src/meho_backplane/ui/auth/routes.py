@@ -20,12 +20,12 @@ auth surfaces:
   token endpoint, validates the access token through the chassis
   JWT chain (so the BFF inherits the same issuer / audience /
   ``tenant_id`` / ``tenant_role`` defences as ``/api/*``), creates a
-  server-side session row, sets the ``meho_session`` cookie
+  server-side session row, sets the ``__Host-meho_session`` cookie
   (``HttpOnly; Secure; SameSite=Strict; Path=/``), and 302s to the
   originally-requested page.
 
 * ``GET /ui/auth/logout`` -- revokes the session row, clears the
-  ``meho_session`` cookie, and 302s to Keycloak's end-session
+  ``__Host-meho_session`` cookie, and 302s to Keycloak's end-session
   endpoint. The IdP-side logout is best-effort: if the discovery doc
   does not advertise an ``end_session_endpoint`` (a pre-OIDC-Session-
   Management Keycloak release, hypothetically), the route still
@@ -106,6 +106,7 @@ from fastapi.responses import RedirectResponse
 from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.settings import Settings, get_settings
+from meho_backplane.tenancy import ensure_tenant
 from meho_backplane.ui.auth.flow import (
     AUTHORIZATION_FLOW_TTL_SECONDS,
     MISSING_CLIENT_SECRET_DETAIL,
@@ -116,6 +117,8 @@ from meho_backplane.ui.auth.flow import (
     exchange_code_for_tokens,
     resolve_oidc_endpoints,
 )
+from meho_backplane.ui.auth.session_cookie import SESSION_COOKIE_NAME, read_session_cookie
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     create_session,
     revoke_session,
@@ -151,10 +154,6 @@ LOGIN_PATH: Final[str] = "/ui/auth/login"
 _CALLBACK_PATH: Final[str] = "/ui/auth/callback"
 _LOGOUT_PATH: Final[str] = "/ui/auth/logout"
 
-#: Name of the BFF session cookie. The browser holds only this opaque
-#: value; the real tokens live encrypted in the ``web_session`` table.
-SESSION_COOKIE_NAME: Final[str] = "meho_session"
-
 #: Clock-skew margin trimmed off the access-token TTL when computing
 #: the session lifetime. Keeps the session from outliving the access
 #: token it represents -- if the token expires at T, the session
@@ -180,6 +179,10 @@ FRESH_SIGN_IN_QUERY: Final[str] = "fresh_sign_in"
 #: Default landing path when no ``?return_to`` is supplied on
 #: ``/ui/auth/login``. T5 (#866) lands the dashboard at ``/ui/``.
 _DEFAULT_RETURN_TO: Final[str] = "/ui/"
+
+#: Longest ``return_to`` path the login accepts; a longer one becomes the
+#: default landing path.
+_MAX_RETURN_TO_LENGTH: Final[int] = 2048
 
 #: Detail code for the *recoverable* callback-state failure class --
 #: an expired/mismatched ``state``, a verifier-store miss, or authlib's
@@ -303,6 +306,7 @@ def _safe_return_to(raw: str | None) -> str:
       ``/ui/`` default. Open-redirect guard -- a crafted phishing
       link could otherwise bounce the operator to an attacker URL
       after auth.
+    * Longer than 2,048 characters → ``/ui/`` default.
     * Anything outside the ``/ui/`` subtree → ``/ui/`` default.
       Keeps the post-login redirect inside the operator-console
       surface; deep links into ``/api/*`` are not the BFF's job.
@@ -315,7 +319,7 @@ def _safe_return_to(raw: str | None) -> str:
     # Strip whitespace -- a stray newline from a misconstructed URL
     # would otherwise smuggle past the prefix check.
     candidate = raw.strip()
-    if not candidate:
+    if not candidate or len(candidate) > _MAX_RETURN_TO_LENGTH:
         return _DEFAULT_RETURN_TO
     if candidate.startswith("//") or "://" in candidate:
         return _DEFAULT_RETURN_TO
@@ -363,7 +367,7 @@ def page_from_htmx_current_url(current_url: str | None) -> str | None:
 
 
 def set_session_cookie(response: RedirectResponse, session_id: uuid.UUID) -> None:
-    """Attach the ``meho_session`` cookie to *response* with the BFF flags.
+    """Attach the ``__Host-meho_session`` cookie to *response* with the BFF flags.
 
     Centralised so every place the BFF sets the cookie (currently the
     callback handler; logout uses :func:`clear_session_cookie`) emits
@@ -386,7 +390,7 @@ def set_session_cookie(response: RedirectResponse, session_id: uuid.UUID) -> Non
 
 
 def clear_session_cookie(response: Response) -> None:
-    """Erase the ``meho_session`` cookie via the same attribute set.
+    """Erase the ``__Host-meho_session`` cookie via the same attribute set.
 
     Setting a cookie with the same name + ``Max-Age=0`` + ``Path=/``
     expires it immediately on the browser. The other attributes must
@@ -498,9 +502,7 @@ async def _handle_login(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="upstream_auth_provider_unreachable",
         ) from exc
-    log.info(
-        "ui_auth_login_redirect", state=state, return_to=return_to, fresh_sign_in=force_sign_in
-    )
+    log.info("ui_auth_login_redirect", state=state, fresh_sign_in=force_sign_in)
     response = RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
     # Hand the initiating browser its login-binding cookie so the
     # callback can prove this same browser completes the flow (F10 #272).
@@ -611,6 +613,9 @@ async def _persist_session_from_tokens(
     lifetime = timedelta(seconds=max(tokens.expires_in - SESSION_TTL_MARGIN_SECONDS, 60))
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
+        # Same as the first /api call: a fresh install has no tenant row
+        # yet, and the console header reads it on every page.
+        await ensure_tenant(operator.tenant_id, session)
         decrypted = await create_session(
             session,
             operator_sub=operator.sub,
@@ -673,7 +678,7 @@ async def _handle_callback(
         tenant_id=str(tenant_id),
         tenant_chosen=tenant_chosen,
         return_to=tokens.return_to,
-        session_id=str(session_id),
+        session_ref=session_ref(session_id),
     )
     # A person with several tenants picks one first (#5240).
     location = (tokens.return_to or _DEFAULT_RETURN_TO) if tenant_chosen else TENANT_PICKER_PATH
@@ -705,7 +710,7 @@ async def _revoke_session_if_present(cookie_value: str | None) -> None:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         await revoke_session(session, cookie_id)
-    log.info("ui_auth_session_revoked", session_id=str(cookie_id))
+    log.info("ui_auth_session_revoked", session_ref=session_ref(cookie_id))
 
 
 async def _resolve_end_session_target(settings_: Settings) -> str:
@@ -739,7 +744,7 @@ async def _resolve_end_session_target(settings_: Settings) -> str:
 
 async def _handle_logout(request: Request) -> RedirectResponse:
     """Revoke the session row, clear the cookie, 302 to the end-session URL."""
-    await _revoke_session_if_present(request.cookies.get(SESSION_COOKIE_NAME))
+    await _revoke_session_if_present(read_session_cookie(request.scope))
     target = await _resolve_end_session_target(get_settings())
     response = RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
     clear_session_cookie(response)

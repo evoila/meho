@@ -59,9 +59,11 @@
  *   - ``templates/`` -- Jinja markup (the bulk of the class inventory)
  *   - ``app/``       -- controllers that inject classes at runtime
  *                       (e.g. ``badge-error``, ``btn-sm``, ``modal-open``)
+ *   - ``pwa/``       -- the static offline page of the installable app
  */
 @source "../../templates";
 @source "./app";
+@source "./pwa";
 
 /*
  * DaisyUI 5 plugin loader. The vendored plugin sits beside this CSS

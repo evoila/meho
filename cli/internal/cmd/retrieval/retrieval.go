@@ -1,34 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 evoila Group
 
-// Package retrieval hosts the cobra commands under `meho retrieval ...`
-// for the G4.3 retrieval-quality / migration-decision tooling
-// (Initiative #373). v0.2 ships:
+// Package retrieval hosts the cobra commands under `meho retrieval ...`.
+// It ships two verbs:
 //
-//   - `meho retrieval eval` — corpus-driven precision@5 / MRR /
-//     coverage report against /api/v1/retrieve/eval (T2 #441).
 //   - `meho retrieval usage` — daily-use telemetry from request usage events
-//     (T5b #464) against /api/v1/retrieve/usage (T5 #444).
-//   - `meho retrieval retire-checklist` — combined retire-decision
-//     verb (T6 #445).
+//     against /api/v1/retrieve/usage.
+//   - `meho retrieval picks` — per connector and day, whether calls used
+//     an operation the search before them returned (#4750), against
+//     /api/v1/retrieve/operation-picks.
 //
 // G0.12-T12 #1270 migrated this package off the per-verb hand-rolled
 // `postXxxWithBearer` helpers + hand-typed copies of backend pydantic
-// models. Every verb here drives the generated `api.ClientWithResponses`
+// models. The verb drives the generated `api.ClientWithResponses`
 // surface directly: `api.NewAuthedClient` wires the bearer + lazy
 // 401-refresh editor onto the embedded `ClientWithResponses`, and the
-// verbs call the typed `*WithResponse` methods
-// (`EvalEndpointApiV1RetrieveEvalPostWithResponse` etc.). Consumer-side
-// struct drift — the #1069 root cause Initiative #1118 targets —
-// can't recur because we now consume `api.EvalResult`,
-// `api.UsageReport`, `api.RetireChecklistReport`, and friends
-// directly.
-//
-// Exception: `ghIssueLabel` and `ghIssue` in retire_checklist.go stay
-// hand-typed. Those describe the JSON shape returned by the `gh issue
-// list --json number,labels` subprocess, not a meho backplane API —
-// they're consumed by `lookupBlockerCounts` running gh as a child
-// process and have no place in the openapi.json snapshot.
+// verb calls the typed `*WithResponse` method. Consumer-side struct
+// drift — the #1069 root cause Initiative #1118 targets — can't recur
+// because we consume `api.UsageReport` directly.
 package retrieval
 
 import (
@@ -57,12 +46,11 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "retrieval",
-		Short:        "Retrieval-quality + migration-decision tooling (G4.3 #373)",
+		Short:        "Retrieval usage and operation-pick telemetry",
 		SilenceUsage: true,
 	}
-	cmd.AddCommand(newEvalCmd())
 	cmd.AddCommand(newUsageCmd())
-	cmd.AddCommand(newRetireChecklistCmd())
+	cmd.AddCommand(newPicksCmd())
 	return cmd
 }
 
@@ -79,10 +67,8 @@ var errMissingAccessToken = errors.New("meho: stored token has no access_token")
 // responseBodyCap bounds the bytes the retrieval verb tree's
 // transport will read off any backplane response body before
 // surfacing `*http.MaxBytesError`. 1 MiB is generous for every
-// documented retrieval payload (eval reports cap at three surfaces
-// × ~25 queries × small per-query records; usage reports cap at a
-// 90-day window × three surfaces ≈ ~270 buckets × ~80-byte rows;
-// retire-checklist reports cap at three surfaces × five criteria).
+// documented retrieval payload (usage reports cap at a 90-day window
+// × three surfaces ≈ ~270 buckets × ~80-byte rows).
 // Without the cap, an adversarial or runaway backplane response
 // could OOM the CLI because the generated `Parse*Response` helpers
 // call `io.ReadAll(rsp.Body)` on an unbounded body before
@@ -323,9 +309,8 @@ func renderHTTPStatus(
 			jsonOut,
 		)
 	case http.StatusUnprocessableEntity:
-		// 422 from a typo in --surface or the
-		// blocker_counts / baseline_overrides shape. The backend
-		// emits the FastAPI validation envelope.
+		// 422 from a typo in --surface. The backend emits the
+		// FastAPI validation envelope.
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("invalid request: %s", bodyStr)),
 			jsonOut,

@@ -81,6 +81,7 @@ __all__ = [
     "release_lease",
     "succeed_run",
     "transition",
+    "uncertain_run",
 ]
 
 
@@ -91,6 +92,7 @@ TERMINAL_STATUSES: Final[frozenset[OperationRunStatus]] = frozenset(
         OperationRunStatus.SUCCEEDED,
         OperationRunStatus.FAILED,
         OperationRunStatus.CANCELLED,
+        OperationRunStatus.UNCERTAIN,
     }
 )
 
@@ -111,11 +113,13 @@ ALLOWED_TRANSITIONS: Final[dict[OperationRunStatus, frozenset[OperationRunStatus
             OperationRunStatus.SUCCEEDED,
             OperationRunStatus.FAILED,
             OperationRunStatus.CANCELLED,
+            OperationRunStatus.UNCERTAIN,
         }
     ),
     OperationRunStatus.SUCCEEDED: frozenset(),
     OperationRunStatus.FAILED: frozenset(),
     OperationRunStatus.CANCELLED: frozenset(),
+    OperationRunStatus.UNCERTAIN: frozenset(),
 }
 
 
@@ -486,6 +490,25 @@ async def fail_run(
     """
     row.error = error
     return await transition(session, row, OperationRunStatus.FAILED)
+
+
+async def uncertain_run(
+    session: AsyncSession,
+    row: OperationRun,
+    *,
+    error: str,
+) -> OperationRun:
+    """Transition a run to ``uncertain`` and record why (#5025).
+
+    For a run that changes something and whose worker died: MEHO does not
+    know if the change happened, and never runs it again.
+
+    Raises:
+        IllegalOperationRunTransitionError: ``uncertain`` is not reachable
+            from the row's current status.
+    """
+    row.error = error
+    return await transition(session, row, OperationRunStatus.UNCERTAIN)
 
 
 async def cancel_run(

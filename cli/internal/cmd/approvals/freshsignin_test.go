@@ -196,7 +196,7 @@ func TestApproveUsesTheApprovalSignInNotTheStoredLogin(t *testing.T) {
 	opened := 0
 	useBrowser(t, fakeSignInBrowser(t, &opened))
 
-	detail, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", "")
+	detail, _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", "")
 	if err != nil {
 		t.Fatalf("postDecision: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestApproveSignsInAgainOnlyOnceAfterARefusal(t *testing.T) {
 	opened := 0
 	useBrowser(t, fakeSignInBrowser(t, &opened))
 
-	_, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", "")
+	_, _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", "")
 	var he *httpResponseError
 	if !errors.As(err, &he) || he.statusCode != http.StatusUnauthorized {
 		t.Fatalf("err = %v, want the second 401", err)
@@ -253,7 +253,7 @@ func TestRejectNeverRunsAFreshSignIn(t *testing.T) {
 	opened := 0
 	useBrowser(t, fakeSignInBrowser(t, &opened))
 
-	_, err := postDecision(context.Background(), client, mustUUID(t, stubID), "reject", "")
+	_, _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "reject", "")
 	var he *httpResponseError
 	if !errors.As(err, &he) {
 		t.Fatalf("err = %v, want the 401 as an httpResponseError", err)
@@ -271,7 +271,7 @@ func TestApproveWithoutABrowserPrintsTheLinkAndTheWebHint(t *testing.T) {
 	client, _ := newSignInTestClient(t, srv, idp)
 	useBrowser(t, func(string) error { return errors.New("no graphical session") })
 
-	_, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", "")
+	_, _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", "")
 	var nb *auth.NoBrowserError
 	if !errors.As(err, &nb) {
 		t.Fatalf("err = %v, want *auth.NoBrowserError", err)
@@ -319,7 +319,7 @@ func TestApproveRenewsTheSignInTokenInMemory(t *testing.T) {
 	opened := 0
 	useBrowser(t, fakeSignInBrowser(t, &opened))
 
-	if _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", ""); err != nil {
+	if _, _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", ""); err != nil {
 		t.Fatalf("postDecision: %v", err)
 	}
 	if opened != 1 || strings.Join(bearers, ",") != "renewed-token" {
@@ -351,7 +351,7 @@ func TestApproveUsesTheLoginClientOnAnOlderMEHO(t *testing.T) {
 	opened := 0
 	useBrowser(t, fakeSignInBrowserFor(t, &opened, "meho-cli"))
 
-	if _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", ""); err != nil {
+	if _, _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", ""); err != nil {
 		t.Fatalf("postDecision: %v", err)
 	}
 	if opened != 1 || strings.Join(bearers, ",") != "fresh-token" {
@@ -374,7 +374,7 @@ func TestApproveRefusesWhenMEHOAcceptsNoCommandLineApproval(t *testing.T) {
 	opened := 0
 	useBrowser(t, fakeSignInBrowser(t, &opened))
 
-	_, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", "")
+	_, _, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve", "")
 	if err == nil || !strings.Contains(err.Error(), "approve in the web interface") {
 		t.Fatalf("err = %v, want the web interface hint", err)
 	}

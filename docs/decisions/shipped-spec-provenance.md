@@ -2,6 +2,7 @@
 
 **Status:** facts recorded; rationale stated; **decision routed for human legal/maintainer signoff** (see "Signoff of record" below — deliberately not filled by this ADR)
 **Date:** 2026-06-22
+**Note (2026-11-07):** the four spec and profile files named here left the public repository in 0.44.0, together with the VMware connectors. See [own connectors leave the public tree](2026-10-28-own-connectors-leave-the-public-tree.md). The links below point to the files at the `v0.43.0` tag.
 **Goal:** [#1964](https://github.com/evoila/meho/issues/1964) — config-driven executable connectors
 **Surfaced by:** [#1976](https://github.com/evoila/meho/issues/1976) (PR [#2023](https://github.com/evoila/meho/pull/2023)), per the [#1966](https://github.com/evoila/meho/issues/1966) initiative body's request to "flag for a SECURITY/legal glance rather than assert as a pure non-issue"
 **Task:** [#2036](https://github.com/evoila/meho/issues/2036) (this ADR)
@@ -46,10 +47,10 @@ and **expressive content**.
 These are copied **verbatim** for one reason only: the dispatcher must address
 the real appliance using the appliance's own names. A renamed path or field
 would not reach the appliance. See the per-file rationale in
-[`vmware_rest_minimal.yaml`](../../backend/src/meho_backplane/operations/ingest/specs/vmware_rest_minimal.yaml)
+[`vmware_rest_minimal.yaml`](https://github.com/evoila/meho/blob/v0.43.0/backend/src/meho_backplane/operations/ingest/specs/vmware_rest_minimal.yaml)
 ("SCOPE … Paths and params copy the vendor's verbatim names because the
 dispatcher must address the real appliance with them") and
-[`sddc_manager_minimal.yaml`](../../backend/src/meho_backplane/operations/ingest/specs/sddc_manager_minimal.yaml)
+[`sddc_manager_minimal.yaml`](https://github.com/evoila/meho/blob/v0.43.0/backend/src/meho_backplane/operations/ingest/specs/sddc_manager_minimal.yaml)
 ("Paths, params and the `elements[]` pagination envelope copy the vendor's
 verbatim names because the dispatcher must address the real appliance").
 
@@ -165,11 +166,11 @@ not resolved.
 - Precedent ADR: [`docs/decisions/jsonflux-license.md`](jsonflux-license.md).
 - Top-level attribution file: [`NOTICE`](../../NOTICE).
 - Per-file rationale (cross-linked, not duplicated):
-  - [`operations/ingest/specs/vmware_rest_minimal.yaml`](../../backend/src/meho_backplane/operations/ingest/specs/vmware_rest_minimal.yaml)
+  - [`operations/ingest/specs/vmware_rest_minimal.yaml`](https://github.com/evoila/meho/blob/v0.43.0/backend/src/meho_backplane/operations/ingest/specs/vmware_rest_minimal.yaml)
     (header: WHY / SCOPE / CONSTRAINTS).
-  - [`operations/ingest/specs/sddc_manager_minimal.yaml`](../../backend/src/meho_backplane/operations/ingest/specs/sddc_manager_minimal.yaml).
-  - [`connectors/profiles/vmware_rest_minimal.yaml`](../../backend/src/meho_backplane/connectors/profiles/vmware_rest_minimal.yaml).
-  - [`connectors/profiles/sddc_manager_minimal.yaml`](../../backend/src/meho_backplane/connectors/profiles/sddc_manager_minimal.yaml).
+  - [`operations/ingest/specs/sddc_manager_minimal.yaml`](https://github.com/evoila/meho/blob/v0.43.0/backend/src/meho_backplane/operations/ingest/specs/sddc_manager_minimal.yaml).
+  - [`connectors/profiles/vmware_rest_minimal.yaml`](https://github.com/evoila/meho/blob/v0.43.0/backend/src/meho_backplane/connectors/profiles/vmware_rest_minimal.yaml).
+  - [`connectors/profiles/sddc_manager_minimal.yaml`](https://github.com/evoila/meho/blob/v0.43.0/backend/src/meho_backplane/connectors/profiles/sddc_manager_minimal.yaml).
 - Redistribution stance (scoped to the `upstream` field):
   [`operations/ingest/catalog.yaml`](../../backend/src/meho_backplane/operations/ingest/catalog.yaml)
   comments.

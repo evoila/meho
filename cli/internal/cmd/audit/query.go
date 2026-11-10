@@ -321,10 +321,12 @@ func postQuery(
 // printQueryTable renders the audit page as a compact, scannable
 // table. Columns: AUDIT_ID, TIME, TENANT, PRINCIPAL, TARGET, OP_ID,
 // CLASS, STATUS. TENANT is the tenant name, or the tenant id when the
-// backend has no name for it (#5238). The audit id comes first and
+// backend has no name for it (#5238). PRINCIPAL ends with "via <actor>"
+// when an agent acted for the person (#5773). The audit id comes first and
 // is printed whole (#4858), so an operator can paste it into
 // `meho audit show` without re-running the query with --json. When `next_cursor` is set, a final NEXT
-// line tells the operator how to paste-paginate.
+// line tells the operator how to paste-paginate. Server text goes through
+// output.SafeText, so control codes show as visible escapes.
 func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintln(w, "no audit rows matched the filter")
@@ -337,6 +339,9 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 		if name := strDeref(row.PrincipalName); name != "" {
 			principal = fmt.Sprintf("%s (%s)", name, row.PrincipalSub)
 		}
+		if actor := strDeref(row.ActorSub); actor != "" {
+			principal = fmt.Sprintf("%s via %s", principal, actor)
+		}
 		target := strDeref(row.TargetName)
 		if target == "" {
 			target = "-"
@@ -344,15 +349,15 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 		fmt.Fprintf(w, "%-36s  %-22s %-18s %-32s %-18s %-26s %-16s %s\n",
 			row.Id.String(),
 			truncate(formatTS(row.Ts), 22),
-			truncate(tenantLabel(row.TenantName, row.TenantId), 18),
-			principal,
-			truncate(target, 18),
-			truncate(row.OpId, 26),
-			truncate(row.OpClass, 16),
-			truncate(row.ResultStatus, 8),
+			truncate(output.SafeText(tenantLabel(row.TenantName, row.TenantId)), 18),
+			output.SafeText(principal),
+			truncate(output.SafeText(target), 18),
+			truncate(output.SafeText(row.OpId), 26),
+			truncate(output.SafeText(row.OpClass), 16),
+			truncate(output.SafeText(row.ResultStatus), 8),
 		)
 	}
 	if r.NextCursor != nil && *r.NextCursor != "" {
-		fmt.Fprintf(w, "NEXT: --cursor=%s  (paste to continue)\n", *r.NextCursor)
+		fmt.Fprintf(w, "NEXT: --cursor=%s  (paste to continue)\n", output.SafeText(*r.NextCursor))
 	}
 }

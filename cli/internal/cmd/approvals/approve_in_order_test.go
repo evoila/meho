@@ -34,6 +34,7 @@ type groupRow struct {
 	sub      string
 	created  string
 	dispatch string // dispatch_status the decide route answers
+	outcome  string // dispatch_execution_outcome the decide route answers
 	decideHT int    // HTTP status the decide route answers (default 200)
 	// results the detail route answers as result_state after the decide,
 	// one per read; the last one repeats. Plays the waiting requester
@@ -140,6 +141,10 @@ func runInOrderWithMock(t *testing.T, rows []groupRow, stdin string, jsonOut boo
 			if status == "error" {
 				msg := "connector_error: file not found"
 				body.DispatchError = &msg
+			}
+			if row.outcome != "" {
+				outcome := row.outcome
+				body.DispatchExecutionOutcome = &outcome
 			}
 			writeJSON(t, w, http.StatusOK, body)
 		}
@@ -254,6 +259,35 @@ func TestInOrderOtherCallerClaimsThenFails(t *testing.T) {
 	}
 	if !strings.Contains(res.Steps[0].Detail, "run by the waiting requester failed") {
 		t.Errorf("stopped step does not say the other run failed: %q", res.Steps[0].Detail)
+	}
+}
+
+// TestInOrderUncertainRunStopsWithoutSendItAgain checks that a step whose
+// own run ended without MEHO knowing if the change happened stops the run
+// with the target-check advice, never with "send it again" (#5025).
+func TestInOrderUncertainRunStopsWithoutSendItAgain(t *testing.T) {
+	rows := []groupRow{
+		{status: "pending", level: "caution", dispatch: "error", outcome: "uncertain"},
+		{status: "pending", level: "caution", dispatch: "ok"},
+	}
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, true)
+	assertExitCode(t, err, 4)
+	if len(rec.decided) != 1 || rec.decided[0] != inOrderID(1) {
+		t.Fatalf("decided: got %v want only step 1", rec.decided)
+	}
+	var res inOrderResult
+	if jerr := json.Unmarshal([]byte(stdout), &res); jerr != nil {
+		t.Fatalf("stdout is not the JSON result: %v\n%s", jerr, stdout)
+	}
+	if res.Completed || res.StoppedAt != 1 || res.Steps[1].Outcome != stepNotRun {
+		t.Errorf("result: got %+v", res)
+	}
+	detail := res.Steps[0].Detail
+	if !strings.Contains(detail, "Do not run it again. Check the target first") || strings.Contains(detail, "send it again") {
+		t.Errorf("stopped step does not give the target-check advice: %q", detail)
+	}
+	if !strings.Contains(detail, "connector_error: file not found") {
+		t.Errorf("stopped step does not name the error: %q", detail)
 	}
 }
 

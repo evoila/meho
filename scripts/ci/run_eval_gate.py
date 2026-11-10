@@ -4,11 +4,11 @@
 
 """Run the retrieval-eval runner + check the result against a baseline.
 
-CI gate for G4.3-T2 (#441). The workflow
-``.github/workflows/eval-gate.yml`` runs this script on every PR
-that touches ``backend/src/meho_backplane/retrieval/`` (the read
-path the eval gates) or ``backend/src/meho_backplane/retrieval/eval/``
-(the eval engine itself).
+The workflow ``.github/workflows/eval-gate.yml`` runs this script on
+every PR that touches ``backend/src/meho_backplane/retrieval/`` (the
+read path the eval gates) or ``backend/scripts/retrieval_eval/`` (the
+eval engine itself). The eval engine is test tooling: it lives under
+``backend/scripts/``, outside the product package.
 
 What the gate exercises today
 -----------------------------
@@ -19,7 +19,9 @@ fastembed model + ingested kb seed would 5-10x the CI wall clock,
 violating Goal #11 DoD bullet 4 — "PR CI <10 minutes"). This gate
 therefore exercises the runner end-to-end against a **deterministic
 stub retrieve_fn** that hits the kb seed corpus's first expected
-slug per query — the "perfect-retrieval reference" case.
+slug per query — the "perfect-retrieval reference" case — and a
+matching **stub operation search** for the operations surface (the
+live runner searches ``endpoint_descriptor`` there, #4752).
 
 This catches:
 
@@ -36,10 +38,7 @@ What it does NOT catch (yet)
 The live retrieval substrate (BM25 + cosine + RRF fusion in
 ``retriever.py``) is not exercised here. That coverage lives in
 ``tests/integration/test_retrieval_e2e.py`` and the
-``chart.yml::helm-test`` job (Helm test Pod + pgvector). When the
-Initiative #373 retire-checklist (T6 #445) wires a per-surface
-threshold check against the live substrate, this gate becomes the
-inner ring + a new "live eval" job becomes the outer ring.
+``chart.yml::helm-test`` job (Helm test Pod + pgvector).
 
 Baseline + regression detection
 -------------------------------
@@ -74,19 +73,25 @@ from collections.abc import Awaitable
 from datetime import UTC, datetime
 from pathlib import Path
 
-# Importable because the CI job runs `uv sync` in backend/ first +
-# invokes this script with PYTHONPATH=backend/src.
-from meho_backplane.retrieval.eval.baseline_io import (
+# meho_backplane is importable because the CI job runs `uv sync` in
+# backend/ first. The eval engine is the `scripts.retrieval_eval`
+# package under backend/, which is not installed, so put backend/ on
+# the import path first.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
+
+from scripts.retrieval_eval.baseline_io import (
     compare_baseline,
     load_baseline,
     save_baseline,
 )
-from meho_backplane.retrieval.eval.corpus import load_corpus
-from meho_backplane.retrieval.eval.runner import eval_all
+from scripts.retrieval_eval.corpus import load_corpus
+from scripts.retrieval_eval.operation_search import OperationSearchResult
+from scripts.retrieval_eval.runner import eval_all
+
 from meho_backplane.retrieval.retriever import RetrievalHit
 
 # Deterministic timezone-aware timestamp for stub RetrievalHits. Matches
-# the shape used by tests/test_retrieval_eval_runner.py::_make_hit so the
+# the shape used by tests/retrieval_eval/test_retrieval_eval_runner.py::_make_hit so the
 # gate script and the unit tests stay aligned on stub semantics.
 _STUB_TS: datetime = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -95,7 +100,7 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
     """Stub retrieve_fn that returns the corpus's first expected hit per query.
 
     Same shape the unit tests use — see
-    ``tests/test_retrieval_eval_runner.py::_make_perfect_retrieve_fn``.
+    ``tests/retrieval_eval/test_retrieval_eval_runner.py::_make_perfect_retrieve_fn``.
     Models the "production retrieval is working perfectly" baseline
     across every shipped surface; ensures the gate's reference run is
     always green so any drop is a regression in the runner / metrics /
@@ -105,11 +110,8 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
 
     * kb — corpus row's first ``expected_hits`` slug; RetrievalHit
       ``source_id`` is the slug.
-    * operations — corpus row's first ``expected_op_ids`` value;
-      RetrievalHit ``source_id`` is the op_id (per
-      ``runner._operations_hits_to_op_ids``). The G4.3-T3 operations
-      corpus shipped 10 govc-parity queries; without this branch the
-      gate would flip red the moment the YAML lands.
+    * operations — not served here: the runner calls the operation
+      search for that surface, see :func:`_build_perfect_search_operations_fn`.
     * memory — corpus row's first ``expected_hits`` ``(scope, slug)``
       pair, encoded into ``source_id`` as ``"<scope>:<slug>"``. The
       runner's ``_memory_hits_to_pairs`` splits on ``:`` and joins
@@ -121,9 +123,6 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
       surface.
     """
     kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
-    ops_answers = {
-        row.query: row.expected_op_ids[0] for row in load_corpus("operations")
-    }
     memory_answers = {row.query: row.expected_hits[0] for row in load_corpus("memory")}
 
     def _hit(slug: str, source: str, tenant_id: uuid.UUID) -> RetrievalHit:
@@ -151,10 +150,8 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
         source: str | None = None,
         kind: str | None = None,
         limit: int = 10,
+        principal_sub: str | None = None,
     ) -> list[RetrievalHit]:
-        if source == "operations":
-            op_id = ops_answers.get(query)
-            return [_hit(op_id, "operations", tenant_id)] if op_id else []
         if source == "memory":
             pair = memory_answers.get(query)
             if pair is None:
@@ -166,6 +163,31 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
             return [_hit(f"{scope}:{slug}", "memory", tenant_id)]
         slug = kb_answers.get(query)
         return [_hit(slug, source or "kb", tenant_id)] if slug else []
+
+    return perfect  # type: ignore[return-value]
+
+
+def _build_perfect_search_operations_fn() -> Awaitable[OperationSearchResult]:
+    """Stub operation search that returns the corpus's first expected op_id.
+
+    The operations surface of the runner calls an operation search, not
+    ``retrieve_fn`` (#4752). This stub models a perfect search for the
+    10 govc-parity questions of the operations corpus, so the gate's
+    reference run stays green and a drop is a runner / metrics regression.
+    """
+    ops_answers = {
+        row.query: row.expected_op_ids[0] for row in load_corpus("operations")
+    }
+
+    async def perfect(
+        *,
+        tenant_id: uuid.UUID,
+        connector_id: str,
+        query: str,
+        limit: int,
+    ) -> OperationSearchResult:
+        op_id = ops_answers.get(query)
+        return OperationSearchResult(op_ids=[op_id] if op_id else [])
 
     return perfect  # type: ignore[return-value]
 
@@ -189,6 +211,7 @@ async def _run() -> int:
     today = await eval_all(
         tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
         retrieve_fn=perfect,
+        search_operations_fn=_build_perfect_search_operations_fn(),
     )
 
     if args.save_baseline:

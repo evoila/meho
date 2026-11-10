@@ -76,11 +76,19 @@ data:
   # `config.vaultAddr` empty and runs no Vault, so the key is omitted
   # entirely — the backplane coerces a missing/blank VAULT_ADDR to None
   # and boots Vault-free.
-  {{- if .Values.config.vaultAddr }}
-  VAULT_ADDR: {{ .Values.config.vaultAddr | quote }}
+  {{- /* The three Vault keys below come from the built-in OpenBao when it is on (#4047). */}}
+  {{- $vault := include "meho.vaultSettings" . | fromYaml }}
+  {{- if $vault.addr }}
+  VAULT_ADDR: {{ $vault.addr | quote }}
   {{- end }}
-  VAULT_OIDC_ROLE: {{ .Values.config.vaultOidcRole | quote }}
-  VAULT_OIDC_MOUNT_PATH: {{ .Values.config.vaultOidcMountPath | quote }}
+  VAULT_OIDC_ROLE: {{ $vault.role | quote }}
+  VAULT_OIDC_MOUNT_PATH: {{ $vault.mountPath | quote }}
+  {{- if $vault.schedulerSecret }}
+  # The scheduler's token from <release>-core-vault-scheduler, mounted by
+  # the Deployment. VAULT_KV_TENANT_SCOPE_PREFIX is not set: the code
+  # default keeps each tenant inside secret/tenants/<tenant_id>/.
+  VAULT_SCHEDULER_TOKEN_FILE: /var/run/meho/vault-scheduler/token
+  {{- end }}
   VAULT_TIMEOUT_SECONDS: {{ .Values.config.vaultTimeoutSeconds | quote }}
   # Credential backend surface (Initiative #2227). `CREDENTIAL_BACKEND`
   # names the store a schemeless target `secret_ref` and the
@@ -218,6 +226,17 @@ data:
   DISPATCH_MAX_CONCURRENT_OPS: {{ .Values.config.dispatchMaxConcurrentOps | quote }}
   MCP_SESSION_START_LIMIT_PER_MINUTE: {{ .Values.config.mcpSessionStartLimitPerMinute | quote }}
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: {{ .Values.config.approvalOneTimeCodeAcrValues | quote }}
+  # Switches for what the agent sees, off by default until model tests
+  # show they help: team knowledge before an operation and in the start
+  # text, and the similar-entry check on a new knowledge entry.
+  TEAM_KNOWLEDGE_RECALL: {{ .Values.config.teamKnowledgeRecall | quote }}
+  KB_SIMILAR_CHECK: {{ .Values.config.kbSimilarCheck | quote }}
+  # The shared knowledge scope and the weekly knowledge upkeep. Rendered
+  # always; the defaults match the backplane's own defaults (nothing
+  # shared, upkeep on, once a week).
+  KB_SHARED_TENANT_IDS: {{ .Values.config.kbSharedTenantIds | quote }}
+  KNOWLEDGE_UPKEEP_ENABLED: {{ .Values.config.knowledgeUpkeepEnabled | quote }}
+  KNOWLEDGE_UPKEEP_INTERVAL_SECONDS: {{ .Values.config.knowledgeUpkeepIntervalSeconds | int | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that
@@ -303,3 +322,38 @@ data:
   BROADCAST_ANNOUNCEMENT_RETENTION_DAYS: {{ .Values.broadcastAnnouncement.retentionDays | quote }}
   BROADCAST_ANNOUNCEMENT_PRUNE_INTERVAL_SECONDS: {{ .Values.broadcastAnnouncement.pruneIntervalSeconds | quote }}
   BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED: {{ .Values.broadcastAnnouncement.pruneEnabled | quote }}
+  {{- /* Agent session store. A value renders only when it is set; an empty
+       value keeps MEHO's default from session_store/config.py. See
+       docs-site/guides/agent-sessions.md. */}}
+  {{- with .Values.config.sessionStore }}
+  {{- with .endpoint }}
+  SESSION_STORE_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  {{- with .bucket }}
+  SESSION_STORE_BUCKET: {{ . | quote }}
+  {{- end }}
+  {{- with .credentialsVaultPath }}
+  SESSION_STORE_CREDENTIALS_VAULT_PATH: {{ . | quote }}
+  {{- end }}
+  {{- with .region }}
+  SESSION_STORE_REGION: {{ . | quote }}
+  {{- end }}
+  {{- with .retentionDaysDefault }}
+  SESSION_STORE_RETENTION_DAYS_DEFAULT: {{ . | quote }}
+  {{- end }}
+  {{- with .maxUploadBytes }}
+  SESSION_STORE_MAX_UPLOAD_BYTES: {{ . | quote }}
+  {{- end }}
+  {{- with .maxUnpackedBytes }}
+  SESSION_STORE_MAX_UNPACKED_BYTES: {{ . | quote }}
+  {{- end }}
+  {{- with .maxFiles }}
+  SESSION_STORE_MAX_FILES: {{ . | quote }}
+  {{- end }}
+  {{- with .cleanupEnabled }}
+  SESSION_STORE_CLEANUP_ENABLED: {{ . | quote }}
+  {{- end }}
+  {{- with .cleanupIntervalSeconds }}
+  SESSION_STORE_CLEANUP_INTERVAL_SECONDS: {{ . | quote }}
+  {{- end }}
+  {{- end }}

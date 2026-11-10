@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Retrieval UI routes: in-process diagnostics + usage + eval + retire, no REST endpoint.
+"""Retrieval UI routes: in-process diagnostics + usage, no REST endpoint.
 
 Initiative #1840 (G10.14 Retrieval diagnostics & quality console), Tasks #1888
-(Diagnostics) + #1889 (Usage Analytics + Eval Quality) + #1890 (Retire
-Checklist).
+(Diagnostics) + #1889 (Usage Analytics).
 
 ``GET /ui/retrieval`` renders the page: a tabbed shell (Diagnostics tab
-default-active; Usage Analytics + Eval Quality + Retire Checklist all live) with
-the diagnostics query form and an empty ``#retrieval-diagnostics-results``
-region. Four HTMX fragment endpoints front the four in-process services -- none
-adds a ``/api/v1`` endpoint, exactly as ``ui/routes/corpus/routes.py`` fronts
-``search_docs``:
+default-active; Usage Analytics live) with the diagnostics query form and an
+empty ``#retrieval-diagnostics-results`` region. Two HTMX fragment endpoints
+front the two in-process services -- none adds a ``/api/v1`` endpoint, exactly
+as ``ui/routes/corpus/routes.py`` fronts ``search_docs``:
 
 * ``POST /ui/retrieval/diagnostics`` -- reconstructs the session operator, binds
   the privacy ``audit_*`` contextvars, runs in-process
@@ -30,38 +28,6 @@ adds a ``/api/v1`` endpoint, exactly as ``ui/routes/corpus/routes.py`` fronts
   ``total_searches=0`` reads as "REST excluded", not "no activity". A malformed
   ``since`` (:class:`~meho_backplane.retrieval.usage.SinceValueError`) renders an
   inline 400 error card, never a 500.
-* ``POST /ui/retrieval/eval`` (#1889) -- runs in-process
-  :func:`~meho_backplane.retrieval.eval.eval_all` own-tenant with **no
-  baseline** (the server-side baseline path is 501 today), and swaps
-  ``retrieval/_eval_results.html`` with per-surface ``precision_at_5`` / ``mrr``
-  / ``coverage`` + a green/yellow/red verdict pill (mapped in the template from
-  the verdict token the service returns verbatim) + the ``overall_verdict``.
-* ``POST /ui/retrieval/retire-checklist`` (#1890) -- runs in-process
-  :func:`~meho_backplane.retrieval.retire.compute_retire_checklist` over every
-  :data:`~meho_backplane.retrieval.retire.SURFACE_VERDICT_ORDER` surface (kb,
-  memory, operations), opening a read-only session via
-  :func:`~meho_backplane.db.engine.get_sessionmaker` (the service is keyword-only
-  and **requires** a ``session``; it runs ``eval_all`` internally for criteria
-  3+4, so the handler does not). Swaps ``retrieval/_retire_results.html`` with
-  the three-state ``overall_verdict`` pill heading the fragment and, per surface,
-  a three-state verdict pill + the five-criterion table (``name``,
-  green/yellow/red dot, ``observed_value``, ``threshold_summary``, ``notes``
-  rendered verbatim). The surface is **read-only** -- no purge / dry-run /
-  execute-retirement affordance exists; the only POST is this checklist run.
-
-  Tenant scoping differs from the sibling tabs: a **platform admin** may audit
-  any tenant's retirement readiness via a ``tenant_filter`` UUID selector. The
-  selector renders only when ``operator.platform_admin`` is true (a soft-hide UX
-  hint); the service stays the authority --
-  :func:`~meho_backplane.auth.rbac.authorize_tenant_scope` raises HTTP 403
-  ``cross_tenant_requires_platform_admin`` on a forged cross-tenant ``tenant_filter``
-  from a non-platform-admin, which this handler surfaces as an inline error card
-  (never a 500). The UI sends **no** ``blocker_counts`` / ``baseline_overrides``
-  -- those are CLI-fill-only, so criterion 4 (``meho_vs_baseline``) reads yellow
-  ("baseline did not run") and "READY TO RETIRE" is effectively unreachable via
-  the bare UI: the honest v0.2 posture, which the template surfaces with an
-  explanatory note + the ``rest_excluded`` / ``counted_surfaces`` honesty-gap
-  explainer (criteria 1+2 are fed only by the audited ``/mcp`` search tools).
 
 Reusing the substrate (no new ``/api/v1`` endpoint)
 ---------------------------------------------------
@@ -89,7 +55,7 @@ Operator reconstruction
 -----------------------
 
 The :class:`~meho_backplane.ui.auth.middleware.UISessionContext` the
-``require_ui_session`` dependency hands route handlers carries only
+``require_ui_operator`` dependency hands route handlers carries only
 ``operator_sub`` / ``tenant_id`` -- not the full
 :class:`~meho_backplane.auth.operator.Operator` (with its ``sub`` for the
 per-principal predicate). The handler reconstructs the operator from the
@@ -113,18 +79,18 @@ fresh mint + re-set. See :func:`_resolve_fragment_csrf`.
 Tenant scoping + RBAC
 ---------------------
 
-``operator`` role minimum (enforced by ``require_ui_session``; matches the
-OPERATOR floor the ``POST /api/v1/retrieve`` route carries). Diagnostics is
-**own-tenant only** -- tenant identity is derived from ``session.tenant_id``
-via the reconstructed operator, there is no ``tenant_filter`` (that is the
-sibling T3 concern). The whole surface is read-only -- no confirm gates.
+``operator`` role minimum, enforced by ``require_ui_operator`` on every
+route of the surface: a ``read_only`` session gets ``403 operator_required``.
+This matches the OPERATOR floor the ``POST /api/v1/retrieve`` route carries. Both tabs
+are **own-tenant only** -- tenant identity is derived from ``session.tenant_id``
+via the reconstructed operator, there is no ``tenant_filter``. The whole surface
+is read-only -- no confirm gates.
 """
 
 from __future__ import annotations
 
 import hashlib
 import time
-import uuid
 from datetime import UTC, datetime
 from typing import Final
 
@@ -133,15 +99,8 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.memory.rbac import MemoryRbacResolver
-from meho_backplane.retrieval.eval import EvalResult, eval_all
-from meho_backplane.retrieval.retire import (
-    SURFACE_VERDICT_ORDER,
-    RetireChecklistReport,
-    compute_retire_checklist,
-)
 from meho_backplane.retrieval.retriever import (
     CANDIDATE_LIMIT,
     MemoryEligibility,
@@ -159,11 +118,12 @@ from meho_backplane.retrieval.usage import (
     parse_since,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token, verify_csrf_token
 from meho_backplane.ui.templating import get_templates
 
@@ -198,23 +158,19 @@ _LIMIT_OPTIONS: Final[tuple[int, ...]] = (5, 10, 20, 50)
 #: form boundary rather than forwarded to :func:`parse_since`.
 _MAX_SINCE_LENGTH: Final[int] = 32
 
-#: Maximum ``tenant_filter`` value length accepted by the retire fragment.
-#: A UUID string is 36 chars; the small slack tolerates surrounding whitespace
-#: a paste might carry. An over-long value is rejected at the form boundary
-#: rather than forwarded to :class:`uuid.UUID` parsing.
-_MAX_TENANT_FILTER_LENGTH: Final[int] = 64
-
-#: The ``since`` presets the usage selector offers. ``30d`` (the backend
-#: :data:`~meho_backplane.retrieval.usage.DEFAULT_SINCE`) is the retire-decision
-#: window Goal #215 keys off; the others are common shorter lookbacks. An
+#: The ``since`` presets the usage selector offers. ``30d`` is the backend
+#: :data:`~meho_backplane.retrieval.usage.DEFAULT_SINCE`; the others are common
+#: shorter lookbacks. An
 #: operator can still type any ``<N>d`` / ``<N>h`` / ISO-8601 value the backend
 #: parser accepts.
 _SINCE_OPTIONS: Final[tuple[str, ...]] = ("24h", "7d", "30d", "90d")
 
-#: Module-level ``Depends`` closure for the operator-session gate. Built once
+#: Module-level ``Depends`` closure for the operator-role gate. Built once
 #: (rather than inline) to satisfy ruff B008, matching the convention the
-#: corpus / kb / dashboard routes established.
-_require_session = Depends(require_ui_session)
+#: corpus / kb / dashboard routes established. ``require_ui_operator`` checks
+#: the role in the session's access token, so every route of the surface has
+#: the same ``operator`` floor as its REST twin.
+_require_session = Depends(require_ui_operator)
 
 
 async def _resolve_operator(session: UISessionContext) -> Operator:
@@ -251,26 +207,22 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
 async def _resolve_operator_softly(session: UISessionContext) -> Operator | None:
     """Reconstruct the operator for the read-only page render, failing **soft**.
 
-    Two page-render concerns need the operator on the ``GET /ui/retrieval``
-    render: the retire tab's cross-tenant ``tenant_filter`` selector (shown only
-    to a platform admin) and the diagnostics Source / Kind datalists (#2458,
-    enumerated own-tenant + own-principal). Both must keep rendering even when
-    the JWT round-trip can't complete (a transient JWKS outage, a session
-    revoked in the gap since the middleware check). So any failure projects to
-    ``None`` -- the selector hides and the datalists render empty -- mirroring
-    the soft-hide posture
+    The diagnostics Source / Kind datalists need the operator on the
+    ``GET /ui/retrieval`` render (enumerated own-tenant + own-principal). They
+    must keep rendering even when the JWT round-trip can't complete (a
+    transient JWKS outage, a session revoked in the gap since the middleware
+    check). So any failure projects to ``None`` -- the datalists render empty --
+    mirroring the soft-hide posture
     :func:`~meho_backplane.ui.routes.connectors.operator.resolve_role_probe`
-    uses. The hide is only a UX hint: every ``POST`` handler reconstructs the
-    operator for real and the server-side authorities
-    (:func:`~meho_backplane.auth.rbac.authorize_tenant_scope`, the substrate's
-    own tenant + per-principal predicates) stay authoritative.
+    uses. Every ``POST`` handler reconstructs the operator for real, and the
+    substrate's own tenant + per-principal predicates stay authoritative.
     """
     try:
         return await _resolve_operator(session)
     except Exception as exc:
         log.info(
             "ui_retrieval_operator_probe_unavailable",
-            session_id=str(session.session_id),
+            session_ref=session_ref(session.session_id),
             reason=type(exc).__name__,
         )
         return None
@@ -437,23 +389,6 @@ def build_retrieval_router() -> APIRouter:
         """Run the Usage Analytics fragment (delegates to :func:`_render_usage`)."""
         return await _render_usage(request, session, since)
 
-    @router.post("/ui/retrieval/eval", response_class=HTMLResponse)
-    async def retrieval_eval(
-        request: Request,
-        session: UISessionContext = _require_session,
-    ) -> HTMLResponse:
-        """Run the Eval Quality fragment (delegates to :func:`_render_eval`)."""
-        return await _render_eval(request, session)
-
-    @router.post("/ui/retrieval/retire-checklist", response_class=HTMLResponse)
-    async def retrieval_retire_checklist(
-        request: Request,
-        session: UISessionContext = _require_session,
-        tenant_filter: str = Form(default="", max_length=_MAX_TENANT_FILTER_LENGTH),
-    ) -> HTMLResponse:
-        """Run the Retire Checklist fragment (delegates to :func:`_render_retire`)."""
-        return await _render_retire(request, session, tenant_filter)
-
     return router
 
 
@@ -485,15 +420,9 @@ async def _render_retrieval_index(
     Renders the tabbed shell with the Diagnostics tab active and an empty
     results region. Mints a CSRF token and sets the ``meho_csrf`` cookie so the
     diagnostics form's ``hx-headers`` echo passes the double-submit check.
-
-    Resolves ``operator.platform_admin`` (soft-hiding on any JWT hiccup) so the
-    Retire-checklist tab renders the cross-tenant ``tenant_filter`` selector only
-    for a platform admin -- a UX hint, not the authority (the POST handler
-    re-checks server-side via ``authorize_tenant_scope``).
     """
     csrf_token = mint_csrf_token(str(session.session_id))
     operator = await _resolve_operator_softly(session)
-    platform_admin = operator.platform_admin if operator is not None else False
     facets = await _load_retrieval_facets(operator)
     context: dict[str, object] = {
         **_diagnostics_form_context(
@@ -513,21 +442,13 @@ async def _render_retrieval_index(
         "hits": [],
         "searched": False,
         "candidate_limit": CANDIDATE_LIMIT,
-        # Usage Analytics tab (#1889): the lookback form defaults to the
-        # retire-decision window; the partials read their data off
-        # ``report`` / ``result`` (both ``None`` on the initial render, so the
-        # included fragments fall through to their quiet prompts).
+        # Usage Analytics tab: the lookback form defaults to
+        # ``DEFAULT_SINCE``; the partial reads its data off ``report``
+        # (``None`` on the initial render, so the included fragment falls
+        # through to its quiet prompt).
         "since": DEFAULT_SINCE,
         "since_options": _SINCE_OPTIONS,
         "report": None,
-        "result": None,
-        # Retire Checklist tab (#1890): ``checklist`` is ``None`` on the initial
-        # render so the included partial falls through to its quiet prompt;
-        # ``platform_admin`` gates the cross-tenant ``tenant_filter`` selector
-        # (a soft-hide hint -- the POST handler re-checks server-side).
-        "checklist": None,
-        "platform_admin": platform_admin,
-        "tenant_filter": "",
         "operator_sub": session.operator_sub,
         "active_surface": "retrieval",
         "page_title": "Retrieval",
@@ -668,8 +589,7 @@ async def _render_usage(
 
     Reconstructs the operator and runs the in-process
     :func:`~meho_backplane.retrieval.usage.compute_usage` own-tenant (no
-    ``tenant_filter`` -- the ``platform_admin`` cross-tenant selector is the
-    sibling T3 concern), then swaps ``retrieval/_usage_results.html`` into
+    ``tenant_filter``), then swaps ``retrieval/_usage_results.html`` into
     ``#retrieval-usage-results``.
 
     ``compute_usage`` is keyword-only and **requires** a ``session:
@@ -749,184 +669,3 @@ async def _run_usage(
         bucket_count=len(report.buckets),
     )
     return report
-
-
-# ---------------------------------------------------------------------------
-# Eval Quality tab (#1889)
-# ---------------------------------------------------------------------------
-
-
-async def _render_eval(
-    request: Request,
-    session: UISessionContext,
-) -> HTMLResponse:
-    """Run the HTMX Eval Quality fragment for ``POST /ui/retrieval/eval``.
-
-    Reconstructs the operator and runs the in-process
-    :func:`~meho_backplane.retrieval.eval.eval_all` own-tenant with **no
-    baseline** -- the server-side baseline path is rejected 501
-    (``retrieve_eval.py``) since v0.2 ships no checked-in corpus snapshot, so
-    this surface never offers a baseline toggle and never reaches that path.
-    Unlike usage, ``eval_all`` takes **no session** (it owns its own retrieval
-    plumbing), so it is called as ``await eval_all(tenant_id=operator.tenant_id)``.
-
-    Swaps ``retrieval/_eval_results.html`` into ``#retrieval-eval-results``: per
-    surface, ``precision_at_5`` / ``mrr`` / ``coverage`` and a green/yellow/red
-    verdict pill mapped (in the template) from the verdict token the service
-    returns verbatim, plus the ``overall_verdict``. An empty-corpus surface
-    legitimately returns ``green``; the verdict is rendered as-is, never
-    recomputed.
-    """
-    operator = await _resolve_operator(session)
-    result = await _run_eval(operator)
-
-    csrf_token, set_csrf = _resolve_fragment_csrf(request, str(session.session_id))
-    context: dict[str, object] = {
-        "result": result,
-        "csrf_token": csrf_token,
-    }
-    response = get_templates().TemplateResponse(request, "retrieval/_eval_results.html", context)
-    if set_csrf:
-        _set_csrf_cookie(response, csrf_token)
-    return response
-
-
-async def _run_eval(operator: Operator) -> EvalResult:
-    """Run in-process ``eval_all`` own-tenant with no baseline.
-
-    Scoped to ``operator.tenant_id``; ``eval_all`` runs every shipped surface's
-    corpus (the default) and computes MEHO-only metrics -- no ``baseline``
-    argument, so the 501 baseline path is never reached.
-    """
-    result = await eval_all(tenant_id=operator.tenant_id)
-    log.info(
-        "ui_retrieval_eval_completed",
-        operator_sub=operator.sub,
-        tenant_id=str(operator.tenant_id),
-        overall_verdict=result.overall_verdict,
-        surface_count=len(result.surfaces),
-    )
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Retire Checklist tab (#1890)
-# ---------------------------------------------------------------------------
-
-
-async def _render_retire(
-    request: Request,
-    session: UISessionContext,
-    tenant_filter: str,
-) -> HTMLResponse:
-    """Run the HTMX Retire Checklist fragment for ``POST /ui/retrieval/retire-checklist``.
-
-    Reconstructs the operator and runs the in-process
-    :func:`~meho_backplane.retrieval.retire.compute_retire_checklist` over every
-    :data:`~meho_backplane.retrieval.retire.SURFACE_VERDICT_ORDER` surface, then
-    swaps ``retrieval/_retire_results.html`` into ``#retrieval-retire-results``.
-
-    Tenant scoping mirrors the REST route (``retrieve_retire.py``):
-
-    * A blank ``tenant_filter`` (the common case, and the only shape a
-      non-platform-admin can produce from the rendered form) resolves to the
-      operator's own tenant.
-    * A platform admin may name a different tenant; the resolution defers to
-      :func:`~meho_backplane.auth.rbac.authorize_tenant_scope`, which returns the
-      requested tenant for a platform admin and raises HTTP 403
-      ``cross_tenant_requires_platform_admin`` otherwise. A forged cross-tenant
-      ``tenant_filter`` from a non-platform-admin therefore surfaces as an inline
-      error card (the 403 detail), **not** a 500.
-    * A malformed (non-UUID) ``tenant_filter`` renders an inline error card too,
-      rather than escaping as a 422/500.
-
-    The UI sends **no** ``blocker_counts`` / ``baseline_overrides`` (CLI-fill-only),
-    so criterion 4 reads yellow and the template surfaces that honest-posture
-    note. ``compute_retire_checklist`` is keyword-only and **requires** a
-    ``session: AsyncSession``, opened here via
-    :func:`~meho_backplane.db.engine.get_sessionmaker` exactly as the corpus
-    console does; it runs ``eval_all`` internally for criteria 3+4, so this
-    handler never calls ``eval_all`` itself.
-    """
-    requested = tenant_filter.strip()
-
-    checklist: RetireChecklistReport | None = None
-    error_message: str | None = None
-    operator = await _resolve_operator(session)
-    try:
-        target_tenant = _resolve_target_tenant(operator, requested)
-        checklist = await _run_retire(operator, target_tenant)
-    except HTTPException as exc:
-        # A 401 from the operator-reconstruction seam is an auth condition that
-        # must propagate (the BFF maps it to a login redirect); a 403 from the
-        # cross-tenant gate is a denied-but-handled condition that renders inline.
-        if exc.status_code == status.HTTP_403_FORBIDDEN:
-            error_message = str(exc.detail)
-        else:
-            raise
-    except ValueError as exc:
-        # A malformed (non-UUID) tenant_filter -- render inline, never a 500.
-        error_message = f"Invalid tenant filter: {exc}"
-
-    csrf_token, set_csrf = _resolve_fragment_csrf(request, str(session.session_id))
-    context: dict[str, object] = {
-        "checklist": checklist,
-        "error_message": error_message,
-        "platform_admin": operator.platform_admin,
-        "tenant_filter": requested,
-        "csrf_token": csrf_token,
-    }
-    response = get_templates().TemplateResponse(request, "retrieval/_retire_results.html", context)
-    if set_csrf:
-        _set_csrf_cookie(response, csrf_token)
-    return response
-
-
-def _resolve_target_tenant(operator: Operator, requested: str) -> uuid.UUID:
-    """Resolve the effective tenant for a retire-checklist run.
-
-    A blank *requested* (the own-tenant path) skips the cross-tenant gate and
-    returns ``operator.tenant_id`` directly. A non-blank value is parsed to a
-    :class:`uuid.UUID` (a malformed value raises :class:`ValueError`, which the
-    caller renders inline) and then run through
-    :func:`~meho_backplane.auth.rbac.authorize_tenant_scope`, which is the
-    server-side authority on the cross-tenant claim (403 for a non-platform-admin).
-    """
-    if not requested:
-        return operator.tenant_id
-    parsed = uuid.UUID(requested)
-    return authorize_tenant_scope(operator, parsed)
-
-
-async def _run_retire(
-    operator: Operator,
-    target_tenant: uuid.UUID,
-) -> RetireChecklistReport:
-    """Open a read-only session and run in-process ``compute_retire_checklist``.
-
-    Scoped to *target_tenant* (the operator's own tenant, or the
-    platform-admin-authorized ``tenant_filter`` tenant) over every
-    :data:`~meho_backplane.retrieval.retire.SURFACE_VERDICT_ORDER` surface. The
-    session is opened via :func:`~meho_backplane.db.engine.get_sessionmaker` and
-    closed by the ``async with``. No ``blocker_counts`` / ``baseline_overrides``
-    are passed (CLI-fill-only), so criterion 5 reads yellow ("unknown") and
-    criterion 4 reads yellow ("baseline did not run") -- the honest v0.2 posture.
-    """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session:
-        checklist = await compute_retire_checklist(
-            session=db_session,
-            surfaces=list(SURFACE_VERDICT_ORDER),
-            tenant_id=target_tenant,
-            source="request_usage",
-        )
-    log.info(
-        "ui_retrieval_retire_checklist_completed",
-        operator_sub=operator.sub,
-        operator_tenant_id=str(operator.tenant_id),
-        target_tenant_id=str(target_tenant),
-        cross_tenant=target_tenant != operator.tenant_id,
-        overall_verdict=checklist.overall_verdict,
-        surface_count=len(checklist.surfaces),
-    )
-    return checklist

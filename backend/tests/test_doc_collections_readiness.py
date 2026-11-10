@@ -356,8 +356,8 @@ async def test_set_collection_enabled_is_idempotent() -> None:
         row = await session.get(DocCollection, collection.id)
         assert row is not None
         # Disable → change; disable again → no-op.
-        assert await set_collection_enabled(session, row, enabled=False) is True
-        assert await set_collection_enabled(session, row, enabled=False) is False
+        assert await set_collection_enabled(session, _make_operator(), row, enabled=False) is True
+        assert await set_collection_enabled(session, _make_operator(), row, enabled=False) is False
         assert row.status == STATUS_DISABLED
 
 

@@ -61,6 +61,7 @@ from pydantic import (
 )
 
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.targets.extras_limits import check_extras_size
 from meho_backplane.targets.field_rules import check_target_host, check_target_name
 from meho_backplane.targets.ssrf_guard import assert_public_destination
 
@@ -169,6 +170,14 @@ class TargetSummary(BaseModel):
     port: int | None
     fqdn: str | None
     secret_ref: str | None
+    secret_ref_derived: bool = Field(
+        default=False,
+        description=(
+            "True when secret_ref is the path MEHO builds from the target name "
+            "(tenants/<tenant_id>/<name>), as it does for a target added without "
+            "a secret_ref."
+        ),
+    )
     auth_model: AuthModel
     vpn_required: bool
     # T1 (#1780). Per-target TLS-verification flag. Connection-routing
@@ -277,6 +286,14 @@ class Target(BaseModel):
     port: int | None
     fqdn: str | None
     secret_ref: str | None
+    secret_ref_derived: bool = Field(
+        default=False,
+        description=(
+            "True when secret_ref is the path MEHO builds from the target name "
+            "(tenants/<tenant_id>/<name>), as it does for a target added without "
+            "a secret_ref."
+        ),
+    )
     auth_model: AuthModel
     vpn_required: bool
     # T1 (#1780). Whether connector dispatch verifies the target's TLS
@@ -314,7 +331,14 @@ class Target(BaseModel):
     secret_field_map: Mapping[str, str] = Field(default_factory=dict)
     extras: Mapping[str, Any]
     notes: str | None
-    fingerprint: Mapping[str, Any] | None
+    fingerprint: Mapping[str, Any] | None = Field(
+        description=(
+            "Product and version from the last successful probe. null means "
+            "the target is not probed yet (a new target is never probed): "
+            "run POST /api/v1/targets/{name}/probe, or `meho targets probe "
+            "<name>` in the CLI."
+        ),
+    )
     preferred_impl_id: str | None
     # #3272 / #3212 (F1). Per-target capture override, tri-state: ``None`` inherit
     # / ``True`` force ON / ``False`` force OFF (resolved by ``should_capture``).
@@ -412,6 +436,11 @@ class TargetCreate(BaseModel):
     @classmethod
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
+
+    @field_validator("extras")
+    @classmethod
+    def _check_extras_size(cls, value: Any) -> Any:
+        return check_extras_size(value)
 
     @field_validator("name", "aliases")
     @classmethod
@@ -565,6 +594,11 @@ class TargetUpdate(BaseModel):
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
 
+    @field_validator("extras")
+    @classmethod
+    def _check_extras_size(cls, value: Any) -> Any:
+        return check_extras_size(value)
+
     @field_validator("aliases")
     @classmethod
     def _check_aliases(cls, value: list[str] | None) -> list[str] | None:
@@ -630,6 +664,9 @@ def project_target_to_summary(t: TargetORM) -> TargetSummary:
     :class:`~meho_backplane.connectors.schemas.AuthModel` enum so
     callers get the typed value the schema declares.
     """
+    # Call-time import: ``tenant_paths`` pulls in the Vault ops module.
+    from meho_backplane.connectors.vault.tenant_paths import is_derived_secret_ref
+
     return TargetSummary(
         id=t.id,
         tenant_id=t.tenant_id,
@@ -644,6 +681,9 @@ def project_target_to_summary(t: TargetORM) -> TargetSummary:
         port=t.port,
         fqdn=t.fqdn,
         secret_ref=t.secret_ref,
+        secret_ref_derived=is_derived_secret_ref(
+            t.secret_ref, tenant_id=t.tenant_id, target_name=t.name
+        ),
         auth_model=AuthModel(t.auth_model),
         vpn_required=t.vpn_required,
         verify_tls=t.verify_tls,

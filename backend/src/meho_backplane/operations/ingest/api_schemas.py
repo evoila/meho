@@ -69,6 +69,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from meho_backplane.connectors.profile import AuthSchemeName
 from meho_backplane.operations.ingest.catalog import _compatibility_pattern_to_specifier
+from meho_backplane.operations.ingest.job_phase import IngestJobPhase
 
 __all__ = [
     "AffectedSensorModel",
@@ -87,6 +88,7 @@ __all__ = [
     "IngestRequest",
     "IngestResponse",
     "IngestionResultModel",
+    "LoginSetupOutcome",
     "NextStep",
     "OperationOverrideList",
     "OperationOverrideRow",
@@ -102,6 +104,17 @@ __all__ = [
 #: the CLI / MCP sibling tasks can use it as a sentinel without
 #: needing to send ``status=<empty>``.
 ConnectorStatusFilter = Literal["staged", "enabled", "disabled", "all"]
+
+#: What happened to the login setup of an ingest with a login type (the
+#: ``login_setup`` field of :class:`IngestionResultModel`). See
+#: :mod:`meho_backplane.operations.ingest.login_setup`.
+LoginSetupOutcome = Literal[
+    "registered",
+    "replaced",
+    "unchanged",
+    "served_by_connector_code",
+    "served_by_builtin_login_setup",
+]
 
 
 class SpecSource(BaseModel):
@@ -684,6 +697,20 @@ class IngestionResultModel(BaseModel):
     safety_changes: list[SafetyChangeModel] = Field(default_factory=list)
     dropped_count: int = 0
     dropped_ops: list[DroppedOpModel] = Field(default_factory=list)
+    login_setup: LoginSetupOutcome | None = Field(
+        default=None,
+        description=(
+            "What happened to the login setup of an ingest with a login type. "
+            "registered: the scope's calls use it now. replaced: it replaced a "
+            "different login setup of the same scope (audited with the old and the "
+            "new login type). unchanged: the same login setup was already in place. "
+            "served_by_connector_code / served_by_builtin_login_setup: hand-written "
+            "connector code or a shipped or built-in login setup serves this "
+            "connector for every tenant, so this login setup is saved but not used. "
+            "A tenant's login setup applies only to that tenant's calls. Null for an "
+            "ingest without a login type."
+        ),
+    )
 
 
 class GroupSummaryModel(BaseModel):
@@ -1287,7 +1314,11 @@ class IngestJobStatusResponse(BaseModel):
       correlate against their own state.
     * **Lifecycle** -- ``status`` + ``started_at`` + optional
       ``ended_at``. Status moves ``running`` → one of ``succeeded`` /
-      ``degraded`` / ``failed`` exactly once.
+      ``degraded`` / ``failed`` exactly once. ``phase`` is the step the
+      job is on (``parse`` → ``register`` → ``grouping``) and
+      ``phase_started_at`` is when that step started (#5786), so a slow
+      import can be told from a stuck one. A finished job keeps the step
+      it ended in.
     * **Result vs error** -- keyed on status. ``succeeded`` populates
       ``ingestion`` (with optional ``grouping``) and leaves ``error``
       ``None``; ``failed`` populates ``error`` / ``error_class`` and
@@ -1320,6 +1351,19 @@ class IngestJobStatusResponse(BaseModel):
     spec_uris: list[str] = Field(default_factory=list)
     started_at: float
     ended_at: float | None = None
+    phase: IngestJobPhase = Field(
+        description=(
+            "The step the job is on: parse (read and check the API files), "
+            "register (write the operations), grouping (the language model "
+            "groups the operations). A finished job keeps the step it ended in."
+        ),
+    )
+    # ``format: double`` makes generated clients keep full precision; a
+    # 32-bit float rounds an epoch time to about two minutes.
+    phase_started_at: float = Field(
+        description="When the current step started (epoch seconds).",
+        json_schema_extra={"format": "double"},
+    )
     ingestion: IngestionResultModel | None = None
     grouping: GroupingResultModel | None = None
     error: str | None = None

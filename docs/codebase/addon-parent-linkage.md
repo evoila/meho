@@ -14,7 +14,7 @@ instead of orphaning as a second replay root. `/audit/sessions/{id}/replay`
 anchors on `agent_session_id` and descends by `parent_audit_id`, so that
 re-bind is all it takes to make the chain one tree.
 
-A paired add-on (the first consumers are meho-automation and meho-ssp)
+A paired add-on (the first one is meho-automation)
 orchestrates from outside the backplane. It calls `call_operation` several
 times for one unit of work, but there is no in-process parent audit row to hang
 those dispatches off — each would land as an independent replay root. This

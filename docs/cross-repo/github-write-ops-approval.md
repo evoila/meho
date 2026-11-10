@@ -6,7 +6,7 @@ Copyright (c) 2026 evoila Group
 # GitHub write-op approval-queue annotation — operator runbook
 
 > Operator-facing runbook for opting the 4 high-blast-radius
-> [`gh-rest-v3`](github-app-credential.md) write operations into the
+> [`gh-rest-3`](github-app-credential.md) write operations into the
 > [G11.2 approval queue](https://github.com/evoila/meho/issues/803)
 > after a fresh ingest.
 >
@@ -16,9 +16,9 @@ Copyright (c) 2026 evoila Group
 
 ## Why this exists
 
-The G0.7 review state machine ingests `gh-rest-v3` operations
+The G0.7 review state machine ingests `gh-rest-3` operations
 `is_enabled=False, requires_approval=False` by default. Four of the
-~700 GitHub write operations are high-blast-radius enough that an
+~700 GitHub operations are high-blast-radius enough that an
 agent attempting them without operator-in-the-loop approval is
 unacceptable for any production target:
 
@@ -38,9 +38,9 @@ after every re-ingest.
 
 ## When to run
 
-Run **once** after each fresh `gh/v3` ingest. Specifically:
+Run **once** after each fresh `gh/3` ingest. Specifically:
 
-* After `meho connector ingest --catalog gh/v3` has populated the
+* After `meho connector ingest --catalog gh/3` has populated the
   `endpoint_descriptor` table with the ~700 GitHub L2 rows.
 * After a re-ingest (a quarterly spec refresh, an operator-applied
   `info.version` bump). The flip is preserved by row identity, but
@@ -49,7 +49,7 @@ Run **once** after each fresh `gh/v3` ingest. Specifically:
 
 ## Prerequisites
 
-* The `gh-rest-v3` connector has been ingested (see
+* The `gh-rest-3` connector has been ingested (see
   [github-app-credential.md](github-app-credential.md) for the
   per-target credential bootstrap; the ingest itself is operator-
   driven and orthogonal to the credential plumbing).
@@ -57,17 +57,11 @@ Run **once** after each fresh `gh/v3` ingest. Specifically:
   the script uses. The script reads the standard env var via
   `meho_backplane.settings.get_settings()`.
 
-> ⚠️ **Parser-fix dependency** — as of MEHO v0.7.0 the G0.7 OpenAPI
-> parser doesn't inline `#/components/responses/*` `$ref` shapes,
-> which the GitHub REST spec uses extensively. Live ingest of the
-> GitHub spec raises `UnsupportedSpecError`; the integration test
-> at `backend/tests/integration/test_operations_ingest_github.py`
-> is `pytest.xfail`-marked accordingly. **Until that follow-up
-> lands** (a sibling Task on Initiative #1220 or a Goal #214 parser
-> follow-up), the 4 target rows are absent from `endpoint_descriptor`
-> and the script reports `MISSING` for each. The script itself is
-> deliverable today; the operationally-meaningful run waits on the
-> parser fix.
+> **Note** — the OpenAPI parser inlines `#/components/responses/*`
+> and `#/components/requestBodies/*` refs, so the GitHub spec ingests
+> and the 4 target rows land in `endpoint_descriptor`. The live
+> ingest test at `backend/tests/integration/test_operations_ingest_github.py`
+> runs only when `MEHO_GH_INGEST_LIVE=1` is set.
 
 ## Pre-flight (dry-run)
 
@@ -79,8 +73,8 @@ uv run python -m scripts.annotate_github_write_ops --dry-run
 The dry-run prints one line per op (`WOULD-FLIP` / `OK` / `MISSING`)
 and exits `0` if every targeted op is present (irrespective of
 current flag state). Exit code `2` means one or more rows are
-absent from `endpoint_descriptor` — usually the parser-fix
-dependency above; nothing is mutated.
+absent from `endpoint_descriptor` — usually the ingest has not run
+yet; nothing is changed.
 
 ## Apply
 
@@ -102,9 +96,11 @@ The flip is queryable through the standard operations meta-tool
 once it's enabled:
 
 ```bash
-# MCP / REST surface (production-shaped verification)
-meho operation view gh.pr.merge | grep requires_approval
-# expected: requires_approval: true
+# REST surface: show the call contract of one op
+meho operation search gh-rest-3 \
+  --op-id 'PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge' --json \
+  | grep requires_approval
+# expected: "requires_approval": true
 ```
 
 Or directly against the database (admin-only):
@@ -112,7 +108,7 @@ Or directly against the database (admin-only):
 ```sql
 SELECT op_id, safety_level, requires_approval
   FROM endpoint_descriptor
- WHERE product = 'gh' AND version = 'v3' AND impl_id = 'gh-rest'
+ WHERE product = 'gh' AND version = '3' AND impl_id = 'gh-rest'
    AND op_id IN (
      'POST:/repos/{owner}/{repo}/issues',
      'PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge',
@@ -127,7 +123,7 @@ SELECT op_id, safety_level, requires_approval
 The Task [#1225](https://github.com/evoila/meho/issues/1225) body
 specifies `safety_level="write"` per-op; the
 [`endpoint_descriptor` schema](../../backend/src/meho_backplane/db/models.py)
-allows only `safe` / `caution` / `dangerous`. The script maps all
+allows only `safe` / `caution` / `dangerous` / `destructive`. The script maps all
 4 ops to `safety_level="dangerous"` (the existing high-blast-radius
 tier; matches the issue's intent). Widening the enum to admit a
 new `write` literal is **out of scope** for T5 — track separately
@@ -154,5 +150,4 @@ if the policy team decides the 4-value vocabulary is insufficient.
 * [`backend/src/meho_backplane/operations/dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py)
   `_handle_needs_approval` — the dispatcher's approval-park mechanism.
 * [`backend/tests/integration/test_operations_ingest_github.py`](../../backend/tests/integration/test_operations_ingest_github.py)
-  — the xfailed live-ingest test that gates the operationally-
-  meaningful run.
+  — the live-ingest test (runs when `MEHO_GH_INGEST_LIVE=1` is set).

@@ -71,7 +71,9 @@ the tests set it, as `install.sh` does.
    appliance; and the first-start service and the console banner
    (`firststart/`, [appliance-firststart.md](appliance-firststart.md)):
    the scripts under `/opt/meho/appliance/firststart/`, the two units
-   under `/etc/systemd/system/`, both enabled. They run at the customer's
+   under `/etc/systemd/system/`, both enabled. `banner.sh` gets the git
+   commit of this checkout as `DOCS_REF`, for its link to the boot-menu
+   steps (`main` when the checkout has no git). They run at the customer's
    first boot; the build VM does not boot again. Then the OS hardening
    (`harden_os`, [appliance-cis.md](appliance-cis.md)): `build.sh`
    downloads the CIS content of ComplianceAsCode (pinned with its sha512,
@@ -80,7 +82,10 @@ the tests set it, as `install.sh` does.
    packages from the Ubuntu archive, runs the CIS fixes, sets the design's
    settings, sets the firewall to block by default, and scans. The scan's
    result list comes back as `meho-appliance-<version>-cis.txt` in the
-   out-dir.
+   out-dir. It comes back also when `harden.sh` stops after its scan, for
+   example on a failing rule that is in neither list; then the build
+   stops. Before the run, `build.sh` deletes the list of an earlier run on
+   the build VM.
 4. **Clean for copying.** `clean.sh` goes to `/run/meho-clean.sh` (a RAM
    disk, so it is not in the OVA) and starts with
    `systemd-run --unit=meho-clean --collect -p TTYPath=/dev/tty1 -p StandardOutput=tty /bin/bash /run/meho-clean.sh`
@@ -282,8 +287,9 @@ test (#4816).
   migration (#5145), and v0.39.0 has no OpenBao setup (#4044). That build
   had no first start in it, so two appliances from one OVA (different RKE2
   CAs and SSH host keys) wait for the next lab build and import.
-- **The hardening (#4640)** has not run on a real build yet; see
-  [appliance-cis.md](appliance-cis.md).
+- **The hardening** ran on the first real lab build. Its result and the
+  fixes made since then are in [appliance-cis.md](appliance-cis.md),
+  "Known issues".
 - **The cloud image's `ubuntu` user** is not made (no `default` in the
   user-data). If a later cloud-init version changes that rule, the check
   finds no such user; add it to `check_clean` if the first build shows one.

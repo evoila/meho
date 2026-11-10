@@ -62,6 +62,17 @@ rules:
     action: redact
     reason: "JWT in payload body"
 
+  # Before the api_key rule. This rule knows where a query value ends
+  # (at ``&`` or ``#``), and an apostrophe is part of the value. The
+  # api_key rule stops at an apostrophe, so a ``token=`` value with one
+  # would keep its tail. It also takes the parameter name, so this rule
+  # could not find the tail afterwards. A value that already is a
+  # placeholder (a JWT hidden by the jwt rule) is left alone.
+  - name: strip-url-secret
+    pattern: url_secret
+    action: redact
+    reason: "user part and signature / credential / token query values of a URL"
+
   - name: strip-api-key
     pattern: api_key
     action: redact

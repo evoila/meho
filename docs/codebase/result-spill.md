@@ -75,6 +75,59 @@ The handle itself is minted **unconditionally** on every reduce — a
 skipped spill never suppresses the handle, it only flips the drill-in
 branch to `available=false`.
 
+### Answer-ready replies (`JSONFLUX_ANSWER_READY`, off by default)
+
+A setting that is off by default changes the reduced reply so a model can
+answer most questions without a second call. It stays off until model
+tests show that a small open model does better and Claude does not do
+worse. Turning it on by default is a separate change.
+
+With `JSONFLUX_ANSWER_READY=true`, a reduced list reply changes like this
+(`operations/answer_ready.py`, called from `JsonFluxReducer.reduce`):
+
+- Today's summary keys stay.
+- `counts`: for each short column with 10 or fewer different values and at
+  least one repeated value, how many rows have each value, for example
+  `{"power_state": {"POWERED_ON": 46, "POWERED_OFF": 23}}`. A missing value
+  counts as `"null"`. At most 1 KB.
+- `items`: every row, cut to 1 to 3 short columns, when the table fits in
+  3 KB and in the room left under the 4,096-byte summary limit. If 3
+  columns do not fit, the table drops columns down to 1. A table is all
+  rows or none, so a cut table never looks like the whole list. With
+  `items`, the sample rows are dropped (`handle.sample_rows` is null and
+  `sample_rows_returned` is 0), because the table already has those rows.
+  Without `items`, the sample stays as today.
+- The two long texts on the handle are replaced by one line in
+  `fetch_more.drill_in.rationale`, for example "Showing all 69 rows this
+  call returned in items (name). The counts cover all 69 rows. For other
+  columns or a filter, call result_query with handle_id=... The vendor may
+  hold more rows than this call returned." It says when only the first
+  rows were stored, or when no rows were stored. When rows were stored, the
+  line always ends with that vendor note, so a reduced page is never called
+  the whole source (#3676). The note on parts kept out of the summary
+  (`parts_note`) stays in the summary only, not in this line.
+  `native_pagination.rationale` is null when the operation has no paging
+  hint; a paging hint still ships as today.
+
+How the columns are picked. A short column holds only text of 64
+characters or less, numbers, bools and nulls. The first column is the
+operation's `result_digest` name and status fields when it has that hint,
+else the first identity column found (`name`, `display_name`, `title`,
+`hostname`, `connector_id`, `key`, `id`, `value`). The next columns are the
+counted columns with more than one value.
+
+`counts` and `items` cover every row the call returned, also when the
+store kept only the first rows. A summary key with the same name (a part
+called `counts`) is never replaced; that block is left out. Credential-class
+operations, reduces without an `op_id`, and results over the admission
+work limit keep today's reply.
+
+When the whole reply is over the response limit and the rows can still be
+read through the handle, `query_topology` drops `items` and `counts` first
+and keeps the handle (`delivery="partial"`). `call_operation` drops the
+whole summary in that case. In both, the handle's line then says the reply
+was too large and how to read the rows, because it no longer shows them.
+
 ## Result field catalog (#3631)
 
 The captured JSON is the source of truth for a reduced result. The
@@ -150,8 +203,8 @@ aggregate functions are fixed allow-lists; caller values bind as DuckDB
 prepared-statement parameters, never string-interpolated. See
 [`docs/architecture/jsonflux.md`](../architecture/jsonflux.md#query-surface-3366)
 for why compiling from a fixed template is a stronger safety property
-than sanitizing a caller SQL string (verified on the pinned
-`duckdb==1.5.5`).
+than sanitizing a caller SQL string (verified on `duckdb` 1.5.5, the
+lowest version `backend/pyproject.toml` allows).
 
 ### Field catalog and raw output (#3635)
 
@@ -320,7 +373,8 @@ the reducer keeps it **whole** as a document record under a handle:
 - The inline summary is small and fixed in size: `result_record:
   "document"`, `root_type`, `document_bytes`, a `top_level_fields`
   outline (names and kinds, never values; 64 fields and 2 KB of JSON
-  text at most), and the small top-level scalars (same bounded default
+  text at most), `top_level_field_count` (the real number of top-level
+  fields; the outline can list fewer), and the small top-level scalars (same bounded default
   rule as above). Every budget measures escaped JSON text, the way the
   MCP transport sends it, so a field name full of control characters
   cannot push the summary past its bound.
@@ -336,8 +390,7 @@ the reducer keeps it **whole** as a document record under a handle:
   reducer skips collection detection and keeps the payload as a document
   record whatever its size, so a small result gets a handle too, but the
   caller sees only the summary. An operation whose small result should
-  come back whole declares `result_handle` instead (next section); the
-  migration inventory reads do. When the store did not keep a small
+  come back whole declares `result_handle` instead (next section). When the store did not keep a small
   payload, it passes through inline as without the hint. A malformed hint
   is logged and ignored. `result_document` wins when an op declares both.
 - A multi-step operation's failure envelope (an `issues[]` entry with
@@ -487,7 +540,7 @@ is how to read the rows; the receipt is how to prove the call ran.
 | `POST /api/v1/operations/result-query` | `backend/src/meho_backplane/api/v1/operations.py` | REST read surface; misses surface as a `404` with `reason=handle_not_found` (#3179) |
 | `_reduce_or_error` | `backend/src/meho_backplane/operations/dispatcher.py` | Builds `reducer_context` (`tenant_id`, `operator_sub`, `op_id`, hints) from the authenticated `Operator` |
 | `handle_owner_sub_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional handle owner `sub`; the approval resume binds the parking principal so it owns the spill (#3548) |
-| `FullResultCapture` / `full_result_capture_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional capture of the full redacted payload before the reduce; the sensor runner sets it so its rule sees every row (#4117) |
+| `FullResultCapture` / `full_result_capture_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional capture of the full redacted payload before the reduce; the sensor runner sets it so its rule sees every row, and the inventory connector's child reads set it so an inventory is built from the full answer |
 
 ## Control flow (dispatch path)
 
@@ -505,9 +558,11 @@ is how to read the rows; the receipt is how to prove the call ran.
    full redacted payload beside the shortened result (#4117). When it is
    set, `_reduce_or_error` copies the payload reference into the
    `FullResultCapture` before the reduce and then reduces as usual, so
-   the wire result, the handle, and the spill do not change. Only the
-   sensor runner sets it (`checks/runner.py`): a sensor rule runs over
-   every row, not over the summary. See
+   the wire result, the handle, and the spill do not change. Two callers
+   set it. The sensor runner (`checks/runner.py`) sets it, so a sensor
+   rule runs over every row, not over the summary. The inventory
+   connector's child reads (`connectors/inventory/adapter_kit.py`,
+   `read_child`) set it, so an inventory is built from the full answer. See
    [`sensor.md`](sensor.md#the-rule-runs-over-the-full-result-4117).
 2. The reducer validates the captured payload and derives schema, summary,
    and preview directly from raw rows, then `_spill()`:
@@ -516,10 +571,12 @@ is how to read the rows; the receipt is how to prove the call ran.
    - no usable `tenant_id`/`operator_sub` (absent or non-UUID) →
      skip, reason `no_tenant_context`;
    - `ResultHandleStore.spill()` reports `stored_rows == 0` (Valkey
-     unreachable, write rejected, or the guard `ttl/max_rows <= 0` /
+     unreachable, write rejected, not even the first row fits
+     `RESULT_HANDLE_MAX_RECORD_BYTES`, or the guard `ttl/max_rows <= 0` /
      empty rows) → skip, reason `result_store_unavailable`;
-   - otherwise → `stored_rows = min(total_rows,
-     RESULT_HANDLE_MAX_SPILL_ROWS)`.
+   - otherwise → `stored_rows` is the longest run of rows from the start
+     that fits both `RESULT_HANDLE_MAX_SPILL_ROWS` and
+     `RESULT_HANDLE_MAX_RECORD_BYTES`.
 3. `_assemble()` builds the inline summary + handle; the drill-in
    branch carries the outcome (`available` + `reason` + rationale).
 4. The tenant-context and store-unavailable spill skips log a structured
@@ -559,15 +616,17 @@ result. The spill is keyed to the caller even for a cross-tenant
 
 The short `status` uses the words of the `status` filter (`staged`,
 `enabled`, `disabled`), plus `registered` for a connector with no
-operations yet and `mixed` for one whose groups are partly enabled and
-partly disabled.
+operations yet, `mixed` for one whose groups are partly enabled and
+partly disabled, `package_not_installed` when the connector package is
+not installed, and `code_not_installed` when the connector's code is not
+in this MEHO.
 
 A hosted agent run uses the two steps apart: the toolset first drops the
 connectors outside the agent's allow-list, then reduces. So a handle
 never holds a connector the agent may not see. See
 [`agent-runtime.md`](agent-runtime.md).
 
-## Diagnosis: the RDC cycle-8 `k8s.logs tail=300` finding (#1629)
+## Diagnosis: the `k8s.logs tail=300` finding
 
 The consumer reported `k8s.logs tail=300` returning `row_count=300,
 total=300`, a 5-row `sample`, `source_key="lines"`, and "`handle:
@@ -629,12 +688,14 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
 
 ## Dedicated result-cache store (#3639)
 
-Result handles used to live only in the broadcast Valkey, next to the
-governance keys (broadcast, rate limits, approval waits). That Valkey has
-no byte ceiling, so many large handles could get it OOM-killed and take
-governance down too. Handles now move to their own Valkey (chart subchart
-`result-cache`, `maxmemory` + `noeviction`; see
-[devops.md](devops.md#result-cache-subchart-chartsresult-cache)).
+The broadcast Valkey holds the governance keys (broadcast, rate limits,
+approval waits) and has no byte ceiling. Result handles can live in their
+own Valkey instead (chart subchart `result-cache`, `maxmemory` +
+`noeviction`; see
+[devops.md](devops.md#result-cache-subchart-chartsresult-cache)). The
+store is off by default: until an operator turns on `resultCache.enabled`
+and then `resultCache.writerEnabled`, new handles go to the broadcast
+Valkey.
 
 The move is reader-first, so it is safe during a rolling update:
 
@@ -694,18 +755,14 @@ expected value on purpose and say why in the commit.
    ```
 
 3. Forced-handle acceptance, the `result_query` contract, and MCP
-   conformance. The six acceptance suites start vendor simulators in
+   conformance. The two acceptance suites start vendor simulators in
    containers. Without Docker they skip, so they only count when they run
    (CI runs them):
 
    ```bash
    cd backend && uv run pytest \
      tests/acceptance/test_g35_harbor_jsonflux_force_handle.py \
-     tests/acceptance/test_g35_nsx_jsonflux_force_handle.py \
-     tests/acceptance/test_g35_sddc_jsonflux_force_handle.py \
-     tests/acceptance/test_g36_vrops_jsonflux_force_handle.py \
      tests/acceptance/test_g37_robot_jsonflux_force_handle.py \
-     tests/acceptance/test_vmware_rest_jsonflux_force_handle.py \
      tests/test_jsonflux_query_contract.py \
      tests/test_operations_result_query_filter.py \
      tests/test_mcp_tool_result_query.py \
@@ -735,7 +792,8 @@ expected value on purpose and say why in the commit.
   `RESULT_CACHE_REDIS_URL` for `v2` keys (the same client when the URL is
   unset). Both use 5 s socket timeouts and fail fast.
 - `RESULT_HANDLE_MAX_SPILL_ROWS` (default 10000, validated `> 0`) caps
-  the per-key value size; `ttl_seconds` (reducer default 3600) bounds
+  the stored rows, and `RESULT_HANDLE_MAX_RECORD_BYTES` (default 16 MiB)
+  caps the size of one record; `ttl_seconds` (reducer default 3600) bounds
   lifetime server-side.
 - `RESULT_QUERY_MAX_OUTPUT_ROWS` (500) / `RESULT_QUERY_MAX_OUTPUT_BYTES`
   (256 KB) / `RESULT_QUERY_TIMEOUT_SECONDS` (10) bound a single query's
@@ -756,7 +814,9 @@ expected value on purpose and say why in the commit.
   `fetch_more.drill_in.available` is true; a handle whose spill was skipped
   or failed is dropped and the response is `delivery="unavailable"`. Details
   in `docs/codebase/mcp.md`, "Response wire ceiling".
-- `duckdb==1.5.5` / `pyarrow==25.0.1` (pinned) — the sandboxed
+- `duckdb>=1.5.5` / `pyarrow>=25.0.1` (`backend/pyproject.toml`; the
+  lock file sets the exact versions; the engine works on duckdb 1.5 and
+  2.0) — the sandboxed
   `QueryEngine` the lazy compiled-query path runs inside. The reducer does
   not construct an engine for its catalog, summary, or preview.
 
@@ -774,7 +834,7 @@ expected value on purpose and say why in the commit.
 - #3366 — bounded validated query surface over the handle (filter /
   project / group / aggregate, no raw SQL).
 - #1629 — no-spill `reason` surfacing + skip logging + this diagnosis
-  (G0.23-T3, RDC cycle-8 signal `k8s-logs-mcp-five-row-sample-cap`).
+  (the `k8s.logs` five-row sample).
 - #1479 — tail sample ordering for log-shaped ops (G0.19-T1).
 - #3548 — an approval resume's handle belongs to the parking principal.
 - #3631 — the result field catalog built from every captured row.

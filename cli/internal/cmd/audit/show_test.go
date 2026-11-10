@@ -219,6 +219,8 @@ func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 		"tenant_id:         -",
 		"tenant_name:       -",
 		"principal_name:    -",
+		"actor_sub:         -",
+		"actor_name:        -",
 		"target_id:         -",
 		"target_name:       -",
 		"request_id:        -",
@@ -228,6 +230,29 @@ func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 		"broadcast_event_id: -",
 		"payload:           -",
 	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q in %s", want, out)
+		}
+	}
+}
+
+// TestPrintEntrySummaryShowsActor — the summary names the agent that
+// acted for the person, and its name (#5773).
+func TestPrintEntrySummaryShowsActor(t *testing.T) {
+	actor, name := "agent:reader", "reader"
+	var buf bytes.Buffer
+	printEntrySummary(&buf, &api.AuditEntry{
+		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
+		PrincipalSub: "damir",
+		ActorSub:     &actor,
+		ActorName:    &name,
+		OpId:         "x.y",
+		ResultStatus: "denied",
+		Payload:      map[string]any{},
+	})
+	out := buf.String()
+	for _, want := range []string{"actor_sub:         agent:reader", "actor_name:        reader"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q in %s", want, out)
 		}

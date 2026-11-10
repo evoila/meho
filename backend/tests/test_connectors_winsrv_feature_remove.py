@@ -277,11 +277,11 @@ async def test_full_governed_flow_park_approve_resume() -> None:
 
 
 # ===========================================================================
-# No agent execution path — an AGENT principal is DENY'd
+# No agent execution path — an AGENT principal waits for a person (#3980)
 # ===========================================================================
 
 
-async def test_agent_principal_is_denied() -> None:
+async def test_agent_principal_waits_for_a_person() -> None:
     recorder = _RecordingWinsrvConnector()
     await _bootstrap(recorder)
 
@@ -292,9 +292,9 @@ async def test_agent_principal_is_denied() -> None:
         target=_FakeWinsrvTarget(),
         params={"name": _FEATURE},
     )
-    assert result.status == "denied", result
+    assert result.status == "awaiting_approval", result
     assert recorder.uninstall_calls == []  # never executed
-    assert await _pending_count() == 0  # never parked either
+    assert await _pending_count() == 1
 
 
 # ===========================================================================

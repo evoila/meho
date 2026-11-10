@@ -129,7 +129,8 @@ value. If the target sets `extras.tenant_id` and it is not the secret's
 ## Login and token cache
 
 The login is one client credentials request to Microsoft Entra ID with the
-scope `https://graph.microsoft.com/.default` (see
+Graph scope of the target's cloud (`https://graph.microsoft.com/.default` for
+the public cloud; see
 [`connectors-azure.md`](connectors-azure.md#login) for the request and its
 errors). `EntraConnector` keeps two caches, like the Azure connector:
 
@@ -139,6 +140,8 @@ errors). `EntraConnector` keeps two caches, like the Azure connector:
 
 Each cache key has its own lock, so many calls at the same moment start one
 login. A call without a person's token never gets a cached secret or token.
+A person's call uses the cached secret or token only after that caller's own
+Vault read of the target's secret passed once; the first read fills the cache.
 The Graph token lives in this connector's own cache. An Azure target that
 shares the login gets its own token for Azure Resource Manager; the two never
 mix (`test_connectors_entra.py` proves it).
@@ -164,6 +167,9 @@ permissions are unknown (`null`).
   calls `invalidate_credentials(target)`, which drops the target's secret
   and tokens, and returns `connector_auth_failed`. The next call reads the
   secret again.
+- **The target's connection changes** (for example its `secret_ref`, host or
+  extras): MEHO calls `invalidate_session` and `invalidate_credentials`, so
+  the next call reads the secret again and logs in with the new values.
 
 ## Retries and throttling
 
@@ -171,8 +177,9 @@ Every Graph call goes through `send` in `_http.py`, with the numbers of the
 Azure connector: at most 4 tries and 60 seconds of waiting per call. A 429
 waits `Retry-After` (or 2, 4, 8 seconds when it is missing) and tries again
 while the budget allows, then fails with `EntraThrottledError`, which says
-when to try again. A 5xx answer or a lost connection is tried again after
-0.5, 1, 2 seconds. Every Graph call here is a read, so repeating it is safe.
+when to try again. A 5xx answer is tried again after `Retry-After` when Graph
+sends it, else after 0.5, 1, 2 seconds; a lost connection after 0.5, 1, 2
+seconds. Every Graph call here is a read, so repeating it is safe.
 Other answers fail at once. No redirect is followed: a 3xx answer fails with
 `EntraUrlRefusedError`, and no token goes to the new address.
 
@@ -312,7 +319,7 @@ Graph never returns a secret's value after it is made, but it returns `hint`
 (the first characters of each secret) and, for some reads, certificate data
 (`key`). MEHO reads only `endDateTime`. The connector's trace filter
 (`trace_response_body`) cuts every credential in a raw answer down to its
-ID, name and dates before the answer reaches a trace. Graph limits reads
+ID, name, dates, type and usage before the answer reaches a trace. Graph limits reads
 that select `keyCredentials` to 150 requests per minute per tenant; the 429
 handling covers it.
 

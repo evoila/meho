@@ -8,7 +8,7 @@ Copyright (c) 2026 evoila Group
 ## Overview
 
 The autonomous review skills (`/auto-review-pr`, driven by the
-`/auto-implement-*` family in `evoila-bosnia/meho-internal`) post a
+`/auto-implement-*` family, kept outside this repo) post a
 binary APPROVE / REQUEST_CHANGES verdict on `evoila/meho` PRs. Those
 PRs are authored by a maintainer's identity, and GitHub refuses a
 formal review on your own PR — so without a second identity the
@@ -143,8 +143,7 @@ GH_TOKEN="$MEHO_REVIEW_APP_TOKEN" gh pr review <n> --repo evoila/meho \
 
 ## How the skills select the identity
 
-Contract implemented by
-`evoila-bosnia/meho-internal/.claude/skills/auto-review-pr/SKILL.md`
+Contract implemented by the `auto-review-pr` skill
 (review posting) and consumed by the orchestrators' merge gates:
 
 1. **Machine token present** (`MEHO_REVIEW_APP_TOKEN` set, or mintable
@@ -296,8 +295,7 @@ by automation. Record completion in the decision record's
   backdate).
 - [dcoapp/app](https://github.com/dcoapp/app) — `.github/dco.yml`
   remediation-commit configuration.
-- Skill-side wiring: `evoila-bosnia/meho-internal`,
-  `.claude/skills/auto-review-pr/SKILL.md` (identity selection,
-  degraded banner) and
-  `.claude/skills/auto-implement-initiative/SKILL.md` (merge-gate
-  handling of `review_mode`).
+- Skill-side wiring, kept outside this repo: the `auto-review-pr` skill
+  (identity selection, degraded banner) and the
+  `auto-implement-initiative` skill (merge-gate handling of
+  `review_mode`).

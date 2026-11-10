@@ -10,7 +10,11 @@ PowerShell-over-SSH transport. This is the c1sql1 SQL-FCI shared-disk path:
 attach an iSCSI target, then provision the raw disk into a volume.
 
 ``iscsi.connect`` and ``disk.format`` are ``caution`` (recoverable
-provisioning). ``disk.format`` is non-destructive by construction: it
+provisioning). ``iscsi.connect`` also waits for a person's approval: the
+host connects to the portal address the caller gives, so that field
+carries the caller-address marker
+(:mod:`meho_backplane.operations.caller_address`). ``disk.format`` is
+non-destructive by construction: it
 ``Initialize-Disk``s only a ``RAW`` disk and ``New-Partition -UseMaximumSize``
 only allocates **unallocated** space, so it never removes an existing
 partition or its data. It fails closed on a disk that already carries a
@@ -56,6 +60,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors.winsrv.ops import SSH_TRANSPORT_NOTE, WinsrvOp, normalise_json_rows
+from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -329,6 +334,7 @@ STORAGE_OPS: tuple[WinsrvOp, ...] = (
                 },
                 "target_portal_address": {
                     "type": "string",
+                    CALLER_ADDRESS_MARKER: True,
                     "description": "Optional target portal IP/DNS (``-TargetPortalAddress``).",
                 },
                 "target_portal_port": {
@@ -364,11 +370,12 @@ STORAGE_OPS: tuple[WinsrvOp, ...] = (
         group_key="storage",
         tags=("write", "storage", "iscsi", "connect"),
         safety_level="caution",
-        requires_approval=False,
+        requires_approval=True,
         llm_instructions={
             "when_to_use": (
                 "Attach an iSCSI target to a Windows Server host (e.g. a SQL "
-                "FCI shared disk). Recoverable; safety_level=caution. No CHAP "
+                "FCI shared disk). Recoverable; safety_level=caution. Each call "
+                "waits until a person approves it. No CHAP "
                 "in this cut. " + SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {

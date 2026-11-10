@@ -9,12 +9,16 @@ render the same objects as the previous one. This test renders
 ``deploy/values-examples/values-bring-your-own-fixture.yaml`` and compares
 it with the saved copy in ``fixtures/chart/bring-your-own-render.golden``.
 
-Two things are evened out before the compare, and nothing else:
+Three things are evened out before the compare, and nothing else:
 
 * blank lines and trailing spaces (Helm 3 and Helm 4 differ only there);
 * the broadcast password and the metrics token, which the chart makes at
   random on every render when no Secret is given, and the checksum of the
-  metrics token on the Deployment.
+  metrics token on the Deployment;
+* the parent chart's own version (``Chart.yaml`` ``version``), which every
+  version bump changes: the ``helm.sh/chart: meho-chart-<version>`` label,
+  the ``CHART_VERSION`` value, and the ``checksum/config`` of the ConfigMap
+  that carries the label (the ConfigMap itself is still compared).
 
 When a change to the bring-your-own render is wanted, write the new copy
 and commit it with the change, so the review shows the difference::
@@ -45,6 +49,9 @@ _RANDOM_VALUES = (
     re.compile(r'^(\s+token: )"[^"]*"$'),
     re.compile(r"^(\s+checksum/metrics-auth: )[0-9a-f]+$"),
 )
+_CHART_LABEL = re.compile(r"^(\s+helm\.sh/chart: meho-chart-)\S+$")
+_CHART_VERSION_VALUE = re.compile(r'^(\s+value: )"[^"]*"$')
+_CONFIG_CHECKSUM = re.compile(r"^(\s+checksum/config: )\S+$")
 
 pytestmark = pytest.mark.skipif(
     shutil.which("helm") is None and os.environ.get("MEHO_REQUIRE_HELM") != "1",
@@ -53,13 +60,17 @@ pytestmark = pytest.mark.skipif(
 
 
 def _normalise(rendered: str) -> str:
-    lines = []
+    lines: list[str] = []
     for raw in rendered.splitlines():
         line = raw.rstrip()
         if not line:
             continue
         for pattern in _RANDOM_VALUES:
             line = pattern.sub(r'\1"<random>"', line)
+        line = _CHART_LABEL.sub(r"\1<version>", line)
+        line = _CONFIG_CHECKSUM.sub(r"\1<checksum>", line)
+        if lines and lines[-1].endswith("- name: CHART_VERSION"):
+            line = _CHART_VERSION_VALUE.sub(r'\1"<version>"', line)
         lines.append(line)
     return "\n".join(lines) + "\n"
 
@@ -107,10 +118,30 @@ def test_fixture_renders_no_built_in_part() -> None:
 def test_normalise_masks_only_the_random_values() -> None:
     text = (
         'a: 1\n\n  requirepass: "c2VjcmV0"   \nb:   \n  requirepassword: "x"\n'
-        '  token: "dG9r"\n  tokens: "x"\n  checksum/metrics-auth: 0abc\n  checksum/config: 0abc\n'
+        '  token: "dG9r"\n  tokens: "x"\n  checksum/metrics-auth: 0abc\n'
     )
     assert _normalise(text) == (
         'a: 1\n  requirepass: "<random>"\nb:\n  requirepassword: "x"\n'
         '  token: "<random>"\n  tokens: "x"\n  checksum/metrics-auth: "<random>"\n'
-        "  checksum/config: 0abc\n"
+    )
+
+
+def test_normalise_masks_only_the_parent_chart_version() -> None:
+    text = (
+        "    helm.sh/chart: meho-chart-0.2.0\n"
+        "    helm.sh/chart: broadcast-0.1.0\n"
+        "            - name: CHART_VERSION\n"
+        '              value: "0.2.0"\n'
+        "            - name: OTHER\n"
+        '              value: "0.2.0"\n'
+        "    checksum/config: 0abc\n"
+    )
+    assert _normalise(text) == (
+        "    helm.sh/chart: meho-chart-<version>\n"
+        "    helm.sh/chart: broadcast-0.1.0\n"
+        "            - name: CHART_VERSION\n"
+        '              value: "<version>"\n'
+        "            - name: OTHER\n"
+        '              value: "0.2.0"\n'
+        "    checksum/config: <checksum>\n"
     )

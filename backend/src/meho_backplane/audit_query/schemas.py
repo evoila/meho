@@ -152,6 +152,11 @@ class AuditEntry(BaseModel):
       None pending a separate fix to bind ``name`` to contextvars in
       ``verify_jwt_and_bind``.
     * ``sandbox_mode`` ← ``audit_log.sandbox_mode`` (the sandbox mark; #4622)
+    * ``actor_sub`` ← ``audit_log.actor_sub`` (#5773): the agent that acted
+      for the person in ``principal_sub``, in a run the person started.
+      ``None`` when nobody acted for another login.
+    * ``actor_name`` — the agent's name, read from ``actor_sub``
+      (``agent:<name>``). ``None`` when ``actor_sub`` is not of that form.
     * ``broadcast_event_id`` — v0.2 placeholder, always None (FK direction
       is reversed: ``BroadcastEvent.audit_id`` points at the audit row).
     """
@@ -193,6 +198,10 @@ class AuditEntry(BaseModel):
     # (#4622), from the real ``audit_log.sandbox_mode`` column. Rows
     # written before the column existed read as ``False``.
     sandbox_mode: bool
+    # The agent that acted for the person in ``principal_sub`` (#5773), from
+    # the real ``audit_log.actor_sub`` column, and the agent's name from it.
+    actor_sub: str | None = None
+    actor_name: str | None = None
     broadcast_event_id: uuid.UUID | None
 
 

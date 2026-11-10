@@ -5,27 +5,17 @@ Copyright (c) 2026 evoila Group
 
 # install.sh cold-deploy — acceptance contract
 
-> The producer-side specification of Goal #11 DoD bullet 1:
+> The producer-side specification of point 1 of the v0.1 "done" list:
 >
-> > `bash rdc-hetzner-dc/manifests/meho/install.sh --tag <git-sha>`
-> > cold-deploy → working MEHO at <https://meho.evba.lab> in <5 min.
+> > `bash manifests/meho/install.sh --tag <git-sha>`
+> > cold-deploy → working MEHO at `https://meho.example.com` in <5 min.
 >
-> This document codifies **what "passing" looks like** so that the RDC
-> operator running the cold-deploy on
-> `evoila-bosnia/claude-rdc-hetzner-dc`
+> This document codifies **what "passing" looks like** so that the lab
+> operator running the cold-deploy from the consumer's deployment repo
 > and the maintainer reviewing the result are working from one shared
 > definition. The actual cold-deploy runs on the consumer side; the
 > acceptance contract lives here so the chart/image producer (this repo)
 > owns the "what passing means" half of the handshake.
-
-## Tracking issue
-
-This contract closes
-`evoila-bosnia/meho-internal#55`
-(parent Initiative
-#54,
-parent Goal
-#11).
 
 ## Why this lives in `evoila/meho`
 
@@ -35,11 +25,9 @@ template
 the chart at
 [`deploy/charts/meho/`](../../deploy/charts/meho/), and the operator
 CLI shipped on Releases all originate from this repository. The
-consumer-side
-`claude-rdc-hetzner-dc/manifests/meho/{install.sh,values-rdc.yaml}`
-is environment-private (real CIDRs, real Keycloak realm, real Vault
-address) and lives on the consumer side per
-Goal #11 cross-repo deps.
+consumer-side `install.sh` and its values file are
+environment-private (real CIDRs, real Keycloak realm, real Vault
+address) and live in the consumer's deployment repo.
 
 Splitting the acceptance contract from the install script lets us
 audit two questions independently:
@@ -71,13 +59,18 @@ path. Stopwatch semantics:
 The 5-minute budget covers **everything in between**:
 
 - Pre-flight checks (VPN reachable, Vault session valid, kubectl
-  context set to `rke2-infra`, outbound egress to `ghcr.io` OK)
+  context set to the target cluster, outbound egress to `ghcr.io` OK)
 - Namespace create (if absent)
 - `helm upgrade --install meho oci://ghcr.io/evoila/meho-chart`
   pulling the chart, resolving the in-tree `broadcast` subchart,
   rendering manifests
-- Pre-install/pre-upgrade migration Job pulling the backplane image,
-  running `alembic upgrade head` against PostgreSQL
+- The database migration (`alembic upgrade head`). With your own
+  PostgreSQL it runs in the pre-install/pre-upgrade migration Job.
+  With the built-in PostgreSQL (`corePostgres.enabled: true`, the
+  chart default) it runs in the `migrate` init container of the
+  backplane pod, and there is no Job
+  (`deploy/charts/meho/templates/migration-job.yaml`,
+  `backend/src/meho_backplane/db/migrate.py`)
 - Deployment rollout (image pull, container start, readiness probe
   passing)
 - Ingress + cert-manager Certificate issuance (when the certificate
@@ -93,15 +86,13 @@ The budget does **not** cover:
   consumer assumes the image is already pushed to GHCR by the time
   `install.sh` runs)
 - Chart publish (same, via `chart.yml`)
-- Cluster provisioning (`rke2-infra` already exists; bringing up a
-  fresh cluster is out of scope for Goal #11)
-- Vault / Keycloak / Postgres provisioning (consumer-side
-  prerequisites — see
-  [cross-repo coordination](../cross-repo/rke2-infra-coordination.md)
-  Section 4)
+- Cluster provisioning (the cluster already exists; bringing up a
+  fresh cluster is out of scope)
+- Vault / Keycloak / Postgres provisioning when the install uses its
+  own (consumer-side prerequisites)
 - Operator-side device-code login (`meho login` is exercised by
-  acceptance Task #56,
-  the federation-chain smoke, not this one). The cold-deploy
+  the federation-chain smoke in [`smoke.md`](./smoke.md), not this
+  one). The cold-deploy
   acceptance does **not** drive `meho login` end-to-end, but the
   realm-side prerequisites the CLI and MCP onramp share — a
   public `meho-cli` Keycloak client (device-grant enabled) and a
@@ -116,9 +107,10 @@ The budget does **not** cover:
   don't auto-inherit realm default-default scopes). The CLI-side
   chart value to wire the resulting client_id through is
   `config.keycloakCliClientId` (env `KEYCLOAK_CLI_CLIENT_ID`).
-  Auto-provisioning the realm-side state at install time is
-  tracked as [#791](https://github.com/evoila/meho/issues/791)
-  (G0.9.1-T11) and is not yet shipped.
+  `meho admin keycloak bootstrap-clients` creates both public
+  clients in an existing realm. The chart's built-in Keycloak ships
+  a realm that already has `meho-cli` and `meho-mcp`
+  (`deploy/charts/meho/charts/keycloak/files/meho-realm.json`).
 
 ### Why 5 minutes is the right bar
 
@@ -133,12 +125,12 @@ cluster:
 
 MEHO's pre-install migration Job + the ingress-controller cert-manager
 reconcile push the floor toward 2-3 minutes on warm caches; 5 minutes
-covers cold image pulls on the rke2-infra nodes and a freshly-minted
+covers cold image pulls on the cluster nodes and a freshly-minted
 TLS certificate (cert-manager's Let's Encrypt staging issuance is
 sub-30s; the lab's internal CA via cert-manager is sub-5s). The
 budget has headroom for one transient retry without bursting.
 
-If the cold-deploy ever exceeds 5 minutes on rke2-infra without a
+If the cold-deploy ever exceeds 5 minutes on the lab cluster without a
 known correlate (full restart of the cluster, GHCR rate limit, etc.),
 the regression is a deploy-pipeline bug, **not** a budget bug. The
 fix lands in the chart / image / runtime — not in this document.
@@ -154,13 +146,13 @@ encodes every one of them as a discrete check.
 
 | # | Assertion | How it's checked | Why |
 | --- | --- | --- | --- |
-| 1 | The backplane Deployment selected by `app.kubernetes.io/name=meho,app.kubernetes.io/instance=<release>` reports `Available=True` with `replicas == readyReplicas` | `kubectl rollout status deployment/$(kubectl get deployment -n <ns> -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=<release> -o jsonpath='{.items[0].metadata.name}') -n <ns> --timeout=5m` | Pod is up, readiness probe green; the kubelet has admitted the Pod to the Service endpoints. The label-selector form keeps the assertion release-name-agnostic — the chart's `meho.fullname` helper folds a `name`-prefixed release name (`meho`) but prepends release otherwise (`prod` → `prod-meho`) |
-| 2 | Pre-install migration Job (selected by `app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release>`) exists and exited 0 | `kubectl get job -n <ns> -l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release> -o jsonpath='{.items[0].status.succeeded}'` returns `1` | Schema is at `head`; the Deployment is rolling against a migrated DB. A failed Job leaves Helm at `pre-install` and the Deployment is never created — but the verifier still re-asserts to catch a subtle "succeeded but didn't actually migrate" case (e.g. stamped without running). Same release-name-agnostic discipline as row 1 |
+| 1 | The backplane Deployment selected by `app.kubernetes.io/name=meho,app.kubernetes.io/instance=<release>` reports `Available=True` with `replicas == readyReplicas` | `kubectl rollout status deployment/$(kubectl get deployment -n <ns> -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=<release> -o jsonpath='{.items[0].metadata.name}') -n <ns> --timeout=60s` (the install already waited with `--wait`) | Pod is up, readiness probe green; the kubelet has admitted the Pod to the Service endpoints. The label-selector form keeps the assertion release-name-agnostic — the chart's `meho.fullname` helper folds a `name`-prefixed release name (`meho`) but prepends release otherwise (`prod` → `prod-meho`) |
+| 2 | The migration succeeded: the migration Job (selected by `app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release>`) has `succeeded=1`, or, when there is no Job, the helm release status is `deployed` | `kubectl get job -n <ns> -l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release> -o jsonpath='{.items[0].status.succeeded}'` returns `1`; with no Job, `helm status` reports `deployed` | Schema is at `head`; the Deployment is rolling against a migrated DB. The Job's delete policy `hook-succeeded` removes a Job that succeeded, and an install with the built-in PostgreSQL has no Job at all (the migration runs in the pod's init container). The verifier then checks that Helm marked the release `deployed`. Same release-name-agnostic discipline as row 1 |
 | 3 | `GET https://<host>/healthz` returns 200 | `curl -sf --cacert <ca-bundle> https://<host>/healthz` | Liveness probe contract; the public ingress entry-point is reachable through TLS terminated at ingress-nginx and routed to the Service |
 | 4 | `GET https://<host>/version` returns JSON containing the deployed `git_sha`, and that SHA matches the `--tag` value passed to `install.sh` | `curl -sf https://<host>/version \| jq -e '.git_sha == "<expected>"'` | The image that's running is the one the operator asked for. Catches the `helm upgrade --install` no-op case (chart unchanged, image tag unchanged → no rollout, old version still serving) |
-| 5 | `GET https://<host>/api/v1/health` (no `Authorization` header) returns 401 | `curl -so /dev/null -w '%{http_code}' https://<host>/api/v1/health` returns `401` | Negative auth test. A 200 here means the federation chain (Keycloak JWT validation middleware) regressed open — the Goal #11 "no anonymous access to authenticated surfaces" invariant. A non-200/non-401 means something else broke (502 → backplane down behind ingress; 503 → readiness flipped after probe) |
-| 6 | The `audit_log` table exists in Postgres with the columns Task #29 stamped | A direct `psql` query is operator-cost; the verifier asserts the negative-auth path went through the audit middleware by checking the response carried a freshly-generated `X-Request-ID` header — surrogate for "the middleware chain ran" | Audit middleware reachability — the row write requires an authenticated request which lands in Task #56. Surrogate keeps this verifier authentication-free |
-| 7 | Wall-clock duration from `install.sh` start to verifier exit ≤ 300 seconds (5 minutes) | The verifier reads `INSTALL_START_TS` from env (set by the consumer's `install.sh` as the first action) and computes `now - INSTALL_START_TS` | The budget itself. Failing this assertion is a soft fail by default (warning) and a hard fail when the verifier is invoked with `--enforce-budget`. Under `--enforce-budget` the verifier also hard-fails when `INSTALL_START_TS` is unset or non-numeric — a Goal #11 closing run must prove the bar was met, and a missing timestamp can't |
+| 5 | `GET https://<host>/api/v1/health` (no `Authorization` header) returns 401 | `curl -so /dev/null -w '%{http_code}' https://<host>/api/v1/health` returns `401` | Negative auth test. A 200 here means the federation chain (Keycloak JWT validation middleware) regressed open — the "no anonymous access to authenticated surfaces" invariant. A non-200/non-401 means something else broke (502 → backplane down behind ingress; 503 → readiness flipped after probe) |
+| 6 | The `audit_log` table exists in Postgres | A direct `psql` query is operator-cost; the verifier asserts the negative-auth path went through the audit middleware by checking the response carried a freshly-generated `X-Request-ID` header — surrogate for "the middleware chain ran". An inconclusive result is a `[WARN]`, not a `[FAIL]` | Audit middleware reachability — the row write requires an authenticated request, which [`smoke.md`](./smoke.md) covers. Surrogate keeps this verifier authentication-free |
+| 7 | Wall-clock duration from `install.sh` start to verifier exit ≤ 300 seconds (5 minutes) | The verifier reads `INSTALL_START_TS` from env (set by the consumer's `install.sh` as the first action) and computes `now - INSTALL_START_TS` | The budget itself. Failing this assertion is a soft fail by default (warning) and a hard fail when the verifier is invoked with `--enforce-budget`. Under `--enforce-budget` the verifier also hard-fails when `INSTALL_START_TS` is unset or non-numeric — a closing run must prove the bar was met, and a missing timestamp can't |
 
 ### Optional (operator-asserted) — authenticated probes
 
@@ -178,17 +170,19 @@ The verifier prints a note pointing at this section when run without
 
 ## What failure looks like
 
-The verifier exits non-zero on the first failed check and prints a
-diagnostic line. Common failure modes the operator should expect:
+The verifier runs every check, prints one `[ok]`, `[FAIL]` or
+`[WARN]` line per check, and at the end exits 1 when any check failed
+(`install-verify.sh: N passed, N failed, N warned`). Common failure
+modes the operator should expect:
 
 | Failure | Surface | First debug step |
 | --- | --- | --- |
-| Migration Job stuck | Helm aborts at `pre-install` with `Job has reached the specified backoff limit`. Deployment never rolls. | `kubectl logs -n <ns> -l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release>` — Alembic error rendered to stderr by the runner as `migration_failed: <ExcClass>: <msg>` |
-| Image pull failure | Pod stays in `ImagePullBackOff` or `ErrImagePull`. `kubectl describe pod` shows the pull error. | Check the image tag matches a published GHCR tag; check `imagePullSecrets` (empty by default — anonymous GHCR pull is expected); check egress from `rke2-infra` to `ghcr.io` |
+| Migration stuck | Own PostgreSQL: Helm aborts at `pre-install` with `Job has reached the specified backoff limit`, and the Deployment never rolls. Built-in PostgreSQL: the pod stays in `Init` and the `migrate` init container restarts. | Job: `kubectl logs -n <ns> -l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release>`. Init container: `kubectl logs -n <ns> <pod> -c migrate`. The runner writes the Alembic error to stderr as `migration_failed: <ExcClass>: <msg>` |
+| Image pull failure | Pod stays in `ImagePullBackOff` or `ErrImagePull`. `kubectl describe pod` shows the pull error. | Check the image tag matches a published GHCR tag; check `imagePullSecrets` (empty by default — anonymous GHCR pull is expected); check egress from the cluster to `ghcr.io` |
 | Probes failing | Pod is `Running` but `Ready=False`. Service has zero endpoints. | `kubectl logs -n <ns> -l app.kubernetes.io/name=meho,app.kubernetes.io/instance=<release> --tail=50` — backplane startup error (most often: Vault unreachable, Keycloak JWKS unreachable, DATABASE_URL malformed) |
 | Ingress 502 / 503 | `/healthz` from the operator workstation fails; from inside the cluster it succeeds. | `kubectl describe ingress -n <ns> meho` — check the TLS Secret exists (`cert-manager` Certificate `Ready=True`); from another Pod in the cluster `curl -k http://<svc>.<ns>.svc.cluster.local:8000/healthz` to isolate ingress vs. backplane |
 | `/version` git_sha mismatch | Verifier check #4 fails. | The chart/image rolled but the *previous* Pod is still answering. `kubectl rollout status` for a tighter signal; `kubectl get pods -n <ns> -l app.kubernetes.io/name=meho -o yaml \| grep image:` to see which image tag the live Pod is running |
-| `/api/v1/health` returns 200 instead of 401 | Verifier check #5 fails. | Federation regression. The middleware chain in `backend/src/meho_backplane/app.py` is no longer enforcing the Keycloak JWT validation dependency. Roll back: `helm rollback meho <prev-revision> -n <ns>` |
+| `/api/v1/health` returns 200 instead of 401 | Verifier check 5 fails. | Federation regression. The Keycloak JWT check (`verify_jwt` in `backend/src/meho_backplane/auth/jwt.py`) does not run on the route. Roll back: `helm rollback meho <prev-revision> -n <ns>` |
 | Budget exceeded | Verifier check #7 fails with warning (or hard-fail with `--enforce-budget`). | First inspect `helm history -n <ns> meho` for which revision is in flight, then the slowest leg via `kubectl get events -n <ns> --sort-by=.lastTimestamp` |
 
 The verifier never hides a failure behind a green check. Each
@@ -199,8 +193,8 @@ git_sha=abc1234, got def5678`).
 
 | Role | Action | Cadence |
 | --- | --- | --- |
-| **RDC operator** | Runs `time bash install.sh --tag <fresh-sha>` against a clean `meho` namespace from the operator workstation (with VPN + Vault session). Captures stdout + stderr + `helm history` + `kubectl describe` + the verifier's output. | Per Goal #11 closing-criteria — once for the acceptance milestone; in addition, on every `repository_dispatch` deploy when the consumer chooses to re-baseline |
-| **`evoila/meho` maintainer** | Reviews the captured run on issue #55 (or the linked workflow artefact), confirms the verifier's check #1..#7 are green and the wall-clock is ≤ 5 minutes, ticks the DoD bullet on Goal #11. | Once per Goal-closing review; subsequent runs on `repository_dispatch` are operator-attested |
+| **Lab operator** | Runs `time bash install.sh --tag <fresh-sha>` against a clean `meho` namespace from the operator workstation (with VPN + Vault session). Captures stdout + stderr + `helm history` + `kubectl describe` + the verifier's output. | Once for the acceptance milestone; in addition, on every `repository_dispatch` deploy when the consumer chooses to re-baseline |
+| **`evoila/meho` maintainer** | Reviews the captured run (or the linked workflow artefact), confirms the verifier's check 1..7 are green and the wall-clock is ≤ 5 minutes, ticks the "done" point. | Once per milestone review; subsequent runs on `repository_dispatch` are operator-attested |
 | **CI (per-PR ephemeral smoke)** | Runs a **subset** of the verifier against the per-PR `meho-ci-<n>` namespace via [`scripts/ci/pr-smoke.sh`](../../scripts/ci/pr-smoke.sh). The PR-smoke is the unauthenticated subset (checks #3, #4 partial, #5); it does **not** assert the budget (PR builds are not Goal-DoD runs). | Every PR against `main` |
 
 The PR-smoke and this verifier intentionally overlap on the
@@ -208,8 +202,11 @@ unauthenticated probes — the PR-smoke catches regressions before
 they reach `main`; the cold-deploy verifier catches what survives
 the smoke (chart-only changes, image-only changes, the cumulative
 effect of merged PRs). Together they're the two sides of the
-"every code path closes the real-target feedback loop" discipline
-that Goal #11 makes non-negotiable.
+"every code path closes the real-target feedback loop" discipline.
+
+The PR-smoke workflow (`.github/workflows/pr-smoke.yml`) skips its
+run when the cluster login secrets are not set. Its recent runs end
+as `skipped`, so check the run history before you count on it.
 
 ## What the consumer-side `install.sh` needs to do
 
@@ -223,31 +220,37 @@ For the producer-side verifier to be invocable, the consumer's
    export INSTALL_START_TS="$START_TS"
    ```
 
-2. **Pin the image tag.** `install.sh --tag <git-sha>` resolves to
-   `--set image.tag=<git-sha>` (or `--set
-   image.tag=sha-<long-sha>` — both work). `:latest` and `:main` are
-   forbidden per Goal #11 deploy discipline; the chart's
+2. **Pin the image tag.** The image pipeline
+   (`.github/workflows/image.yml`) publishes `sha-<40-char-git-sha>`
+   for every build, `v<x.y.z>` for a release and `main` for the
+   newest `main` build. There is no tag with the bare SHA. So
+   `install.sh --tag <git-sha>` resolves to
+   `--set image.tag=sha-<40-char-git-sha>`, or use the release tag
+   (`--set image.tag=v<x.y.z>`). `:latest` does not exist and `:main`
+   is forbidden by the deploy discipline; the chart's
    `values.schema.json` rejects an empty `image.tag` so a forgotten
-   `--set` fails-loud.
+   `--set` fails-loud. The verifier's `--expected-git-sha` takes the
+   commit SHA, bare or with the `sha-` prefix; for a release tag,
+   pass the commit SHA of that release.
 
 3. **Run `helm upgrade --install`** against the published chart at
-   `oci://ghcr.io/evoila/meho-chart` with `values-rdc.yaml`, with
-   `--wait --timeout 5m --create-namespace --namespace meho`.
+   `oci://ghcr.io/evoila/meho-chart` with the consumer's values file,
+   with `--wait --timeout 5m --create-namespace --namespace meho`.
 
 4. **Invoke the verifier as the last step:**
 
    ```bash
    bash scripts/acceptance/install-verify.sh \
-     --host meho.evba.lab \
+     --host meho.example.com \
      --expected-git-sha "$TAG" \
      --namespace meho
    ```
 
    (or fetch the script via `curl -sSf
    https://raw.githubusercontent.com/evoila/meho/main/scripts/acceptance/install-verify.sh
-   | bash -s -- --host meho.evba.lab --expected-git-sha "$TAG"
+   | bash -s -- --host meho.example.com --expected-git-sha "$TAG"
    --namespace meho` if the consumer prefers not to pin a producer
-   commit).
+   commit). Always pass `--host`: use your own MEHO host name.
 
 5. **Propagate the verifier's exit code** as `install.sh`'s exit
    code. Either the install passed wholesale (every probe green +
@@ -260,44 +263,35 @@ pre-flight checks (VPN, Vault session) that are environment-specific.
 
 ## Acceptance criteria status
 
-The full set of acceptance criteria on
-issue #55
-and where each lands:
+The full set of acceptance criteria of this contract and where each
+lands:
 
 | AC | Status at PR-time | Evidence path |
 | --- | --- | --- |
-| AC1 — Cold-install completes in <5 min wall clock | **deferred-to-consumer-side** | The verifier asserts the budget (check #7); the actual cold-deploy runs on the operator workstation against `meho.evba.lab` and is captured in the closing comment on the issue |
+| AC1 — Cold-install completes in <5 min wall clock | **deferred-to-consumer-side** | The verifier asserts the budget (check 7); the actual cold-deploy runs on the operator workstation against the lab's MEHO host and is captured in the closing comment of the tracking issue |
 | AC2 — install.sh pre-flight checks pass (VPN, Vault session, kubectl context, GHCR egress) | **deferred-to-consumer-side** | Pre-flight is `install.sh`'s responsibility — see the consumer's `manifests/meho/install.sh`. The producer-side verifier doesn't re-check VPN / Vault session because that's already verified by the time the `helm upgrade` succeeded. The verifier *does* check GHCR egress implicitly via the chart pull |
 | AC3 — `helm upgrade --install` exits 0; backplane Pod Ready | **verifier-asserted** (check #1) | `kubectl rollout status` in the verifier |
-| AC4 — Migration Job succeeded; `audit_log` table exists | **verifier-asserted** (check #2 + check #6 surrogate) | `kubectl get job` in the verifier; the table presence is asserted indirectly through the audit middleware's `X-Request-ID` header on probe #5; direct `psql` check lands in Task #56's federation-chain smoke |
-| AC5 — `curl -sf https://meho.evba.lab/healthz` 200; `/version` JSON carries deployed `git_sha` | **verifier-asserted** (checks #3 + #4) | curl in the verifier |
+| AC4 — Migration Job succeeded; `audit_log` table exists | **verifier-asserted** (check 2 + check 6 surrogate) | `kubectl get job` in the verifier; the table presence is asserted indirectly through the audit middleware's `X-Request-ID` header on probe 5; direct `psql` check lands in the federation-chain smoke ([`smoke.md`](./smoke.md)) |
+| AC5 — `curl -sf https://<host>/healthz` 200; `/version` JSON carries deployed `git_sha` | **verifier-asserted** (checks 3 + 4) | curl in the verifier |
 | AC6 — TLS works; certificate issued by internal CA via cert-manager | **verifier-asserted** (check #3 with `--cacert`) | The verifier's curl uses the operator-supplied `--cacert` (defaulting to system trust); failure here is either a missing/wrong CA bundle or a cert-manager reconcile that didn't finish in budget |
-| AC7 — Test run captured (logs, transcript, timing) | **deferred-to-consumer-side** | The captured artefact lands in the closing comment on #55 |
+| AC7 — Test run captured (logs, transcript, timing) | **deferred-to-consumer-side** | The captured artefact lands in the closing comment of the tracking issue |
 
 The "deferred-to-consumer-side" status is **expected and correct** —
-the producer-side worker for #55 cannot run the cold-deploy itself
+the producer-side worker cannot run the cold-deploy itself
 (no VPN session, no Vault credentials, no kubectl context). The
 producer ships the contract + the verifier; the consumer runs the
 deploy + writes the closing artefact.
 
 ## References
 
-- Parent Goal:
-  #11 — Deployable v0.1
-  (DoD bullet 1)
-- Parent Initiative:
-  #54 — G2.8 Acceptance / dogfood proof
-- This task:
-  #55 — install.sh cold-deploy → working MEHO at meho.evba.lab in <5 min
-- Sibling acceptance tasks:
-  #56 — smoke.sh,
-  #57 — helm rollback,
-  #58 — 5-PR green counter
+- Sibling acceptance contracts:
+  [`smoke.md`](./smoke.md),
+  [`rollback.md`](./rollback.md),
+  [`green-counter.md`](./green-counter.md)
 - Producer artefacts the cold-deploy uses:
   - Image: `ghcr.io/evoila/meho:<tag>` ([chart `Chart.yaml`](../../deploy/charts/meho/Chart.yaml))
   - Chart: `oci://ghcr.io/evoila/meho-chart:<version>` ([publish workflow](../../.github/workflows/chart.yml))
   - Values overlay template: [`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml)
   - CLI: [`https://github.com/evoila/meho/releases`](https://github.com/evoila/meho/releases)
-- Cross-repo handshake: [`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
 - PR-smoke (CI subset): [`scripts/ci/pr-smoke.sh`](../../scripts/ci/pr-smoke.sh)
 - Deploy surface deep-dive: [`docs/codebase/devops.md`](../codebase/devops.md)

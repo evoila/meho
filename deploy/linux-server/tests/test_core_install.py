@@ -47,7 +47,6 @@ def place_values(
     tenant_id: str = TENANT_ID,
     admin: str = "admin",
     approver: str = "approver",
-    pod_range: str = "10.42.0.0/16",
 ) -> str:
     return textwrap.dedent(f"""\
         # Written by MEHO install.sh: the answers of this place. A later run of
@@ -60,12 +59,6 @@ def place_values(
           firstLogin:
             adminUsername: "{admin}"
             approverUsername: "{approver}"
-        # shortcut: the pod range, so MEHO may reach the built-in PostgreSQL and
-        # OpenBao, until the chart derives these from its built-in parts (#4047).
-        # Then the next update removes the two keys.
-        networkPolicy:
-          postgresCIDR: "{pod_range}"
-          vaultCIDR: "{pod_range}"
         """)
 
 
@@ -136,7 +129,6 @@ class CoreInstallTests(InstallTestCase):
             tenant_id="9b4d2a7e-3f1c-4e2a-8c1f-5d6e7f8a9b0c",
             admin="first.admin",
             approver="second@example.org",
-            pod_range="172.30.0.0/16",
         )
         self.assertEqual(expected, self.machine.host_path(PLACE_VALUES).read_text())
 

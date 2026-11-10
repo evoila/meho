@@ -3,18 +3,23 @@
 
 """Safety floors for ingested operations.
 
-Three sources raise the parsed safety of an ingested operation:
+Four sources raise the parsed safety of an ingested operation:
 
 * a connector-owned floor, registered in code by the connector module;
 * the per-spec ``safety_overlay`` declared on the catalog row; and
 * the op class of the operation: a read whose answer holds credentials
   (``credential_read``, see :mod:`meho_backplane.op_classes`) is at least
-  ``caution`` and waits for a person's approval.
+  ``caution`` and waits for a person's approval; and
+* the caller-address marker: an operation with a parameter that holds an
+  address MEHO connects to (``x-meho-caller-address: true``, see
+  :mod:`meho_backplane.operations.caller_address`) is at least ``caution``
+  and waits for a person's approval. A connector's spec corrections set
+  the marker.
 
 Each floor runs after the one before it and only raises: it never lowers a
-safety level and never clears ``requires_approval``. The op class floor is
-the last and lowest bound. It needs no catalog row and no overlay list: the
-marker that hides the values of the answer is enough.
+safety level and never clears ``requires_approval``. The op class floor and
+the caller-address floor are the last and lowest bounds. They need no
+catalog row and no overlay list: a marker on the operation is enough.
 """
 
 from __future__ import annotations
@@ -22,6 +27,10 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from meho_backplane.broadcast.events import classify_op
+from meho_backplane.operations.caller_address import (
+    has_caller_address,
+    raise_for_caller_address,
+)
 from meho_backplane.operations.ingest.catalog import safety_overlay_for
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
 
@@ -79,10 +88,28 @@ def _apply_credential_read_floor(proto: EndpointDescriptorProto) -> EndpointDesc
     return proto.model_copy(update={"safety_level": safety_level, "requires_approval": True})
 
 
+def _apply_caller_address_floor(proto: EndpointDescriptorProto) -> EndpointDescriptorProto:
+    """Raise an op with a caller-address parameter to at least ``caution`` with approval.
+
+    Returns *proto* itself when no parameter carries the marker, and a copy
+    otherwise, so :func:`has_safety_floor` sees every marked op as governed.
+    """
+    if not has_caller_address(proto.parameter_schema):
+        return proto
+    safety_level, requires_approval = raise_for_caller_address(
+        proto.parameter_schema,
+        safety_level=proto.safety_level,
+        requires_approval=proto.requires_approval,
+    )
+    return proto.model_copy(
+        update={"safety_level": safety_level, "requires_approval": requires_approval}
+    )
+
+
 def has_safety_floor(
     *, product: str, version: str, impl_id: str, proto: EndpointDescriptorProto
 ) -> bool:
-    """Return whether a connector floor, a catalog overlay or the op class governs *proto*."""
+    """Return whether any of the four floors governs *proto*."""
     applied = apply_safety_floor(product=product, version=version, impl_id=impl_id, proto=proto)
     return applied is not proto
 
@@ -90,8 +117,8 @@ def has_safety_floor(
 def apply_safety_floor(
     *, product: str, version: str, impl_id: str, proto: EndpointDescriptorProto
 ) -> EndpointDescriptorProto:
-    """Apply the connector floor, the catalog overlay, then the op class floor, to *proto*."""
+    """Apply the connector floor, the catalog overlay, then the two marker floors, to *proto*."""
     floor = _FLOORS.get((product, impl_id))
     floored = floor(version, proto) if floor is not None else proto
     overlaid = _apply_catalog_overlay(product=product, version=version, proto=floored)
-    return _apply_credential_read_floor(overlaid)
+    return _apply_caller_address_floor(_apply_credential_read_floor(overlaid))

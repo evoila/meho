@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Helm values for MEHO on VKS, the vSphere Kubernetes Service (install form
+# 3), with the built-in PostgreSQL, Keycloak and OpenBao (on by default).
+# Tested on 2026-11-09 on a VKS cluster with Kubernetes v1.35.5 (VCF 9.1):
+# installed by an admin of one namespace, every pod under the enforced pod
+# security rule `restricted`, no extra rights (#5833).
+#
+# Before the install:
+# - VKS brings no ingress controller. The cluster admin installs Traefik from
+#   its own chart into the namespace `traefik`. Its Service of type
+#   LoadBalancer gets an address from the Supervisor. Another namespace: change
+#   `traefik` in both places below.
+# - The disks use the cluster's default StorageClass. VKS makes one
+#   StorageClass per vSphere storage policy of the namespace, and marks none
+#   as the default unless you do. Mark one, or name it below.
+#
+# Pass it before your own values file, which sets at least `image.tag`,
+# `ingress.host`, `coreKeycloak.hostname` (the same name),
+# `coreKeycloak.firstTenantId` (a UUID you pick once and keep) and
+# `networkPolicy.extraEgress` (the vCenter and NSX networks MEHO manages):
+#
+#   helm install meho oci://ghcr.io/evoila/meho-chart --version <version> \
+#     -n <namespace> -f values-vks.yaml -f values-site.yaml \
+#     --wait --wait-for-jobs --timeout 20m
+ingress:
+  className: traefik
+  annotations:
+    # HTTPS only. Without it, Traefik also serves MEHO and the Keycloak login
+    # on plain HTTP (port 80), with no redirect. `websecure` is the HTTPS entry
+    # point of Traefik's Helm chart; use your name if you changed it.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+networkPolicy:
+  # Only Traefik may reach the backplane.
+  ingressControllerNamespace: traefik
+# The web console at https://<host>/ui/. Off by default in the chart. The
+# install makes the Secret `<release>-core-ui-auth`: with a release name
+# other than `meho`, change the name below.
+uiConsole:
+  enabled: true
+  secretName: meho-core-ui-auth
+config:
+  # The schema asks for the console's Keycloak client when the console is on.
+  uiKeycloakClientId: meho-web
+corePostgres:
+  persistence:
+    # Empty = the cluster's default StorageClass.
+    storageClass: ""
+coreKeycloak:
+  # Off by default. On: only the backplane, OpenBao, the setup Jobs and
+  # Traefik (for browser and CLI logins) reach Keycloak.
+  networkPolicy:
+    enabled: true
+    extraFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: traefik
+coreVault:
+  persistence:
+    # Empty = the cluster's default StorageClass.
+    storageClass: ""
+  # Off by default. On: only the backplane and its setup Job reach OpenBao.
+  networkPolicy:
+    enabled: true

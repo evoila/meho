@@ -77,8 +77,14 @@ registrar stores every operation of `FREEIPA_TYPED_OPS` with
 4. The session is cached per credential (`credential_cache_key`: tenant,
    secret and host). The cache is read without a lock. A login takes the
    lock of its own credential only, so a login that hangs for one IPA server
-   never holds up a call for another credential or another tenant. A call as
-   MEHO's system identity never reads a cached session.
+   never holds up a call for another credential or another tenant. A cached
+   session goes to a caller only after that caller's own Vault read of the
+   target's secret passed once in this process (`SecretReaders`, see
+   [connectors-shared-secret-readers.md](connectors-shared-secret-readers.md)).
+   A caller whose read is refused gets no session. `invalidate_credentials`
+   drops the session and forgets who has read the secret, after a failed
+   login or a target change. A call as MEHO's system identity never reads a
+   cached session.
 5. A refused login answers 401 and names the reason in
    `X-IPA-Rejection-Reason` (for example `invalid-password`,
    `password-expired`, `user-locked`). The error message carries the reason.
@@ -336,7 +342,8 @@ The other writes show the generic echo of their parameters.
 - Adding a host that is already a member fails, because FreeIPA lists it in
   `failed`. The message names it with FreeIPA's reason.
 - FreeIPA's answer to an expired session is a 401 by its source code
-  (`ipaserver/rpcserver.py`, `need_login`). The lab proof confirms it.
+  (`ipaserver/rpcserver.py`, `need_login`). The lab proof is still to
+  confirm it.
 - A target that points at a load balancer in front of several IPA servers
   fails the `Referer` check: each server accepts only its own host name.
   Use one target per server.

@@ -457,6 +457,32 @@ def test_remember_tenant_scope_operator_role_returns_403(client: TestClient) -> 
     assert response.status_code == 403
 
 
+def test_remember_an_agent_cannot_confirm_a_memory_entry(client: TestClient) -> None:
+    """An agent sets ``status: confirmed`` through REST → 403 from the real service."""
+    key = _make_rsa_keypair("kid-agent")
+    token = _mint_token(
+        key,
+        sub="agent-1",
+        tenant_role=TenantRole.OPERATOR.value,
+        tenant_id=str(uuid.uuid4()),
+        principal_kind="agent",
+    )
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={
+                "scope": "user",
+                "body": "Restart the agent first.",
+                "slug": "lesson",
+                "metadata": {"status": "confirmed"},
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 403
+    assert "reviewer" in response.json()["detail"]
+
+
 def test_remember_unknown_field_returns_422(client: TestClient) -> None:
     """``extra="forbid"`` rejects unknown body fields at 422."""
     tenant_a = uuid.uuid4()

@@ -682,6 +682,7 @@ class KeycloakConnector(HttpConnector):
         *,
         operator: Operator,
         params: dict[str, Any] | None = None,
+        strict: bool = False,
     ) -> list[Any]:
         """Retried admin-auth GET for an **array** response.
 
@@ -693,14 +694,20 @@ class KeycloakConnector(HttpConnector):
         :meth:`~meho_backplane.connectors.adapters.http.HttpConnector._request_json`
         — but returns the parsed list. A non-list body (an error envelope
         Keycloak occasionally returns as an object) yields an empty list
-        so a handler never iterates a dict.
+        so a handler never iterates a dict. With *strict*, a non-list body
+        raises :exc:`ValueError` instead, for a caller that must tell an
+        empty list from a list it could not read.
         """
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         resp = await client.request("GET", path, params=params, headers=headers)
         resp.raise_for_status()
         payload = resp.json()
-        return payload if isinstance(payload, list) else []
+        if isinstance(payload, list):
+            return payload
+        if strict:
+            raise ValueError(f"expected a JSON array from {path}, got {type(payload).__name__}")
+        return []
 
     # -- admin-auth write helpers (G3.13-T4 #1406) ----------------------
 
@@ -832,7 +839,9 @@ class KeycloakConnector(HttpConnector):
         try:
             role = await self._get_admin_json(
                 target,
-                fill_path(_ROLE_PATH, {"realm": managed_realm, "role-name": role_name}),
+                fill_path(
+                    _ROLE_PATH, {"realm": managed_realm, "role-name": quote_segment(role_name)}
+                ),
                 operator=operator,
             )
         except httpx.HTTPStatusError as exc:
@@ -1153,6 +1162,16 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_authflow_ensure_approval_flow(self, operator, target, params)
 
+    async def authflow_ensure_passkey_code_skip(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_passkey_code_skip``."""
+        from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
+            keycloak_authflow_ensure_passkey_code_skip,
+        )
+
+        return await keycloak_authflow_ensure_passkey_code_skip(self, operator, target, params)
+
     async def identity_provider_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1193,7 +1212,8 @@ class KeycloakConnector(HttpConnector):
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
         ``user.check_login`` (one login test) rides the same walk, and so do
-        ``authflow.ensure_approval_flow`` and ``identity_provider.list``.
+        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``
+        and ``identity_provider.list``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
@@ -1203,6 +1223,9 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_authflow import (
             APPROVAL_FLOW_OPS,
             WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+        )
+        from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
+            PASSKEY_CODE_SKIP_OPS,
         )
         from meho_backplane.connectors.keycloak.ops_identity_provider import (
             IDENTITY_PROVIDER_OPS,
@@ -1239,6 +1262,7 @@ class KeycloakConnector(HttpConnector):
             *WRITE_OPS,
             *LOGIN_CHECK_OPS,
             *APPROVAL_FLOW_OPS,
+            *PASSKEY_CODE_SKIP_OPS,
             *IDENTITY_PROVIDER_OPS,
         ):
             handler = getattr(cls, op.handler_attr, None)

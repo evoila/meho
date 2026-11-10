@@ -19,7 +19,8 @@ spec:
   tls:
     - hosts:
         - {{ .Values.ingress.host | quote }}
-      secretName: {{ .Values.ingress.tls.secretName }}
+      {{- /* Empty with a built-in part on: the certificate the install makes (#4047). */}}
+      secretName: {{ .Values.ingress.tls.secretName | default (ternary (printf "%s-core-tls" .Release.Name) "" (eq (include "meho.core.enabled" .) "true")) }}
   {{- end }}
   rules:
     - host: {{ .Values.ingress.host | quote }}

@@ -56,7 +56,7 @@ connector script produces the evidence bundle; the driver grades it.
 | 1 | **Dry-run / read-back parity** — MEHO resolves the same target + params + **plan** as the wrapper (`kubectl apply --dry-run=server` vs `meho k8s apply --dry-run`; VCF task-preview / DRS recommendation). Diverging plans fail before anything writes. | ✅ `parity_diff` | core |
 | 2 | **Dual-run on a disposable target** — both wrapper and MEHO op run against the same scratch target (holodeck, k3d/CI cluster, scratch Vault path), same operator workflow. Capture each side's **effect**, not stdout. | Orchestrated (driver + consumer hooks) | driver |
 | 3 | **State diff, not framing** — read post-op state back via the **already-shipped READ ops**, normalising cosmetic diffs (timestamps, generated UIDs, MEHO's reduced envelope). Idempotent ops run twice to prove no drift. Any semantic divergence is a blocker with recorded rationale. | ✅ `state_diff` + `idempotency_drift` | core |
-| 4 | **Audit + approval completeness** — exactly one **dispatch audit row** (`path == op_id`, the durable write-record the dispatcher writes once the op executes) AND (being `dangerous` + `requires_approval`) exactly the **two synchronous approval audit rows** (`approval.request` + `approval.decision`, the #817 invariant), with the op not returning until the decision row commits. A rejected decision never executes → zero dispatch rows. A dispatch publishes no Broadcast event (#3758), so the feed is not part of the evidence. | ✅ `assert_approval_completeness` | core |
+| 4 | **Audit + approval completeness** — exactly one **dispatch audit row** (`path == op_id`, the durable write-record the dispatcher writes once the op executes) AND (being `requires_approval`) exactly the **two synchronous approval audit rows** (`approval.request` + `approval.decision`, the #817 invariant), with the op not returning until the decision row commits. A rejected decision never executes → zero dispatch rows. A dispatch publishes no Broadcast event (#3758), so the feed is not part of the evidence. | ✅ `assert_approval_completeness` | core |
 | 5 | **Bounded live soak** — MEHO + wrapper in parallel on the **real** target for a bounded window (~2 weeks / N≥10 real invocations per op), wrapper authoritative. The scorecard write column moves 🟡→✅ only after a clean soak. | Documented protocol (below) | runbook |
 
 ## Prepared environment
@@ -160,17 +160,22 @@ emits the cell its evidence **supports**; the operator transcribes it.
 
 [`backend/tests/test_soak_harness_reference_run.py`](../../backend/tests/test_soak_harness_reference_run.py)
 is the reference application of the harness against **live backplane
-primitives**. #1398 (the real k8s write ops) is not yet merged, so the
-reference run drives a stand-in `requires_approval=True` write op through
+primitives**. It drives a stand-in `requires_approval=True` write op
+(`examples.soak.scale`) through
 the full **human** queued → approve → resume cycle that #1401 shipped,
 captures the real `approval.request` / `approval.decision` audit rows
 and feeds them into the stage-4 verifier —
-proving the governance invariant holds against the actual substrate. When
-#1398 merges, the consumer's `parity-check-kubernetes.sh` produces the
-same evidence shape against the real `k8s.scale` op and this same driver
-grades it; no harness change is required.
+proving the governance invariant holds against the actual substrate. The
+real `k8s.scale` op ships in the `k8s-1.x` connector. The consumer's
+`parity-check-kubernetes.sh` produces the same evidence shape against it,
+and this same driver grades it. No harness change is needed.
 
 ## Worked retirement — `host.detach_from_vds` (the headline VCF retirement)
+
+Since 0.44.0 the VMware connectors ship in a separate connector package,
+not in the public image. The public image has no
+`vmware.composite.host.detach_from_vds` op. The example bundle and its
+test stay in this repo, because they only check the harness.
 
 Initiative [#1400](https://github.com/evoila/meho/issues/1400) wires the
 8 VCF write composites onto this harness. The first op to soak is
@@ -204,7 +209,7 @@ A worked, runnable bundle ships at
 [`scripts/soak/examples/host.detach_from_vds/`](../../scripts/soak/examples/host.detach_from_vds)
 and is CI-exercised end-to-end by
 [`backend/tests/test_soak_harness_host_detach_from_vds.py`](../../backend/tests/test_soak_harness_host_detach_from_vds.py).
-It is the VCF analogue of the `k8s.scale` example: the same seven-file
+It is the VCF analogue of the `k8s.scale` example: the same six-file
 contract, populated with realistic vSphere shapes —
 
 * **stage 1** — `wrapper-plan.json` / `meho-plan.json`: the planned
@@ -247,7 +252,8 @@ ESXi host and a real vDS. On the holodeck lab:
    NICs sit on a DVS portgroup, plus a standard-switch fallback network.
 2. For each soak invocation, run both paths against the same scratch
    host (the consumer's `scripts/host-detach-from-vds.py` and
-   `meho vmware composite host detach_from_vds`), capture each side's
+   `meho operation call <connector_id> vmware.composite.host.detach_from_vds`),
+   capture each side's
    plan + post-op read-back into the bundle file shapes above, and run
    the driver. Wrapper stays authoritative for the window.
 3. Soak for the bounded window (~2 weeks **or** N≥10 real detaches,
@@ -261,14 +267,13 @@ ESXi host and a real vDS. On the holodeck lab:
 
 ### Cross-repo handoff — queue the script for Phase-D deletion
 
-`scripts/host-detach-from-vds.py` lives in the consumer/ops repo
-`evoila-bosnia/claude-rdc-hetzner-dc`,
+`scripts/host-detach-from-vds.py` lives in the consumer/ops repo,
 **not** in `evoila/meho` — its deletion is a cross-repo operator action,
 tracked but not performed here. Once the soak grades ✅ READY:
 
 1. File the wrapper-retirement issue on the consumer repo (`Retire
    scripts/host-detach-from-vds.py — superseded by
-   meho vmware composite host detach_from_vds`), linking the ✅
+   vmware.composite.host.detach_from_vds`), linking the ✅
    `soak-report.json` as the proof the cell rests on and this section
    as the methodology.
 2. Move the `host.detach_from_vds` write column to ✅ on the ops team's
@@ -295,8 +300,9 @@ demand signal, not part of #1400.
 * Initiative [#1397](https://github.com/evoila/meho/issues/1397) — the
   thin approval-policy layer this harness sits on.
 * [#1401](https://github.com/evoila/meho/issues/1401) — human-queue
-  routing, self-approval guard, write-op secret redaction
-  (`credential_write` / `credential_mint`) the stage-4 check asserts.
+  routing, self-approval guard, and write-op secret redaction
+  (`credential_write` / `credential_mint`). The decision core exposes
+  `op_is_redacted` for it; the stage-4 check counts audit rows only.
 * [#817](https://github.com/evoila/meho/issues/817) / #820 — the durable
   approval queue + dispatch-time gate (v0.6.0) the two-row invariant
   comes from.

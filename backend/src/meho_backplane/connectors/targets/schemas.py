@@ -109,7 +109,9 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional Vault path to the target's credential. Must lie "
                 "within the tenant's secret subtree — an out-of-scope ref "
-                "is rejected. Omitting it derives the per-tenant default."
+                "is rejected. Omitting it derives the per-tenant default. "
+                "An agent or service login whose call runs without a "
+                "person's approval may give only that default path."
             ),
         },
         "auth_model": {
@@ -193,8 +195,42 @@ TARGETS_REGISTER_RESPONSE_SCHEMA: dict[str, Any] = {
                 "impossible)."
             ),
         },
+        "secret_ref": {
+            "type": ["string", "null"],
+            "description": (
+                "The secret_ref MEHO stored: the Vault path it reads the "
+                "target's credential from. `null` when the target has no "
+                "credential."
+            ),
+        },
+        "secret_ref_derived": {
+            "type": "boolean",
+            "description": (
+                "True when MEHO built secret_ref from the target name "
+                "(`tenants/<tenant_id>/<name>`), because no secret_ref was "
+                "given. Store the credential at that path, or set the path "
+                "where it is."
+            ),
+        },
+        "next_step": {
+            "type": "string",
+            "description": (
+                "What to do next. A new target is not probed yet: run "
+                "`targets.probe` with its name to detect the product and "
+                "version."
+            ),
+        },
     },
-    "required": ["target_id", "name", "product", "host", "tenant_id"],
+    "required": [
+        "target_id",
+        "name",
+        "product",
+        "host",
+        "tenant_id",
+        "secret_ref",
+        "secret_ref_derived",
+        "next_step",
+    ],
 }
 
 

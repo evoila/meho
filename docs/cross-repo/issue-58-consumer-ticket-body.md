@@ -3,29 +3,31 @@ SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 evoila Group
 -->
 
-# Draft consumer-side issue body — Goal #11 DoD bullets 4 + 5
+# Draft consumer-side issue body — v0.1 green counter and MEHO target entry
+
+> **Status:** this draft is not current. MEHO's image workflow sends no
+> `meho-image-pushed` event, and the README has no green-smoke badge
+> placeholder.
 
 > The maintainer files this as a single issue on
-> `evoila-bosnia/claude-rdc-hetzner-dc`
+> the consumer's repo
 > by copy-pasting **everything below the marker line** (`---` after
 > this paragraph) into `gh issue create`'s body. Same pattern as
-> the existing consumer-side coordination ticket filed for Task
-> #53 (per Task #53's "Acceptance criteria — coordination ticket
-> filed on `evoila-bosnia/claude-rdc-hetzner-dc`" bullet).
+> the earlier consumer-side coordination ticket.
 
 The body is **stable text**, not a template — the maintainer does
 not have to substitute anything before filing. Every cross-repo
 reference (issue numbers, paths, URLs) is final.
 
 After filing the issue, the maintainer records the
-consumer-side issue number on a closing comment to producer-side
-issue #58 so the round-trip is auditable.
+consumer-side issue number on a closing comment on the
+producer-side tracking issue, so the round-trip is auditable.
 
 ---
 
 ## Title
 
-`MEHO v0.1 dogfood: green-smoke counter + targets.yaml rdc-meho entry`
+`MEHO v0.1 dogfood: green-smoke counter + targets.yaml meho entry`
 
 ## Body
 
@@ -34,9 +36,9 @@ issue #58 so the round-trip is auditable.
 Two consumer-side acceptance items, combined into one issue because
 they share a producer-side dependency (the green-smoke counter
 contract in `evoila/meho/docs/acceptance/green-counter.md`) and a
-single audit surface (the `rdc-meho` entry in `targets.yaml`):
+single audit surface (the `meho` entry in `targets.yaml`):
 
-1. **`targets.yaml` `rdc-meho` entry.** Register MEHO as a managed
+1. **`targets.yaml` `meho` entry.** Register MEHO as a managed
    target the consumer's connector chassis can probe — see the
    producer-side schema spec at
    [`evoila/meho/docs/cross-repo/targets-yaml.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/targets-yaml.md).
@@ -53,27 +55,24 @@ on this repo.
 ### Context
 
 This issue is the consumer-side half of
-`evoila-bosnia/meho-internal#58`,
-which is the producer-side acceptance tracker. The producer-side
+the producer-side acceptance tracker. The producer-side
 issue carries the closing artefact (5 PR numbers, `targets.yaml`
 diff, successful probe transcript); this issue carries the
 implementation work.
 
-Same pattern as the earlier consumer-side coordination ticket
-filed for
-`#53 G2.7-T5`:
+Same pattern as the earlier consumer-side coordination ticket:
 producer side ships the spec + a draft body; consumer files the
 issue with that body verbatim; both sides cross-link.
 
 ### Acceptance criteria
 
-#### Half 1 — `targets.yaml` `rdc-meho` entry
+#### Half 1 — `targets.yaml` `meho` entry
 
 - [ ] `targets.yaml` exists on this repo at the root path (or the
   chassis-defined alternative location) — verifiable via
   `[ -f targets.yaml ]` from a clean clone.
-- [ ] An entry with `name: rdc-meho` is present — verifiable via
-  `yq '.targets[] | select(.name == "rdc-meho")' targets.yaml`
+- [ ] An entry with `name: meho` is present — verifiable via
+  `yq '.targets[] | select(.name == "meho")' targets.yaml`
   returning a non-empty mapping.
 - [ ] Every required field per the producer-side schema is
   populated and non-null — verifiable via the JSON probe in
@@ -87,11 +86,11 @@ issue with that body verbatim; both sides cross-link.
     `meho-image-pushed` (G2.7-T3); drift here is a silent
     integration failure.
   - [ ] `smoke_gate.counter.min_streak` is `5`.
-  - [ ] No duplicate `name: rdc-meho` rows.
-- [ ] The connector chassis can probe `rdc-meho` and the probe
+  - [ ] No duplicate `name: meho` rows.
+- [ ] The connector chassis can probe `meho` and the probe
   returns success — verifiable via the consumer-side probe
   command (chassis-specific; the canonical form is
-  `./scripts/probe.sh rdc-meho` or chassis-equivalent).
+  `./scripts/probe.sh meho` or chassis-equivalent).
 - [ ] A successful probe transcript is captured and posted on
   this issue's closing comment.
 
@@ -138,14 +137,13 @@ issue with that body verbatim; both sides cross-link.
 
 ### Producer-side artefacts to consume
 
-All landed on `evoila/meho` via the producer-side PR closing
-`#58`:
+All landed on `evoila/meho` via the producer-side PR:
 
 | Artefact | Path on `evoila/meho` | What it gives this issue |
 | --- | --- | --- |
 | Green-counter contract | [`docs/acceptance/green-counter.md`](https://github.com/evoila/meho/blob/main/docs/acceptance/green-counter.md) | Counter definition, scope, exclusions, data source, reference algorithm |
 | `targets.yaml` contract | [`docs/cross-repo/targets-yaml.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/targets-yaml.md) | Schema, field reference, anti-patterns, worked example, health-probe contract |
-| Worked example for `rdc-meho` | [`docs/cross-repo/targets-yaml.md` — Worked example](https://github.com/evoila/meho/blob/main/docs/cross-repo/targets-yaml.md#worked-example) | Copy-paste-ready YAML; the consumer's `targets.yaml` should match this verbatim except for chart `version_pin` (consumer chooses cadence) and `notes` (operator-private) |
+| Worked example for `meho` | [`docs/cross-repo/targets-yaml.md` — Worked example](https://github.com/evoila/meho/blob/main/docs/cross-repo/targets-yaml.md#worked-example) | Copy-paste-ready YAML; the consumer's `targets.yaml` should match this verbatim except for chart `version_pin` (consumer chooses cadence) and `notes` (operator-private) |
 | README badge placeholder | [`README.md`](https://github.com/evoila/meho/blob/main/README.md) (Status block) | Marker the maintainer replaces with the live badge URL via a follow-up PR once Half 2 lands |
 | `repository_dispatch` event spec | [`docs/cross-repo/rke2-infra-coordination.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/rke2-infra-coordination.md) | The `meho-image-pushed` event type the counter listens for to refresh on every green merge |
 
@@ -157,8 +155,8 @@ All landed on `evoila/meho` via the producer-side PR closing
   not redefine the counter on this side.
 - **Continuous monitoring / SLO discipline.** v0.2 — out of scope
   for both this issue and the producer-side acceptance bar.
-- **Multi-environment targets** (`rdc-meho-staging`,
-  `rdc-meho-prod`). v0.1 has only the dogfood lab.
+- **Multi-environment targets** (`meho-staging`,
+  `meho-prod`). v0.1 has only the dogfood lab.
 - **Counter for non-`main` branches.** v0.1 is trunk-only on
   producer side; consumer-side counter is trunk-only by extension.
 - **Auto-promotion of green counter to releases.** v0.2 — when
@@ -170,12 +168,12 @@ All landed on `evoila/meho` via the producer-side PR closing
 
 ```bash
 # Half 1 — targets.yaml entry
-yq '.targets[] | select(.name == "rdc-meho")' targets.yaml
-# Returns the rdc-meho entry as a YAML mapping.
+yq '.targets[] | select(.name == "meho")' targets.yaml
+# Returns the meho entry as a YAML mapping.
 
 # Half 1 — required fields populated
 yq '
-  .targets[] | select(.name == "rdc-meho") |
+  .targets[] | select(.name == "meho") |
   [.name, .repo.url, .image.registry, .image.repository,
    .chart.registry, .chart.chart, .deploy.dispatch_event.event_type,
    .smoke_gate.workflow, .smoke_gate.counter.min_streak,
@@ -185,7 +183,7 @@ yq '
 # All fields non-null; min_streak == 5.
 
 # Half 1 — chassis probe
-./scripts/probe.sh rdc-meho
+./scripts/probe.sh meho
 # (or chassis-equivalent — adapt path)
 
 # Half 2 — counter endpoint reachable and well-formed
@@ -205,10 +203,6 @@ gh run list \
 
 ### References
 
-- Producer-side issue: `evoila-bosnia/meho-internal#58`
-- Producer-side parent Initiative: `#54 — G2.8 Acceptance / dogfood proof`
-- Producer-side parent Goal: `#11 — Deployable v0.1` — DoD bullets 4 + 5
-- Sibling consumer-side coordination ticket: filed under `#53 G2.7-T5`
 - Cross-repo handshake spec: [`evoila/meho/docs/cross-repo/rke2-infra-coordination.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/rke2-infra-coordination.md)
 - Green-counter contract: [`evoila/meho/docs/acceptance/green-counter.md`](https://github.com/evoila/meho/blob/main/docs/acceptance/green-counter.md)
 - `targets.yaml` schema + worked example: [`evoila/meho/docs/cross-repo/targets-yaml.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/targets-yaml.md)
@@ -221,14 +215,14 @@ gh run list \
 
 When the time comes, the producer-side maintainer files the
 consumer-side issue as follows (run from a checkout of
-`claude-rdc-hetzner-dc`):
+your infrastructure repo):
 
 ```bash
 # Extract the body section between "## Body" and "## Filing command"
 # from this file and pass it to `gh issue create --body-file`.
 gh issue create \
-  --repo evoila-bosnia/claude-rdc-hetzner-dc \
-  --title 'MEHO v0.1 dogfood: green-smoke counter + targets.yaml rdc-meho entry' \
+  --repo <your-org>/<your-infra-repo> \
+  --title 'MEHO v0.1 dogfood: green-smoke counter + targets.yaml meho entry' \
   --body-file <(sed -n '/^## Body$/,/^## Filing command$/p' \
                 /path/to/issue-58-consumer-ticket-body.md \
                 | sed '/^## Body$/d; /^## Filing command$/d')

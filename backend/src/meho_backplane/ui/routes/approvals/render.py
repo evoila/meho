@@ -26,17 +26,23 @@ from meho_backplane.operations.approval_outcome import (
     resume_outcome_from_envelope,
     with_approval_guidance,
 )
+from meho_backplane.operations.approval_outcome_check import (
+    outcome_check,
+    outcome_unknown,
+    run_started_at,
+)
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
-    ApprovalResultState,
     ChainPosition,
     Delegation,
     approval_expired_reason,
     approval_result_state,
     get_request,
     pending_chain_positions,
+    result_state_of_envelope,
 )
+from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
 
@@ -46,8 +52,7 @@ __all__ = [
     "parked_request_chain",
     "project_outcome",
     "project_request_to_view",
-    "project_run_result",
-    "project_stored_run_result",
+    "project_run_envelope",
     "set_csrf_cookie",
 ]
 
@@ -75,6 +80,13 @@ RESULT_STATE_PILL: Final[dict[str, tuple[str, str]]] = {
     "started": ("running", "badge-info"),
     "executed": ("ran OK", "badge-success"),
     "failed": ("run failed", "badge-error"),
+    "uncertain": ("outcome unknown", "badge-warning"),
+    # The console's own background run of the approval is still going (#5110).
+    "running": ("running", "badge-info"),
+    # The background run ended, but no result was stored (#5110).
+    "ended_no_result": ("no result: check it", "badge-warning"),
+    # Another caller runs it, and it started too long ago with no result (#5110).
+    "started_no_result": ("no result", "badge-warning"),
 }
 
 
@@ -97,6 +109,11 @@ RESUME_REFUSAL_MESSAGES: dict[str, str] = {
         "The target of this request no longer exists: it was deleted or revoked "
         "after the request was made. The operation did not run. The requester "
         "must ask again."
+    ),
+    "approval_resume_params_unavailable": (
+        "The request was approved, but MEHO does not have the settings it needs "
+        "to run it. The operation did not run. The requester can run it again "
+        "and send the settings with it, or ask again."
     ),
     "preview_changed_since_approval": (
         "The preview of this request is not the one that was approved, so the "
@@ -122,65 +139,31 @@ def project_outcome(outcome: ResumeOutcome | None) -> dict[str, Any] | None:
         "audit_id": audit_id,
         "audit_href": f"/ui/audit?audit_id={audit_id}" if audit_id else None,
         "guidance": outcome.guidance,
+        "execution_outcome": outcome.execution_outcome,
         "refused_message": RESUME_REFUSAL_MESSAGES.get(outcome.error_code or ""),
     }
 
 
-def project_run_result(result: Any, *, parked_op_id: str) -> dict[str, Any] | None:
-    """Project the result of the run that an approve just started (#3543).
+def project_run_envelope(envelope: dict[str, Any], *, parked_op_id: str) -> dict[str, Any]:
+    """Project the result of an approved run into ``result_state`` + ``outcome`` (#3543).
 
-    Used by the decision-outcome fragment, which renders right after the
-    run returns. The request row in hand was read before the run, so the
-    outcome is read off the returned result, not off the row.
-
-    Returns ``None`` when another resumer (usually the waiting requester)
-    won the run claim (``already_resumed``). That result says nothing about
-    the run itself: the caller reads the stored result off the row instead
-    (:func:`project_stored_run_result`).
+    *envelope* is the run's result in its JSON form: the stored result of
+    the background run the console started (#5110).
     """
-    if getattr(result, "status", None) == "already_resumed":
-        return None
-    envelope = {
-        "status": getattr(result, "status", None),
-        "extras": getattr(result, "extras", None),
-        "audit_id": getattr(result, "audit_id", None),
-        "op_id": getattr(result, "op_id", None),
-        "result": getattr(result, "result", None),
-    }
     outcome = resume_outcome_from_envelope(
         with_approval_guidance(envelope, parked_op_id=parked_op_id)
     )
     return {
-        "result_state": "executed" if outcome.result_status == "ok" else "failed",
+        "result_state": result_state_of_envelope(envelope).value,
         "outcome": project_outcome(outcome),
     }
-
-
-async def project_stored_run_result(request: ApprovalRequest) -> dict[str, Any]:
-    """Project the run of a request that another resumer claimed.
-
-    Used by the decision-outcome fragment when the resume answered
-    ``already_resumed``: another caller (usually the waiting requester) won
-    the run claim. That caller may have recorded a refusal (the target
-    changed or is gone, MEHO was updated) or a failed run, so the card must
-    not say the operation was re-dispatched. The row is read again. A
-    stored result gives ``result_state`` ``executed`` or ``failed`` with its
-    summary, the same as the detail modal shows. No stored result yet gives
-    ``result_state`` ``started`` and no outcome: the card says the run is
-    still going and where its result will show.
-    """
-    async with get_sessionmaker()() as db_session:
-        fresh = await get_request(db_session, tenant_id=request.tenant_id, request_id=request.id)
-    state = approval_result_state(fresh)
-    if state in (ApprovalResultState.EXECUTED, ApprovalResultState.FAILED):
-        return {"result_state": state.value, "outcome": project_outcome(resume_outcome(fresh))}
-    return {"result_state": ApprovalResultState.STARTED.value, "outcome": None}
 
 
 def project_request_to_view(
     row: ApprovalRequest,
     delegation: Delegation | None = None,
     chain: ChainPosition | None = None,
+    target_name: str | None = None,
 ) -> dict[str, Any]:
     """Project an :class:`ApprovalRequest` ORM row into a template dict.
 
@@ -215,6 +198,9 @@ def project_request_to_view(
     pass it; the key is always present so the templates stay
     ``StrictUndefined``-safe.
 
+    ``reveal_secret`` is ``True`` when the requester asked for the hidden
+    values of the answer: the approved run returns them to the requester.
+
     ``withdrawn_at`` / ``withdraw_reason`` (#4987) say when and why the
     sender withdrew the request; both are ``None`` on any other row.
 
@@ -231,6 +217,10 @@ def project_request_to_view(
     waited) and tell the requester to ask again; ``release_id`` is the
     release the request was made under. The reason keys are ``None`` for a
     request that is not expired.
+
+    ``target_id``, ``target_name`` and ``run_started_at`` (#5026): see
+    :func:`_project_target_and_run_start`. ``outcome_unknown`` and
+    ``outcome_check`` (#5026): see :func:`_project_outcome_check`.
     """
     result_state = approval_result_state(row)
     expired_reason = approval_expired_reason(row)
@@ -240,9 +230,11 @@ def project_request_to_view(
         "connector_id": row.connector_id,
         "principal_sub": row.principal_sub,
         "principal_act": row.principal_act,
-        "requester": subject_ref(row.principal_sub, row.principal_name),
+        "requester": subject_ref(row.principal_sub, row.principal_name, row.principal_kind),
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
         "proposed_effect": row.proposed_effect,
+        "reveal_secret": bool(row.reveal_secret),
+        "rights_change": is_rights_change(row),
         "status": row.status,
         "reviewed_by": row.reviewed_by,
         "work_ref": row.work_ref,
@@ -258,6 +250,65 @@ def project_request_to_view(
         "expired_reason": expired_reason.value if expired_reason else None,
         "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
         "release_id": row.release_id,
+        **_project_target_and_run_start(row, target_name),
+        **_project_outcome_check(row),
+    }
+
+
+def _project_target_and_run_start(row: ApprovalRequest, target_name: str | None) -> dict[str, Any]:
+    """The target and latest-run keys of the template dict (#5026).
+
+    ``run_started_at`` is when the latest run started: the latest re-run,
+    else the first run. ``None`` before the first run. The modal shows it
+    as the start of the run, so a re-run shows its own start.
+    ``outcome.resumed_at`` stays the start of the first run.
+
+    ``target_id`` is the id of the target the request names, or ``None``.
+    ``target_name`` is its name in this tenant, when the caller resolved it
+    (the "outcome unknown" list does, with
+    :func:`~meho_backplane.operations.approval_context.resolve_target_names`);
+    else ``None``, and the row falls back to the id.
+    """
+    started = run_started_at(row)
+    return {
+        "target_id": str(row.target_id) if row.target_id else None,
+        "target_name": target_name,
+        "run_started_at": started.isoformat() if started is not None else None,
+    }
+
+
+def _project_outcome_check(row: ApprovalRequest) -> dict[str, Any]:
+    """The two outcome-unknown keys of the template dict (#5026).
+
+    ``outcome_unknown`` is ``{"reason", "advice", "run_started_at"}`` when
+    the request is on the "outcome unknown" list, else ``None``.
+    ``run_started_at`` is the start of the latest run, the time the minutes
+    of the list count from. ``outcome_check`` is
+    ``{"verdict", "note", "checker", "checked_at"}`` once a person marked it
+    as checked, else ``None``.
+    """
+    unknown = outcome_unknown(row)
+    check = outcome_check(row)
+    return {
+        "outcome_unknown": (
+            {
+                "reason": unknown.reason.value,
+                "advice": unknown.advice,
+                "run_started_at": unknown.run_started_at,
+            }
+            if unknown
+            else None
+        ),
+        "outcome_check": (
+            {
+                "verdict": check.verdict.value,
+                "note": check.note,
+                "checker": subject_ref(check.checked_by, check.checked_by_name),
+                "checked_at": check.checked_at,
+            }
+            if check
+            else None
+        ),
     }
 
 

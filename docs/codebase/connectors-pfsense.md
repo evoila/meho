@@ -914,7 +914,8 @@ dropping" ticket. They change nothing.
   was full) or more events matched than `limit`. The newest events are kept.
 - **Known limit.** Lines are matched by the common name text. A line from
   before the server knew the user (for example an early TLS error) has no name
-  and is not returned.
+  and is not returned. The match is on text, not on whole names: the name
+  `bob` also returns lines of `bobby`. Check the name inside each line.
 - **Tests.** `backend/tests/test_connectors_pfsense_openvpn_ops.py`.
 
 ## Diagnostics: `pfsense.diag.ping` (#3965)

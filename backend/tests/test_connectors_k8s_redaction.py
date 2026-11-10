@@ -20,6 +20,7 @@ secret), matching ``test_connectors_k8s_storage_cr.py``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from meho_backplane.connectors.kubernetes.redaction import (
     redact_kubernetes_payload,
     redact_secret_value,
 )
+from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.settings import get_settings
 
 # A base64 ``data`` value and a plaintext ``stringData`` value that match
@@ -128,15 +130,42 @@ def _make_secret(
 
 def test_redact_secret_value_is_placeholder_plus_stable_digest() -> None:
     out = redact_secret_value(_TLS_KEY_B64)
-    assert out.startswith(REDACTED_PREFIX + ";sha256:")
+    assert out.startswith(REDACTED_PREFIX + ";hmac-sha256:")
     assert out.endswith("]")
     # Deterministic across calls (correlatable), and NOT the raw value.
     assert out == redact_secret_value(_TLS_KEY_B64)
     assert _TLS_KEY_B64 not in out
     # 12 hex chars of digest between the prefix and the closing bracket.
-    digest = out[len(REDACTED_PREFIX) + len(";sha256:") : -1]
+    digest = out[len(REDACTED_PREFIX) + len(";hmac-sha256:") : -1]
     assert len(digest) == 12
     assert all(c in "0123456789abcdef" for c in digest)
+
+
+@pytest.mark.parametrize("value", ["1234", "hunter2", _TLS_KEY_B64])
+def test_redact_secret_value_is_keyed_not_a_plain_sha256_prefix(value: str) -> None:
+    out = redact_secret_value(value)
+    plain = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    assert plain[:12] not in out
+    expected = compute_value_fingerprint(value.encode("utf-8"))[:12]
+    assert out == f"{REDACTED_PREFIX};hmac-sha256:{expected}]"
+
+
+def test_redact_secret_value_changes_with_the_server_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-install-key-one")
+    get_settings.cache_clear()
+    first = redact_secret_value("1234")
+    assert first == redact_secret_value("1234")
+    monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-install-key-two")
+    get_settings.cache_clear()
+    second = redact_secret_value("1234")
+    assert second.startswith(REDACTED_PREFIX + ";hmac-sha256:")
+    assert second != first
+
+
+def test_redact_secret_value_coerces_a_non_string_value() -> None:
+    assert redact_secret_value(1234) == redact_secret_value("1234")
 
 
 def test_single_secret_object_data_and_stringdata_redacted() -> None:

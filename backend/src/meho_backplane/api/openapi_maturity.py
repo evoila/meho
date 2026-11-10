@@ -63,6 +63,7 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # Paired-surface activation (#3029): the automation surface is part of the
     # add-on pairing contract (Initiative #2900) and shares its maturity.
     "automation": "addon_pairing",
+    "agent-budgets": "agent_runtime",
     "agent-grants": "agent_runtime",
     "agent-principals": "agent_runtime",
     "agents": "agent_runtime",

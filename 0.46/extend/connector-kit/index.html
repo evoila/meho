@@ -3148,7 +3148,7 @@ tests and its <code>pyproject.toml</code>.</p>
 <p>Your package imports MEHO only through one module:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">meho_connector_kit</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">kit</span>
 </code></pre></div>
-<p>The kit version this page describes: <strong>1.2</strong>.</p>
+<p>The kit version this page describes: <strong>1.3</strong>.</p>
 <p>The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
 part that starts with an underscore is private by its name too.</p>
@@ -3325,6 +3325,11 @@ part that starts with an underscore is private by its name too.</p>
 <td>Approvals</td>
 <td><code>register_permission_preflight</code></td>
 <td>Register such a check for one operation.</td>
+</tr>
+<tr>
+<td>Approvals</td>
+<td><code>declare_root_shell</code></td>
+<td>Mark the operations that change a host by running a command or script as root, for example over SSH with <code>sudo</code>. A run approval of an automation run never covers them: a person approves each call.</td>
 </tr>
 <tr>
 <td>Audit</td>

@@ -140,14 +140,17 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 
 | op_id | group | Params | Returns |
 |---|---|---|---|
-| `linux.about` | `system` | — | `{vendor, product, version, kernel, os_pretty, hostname, init_system}` |
-| `linux.file.read` | `file` | `path`, `max_bytes?` | `{path, content, truncated, size_bytes, exists}` |
+| `linux.about` | `system` | — | `{vendor, product, version, kernel, os_pretty, hostname, init_system, uptime_seconds, load_1m, load_5m, load_15m}` |
+| `linux.file.read` | `file` | `path`, `max_bytes?` | `{path, content, truncated, size_bytes, exists, zero_length}` |
 | `linux.log.tail` | `log` | `path`, `lines?` | `{rows, total, path}` |
 | `linux.service.status` | `service` | `unit` | `{unit, active, enabled, sub_state}` |
 | `linux.sysctl.read` | `system` | `key` | `{key, value}` |
 | `linux.dns.lookup` | `network` | `name` | `{name, found, addresses, exit_code}` |
 | `linux.firewall.show` | `firewall` | — | `{rows, total, backend}` |
 | `linux.mount.list` | `storage` | — | `{rows, total}` (each row `kind` = `mount` / `export`) |
+| `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
+| `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
+| `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
 
 `linux.about` is the identity canary (its handler wraps `fingerprint`).
 `linux.firewall.show` reads the rules as root. When the login is not root,
@@ -160,8 +163,61 @@ read that fails is an error that starts with `permission_denied` or
 has neither `nft` nor `iptables-save`.
 `linux.mount.list` inspects the mount table (`findmnt` / `mount`) plus NFS
 exports (`exportfs -s` / `showmount -e`); each row carries a `kind`
-discriminator. Block-topology and capacity reporting (`df` / `lsblk`) is
-out of scope — a separate op if a concrete need arises.
+discriminator. Block topology (`lsblk`) is out of scope.
+
+`linux.about` also returns `uptime_seconds` and the 1, 5 and 15 minute load
+(`load_1m`, `load_5m`, `load_15m`). They come from `/proc/uptime` and
+`/proc/loadavg`, read in the same fixed round-trip as the identity; a value
+the host does not answer is `null`.
+
+`linux.file.read` sets `zero_length: true` when a `/proc` or `/sys` file read
+back with no content. Those files always report size 0, so empty content is
+the kernel's empty answer, not an empty file. An empty regular file has
+`size_bytes: 0` and `zero_length: false`.
+
+### Journal, filesystem usage and directory listing (`ops_inspect.py`)
+
+Three reads for storage and NFS diagnosis, in `ops_inspect.py` (handlers
+and checks) and `ops_inspect_ops.py` (op rows).
+
+- `linux.journal.tail` runs `journalctl -o json --all --no-pager -n <lines>`
+  (default 200, same cap as `log.tail`). `--all` keeps fields over 4096
+  bytes; without it `journalctl` prints them as `null`. `unit` uses the
+  unit-name check of `service.status`; `since` / `until` allow letters,
+  digits, space and `: + . _ -` (max 64 characters) and are passed as
+  `--since=<quoted>`; `priority` is `0`-`7` or a syslog level name.
+  The command prints the exit code of `journalctl` after its output,
+  because a pipe returns only the exit code of its last command. The
+  output is cut at 8 MiB (`head` keeps one byte more, so a cut right
+  after a line break is still seen), and then `awk` (in the C locale, so
+  it counts bytes) keeps only the lines that fit the cap whole, so a cut
+  never splits a UTF-8 character. The rows are oldest first, so a cut
+  drops the newest rows. A cut ends with a cut marker and sets
+  `truncated`. A
+  message over 4096 characters is cut and its row has
+  `message_truncated: true`. No `journalctl` (exit 127), a `journalctl`
+  exit code other than 0, an output with neither the exit code nor the
+  cut marker, or no rows with text on stderr (for example no permission
+  to read the journal) is an error, never an empty list. Rows with
+  stderr text carry a `warning`.
+- `linux.fs.usage` runs `df -B1 --output=source,fstype,size,used,avail,itotal,iused`
+  for one path. `/` itself is allowed here only. A `-` inode count is
+  `null`. A df failure or an answer that cannot be read is an error.
+- `linux.dir.list` runs one command: it changes into the directory with
+  `cd -P`, prints the real path, then `find -mindepth 1 -maxdepth <depth>`
+  with NUL-ended records. `depth` is 1 or 2. Hidden names are left out
+  unless `include_hidden`. At most 5000 rows; more sets `truncated`.
+  `incomplete` is true when `find` exited non-zero (part of the tree could
+  not be read). A missing directory is `exists: false`. The real path the
+  host reports goes through the same allow-list check as the typed path.
+
+The paths of `fs.usage` and `dir.list` must lie under the **directory
+allow-list**: `LINUX_READ_ROOTS` plus `/srv`, `/mnt`, `/media`, `/data`,
+`/export`, `/exports`, `/opt`, plus any absolute roots in the
+`LINUX_DIR_LIST_ROOTS` environment variable of the backplane (separated by
+`:`; `/` is refused and a wrong entry raises an error). The key and
+password deny list of `file.read` applies too. Overlap with the host
+readiness reads: `linux.fs.usage` is the one `df` read.
 
 ### DNS lookup on the host (`linux.dns.lookup`)
 

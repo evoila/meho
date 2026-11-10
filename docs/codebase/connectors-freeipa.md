@@ -15,13 +15,14 @@ server. IdM is Red Hat's build of FreeIPA. One target is one IPA server.
   `>=4.9,<5.0` (Red Hat Enterprise Linux 8 and later).
 - FreeIPA has no OpenAPI description. Its API is JSON-RPC, so the connector
   has typed (hand-written) operations only. Nothing is ingested.
-- Thirty-four operations. Seventeen read (`safe`, no approval). Seventeen
+- Forty-two operations. Seventeen read (`safe`, no approval). Twenty-five
   change something, and each change waits until a second person approves:
   - six change host groups, their members, automember rules and hosts;
   - eleven change sudo commands, sudo rules, access rules (HBAC) and
-    password policies.
-- Writes for users, groups and roles come in a later Task of Initiative
-  #4772.
+    password policies;
+  - eight change users, user groups and role members.
+- No operation takes or returns a password. Setting a password comes in a
+  later Task of Initiative #4772.
 
 Code: [`backend/src/meho_backplane/connectors/freeipa/`](../../backend/src/meho_backplane/connectors/freeipa/).
 Onboarding for operators: [`docs/cross-repo/freeipa-onboarding.md`](../cross-repo/freeipa-onboarding.md).
@@ -49,6 +50,7 @@ meho targets add <ipa-target-name> --product freeipa --host <ipa-server-name> \
 | --- | --- | --- |
 | `FreeipaConnector` | `connector.py` | Login, session cache, `call()`, fingerprint, the handler methods of the reads and host writes |
 | `FreeipaAccessWriteOps` | `access_writes.py` | The handler methods of the sudo, access rule and password policy writes; `FreeipaConnector` inherits them |
+| `FreeipaIdentityWriteOps` | `identity_writes.py` | The handler methods of the user, group and role writes, and their previews; `FreeipaConnector` inherits them |
 | `FreeipaAnswer` | `rpc.py` | A successful answer: `result`, `principal`, `server_version` |
 | `FreeipaCommandError` | `rpc.py` | The server answered a command with `error`, or a write did not do all of its change (`NotDone`); names the command, error and text |
 | `FreeipaRequestRefusedError` | `connector.py` | HTTP 400; the message names the `Referer` rule |
@@ -178,6 +180,44 @@ person approved. A change is `caution`, a delete is `dangerous`.
   `ipaservers`. A host delete also deletes the host's services and revokes
   its certificates.
 
+### The user, group and role writes
+
+The bodies are methods of `FreeipaIdentityWriteOps` in `identity_writes.py`;
+`FreeipaConnector` inherits them. The metadata is in
+`ops_identity_writes.py`. All eight are in the `identity` group and wait
+until a second person approves. Adding role members is `dangerous`, not
+`caution`: a member of a role gets all of its rights. This follows the
+proposal of Task #5360; a person may change it.
+
+| Operation | Command | Risk level | Parameters | Returns |
+| --- | --- | --- | --- | --- |
+| `freeipa.user.create` | `user_add` | `caution` | `login`, `first_name` (sent as `givenname`), `last_name` (sent as `sn`), `mail` | `{entry}` |
+| `freeipa.user.password_expiry.set` | `user_mod` | `caution` | `login`, `expires` (sent as `krbpasswordexpiration`) | `{entry}` |
+| `freeipa.user.disable` | `user_disable` | `caution` | `login` | `{disabled}` |
+| `freeipa.group.create` | `group_add` | `caution` | `name`, `description` | `{entry}` |
+| `freeipa.group.member.add` | `group_add_member` | `caution` | `name`, `users` (sent as `user`), `groups` (sent as `group`); at least one of the two | `{entry, completed}` |
+| `freeipa.role.member.add` | `role_add_member` | `dangerous` | `name`, `users`, `groups`, `hosts`, `hostgroups` (sent as `user`, `group`, `host`, `hostgroup`); at least one | `{entry, completed}` |
+| `freeipa.user.delete` | `user_del` | `dangerous` | `login` | `{deleted, warnings}` |
+| `freeipa.role.delete` | `role_del` | `dangerous` | `name` | `{deleted, warnings}` |
+
+- No parameter holds a password, and the parameter schemas refuse any other
+  parameter, so `password`, `userpassword` and `random` are refused before
+  any call. `user_add` is sent with neither `userpassword` nor `random`: the
+  new user has no password until an administrator sets one. The ops carry no
+  tag `password`, because it would hide FreeIPA's error text.
+- `expires` is a UTC time such as `2030-01-01T00:00:00Z`. The body sends it
+  in FreeIPA's date form (`{"__datetime__": "20300101000000Z"}`) and refuses
+  a time that is not in the future, before any call. A password that an
+  administrator sets runs out at once; a past date would do the same.
+- Adding a member never creates a user, group or host. A member that does
+  not exist is in `failed`, so the call fails and names it (see below).
+- A delete sends one name, no `continue` and no `preserve`, so the user is
+  deleted for good, and a missing object is FreeIPA's `NotFound` error. The
+  delete bodies share `run_delete` in `_write_common.py` with the host
+  deletes. FreeIPA itself refuses to delete the last administrator.
+- `user_disable` fails with FreeIPA's error when the user is disabled
+  already.
+
 ### The sudo, access rule and password policy writes
 
 The bodies are methods of `FreeipaAccessWriteOps` in `access_writes.py`;
@@ -286,6 +326,19 @@ connector (`preview_operation`) the builder declines.
   name is the global policy. It reads only the parameters, so it needs no
   live connector.
 
+`identity_writes.py` registers three more. Each runs a `*_show` command with
+the requester's login, and declines without a live connector:
+
+- `freeipa.user.delete` stores `{user, groups, indirect_groups, roles}`
+  (`user_show`), so the approver sees what the user leaves.
+- `freeipa.role.delete` stores `{role, privileges, members}` (`role_show`).
+  `members` holds `users`, `groups`, `hosts` and `hostgroups`.
+- `freeipa.role.member.add` stores `{role, privileges, new_members}`
+  (`role_show`), so the approver sees which rights the new members get.
+
+When the read fails (for example `NotFound`), the request still waits, and
+the approval request says the preview is unavailable and why.
+
 The other writes show the generic echo of their parameters.
 
 ## Dependencies
@@ -317,6 +370,10 @@ The other writes show the generic echo of their parameters.
   sudo, access rule and password policy writes, plus the external names of
   a sudo rule, the `allow_all` preview with and without other enabled
   rules, and the global password policy warning.
+- `backend/tests/test_connectors_freeipa_identity_writes.py`: the same for the
+  user, group and role writes, plus the three previews and their failed
+  reads, an expiry date in the past, and a password parameter that is refused
+  and never shown.
 - `backend/tests/test_connectors_freeipa_spec_reconcile.py`: the command
   names against FreeIPA's `API.txt` (skips until the file is on the spec
   shelf; see `docs/decisions/spec-reconcile-guards-standard.md`).
@@ -325,8 +382,12 @@ The other writes show the generic echo of their parameters.
 ## Known issues
 
 - No live proof yet. The lab proofs of the reads (#5357), of the host
-  writes (#5359) and of the sudo, access rule and password policy writes
-  (#5361) run on a lab IdM server.
+  writes (#5359), of the sudo, access rule and password policy writes
+  (#5361) and of the user, group and role writes (#5360) run on a lab IdM
+  server. The proof of #5360 also checks which attributes `user_mod` returns
+  for the expiry date.
+- There are no writes that remove a member from a group or a role, enable a
+  disabled user again, or change a user's other attributes.
 - There are no writes that remove a member from a sudo rule or an access
   rule, enable a rule again, or delete one. To undo a typo in `external`,
   use the `ipa` command on the server for now.
@@ -355,5 +416,6 @@ The other writes show the generic echo of their parameters.
 - FreeIPA JSON-RPC usage: `doc/api/jsonrpc_usage.md` in
   [`freeipa/freeipa`](https://github.com/freeipa/freeipa), release 4.13.4.
 - FreeIPA `API.txt`, release 4.13.4 (506 commands, API version 2.257).
-- Initiative #4772, Tasks #5357 (reads), #5359 (host writes) and #5361
-  (sudo, access rule and password policy writes).
+- Initiative #4772, Tasks #5357 (reads), #5359 (host writes), #5361
+  (sudo, access rule and password policy writes) and #5360 (user, group and
+  role writes).

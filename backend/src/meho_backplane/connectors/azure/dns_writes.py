@@ -11,11 +11,14 @@ DNS name, so both wait for a person's approval.
   the ``etag`` the approver saw. MEHO reads the record set first and refuses
   when its etag is another one, and Azure refuses too (``If-Match``). What is
   deleted is exactly the version on the approval card. The answer holds the
-  deleted values (``previous``), so the audit row and a person can recreate
-  the record set.
+  deleted values (``previous``), and the audit row of the call keeps them as
+  its state before, so a person can recreate the record set.
 * :func:`dns_record_set_upsert_impl` creates a record set, or changes one when
   the call names its ``etag``. Without an etag it sends ``If-None-Match: *``,
-  so it never overwrites a record set that exists.
+  so it never overwrites a record set that exists. A change must name one
+  etag (never ``*``), and it runs only as the approved run of a request whose
+  card shows the current record set. The audit row keeps the old and the new
+  values.
 
 :func:`delete_card` and :func:`upsert_card` are the approval cards: they read
 the record set as it is when the call waits for approval.
@@ -29,6 +32,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
+import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.http import json_payload_or_empty
@@ -40,7 +44,7 @@ from meho_backplane.connectors.azure.dns_reads import find_record_set
 from meho_backplane.connectors.azure.dns_rows import record_set_detail
 from meho_backplane.connectors.azure.dns_schemas import READ_RECORD_TYPES, WRITE_RECORD_TYPES
 from meho_backplane.connectors.azure.session import AzureTargetLike, resolve_target_config
-from meho_backplane.operations._preview import PreviewContext
+from meho_backplane.operations._preview import PreviewContext, approved_preview
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.azure.connector import AzureConnector
@@ -54,6 +58,8 @@ __all__ = [
 
 #: The types a delete takes: every type but SOA, which Azure deletes with the zone.
 _DELETE_TYPES: Final[tuple[str, ...]] = tuple(t for t in READ_RECORD_TYPES if t != "SOA")
+
+UPSERT_OP_ID: Final[str] = "azure.network.dns.recordset.upsert"
 
 #: What the approver reads about a delete.
 IRREVERSIBLE: Final[str] = (
@@ -159,7 +165,21 @@ def _etag_param(params: dict[str, Any]) -> str | None:
         return None
     if not isinstance(etag, str) or not etag.strip():
         raise ValueError("etag must be the etag text from azure.network.dns.recordset.show.")
+    if any(part.strip() == "*" for part in etag.split(",")):
+        raise ValueError(
+            "etag must be one specific etag from azure.network.dns.recordset.show. "
+            "A wildcard (*) matches any version, so it is refused."
+        )
     return etag
+
+
+def _bind_audit(**extras: Any) -> None:
+    """Put old and new values on the audit row of this call (``audit_*`` keys).
+
+    The dispatcher copies every bound ``audit_*`` value into the row as
+    ``state_before`` and ``state_after``, and drops a value that is ``None``.
+    """
+    structlog.contextvars.bind_contextvars(**extras)
 
 
 def _changed(target: AzureTargetLike, expected: str, current: str | None) -> Exception:
@@ -199,6 +219,7 @@ async def dns_record_set_delete_impl(
     if current.get("etag") != etag:
         raise _changed(target, etag, current.get("etag"))
     previous = record_set_detail(current)
+    _bind_audit(audit_state_before=previous)
     response = await _send_write(
         connector,
         operator,
@@ -212,6 +233,31 @@ async def dns_record_set_delete_impl(
     return {**base, "deleted": not gone, "already_absent": gone, "previous": previous}
 
 
+def _approved_current(target: AzureTargetLike, etag: str | None) -> dict[str, Any] | None:
+    """The record set on the approval card, or an error when there is no usable card.
+
+    The upsert runs only as the approved run of a request. A card that is
+    missing, or that has no read of the record set (the read failed while the
+    card was built), means nobody saw the current values, so MEHO sends
+    nothing. When the call names an etag, the card must show a record set
+    with that etag.
+    """
+    card = approved_preview(UPSERT_OP_ID)
+    current = (card or {}).get("current")
+    if not isinstance(current, dict) or not isinstance(current.get("exists"), bool):
+        raise ValueError(
+            f"Azure target {target.name!r}: the approval request shows no current values of "
+            "the record set (no card, or the read failed when it was built), so MEHO "
+            "changed nothing. Send a new request."
+        )
+    if etag is not None and (current.get("exists") is not True or current.get("etag") != etag):
+        raise ValueError(
+            f"Azure target {target.name!r}: the approval card shows another version of the "
+            f"record set than etag {etag!r}, so MEHO changed nothing. Send a new request."
+        )
+    return current if current["exists"] else None
+
+
 async def dns_record_set_upsert_impl(
     connector: AzureConnector, operator: Operator, target: AzureTargetLike, params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -221,6 +267,7 @@ async def dns_record_set_upsert_impl(
     )
     body = record_set_body(params, record_type)
     etag = _etag_param(params)
+    approved_current = _approved_current(target, etag)
     if etag is None:
         headers = {"If-None-Match": "*"}
         hint = (
@@ -235,11 +282,13 @@ async def dns_record_set_upsert_impl(
     if not isinstance(payload.get("name"), str):
         # A success answer without a body: show what was sent, not nothing.
         payload = {"name": name, "type": f"Microsoft.Network/dnsZones/{record_type}", **body}
+    detail = record_set_detail(payload)
+    _bind_audit(audit_state_before=approved_current, audit_state_after=detail)
     return {
         "state": "created" if response.status_code == 201 else "updated",
         "zone": zone,
         "resource_group": group,
-        "record_set": record_set_detail(payload),
+        "record_set": detail,
     }
 
 
@@ -326,6 +375,11 @@ async def upsert_card(ctx: PreviewContext) -> dict[str, Any] | None:
         "current": _card(record_type, group, zone, name, current),
         "proposed": {key: proposed[key] for key in ("ttl", "values")},
         "mode": "create only" if etag is None else "change the version with this etag",
+        "replaces": (
+            "A change replaces the whole record set: the TTL and the values above are "
+            "written, and anything on the current record set that is not listed under "
+            "proposed (for example metadata) is dropped."
+        ),
     }
     if etag is not None and current is not None:
         card["etag_matches_current"] = current.get("etag") == etag

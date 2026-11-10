@@ -13,6 +13,7 @@ documentation and the zone is ``example.com``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from collections.abc import Iterator
@@ -43,7 +44,7 @@ from meho_backplane.connectors.azure.dns_writes import delete_card, upsert_card
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -54,6 +55,8 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     blast_radius_missing_reason,
 )
+from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations.approval_queue import composite_resume_binding
 from meho_backplane.settings import get_settings
 from tests._azure_fixtures import (
     ARM_BASE,
@@ -154,17 +157,41 @@ async def azure(monkeypatch: pytest.MonkeyPatch) -> AzureConnector:
     return instance
 
 
+def _approved_card(params: dict[str, Any]) -> dict[str, Any]:
+    """The card of an upsert as the approver saw it: no record set, or the one with the etag."""
+    etag = params.get("etag")
+    if etag is None:
+        return {"current": {"exists": False}}
+    return {"current": {"exists": True, "etag": etag, "values": ["198.51.100.77"], "ttl": 300}}
+
+
 async def _call(
-    op_id: str, params: dict[str, Any] | None = None, *, approved: bool = True
+    op_id: str,
+    params: dict[str, Any] | None = None,
+    *,
+    approved: bool = True,
+    card: dict[str, Any] | None = None,
 ) -> OperationResult:
-    return await dispatch(
-        operator=operator(),
-        connector_id=AZURE_CONNECTOR_ID,
-        op_id=op_id,
-        target=AzureTargetStub(),
-        params=params or {},
-        _approved=approved,
+    """Run an op. An approved run is bound to *card*, as the approval queue binds it."""
+    params = params or {}
+    binding = composite_resume_binding(
+        subop_op_id=op_id,
+        subop_params_hash="h",
+        resume_parent=None,
+        proposed_effect={
+            "op_class": "write",
+            "preview": card if card is not None else _approved_card(params),
+        },
     )
+    with binding if approved else contextlib.nullcontext():
+        return await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id=op_id,
+            target=AzureTargetStub(),
+            params=params,
+            _approved=approved,
+        )
 
 
 def _login(mock: respx.MockRouter) -> respx.Route:
@@ -1050,3 +1077,200 @@ async def test_the_upsert_card_of_a_new_name_says_it_does_not_exist(azure: Azure
     assert card is not None
     assert card["current"]["exists"] is False
     assert card["mode"] == "create only"
+
+
+# ----------------------------------------------------------------------
+# Review fixes: wildcard etag, audit row, preview that is missing or failed
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("etag", ["*", " * ", f'"{ETAG}", *'])
+async def test_upsert_with_a_wildcard_etag_sends_no_write(azure: AzureConnector, etag: str) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        login = _login(mock)
+        arm = mock.route(host=ARM_HOST).respond(200, json={})
+        result = await _call(
+            "azure.network.dns.recordset.upsert",
+            {**UPSERT, "etag": etag},
+            card={"current": {"exists": True, "etag": etag}},
+        )
+
+    assert result.status == "error", result
+    assert "wildcard" in _full_error(result) or "schema" in _full_error(result).lower()
+    assert not arm.called and not login.called
+
+
+def test_the_schemas_refuse_a_wildcard_etag() -> None:
+    for op_id, base in (
+        ("azure.network.dns.recordset.upsert", UPSERT),
+        ("azure.network.dns.recordset.delete", DELETE),
+    ):
+        schema = next(op.parameter_schema for op in dns.OPS if op.op_id == op_id)
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({**base, "etag": "*"}, schema)
+        jsonschema.validate({**base, "etag": ETAG}, schema)
+
+
+async def _audit_row(op_id: str) -> Any:
+    async with get_sessionmaker()() as session:
+        query = select(AuditLog).where(AuditLog.path == op_id, AuditLog.method == "DISPATCH")
+        rows = (await session.execute(query)).scalars().all()
+    assert len(rows) == 1
+    return rows[0]
+
+
+async def _preview_hash(op_id: str, params: dict[str, Any]) -> str:
+    preview = await preview_dispatch(
+        operator=operator(),
+        connector_id=AZURE_CONNECTOR_ID,
+        op_id=op_id,
+        target=AzureTargetStub(),
+        params=params,
+    )
+    assert preview["status"] == "ok", preview
+    return cast(str, preview["preview_hash"])
+
+
+@pytest.mark.asyncio
+async def test_delete_approval_and_resume_keeps_the_old_values_in_the_audit_row(
+    azure: AzureConnector,
+) -> None:
+    """Park with the bound hash, then run as the approved request: the row holds the old values."""
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        mock.get(_set_url("A", "old-host")).respond(200, json=_a_set())
+        gone = mock.delete(_set_url("A", "old-host")).respond(200)
+        op_id = "azure.network.dns.recordset.delete"
+        bound = await _preview_hash(op_id, DELETE)
+        parked = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id=op_id,
+            target=AzureTargetStub(),
+            params=DELETE,
+            preview_hash=bound,
+        )
+        assert parked.status == "awaiting_approval", parked
+        assert not gone.called
+        result = await _call(op_id, DELETE)
+
+    assert result.status == "ok", result.error
+    assert gone.call_count == 1
+    row = await _audit_row(op_id)
+    assert row.payload["state_before"]["values"] == ["198.51.100.77"]
+    assert row.payload["state_before"]["etag"] == ETAG
+    assert "state_after" not in row.payload
+
+
+@pytest.mark.asyncio
+async def test_upsert_approval_and_resume_keeps_old_and_new_values_in_the_audit_row(
+    azure: AzureConnector,
+) -> None:
+    params = {**UPSERT, "records": ["203.0.113.11"], "etag": ETAG}
+    op_id = "azure.network.dns.recordset.upsert"
+    updated = _record_set("A", "www", {"ARecords": [{"ipv4Address": "203.0.113.11"}]}, NEW_ETAG)
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        mock.get(_set_url("A", "www")).respond(200, json=_a_set("www"))
+        put = mock.put(_set_url("A", "www")).respond(200, json=updated)
+        parked = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id=op_id,
+            target=AzureTargetStub(),
+            params=params,
+        )
+        assert parked.status == "awaiting_approval", parked
+        assert not put.called
+        card = await upsert_card(_context(azure, params))
+        result = await _call(op_id, params, card=card)
+
+    assert result.status == "ok", result.error
+    row = await _audit_row(op_id)
+    assert row.payload["state_before"]["values"] == ["198.51.100.77"]
+    assert row.payload["state_after"]["values"] == ["203.0.113.11"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_refuses_to_run_when_the_card_read_failed(azure: AzureConnector) -> None:
+    """The read of the card fails, the request still waits, and the approved run sends nothing."""
+    params = {**UPSERT, "etag": ETAG}
+    op_id = "azure.network.dns.recordset.upsert"
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        mock.get(_set_url("A", "www")).respond(500, json=_error("Failure"))
+        put = mock.put(_set_url("A", "www")).respond(200, json=_a_set("www"))
+        parked = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id=op_id,
+            target=AzureTargetStub(),
+            params=params,
+        )
+        assert parked.status == "awaiting_approval", parked
+        # What the queue stores when the builder failed: a marker, no preview body.
+        failed = composite_resume_binding(
+            subop_op_id=op_id,
+            subop_params_hash="h",
+            resume_parent=None,
+            proposed_effect={"op_class": "write", "preview_unavailable": True},
+        )
+        with failed:
+            result = await dispatch(
+                operator=operator(),
+                connector_id=AZURE_CONNECTOR_ID,
+                op_id=op_id,
+                target=AzureTargetStub(),
+                params=params,
+                _approved=True,
+            )
+
+    assert result.status == "error", result
+    assert "changed nothing" in _full_error(result)
+    assert not put.called
+
+
+@pytest.mark.asyncio
+async def test_upsert_without_any_approved_card_sends_nothing(azure: AzureConnector) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        put = mock.put(_set_url("A", "www")).respond(201, json=_a_set("www"))
+        result = await dispatch(
+            operator=operator(),
+            connector_id=AZURE_CONNECTOR_ID,
+            op_id="azure.network.dns.recordset.upsert",
+            target=AzureTargetStub(),
+            params=UPSERT,
+            _approved=True,
+        )
+
+    assert result.status == "error", result
+    assert not put.called
+
+
+@pytest.mark.asyncio
+async def test_upsert_refuses_when_the_card_shows_another_etag(azure: AzureConnector) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        put = mock.put(_set_url("A", "www")).respond(200, json=_a_set("www"))
+        result = await _call(
+            "azure.network.dns.recordset.upsert",
+            {**UPSERT, "etag": ETAG},
+            card={"current": {"exists": True, "etag": NEW_ETAG}},
+        )
+
+    assert result.status == "error", result
+    assert not put.called
+
+
+@pytest.mark.asyncio
+async def test_the_upsert_card_says_a_change_replaces_the_whole_record_set(
+    azure: AzureConnector,
+) -> None:
+    with respx.mock() as mock:
+        _login(mock)
+        mock.get(_set_url("A", "www")).respond(404, json=_error("ResourceNotFound"))
+        card = await upsert_card(_context(azure, UPSERT))
+
+    assert card is not None and "replaces the whole record set" in card["replaces"]

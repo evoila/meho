@@ -138,7 +138,13 @@ def _type_param(types: tuple[str, ...]) -> dict[str, Any]:
 
 
 def _etag_param(description: str) -> dict[str, Any]:
-    return {"type": "string", "minLength": 1, "maxLength": 256, "description": description}
+    return {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "not": {"enum": ["*"]},
+        "description": description,
+    }
 
 
 # ----------------------------------------------------------------------

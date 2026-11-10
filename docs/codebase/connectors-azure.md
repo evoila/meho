@@ -1585,9 +1585,9 @@ the current values.
   deletes nothing. The same etag: it sends `DELETE` with `If-Match: <etag>`,
   so Azure refuses too when the record set changed in between.
 - The answer holds `previous`: the record set as it was just before the
-  delete. That is the copy to recreate it from. The audit row keeps only a
-  hash of the call and its outcome, by design, so the old values are kept in
-  the approval request (the card above) and in the answer.
+  delete. That is the copy to recreate it from. The audit row of the call
+  also holds these values as `state_before`. The approval request (the card
+  above) and the answer hold them too.
 - No record set (404 on the read, or 204 on the delete): nothing is deleted
   and `already_absent` is true.
 - MEHO never deletes `SOA`, or the `NS` record set at the zone name (`@`).
@@ -1604,11 +1604,17 @@ the current values.
 - Without `etag` the call sends `If-None-Match: *`: it creates a record set
   and Azure refuses when the name and type exist. With `etag` it sends
   `If-Match`: it replaces the records and TTL of that version. A write never
-  overwrites by accident.
+  overwrites by accident. `etag` must be one specific etag: `*` (any version)
+  is refused by the schema and by the code.
+- The change runs only as the approved run of a request whose card shows the
+  current record set. When the card is missing, or its read failed, MEHO sends
+  nothing and says so. The audit row holds the old values (`state_before`,
+  from the card) and the new ones (`state_after`).
 - Azure answers 412 when the etag does not match. MEHO shows it as an error
   that says nothing was changed. A lost answer is not sent again (a write is
   repeated only after a 429 or a 401). Look with `show` before you try again.
-- A change replaces all records of the set. Caches may serve the old values
+- A change replaces the whole record set, also what the card does not list
+  (for example metadata). Caches may serve the old values
   until the old TTL runs out.
 - The approval card (`upsert_card`) shows the current values next to the new
   ones, and whether the call only creates.
@@ -1634,7 +1640,7 @@ lab proof must still show:
 - the record sets of a test zone list the same as the portal;
 - a test record is created, then deleted, with approval, and the approval
   request of the delete holds its old values (the card, and `previous` in the
-  answer);
+  answer), and the audit row shows them as `state_before`;
 - the audit row, the approval card and the answer hold the values and no
   other field of the zone.
 

@@ -32,14 +32,13 @@ from meho_backplane.session_store.upload_slots import (
     UploadBusyError,
     upload_slot,
 )
-from meho_backplane.session_store.worker import run_in_worker, shutdown_worker_pool
+from meho_backplane.session_store.worker import WORKERS, run_in_worker
 from meho_backplane.settings import get_settings
 
 _TENANT = UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
 _SID = "7a2b3c4d-aaaa-4bbb-8ccc-ddddeeeeffff"
 _PATH = f"{_SID}.jsonl"
 _MIB = 1024 * 1024
-_LIMIT = 16 * _MIB
 
 
 class _Store:
@@ -92,6 +91,16 @@ def _exit_now() -> None:
     os._exit(1)
 
 
+def _exit_after(seconds: float) -> None:
+    time.sleep(seconds)
+    os._exit(1)
+
+
+def _echo_after(seconds: float, value: str) -> str:
+    time.sleep(seconds)
+    return value
+
+
 def _meta() -> UploadMeta:
     return UploadMeta(
         session_id=_SID,
@@ -109,12 +118,13 @@ def _meta() -> UploadMeta:
 async def test_healthz_answers_while_a_maximum_size_upload_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SESSION_STORE_MAX_UNPACKED_BYTES", str(_LIMIT))
+    monkeypatch.delenv("SESSION_STORE_MAX_UNPACKED_BYTES", raising=False)
+    limit = load_config().max_unpacked_bytes
     # One long line with a secret-like name: the slowest kind of content
-    # for the secret check, at the full unpacked limit.
-    line = b"password=" + b"a" * (_LIMIT - 10) + b"\n"
+    # for the secret check, at the full default unpacked limit. This is
+    # the first call, so the worker process starts during the test too.
+    line = b"password=" + b"a" * (limit - 10) + b"\n"
     data = _archive(line)
-    await run_in_worker(len, b"")  # start the worker processes first
     store = _Store()
     upload = asyncio.create_task(
         upload_session(
@@ -162,12 +172,32 @@ def test_an_archive_error_pickles_with_its_reason() -> None:
 
 @pytest.mark.asyncio
 async def test_a_dead_worker_fails_one_call_and_the_next_call_works() -> None:
-    try:
-        with pytest.raises(BrokenProcessPool):
-            await run_in_worker(_exit_now)
-        assert await run_in_worker(len, b"abc") == 3
-    finally:
-        shutdown_worker_pool()
+    with pytest.raises(BrokenProcessPool):
+        await run_in_worker(_exit_now)
+    assert await run_in_worker(len, b"abc") == 3
+
+
+@pytest.mark.asyncio
+async def test_a_dead_worker_fails_only_its_own_call() -> None:
+    assert WORKERS == 2
+    running = asyncio.create_task(run_in_worker(_echo_after, 4.0, "running"))
+    dying = asyncio.create_task(run_in_worker(_exit_after, 1.0))
+    await asyncio.sleep(0.1)
+    # Both places are taken, so this call waits until the dying one ends.
+    queued = asyncio.create_task(run_in_worker(_echo_after, 0.0, "queued"))
+    with pytest.raises(BrokenProcessPool):
+        await dying
+    assert not running.done(), "the other call should still run when the worker dies"
+    assert await queued == "queued"
+    assert await running == "running"
+
+
+@pytest.mark.asyncio
+async def test_no_more_than_the_limit_of_calls_run_at_a_time() -> None:
+    started = time.perf_counter()
+    await asyncio.gather(*(run_in_worker(_echo_after, 1.0, "x") for _ in range(WORKERS + 1)))
+    # The last call starts only after one of the first ones ended.
+    assert time.perf_counter() - started >= 2.0
 
 
 def test_prepare_finds_the_tail_checks_it_and_packs_it() -> None:

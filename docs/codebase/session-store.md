@@ -107,12 +107,13 @@ MEHO first loads and locks the stored session. A session that another
 person started is `409 session_owned_by_another_person`. Then steps 1, 2
 and the secret check of step 4 run in one call in a worker process
 (`prepare.py`, `worker.py`), not on the server's event loop. So a large
-upload never holds up other requests. A pool of two worker processes
-starts with the first upload; a third upload waits for a free worker. A
-worker thread would not be enough: the regular expressions of the secret
-check hold Python's interpreter lock for a whole search. When a worker
-process dies, that upload fails with `500`, and the next upload starts a
-new pool.
+upload never holds up other requests. Each upload gets its own new
+worker process, which stops when the upload is done. At most two run at
+a time; a third upload waits for a free place. A worker thread would not
+be enough: the regular expressions of the secret check hold Python's
+interpreter lock for a whole search. When a worker process dies (for
+example, it runs out of memory), only that upload fails with `500`.
+Other uploads that run or wait at the same time go on as normal.
 
 1. **Unpack** (`archive.py`). Nothing goes to disk. MEHO refuses a link or
    device, a path with `..`, a leading `/`, a backslash or a control

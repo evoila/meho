@@ -3045,7 +3045,7 @@
 <p>You can add your own connectors the same way as the enterprise pack: see <a href="../../extend/connector-kit/">Write a connector package</a>.</p>
 <h2 id="open-source-connectors-public-image">Open source connectors (public image)<a class="headerlink" href="#open-source-connectors-public-image" title="Permanent link">&para;</a></h2>
 <p>These connectors are in the public image, generated from the in-process connector registry. Each row is one registered implementation. The <strong>Docs</strong> column links to the connector's page in the source repository.</p>
-<p>MEHO has two kinds of connector, both first-class and indistinguishable to an agent. <strong>Generic</strong> connectors are built by ingesting a vendor's protocol spec (OpenAPI, GraphQL, WSDL, proto); <strong>typed</strong> connectors are hand-coded against a vendor SDK or transport where no usable spec exists. The <strong>Kind</strong> column is populated only where MEHO's published connector-spec catalog states it, and is blank otherwise — it is a property of how a connector's operations are sourced, not something this table infers.</p>
+<p>MEHO has two kinds of connector, both first-class and indistinguishable to an agent. <strong>Generic</strong> connectors are built by ingesting a vendor's OpenAPI file (version 3.0 or 3.1; the command line converts a Swagger 2.0 file first); <strong>typed</strong> connectors are hand-coded against a vendor SDK or transport where no usable spec exists. The <strong>Kind</strong> column is populated only where MEHO's published connector-spec catalog states it, and is blank otherwise — it is a property of how a connector's operations are sourced, not something this table infers.</p>
 <table>
 <thead>
 <tr>

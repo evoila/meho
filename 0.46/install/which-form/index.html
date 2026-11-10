@@ -3044,10 +3044,13 @@ steps for every form.</p>
 <p>Start at the first question and stop at the first "yes".</p>
 <ol>
 <li><strong>Do you run VMware vSphere or VMware Cloud Foundation (VCF)?</strong>
-   Yes: use form 1, the <a href="../form-1-vmware-appliance/">VMware appliance</a>.
-   If you want MEHO inside your own VKS cluster (vSphere Kubernetes
-   Service) instead, use form 3,
-   <a href="../form-3-your-kubernetes/#vks-vsphere-kubernetes-service">your Kubernetes</a>.</li>
+   Yes: the <a href="../form-1-vmware-appliance/">VMware appliance</a> is not
+   released yet. Use form 3 (<a href="../form-3-your-kubernetes/">your Kubernetes</a>)
+   if you have one. This includes your own VKS cluster (vSphere
+   Kubernetes Service): see
+   <a href="../form-3-your-kubernetes/#vks-vsphere-kubernetes-service">VKS</a>.
+   Otherwise use form 2, the <a href="../form-2-linux-server/">Linux server</a>,
+   which can be a VM in vSphere. Ask evoila about the appliance.</li>
 <li><strong>Do you run your own Kubernetes or OpenShift cluster, and may you
    install a Helm chart on it?</strong>
    Yes: use form 3, <a href="../form-3-your-kubernetes/">your Kubernetes</a>.</li>
@@ -3094,7 +3097,7 @@ steps for every form.</p>
 <tbody>
 <tr>
 <td>1. VMware appliance</td>
-<td>Not released yet.</td>
+<td>In progress, not released.</td>
 <td>VMware vSphere, as the release notes say when it ships.</td>
 </tr>
 <tr>

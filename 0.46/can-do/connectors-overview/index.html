@@ -3101,8 +3101,9 @@ needs one, and writes an audit row. You do not need a different tool
 for each vendor.</p>
 <p>MEHO has two kinds of connectors. Both work the same for the caller:</p>
 <ul>
-<li><strong>Generic</strong> connectors are built from a vendor's API file (OpenAPI,
-  GraphQL, WSDL or proto).</li>
+<li><strong>Generic</strong> connectors are built from a vendor's OpenAPI file (version
+  3.0 or 3.1). The command line converts a Swagger 2.0 file to OpenAPI 3
+  first.</li>
 <li><strong>Typed</strong> connectors are written by hand against a vendor library or
   a protocol, where no good API file exists.</li>
 </ul>

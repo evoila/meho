@@ -33,8 +33,18 @@ The code is in `backend/src/meho_backplane/session_store/` and
 
 ## Setup
 
+The operator guide page `docs-site/guides/agent-sessions.md` shows the
+setup. An operator sets the Helm values under `config.sessionStore`
+(`endpoint`, `bucket`, `credentialsVaultPath`, `region`,
+`retentionDaysDefault`, `maxUploadBytes`, `maxUnpackedBytes`, `maxFiles`,
+`cleanupEnabled`, `cleanupIntervalSeconds`). The chart renders each set
+value into its variable below (`templates/configmap.yaml`); an empty
+value renders nothing, so the default here applies. The chart test is
+`backend/tests/test_chart_session_store_values.py`.
+
 The store is off until three environment variables are set. Until then
-every session route answers `503 session_store_not_configured`.
+an upload, a download and a delete answer `503
+session_store_not_configured`.
 
 | Variable | Meaning |
 |---|---|
@@ -52,7 +62,9 @@ every session route answers `503 session_store_not_configured`.
 The access keys are never a plain setting. MEHO reads them from Vault with
 its scheduler token (`VAULT_SCHEDULER_TOKEN`), for every call to the
 store, so a rotated key works at once. The token's policy must allow
-`read` on that path.
+`read` on that path. The built-in OpenBao's `meho-scheduler` policy
+allows `read` on `secret/data/services/session-store`, so a built-in
+install uses that path.
 
 The variables live in `session_store/config.py`, not in `settings.py`.
 

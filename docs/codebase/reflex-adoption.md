@@ -44,8 +44,9 @@ correlation:
 - `_fetch_meta_tool_rows` — successful (`status_code == 200`) MCP
   meta-tool **envelope** rows in the window: `method="MCP"`,
   `path = f"/mcp/tools/call/{tool}"` for `call_operation`,
-  `broadcast_recent`, `add_to_knowledge`, `add_to_memory` (the same
-  path-prefix filter #444 uses).
+  `meho_broadcast_recent`, `add_to_knowledge`, `add_to_memory` (the same
+  path-prefix filter the retrieval usage report uses). Old rows of the
+  broadcast read carry the name `broadcast_recent`; they count too.
 - `_fetch_dispatch_rows` — successful **dispatch** rows
   (`method="DISPATCH"`, `path = op_id`); the write-class filter is
   applied in Python via `classify_op` because the classifier is
@@ -102,7 +103,8 @@ signal that a surface has no client-side reflex lever.
 
 1. **read-before-act** — of the sessions with ≥1 `call_operation`, the
    fraction whose **first** `call_operation` is *strictly preceded*, in
-   the same session, by a `broadcast_recent`. Denominator: sessions
+   the same session, by a `meho_broadcast_recent` call (in old rows:
+   `broadcast_recent`). Denominator: sessions
    with ≥1 `call_operation`. `None` when 0 (the whole `cli_rest`
    surface).
 
@@ -214,13 +216,6 @@ a per-surface table (or `--json` for the raw envelope). Nil ratios read
   (bounded by `AgentAnnouncement.ttl_minutes`) is a future refinement;
   it is a subset of the current boolean, so v1 is the looser, simpler
   definition.
-- **The read count uses the tool name `broadcast_recent`.** The report
-  counts envelope rows with path `/mcp/tools/call/broadcast_recent`
-  (`BROADCAST_RECENT_TOOL` in `reflex/adoption.py`). The MCP tool is
-  registered as `meho_broadcast_recent`, so its rows carry
-  `/mcp/tools/call/meho_broadcast_recent`. So read-before-act counts no
-  reads today and reads `0.0` on the `agent` surface. The reflex advisory
-  uses the right path (see [reflex-advisory.md](reflex-advisory.md)).
 - **Emission wiring may lag the metric.** As with #444's usage surface,
   the metric is defined against audit-row shapes that some meta-tools
   may not yet emit; the report degrades to all-`None`/zero gracefully.

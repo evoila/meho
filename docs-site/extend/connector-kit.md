@@ -174,6 +174,10 @@ The inputs of `register_typed_operation`:
   `when_to_use` and `llm_instructions`. An agent picks your operation
   from these texts, so write them with care.
 - `embedding_service`: pass on the value MEHO hands to your function.
+- **Tags:** add the tag `no-trace-body` to an operation whose request
+  body must not be kept in the trace (for example an operation that runs
+  code with given inputs). It changes nothing else: not the risk level,
+  not the approval, and not the error text of the vendor.
 
 **An input that holds an address.** Some operations connect to an
 address the caller gives: a URL, a host name, or a host and port. The

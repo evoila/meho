@@ -38,6 +38,7 @@ from meho_backplane.redaction.flight_recorder import (
     redact_span,
 )
 from meho_backplane.redaction.flight_recorder import bodies as fr_bodies
+from meho_backplane.redaction.flight_recorder.families import secret_tag_tokens
 from meho_backplane.settings import get_settings
 
 # --- Synthetic, PLACEHOLDER-shaped secrets ---------------------------------
@@ -647,6 +648,47 @@ def test_hyphenated_secret_tags_are_matched(tag: str) -> None:
     result = classify_body_exclusion("acme.generic.op", tags=[tag])
     assert result.excluded is True
     assert result.family == "secret-bearing"
+
+
+@pytest.mark.parametrize("tag", ["no-trace-body", "No_Trace_Body", " NO-TRACE-BODY "])
+def test_no_trace_body_tag_excludes_body(tag: str) -> None:
+    result = classify_body_exclusion("acme.workflow.run", tags=["write", tag])
+    assert result.excluded is True
+    assert result.uncertain is False
+    assert result.family == "marked-no-body"
+
+
+@pytest.mark.parametrize("tags", [[], ["write"], ["no-trace"], ["trace-body"], ["no-trace-body-x"]])
+def test_untagged_op_is_unchanged_by_no_trace_body(tags: list[str]) -> None:
+    assert classify_body_exclusion("acme.workflow.run", tags=tags).excluded is False
+
+
+def test_no_trace_body_tag_with_delete_is_still_excluded() -> None:
+    result = classify_body_exclusion("acme.workflow.run", tags=["no-trace-body"], method="DELETE")
+    assert result.excluded is True
+
+
+def test_secret_family_comes_before_no_trace_body() -> None:
+    result = classify_body_exclusion("acme.workflow.run", tags=["no-trace-body", "secret"])
+    assert result.family == "secret-bearing"
+
+
+def test_no_trace_body_tag_is_not_a_secret_tag() -> None:
+    assert secret_tag_tokens(["no-trace-body"]) == set()
+
+
+def test_no_trace_body_tag_does_not_change_risk_level_or_grants() -> None:
+    from types import SimpleNamespace
+
+    from meho_backplane.operations.op_policy import effective_policy
+    from meho_backplane.operations.service_grants import _delete_shaped_reason_by_descriptor
+
+    policy = effective_policy("dangerous", True, [])
+    assert (policy.safety_level, policy.requires_approval) == ("dangerous", True)
+    descriptor = SimpleNamespace(
+        op_id="acme.workflow.run", safety_level="dangerous", method="POST", tags=["no-trace-body"]
+    )
+    assert _delete_shaped_reason_by_descriptor(descriptor) is None  # type: ignore[arg-type]
 
 
 def test_read_only_tag_is_not_secret_bearing() -> None:

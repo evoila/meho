@@ -66,6 +66,10 @@ matches your client:
 | **Claude Code** | One-command MEHO plugin (recommended), or a manual native-HTTP `.mcp.json` with a loopback PKCE flow pinned to the pre-registered `meho-mcp` public client. The pattern both dogfood repos run daily. | [Claude Code](claude-code.md) |
 | **Cursor and other clients that can't carry a `client_id`** | A generic `mcp-remote` stdio shim carrying a CLI-minted bearer token. | [Other MCP clients](mcp-remote-shim.md) |
 
+Running Claude for a whole company? The Claude admin should read
+[Organisation setup for the Claude admin](organisation-setup.md): the
+settings that keep MEHO the only path to your systems.
+
 All three assume the realm already has the public `meho-mcp` OAuth
 client and the operator's workstation trusts the deployment's CA. The
 one-time realm work is in

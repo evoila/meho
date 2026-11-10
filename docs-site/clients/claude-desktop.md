@@ -1,5 +1,7 @@
 # Claude Desktop
 
+Admins: read the [organisation setup page](organisation-setup.md) first.
+
 Claude Desktop reaches an internal MEHO backplane through a **local
 [`mcp-remote`](https://github.com/geelen/mcp-remote) stdio→HTTP shim**
 that runs on your own VPN-connected machine. The shim runs the OAuth

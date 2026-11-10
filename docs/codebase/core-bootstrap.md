@@ -295,7 +295,10 @@ The client secret comes into the Job as `MEHO_COMPANY_LOGIN_CLIENT_SECRET`
 by `secretKeyRef` from `companyLogin.clientSecret`. It is never in the plan,
 the chart or the output. `companyLogin.caBundle` mounts a ConfigMap into the
 Keycloak pod and sets `KC_TRUSTSTORE_PATHS`; Keycloak keeps trusting the
-usual public CAs too. The Keycloak NetworkPolicy limits only incoming
+usual public CAs too. `coreKeycloak.trustedCaBundle` does the same for a CA
+that Keycloak must trust also with the company login off, for example an
+AD or LDAP directory over LDAPS. When both are set, `KC_TRUSTSTORE_PATHS`
+lists both files, comma-separated. The Keycloak NetworkPolicy limits only incoming
 traffic, so Keycloak can call the company login.
 
 **Rights.** Setting up the provider needs `manage-identity-providers`; the

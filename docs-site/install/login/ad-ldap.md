@@ -17,8 +17,23 @@ directory. Passwords stay in the directory.
   [The console admin](../keycloak-realm.md#the-console-admin).
 - You have a read-only bind account in the directory.
 - Keycloak can reach the directory (LDAPS on port 636, or LDAP with
-  StartTLS). If the directory uses an internal CA, Keycloak must trust
-  it.
+  StartTLS).
+- If the directory's certificate comes from your own CA, give Keycloak
+  that CA through the chart. Put the CA certificate (PEM) in a
+  ConfigMap in the MEHO namespace, set `coreKeycloak.trustedCaBundle`,
+  and run `helm upgrade`. Keycloak then trusts this CA for every
+  outgoing TLS call. Without it, **Test connection** in step 2 fails.
+
+  ```bash
+  kubectl create configmap directory-ca --from-file=ca.crt=<path to the CA file>
+  ```
+
+  ```yaml
+  coreKeycloak:
+    trustedCaBundle:
+      configMapName: directory-ca
+      key: ca.crt               # default
+  ```
 
 ## 1. Pick the directory groups
 
@@ -44,19 +59,31 @@ LDAP providers** (or **Add new provider → LDAP**).
 
 | Section | Setting | Value |
 |---|---|---|
-| General options | **Vendor** | `Active Directory` (or your LDAP vendor) |
+| General options | **UI display name** | a name you know the directory by, for example `Active Directory` |
+| | **Vendor** | `Active Directory` (or your LDAP vendor) |
 | Connection and authentication | **Connection URL** | `ldaps://dc1.example.com:636` |
 | | **Enable StartTLS** | On only with `ldap://` |
+| | **Use Truststore SPI** | `Always` |
 | | **Bind type** | `simple` |
 | | **Bind DN** | the read-only bind account |
 | | **Bind credentials** | its password |
 | LDAP searching and updating | **Edit mode** | `READ_ONLY` |
+| | **Username LDAP attribute** | `sAMAccountName` (AD) or `userPrincipalName`; `uid` for most other LDAP directories |
 | | **Users DN** | where your people are, for example `OU=People,DC=example,DC=com` |
 | | **User LDAP filter** | optional, to limit who is read |
 | | **Search scope** | `Subtree` if people sit in sub-OUs |
 | Synchronization settings | **Import users** | On |
 | | **Periodic changed users sync** | On, for example every 3600 seconds |
 | Cache settings | **Cache policy** | `NO_CACHE` (or `MAX_LIFESPAN` with a few minutes) |
+
+**Username LDAP attribute** is the name a person logs in with. For
+Active Directory, Keycloak fills in `cn`. Change it: `cn` is the
+display name, so two people can have the same one, and it changes when
+a person is renamed.
+
+**Use Truststore SPI** `Always` makes Keycloak check the directory's
+certificate against the CAs it trusts, including
+`coreKeycloak.trustedCaBundle`.
 
 **Cache policy** decides when a removal from a directory group takes
 effect. With the default cache, Keycloak keeps the old group of a
@@ -94,6 +121,9 @@ Open the provider → **Mappers** → **Add mapper**, with mapper type
 | **Name** | `meho-groups` |
 | **LDAP Filter** | the filter below |
 | **Groups Path** | `/` |
+
+Paste the filter as one line, exactly as it is here. No spaces and no
+line breaks.
 
 ```text
 (|(cn=MEHO-Readers)(cn=MEHO-Operators)(cn=MEHO-SA-Operators)(cn=MEHO-Admins)(cn=MEHO-Approvers))
@@ -181,7 +211,9 @@ second step in Keycloak: a code from an authenticator app.
    `... Conditional 2FA`).
 3. Set that conditional sub-flow to **Required**, and its **OTP Form**
    step to **Required**. If it also has a **Condition - user
-   configured** step, set that step to **Disabled**.
+   configured** step, set that step to **Disabled**. Keycloak 26.8
+   also shows a **Condition - credential** step there. Set it to
+   **Disabled** too.
 4. **Action → Bind flow** → **Browser flow** → **Save**.
 
 Check **Authentication → Required actions**: **Configure OTP** must be

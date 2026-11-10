@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The ``space``, ``space_member`` and ``resource_assignment`` tables (migration ``0155``)."""
+"""The ``space``, ``space_member`` and ``resource_assignment`` tables (migration ``0156``)."""
 
 from __future__ import annotations
 

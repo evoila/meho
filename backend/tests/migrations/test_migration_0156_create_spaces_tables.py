@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0155_create_spaces_tables``.
+"""Behavioural tests for ``0156_create_spaces_tables``.
 
 The migration creates ``space``, ``space_member`` and ``resource_assignment``.
 ``downgrade()`` drops them. Every step targets this migration's own revision
-(``0155``) and its ``down_revision`` (``0154``), never ``head``.
+(``0156``) and its ``down_revision`` (``0155``), never ``head``.
 """
 
 from __future__ import annotations
@@ -23,14 +23,14 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0155"
-_DOWN_REVISION = "0154"
+_REVISION = "0156"
+_DOWN_REVISION = "0155"
 _TABLES = {"space", "space_member", "resource_assignment"}
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0155.db"
+    db_path = tmp_path / "migration_0156.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

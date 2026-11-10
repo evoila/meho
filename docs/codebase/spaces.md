@@ -19,7 +19,7 @@ The words:
 
 ## Key types
 
-Code is in `backend/src/meho_backplane/spaces/`. Migration `0155` makes the
+Code is in `backend/src/meho_backplane/spaces/`. Migration `0156` makes the
 tables.
 
 | Table | Holds |
@@ -61,4 +61,4 @@ key, not the name.
 ## References
 
 - Tests: `backend/tests/test_spaces_store.py`,
-  `backend/tests/migrations/test_migration_0155_create_spaces_tables.py`.
+  `backend/tests/migrations/test_migration_0156_create_spaces_tables.py`.

@@ -3,8 +3,8 @@
 
 """Create ``space``, ``space_member`` and ``resource_assignment``.
 
-Revision ID: 0155
-Revises: 0154
+Revision ID: 0156
+Revises: 0155
 Create Date: 2026-11-10
 
 A space is an area inside one tenant that belongs to a person or a small
@@ -23,8 +23,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0155"
-down_revision: str | None = "0154"
+revision: str = "0156"
+down_revision: str | None = "0155"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

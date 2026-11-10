@@ -37,7 +37,9 @@ optional `descr` to `pfsense.gateway.add` and `pfsense.route.static.add`, and
 the read `pfsense.diag.ping`: a short ping that runs on the firewall, from
 one of the firewall's own addresses, to prove that a route carries traffic.
 #4131 puts the firewall's subnets and active DHCP leases on the topology map
-(see "Topology map" below).
+(see "Topology map" below). #4093 adds two reads for OpenVPN sessions:
+`pfsense.openvpn.clients` (who is connected now) and `pfsense.openvpn.log` (the
+log lines of one user in a time window, with an event type for each).
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
@@ -67,7 +69,7 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (24 ops total). T1 shipped
+  composition function, and the `PFSENSE_OPS` tuple (26 ops total). T1 shipped
   `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
   appends `pfsense.dhcp.leases`; #3090 appends the two write ops via the
   `ops_write` module; #3232 appends the first two destructive deletes and #3313
@@ -79,7 +81,11 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   `pfsense.filter.rule.delete` via the `ops_filter_rule` module; #3937
   appends `pfsense.user.disable` and `pfsense.user.enable` via the
   `ops_user_write` module; #3965 appends `pfsense.diag.ping` via the
-  `ops_diag` module.
+  `ops_diag` module; #4093 appends `pfsense.openvpn.clients` and
+  `pfsense.openvpn.log` via the `ops_openvpn_meta` module.
+
+- **OpenVPN reads** (`ops_openvpn.py` handlers, `ops_openvpn_meta.py`
+  schemas and `OPENVPN_OPS`, #4093) — see "OpenVPN reads" below.
 
 - **Diagnostics** (`ops_diag.py`, #3965) — the handler `pfsense_diag_ping`,
   the input checks (`_validate_host`, `_validate_source`, `_validate_count`),
@@ -280,7 +286,7 @@ Two-phase registration, identical to the bind9 pattern:
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
 
-## Op surface (24 ops)
+## Op surface (26 ops)
 
 | Op ID | Command | Group | Safety |
 |---|---|---|---|
@@ -308,6 +314,8 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.user.disable` | `cat /cf/conf/config.xml` guard (match one `<system><user>` by name, refuse the admin account) + `pfSsh.php playback` fragment (set `disabled` + `local_user_set()` + `write_config()`) + read-back verify | `users` | `dangerous` |
 | `pfsense.user.enable` | same as `pfsense.user.disable`, but clears `disabled` | `users` | `dangerous` |
 | `pfsense.diag.ping` | `ifconfig -a` (the source must be one of these addresses) + `ping -4\|-6 -n -c <1-5> -W 1000 -t <count+2> -S <source> <host>` | `diagnostics` | `caution` |
+| `pfsense.openvpn.clients` | for each `/var/etc/openvpn/server*` with a socket: `grep` of `proto` / `port` in `config.ovpn` + `nc -U` to the management socket (`status 3`) | `openvpn` | `safe` |
+| `pfsense.openvpn.log` | `date` + `grep -F -e <common_name> /var/log/openvpn.log \| tail -n 5000` | `openvpn` | `safe` |
 
 The 11 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier
 are `safety_level="safe"`. `pfsense.diag.ping` is `safety_level="caution"` /
@@ -876,6 +884,38 @@ the account, its password, its groups and its certificates stay.
   not run the full read-back (`assert_only_own_object_changed`) that the
   other config writes use; they check only the user list. That is separate
   work.
+
+## OpenVPN reads (#4093)
+
+Two `safe` reads for the first step of a "the VPN is slow" or "the VPN keeps
+dropping" ticket. They change nothing.
+
+- **`pfsense.openvpn.clients`** takes no parameters. It finds each OpenVPN
+  server that has a management socket and reads `status 3`. The column names
+  come from the `HEADER` line, so a new column does not break the parser.
+  Answer: `{servers: [{server, proto, port, readable, clients: [{common_name,
+  real_address, virtual_address, virtual_ipv6_address, bytes_received,
+  bytes_sent, connected_since, username}]}], client_count}`. A server whose
+  status did not end with `END` is `readable: false`: its list is unknown, not
+  empty. `client_count` counts readable servers only. No server at all gives an
+  empty list.
+- **`pfsense.openvpn.log`** takes `common_name` (required; 2 to 64 characters of
+  letters, digits, `.`, `_`, `@`, `-`), `since` and `until` (ISO 8601 with a
+  zone; a time without a zone is refused) and `limit` (1 to 1000, default 200).
+  It greps the log for the name (fixed string, quoted) and keeps the last 5000
+  matching lines. Each line gets an event: `connect`, `disconnect` (with a
+  reason such as `remote-exit` or `inactivity-timeout`), `restart` (reason such
+  as `ping-restart`), `error` (TLS and auth errors) or `other`.
+- **Time.** A log stamp has no year and no zone. The op reads the firewall's
+  date and UTC offset in the same command, adds them, and compares the lines to
+  the window as exact moments. A stamp that would be in the future belongs to
+  the year before. The offset is the one at call time.
+- **`truncated: true`** means older lines may be missing (the 5000-line read
+  was full) or more events matched than `limit`. The newest events are kept.
+- **Known limit.** Lines are matched by the common name text. A line from
+  before the server knew the user (for example an early TLS error) has no name
+  and is not returned.
+- **Tests.** `backend/tests/test_connectors_pfsense_openvpn_ops.py`.
 
 ## Diagnostics: `pfsense.diag.ping` (#3965)
 

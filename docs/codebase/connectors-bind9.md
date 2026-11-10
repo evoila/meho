@@ -27,9 +27,9 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
 - **`Bind9Connector`** (`connector.py`) -- `SshConnector` subclass.
   Class attributes: `product="bind9"`, `version="9.x"`,
   `impl_id="bind9-ssh"`. It sets no `supported_version_range` and keeps
-  the default `priority` of 0. Inherits the per-target asyncssh connection
-  pool, the key-or-password auth selection, and `aclose()` from the
-  adapter; overrides `fingerprint`, `probe`, `execute`, and adds the
+  the default `priority` of 0. Inherits the asyncssh connection
+  pool (one login per caller and target), the key-or-password auth
+  selection, and `aclose()` from the adapter; overrides `fingerprint`, `probe`, `execute`, and adds the
   `about` op handler.
 - **`_remote_bash_with_sudo()`** -- the load-bearing safety
   primitive. The only sudo-shell-construction path in the connector

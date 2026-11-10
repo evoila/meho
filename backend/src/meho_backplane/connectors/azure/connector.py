@@ -104,6 +104,7 @@ from meho_backplane.connectors.azure.inventory import InventoryOps
 from meho_backplane.connectors.azure.migrate import MigrateOps
 
 # monitor (Task #5090)
+from meho_backplane.connectors.azure.monitor import MonitorOps
 
 # network (Task #5085)
 from meho_backplane.connectors.azure.network import NetworkOps
@@ -187,6 +188,7 @@ class AzureConnector(
     # migrate (Task #5093)
     MigrateOps,
     # monitor (Task #5090)
+    MonitorOps,
     # network (Task #5085)
     NetworkOps,
     # security (Task #5089)

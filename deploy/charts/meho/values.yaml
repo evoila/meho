@@ -716,6 +716,10 @@ config:
   # a new knowledge entry is not written while similar entries exist; the
   # writer gets the list instead. See `docs/codebase/kb.md`.
   kbSimilarCheck: "false"
+  # -- `mcpShortToolTexts` is rendered into `MCP_SHORT_TOOL_TEXTS`. When
+  # `"true"`, the biggest tools on the default MCP tool list send a short
+  # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
+  mcpShortToolTexts: "false"
   # -- Tenants whose knowledge entries marked `shared` every tenant on
   # this instance can read. Comma-separated tenant ids. Rendered into
   # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and

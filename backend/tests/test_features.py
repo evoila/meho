@@ -354,6 +354,17 @@ def test_mcp_block_reports_server_pinned_protocol_version() -> None:
     assert "docs" not in mcp
 
 
+@pytest.mark.parametrize("short", [False, True])
+def test_mcp_block_reports_the_short_tool_texts_switch(short: bool) -> None:
+    """``/ready`` says whether the short tool texts are on, so a benchmark knows its state."""
+    block = build_features_block(_settings_with(mcp_short_tool_texts=short))
+    assert block["mcp"]["short_tool_texts"] is short
+
+
+def test_mcp_block_short_tool_texts_is_off_by_default() -> None:
+    assert build_features_block(_settings_with())["mcp"]["short_tool_texts"] is False
+
+
 # ---------------------------------------------------------------------------
 # approval_custody (#3712)
 # ---------------------------------------------------------------------------

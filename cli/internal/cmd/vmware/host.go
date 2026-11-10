@@ -42,8 +42,8 @@ func newHostListCmd() *cobra.Command {
 			"power_state for human eyes; --json emits the full OperationResult\n" +
 			"envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vmware host list --target rdc-vcenter\n" +
-			"  meho vmware host list --target rdc-vcenter --json",
+		Example: "  meho vmware host list --target vcenter-lab\n" +
+			"  meho vmware host list --target vcenter-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -118,8 +118,8 @@ func newHostEvacuateCmd() *cobra.Command {
 			"Pre-merge of T6 (#509), the dispatcher returns \"operation not\n" +
 			"found\" which surfaces in the standard error trailer.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vmware host evacuate esxi-01 --target rdc-vcenter\n" +
-			"  meho vmware host evacuate host-23 --target rdc-vcenter --json",
+		Example: "  meho vmware host evacuate esxi-01 --target vcenter-lab\n" +
+			"  meho vmware host evacuate host-23 --target vcenter-lab --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -292,7 +292,7 @@ func renderHTTPStatus(
 		// targets resolver's structured {"detail": {"error":
 		// "no_target", "query": "...", "matches": [...]}}. Render
 		// near-miss suggestions when the structured form lands so the
-		// operator sees "did you mean rdc-vcenter? rdc-vsphere?".
+		// operator sees "did you mean vcenter-lab? vsphere-lab?".
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(formatNotFound(bodyStr)),
 			jsonOut,

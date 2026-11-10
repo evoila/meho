@@ -38,8 +38,8 @@ func newTier1ListCmd() *cobra.Command {
 			"connector_id=\"nsx-rest-4.2\". Renders id / display_name / tier0_path\n" +
 			"for human eyes; --json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho nsx tier1 list --target rdc-nsx\n" +
-			"  meho nsx tier1 list --target rdc-nsx --json",
+		Example: "  meho nsx tier1 list --target nsx-lab\n" +
+			"  meho nsx tier1 list --target nsx-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -271,7 +271,7 @@ func TestRequireTargetForScopeBlocks(t *testing.T) {
 		if err := requireTargetForScope(s, ""); err == nil {
 			t.Errorf("scope=%s should require --target", s)
 		}
-		if err := requireTargetForScope(s, "rdc-vault"); err != nil {
+		if err := requireTargetForScope(s, "vault-lab"); err != nil {
 			t.Errorf("scope=%s with target should pass; got %v", s, err)
 		}
 	}

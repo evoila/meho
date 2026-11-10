@@ -258,7 +258,7 @@ claim for audit parent-linkage (#3446), is never matched against this table).
    | `AGENT_GRANT_REQUIRED` | No matching row |
    |---|---|
    | `off` (default) | the table above, as before |
-   | `observe` | the table above, and MEHO logs `agent_no_grant_would_deny` (agent, op id, target, risk level) for each call that `on` would refuse |
+   | `observe` | the table above, and MEHO logs `agent_no_grant_would_deny` (agent, op id, target, risk level) once for each call that `on` would refuse. A call that checks the grant twice (a destructive call checks its preview hash again; a preview with a check before the wait for approval runs the gate twice) still logs one line (`agent_no_grant_log_scope`). |
    | `on` | `deny` on every risk level, also `safe`. The reason starts with `agent_no_grant:`, names the agent and the op, and says how an admin adds a grant. `result_denied` returns `error_code="agent_no_grant"`, and the audit row of the refusal has `reason_code="agent_no_grant"`. Steps 4 and 5 are skipped: nothing can loosen a `deny`. |
 
    A matching row works as before, also with the switch on. Any other

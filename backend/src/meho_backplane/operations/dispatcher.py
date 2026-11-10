@@ -286,6 +286,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
 from meho_backplane.broadcast.reflex import build_reflex_advisory
@@ -3663,36 +3664,38 @@ async def dispatch(
     for it and record it when it does not finish.
     """
     if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
-        return await _dispatch_now(
-            operator=operator,
-            connector_id=connector_id,
-            op_id=op_id,
-            target=target,
-            params=params,
-            _approved=_approved,
-            preview_hash=preview_hash,
-            idempotency_key=idempotency_key,
-        )
+        with agent_no_grant_log_scope():
+            return await _dispatch_now(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+                _approved=_approved,
+                preview_hash=preview_hash,
+                idempotency_key=idempotency_key,
+            )
     if is_draining() and not _approved:
         _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
         return shutting_down_result(op_id)
-    async with track_operation(
-        op_id=op_id,
-        connector_id=connector_id,
-        operator_sub=operator.sub,
-        tenant_id=operator.tenant_id,
-        approved_run=_approved,
-    ):
-        return await _dispatch_now(
-            operator=operator,
-            connector_id=connector_id,
+    with agent_no_grant_log_scope(new=True):
+        async with track_operation(
             op_id=op_id,
-            target=target,
-            params=params,
-            _approved=_approved,
-            preview_hash=preview_hash,
-            idempotency_key=idempotency_key,
-        )
+            connector_id=connector_id,
+            operator_sub=operator.sub,
+            tenant_id=operator.tenant_id,
+            approved_run=_approved,
+        ):
+            return await _dispatch_now(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+                _approved=_approved,
+                preview_hash=preview_hash,
+                idempotency_key=idempotency_key,
+            )
 
 
 async def _dispatch_now(

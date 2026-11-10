@@ -71,6 +71,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import resolve_connector_or_label
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
@@ -809,27 +810,29 @@ async def preview_dispatch(
     if isinstance(resolved, dict):
         return resolved  # the op or the target did not resolve (see _resolve_descriptor)
     descriptor, connector_id = resolved
-    envelope = await _park_check_envelope(
-        operator=operator,
-        descriptor=descriptor,
-        connector_id=connector_id,
-        op_id=op_id,
-        target=target,
-        params=params,
-    ) or await _preview_resolved_op(
-        operator=operator,
-        connector_id=connector_id,
-        op_id=op_id,
-        descriptor=descriptor,
-        target=target,
-        params=params,
-    )
-    governance = await _governance_fields(
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        connector_id=connector_id,
-    )
+    # The park check and the governance fields each run the policy gate.
+    with agent_no_grant_log_scope():
+        envelope = await _park_check_envelope(
+            operator=operator,
+            descriptor=descriptor,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+        ) or await _preview_resolved_op(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+        )
+        governance = await _governance_fields(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+        )
     return {**envelope, **governance}
 
 

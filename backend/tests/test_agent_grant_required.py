@@ -20,30 +20,44 @@ import uuid
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import select
 from structlog.testing import capture_logs
 
+from meho_backplane.auth import permissions
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.auth.permissions import resolve_verdict
+from meho_backplane.auth.permissions import agent_no_grant_log_scope, resolve_verdict
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, AuditLog, PermissionVerdict, Tenant
 from meho_backplane.docs_search.target_scope import TargetDeniedError, _check_target_access
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._errors import result_denied
+from meho_backplane.operations._park_check import _PARK_CHECKS
+from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.deny_reasons import (
     AGENT_GRANT_DENIED,
     AGENT_NO_GRANT,
     deny_reason_code,
 )
+from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
 from tests.test_agent_invocation import _make_operator as _make_person_for_run
 from tests.test_agent_invocation import _seed_definition, _seed_echo_op
 from tests.test_agent_refusal_audit_reason import _refusal, _run_call
+from tests.test_destructive_preview_binding import _CONNECTOR_ID as _DELETE_CONNECTOR
+from tests.test_destructive_preview_binding import _OP_ID as _DELETE_OP
+from tests.test_destructive_preview_binding import _PARAMS as _DELETE_PARAMS
+from tests.test_destructive_preview_binding import (
+    _blast_radius_builder,
+    _insert_destructive_descriptor,
+    _register_recording_connector,
+    _seed_target,
+)
+from tests.test_destructive_preview_binding import _operator as _delete_operator
 from tests.test_operations_dispatcher import (
     _FakeTarget,
     _module_handler_returning_dict,
@@ -450,3 +464,94 @@ async def test_docs_target_check_allows_with_the_switch_off() -> None:
         await _check_target_access(
             session, _operator(), row, op_id="meho.docs.search", query="docs-target"
         )
+
+
+# --- observe: one log line per call ---------------------------------------------
+
+
+def _would_deny_spy(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    spy = MagicMock()
+    monkeypatch.setattr(permissions, "_log", spy)
+    return spy
+
+
+def _would_deny_ops(spy: MagicMock) -> list[str]:
+    return [
+        c.kwargs["op_id"]
+        for c in spy.info.call_args_list
+        if c.args == ("agent_no_grant_would_deny",)
+    ]
+
+
+async def test_observe_logs_once_per_call_inside_a_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    _switch(monkeypatch, "observe")
+    spy = _would_deny_spy(monkeypatch)
+
+    with agent_no_grant_log_scope():
+        await _resolve("caution")
+        await _resolve("caution")
+        await _resolve("caution", op_id="vault.kv.list")
+        with agent_no_grant_log_scope():  # a preview built inside the call
+            await _resolve("caution")
+    assert _would_deny_ops(spy) == ["vault.kv.read", "vault.kv.list"]
+
+    with agent_no_grant_log_scope(), agent_no_grant_log_scope(new=True):  # a new top-level call
+        await _resolve("caution")
+    await _resolve("caution")  # outside a call each check logs
+    assert _would_deny_ops(spy) == [
+        "vault.kv.read",
+        "vault.kv.list",
+        "vault.kv.read",
+        "vault.kv.read",
+    ]
+
+
+async def _passes(ctx: PreviewContext) -> str | None:
+    return None
+
+
+async def test_observe_preview_with_a_park_check_logs_once(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    """The park check and the governance fields both run the gate; one line."""
+    _switch(monkeypatch, "observe")
+    await _register_op(stub_embedding_service, "vault.kv.flagged", requires_approval=True)
+    monkeypatch.setitem(_PARK_CHECKS, "vault.kv.flagged", AsyncMock(side_effect=_passes))
+    spy = _would_deny_spy(monkeypatch)
+
+    envelope = await preview_dispatch(
+        operator=_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.flagged",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert envelope["policy_verdict"] == "needs-approval", envelope
+    _PARK_CHECKS["vault.kv.flagged"].assert_awaited_once()
+    assert _would_deny_ops(spy) == ["vault.kv.flagged"]
+
+
+async def test_observe_destructive_call_logs_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The call builds its preview again to check the hash; still one line."""
+    _switch(monkeypatch, "observe")
+    _register_recording_connector()
+    monkeypatch.setitem(_PREVIEW_BUILDERS, _DELETE_OP, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=[0.1] * 384)
+    agent = _delete_operator(sub="agent:deleter", principal_kind=PrincipalKind.AGENT)
+    args = {
+        "connector_id": _DELETE_CONNECTOR,
+        "op_id": _DELETE_OP,
+        "target": "gh-prod",
+        "params": _DELETE_PARAMS,
+    }
+    spy = _would_deny_spy(monkeypatch)
+
+    preview = await preview_operation(agent, args)
+    assert preview["status"] == "ok", preview
+    assert _would_deny_ops(spy) == [_DELETE_OP]
+
+    call = await call_operation(agent, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    assert _would_deny_ops(spy) == [_DELETE_OP, _DELETE_OP]

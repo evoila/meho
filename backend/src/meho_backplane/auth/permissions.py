@@ -108,7 +108,9 @@ References
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from typing import Any
@@ -122,6 +124,7 @@ from meho_backplane.db.models import AgentPermission, PermissionVerdict
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "agent_no_grant_log_scope",
     "resolve_verdict",
 ]
 
@@ -344,6 +347,55 @@ def _pick_raw_verdict(
 # ---------------------------------------------------------------------------
 
 
+#: The ``agent_no_grant_would_deny`` lines already written in this call, as
+#: ``(agent, op_id, target_id)``. ``None`` outside a call: then each check logs.
+_no_grant_logged: ContextVar[set[tuple[str, str, str | None]] | None] = ContextVar(
+    "_no_grant_logged", default=None
+)
+
+
+@contextmanager
+def agent_no_grant_log_scope(*, new: bool = False) -> Iterator[None]:
+    """Log ``agent_no_grant_would_deny`` at most once per call inside this block.
+
+    One call can check the same grant more than once: a destructive call
+    builds its preview again to check the preview hash, and a preview with
+    a check before the wait for approval runs the policy gate twice. Inside
+    this block, a second check of the same agent, operation and target
+    writes no second line. ``new=True`` starts a fresh call (a top-level
+    ``dispatch``); otherwise an open block is reused, so a preview built
+    inside a call counts as part of that call.
+    """
+    if not new and _no_grant_logged.get() is not None:
+        yield
+        return
+    token = _no_grant_logged.set(set())
+    try:
+        yield
+    finally:
+        _no_grant_logged.reset(token)
+
+
+def _log_would_deny(
+    *, operator: Operator, agent: str, op_id: str, target_str: str | None, safety_level: str
+) -> None:
+    """Write ``agent_no_grant_would_deny`` unless this call already wrote it."""
+    logged = _no_grant_logged.get()
+    key = (agent, op_id, target_str)
+    if logged is not None:
+        if key in logged:
+            return
+        logged.add(key)
+    _log.info(
+        "agent_no_grant_would_deny",
+        agent=agent,
+        tenant_id=str(operator.tenant_id),
+        op_id=op_id,
+        target_id=target_str,
+        safety_level=safety_level,
+    )
+
+
 def _agent_name(operator: Operator) -> str:
     """The name a grant for *operator* is keyed on: ``agent:<name>`` when known."""
     if operator.client_id and operator.client_id.startswith("agent:"):
@@ -361,8 +413,9 @@ def _no_grant_refusal(
     """Apply ``AGENT_GRANT_REQUIRED`` to an agent call that no grant matches.
 
     ``on`` returns a ``deny`` whose reason starts with ``agent_no_grant:``.
-    ``observe`` logs ``agent_no_grant_would_deny`` and returns ``None``, so
-    the risk-level default applies as before. ``off`` returns ``None``.
+    ``observe`` logs ``agent_no_grant_would_deny`` (once per call, see
+    :func:`agent_no_grant_log_scope`) and returns ``None``, so the
+    risk-level default applies as before. ``off`` returns ``None``.
     Only agent logins are checked: people, service accounts and runners
     never reach this table.
     """
@@ -373,12 +426,11 @@ def _no_grant_refusal(
         return None
     agent = _agent_name(operator)
     if mode == "observe":
-        _log.info(
-            "agent_no_grant_would_deny",
+        _log_would_deny(
+            operator=operator,
             agent=agent,
-            tenant_id=str(operator.tenant_id),
             op_id=op_id,
-            target_id=target_str,
+            target_str=target_str,
             safety_level=safety_level,
         )
         return None

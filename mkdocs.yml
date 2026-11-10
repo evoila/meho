@@ -90,6 +90,7 @@ nav:
       - MCP surface and scopes: clients/mcp-surface-and-scopes.md
       - The meho CLI: clients/cli.md
       - Claude Desktop: clients/claude-desktop.md
+      - Organisation setup for the Claude admin: clients/organisation-setup.md
       - Claude Code: clients/claude-code.md
       - Other MCP clients (mcp-remote shim): clients/mcp-remote-shim.md
       - Troubleshooting auth walls: clients/troubleshooting.md

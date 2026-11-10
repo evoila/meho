@@ -111,6 +111,7 @@ import structlog.contextvars
 
 from meho_backplane.connectors._shared.vault_creds import strip_credential_value
 from meho_backplane.connectors.bind9._atomic import atomic_apply
+from meho_backplane.connectors.bind9._served_check import build_served_serial_check, soa_serial
 from meho_backplane.connectors.bind9.ops import Bind9Op
 
 if TYPE_CHECKING:
@@ -428,6 +429,7 @@ def pack_views_tar(
     files: dict[str, str],
     *,
     bind_root: str = "/etc/bind",
+    mtime: int | None = None,
 ) -> bytes:
     """Pack *files* into a tar.gz archive whose members live under *bind_root*.
 
@@ -451,6 +453,8 @@ def pack_views_tar(
     the lexical filter; the agent gets a structured rejection with
     the sanitised attempt and no archive is produced.
     """
+    if mtime is None:
+        mtime = int(time.time())
     buf = io.BytesIO()
     # ``gzip`` mode compresses on the fly; the resulting bytes are
     # ready to feed into ``tar -xzf -`` on the remote side.
@@ -477,6 +481,10 @@ def pack_views_tar(
             # Pin the mode bits at 0o644 so a future operator-typed
             # archive cannot smuggle a setuid bit through this op.
             info.mode = 0o644
+            # A member without a time gets 1970-01-01. BIND skips a zone
+            # whose file is not newer than the zone's last load, so a
+            # changed zone file must carry the time of the apply.
+            info.mtime = mtime
             tar.addfile(info, io.BytesIO(payload))
     return buf.getvalue()
 
@@ -805,6 +813,18 @@ async def bind9_config_apply_views(
         verify_cmd = f'[ -n "$(dig @localhost {quoted_fqdn} +short 2>/dev/null)" ]'
     else:
         verify_cmd = "named-checkconf > /dev/null"
+    # Ask the running server for the serial of every staged zone file.
+    # ``rndc reload`` answers ok even when it skips a zone.
+    served_check = build_served_serial_check(
+        {
+            ensure_path_under_root(path, bind_root): serial
+            for path, content in files.items()
+            if (serial := soa_serial(content)) is not None
+        },
+        bind_root=bind_root,
+    )
+    if served_check is not None:
+        verify_cmd = f"{verify_cmd} && {served_check}"
 
     apply_result = await atomic_apply(
         connector,

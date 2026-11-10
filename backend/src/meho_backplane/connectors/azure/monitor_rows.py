@@ -179,10 +179,18 @@ class StatBlock:
     maximum: float | None
     samples_found: int
     coverage_percent: float
+    samples_expected: int
 
     @property
     def sufficient(self) -> bool:
-        return self.samples_found > 0 and self.coverage_percent >= MIN_COVERAGE_PERCENT
+        """Enough samples, and a number to size from.
+
+        Compares the counts, not the rounded ``coverage_percent``: 403 of 504 is
+        79.96%, which rounds to 80.0 but is below the cutoff.
+        """
+        if self.average is None or self.samples_expected <= 0:
+            return False
+        return 100 * self.samples_found >= MIN_COVERAGE_PERCENT * self.samples_expected
 
 
 def _block(typical: list[float], peaks: list[float], expected: int) -> StatBlock:
@@ -193,6 +201,7 @@ def _block(typical: list[float], peaks: list[float], expected: int) -> StatBlock
         maximum=round_value(max(peaks) if peaks else None),
         samples_found=len(typical),
         coverage_percent=_coverage(len(typical), expected),
+        samples_expected=expected,
     )
 
 
@@ -216,9 +225,12 @@ def memory_block(
 
     The average and the percentile come from the hourly average of free memory.
     The maximum comes from the lowest free memory of an hour, the peak of use.
+    Without the memory size the samples are still counted, but the block is
+    never sufficient: there is no number to size from.
     """
     if memory_gb is None or memory_gb <= 0:
-        return StatBlock(None, None, None, 0, 0.0)
+        found = sum(1 for v in memory.values() if "average" in v)
+        return StatBlock(None, None, None, found, _coverage(found, expected), expected)
     typical = [used_percent(v["average"], memory_gb) for v in memory.values() if "average" in v]
     peaks = [used_percent(v["minimum"], memory_gb) for v in memory.values() if "minimum" in v]
     return _block(typical, peaks, expected)

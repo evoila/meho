@@ -1957,6 +1957,8 @@ CPU sample), `coverage_percent` and `sufficient`. A VM below 80% coverage has
 `sufficient` and `reason`: a VM can have enough CPU samples and no memory
 samples (Azure does not always have them). The numbers are still shown when
 some samples exist; a caller must check `sufficient` before it sizes a VM.
+`sufficient` compares the sample counts, not the rounded `coverage_percent`:
+403 of 504 samples (79.96%) shows as 80.0 but is not sufficient.
 
 ### The numbers
 
@@ -1968,6 +1970,10 @@ some samples exist; a caller must check `sufficient` before it sizes a VM.
   free memory. Its maximum comes from the hourly lowest free memory, which is
   the peak of use. This is why MEHO asks Azure for the aggregations Average,
   Minimum and Maximum.
+- `azure.vm.metric.list` gives each hour the average, lowest and highest free
+  memory in bytes (`memory_available_bytes_average`, `_minimum`, `_maximum`).
+  `memory_samples_found` counts the hours with a free-memory sample, also when
+  the memory size is unknown and memory used cannot be worked out.
 - The memory of a size comes from `azure.vm.size.list` logic (one Resource SKUs
   read per region). When that read fails, or the size is not in it, the memory
   numbers are `null` and `memory.reason` says why; the CPU numbers still count.

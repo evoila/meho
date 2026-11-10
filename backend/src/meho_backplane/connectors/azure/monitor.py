@@ -143,7 +143,8 @@ _METRIC_LIST_GUIDANCE: Final[dict[str, object]] = {
     "output_shape": (
         "{value: [{time, cpu_average_percent, cpu_maximum_percent, "
         "memory_available_bytes_average, memory_available_bytes_minimum, "
-        "memory_used_percent_average, memory_used_percent_peak}], vm_id, name, "
+        "memory_available_bytes_maximum, memory_used_percent_average, "
+        "memory_used_percent_peak}], vm_id, name, "
         "resource_group, location, size, power_state, window_from, window_to, interval, "
         "samples_expected, samples_found, coverage_percent, memory_samples_found, "
         "memory_gb, note}. There is one row for every hour of the window. A field that "

@@ -78,6 +78,7 @@ def _hour_rows(
                 "cpu_maximum_percent": round_value(cpu.get("maximum")),
                 "memory_available_bytes_average": free.get("average"),
                 "memory_available_bytes_minimum": free.get("minimum"),
+                "memory_available_bytes_maximum": free.get("maximum"),
                 "memory_used_percent_average": (
                     round_value(used_percent(free["average"], size))
                     if known and "average" in free

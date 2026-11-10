@@ -48,6 +48,9 @@ _HOUR_ROW: Final[dict[str, Any]] = {
         "memory_available_bytes_minimum": _field(
             _NUMBER_OR_NULL, "Free memory in bytes, the lowest value of the hour." + _UNKNOWN
         ),
+        "memory_available_bytes_maximum": _field(
+            _NUMBER_OR_NULL, "Free memory in bytes, the highest value of the hour." + _UNKNOWN
+        ),
         "memory_used_percent_average": _field(
             _NUMBER_OR_NULL,
             "Memory used in percent, from the average free memory and the memory of the "

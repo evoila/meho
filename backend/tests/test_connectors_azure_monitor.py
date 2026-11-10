@@ -344,6 +344,10 @@ async def test_metric_list_gives_every_hour_and_keeps_gaps_as_null(
     assert first["cpu_average_percent"] == 10.0
     assert first["memory_used_percent_average"] == 50.0  # 4 of 8 GB free
     assert first["memory_used_percent_peak"] == 75.0  # 2 of 8 GB free at the lowest
+    assert first["memory_available_bytes_average"] == 4 * 2**30
+    assert first["memory_available_bytes_minimum"] == 2 * 2**30
+    assert first["memory_available_bytes_maximum"] == 4 * 2**30
+    assert gap["memory_available_bytes_maximum"] is None
 
 
 @pytest.mark.asyncio
@@ -444,6 +448,30 @@ async def test_metric_list_fails_when_azure_fails_it_does_not_return_empty_rows(
 
     assert result.status == "error"
     assert result.extras["exception_class"] == "AzureForbiddenError"
+
+
+@pytest.mark.asyncio
+async def test_metric_list_counts_free_memory_samples_when_the_size_is_unknown(
+    connector: AzureConnector, store: MemoryResultStore
+) -> None:
+    del connector, store
+    start = END - timedelta(days=7)
+    with respx.mock() as mock:
+        _mock_login(mock)
+        mock.get(f"{ARM_BASE}{vm_id('vm-a')}").respond(200, json=vm_answer("vm-a"))
+        mock.get(SKUS_URL).respond(500, json={"error": {"code": "InternalError"}})
+        mock.get(metrics_url("vm-a")).respond(
+            200, json={"value": cpu_and_memory(start, range(168), range(168))}
+        )
+        result = await _call("azure.vm.metric.list", {"vm_id": vm_id("vm-a")})
+
+    assert result.status == "ok", result.error
+    assert result.result["memory_gb"] is None
+    assert result.result["memory_samples_found"] == 168  # every hour has a free-memory sample
+    rows = (await _query(result, {"limit": 200}))["rows"]
+    assert len(rows) == 168
+    assert all(row["memory_available_bytes_maximum"] == 4 * 2**30 for row in rows)
+    assert all(row["memory_used_percent_average"] is None for row in rows)
 
 
 @pytest.mark.asyncio
@@ -886,8 +914,26 @@ def test_memory_used_is_kept_between_0_and_100_and_unknown_without_a_size() -> N
     )  # more free than the size says: 0, not negative
     assert block.maximum == 0.0
     none = memory_block(free, None, 2)
-    assert (none.average, none.p95, none.maximum, none.samples_found) == (None, None, None, 0)
+    assert (none.average, none.p95, none.maximum) == (None, None, None)
+    assert none.samples_found == 2 and none.coverage_percent == 100.0  # samples still counted
+    assert none.sufficient is False  # but there is no number to size from
     assert math.isfinite(block.p95 or 0.0)
+
+
+@pytest.mark.parametrize(("found", "sufficient"), [(403, False), (404, True)])
+def test_sufficiency_compares_counts_not_the_rounded_coverage(found: int, sufficient: bool) -> None:
+    expected = 21 * 24  # 504 hours; 403 is 79.96%, which rounds to 80.0
+    cpu = {h: {"average": 10.0, "maximum": 20.0} for h in range(found)}
+    free = {h: {"average": 4 * 2**30, "minimum": 2 * 2**30} for h in range(found)}
+    cpu_stats = cpu_block(cpu, expected)
+    memory_stats = memory_block(free, 8.0, expected)
+    assert (
+        cpu_stats.coverage_percent
+        == memory_stats.coverage_percent
+        == round(100 * found / expected, 1)
+    )
+    assert cpu_stats.sufficient is sufficient
+    assert memory_stats.sufficient is sufficient
 
 
 # ---------------------------------------------------------------------------

@@ -134,6 +134,38 @@ client identity should file a follow-up Task on
 [`evoila/meho`](https://github.com/evoila/meho) describing the
 mismatch pattern and what behaviour change would unblock them.
 
+## Session start row (`AUDIT_CLIENT_IDENTITY`, #6209)
+
+With `AUDIT_CLIENT_IDENTITY=true` (off by default), MEHO writes one
+audit row when an MCP session starts. The log can then name the tool,
+for example "claude-code 2.1", next to the person.
+
+- **When.** A successful `initialize` request that gets a new
+  `Mcp-Session-Id` from MEHO. A failed `initialize`, a notification, or
+  a resumed session (the client sent its own session id) writes no row.
+- **What.** `event_class = security_event`, `method = MCP`,
+  `path = /mcp/initialize`, `payload.op_id = mcp.session_open`. The
+  payload also holds `client_name` and `client_version` (from
+  `clientInfo`), `user_agent` (the HTTP header) and
+  `"self_declared": true`.
+- **Link.** The row's `agent_session_id` is the new session id. Every
+  later row of the same session has the same `agent_session_id`.
+- **Clean text.** Control and format characters are removed, and each
+  text is cut to 200 characters. A value that is not a string is stored
+  as `null`.
+- **Fail closed.** The row commits before the response goes back. If
+  the write fails, the client gets a JSON-RPC internal error (`-32603`)
+  and no session id, as for every other MCP audit write.
+- **Find the rows.** `meho audit list --op mcp.session_open`.
+
+**The client name is what the tool says about itself.** MEHO cannot
+check it. Any program with a valid login can send any name and version.
+Use it to read the log, not to decide who may do what.
+
+Code: `_audit_session_open` in `mcp/server.py`,
+`write_mcp_session_open_row` in `mcp/audit.py`. Tests:
+`tests/test_mcp_session_open_audit.py`.
+
 ## Tool naming grammar and deprecation aliases
 
 Multi-verb tool families on the MCP surface are named with the

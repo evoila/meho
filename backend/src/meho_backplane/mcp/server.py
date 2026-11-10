@@ -87,6 +87,7 @@ from pydantic import BaseModel, ValidationError
 
 from meho_backplane.auth.current_tenant import tenant_not_chosen_detail
 from meho_backplane.auth.operator import Operator
+from meho_backplane.mcp.audit import write_mcp_session_open_row
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
 from meho_backplane.mcp.profiles import (
@@ -1436,7 +1437,39 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # caller that disconnects while a long tool call runs.
     async with watch_caller(request.receive):
         response = await _dispatch_to_handler(jrpc, is_notification, operator)
-    _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
+    issued = _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
+    return await _audit_session_open(request, jrpc, operator, response, issued=issued)
+
+
+async def _audit_session_open(
+    request: Request,
+    jrpc: JsonRpcRequest,
+    operator: Operator,
+    response: Response,
+    *,
+    issued: uuid.UUID | None,
+) -> Response:
+    """Write the ``mcp.session_open`` row of a new session, or fail the ``initialize``.
+
+    Runs only with ``AUDIT_CLIENT_IDENTITY`` on and only when this
+    ``initialize`` got a new session id (*issued*, #6209); otherwise
+    *response* is returned as it is. The row commits before the response
+    returns. If the write fails, the client gets a JSON-RPC internal error
+    with no session id, as for every other MCP audit write.
+    """
+    if issued is None or not get_settings().audit_client_identity:
+        return response
+    client_info = (jrpc.params or {}).get("clientInfo")
+    try:
+        await write_mcp_session_open_row(
+            operator=operator,
+            client_info=client_info if isinstance(client_info, dict) else {},
+            user_agent=request.headers.get("user-agent"),
+        )
+    except Exception as exc:
+        _log.exception("mcp_session_open_audit_failed")
+        structlog.contextvars.unbind_contextvars("mcp_session_id")
+        return _error_response(jrpc.id, INTERNAL_ERROR, f"internal error: {type(exc).__name__}")
     return response
 
 
@@ -1445,7 +1478,7 @@ def _maybe_issue_initialize_session_id(
     method: str,
     is_notification: bool,
     response: Response,
-) -> None:
+) -> uuid.UUID | None:
     """Stamp an ``Mcp-Session-Id`` response header on a successful initialize.
 
     G0.15-T4 (#1213): closes the regression on the v0.7.0 release-body's
@@ -1472,19 +1505,22 @@ def _maybe_issue_initialize_session_id(
     (e.g. the ``request_completed`` log from
     :class:`~meho_backplane.middleware.RequestContextMiddleware`)
     carries the same correlation key the client will echo on the next
-    request. The initialize call itself writes no audit row (chassis
-    ``AuditMiddleware`` skips ``/mcp`` and the MCP-side audit path only
-    fires for ``tools/call`` / ``resources/read``), so this binding is
-    purely log-side. See :func:`_issue_mcp_session_id` for the
-    issuance contract.
+    request. With ``AUDIT_CLIENT_IDENTITY`` on, the caller also writes
+    one ``mcp.session_open`` audit row for the issued id
+    (:func:`_audit_session_open`, #6209); otherwise ``initialize`` writes
+    no audit row. See :func:`_issue_mcp_session_id` for the issuance
+    contract.
+
+    Returns the issued id, or ``None`` when no id was issued.
     """
     if method != "initialize" or is_notification:
-        return
+        return None
     if not (200 <= response.status_code < 300):
-        return
+        return None
     if _response_is_jsonrpc_error(response):
-        return
+        return None
     if request.headers.get(_MCP_SESSION_HEADER) not in (None, ""):
-        return
+        return None
     issued = _issue_mcp_session_id(response)
     structlog.contextvars.bind_contextvars(mcp_session_id=str(issued))
+    return issued

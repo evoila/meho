@@ -56,6 +56,9 @@ from meho_backplane.connectors.azure import compute
 # cost (Task #5088)
 from meho_backplane.connectors.azure import cost
 
+# dns (Task #5368)
+from meho_backplane.connectors.azure import dns
+
 # inventory (Task #5082)
 from meho_backplane.connectors.azure import inventory
 
@@ -379,6 +382,8 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     *compute.OPS,
     # cost (Task #5088)
     *cost.OPS,
+    # dns (Task #5368)
+    *dns.OPS,
     # inventory (Task #5082)
     *inventory.OPS,
     # migrate (Task #5093)
@@ -409,6 +414,8 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     **compute.WHEN_TO_USE,
     # cost (Task #5088)
     **cost.WHEN_TO_USE,
+    # dns (Task #5368)
+    **dns.WHEN_TO_USE,
     # inventory (Task #5082)
     **inventory.WHEN_TO_USE,
     # migrate (Task #5093)

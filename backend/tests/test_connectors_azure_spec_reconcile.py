@@ -107,6 +107,10 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "COST_FORECAST_PATH": (("POST",), "COST_MANAGEMENT_API_VERSION"),
     "BUDGETS_PATH": (("GET",), "CONSUMPTION_API_VERSION"),
     "ADVISOR_RECOMMENDATIONS_PATH": (("GET",), "ADVISOR_API_VERSION"),
+    # dns (Task #5368)
+    "DNS_ZONES_PATH": (("GET",), "DNS_API_VERSION"),
+    "DNS_RECORD_SETS_PATH": (("GET",), "DNS_API_VERSION"),
+    "DNS_RECORD_SET_PATH": (("GET", "PUT", "DELETE"), "DNS_API_VERSION"),
     # inventory (Task #5082)
     "SUBSCRIPTIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "RESOURCE_GROUPS_PATH": (("GET",), "RESOURCES_API_VERSION"),
@@ -283,6 +287,12 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/{}/providers/microsoft.consumption/budgets@2026-06-01",
         "POST:/{}/providers/microsoft.costmanagement/forecast@2026-06-01",
         "POST:/{}/providers/microsoft.costmanagement/query@2026-06-01",
+        "# dns (Task #5368)",
+        "DELETE:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/dnszones/{}/{}/{}@2018-05-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/dnszones@2018-05-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/dnszones/{}/recordsets@2018-05-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/dnszones/{}/{}/{}@2018-05-01",
+        "PUT:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/dnszones/{}/{}/{}@2018-05-01",
         "# inventory (Task #5082)",
         "GET:/subscriptions/{}/providers/microsoft.authorization/locks@2020-05-01",
         "GET:/subscriptions/{}/resourcegroups/{}/resources@2021-04-01",

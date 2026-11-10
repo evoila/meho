@@ -97,6 +97,9 @@ from meho_backplane.connectors.azure.compute import ComputeOps
 # cost (Task #5088)
 from meho_backplane.connectors.azure.cost import CostOps
 
+# dns (Task #5368)
+from meho_backplane.connectors.azure.dns import DnsOps
+
 # inventory (Task #5082)
 from meho_backplane.connectors.azure.inventory import InventoryOps
 
@@ -182,6 +185,8 @@ class AzureConnector(
     ComputeOps,
     # cost (Task #5088)
     CostOps,
+    # dns (Task #5368)
+    DnsOps,
     # inventory (Task #5082)
     InventoryOps,
     # migrate (Task #5093)

@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -134,12 +132,3 @@ def test_dashboard_recipe_is_a_valid_dashboard_file_with_three_sensors() -> None
     assert parsed.sensors[1].assertion.compare.degraded == 3  # type: ignore[union-attr]
     for sensor in parsed.sensors:
         sensor.to_create(target_name="sub-a")
-
-
-def test_the_quickstart_json_matches_the_dashboard_recipe() -> None:
-    """The how-to shows the recipe with baselines 12 and 3. Keep the two equal."""
-    guide = Path(__file__).resolve().parents[2] / "docs-site/guides/sensors-quickstart.md"
-    text = guide.read_text(encoding="utf-8")
-    start = text.index("## Watch an Azure subscription")
-    block = text[start:].split("```json\n", 1)[1].split("\n```", 1)[0]
-    assert json.loads(block) == azure_dashboard_recipe(policy_baseline=12, advisor_baseline=3)

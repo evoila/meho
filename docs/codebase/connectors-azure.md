@@ -1459,8 +1459,9 @@ dashboard file (format `meho-dashboard/1`) that groups them. It follows
   is made. It must be a whole number, 0 or more.
 - No budget, a budget with no percent, or a count Azure did not give is
   `unknown`, not `ok`.
-- The how-to is in `docs-site/guides/sensors-quickstart.md`. A test keeps
-  its JSON equal to `azure_dashboard_recipe`. Lab proof is still to do.
+- The how-to is in `docs-site/guides/sensors-quickstart.md`. Its JSON is
+  `azure_dashboard_recipe(policy_baseline=12, advisor_baseline=3)`. Lab proof
+  is still to do.
 
 Text from Azure (resource group and budget names, Advisor's problem and
 solution, price names) is data. The guidance for the AI says so.

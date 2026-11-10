@@ -968,9 +968,11 @@ With `AUDIT_CLIENT_IDENTITY` on (off by default), approvals also name the
 login client (see the `client` block in [audit_query.md](audit_query.md)):
 
 - The request keeps the requester's `client` block in its stored effect
-  (`proposed_effect["client"]`). No new column. A request parked again for
+  (`proposed_effect["client"]`). No new column. A request made again for
   an earlier requester (a step of a multi-step operation that waits again)
-  keeps none, because the caller is then the reviewer.
+  keeps that requester's block: `requester_of` reads it from the approved
+  request, and `ResumeRequester.client` carries it. The reviewer who runs
+  the step is never named there.
 - The `approval.decision` row of an approve adds `approver_azp` and
   `approver_channel` (`web` or `token`) next to `approval_auth`.
 - For an approve over REST (`/approve` and `/decide`, so also `meho

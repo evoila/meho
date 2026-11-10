@@ -32,9 +32,8 @@ Login
 
 The read bodies live in :mod:`meho_backplane.connectors.freeipa.reads`, the
 host write bodies in :mod:`meho_backplane.connectors.freeipa.writes`. The
-sudo, access rule and password policy writes are methods of
-:class:`~meho_backplane.connectors.freeipa.access_writes.FreeipaAccessWriteOps`,
-which the connector inherits.
+other writes are methods of ``FreeipaAccessWriteOps`` (``access_writes.py``) and
+``FreeipaIdentityWriteOps`` (``identity_writes.py``), which the connector inherits.
 ``docs/codebase/connectors-freeipa.md`` describes the whole flow.
 """
 
@@ -64,6 +63,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.freeipa.access_writes import FreeipaAccessWriteOps
+from meho_backplane.connectors.freeipa.identity_writes import FreeipaIdentityWriteOps
 from meho_backplane.connectors.freeipa.rpc import (
     JSON_PATH,
     LOGIN_PATH,
@@ -136,11 +136,11 @@ def referer_for(target: FreeipaTargetLike) -> str:
     return f"https://{server_name}/ipa"
 
 
-class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
+class FreeipaConnector(FreeipaIdentityWriteOps, FreeipaAccessWriteOps, HttpConnector):
     """FreeIPA JSON-RPC connector: password login, session cookie, ``Referer``.
 
-    The handler methods of the sudo, access rule and password policy writes
-    come from :class:`FreeipaAccessWriteOps`.
+    The handler methods of the other writes come from
+    :class:`FreeipaAccessWriteOps` and :class:`FreeipaIdentityWriteOps`.
 
     Registered as ``("freeipa", "4.x", "freeipa-jsonrpc")``, so the connector
     ID is ``freeipa-jsonrpc-4.x``, plus the ``("freeipa", "", "")`` row that
@@ -151,8 +151,8 @@ class FreeipaConnector(FreeipaAccessWriteOps, HttpConnector):
     version = "4.x"
     impl_id = "freeipa-jsonrpc"
     summary = (
-        "Reads FreeIPA users, groups, hosts and access rules; creates host groups and rules, "
-        "deletes hosts and host groups, and sets the password policy."
+        "Reads FreeIPA users, groups, hosts and access rules; creates users, groups, host groups "
+        "and rules, adds members, deletes hosts, users and roles, and sets the password policy."
     )
     supported_version_range = ">=4.9,<5.0"
     priority = 1

@@ -133,6 +133,53 @@ Manage agent definitions, runs and grants (list / show / create / edit / delete 
 meho agent
 ```
 
+### `meho agent budget`
+
+Set, show and clear the spend caps of an agent login (tenant_admin)
+
+```
+meho agent budget
+```
+
+#### `meho agent budget clear`
+
+Remove the spend cap of an agent login for one window (tenant_admin)
+
+```
+meho agent budget clear <principal> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw AgentBudgetRead JSON
+- `--window` — daily | weekly | monthly (required)
+
+#### `meho agent budget set`
+
+Set the spend cap of an agent login for one window (tenant_admin)
+
+```
+meho agent budget set <principal> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--cost-limit` — cost cap for the window, in USD
+- `--json` — emit raw AgentBudgetRead JSON
+- `--request-limit` — cap on the number of runs in the window
+- `--token-limit` — token cap for the window
+- `--window` — daily | weekly | monthly (required)
+
+#### `meho agent budget show`
+
+Show the caps of an agent login and what is used so far (tenant_admin)
+
+```
+meho agent budget show <principal> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw AgentBudgetListResponse JSON
+- `--window` — show one window only: daily | weekly | monthly
+
 ### `meho agent create`
 
 Create one agent definition (tenant_admin)

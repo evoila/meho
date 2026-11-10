@@ -192,8 +192,11 @@ def test_schema_rejects_a_bad_env_name(name: str) -> None:
 
 #: An env value that runs a command when bash evaluates it as arithmetic.
 #: ``tmp`` is set by the wrapper before the export lines, so ``set -u`` does
-#: not stop the evaluation first.
-_ARITHMETIC_PROBE = "tmp[$(echo MEHO_PROBE_RAN >&2)]"
+#: not stop the evaluation first. Only the command prints the marker: bash may
+#: repeat the value text in a warning (for example a bad ``LC_*`` locale), and
+#: the value text does not contain the marker.
+_ARITHMETIC_PROBE = "tmp[$(echo MEHO_PROBE_$((6 * 7)) >&2)]"
+_PROBE_MARKER = "MEHO_PROBE_42"
 
 
 def _names_that_run_the_probe(names: list[str]) -> list[str]:
@@ -210,7 +213,7 @@ def _names_that_run_the_probe(names: list[str]) -> list[str]:
         proc = subprocess.run(
             ["bash", "-c", wrapper], capture_output=True, text=True, timeout=10, check=False
         )
-        if "MEHO_PROBE_RAN" in proc.stderr:
+        if _PROBE_MARKER in proc.stderr:
             ran.append(name)
     return ran
 

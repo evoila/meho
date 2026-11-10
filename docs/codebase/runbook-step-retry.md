@@ -21,7 +21,10 @@ the run. Now the assignee can fix the cause and try the step again.
 - On a step that is not failed, `retry` has no effect.
 - The same rules apply as for any advance: only the assignee may retry,
   and a finished or aborted run cannot be retried. An operation call
-  writes its usual audit row for every attempt.
+  writes its usual audit row for every attempt. A `confirm` step writes an
+  audit row (`runbook.confirm`) for every attempt, pass or fail, in the
+  same transaction as the step change. A failed confirm plus a retry
+  leaves two rows.
 
 ## History
 

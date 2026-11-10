@@ -84,6 +84,11 @@ Audit log
   ``method='DISPATCH'``, ``path='runbook.abort'``, ``run_id`` set,
   ``step_id`` set (the step the run was on when aborted), and the
   abort reason in the JSON payload.
+* Every ``confirm`` step attempt, passed or failed, writes an
+  ``audit_log`` row with ``path='runbook.confirm'`` in the same
+  transaction as the step state change. The row carries ``run_id``,
+  ``step_id`` and whether the attempt passed. A retry writes another
+  row, so a failed confirm followed by a retry leaves two rows.
 
 Substitution
 ------------
@@ -192,6 +197,7 @@ _STEP_FAILED: str = "failed"
 _ABORT_AUDIT_METHOD: str = "DISPATCH"
 _ABORT_AUDIT_PATH: str = "runbook.abort"
 _ABORT_AUDIT_STATUS_CODE: int = 200
+_CONFIRM_AUDIT_PATH: str = "runbook.confirm"
 
 
 class RunNotFoundError(LookupError):
@@ -468,6 +474,8 @@ class RunbookRunService:
             current_step_id = self._current_step_id_or_raise(run, step_states)
             current_state = step_states[current_step_id].state
 
+            # A failed step is retried only on request; the engine then sees
+            # it as in progress again.
             retrying = current_state == _STEP_FAILED and retry
             if current_state == _STEP_FAILED and not retry:
                 raise PreviousStepFailedError(_failed_message(current_step_id))
@@ -563,6 +571,19 @@ class RunbookRunService:
                 "verify_response": persisted_response_dict,
             },
         ]
+
+        if _find_step(template_body, current_step_id).verify.type == "confirm":
+            # An operation_call attempt is audited by the dispatcher; a
+            # confirm attempt has no dispatch, so write its row here, in
+            # the same transaction as the state change.
+            session.add(
+                self._build_confirm_audit_row(
+                    run=run,
+                    operator_sub=operator_sub,
+                    step_id=current_step_id,
+                    passed=outcome.kind != "failed",
+                )
+            )
 
         if outcome.kind == "failed":
             current_step_state.state = _STEP_FAILED
@@ -1280,6 +1301,40 @@ class RunbookRunService:
                 f"template references run.params not supplied at start: "
                 f"{', '.join(sorted_missing)}",
             )
+
+    def _build_confirm_audit_row(
+        self,
+        *,
+        run: RunbookRun,
+        operator_sub: str,
+        step_id: str,
+        passed: bool,
+    ) -> AuditLog:
+        """Compose the audit row for one ``confirm`` step attempt."""
+        kwargs: dict[str, Any] = {
+            "id": uuid.uuid4(),
+            "occurred_at": datetime.now(UTC),
+            "operator_sub": operator_sub,
+            "tenant_id": run.tenant_id,
+            "method": _ABORT_AUDIT_METHOD,
+            "path": _CONFIRM_AUDIT_PATH,
+            "status_code": _ABORT_AUDIT_STATUS_CODE,
+            "duration_ms": Decimal("0"),
+            "payload": {
+                "op_id": _CONFIRM_AUDIT_PATH,
+                "result_status": "ok" if passed else "failed",
+                "passed": passed,
+                "run_id": str(run.run_id),
+                "step_id": step_id,
+            },
+        }
+        if hasattr(AuditLog, "run_id"):
+            kwargs["run_id"] = run.run_id
+        if hasattr(AuditLog, "step_id"):
+            kwargs["step_id"] = step_id
+        if hasattr(AuditLog, "work_ref"):
+            kwargs["work_ref"] = run.work_ref
+        return AuditLog(event_class=AuditEventClass.OPERATION_EXECUTION, **kwargs)
 
     def _build_abort_audit_row(
         self,

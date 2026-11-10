@@ -1952,6 +1952,29 @@ async def test_retry_passes_and_run_goes_on(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_confirm_attempts_each_write_an_audit_row(db_session: AsyncSession) -> None:
+    """A failed confirm and its retry leave two audit rows for the step."""
+    tenant_id = uuid.uuid4()
+    run_id = await _start_failed_confirm_run(tenant_id)
+    await RunbookRunService().next_step(tenant_id, OPERATOR, run_id, _confirm("yes", retry=True))
+
+    rows = (
+        (
+            await db_session.execute(
+                select(AuditLog)
+                .where(AuditLog.run_id == run_id)
+                .where(AuditLog.path == "runbook.confirm")
+                .order_by(AuditLog.occurred_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [r.payload["passed"] for r in rows] == [False, True]
+    assert {r.step_id for r in rows} == {"step-1"}
+
+
+@pytest.mark.asyncio
 async def test_retry_that_fails_again_keeps_both_attempts(db_session: AsyncSession) -> None:
     """A second failure leaves the step failed; the earlier result stays."""
     tenant_id = uuid.uuid4()

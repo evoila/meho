@@ -270,12 +270,19 @@ file or in the wiki pages.
 
 ### Step 4: add the CI calls
 
+Start each job script with `set -euo pipefail`. Then a failed call
+fails the job, also when its answer goes on to `jq` through a pipe.
+Without it, `jq` gets no input, ends without an error, and the job
+passes while MEHO's copy stays old.
+
 Each job first gets a token with the client credentials grant. The
 example is for the import login; use the other client for the other
 jobs:
 
 ```bash
-TOKEN=$(curl -s -d grant_type=client_credentials \
+set -euo pipefail
+
+TOKEN=$(curl -sf -d grant_type=client_credentials \
   -d client_id="$MEHO_IMPORT_CLIENT_ID" -d client_secret="$MEHO_IMPORT_CLIENT_SECRET" \
   "$KEYCLOAK_ISSUER_URL/protocol/openid-connect/token" | jq -r .access_token)
 ```
@@ -374,7 +381,7 @@ six months unless someone confirms it.
 
 ### Instance settings
 
-Two chart values (Helm values) change how knowledge works on the whole
+Three chart values (Helm values) change how knowledge works on the whole
 instance:
 
 | Value | Default | What it does |

@@ -28,8 +28,9 @@ import dns.tokenizer
 __all__ = ["build_served_serial_check", "is_zone_file"]
 
 # Runs on the target with python3. Arguments: bind root, JSON object
-# that maps the absolute path of each staged file to true when it is a
-# zone file (it must be used by a configured zone).
+# that maps the absolute path of each staged file to true when it looks
+# like a zone file. Every staged file that a configured zone uses gets
+# the serial check. A file marked true must be used by a configured zone.
 _REMOTE_SCRIPT = r"""
 import json
 import posixpath
@@ -163,11 +164,13 @@ def build_served_serial_check(
     """Build the shell command for the served-serial check.
 
     *staged* maps the absolute path of each staged file to ``True`` when
-    it is a zone file (see :func:`is_zone_file`). The server checks every
-    staged file that a configured zone uses, and fails for a zone file
-    that no zone uses. Returns ``None`` when no zone file is staged.
+    it looks like a zone file (see :func:`is_zone_file`). The server
+    checks the serial of every staged file that a configured zone uses,
+    whatever its name or content, so an empty or misnamed zone file still
+    fails. The flag only decides whether a file that no zone uses fails.
+    Returns ``None`` when no file is staged.
     """
-    if not any(staged.values()):
+    if not staged:
         return None
     script_b64 = base64.b64encode(_REMOTE_SCRIPT.encode("utf-8")).decode("ascii")
     return (

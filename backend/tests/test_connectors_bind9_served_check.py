@@ -86,12 +86,14 @@ def test_is_zone_file_reads_dns_syntax(path: str, content: str, zone: bool) -> N
     assert is_zone_file(path, content) is zone
 
 
-def test_no_zone_file_means_no_check() -> None:
+def test_no_staged_file_means_no_check() -> None:
     assert build_served_serial_check({}, bind_root="/etc/bind") is None
-    assert build_served_serial_check({"/etc/bind/v.conf": False}, bind_root="/etc/bind") is None
+    # The name or content guess never skips the check: the server decides
+    # which staged files a configured zone uses.
+    assert build_served_serial_check({"/etc/bind/v.conf": False}, bind_root="/etc/bind")
 
 
-async def test_apply_views_adds_the_served_check_only_for_zone_files() -> None:
+async def test_apply_views_adds_the_served_check_for_every_staged_file() -> None:
     connector = Bind9Connector()
     result = AtomicApplyResult(state_before="", state_after="", audit_slice_path="/etc/bind/v.conf")
     atomic_mock = AsyncMock(return_value=result)
@@ -104,11 +106,13 @@ async def test_apply_views_adds_the_served_check_only_for_zone_files() -> None:
         await bind9_config_apply_views(
             connector, _TARGET, {"files": {"v.conf": "view x {};\n", "zones/a.db": ZONE}}
         )
-        await bind9_config_apply_views(connector, _TARGET, {"files": {"v.conf": "view x {};\n"}})
-    with_zone, without_zone = (c.kwargs["verify_command"] for c in atomic_mock.await_args_list)
+        await bind9_config_apply_views(connector, _TARGET, {"files": {"zones/a.db": ""}})
+    with_zone, empty_zone = (c.kwargs["verify_command"] for c in atomic_mock.await_args_list)
     assert with_zone.startswith("named-checkconf > /dev/null && printf %s ")
     assert '"/etc/bind/zones/a.db": true' in with_zone
-    assert without_zone == "named-checkconf > /dev/null"
+    # An empty replacement of a zone file is still checked on the server.
+    assert empty_zone.startswith("named-checkconf > /dev/null && printf %s ")
+    assert '"/etc/bind/zones/a.db": false' in empty_zone
 
 
 async def _verify_command(params: dict[str, object]) -> str:
@@ -153,7 +157,7 @@ async def test_verify_source_rejects_bad_input(params: dict[str, object]) -> Non
 
 
 def _fake_bin(
-    tmp_path: Path, served: dict[str, str], file_serial: str = "2026110901"
+    tmp_path: Path, served: dict[str, str], file_serial: str = "2026110901", conf_text: str = CONF
 ) -> dict[str, str]:
     """Fake ``named-checkconf``, ``named-checkzone`` and ``rndc``.
 
@@ -161,7 +165,7 @@ def _fake_bin(
     reports *file_serial* for every file, or fails when it is empty.
     """
     conf = tmp_path / "conf.txt"
-    conf.write_text(CONF)
+    conf.write_text(conf_text)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     checkconf = bin_dir / "named-checkconf"
@@ -236,3 +240,29 @@ def test_served_check_fails_when_checkzone_cannot_read_the_file(tmp_path: Path) 
     done = _run_check(env, {"/etc/bind/zones/alice.db": True})
     assert done.returncode == 1
     assert "named-checkzone cannot read /etc/bind/zones/alice.db" in done.stdout
+
+
+def test_served_check_fails_for_an_empty_configured_zone_file(tmp_path: Path) -> None:
+    # An empty file has no SOA, so it does not look like a zone file. A
+    # configured zone uses it, so the server check must still fail.
+    assert is_zone_file("zones/alice.db", "") is False
+    env = _fake_bin(tmp_path, {"alice": "2026110901", "bob": "2026110901"}, file_serial="")
+    done = _run_check(env, {"/etc/bind/zones/alice.db": False})
+    assert done.returncode == 1
+    assert "named-checkzone cannot read /etc/bind/zones/alice.db" in done.stdout
+
+
+@pytest.mark.parametrize(("served", "ok"), [("2026110901", True), ("2026110801", False)])
+def test_served_check_checks_a_configured_zone_file_named_conf(
+    tmp_path: Path, served: str, ok: bool
+) -> None:
+    # A zone file named like a config file is not guessed as a zone file,
+    # but a configured zone uses it, so its serial is checked.
+    assert is_zone_file("zones/carol.conf", ZONE) is False
+    conf_text = CONF + 'view "carol" {\n\tzone "example.test" {\n\t\ttype master;\n'
+    conf_text += '\t\tfile "zones/carol.conf";\n\t};\n};\n'
+    env = _fake_bin(tmp_path, {"carol": served}, conf_text=conf_text)
+    done = _run_check(env, {"/etc/bind/zones/carol.conf": False})
+    assert (done.returncode == 0) is ok, done.stdout + done.stderr
+    if not ok:
+        assert "zone example.test (view carol): file has serial 2026110901" in done.stdout

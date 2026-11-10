@@ -483,8 +483,10 @@ you should see `Logged in to https://meho.example.com`.
 
     The command line keeps one login. If you already use another MEHO,
     log in to this one with its own folder, for example
-    `XDG_CONFIG_HOME=$HOME/.config/meho-second meho login https://meho.example.com`,
-    and use the same `XDG_CONFIG_HOME` for every later command.
+    `XDG_CONFIG_HOME=$HOME/.config/meho-second MEHO_KEYRING_DISABLE=1 meho login https://meho.example.com`,
+    and use the same two settings for every later command.
+    `MEHO_KEYRING_DISABLE=1` keeps the login in that folder, not in the
+    keyring of your system.
 
 Check the whole chain:
 

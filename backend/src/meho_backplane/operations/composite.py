@@ -544,17 +544,20 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     return False
 
 
-def _covered_by_approved_run(*, safety_level: str, requires_approval: bool) -> bool:
+def _covered_by_approved_run(
+    *, safety_level: str, requires_approval: bool, always_wait: bool = False
+) -> bool:
     """True when a person's approval of this run covers this waiting step (#3980).
 
     The run is approved when the dispatcher runs it with ``_approved=True``
     (:data:`approved_run_var`) or when it is the re-entry of an approved step
     (:data:`composite_resume_scope_var`). Such an approval covers every other
-    internal step, except a ``destructive`` step and a step marked
-    ``requires_approval``: those keep their own approval, or end with
+    internal step, except a ``destructive`` step, a step marked
+    ``requires_approval`` and a step a classification entry makes always
+    wait: those keep their own approval, or end with
     ``composite_resume_multi_gate_unsupported`` during a resume.
     """
-    if safety_level == "destructive" or requires_approval:
+    if safety_level == "destructive" or requires_approval or always_wait:
         return False
     return approved_run_var.get() or composite_resume_scope_var.get() is not None
 
@@ -706,6 +709,7 @@ async def enforce_subop_policy(
         _destructive_binding_refusal,
         _preflight_denied_refusal,
     )
+    from meho_backplane.operations.op_policy import apply_step_classification
 
     started = time.monotonic()
     product, version, impl_id = parse_connector_id(connector_id)
@@ -766,6 +770,10 @@ async def enforce_subop_policy(
         requires_approval=requires_approval,
         parameter_schema={},
     )
+    # A classification entry can raise the step's level or make it always
+    # wait, the same as for a called operation. Only the step's group key is
+    # read from a stored row; the step runs without one.
+    await apply_step_classification(tenant_id=operator.tenant_id, step=descriptor)
 
     # #4622: the step's params reach the gate so a delete grant (sandbox
     # mode) can store the step's proposed effect on its grant-use row. No
@@ -782,7 +790,9 @@ async def enforce_subop_policy(
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
     if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
-        safety_level=safety_level, requires_approval=requires_approval
+        safety_level=descriptor.safety_level,
+        requires_approval=descriptor.requires_approval,
+        always_wait=descriptor.policy_always_wait,
     ):
         _log.info("composite_subop_covered_by_approved_run", op_id=op_id)
         return None

@@ -19,9 +19,15 @@ class PfSenseRefusedError(RuntimeError):
 
     ``code`` is the short, stable reason (``ambiguous``, ``referenced``,
     ``conflict``, ...). ``guidance`` says why and what to do.
+
+    The dispatcher cuts the error message to 256 characters, but keeps up to
+    2048 characters of ``remediation`` in the error result and the audit
+    record. So ``remediation`` carries the whole guidance, and a long list
+    (every object that still uses an alias) is not lost.
     """
 
     def __init__(self, op_id: str, code: str, guidance: str) -> None:
         super().__init__(f"{op_id} refused ({code}): {guidance}")
         self.code = code
         self.guidance = guidance
+        self.remediation = guidance

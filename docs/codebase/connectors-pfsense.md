@@ -338,7 +338,11 @@ reference (`referenced`, naming every referrer, for `alias.delete` and
 call** (#5138): it raises `PfSenseRefusedError`, so the call gets
 `status: error`, the audit record says it failed, and an approved request shows
 `result_state: failed`. The message reads
-`pfsense.alias.delete refused (<code>): <why>`. Each delete is read-back-verified. `pfsense.alias.member.remove` is the odd one out: it is a
+`pfsense.alias.delete refused (<code>): <why>`. MEHO cuts that message to 256
+characters, so the error's `remediation` field carries the whole text, up to
+2048 characters. For `referenced` it lists every referrer; when the list is
+longer than that, it names the first ones and says how many more there are,
+and `preview_operation` for the same call lists every one. Each delete is read-back-verified. `pfsense.alias.member.remove` is the odd one out: it is a
 **read-modify-write on a shared object**, not a delete — it removes ONE member
 from the alias's `<address>` (and its positionally-aligned `<detail>`) while
 keeping the alias and every other member. `member_not_found` (the member is

@@ -403,6 +403,49 @@ def _reference_row(kind: str, element: Any, name_from: str = "tracker") -> dict[
     }
 
 
+#: Longest list of referrers a ``referenced`` refusal names, in characters.
+#: The dispatcher keeps 2048 characters of the error's ``remediation``; the
+#: rest of the text fits in what is left.
+_REFERRERS_TEXT_BUDGET = 1700
+
+
+def _referenced_refusal(
+    op_id: str, kind: str, name: str, references: list[dict[str, Any]]
+) -> PfSenseRefusedError:
+    """The ``referenced`` refusal: the count first, then every referrer.
+
+    When the list is longer than :data:`_REFERRERS_TEXT_BUDGET`, it names the
+    referrers that fit and says how many more there are. The approval card
+    (``preview_operation``) lists every one of them.
+    """
+    labels = [
+        f"{r['kind']}({r.get('id') or '?'}{': ' + r['descr'] if r.get('descr') else ''})"
+        for r in references
+    ]
+    shown: list[str] = []
+    used = 0
+    for label in labels:
+        used += len(label) + 2
+        if used > _REFERRERS_TEXT_BUDGET:
+            break
+        shown.append(label)
+    listing = ", ".join(shown)
+    if len(shown) < len(labels):
+        listing += (
+            f", and {len(labels) - len(shown)} more (preview_operation for this call "
+            "lists every one)"
+        )
+    return PfSenseRefusedError(
+        op_id,
+        "referenced",
+        (
+            f"{kind} {name!r} is still referenced by {len(references)} object(s); "
+            "refusing to delete (fail-closed) -- remove or repoint each one first: "
+            f"[{listing}]"
+        ),
+    )
+
+
 def find_alias_references(xml_text: str, alias_name: str) -> list[dict[str, Any]]:
     """Return the config objects that reference *alias_name* (fail-closed guard).
 
@@ -1002,19 +1045,7 @@ async def pfsense_alias_delete(
 
     references = find_alias_references(before, name)
     if references:
-        referrers = ", ".join(
-            f"{r['kind']}({r.get('id') or '?'}{': ' + r['descr'] if r.get('descr') else ''})"
-            for r in references
-        )
-        raise PfSenseRefusedError(
-            "pfsense.alias.delete",
-            "referenced",
-            (
-                f"alias {name!r} is still referenced by {len(references)} object(s) "
-                f"[{referrers}]; refusing to delete (fail-closed) -- remove or "
-                "repoint those references first"
-            ),
-        )
+        raise _referenced_refusal("pfsense.alias.delete", "alias", name, references)
 
     alias = matches[0]
     await _apply_playback(
@@ -1217,19 +1248,7 @@ async def pfsense_gateway_delete(
 
     references = find_gateway_references(before, name)
     if references:
-        referrers = ", ".join(
-            f"{r['kind']}({r.get('id') or '?'}{': ' + r['descr'] if r.get('descr') else ''})"
-            for r in references
-        )
-        raise PfSenseRefusedError(
-            "pfsense.gateway.delete",
-            "referenced",
-            (
-                f"gateway {name!r} is still referenced by {len(references)} object(s) "
-                f"[{referrers}]; refusing to delete (fail-closed) -- remove or "
-                "repoint those references first"
-            ),
-        )
+        raise _referenced_refusal("pfsense.gateway.delete", "gateway", name, references)
 
     gateway = matches[0]
     script_name = f"meho_gateway_delete_{_script_token(name)}"
@@ -1837,7 +1856,7 @@ _ALIAS_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``deleted`` on a verified single-alias delete; ``not_found`` "
                 "when absent. A refusal (``ambiguous`` on a duplicate name, "
                 "``referenced`` when still in use) is not a result: the call "
-                "fails and the error text names the referrers."
+                "fails and the error's ``remediation`` names the referrers."
             ),
         },
         "name": {"type": "string"},
@@ -1862,8 +1881,9 @@ _ALIAS_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "``{op_class: 'delete', resource: 'alias', status, name, matched, "
         "removed, references, reference_count, aliases_before, aliases_after, "
-        "verified, guidance}``. A ``referenced`` refusal fails the call; the error "
-        "text names every object still using the alias. On ``deleted``, ``removed`` carries "
+        "verified, guidance}``. A ``referenced`` refusal fails the call; the error's "
+        "``remediation`` names every object still using the alias. On ``deleted``, "
+        "``removed`` carries "
         "the deleted alias and ``verified`` is true."
     ),
 }
@@ -2006,8 +2026,7 @@ _GATEWAY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``deleted`` on a verified single-gateway delete; ``not_found`` "
                 "when absent. A refusal (``ambiguous`` on a duplicate name, "
                 "``referenced`` when still in use) is not a result: the call "
-                "fails and the error text names the referrers "
-                "named in ``references``)."
+                "fails and the error's ``remediation`` names the referrers."
             ),
         },
         "name": {"type": "string"},
@@ -2032,9 +2051,9 @@ _GATEWAY_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "``{op_class: 'delete', resource: 'gateway', status, name, matched, "
         "removed, references, reference_count, gateways_before, gateways_after, "
-        "verified, guidance}``. A ``referenced`` refusal fails the call; the error "
-        "text names every static route / gateway group / default-gateway setting / filter "
-        "rule / interface binding still using the gateway. On ``deleted``, "
+        "verified, guidance}``. A ``referenced`` refusal fails the call; the error's "
+        "``remediation`` names every static route / gateway group / default-gateway "
+        "setting / filter rule / interface binding still using the gateway. On ``deleted``, "
         "``removed`` carries the deleted gateway "
         "and ``verified`` is true."
     ),

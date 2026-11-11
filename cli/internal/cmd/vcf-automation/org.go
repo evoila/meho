@@ -39,7 +39,7 @@ func newOrgListCmd() *cobra.Command {
 			"connector_id=\"vcfa-rest-9.0\" on the provider plane.\n" +
 			"--plane provider is implicit; passing --plane tenant\n" +
 			"errors early.",
-		Example:       "  meho vcf-automation org list --target rdc-vcfa",
+		Example:       "  meho vcf-automation org list --target vcfa-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -67,7 +67,7 @@ func newOrgGetCmd() *cobra.Command {
 		Long: "get dispatches GET:/cloudapi/1.0.0/orgs/{id} against\n" +
 			"connector_id=\"vcfa-rest-9.0\" on the provider plane.\n" +
 			"<id> is forwarded as the `id` path-template parameter.",
-		Example:       "  meho vcf-automation org get a1b2c3d4 --target rdc-vcfa",
+		Example:       "  meho vcf-automation org get a1b2c3d4 --target vcfa-lab",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

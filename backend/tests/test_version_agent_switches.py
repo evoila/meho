@@ -38,6 +38,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
     {
         "agent_operation_tools_from_mcp",
         "agent_reads_custom_description",
+        "checks_agent_events",
         "jsonflux_answer_ready",
         "kb_similar_check",
         "mcp_short_tool_texts",

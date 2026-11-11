@@ -46,7 +46,7 @@ func newRealmCreateCmd() *cobra.Command {
 			"requires approval; a 409 already-exists is an idempotent success.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak realm create --target rdc-keycloak -f realm-evba.json",
+		Example:       "  meho keycloak realm create --target keycloak-lab -f realm-evba.json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -86,7 +86,7 @@ func newRealmUpdateCmd() *cobra.Command {
 			"the target's managed realm; --realm overrides. Requires approval.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak realm update --target rdc-keycloak -f realm-patch.json",
+		Example:       "  meho keycloak realm update --target keycloak-lab -f realm-patch.json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -135,8 +135,8 @@ func newRealmGetCmd() *cobra.Command {
 			"connector. --json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho keycloak realm get --target rdc-keycloak\n" +
-			"  meho keycloak realm get --target rdc-keycloak --json | jq '.result.realm'",
+		Example: "  meho keycloak realm get --target keycloak-lab\n" +
+			"  meho keycloak realm get --target keycloak-lab --json | jq '.result.realm'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

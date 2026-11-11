@@ -44,8 +44,8 @@ func newProjectDescribeCmd() *cobra.Command {
 			"the full structured resource is needed (e.g. to read custom\n" +
 			"labels or the exact parent type).\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho gcloud project describe --target rdc-gcp-dev\n" +
-			"  meho gcloud project describe --target rdc-gcp-dev --json | jq .result.labels",
+		Example: "  meho gcloud project describe --target gcp-dev-lab\n" +
+			"  meho gcloud project describe --target gcp-dev-lab --json | jq .result.labels",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

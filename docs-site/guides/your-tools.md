@@ -1,9 +1,12 @@
 # Your tools: sign out one tool
 
 You can use MEHO through several tools: the web console, the `meho`
-command line, Claude Code, Claude Desktop and other MCP clients. When you
-no longer trust one of them, you can stop it in one click. Your other
-tools keep working.
+command line, Claude Code, Claude Desktop and other MCP clients. The
+account page lets you end the saved login of one tool in one click. Your
+other tools keep working.
+
+This is a label and an off-switch, not a lock: programs that run as the
+same user on one computer can read each other's saved logins.
 
 ## Your tools
 
@@ -33,13 +36,15 @@ MEHO asks Keycloak to end the logins of that one tool: the offline
 login (it keeps a tool signed in for a long time) and each ordinary
 login. Then:
 
-- **The tool stops within about five minutes.** Its last access token
-  works until it ends: at most about five and a half minutes on MEHO's
-  built-in Keycloak. The tool cannot get a new token.
+- **The tool stops when its last access token ends.** That is within the
+  access token lifetime: at most about five and a half minutes on MEHO's
+  built-in Keycloak. The tool's saved login ends.
 - **Your other tools keep working.** For example, if you sign out Claude
   Desktop, Claude Code and the command line keep their logins.
-- **It is not a block.** The tool can sign in again. Then it asks you to
-  log in in the browser and gets a new login.
+- **It is not a block.** The tool can sign in again. If your browser is
+  still signed in to MEHO's Keycloak, that can happen without a question.
+  If it is not, the tool asks you to log in in the browser. Either way,
+  the tool gets a new login.
 - **The audit log records it** with the entry `auth.tool_sign_out` and
   the login client.
 
@@ -52,8 +57,11 @@ access tokens through it. To stop that too, end the login in your
 Keycloak account page.
 
 If Keycloak has no login of that tool for you, the card says "Nothing
-changed". If the call to Keycloak fails, the card shows an error and the
-audit log gets no sign-out entry. Try again later.
+changed". If a call to Keycloak fails, the card shows an error. Try again
+later. The audit log records the failed try too: what ended before the
+failure, if anything, and the error. If Keycloak refuses the call, the
+card says that MEHO's Keycloak admin client needs the right
+`manage-users`. Ask your MEHO admin.
 
 The web console has no button here. To sign out a browser, use the card
 **Active sessions** on the same page.

@@ -94,7 +94,7 @@ func TestPrintFingerprintOmitsNilOptionals(t *testing.T) {
 // not ProbeResult).
 func TestRunProbeHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets/rdc-vcenter/probe", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/targets/vcenter-lab/probe", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("expected POST; got %s", r.Method)
 		}
@@ -117,7 +117,7 @@ func TestRunProbeHappyPath(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	cmd, stdout, stderr := newRunCmd(t)
-	err := runProbe(cmd, probeOptions{Query: "rdc-vcenter", BackplaneOverride: srv.URL})
+	err := runProbe(cmd, probeOptions{Query: "vcenter-lab", BackplaneOverride: srv.URL})
 	if err != nil {
 		t.Fatalf("runProbe: %v; stderr=%s", err, stderr.String())
 	}
@@ -132,7 +132,7 @@ func TestRunProbeHappyPath(t *testing.T) {
 // it parses back to a FingerprintResult unchanged.
 func TestRunProbeJSONRoundTrip(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets/rdc-vcenter/probe", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/targets/vcenter-lab/probe", func(w http.ResponseWriter, _ *http.Request) {
 		ver := "9.0.0"
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.FingerprintResult{
@@ -149,7 +149,7 @@ func TestRunProbeJSONRoundTrip(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	cmd, stdout, _ := newRunCmd(t)
-	err := runProbe(cmd, probeOptions{Query: "rdc-vcenter", JSONOut: true, BackplaneOverride: srv.URL})
+	err := runProbe(cmd, probeOptions{Query: "vcenter-lab", JSONOut: true, BackplaneOverride: srv.URL})
 	if err != nil {
 		t.Fatalf("runProbe --json: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestRunProbeJSONRoundTrip(t *testing.T) {
 // missing.
 func TestRunProbe501RendersGracefulMessage(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets/rdc-vcenter/probe", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/targets/vcenter-lab/probe", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotImplemented)
 		fmt.Fprint(w, `{"detail":"no connector registered for product='vcenter'"}`)
 	})
@@ -177,7 +177,7 @@ func TestRunProbe501RendersGracefulMessage(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	cmd, _, stderr := newRunCmd(t)
-	err := runProbe(cmd, probeOptions{Query: "rdc-vcenter", BackplaneOverride: srv.URL})
+	err := runProbe(cmd, probeOptions{Query: "vcenter-lab", BackplaneOverride: srv.URL})
 	if err == nil {
 		t.Fatalf("expected error on 501")
 	}
@@ -195,7 +195,7 @@ func TestRunProbe501RendersGracefulMessage(t *testing.T) {
 // opaque "something failed".
 func TestRunProbe500SurfacesConnectorException(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets/rdc-vcenter/probe", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/targets/vcenter-lab/probe", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprint(w, `{"detail":"Internal Server Error"}`)
 	})
@@ -204,7 +204,7 @@ func TestRunProbe500SurfacesConnectorException(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	cmd, _, stderr := newRunCmd(t)
-	err := runProbe(cmd, probeOptions{Query: "rdc-vcenter", BackplaneOverride: srv.URL})
+	err := runProbe(cmd, probeOptions{Query: "vcenter-lab", BackplaneOverride: srv.URL})
 	if err == nil {
 		t.Fatalf("expected error on 500")
 	}

@@ -57,9 +57,9 @@ func newFirewallPolicyListCmd() *cobra.Command {
 			"Renders id / display_name / category for human eyes;\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho nsx firewall policy list --target rdc-nsx\n" +
-			"  meho nsx firewall policy list --scope default --target rdc-nsx\n" +
-			"  meho nsx firewall policy list --target rdc-nsx --json",
+		Example: "  meho nsx firewall policy list --target nsx-lab\n" +
+			"  meho nsx firewall policy list --scope default --target nsx-lab\n" +
+			"  meho nsx firewall policy list --target nsx-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -151,9 +151,9 @@ func newFirewallRuleListCmd() *cobra.Command {
 			"Renders id / display_name / action for human eyes;\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho nsx firewall rule list policy-app-tier --target rdc-nsx\n" +
-			"  meho nsx firewall rule list policy-app-tier --scope default --target rdc-nsx\n" +
-			"  meho nsx firewall rule list policy-app-tier --target rdc-nsx --json",
+		Example: "  meho nsx firewall rule list policy-app-tier --target nsx-lab\n" +
+			"  meho nsx firewall rule list policy-app-tier --scope default --target nsx-lab\n" +
+			"  meho nsx firewall rule list policy-app-tier --target nsx-lab --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

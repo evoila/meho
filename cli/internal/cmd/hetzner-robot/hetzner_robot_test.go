@@ -381,7 +381,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "GET:/rdns", "rdc-robot", nil)
+	r, err := dispatchOp(context.Background(), srv.URL, "GET:/rdns", "robot-lab", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestDispatchServerInfoSendsParams(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"server-ip": "1.2.3.1"}
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/server/{server-ip}", "rdc-robot", params); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/server/{server-ip}", "robot-lab", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -467,7 +467,7 @@ func TestDispatchVswitchInfoSendsID(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"vswitch-id": "4321"}
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/vswitch/{vswitch-id}", "rdc-robot", params); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/vswitch/{vswitch-id}", "robot-lab", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -496,7 +496,7 @@ func TestDispatchFirewallGetSendsParams(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"server-ip": "1.2.3.1"}
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/firewall/{server-ip}", "rdc-robot", params); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/firewall/{server-ip}", "robot-lab", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }

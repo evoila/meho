@@ -46,7 +46,7 @@ func newEnvironmentListCmd() *cobra.Command {
 			"handle — page it with result_query(handle_id, offset, limit) to\n" +
 			"read the full set a row-window at a time when present.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho vcf-fleet environment list --target rdc-fleet",
+		Example:       "  meho vcf-fleet environment list --target fleet-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -111,7 +111,7 @@ func newEnvironmentInfoCmd() *cobra.Command {
 			"connector_id=\"fleet-rest-9.0\". Returns the environment with its\n" +
 			"products[] (versions, nodes and settings). Secret values are replaced.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho vcf-fleet environment info env-vrops-prod --target rdc-fleet",
+		Example:       "  meho vcf-fleet environment info env-vrops-prod --target fleet-lab",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

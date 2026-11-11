@@ -38,7 +38,7 @@ func newHostListCmd() *cobra.Command {
 			"Renders hostname / sourceType / lastReceivedTimestamp for human eyes;\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho vcf-logs host list --target rdc-vrli\n",
+		Example:       "  meho vcf-logs host list --target vrli-lab\n",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

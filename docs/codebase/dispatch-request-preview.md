@@ -69,8 +69,8 @@ sees, so it stays off until a before-and-after measurement shows it helps.
 - **On:**
   - A typed or composite op that is not a read previews, also when it does
     not carry `requires_approval`. Example: `targets.register` runs at once
-    for a person, but an agent's call waits for approval. A `safe` typed op
-    is a read and stays `unavailable`.
+    only from the web interface. A call with a token (CLI, MCP, an agent)
+    waits for approval. A `safe` typed op is a read and stays `unavailable`.
   - A credential-class op with its own preview builder previews too.
     Example: `keycloak.user.reset_password`. The preview shows only the
     builder's plan as `proposed_effect`. `redacted_body` is `null`: the

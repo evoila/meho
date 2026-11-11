@@ -380,8 +380,11 @@ class KeycloakAdminClient:
             raise KeycloakAdminError(
                 f"Keycloak admin auth unreachable: {type(exc).__name__}"
             ) from exc
-        data: Any = resp.json()
-        self._token = data.get("access_token", "")
+        try:
+            data: Any = resp.json()
+        except ValueError as exc:
+            raise KeycloakAdminError("Keycloak admin auth answered with no JSON body") from exc
+        self._token = data.get("access_token", "") if isinstance(data, dict) else ""
         if not self._token:
             raise KeycloakAdminError("Keycloak admin auth returned no access_token")
 
@@ -482,6 +485,27 @@ class KeycloakAdminClient:
                 "Keycloak create_client succeeded but returned no Location header"
             )
         return internal_id
+
+    async def read(self, path: str, params: dict[str, str] | None = None) -> tuple[int, Any]:
+        """GET *path* under the realm's admin URL: the status and the JSON body.
+
+        The body is ``None`` when the answer is not JSON. Used by the
+        approval sign-in check of ``/api/v1/health`` (#6280), which turns
+        each status into a state of its own.
+        """
+        assert self._http is not None
+        assert self._token
+        try:
+            resp = await self._http.get(
+                f"{self._admin_url}{path}", params=params, headers=self._auth_headers()
+            )
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(f"Keycloak read network error: {type(exc).__name__}") from exc
+        try:
+            body: Any = resp.json()
+        except ValueError:
+            body = None
+        return resp.status_code, body
 
     async def get_client_secret(self, keycloak_internal_id: str) -> str:
         """Return the ``client_credentials`` secret for an existing client.

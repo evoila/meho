@@ -434,6 +434,9 @@ type mcpStub struct {
 	listed     []string
 	scopes     []string
 	gotSession []string
+	// signIn is approvals.sign_in in the meho_status answer; nil leaves
+	// the approvals block out, as an older backplane does.
+	signIn map[string]any
 }
 
 func (s *mcpStub) handler(t *testing.T) http.Handler {
@@ -470,7 +473,7 @@ func (s *mcpStub) handler(t *testing.T) http.Handler {
 			}
 			result = map[string]any{"tools": tools}
 		case "tools/call":
-			payload, _ := json.Marshal(map[string]any{
+			status := map[string]any{
 				"operator":               map[string]any{"sub": "alice-sub", "name": "Alice", "email": nil, "tenant_id": "00000000-0000-0000-0000-000000000001", "tenant_role": "operator"},
 				"vault":                  map[string]any{"reachable": true, "read_ok": true, "detail": nil},
 				"db":                     map[string]any{"migrated": true},
@@ -482,7 +485,14 @@ func (s *mcpStub) handler(t *testing.T) http.Handler {
 					"missing_working_tools":   []string{"search_docs"},
 					"operator_surface_listed": false,
 				},
-			})
+			}
+			if s.signIn != nil {
+				status["approvals"] = map[string]any{
+					"custody": "configured", "effective_posture": "four_eyes_enforced",
+					"delegated_decision_posture": "production_own_hand_only", "sign_in": s.signIn,
+				}
+			}
+			payload, _ := json.Marshal(status)
 			result = map[string]any{"isError": false, "content": []any{map[string]any{"type": "text", "text": string(payload)}}}
 		}
 		w.Header().Set("Content-Type", "application/json")

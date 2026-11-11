@@ -26,7 +26,7 @@ You can add your own connector as a package. See
 
 The tables below group the connectors by what they manage. **Built for**
 is the range the code declares and CI tests. The exact ranges, and the
-versions that were tested on a real system, are on the
+versions that a person ran against a real system, are on the
 [connector inventory](../reference/connectors.md).
 
 ### In the public image

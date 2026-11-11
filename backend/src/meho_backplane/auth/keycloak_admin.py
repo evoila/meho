@@ -73,6 +73,7 @@ __all__ = [
     "KeycloakClientConflictError",
     "KeycloakClientNotFoundError",
     "KeycloakConsentNotFoundError",
+    "KeycloakForbiddenError",
 ]
 
 _ADMIN_HTTP_TIMEOUT_SECONDS: float = 10.0
@@ -127,6 +128,13 @@ class KeycloakClientNotFoundError(KeycloakAdminError):
 
 class KeycloakConsentNotFoundError(KeycloakAdminError):
     """Raised when Keycloak has no consent or offline login of the person for the client (404)."""
+
+
+class KeycloakForbiddenError(KeycloakAdminError):
+    """Raised when Keycloak answers 403 to a call on a person's logins.
+
+    The admin client lacks the realm role ``manage-users``.
+    """
 
 
 def _hardcoded_claim_mapper(name: str, claim_name: str, claim_value: str) -> dict[str, Any]:
@@ -694,8 +702,10 @@ class KeycloakAdminClient:
         KeycloakConsentNotFoundError
             Keycloak answered 404: no consent or offline login of this
             person for this client, or no such client or person.
+        KeycloakForbiddenError
+            Keycloak answered 403: the admin client lacks ``manage-users``.
         KeycloakAdminError
-            Any other failure (a network error, 403, 5xx).
+            Any other failure (a network error, 5xx).
         """
         assert self._http is not None
         assert self._token
@@ -713,6 +723,10 @@ class KeycloakAdminClient:
         if resp.status_code == 404:
             raise KeycloakConsentNotFoundError(
                 f"Keycloak has no consent or offline login of this person for client {client_id!r}"
+            )
+        if resp.status_code == 403:
+            raise KeycloakForbiddenError(
+                "Keycloak revoke_user_client_consent refused: HTTP 403 (needs manage-users)"
             )
         if resp.status_code not in (200, 204):
             log.warning(
@@ -735,8 +749,10 @@ class KeycloakAdminClient:
 
         Raises
         ------
+        KeycloakForbiddenError
+            Keycloak answered 403: the admin client lacks ``manage-users``.
         KeycloakAdminError
-            Any failure (a network error, 403, 404, 5xx) or an answer that
+            Any other failure (a network error, 404, 5xx) or an answer that
             is not a list.
         """
         assert self._http is not None
@@ -748,6 +764,10 @@ class KeycloakAdminClient:
             raise KeycloakAdminError(
                 f"Keycloak list_user_sessions network error: {type(exc).__name__}"
             ) from exc
+        if resp.status_code == 403:
+            raise KeycloakForbiddenError(
+                "Keycloak list_user_sessions refused: HTTP 403 (needs manage-users)"
+            )
         if resp.status_code != 200:
             structlog.get_logger(__name__).warning(
                 "keycloak_list_user_sessions_failed", status=resp.status_code
@@ -766,8 +786,10 @@ class KeycloakAdminClient:
 
         Raises
         ------
+        KeycloakForbiddenError
+            Keycloak answered 403: the admin client lacks ``manage-users``.
         KeycloakAdminError
-            Any other failure (a network error, 403, 5xx).
+            Any other failure (a network error, 5xx).
         """
         assert self._http is not None
         assert self._token
@@ -780,6 +802,10 @@ class KeycloakAdminClient:
             ) from exc
         if resp.status_code == 404:
             return False
+        if resp.status_code == 403:
+            raise KeycloakForbiddenError(
+                "Keycloak delete_user_session refused: HTTP 403 (needs manage-users)"
+            )
         if resp.status_code not in (200, 204):
             structlog.get_logger(__name__).warning(
                 "keycloak_delete_user_session_failed", status=resp.status_code

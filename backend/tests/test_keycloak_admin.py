@@ -24,6 +24,7 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakClientConflictError,
     KeycloakClientNotFoundError,
     KeycloakConsentNotFoundError,
+    KeycloakForbiddenError,
 )
 
 _ADMIN_URL = "https://kc.test/admin/realms/meho"
@@ -357,6 +358,7 @@ async def test_revoke_user_client_consent_other_status_raises(status: int) -> No
             with pytest.raises(KeycloakAdminError) as info:
                 await kc.revoke_user_client_consent(_INTERNAL_ID, "meho-cli")
     assert not isinstance(info.value, KeycloakConsentNotFoundError)
+    assert isinstance(info.value, KeycloakForbiddenError) == (status == 403)
     assert f"HTTP {status}" in str(info.value)
 
 
@@ -391,8 +393,11 @@ async def test_list_user_sessions_failure_raises(answer: httpx.Response) -> None
         _mock_token(r)
         r.get(url__regex=r"/sessions$").mock(return_value=answer)
         async with _client() as kc:
-            with pytest.raises(KeycloakAdminError):
+            with pytest.raises(KeycloakAdminError) as info:
                 await kc.list_user_sessions(_INTERNAL_ID)
+    assert isinstance(info.value, KeycloakForbiddenError) == (
+        isinstance(answer, httpx.Response) and answer.status_code == 403
+    )
 
 
 @pytest.mark.asyncio
@@ -416,5 +421,8 @@ async def test_delete_user_session_failure_raises(answer: Any) -> None:
         _mock_token(r)
         r.delete(url__regex=r"/sessions/").mock(side_effect=[answer])
         async with _client() as kc:
-            with pytest.raises(KeycloakAdminError):
+            with pytest.raises(KeycloakAdminError) as info:
                 await kc.delete_user_session("s-1")
+    assert isinstance(info.value, KeycloakForbiddenError) == (
+        isinstance(answer, httpx.Response) and answer.status_code == 403
+    )

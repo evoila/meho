@@ -18,8 +18,9 @@ off, the account page has no such section and the route answers 404.
   tools. An unknown key, or a kind without a sign-out button (the web
   console), answers 404.
 
-A Keycloak failure answers the section with an error line and writes no
-audit row. The logic is in :mod:`meho_backplane.auth.tool_sign_out`.
+A Keycloak failure answers the section with an error line; the audit row
+of the failed try says what ended before it, if anything. The logic is in
+:mod:`meho_backplane.auth.tool_sign_out`.
 """
 
 from __future__ import annotations
@@ -37,9 +38,11 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminError,
     KeycloakAdminNotConfiguredError,
     KeycloakConsentNotFoundError,
+    KeycloakForbiddenError,
 )
 from meho_backplane.auth.tool_sign_out import (
     ToolKind,
+    ToolSignOutIncompleteError,
     last_use_by_client,
     sign_out_tool,
     tool_kinds,
@@ -58,8 +61,9 @@ _get_session_dep = Depends(get_session)
 
 #: Result lines after a sign-out. Kept here so the tests pin the words.
 SIGNED_OUT_TEXT = (
-    "{label} is signed out. It stops within about five minutes, when its "
-    "last access token ends. If it signs in again, it gets a new login."
+    "{label} is signed out. It stops when its last access token ends: within "
+    "the access token lifetime (about five minutes on MEHO's built-in "
+    "Keycloak). If it signs in again, it gets a new login."
 )
 SHARED_KEPT_TEXT = (
     " {label} also shares one browser login with {others}. MEHO did not end "
@@ -80,6 +84,16 @@ NOT_CONFIGURED_TEXT = (
 FAILED_TEXT = (
     "Keycloak could not sign out {label}. Try again later. If it keeps "
     "failing, ask your MEHO admin."
+)
+FORBIDDEN_TEXT = (
+    "Keycloak refused to sign out {label}: MEHO's Keycloak admin client does "
+    "not have the right manage-users. Ask your MEHO admin to give it that "
+    "right. Nothing changed."
+)
+PARTLY_SIGNED_OUT_TEXT = (
+    "{label} is only partly signed out: Keycloak ended some of its logins, "
+    "then a call failed. {label} may still work. Try again later. If it "
+    "keeps failing, ask your MEHO admin."
 )
 
 
@@ -155,6 +169,10 @@ async def _do_sign_out(session_ctx: UISessionContext, kind: ToolKind) -> _Result
         return _Result("info", NOTHING_TO_SIGN_OUT_TEXT.format(label=kind.label))
     except KeycloakAdminNotConfiguredError:
         return _Result("error", NOT_CONFIGURED_TEXT)
+    except ToolSignOutIncompleteError:
+        return _Result("error", PARTLY_SIGNED_OUT_TEXT.format(label=kind.label))
+    except KeycloakForbiddenError:
+        return _Result("error", FORBIDDEN_TEXT.format(label=kind.label))
     except KeycloakAdminError as exc:
         _log.warning(
             "ui_account_tool_sign_out_failed",

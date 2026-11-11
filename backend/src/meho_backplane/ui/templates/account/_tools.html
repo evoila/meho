@@ -27,9 +27,10 @@
     <h2 class="card-title text-base">Your tools</h2>
     <p class="text-xs opacity-60">
       Each tool signs in with its own login. Sign out one tool to stop it.
-      Your other tools keep working. A signed-out tool stops within about
-      five minutes, when its last access token ends. Signing out is not a
-      block: the tool can sign in again and then gets a new login.
+      Your other tools keep working. A signed-out tool stops when its last
+      access token ends: within the access token lifetime (about five
+      minutes on MEHO's built-in Keycloak). Signing out is not a block: the
+      tool can sign in again and then gets a new login.
     </p>
 
     {% if tools_result %}
@@ -71,9 +72,9 @@
             <div class="modal-box">
               <h3 class="text-lg font-semibold">Sign out {{ t.label }}?</h3>
               <p class="py-2 text-sm opacity-80">
-                {{ t.label }} stops within about five minutes. Your other
-                tools keep working. If it signs in again, it gets a new
-                login.
+                {{ t.label }} stops within the access token lifetime (about
+                five minutes on MEHO's built-in Keycloak). Your other tools
+                keep working. If it signs in again, it gets a new login.
               </p>
               <div class="modal-action">
                 <form method="dialog">

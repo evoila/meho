@@ -1045,14 +1045,22 @@ A kind whose client id is not set is left out.
   field. `tests/integration/test_keycloak_tool_sign_out.py` checks against
   a real Keycloak that only the signed-out tool stops renewing.
 - After at least one login ended, MEHO writes the audit row
-  `auth.tool_sign_out` (method `INTERNAL`, payload `client_id`, `tool`,
-  `offline_login_ended`, `sessions_ended`, `shared_with`). A failed call
-  (an error answer, no answer, no admin client) shows an error line and
-  writes no row. No login at all says "Nothing changed"; only shared
+  `auth.tool_sign_out` (method `INTERNAL`, status 200, payload
+  `client_id`, `tool`, `outcome` `signed_out`, `offline_login_ended`,
+  `sessions_ended`, `shared_with`). A failed call (an error answer, no
+  answer, no admin client) shows an error line and writes the same row
+  with status 502, the `error` class name, and `outcome` `failed`. When
+  the call failed after a login already ended
+  (`ToolSignOutIncompleteError`), `outcome` is `partly_signed_out` and
+  the row says what ended. A 403 from Keycloak
+  (`KeycloakForbiddenError`) gets its own line: the admin client lacks
+  `manage-users`. No login at all says "Nothing changed"; only shared
   logins says so too and names the other tools. Neither writes a row.
-- The tool's last access token works until it ends: about five minutes on
-  the built-in realm (300 seconds plus 30 seconds leeway). The card says
-  so. Signing out is not a block: the tool can sign in again.
+- The tool's last access token works until it ends: the access token
+  lifetime of the realm (about five minutes on the built-in realm: 300
+  seconds plus 30 seconds leeway). The card says so. Signing out is not a
+  block: the tool can sign in again, and with a signed-in browser that
+  can happen without a question.
 - With the switch off, the card is not shown and the route answers 404.
 
 Code: `auth/tool_sign_out.py` (tool kinds, last use, the sign-out and the

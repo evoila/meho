@@ -24,6 +24,7 @@ against a real Keycloak in CI.
 from __future__ import annotations
 
 import asyncio
+import html
 import uuid
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -59,8 +60,10 @@ from meho_backplane.ui.paths import static_root_dir, static_src_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.account_tools import (
     FAILED_TEXT,
+    FORBIDDEN_TEXT,
     NOT_CONFIGURED_TEXT,
     NOTHING_TO_SIGN_OUT_TEXT,
+    PARTLY_SIGNED_OUT_TEXT,
     SHARED_KEPT_TEXT,
     SHARED_ONLY_TEXT,
     SIGNED_OUT_TEXT,
@@ -185,6 +188,15 @@ def _sign_out_rows() -> list[AuditLog]:
     return asyncio.run(_do())
 
 
+def _assert_one_failed_row(error: str, *, outcome: str = "failed") -> dict[str, Any]:
+    rows = _sign_out_rows()
+    assert len(rows) == 1
+    assert rows[0].status_code == 502
+    assert rows[0].payload["outcome"] == outcome
+    assert rows[0].payload["error"] == error
+    return dict(rows[0].payload)
+
+
 class _FakeKeycloak:
     """The logins of each person, served like the Keycloak 26 admin API.
 
@@ -304,7 +316,7 @@ def test_section_lists_tool_kinds_with_last_use() -> None:
     assert "none in the last 90 days" in desktop_row
     cli_row = body.split('data-tool-row="cli"', 1)[1].split("data-tool-row=", 1)[0]
     assert "none in the last 90 days" in cli_row
-    assert "about five minutes" in body
+    assert "access token lifetime" in body
     assert "not a" in body and "block" in body
 
 
@@ -368,14 +380,15 @@ def test_sign_out_desktop_keeps_the_other_tools() -> None:
     assert kc.can_renew(_ME, "meho-cli")
     assert kc.can_renew(_OTHER, "meho-mcp-desktop")
     assert 'data-result="success"' in response.text
-    assert SIGNED_OUT_TEXT.format(label="Claude Desktop") in response.text
-    assert "about five minutes" in response.text
+    assert SIGNED_OUT_TEXT.format(label="Claude Desktop") in html.unescape(response.text)
+    assert "about five minutes" in html.unescape(response.text)
     rows = _sign_out_rows()
     assert len(rows) == 1
     row = rows[0]
     assert row.operator_sub == _ME
     assert row.tenant_id == _TENANT
     assert row.status_code == 200
+    assert row.payload["outcome"] == "signed_out"
     assert row.payload["client_id"] == "meho-mcp-desktop"
     assert row.payload["tool"] == "claude-desktop"
     assert row.payload["offline_login_ended"] is True
@@ -426,20 +439,16 @@ def test_nothing_to_sign_out_writes_no_row() -> None:
     assert response.status_code == 200, response.text
     assert kc.deletes == [(_ME, "meho-mcp-code")]
     assert 'data-result="info"' in response.text
-    assert NOTHING_TO_SIGN_OUT_TEXT.format(label="Claude Code") in response.text
+    assert NOTHING_TO_SIGN_OUT_TEXT.format(label="Claude Code") in html.unescape(response.text)
     assert _sign_out_rows() == []
 
 
 @pytest.mark.parametrize(
     "answer",
-    [
-        httpx.Response(500),
-        httpx.Response(403, json={"error": "unknown_error"}),
-        httpx.ConnectError("refused"),
-    ],
-    ids=["server-error", "forbidden", "unreachable"],
+    [httpx.Response(500), httpx.ConnectError("refused")],
+    ids=["server-error", "unreachable"],
 )
-def test_failed_keycloak_call_shows_an_error_and_writes_no_row(answer: Any) -> None:
+def test_failed_keycloak_call_shows_an_error_and_writes_a_failed_row(answer: Any) -> None:
     client, csrf = _client_for(_ME)
     with respx.mock(assert_all_called=False) as router:
         router.post(_TOKEN_URL).mock(
@@ -451,12 +460,29 @@ def test_failed_keycloak_call_shows_an_error_and_writes_no_row(answer: Any) -> N
     assert route.call_count == 1
     assert response.status_code == 200, response.text
     assert 'data-result="error"' in response.text
-    assert FAILED_TEXT.format(label="Claude Desktop") in response.text
+    assert FAILED_TEXT.format(label="Claude Desktop") in html.unescape(response.text)
     assert "signed out." not in response.text
-    assert _sign_out_rows() == []
+    payload = _assert_one_failed_row("KeycloakAdminError")
+    assert payload["offline_login_ended"] is False
+    assert payload["sessions_ended"] == 0
 
 
-def test_failed_admin_login_shows_an_error_and_writes_no_row() -> None:
+def test_forbidden_answer_names_the_missing_right() -> None:
+    client, csrf = _client_for(_ME)
+    with respx.mock(assert_all_called=False) as router:
+        router.post(_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        router.get(url__regex=r"/sessions$").mock(return_value=httpx.Response(200, json=[]))
+        router.delete(url__regex=r"/consents/").mock(return_value=httpx.Response(403))
+        response = _post(client, csrf, "claude-desktop")
+    assert 'data-result="error"' in response.text
+    assert FORBIDDEN_TEXT.format(label="Claude Desktop") in html.unescape(response.text)
+    assert "manage-users" in html.unescape(response.text)
+    _assert_one_failed_row("KeycloakForbiddenError")
+
+
+def test_failed_admin_login_shows_an_error_and_writes_a_failed_row() -> None:
     client, csrf = _client_for(_ME)
     with respx.mock(assert_all_called=False) as router:
         router.post(_TOKEN_URL).mock(return_value=httpx.Response(401))
@@ -464,9 +490,9 @@ def test_failed_admin_login_shows_an_error_and_writes_no_row() -> None:
         response = _post(client, csrf, "claude-desktop")
     assert route.call_count == 0
     assert 'data-result="error"' in response.text
-    assert FAILED_TEXT.format(label="Claude Desktop") in response.text
+    assert FAILED_TEXT.format(label="Claude Desktop") in html.unescape(response.text)
     assert "made-up-admin-secret" not in response.text
-    assert _sign_out_rows() == []
+    _assert_one_failed_row("KeycloakAdminError")
 
 
 def test_admin_client_not_set_up_shows_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -477,8 +503,8 @@ def test_admin_client_not_set_up_shows_an_error(monkeypatch: pytest.MonkeyPatch)
         response = _post(client, csrf, "claude-desktop")
     assert response.status_code == 200, response.text
     assert 'data-result="error"' in response.text
-    assert NOT_CONFIGURED_TEXT in response.text
-    assert _sign_out_rows() == []
+    assert NOT_CONFIGURED_TEXT in html.unescape(response.text)
+    _assert_one_failed_row("KeycloakAdminNotConfiguredError")
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +520,7 @@ def test_sign_out_ends_an_ordinary_login_without_offline() -> None:
         response = _post(client, csrf, "cli")
     assert response.status_code == 200, response.text
     assert 'data-result="success"' in response.text
-    assert SIGNED_OUT_TEXT.format(label="Command line (meho)") in response.text
+    assert SIGNED_OUT_TEXT.format(label="Command line (meho)") in html.unescape(response.text)
     assert not kc.can_renew(_ME, "meho-cli")
     assert kc.can_renew(_ME, "meho-mcp-code")
     rows = _sign_out_rows()
@@ -516,10 +542,9 @@ def test_shared_login_is_kept_and_named() -> None:
         response = _post(client, csrf, "claude-desktop")
     assert response.status_code == 200, response.text
     assert 'data-result="success"' in response.text
-    assert (
-        SHARED_KEPT_TEXT.format(label="Claude Desktop", others="Command line (meho)")
-        in response.text
-    )
+    assert SHARED_KEPT_TEXT.format(
+        label="Claude Desktop", others="Command line (meho)"
+    ) in html.unescape(response.text)
     assert kc.can_renew(_ME, "meho-cli")
     assert len(kc.session_deletes) == 1
     rows = _sign_out_rows()
@@ -534,14 +559,16 @@ def test_only_a_shared_login_changes_nothing() -> None:
         response = _post(client, csrf, "claude-code")
     assert response.status_code == 200, response.text
     assert 'data-result="info"' in response.text
-    assert SHARED_ONLY_TEXT.format(label="Claude Code", others="Web console") in response.text
+    assert SHARED_ONLY_TEXT.format(label="Claude Code", others="Web console") in html.unescape(
+        response.text
+    )
     assert kc.session_deletes == []
     assert kc.can_renew(_ME, "meho-mcp-code")
     assert kc.can_renew(_ME, "meho-web")
     assert _sign_out_rows() == []
 
 
-def test_failed_session_list_changes_nothing_and_writes_no_row() -> None:
+def test_failed_session_list_changes_nothing_and_writes_a_failed_row() -> None:
     """The session list is read before anything ends, so its failure changes nothing."""
     client, csrf = _client_for(_ME)
     with respx.mock(assert_all_called=False) as router:
@@ -553,10 +580,10 @@ def test_failed_session_list_changes_nothing_and_writes_no_row() -> None:
         response = _post(client, csrf, "claude-desktop")
     assert consent.call_count == 0
     assert 'data-result="error"' in response.text
-    assert _sign_out_rows() == []
+    _assert_one_failed_row("KeycloakAdminError")
 
 
-def test_failed_session_delete_shows_an_error_and_writes_no_row() -> None:
+def test_forbidden_session_delete_names_the_missing_right() -> None:
     client, csrf = _client_for(_ME)
     with respx.mock(assert_all_called=False) as router:
         router.post(_TOKEN_URL).mock(
@@ -571,5 +598,34 @@ def test_failed_session_delete_shows_an_error_and_writes_no_row() -> None:
         router.delete(url__regex=r"/sessions/").mock(return_value=httpx.Response(403))
         response = _post(client, csrf, "claude-desktop")
     assert 'data-result="error"' in response.text
-    assert FAILED_TEXT.format(label="Claude Desktop") in response.text
-    assert _sign_out_rows() == []
+    assert FORBIDDEN_TEXT.format(label="Claude Desktop") in html.unescape(response.text)
+    _assert_one_failed_row("KeycloakForbiddenError")
+
+
+@pytest.mark.parametrize("answer", [httpx.Response(500), httpx.Response(403)], ids=str)
+def test_failed_session_delete_after_offline_ended_says_partly(answer: Any) -> None:
+    """The offline login ended, then a session delete failed: the row says what ended."""
+    client, csrf = _client_for(_ME)
+    with respx.mock(assert_all_called=False) as router:
+        router.post(_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        router.get(url__regex=r"/sessions$").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"id": "s-1", "clients": {"u": "meho-mcp-desktop"}},
+                    {"id": "s-2", "clients": {"u": "meho-mcp-desktop"}},
+                ],
+            )
+        )
+        router.delete(url__regex=r"/consents/").mock(return_value=httpx.Response(204))
+        router.delete(url__regex=r"/sessions/").mock(side_effect=[httpx.Response(204), answer])
+        response = _post(client, csrf, "claude-desktop")
+    assert 'data-result="error"' in response.text
+    assert PARTLY_SIGNED_OUT_TEXT.format(label="Claude Desktop") in html.unescape(response.text)
+    assert "could not sign out" not in response.text
+    error = "KeycloakForbiddenError" if answer.status_code == 403 else "KeycloakAdminError"
+    payload = _assert_one_failed_row(error, outcome="partly_signed_out")
+    assert payload["offline_login_ended"] is True
+    assert payload["sessions_ended"] == 1

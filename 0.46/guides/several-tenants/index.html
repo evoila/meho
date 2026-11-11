@@ -3674,6 +3674,10 @@ also in at least one role group.</p>
   the tenants of the person's own groups.</li>
 <li>act there as <code>tenant_admin</code>. When the person has a role group in that
   tenant, the role of that group applies instead.</li>
+<li>approve their own changes in a tenant where they act as <code>tenant_admin</code>.
+  They count as an admin there, so they may approve their own changes
+  like members of <code>MEHO-SA-Operators</code> and <code>MEHO-Admins</code>. This does not
+  cover a change of rights: another admin must approve that.</li>
 <li>use the cross-tenant options, for example <code>--tenant</code> on the commands
   that have it. For a tenant where the person has a role group, MEHO
   answers <code>403 tenant_select_with_header</code>: pick that tenant with
@@ -3681,8 +3685,6 @@ also in at least one role group.</p>
 </ul>
 <p>A platform admin <strong>may not</strong>:</p>
 <ul>
-<li>approve their own changes. Only the <code>SA-Operators</code> group of the
-  current tenant allows that.</li>
 <li>get the <code>approver</code> flag from the platform admin group. It comes only
   from an <code>Approvers</code> group of the current tenant.</li>
 <li>pick a tenant that does not exist. MEHO answers

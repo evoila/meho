@@ -52,7 +52,7 @@ contact evoila.
 <!-- live-tests:start -->
 | Product | Built for | Tested live on |
 | --- | --- | --- |
-| VMware vCenter and vSphere | 8.0, 9.x | `vmware-rest-9.0`: not yet recorded. `vmware-rest-8.0`: not yet recorded. |
+| VMware vCenter and vSphere | 8.0 Update 1 or newer, 9.x | `vmware-rest-9.0`: not yet recorded. `vmware-rest-8.0`: not yet recorded. |
 | VMware NSX | 4.x, 9.x | `nsx-rest-9.0`: not yet recorded. `nsx-rest-4.2`: not yet recorded. |
 | VCF SDDC Manager | 5.x, 9.x | `sddc-rest-9.0`: not yet recorded. `sddc-vcf5-5.0`: not yet recorded. |
 | VCF Installer and Cloud Builder | 5.x, 9.x | `installer-rest-9.1`: not yet recorded. `installer-cb-5.0`: not yet recorded. |

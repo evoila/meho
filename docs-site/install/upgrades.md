@@ -172,6 +172,9 @@ this section:
 core_bootstrap_failed: login flow meho approval sign-in: meho-admin may not read or change login flows, ...
 ```
 
+With `helm upgrade --atomic`, Helm rolls the release back when the Job
+stops, so the old version keeps running until you add the role.
+
 Give `meho-admin` the role once, then run the upgrade again:
 
 1. Log in to the Keycloak admin console as the console admin

@@ -194,8 +194,8 @@ rows in the realm `meho`.
 `meho approvals approve` signs in through its own login flow in realm
 `meho`: `meho approval sign-in`, bound to the client `meho-cli-approve`.
 The flow asks for the password, and for the one-time code when the person
-has set one up. It has no other step, so it does not send the person to
-your Keycloak. Every install needs this flow and its binding.
+has set one up. It has no other step. Every install needs this flow and
+its binding.
 
 - **MEHO's built-in Keycloak in front of yours (this page):** the install
   makes the flow and binds it at every `helm upgrade`. On an older install

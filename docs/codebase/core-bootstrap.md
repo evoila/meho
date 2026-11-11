@@ -395,7 +395,11 @@ Steps of the realm stage, in order:
    that stops half-way (a timeout, a restart) can leave a flow with
    missing steps or steps that are still off; the next run adds the
    missing steps and sets the requirements of the file (output:
-   `completed (an earlier run had not finished it)`). A flow that then
+   `completed (an earlier run had not finished it)`). The flow matches
+   only when its whole list of steps, as Keycloak shows it, is the one of
+   the file: the same steps in the same order, at the same level, with
+   the same requirement. A step twice or a step in the wrong sub-flow does
+   not match. A flow that then
    still has other steps than the file is kept as it is, and the step
    prints `kept, but its steps differ from the realm file; no client is
    bound to it`: such a flow is left out of the bindings, so a new

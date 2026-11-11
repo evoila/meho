@@ -36,6 +36,7 @@ from tests._reveal_fetch_helpers import (
     PLAIN_OP,
     SECRET_VALUE,
     approved_reveal,
+    register_mint_op,
     register_plain_read,
     register_vault_read,
     run_without_value,
@@ -85,6 +86,7 @@ async def vault_read(client: TestClient) -> AsyncIterator[None]:
     reset_dispatcher_caches()
     await register_vault_read()
     await register_plain_read()
+    await register_mint_op()
     yield
     clear_registry()
     reset_dispatcher_caches()
@@ -114,6 +116,19 @@ async def test_rest_reveal_answer_with_the_value_says_no_store(client: TestClien
     assert stored.status_code == 200, stored.text
     assert SECRET_VALUE not in stored.text
     assert not _says_no_store(stored)
+
+
+@pytest.mark.usefixtures("vault_read")
+async def test_rest_reveal_of_a_new_credential_says_no_store(client: TestClient) -> None:
+    """An approved reveal of an operation that makes a new credential says no-store."""
+    request_id = await approved_reveal(_REQUESTER, None)
+
+    shown = client.post(f"/api/v1/approvals/{request_id}/reveal")
+    assert shown.status_code == 200, shown.text
+    assert shown.json()["status"] == "ok", shown.text
+    assert SECRET_VALUE in shown.text
+    assert shown.headers["cache-control"] == "no-store"
+    assert shown.headers["pragma"] == "no-cache"
 
 
 @pytest.mark.usefixtures("vault_read")

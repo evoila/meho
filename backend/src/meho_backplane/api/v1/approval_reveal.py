@@ -98,7 +98,7 @@ async def reveal_approved_request(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT, detail=f"reveal_{exc.code}: {exc.message}"
         ) from exc
-    # The dispatcher marks the answer when it holds the value.
+    # The answer is marked when it holds the value (a read or a new credential).
     if mark.holds_secret:
         set_no_store(response)
     # Log only fields that hold no secret value.

@@ -24,8 +24,9 @@ gives the same way to a person who works through an AI tool over MCP:
   same person and tenant, once, within the fetch window after the approval.
   Each try writes an ``approval.reveal`` audit row.
 * When the answer holds the value, the HTTP answer says ``Cache-Control:
-  no-store`` (:mod:`meho_backplane.no_store`): the dispatcher marks it, and
-  the MCP route sets the headers. A refused or failed run keeps the usual
+  no-store`` (:mod:`meho_backplane.no_store`): the dispatcher or
+  :func:`~meho_backplane.operations.approved_reveal.fetch_approved_reveal`
+  marks it, and the MCP route sets the headers. A refused or failed run keeps the usual
   headers.
 
 A refused fetch answers ``status="denied"`` with ``extras.error_code``

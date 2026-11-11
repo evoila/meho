@@ -1665,9 +1665,12 @@ for the person who asked, not a run. The code is in
   and gives the value only in that one answer.
 - **No cache keeps the answer with the value.** An answer that holds the
   value says `Cache-Control: no-store` and `Pragma: no-cache`
-  (`no_store.py`). The dispatcher decides: it marks the answer when it
-  puts the values in (`_protect_secret_values` calls
-  `no_store.mark_answer_holds_secret`). Each route opens
+  (`no_store.py`). The dispatcher marks the answer when it puts the
+  values in (`_protect_secret_values` calls
+  `no_store.mark_answer_holds_secret`). `fetch_approved_reveal` also
+  marks every approved reveal that ran with `status: ok`, so the answer
+  with a new credential (for example a new AppRole secret ID) is marked
+  too. Each route opens
   `no_store.answer_scope` around the run and sets the headers only when
   the answer was marked: `POST /api/v1/approvals/{id}/reveal`, `POST
   /api/v1/operations/call`, MCP, and the console's operation page, Vault

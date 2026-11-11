@@ -16,7 +16,7 @@ from uuid import UUID
 
 import pytest
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
@@ -37,6 +37,9 @@ READ_OP = "vault.kv.read"
 #: A plain read (not a credential read) whose answer has a secret-named field.
 #: A person's ``reveal_secret: true`` on it runs at once, with no approval.
 PLAIN_OP = "vault.app.config"
+#: An operation that makes a new credential and returns it. Its approved
+#: reveal answers with :data:`SECRET_VALUE` in ``secret_id``.
+MINT_OP = "vault.auth.approle.generate_secret_id"
 #: A path whose read fails: the approved run ends with an error and no value.
 BROKEN_PATH = "app/broken"
 
@@ -66,6 +69,10 @@ async def _plain_handler(operator: Operator, target: Any, params: dict[str, Any]
     return {"name": "app", "password": SECRET_VALUE}
 
 
+async def _mint_handler(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    return {"data": {"secret_id": SECRET_VALUE, "secret_id_accessor": "accessor-6273"}}
+
+
 def _embedding_service() -> AsyncMock:
     service = AsyncMock()
     service.encode_one.return_value = [0.0] * EMBEDDING_DIMENSION
@@ -87,6 +94,25 @@ async def register_plain_read() -> None:
         handler=_plain_handler,
         summary="Read the app config.",
         description="Read the app config.",
+        parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        when_to_use=None,
+        embedding_service=_embedding_service(),
+    )
+
+
+async def register_mint_op() -> None:
+    """Register :data:`MINT_OP`, which answers with a new :data:`SECRET_VALUE`.
+
+    Call after :func:`register_vault_read`, which registers the connector.
+    """
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=MINT_OP,
+        handler=_mint_handler,
+        summary="Make a new AppRole secret ID.",
+        description="Make a new AppRole secret ID.",
         parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
         when_to_use=None,
         embedding_service=_embedding_service(),
@@ -116,23 +142,33 @@ async def register_vault_read() -> None:
     )
 
 
-async def parked_reveal(requester: Operator, path: str = "app/db") -> UUID:
-    """*requester* asks to see the value at *path*; the call waits for approval."""
+async def parked_reveal(requester: Operator, path: str | None = "app/db") -> UUID:
+    """*requester* asks to see the value at *path*; the call waits for approval.
+
+    With *path* ``None``, *requester* asks for a new credential of :data:`MINT_OP`.
+    """
     parked = await dispatch(
         operator=requester,
         connector_id=CONNECTOR_ID,
-        op_id=READ_OP,
+        op_id=READ_OP if path is not None else MINT_OP,
         target=None,
-        params={"path": path, "reveal_secret": True},
+        params={"path": path, "reveal_secret": True}
+        if path is not None
+        else {"reveal_secret": True},
     )
     assert parked.status == "awaiting_approval", parked.error
     return UUID(parked.extras["approval_request_id"])
 
 
-async def approved_reveal(requester: Operator, path: str = "app/db") -> UUID:
-    """*requester*'s reveal waits; another person of the tenant approves it. Nothing runs."""
+async def approved_reveal(requester: Operator, path: str | None = "app/db") -> UUID:
+    """*requester*'s reveal waits; a tenant admin approves it. Nothing runs.
+
+    An admin may approve also a dangerous change, such as :data:`MINT_OP`.
+    """
     request_id = await parked_reveal(requester, path)
-    reviewer = requester.model_copy(update={"sub": "reviewer-6273"})
+    reviewer = requester.model_copy(
+        update={"sub": "reviewer-6273", "tenant_role": TenantRole.TENANT_ADMIN}
+    )
     async with get_sessionmaker()() as session:
         approved = await approve_request(session, request_id, operator=reviewer)
         await session.commit()

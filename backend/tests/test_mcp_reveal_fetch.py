@@ -42,10 +42,12 @@ from meho_backplane.operations.approved_reveal import fetch_approved_reveal
 from meho_backplane.settings import get_settings
 from tests._reveal_fetch_helpers import (
     CONNECTOR_ID,
+    MINT_OP,
     PLAIN_OP,
     READ_OP,
     SECRET_VALUE,
     approved_reveal,
+    register_mint_op,
     register_plain_read,
     register_vault_read,
     run_without_value,
@@ -97,6 +99,7 @@ async def vault_read(client: TestClient) -> AsyncIterator[None]:
     reset_dispatcher_caches()
     await register_vault_read()
     await register_plain_read()
+    await register_mint_op()
     yield
     clear_registry()
     reset_dispatcher_caches()
@@ -197,6 +200,23 @@ async def test_mcp_client_fetches_the_value_once_and_a_second_fetch_is_refused(
     assert second["extras"]["error_code"] == "reveal_already_used"
     assert second["extras"]["approval_request_id"] == str(request_id)
     assert "already fetched" in second["error"]
+
+
+@pytest.mark.usefixtures("vault_read")
+async def test_a_fetch_of_a_new_credential_says_no_store(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An approved reveal of an operation that makes a new credential says no-store."""
+    _switch(monkeypatch, on=True)
+    request_id = await approved_reveal(_REQUESTER, None)
+
+    response = _fetch(client, request_id, op_id=MINT_OP)
+    assert response.status_code == 200, response.text
+    structured = response.json()["result"]["structuredContent"]
+    assert structured["status"] == "ok", structured
+    assert SECRET_VALUE in response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
 
 
 @pytest.mark.usefixtures("vault_read")

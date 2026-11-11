@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.no_store import mark_answer_holds_secret
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -257,4 +258,8 @@ async def fetch_approved_reveal(
             "already_used",
             "The value of this request was already fetched. Send the request again.",
         )
+    if result.status == "ok":
+        # The answer holds the value. The dispatcher marks a revealed read,
+        # but not an operation that makes a new credential, so mark it here.
+        mark_answer_holds_secret()
     return result

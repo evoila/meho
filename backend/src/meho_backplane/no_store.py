@@ -11,9 +11,11 @@ no-store`` (and ``Pragma: no-cache`` for old HTTP/1.0 caches). Other answers
 keep their headers as they are.
 
 The dispatcher decides. When it puts revealed values into an answer, it
-calls :func:`mark_answer_holds_secret`. Each route that runs an operation
-for a person opens :func:`answer_scope` around the run and calls
-:func:`set_no_store` on its response only when the answer was marked:
+calls :func:`mark_answer_holds_secret`. An approved reveal that ran with
+``status: ok`` is marked too, also when the operation made a new credential
+(:func:`~meho_backplane.operations.approved_reveal.fetch_approved_reveal`).
+Each route that runs an operation for a person opens :func:`answer_scope`
+around the run and calls :func:`set_no_store` on its response only when the answer was marked:
 ``POST /api/v1/operations/call``, ``POST /api/v1/approvals/{id}/reveal``,
 the MCP route, and the console's operation and Vault pages. So a run that
 was refused or ended with an error, and holds no value, keeps the usual

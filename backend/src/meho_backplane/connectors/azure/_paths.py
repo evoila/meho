@@ -407,6 +407,23 @@ OFFAZURE_MASTER_SITES_PATH: Final[str] = f"{_OFFAZURE}/masterSites"
 
 # ---- monitor (Task #5090) ----
 
+#: ``GET /{resourceUri}/providers/Microsoft.Insights/metrics``: the metrics of
+#: one resource (Metrics - List). *resource_uri* is the resource ID without its
+#: leading ``/``.
+METRICS_PATH: Final[str] = "/{resource_uri}/providers/Microsoft.Insights/metrics"
+
+#: The API version of the metrics read of one resource (Microsoft.Insights).
+METRICS_API_VERSION: Final[str] = "2023-10-01"
+
+#: ``POST /subscriptions/{subscriptionId}/metrics:getBatch``: the metrics of up
+#: to 50 resources of one region and one type (Metrics Data Plane - Batch). A
+#: read, even though it is a POST. It is sent to the regional host
+#: ``{region}.metrics.monitor.azure.com``, not to Resource Manager.
+METRICS_BATCH_PATH: Final[str] = "/subscriptions/{subscription_id}/metrics:getBatch"
+
+#: The API version of the metrics batch read.
+METRICS_BATCH_API_VERSION: Final[str] = "2024-02-01"
+
 # ---- network (Task #5085) ----
 
 #: The API version of the Microsoft.Network reads: virtual networks, network

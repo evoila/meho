@@ -592,27 +592,23 @@ async def remove_built_in_connector_rows(*, product: str, version: str, impl_id:
 
     For a registrar whose operations exist only while a switch is on: with
     the switch off it calls this, so rows from a start with the switch on
-    are not found, listed or called. Writes through the start-up
-    transaction when one is open, else commits in its own session.
+    are not found, listed or called. Writes only through the start-up
+    registration transaction (:func:`operation_catalog_write`); outside it
+    (a registry check that runs a registrar with no database) it does
+    nothing.
     """
-
-    async def _delete(session: AsyncSession) -> None:
-        for model in (EndpointDescriptor, OperationGroup):
-            await session.execute(
-                delete(model).where(
-                    model.tenant_id.is_(None),
-                    model.product == product,
-                    model.version == version,
-                    model.impl_id == impl_id,
-                )
-            )
-
-    bound = _CATALOG_SESSION.get()
-    if bound is not None:
-        await _delete(bound)
+    session = _CATALOG_SESSION.get()
+    if session is None:
         return
-    async with get_sessionmaker()() as session, session.begin():
-        await _delete(session)
+    for model in (EndpointDescriptor, OperationGroup):
+        await session.execute(
+            delete(model).where(
+                model.tenant_id.is_(None),
+                model.product == product,
+                model.version == version,
+                model.impl_id == impl_id,
+            )
+        )
 
 
 async def _run_typed_op_registrars(

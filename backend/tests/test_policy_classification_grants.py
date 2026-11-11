@@ -50,7 +50,10 @@ from meho_backplane.operations.service_grants import (
     GrantValidationError,
     ServicePrincipalGrantService,
 )
-from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.operations.typed_register import (
+    _bind_catalog_session,
+    register_typed_operation,
+)
 from meho_backplane.settings import get_settings
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-000000006271")
@@ -258,6 +261,15 @@ async def test_policy_classify_is_approved_call_by_call(
     assert verdict is PermissionVerdict.NEEDS_APPROVAL
 
 
+async def _policy_rows() -> list[Any]:
+    """The built-in operation and group rows of ``policy-registry-1.x``."""
+    rows: list[Any] = []
+    async with get_sessionmaker()() as session:
+        for model in (EndpointDescriptor, OperationGroup):
+            rows += (await session.execute(select(model).where(model.product == "policy"))).all()
+    return rows
+
+
 @pytest.mark.asyncio
 async def test_switch_on_then_off_removes_policy_classify(
     embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
@@ -269,12 +281,16 @@ async def test_switch_on_then_off_removes_policy_classify(
     assert [g["group_key"] for g in groups["groups"]] == ["policy"]
 
     _switch(monkeypatch, False)
+    # Outside the start-up transaction (a registry check) nothing is removed.
     await register_policy_classify_operation(embedding_service=embedding)
-
+    assert await _policy_rows() != []
+    # The start-up registration removes the rows.
     async with get_sessionmaker()() as session:
-        for model in (EndpointDescriptor, OperationGroup):
-            rows = (await session.execute(select(model).where(model.product == "policy"))).all()
-            assert rows == [], model
+        async with _bind_catalog_session(session):
+            await register_policy_classify_operation(embedding_service=embedding)
+        await session.commit()
+
+    assert await _policy_rows() == []
     with pytest.raises(UnknownConnectorError):
         await list_operation_groups(_admin(), {"connector_id": POLICY_REGISTRY_CONNECTOR_ID})
     call = await call_operation(

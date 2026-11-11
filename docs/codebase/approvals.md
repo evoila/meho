@@ -2512,6 +2512,95 @@ removals of one operation run one at a time, across all scopes, under
 a per-operation lock (see `spec-ingestion.md`, "Edits of one operation
 run one at a time").
 
+## Passkey touch: the challenge row and the binding hash (#6214)
+
+A `dangerous` or `destructive` approval can need a passkey touch (Face
+ID, Touch ID, Windows Hello or a hardware key). Keycloak checks the
+touch. MEHO binds the touch to the request with a hash of what the
+request will run. This part ships the row and the hash. Nothing uses
+them while the `APPROVAL_PRESENCE_TOUCH` switch is off (the default).
+
+Code: `operations/approval_presence.py`. Table:
+`approval_presence_challenge` (migration `0157`).
+
+**The row.** When a person clicks Approve, `start_touch(...)` makes one
+row:
+
+| Column | What it holds |
+|---|---|
+| `tenant_id`, `approver_sub` | The tenant and the person. Only this person, in this tenant, can use the row. |
+| `request_ids` | The requests the touch approves, in the order the person saw them (a JSON list). |
+| `card_hash` | SHA-256 over the text of the approval card. |
+| `server_random` | 32 random bytes (hex), made by MEHO for this row. |
+| `binding_hash` | SHA-256 over the binding encoding (below). MEHO sends it to Keycloak as the `nonce`. |
+| `match_code` | 6 characters from the binding hash. |
+| `created_at`, `expires_at` | `expires_at` = `created_at` + `APPROVAL_PRESENCE_TOUCH_VALID_SECONDS` (default 120, from 30 to 600). |
+| `used_at` | When an approve used the row. Set once. |
+| `channel` | `web`, `cli_link` or `rest_link`. |
+| `session_kind` | What kind of session started the touch. |
+
+Each request must be `pending` and in the person's tenant, or
+`start_touch` refuses (`ApprovalNotFoundError`,
+`ApprovalRequestAlreadyDecidedError`). Two touches for one request get
+different binding hashes, because each row has its own random bytes.
+
+**The card.** `approval_card_text(requests)` builds the card from the
+stored request rows at decision time, never from what the caller sent:
+for each request the operation (`connector_id`, `op_id`), the target
+id, the risk level (`proposed_effect.safety_level`) and the effect
+(`proposed_effect`, which holds the parameters as the card shows them).
+The text is canonical JSON (sorted keys, no spaces).
+
+**The binding hash.** `compute_binding_hash(...)` is SHA-256 over one
+canonical JSON text with: the algorithm name
+`sha256/meho-touch-binding-v1`, the tenant id, for each request (in
+order) its `id`, `params_hash`, `preview_hash`, `target_hash` and
+`release_id`, the `card_hash`, and the `server_random`. A change of the
+encoding gets a new algorithm name.
+
+**The match code.** The first 30 bits of the binding hash, as 6
+characters of `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` (32 characters, no 0,
+1, I or O, so no two look alike). The person sees it in MEHO before the
+touch.
+
+**Using the row.** When the person comes back, `use_touch(session,
+challenge_id, operator=..., nonce=...)` checks, in this order, and
+refuses with `TouchChallengeError` (a `reason` and one plain sentence):
+
+1. `not_found`: no row, or the row of another person or another tenant.
+2. `used`: the row was used before.
+3. `expired`: the valid time has passed.
+4. `nonce_mismatch`: the `nonce` of the touch's ID token is not the
+   binding hash of the row.
+5. `request_changed`: MEHO builds the card hash and the binding hash
+   again from the requests as they are now, with the row's random
+   bytes. When any hash differs, or a request is gone: "The request
+   changed after you started the passkey touch. Click Approve again to
+   see it as it is now."
+
+Then it marks the row used. Two approves can use one row at the same
+moment, on two replicas. `use_touch` first takes the transaction-level
+advisory lock of the row through `take_approval_lock` in
+`approval_queue.py`, the same helper that guards the reuse of a sign-in.
+The mark itself is a conditional `UPDATE ... WHERE used_at IS NULL`, so
+exactly one approve wins also on a database without the lock. The caller
+commits; a rollback leaves the row unused.
+
+**The audit row.** `ApprovalAuth` has two optional fields:
+`presence` (`TouchPresence`: `acr`, `amr`, `auth_time` from the touch's
+ID token) and `binding` (`TouchBinding`: `algorithm`, `hash`,
+`request_ids`, `card_hash`, `challenge_id`; `touch_binding(row)` builds
+it). `audit_payload` writes `"presence"` and `"binding"` only when they
+are set, so an approve without a touch writes the same block as before.
+
+**Clean-up.** A loop that the app starts (`start_presence_challenge_cleanup`)
+first runs one minute after start (`FIRST_RUN_DELAY_SECONDS`), then once a
+day. So a deployment that restarts often still cleans the table. Each run
+deletes rows that were never used and are older than 14 days. Used rows
+stay: the audit row names them by `challenge_id`. The table has no foreign
+key to the tenant, so rows of a deleted tenant stay until this clean-up
+removes them (used rows stay for good). The rows hold only hashes.
+
 ## Catalog `safety_level` on every envelope (#1855)
 
 The per-op preview hook is opt-in, so before #1855 a parked op with no
@@ -3135,7 +3224,10 @@ CLI) the token must prove it:
   "fresh_sign_in" | "one_time_code", "auth_time": <int>, "acr":
   <str|null>, "sign_in_key": <hash>}` plus `"single_use": true` for a
   destructive approve. Rows written before this rule carry `"method":
-  "web_click"` with no `sign_in_key`.
+  "web_click"` with no `sign_in_key`. An approve with a passkey touch
+  also has `"presence"` and `"binding"` (see "Passkey touch: the
+  challenge row and the binding hash"). Without a touch the block is
+  exactly as above.
 - The window never covers turning approval off or lowering a risk level
   (it uses `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`, see above), and the
   login and permission changes do not read it.

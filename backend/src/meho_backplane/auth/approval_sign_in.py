@@ -68,6 +68,8 @@ __all__ = [
     "FRESH_SIGN_IN_REMEDIATION",
     "WEB_FRESH_SIGN_IN_REMEDIATION",
     "ApprovalAuth",
+    "TouchBinding",
+    "TouchPresence",
     "approval_sign_in_max_age",
     "asked_for_credentials",
     "check_fresh_approval_sign_in",
@@ -98,6 +100,51 @@ WEB_FRESH_SIGN_IN_REMEDIATION: Final[str] = (
 
 
 @dataclass(frozen=True)
+class TouchPresence:
+    """What Keycloak said about one passkey touch (from the touch's ID token).
+
+    ``acr`` is the sign-in level, ``amr`` the list of methods, ``auth_time``
+    when the person touched the passkey.
+    """
+
+    acr: str
+    amr: tuple[str, ...]
+    auth_time: int
+
+    def audit_payload(self) -> dict[str, Any]:
+        """The ``presence`` block of the audit row."""
+        return {"acr": self.acr, "amr": list(self.amr), "auth_time": self.auth_time}
+
+
+@dataclass(frozen=True)
+class TouchBinding:
+    """Which requests one passkey touch approves.
+
+    ``hash`` is the binding hash of the touch challenge, made with
+    ``algorithm``. It names ``request_ids`` exactly as they were when the
+    person started the touch, and ``card_hash`` names the approval card the
+    person saw. ``challenge_id`` is the id of the challenge row
+    (:mod:`meho_backplane.operations.approval_presence`).
+    """
+
+    algorithm: str
+    hash: str
+    request_ids: tuple[str, ...]
+    card_hash: str
+    challenge_id: str
+
+    def audit_payload(self) -> dict[str, Any]:
+        """The ``binding`` block of the audit row."""
+        return {
+            "algorithm": self.algorithm,
+            "hash": self.hash,
+            "request_ids": list(self.request_ids),
+            "card_hash": self.card_hash,
+            "challenge_id": self.challenge_id,
+        }
+
+
+@dataclass(frozen=True)
 class ApprovalAuth:
     """How a person proved they were present for one approve.
 
@@ -106,6 +153,10 @@ class ApprovalAuth:
     how the person signed in (the token's ``acr`` claim, or ``None``).
     ``sid`` is the Keycloak session id; it is never written to the audit
     row as is, only as part of :meth:`sign_in_key`.
+
+    ``presence`` and ``binding`` are set only when the person also touched a
+    passkey for this approve: what Keycloak said about the touch, and which
+    requests the touch names. Both are ``None`` otherwise.
     """
 
     channel: ApprovalChannel
@@ -113,6 +164,8 @@ class ApprovalAuth:
     auth_time: int
     sid: str | None = None
     acr: str | None = None
+    presence: TouchPresence | None = None
+    binding: TouchBinding | None = None
 
     def sign_in_key(self, sub: str) -> str:
         """A short hash that names one sign-in of *sub*.
@@ -139,6 +192,10 @@ class ApprovalAuth:
         }
         if single_use:
             payload["single_use"] = True
+        if self.presence is not None:
+            payload["presence"] = self.presence.audit_payload()
+        if self.binding is not None:
+            payload["binding"] = self.binding.audit_payload()
         return payload
 
 

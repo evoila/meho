@@ -49,10 +49,10 @@ func newAlertDefinitionListCmd() *cobra.Command {
 			"(id (repeatable) / adapterKind / resourceKind / name / page /\n" +
 			"pageSize).\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-operations alertdefinition list --target rdc-vrops\n" +
-			"  meho vcf-operations alertdefinition list --target rdc-vrops " +
+		Example: "  meho vcf-operations alertdefinition list --target vrops-lab\n" +
+			"  meho vcf-operations alertdefinition list --target vrops-lab " +
 			"--params '{\"adapterKind\":\"VMWARE\",\"resourceKind\":\"VirtualMachine\"}'\n" +
-			"  meho vcf-operations alertdefinition list --target rdc-vrops --json",
+			"  meho vcf-operations alertdefinition list --target vrops-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

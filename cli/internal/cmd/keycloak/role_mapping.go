@@ -50,7 +50,7 @@ func newRoleMappingAssignCmd() *cobra.Command {
 			"a server-side no-op.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak role-mapping assign --target rdc-keycloak --username operator-a --role tenant_admin",
+		Example:       "  meho keycloak role-mapping assign --target keycloak-lab --username operator-a --role tenant_admin",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -113,8 +113,8 @@ func newRoleMappingGetCmd() *cobra.Command {
 			"OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho keycloak role-mapping get --target rdc-keycloak --id 22222222-2222-2222-2222-222222222222\n" +
-			"  meho keycloak role-mapping get --target rdc-keycloak --id <uuid> --json | jq '.result.role_mappings'",
+		Example: "  meho keycloak role-mapping get --target keycloak-lab --id 22222222-2222-2222-2222-222222222222\n" +
+			"  meho keycloak role-mapping get --target keycloak-lab --id <uuid> --json | jq '.result.role_mappings'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

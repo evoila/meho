@@ -44,14 +44,14 @@ func TestBuildWhoTouchedParamsEmitsParams(t *testing.T) {
 // table the query verb emits.
 func TestRunWhoTouchedHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/audit/who-touched/rdc-vcenter", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/audit/who-touched/vcenter-lab", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("method: got %s; want GET", r.Method)
 		}
 		if r.URL.Query().Get("since") != "7d" {
 			t.Errorf("query since: got %q; want 7d", r.URL.Query().Get("since"))
 		}
-		tname := "rdc-vcenter"
+		tname := "vcenter-lab"
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.AuditQueryResult{
 			Rows: []api.AuditEntry{{
@@ -75,7 +75,7 @@ func TestRunWhoTouchedHappyPath(t *testing.T) {
 
 	cmd, stdout, stderr := newRunCmd(t)
 	err := runWhoTouched(cmd, whoTouchedOptions{
-		Target:            "rdc-vcenter",
+		Target:            "vcenter-lab",
 		Since:             "7d",
 		BackplaneOverride: srv.URL,
 	})
@@ -85,7 +85,7 @@ func TestRunWhoTouchedHappyPath(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"AUDIT_ID", "00000000-0000-0000-0000-000000000001",
-		"TIME", "tarik", "rdc-vcenter", "nsx.firewall.update", "write",
+		"TIME", "tarik", "vcenter-lab", "nsx.firewall.update", "write",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q in %s", want, out)
@@ -139,7 +139,7 @@ func TestRunWhoTouchedRequiresTarget(t *testing.T) {
 // bytes; pinning the key set keeps jq pipelines stable.
 func TestRunWhoTouchedJSONRoundTrips(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/audit/who-touched/rdc-vcenter", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/audit/who-touched/vcenter-lab", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"rows":[],"next_cursor":null}`))
 	})
@@ -149,7 +149,7 @@ func TestRunWhoTouchedJSONRoundTrips(t *testing.T) {
 
 	cmd, stdout, _ := newRunCmd(t)
 	err := runWhoTouched(cmd, whoTouchedOptions{
-		Target:            "rdc-vcenter",
+		Target:            "vcenter-lab",
 		JSONOut:           true,
 		BackplaneOverride: srv.URL,
 	})
@@ -166,7 +166,7 @@ func TestRunWhoTouchedJSONRoundTrips(t *testing.T) {
 // validation matches the query verb.
 func TestRunWhoTouchedRejectsOutOfRangeLimit(t *testing.T) {
 	cmd, _, _ := newRunCmd(t)
-	if err := runWhoTouched(cmd, whoTouchedOptions{Target: "rdc-vcenter", Limit: 99999}); err == nil {
+	if err := runWhoTouched(cmd, whoTouchedOptions{Target: "vcenter-lab", Limit: 99999}); err == nil {
 		t.Fatalf("expected error for --limit=99999")
 	}
 }

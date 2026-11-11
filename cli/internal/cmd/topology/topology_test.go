@@ -502,9 +502,9 @@ func TestFormatAutoEdgeConflictPullsServerMessage(t *testing.T) {
 // TestFormatNotFoundResolver — refresh's 404 resolver envelope yields
 // the near-miss suggestion line.
 func TestFormatNotFoundResolver(t *testing.T) {
-	body := `{"detail":{"error":"no_target","query":"vc","matches":[{"name":"rdc-vcenter","aliases":["vc-prod"]}]}}`
+	body := `{"detail":{"error":"no_target","query":"vc","matches":[{"name":"vcenter-lab","aliases":["vc-prod"]}]}}`
 	got := formatNotFound(body)
-	if !strings.Contains(got, "rdc-vcenter") || !strings.Contains(got, "did you mean") {
+	if !strings.Contains(got, "vcenter-lab") || !strings.Contains(got, "did you mean") {
 		t.Errorf("formatNotFound missing near-miss; got %q", got)
 	}
 }

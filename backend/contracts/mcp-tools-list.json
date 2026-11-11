@@ -2607,6 +2607,41 @@
             "format": "uuid",
             "type": "string"
           },
+          "check_source": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "sensor",
+                  "dashboard"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "only_worsening": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "cron_expr": {
             "maxLength": 128,
             "type": [

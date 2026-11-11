@@ -20879,9 +20879,10 @@
 </ul>
 <h3 id="meho-secret-read"><code>meho secret read</code><a class="headerlink" href="#meho-secret-read" title="Permanent link">&para;</a></h3>
 <p>Pipe a single raw secret field to stdout (pipe-only, audited)</p>
-<div class="highlight"><pre><span></span><code>meho secret read &lt;mount&gt; &lt;path&gt; [flags]
+<div class="highlight"><pre><span></span><code>meho secret read &lt;mount&gt; &lt;path&gt; | read --approval &lt;id&gt; [flags]
 </code></pre></div>
 <ul>
+<li><code>--approval</code> — id of an approved read request: run it once and write its --field value instead of sending a new read</li>
 <li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>
 <li><code>--field</code> — key within the secret's data map whose raw value is written to stdout (required)</li>
 <li><code>--target</code> — Vault target slug to dispatch against (resolved server-side)</li>

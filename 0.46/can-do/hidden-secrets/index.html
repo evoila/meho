@@ -3116,7 +3116,16 @@ result of an operation.</p>
 <li>MEHO also finds secrets in free text, for example private key blocks
   and labels such as <code>DB_PASSWORD=</code>.</li>
 <li>A person or a service principal can ask for the real value with
-  <code>reveal_secret: true</code>. An agent is refused.</li>
+  <code>reveal_secret: true</code>. An agent is refused. When the operation reads a
+  secret, such as a Vault secret read, the request waits until a second
+  person approves it. For every request with <code>reveal_secret</code> that waits
+  for approval, also one that creates a credential, approving does not
+  run the operation. The person who asked then runs it and gets the
+  value: with <code>POST /api/v1/approvals/&lt;id&gt;/reveal</code>, with "Show value" in
+  the console's Vault view, or with
+  <code>meho secret read --approval &lt;id&gt; --field &lt;name&gt;</code>. This works once, and
+  only for 15 minutes after the approval. The person who approved does
+  not see the value, and MEHO does not store it.</li>
 <li>An operation that makes a new credential still gives it to the
   caller once.</li>
 <li>A connector can mark a field that only looks secret, such as a date

@@ -48,6 +48,7 @@ from meho_backplane.targets.resolver import (
 __all__ = [
     "MAX_STARTING_TARGETS",
     "NOT_CHOSEN",
+    "PERSON_ONLY_REMEDIATION",
     "STARTING_GRANTS_JSON_SCHEMA",
     "StartingGrantSet",
     "StartingGrants",
@@ -57,6 +58,7 @@ __all__ = [
     "require_pick",
     "resolve_scopes",
     "write_starting_grants",
+    "writes_rows",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -136,6 +138,21 @@ STARTING_GRANTS_JSON_SCHEMA: Final[dict[str, object]] = {
     "required": ["set"],
     "additionalProperties": False,
 }
+
+
+#: What a machine login can do instead when it sends a pick that adds
+#: rows. Only a person may create grants, the same rule as the grant
+#: routes (``api/v1/agent_grants.py``).
+PERSON_ONLY_REMEDIATION: Final[str] = (
+    "Only a person may pick starting grants that add grants. Send "
+    "starting_grants with set='none', or ask a person to create the agent "
+    "definition."
+)
+
+
+def writes_rows(starting: StartingGrants | None) -> bool:
+    """Return whether the pick adds grant rows (any set but ``none``)."""
+    return starting is not None and starting.set is not StartingGrantSet.NONE
 
 
 class StartingGrantsError(ValueError):
@@ -230,44 +247,66 @@ async def write_starting_grants(
     created_by_sub: str,
     scopes: list[str],
 ) -> int:
-    """Add the rows for *scopes* in the caller's transaction; return how many were new.
+    """Add the rows for *scopes* in the caller's transaction; return how many were written.
 
-    A row the agent already has (same operation pattern and target) is
-    skipped, so a pick never fails on an existing grant. The caller commits.
+    A live row the agent already has (same operation pattern and target)
+    is skipped, so a pick never fails on an existing grant. A ``deny`` row
+    is skipped too: a pick never removes a deny. An expired row is
+    renewed with the picked verdict and no end date, because an expired
+    row grants nothing. The caller commits.
     """
     if not scopes:
         return 0
     result = await session.execute(
-        select(AgentPermission.target_scope).where(
+        select(AgentPermission).where(
             AgentPermission.tenant_id == tenant_id,
             AgentPermission.principal_sub == principal_sub,
             AgentPermission.op_pattern == _OP_PATTERN,
             AgentPermission.target_scope.in_(scopes),
         )
     )
-    existing = set(result.scalars().all())
-    new_scopes = [scope for scope in scopes if scope not in existing]
-    for scope in new_scopes:
-        session.add(
-            AgentPermission(
-                tenant_id=tenant_id,
-                principal_sub=principal_sub,
-                op_pattern=_OP_PATTERN,
-                target_scope=scope,
-                verdict=_VERDICT,
-                created_by_sub=created_by_sub,
+    existing = {row.target_scope: row for row in result.scalars().all()}
+    now = datetime.now(UTC)
+    written = 0
+    for scope in scopes:
+        row = existing.get(scope)
+        if row is None:
+            session.add(
+                AgentPermission(
+                    tenant_id=tenant_id,
+                    principal_sub=principal_sub,
+                    op_pattern=_OP_PATTERN,
+                    target_scope=scope,
+                    verdict=_VERDICT,
+                    created_by_sub=created_by_sub,
+                )
             )
-        )
+        elif row.verdict != "deny" and _has_expired(row.expires_at, now):
+            row.verdict = _VERDICT
+            row.expires_at = None
+            row.created_by_sub = created_by_sub
+        else:
+            continue
+        written += 1
     await session.flush()
     _log.info(
         "agent_starting_grants_written",
         tenant_id=str(tenant_id),
         principal_sub=principal_sub,
-        rows=len(new_scopes),
-        skipped=len(scopes) - len(new_scopes),
+        rows=written,
+        skipped=len(scopes) - written,
         created_by_sub=created_by_sub,
     )
-    return len(new_scopes)
+    return written
+
+
+def _has_expired(expires_at: datetime | None, now: datetime) -> bool:
+    if expires_at is None:
+        return False
+    # SQLite gives back a naive datetime; the column stores UTC.
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at <= now
 
 
 def audit_fields(starting: StartingGrants | None) -> dict[str, object]:

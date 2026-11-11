@@ -15,6 +15,7 @@ Covers the service, the REST routes and the admin MCP tools:
 
 from __future__ import annotations
 
+import importlib
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -44,7 +45,11 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.main import app
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.handlers import handle_tools_call
+from meho_backplane.mcp.registry import MCP_ADMIN_SCOPE, get_tool
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.tools import agent_principals as mcp_agent_principals
+from meho_backplane.mcp.tools import agents as mcp_agents
 from meho_backplane.mcp.tools.agent_principals import _register_handler
 from meho_backplane.mcp.tools.agents import _create_handler
 from meho_backplane.settings import get_settings
@@ -111,15 +116,21 @@ def _mock_kc() -> tuple[MagicMock, AsyncMock]:
     return MagicMock(return_value=kc), kc
 
 
-def _operator(tenant_id: uuid.UUID = _TENANT_A) -> Operator:
+def _operator(
+    tenant_id: uuid.UUID = _TENANT_A,
+    *,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    kind: PrincipalKind = PrincipalKind.USER,
+) -> Operator:
     return Operator(
         sub=_ADMIN,
         name="Admin",
         email=None,
         raw_jwt="<test-jwt>",
         tenant_id=tenant_id,
-        tenant_role=TenantRole.TENANT_ADMIN,
-        principal_kind=PrincipalKind.USER,
+        tenant_role=role,
+        principal_kind=kind,
+        scopes=frozenset({MCP_ADMIN_SCOPE}),
     )
 
 
@@ -166,15 +177,21 @@ async def _seed_principal(name: str) -> str:
     return f"agent:{name}"
 
 
-async def _seed_grant(sub: str, *, expires_at: datetime | None = None) -> None:
+async def _seed_grant(
+    sub: str,
+    *,
+    expires_at: datetime | None = None,
+    op_pattern: str = "vault.*",
+    verdict: str = "auto-execute",
+) -> None:
     async with get_sessionmaker()() as session:
         session.add(
             AgentPermission(
                 tenant_id=_TENANT_A,
                 principal_sub=sub,
-                op_pattern="vault.*",
+                op_pattern=op_pattern,
                 target_scope="*",
-                verdict="auto-execute",
+                verdict=verdict,
                 created_by_sub=_ADMIN,
                 expires_at=expires_at,
             )
@@ -338,10 +355,17 @@ async def test_starting_grant_is_an_ordinary_grant() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _post(client: TestClient, path: str, body: dict[str, Any]) -> Any:
+def _post(
+    client: TestClient,
+    path: str,
+    body: dict[str, Any],
+    *,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    kind: str | None = None,
+) -> Any:
     key = make_rsa_keypair("kid-starting")
     token = mint_token(
-        key, sub=_ADMIN, tenant_role=TenantRole.TENANT_ADMIN.value, tenant_id=str(_TENANT_A)
+        key, sub=_ADMIN, tenant_role=role.value, tenant_id=str(_TENANT_A), principal_kind=kind
     )
     factory, _kc = _mock_kc()
     with patch(_KC_PATH, factory), respx.mock as r:
@@ -501,6 +525,28 @@ async def _register_definition_grant(sub: str, name: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_definition_pick_renews_an_expired_grant() -> None:
+    await _seed_tenants()
+    sub = await _seed_principal("triage-bot")
+    await _seed_grant(sub, op_pattern="*", expires_at=datetime.now(UTC) - timedelta(hours=1))
+    await _register_definition_grant(sub, "first")
+    [row] = await _grants(sub)
+    assert (row.op_pattern, row.target_scope, row.verdict) == ("*", "*", "auto-execute")
+    assert row.expires_at is None
+
+
+@pytest.mark.parametrize("expires_at", [None, datetime.now(UTC) - timedelta(hours=1)])
+@pytest.mark.asyncio
+async def test_definition_pick_keeps_a_deny_grant(expires_at: datetime | None) -> None:
+    await _seed_tenants()
+    sub = await _seed_principal("triage-bot")
+    await _seed_grant(sub, op_pattern="*", verdict="deny", expires_at=expires_at)
+    await _register_definition_grant(sub, "first")
+    [row] = await _grants(sub)
+    assert row.verdict == "deny"
+
+
+@pytest.mark.asyncio
 async def test_definition_unknown_target_writes_nothing() -> None:
     await _seed_tenants()
     sub = await _seed_principal("triage-bot")
@@ -559,3 +605,115 @@ async def test_mcp_definition_create_needs_the_pick(monkeypatch: pytest.MonkeyPa
     result = await _create_handler(_operator(), _definition(sub, {"set": "none"}))
     assert result["name"] == "triage"
     assert await _grants(sub) == []
+
+
+# ---------------------------------------------------------------------------
+# Who may send a pick
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "detail"),
+    [
+        ("service", "human_principal_required:"),
+        # An agent login acts as at most operator, so the role check refuses it first.
+        ("agent", "insufficient_role"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_definition_pick_from_a_machine_login_is_refused(
+    client: TestClient, kind: str, detail: str
+) -> None:
+    await _seed_tenants()
+    sub = await _seed_principal("triage-bot")
+    resp = _post(client, "/api/v1/agents", _definition(sub, {"set": "read-everything"}), kind=kind)
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"].startswith(detail)
+    assert await _definitions() == []
+    assert await _grants(sub) == []
+
+
+@pytest.mark.asyncio
+async def test_definition_with_set_none_from_a_service_login_works(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_tenants()
+    sub = await _seed_principal("triage-bot")
+    _switch(monkeypatch, "on")
+    resp = _post(client, "/api/v1/agents", _definition(sub, {"set": "none"}), kind="service")
+    assert resp.status_code == 201, resp.text
+    assert await _grants(sub) == []
+
+
+@pytest.mark.parametrize("kind", [PrincipalKind.SERVICE, PrincipalKind.AGENT])
+@pytest.mark.asyncio
+async def test_mcp_definition_pick_from_a_machine_login_is_refused(kind: PrincipalKind) -> None:
+    await _seed_tenants()
+    sub = await _seed_principal("triage-bot")
+    with pytest.raises(McpPermissionDeniedError, match="human_principal_required"):
+        await _create_handler(_operator(kind=kind), _definition(sub, {"set": "read-everything"}))
+    assert await _definitions() == []
+    assert await _grants(sub) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (
+            "/api/v1/agent-principals",
+            {"name": "bot", "starting_grants": {"set": "read-everything"}},
+        ),
+        ("/api/v1/agents", _definition("agent:triage-bot", {"set": "read-everything"})),
+    ],
+)
+@pytest.mark.asyncio
+async def test_pick_from_a_caller_without_tenant_admin_is_refused(
+    client: TestClient, path: str, body: dict[str, Any]
+) -> None:
+    await _seed_tenants()
+    sub = await _seed_principal("triage-bot")
+    resp = _post(client, path, body, role=TenantRole.OPERATOR)
+    assert resp.status_code == 403, resp.text
+    assert [p.name for p in await _principals()] == ["triage-bot"]
+    assert await _definitions() == []
+    assert await _grants(sub) == []
+    assert await _grants("agent:bot") == []
+
+
+@pytest.mark.parametrize(
+    ("tool", "module", "arguments"),
+    [
+        (
+            "meho_agent_principals_register",
+            mcp_agent_principals,
+            {"name": "bot", "starting_grants": {"set": "read-everything"}},
+        ),
+        (
+            "meho_agents_create",
+            mcp_agents,
+            _definition("agent:triage-bot", {"set": "read-everything"}),
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mcp_pick_from_a_caller_without_tenant_admin_is_refused(
+    tool: str, module: Any, arguments: dict[str, Any]
+) -> None:
+    # Another test file may have emptied the tool registry.
+    if get_tool(tool) is None:
+        importlib.reload(module)
+    await _seed_tenants()
+    sub = await _seed_principal("triage-bot")
+    factory, kc = _mock_kc()
+    with (
+        patch(_KC_PATH, factory),
+        patch("meho_backplane.mcp.handlers.write_mcp_audit_row", new=AsyncMock()),
+        pytest.raises(McpInvalidParamsError, match="forbidden"),
+    ):
+        await handle_tools_call(
+            _operator(role=TenantRole.OPERATOR), {"name": tool, "arguments": arguments}
+        )
+    kc.create_client.assert_not_awaited()
+    assert await _definitions() == []
+    assert await _grants(sub) == []
+    assert await _grants("agent:bot") == []

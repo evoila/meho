@@ -56,9 +56,11 @@ import structlog
 from pydantic import ValidationError
 
 from meho_backplane.agents.grant_sets import (
+    PERSON_ONLY_REMEDIATION,
     STARTING_GRANTS_JSON_SCHEMA,
     StartingGrantsError,
     audit_fields,
+    writes_rows,
 )
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
@@ -71,6 +73,7 @@ from meho_backplane.agents.service import (
     AgentIdentityRefInvalidError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
@@ -218,6 +221,10 @@ async def _create_handler(
         audit_agent_name=payload.name,
         **audit_fields(payload.starting_grants),
     )
+    if writes_rows(payload.starting_grants):
+        ensure_human_mcp_caller(
+            operator, "meho_agents_create with starting_grants", PERSON_ONLY_REMEDIATION
+        )
     service = AgentDefinitionService()
     try:
         entry = await service.create(

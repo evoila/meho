@@ -165,7 +165,14 @@ Rules:
   three choices in the text. With `off` the field may be left out.
 - For a definition the field is required only when the agent that
   `identity_ref` names has no live (not expired) grant yet. The rows go
-  to that agent principal. A row the agent already has is skipped.
+  to that agent principal. A live row the agent already has is skipped,
+  and so is a `deny` row. An expired row with the same pattern and
+  target is renewed: it gets `auto-execute` and no end date.
+- Only a person may send a pick that adds rows (`read-everything` or
+  `read-targets`), the same rule as the grant routes. Register is
+  person-only anyway. On `POST /api/v1/agents` and `meho_agents_create`
+  a service, agent or runner login gets `human_principal_required` and
+  nothing is written; `set: none` still works for it.
 - Register resolves the names before it creates the Keycloak client, so
   a bad pick creates nothing. The rows go in the same database
   transaction as the principal row; if they fail, the principal row is

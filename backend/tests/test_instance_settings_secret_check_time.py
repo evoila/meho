@@ -31,6 +31,8 @@ from meho_backplane.instance_settings.service import (
 
 _HEAD = "apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n    - targets:\n"
 _FILE_CHARS = 256 * 1024
+_CHECK_LIMIT_S = 5.0
+_LOOP_GAP_LIMIT_S = 1.0
 _HEADER = "eyJhbGciOiJIUzI1NiJ9"
 _PAYLOAD = "eyJzdWIiOiIxMjM0NTY3ODkwIn0"
 # Built from parts, so no line of this file holds a whole made-up key.
@@ -62,6 +64,7 @@ _SLOW_SHAPES = [
 ]
 
 
+@pytest.mark.slow_runner_tolerant
 @pytest.mark.parametrize("unit", _SLOW_SHAPES)
 def test_a_large_file_of_secret_starts_is_checked_fast(unit: str) -> None:
     content = _file_of(unit)
@@ -69,9 +72,13 @@ def test_a_large_file_of_secret_starts_is_checked_fast(unit: str) -> None:
     parsed = parse_settings_file(content)
     elapsed = time.perf_counter() - started
     assert parsed.mistakes == []
-    assert elapsed < 0.5
+    # Healthy time is a few milliseconds. The limit is wide so a busy runner
+    # does not fail it; a check that grows with the square of the size takes
+    # minutes on this file.
+    assert elapsed < _CHECK_LIMIT_S
 
 
+@pytest.mark.slow_runner_tolerant
 @pytest.mark.parametrize("unit", _SLOW_SHAPES)
 async def test_the_event_loop_stays_free_while_a_large_file_is_checked(unit: str) -> None:
     content = _file_of(unit)
@@ -94,7 +101,7 @@ async def test_the_event_loop_stays_free_while_a_large_file_is_checked(unit: str
     finally:
         done.set()
         await beat
-    assert largest_gap < 0.1
+    assert largest_gap < _LOOP_GAP_LIMIT_S
 
 
 @pytest.mark.parametrize(

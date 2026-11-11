@@ -101,6 +101,9 @@ def _echo_after(seconds: float, value: str) -> str:
     return value
 
 
+_HEALTHZ_LIMIT_S = 1.5
+
+
 def _meta() -> UploadMeta:
     return UploadMeta(
         session_id=_SID,
@@ -114,6 +117,7 @@ def _meta() -> UploadMeta:
     )
 
 
+@pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
 async def test_healthz_answers_while_a_maximum_size_upload_runs(
     monkeypatch: pytest.MonkeyPatch,
@@ -154,7 +158,9 @@ async def test_healthz_answers_while_a_maximum_size_upload_runs(
     assert result.redactions == 1
     assert len(store.objects) == 1
     assert answers >= 5, "the upload ended before healthz was checked"
-    assert slowest < 0.1, f"healthz took {slowest * 1000:.0f} ms during the upload"
+    # The limit is wide on purpose: a busy CI runner delayed one answer by
+    # 0.35 s. A secret check run on the event loop blocks it for seconds.
+    assert slowest < _HEALTHZ_LIMIT_S, f"healthz took {slowest * 1000:.0f} ms during the upload"
 
 
 @pytest.mark.asyncio

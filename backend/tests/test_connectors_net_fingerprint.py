@@ -665,11 +665,13 @@ def test_extract_title_finds_the_first_closed_title(body: str, title: str | None
     "piece",
     ["<title>", "<title", "<title></title", "<title>" + "</title " * 4],
 )
+@pytest.mark.slow_runner_tolerant
 def test_extract_title_is_fast_on_a_64_kib_page_of_repeated_tags(piece: str) -> None:
     body = piece * (64 * 1024 // len(piece))
     start = time.perf_counter()
     extract_title(body)
-    assert time.perf_counter() - start < 0.05
+    # Healthy time is well under 10 ms; a slow pattern takes many seconds.
+    assert time.perf_counter() - start < 2.0
 
 
 def test_two_products_with_the_same_score_give_unknown() -> None:

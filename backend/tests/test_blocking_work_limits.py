@@ -74,6 +74,7 @@ def test_tenant_share_is_below_the_number_of_threads() -> None:
     assert PROBE_TENANT_SHARE < PROBE_POOL_WORKERS
 
 
+@pytest.mark.slow_runner_tolerant
 async def test_waiting_probes_leave_the_default_thread_pool_free() -> None:
     release = threading.Event()
     running: list[int] = []
@@ -92,7 +93,8 @@ async def test_waiting_probes_leave_the_default_thread_pool_free() -> None:
         await _wait_until(lambda: len(running) == PROBE_POOL_WORKERS)
         begin = time.monotonic()
         assert await asyncio.to_thread(lambda: "login ok") == "login ok"
-        assert time.monotonic() - begin < 0.1
+        # A blocked pool would hold this call for the full 10 s.
+        assert time.monotonic() - begin < 2.0
         assert not queued.done()
     finally:
         release.set()

@@ -31,7 +31,7 @@ import asyncio
 import os
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -195,6 +195,48 @@ async def _run_runner(url: str, role: str, *, wait_seconds: str = "60") -> tuple
     return proc.returncode, err.decode()
 
 
+async def _run_runner_until_it_waits(
+    url: str, role: str, create_role: Callable[[], Awaitable[object]]
+) -> tuple[int, str]:
+    """Run the runner; create the role only after the runner says it is waiting.
+
+    A fixed pause before the role appears is not safe: on a busy machine the
+    runner can start after the pause, find the role at once and never wait.
+    """
+    env = {
+        **os.environ,
+        "DATABASE_URL": url,
+        "MIGRATION_DB_WAIT_SECONDS": "60",
+        RUNTIME_ROLE_ENV_VAR: role,
+    }
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "meho_backplane.db.migrate",
+        cwd=_BACKEND_DIR,
+        env=env,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert proc.stderr is not None
+    lines: list[str] = []
+    created = False
+
+    async def _read() -> None:
+        nonlocal created
+        async for raw in proc.stderr:  # type: ignore[union-attr]
+            line = raw.decode()
+            lines.append(line)
+            if not created and "migration_runtime_role_waiting" in line:
+                created = True
+                await create_role()
+
+    await asyncio.wait_for(_read(), timeout=240)
+    await asyncio.wait_for(proc.wait(), timeout=60)
+    assert proc.returncode is not None
+    return proc.returncode, "".join(lines)
+
+
 #: One complete audit row; made-up values only.
 def _audit_row() -> dict[str, Any]:
     return {
@@ -318,13 +360,10 @@ async def test_runner_grants_the_runtime_role_its_rights(owner_db: dict[str, Any
 async def test_runner_waits_for_a_role_created_a_moment_later(owner_db: dict[str, Any]) -> None:
     role = f"late_{uuid.uuid4().hex[:8]}"
 
-    async def _create_after_a_while() -> None:
-        await asyncio.sleep(4)
+    async def _create() -> None:
         await _make_login(owner_db, role)
 
-    (code, err), _ = await asyncio.gather(
-        _run_runner(owner_db["owner_url"], role), _create_after_a_while()
-    )
+    code, err = await _run_runner_until_it_waits(owner_db["owner_url"], role, _create)
     assert code == 0, err
     assert f"migration_runtime_role_waiting: no role '{role}' yet; waited 0 s of 60 s" in err
     assert f"migration_runtime_role_granted: {role}" in err

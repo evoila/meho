@@ -48,9 +48,9 @@ func newSymptomListCmd() *cobra.Command {
 			"(id (repeatable) / resourceId / activeOnly / statusType / page /\n" +
 			"pageSize).\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-operations symptom list --target rdc-vrops\n" +
-			"  meho vcf-operations symptom list --target rdc-vrops --params '{\"activeOnly\":true}'\n" +
-			"  meho vcf-operations symptom list --target rdc-vrops --json",
+		Example: "  meho vcf-operations symptom list --target vrops-lab\n" +
+			"  meho vcf-operations symptom list --target vrops-lab --params '{\"activeOnly\":true}'\n" +
+			"  meho vcf-operations symptom list --target vrops-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

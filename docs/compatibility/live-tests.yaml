@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Live test record: which connector versions were tested on a real system.
+#
+# What a row means
+#   A connector id with a list of tests was run through MEHO against a real
+#   system of that product version.
+#   A connector id with "tests: []" is built (code and CI tests only) and not
+#   yet tested live.
+#   A connector id that is not in this file is not yet recorded.
+#
+# Who adds a row, and how
+#   The person who ran the live test opens a pull request that adds one entry
+#   under that connector id. One entry for each product version.
+#   Keep only the highest level reached on that version: a "change" test also
+#   counts as a "read" test, so replace the "read" entry when you reach
+#   "change". The pull request says where the evidence is kept. It names no
+#   lab, host or address.
+#
+# Fields of a test
+#   product_version  the version of the real system, as quoted text
+#   level            "read" or "change" (see "levels" below)
+#   date             the day of the test, as YYYY-MM-DD, not in the future
+#   meho_release     the MEHO release that was tested; it must be a release
+#                    heading in CHANGELOG.md
+#
+# No lab details: no IP address, no host name, no URL, anywhere in this file.
+# The check is backend/scripts/validate_live_tests.py.
+schema_version: 1
+levels:
+  read: "A read operation ran through MEHO against a real system of this version."
+  change: "A change operation ran through MEHO against a real system of this version, with approval."
+# A test older than this many minor releases is shown with its age.
+stale_after_minor_releases: 5
+connectors: {}

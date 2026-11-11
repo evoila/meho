@@ -117,9 +117,9 @@ func newOperationCallCmd() *cobra.Command {
 			"\"fleet-rest-9.0\" pre-baked. Use when an op doesn't have a\n" +
 			"dedicated alias yet.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-fleet operation call GET:/lcm/lcops/api/v2/datacenters --target rdc-fleet\n" +
+		Example: "  meho vcf-fleet operation call GET:/lcm/lcops/api/v2/datacenters --target fleet-lab\n" +
 			"  meho vcf-fleet operation call GET:/lcm/lcops/api/v2/environments/{environmentId} \\\n" +
-			"      --target rdc-fleet --params '{\"environmentId\":\"env-vrops\"}'",
+			"      --target fleet-lab --params '{\"environmentId\":\"env-vrops\"}'",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

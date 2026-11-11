@@ -17,7 +17,7 @@ merge against **real-target deploys**, not mocks.
 When you propose a feature touching the deploy contract (image, chart,
 or CLI), expect a coupled discussion thread on the lab side —
 that's not a side conversation, it's how we measure done. The
-[`deploy/values-examples/values-rdc-example.yaml`](./deploy/values-examples/values-rdc-example.yaml)
+[`deploy/values-examples/values-example-lab.yaml`](./deploy/values-examples/values-example-lab.yaml)
 in this repo is the sanitized template; the actual live values file
 lives on the consumer side and only flips green once both sides agree
 the contract is right.

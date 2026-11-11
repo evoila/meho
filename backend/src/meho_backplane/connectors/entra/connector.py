@@ -137,7 +137,7 @@ class EntraConnector(HttpConnector):
     ``entra-graph-1.0``, plus the ``("entra", "", "")`` row that lets every
     ``entra`` target find it. The version is the Microsoft Graph API version;
     Entra ID has no product version, so ``supported_version_range`` stays
-    ``None``.
+    ``None`` and ``version_range_reason`` says why.
     """
 
     product = "entra"
@@ -148,6 +148,9 @@ class EntraConnector(HttpConnector):
         "assignments."
     )
     supported_version_range: str | None = None
+    version_range_reason = (
+        "Entra ID has no product version. The connector calls Microsoft Graph v1.0."
+    )
     priority = 1
     #: No redirect is followed: every tenant shares one Graph host.
     _client_class = NoRedirectClient

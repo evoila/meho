@@ -133,6 +133,53 @@ Manage agent definitions, runs and grants (list / show / create / edit / delete 
 meho agent
 ```
 
+### `meho agent budget`
+
+Set, show and clear the spend caps of an agent login (tenant_admin)
+
+```
+meho agent budget
+```
+
+#### `meho agent budget clear`
+
+Remove the spend cap of an agent login for one window (tenant_admin)
+
+```
+meho agent budget clear <principal> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw AgentBudgetRead JSON
+- `--window` — daily | weekly | monthly (required)
+
+#### `meho agent budget set`
+
+Set the spend cap of an agent login for one window (tenant_admin)
+
+```
+meho agent budget set <principal> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--cost-limit` — cost cap for the window, in USD
+- `--json` — emit raw AgentBudgetRead JSON
+- `--request-limit` — cap on the number of runs in the window
+- `--token-limit` — token cap for the window
+- `--window` — daily | weekly | monthly (required)
+
+#### `meho agent budget show`
+
+Show the caps of an agent login and what is used so far (tenant_admin)
+
+```
+meho agent budget show <principal> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw AgentBudgetListResponse JSON
+- `--window` — show one window only: daily | weekly | monthly
+
 ### `meho agent create`
 
 Create one agent definition (tenant_admin)
@@ -4672,9 +4719,10 @@ meho secret move [flags]
 Pipe a single raw secret field to stdout (pipe-only, audited)
 
 ```
-meho secret read <mount> <path> [flags]
+meho secret read <mount> <path> | read --approval <id> [flags]
 ```
 
+- `--approval` — id of an approved read request: run it once and write its --field value instead of sending a new read
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--field` — key within the secret's data map whose raw value is written to stdout (required)
 - `--target` — Vault target slug to dispatch against (resolved server-side)

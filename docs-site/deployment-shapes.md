@@ -520,7 +520,7 @@ repository:
   counts above 1, ephemeral streams, and the Valkey image source.
 - [`deploy/values-examples/`](https://github.com/evoila/meho/tree/main/deploy/values-examples)
   — the sanitized on-premises archetype
-  (`values-rdc-example.yaml`), the Google Secret Manager archetype
+  (`values-example-lab.yaml`), the Google Secret Manager archetype
   (`values-gsm-example.yaml`), and the local rehearsal overlay
   (`values-kind.yaml`, explicitly *not* a functional federation
   deploy).

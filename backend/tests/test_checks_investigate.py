@@ -519,7 +519,7 @@ async def test_concurrent_transitions_fire_one_agent_run(monkeypatch: pytest.Mon
     correlates them into one cause group -> exactly one ``run_scheduled`` fire
     (#2575). Without the coalescing claim each outcome would drive its own
     investigation and the stub -- which persists no real ``agent_run`` row for the
-    ``_has_in_flight_run`` gate to see -- would record two fires.
+    ``has_in_flight_run`` gate to see -- would record two fires.
     """
     await _seed_definition()
     _patch_creds(monkeypatch)

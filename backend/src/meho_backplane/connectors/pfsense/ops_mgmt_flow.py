@@ -142,6 +142,58 @@ def _ip_in_nets(ip_obj: Any, nets: list[Any]) -> bool:
     return any(ip_obj.version == net.version and ip_obj in net for net in nets)
 
 
+def _compile_baseline(
+    entries: Any,
+) -> tuple[list[Any], list[tuple[Any, Any, frozenset[int] | None]]]:
+    """Split ``baseline_src`` into source-only networks and pair entries.
+
+    A string entry is a source known for every management network and port.
+    An object ``{"src", "dst", "ports"?}`` is a source known only for
+    connections to ``dst`` (on ``ports`` when given). An entry that cannot be
+    read is dropped, so it hides no connection.
+    """
+    nets: list[Any] = []
+    pairs: list[tuple[Any, Any, frozenset[int] | None]] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            nets.extend(_compile_nets([entry]))
+            continue
+        src_nets = _compile_nets([entry["src"]]) if entry.get("src") is not None else []
+        dst_nets = _compile_nets([entry["dst"]]) if entry.get("dst") is not None else []
+        if not src_nets or not dst_nets:
+            continue
+        ports: frozenset[int] | None = None
+        if entry.get("ports") is not None:
+            raw = entry["ports"]
+            if (
+                not isinstance(raw, (list, tuple))
+                or not raw
+                or not all(isinstance(p, int) and not isinstance(p, bool) for p in raw)
+            ):
+                continue
+            ports = frozenset(raw)
+        pairs.append((src_nets[0], dst_nets[0], ports))
+    return nets, pairs
+
+
+def _is_baseline(
+    client_ip: Any,
+    server_ip: Any,
+    server_port: int,
+    nets: list[Any],
+    pairs: list[tuple[Any, Any, frozenset[int] | None]],
+) -> bool:
+    """True when the connection is covered by a ``baseline_src`` entry."""
+    if _ip_in_nets(client_ip, nets):
+        return True
+    return any(
+        _ip_in_nets(client_ip, [src])
+        and _ip_in_nets(server_ip, [dst])
+        and (ports is None or server_port in ports)
+        for src, dst, ports in pairs
+    )
+
+
 def _leg_for(ip_obj: Any, leg_nets: list[tuple[Any, str]]) -> str | None:
     """Return the leg label of the first ``mgmt_nets`` CIDR *ip_obj* falls in."""
     for net, leg in leg_nets:
@@ -293,7 +345,7 @@ def classify_mgmt_flows(
     """
     ports = {int(p) for p in mgmt_ports} if mgmt_ports else set(_DEFAULT_MGMT_PORTS)
     sanctioned_nets = _compile_nets(sanctioned_src)
-    baseline_nets = _compile_nets(baseline_src)
+    baseline_nets, baseline_pairs = _compile_baseline(baseline_src)
     leg_nets = _compile_leg_nets(mgmt_nets)
 
     leg_stats: dict[str, dict[str, int]] = {}
@@ -345,7 +397,7 @@ def classify_mgmt_flows(
         ent = non_sanctioned.setdefault((client_ip_s, leg), {"ports": set(), "states": 0})
         ent["ports"].add(server_port)
         ent["states"] += 1
-        if not _ip_in_nets(client_ip, baseline_nets):
+        if not _is_baseline(client_ip, server_ip, server_port, baseline_nets, baseline_pairs):
             uent = unexpected.setdefault((client_ip_s, leg), {"ports": set(), "states": 0})
             uent["ports"].add(server_port)
             uent["states"] += 1
@@ -486,13 +538,44 @@ MGMT_FLOW_SUMMARY_OP = PfSenseOp(
             },
             "baseline_src": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "src": {
+                                    "type": "string",
+                                    "description": "Source address or CIDR that is known.",
+                                },
+                                "dst": {
+                                    "type": "string",
+                                    "description": "The destination address or CIDR it may reach.",
+                                },
+                                "ports": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": (
+                                        "Destination ports that are known. "
+                                        "Omit for every management port on dst."
+                                    ),
+                                },
+                            },
+                            "required": ["src", "dst"],
+                            "additionalProperties": False,
+                        },
+                    ]
+                },
                 "description": (
-                    "Additional known/expected NON-sanctioned CIDR/host "
-                    "sources that must NOT raise the unexpected-source signal "
-                    "(e.g. the operator set captured at Sensor-creation time). "
-                    "unexpected = non-sanctioned AND not in the union of "
-                    "sanctioned_src and baseline_src."
+                    "Known/expected NON-sanctioned sources that must NOT "
+                    "raise the unexpected-source signal (e.g. the operator "
+                    "set captured at Sensor-creation time). An entry is "
+                    "either a CIDR/host string (known for every management "
+                    "network and port) or an object {src, dst, ports?} "
+                    "(known only for connections to dst, on those ports "
+                    "when given). unexpected = non-sanctioned AND not "
+                    "covered by an entry. An entry that cannot be read "
+                    "hides nothing."
                 ),
             },
         },
@@ -538,7 +621,12 @@ MGMT_FLOW_SUMMARY_OP = PfSenseOp(
             "sanctioned_src": "Required. List of CIDR/host strings.",
             "mgmt_nets": "Required. List of {cidr, leg} objects.",
             "mgmt_ports": "Optional. Defaults to [443, 22, 902, 5480].",
-            "baseline_src": "Optional. Known non-sanctioned sources to exempt.",
+            "baseline_src": (
+                "Optional. Known non-sanctioned sources to exempt. Each entry is a "
+                "CIDR/host string (any destination and port) or an object "
+                '{"src": cidr, "dst": cidr, "ports": [int]} (only that destination, '
+                "and only those ports when given)."
+            ),
         },
         "output_shape": (
             "``{legs: {<leg>: {sanctioned_states, non_sanctioned_states, "

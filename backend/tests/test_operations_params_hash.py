@@ -41,6 +41,8 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.connectors.vault.ops_auth_write_schemas import (
     VAULT_AUTH_USERPASS_UPDATE_PASSWORD_PARAMETER_SCHEMA,
+)
+from meho_backplane.connectors.vault.ops_userpass_write_schemas import (
     VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA,
 )
 from meho_backplane.db.engine import get_sessionmaker

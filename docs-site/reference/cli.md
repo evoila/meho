@@ -1049,6 +1049,7 @@ meho bind9 config apply-views <local-views.conf> <zones-dir> [flags]
 - `--primary-path` — which staged file's content the audit row captures (defaults to first key sorted)
 - `--target` — target slug to dispatch against
 - `--verify-fqdn` — sample FQDN to dig-verify post-reload (optional)
+- `--verify-source` — server address the --verify-fqdn dig is sent from, to reach one view (optional)
 
 #### `meho bind9 config backup`
 

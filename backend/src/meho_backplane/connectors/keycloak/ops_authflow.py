@@ -377,8 +377,9 @@ _WHEN_TO_USE_AUTHFLOW_GROUP = (
     "sign-in flow of 'meho-cli-approve'. "
     "``keycloak.authflow.ensure_passkey_code_skip`` gives a realm made before "
     "Keycloak 26.4 the step that skips the one-time code after a passkey "
-    "login. Both are safe to run twice and stop without a change on a flow "
-    "with another shape."
+    "login. ``keycloak.authflow.ensure_approval_touch`` gives the console "
+    "client the login flow with the passkey touch level. All are safe to run "
+    "twice and stop without a change on a flow with another shape."
 )
 
 #: Group text for the login flow ops' group, merged into the connector's map.

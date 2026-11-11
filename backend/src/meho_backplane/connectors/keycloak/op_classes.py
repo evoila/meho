@@ -21,8 +21,11 @@ declare_op_classes(
     # write suffix, so it needs this pin.
     # ``.ensure_passkey_code_skip`` copies and binds the realm's browser flow;
     # its params are empty, so it is a plain write too.
+    # ``.ensure_approval_touch`` makes the console's touch flow and binds it;
+    # its params hold only a client id.
     write=(
         "keycloak.authflow.ensure_approval_flow",
         "keycloak.authflow.ensure_passkey_code_skip",
+        "keycloak.authflow.ensure_approval_touch",
     ),
 )

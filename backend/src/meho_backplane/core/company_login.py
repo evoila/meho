@@ -25,6 +25,8 @@ and come back with a MEHO token from Keycloak:
   cleanup finishes it at the next run;
 * the company login as the default of the "Identity Provider Redirector"
   step when ``autoRedirect`` is on; that default is removed when it is off.
+  This is done on the realm's login flow and, when the realm has it, on
+  ``meho approval touch``, the console's own login flow.
 
 A second run with the same inputs changes nothing. Output lines never hold
 the client secret. Details: docs/codebase/core-bootstrap.md.
@@ -65,6 +67,8 @@ ROLES = ("manage-identity-providers", "manage-realm")
 _GROUP_MAPPER = "oidc-advanced-group-idp-mapper"
 _REDIRECTOR = "identity-provider-redirector"
 _FIRST_LOGIN_FLOW = "first broker login"
+# The console's login flow with the passkey touch level (#6213).
+TOUCH_FLOW_ALIAS = "meho approval touch"
 # The keys Keycloak takes from the discovery document (OIDCIdentityProviderFactory).
 _FROM_DISCOVERY = (
     "issuer",
@@ -401,11 +405,8 @@ class _CompanyLogin:
                 left += 1
             _say(f"group {path}: {left} company login member(s) removed")
 
-    async def _redirector(self) -> dict[str, Any] | None:
-        realm = expect(
-            await self.admin.call("GET", self.base), 200, what=f"cannot read realm {REALM}"
-        ).data
-        flow = str(realm.get("browserFlow") or "browser")
+    async def _redirector(self, flow: str) -> dict[str, Any] | None:
+        """The redirect step of login flow *flow*; ``None`` when it has none."""
         executions = expect(
             await self.admin.call(
                 "GET", f"{self.base}/authentication/flows/{quote(flow, safe='')}/executions"
@@ -418,17 +419,43 @@ class _CompanyLogin:
         )
         return step
 
+    async def _touch_flow_exists(self) -> bool:
+        flows = expect(
+            await self.admin.call("GET", f"{self.base}/authentication/flows"),
+            200,
+            what="cannot list the login flows",
+        ).data
+        return any(flow.get("alias") == TOUCH_FLOW_ALIAS for flow in flows)
+
     async def ensure_redirect(self) -> None:
-        step = await self._redirector()
-        label = "auto-redirect"
+        """Set the redirect default on the realm's login flow and on the touch flow.
+
+        The console logs in through ``meho approval touch`` when the realm has
+        it (#6213), so the company login must send people straight there too.
+        """
+        realm = expect(
+            await self.admin.call("GET", self.base), 200, what=f"cannot read realm {REALM}"
+        ).data
+        browser = str(realm.get("browserFlow") or "browser")
+        step = await self._redirector(browser)
         if step is None:
             if self.plan.auto_redirect:
                 raise RealmStageError(
                     "the login flow has no Identity Provider Redirector step, "
                     "so autoRedirect cannot be set"
                 )
-            _say(f"{label}: off")
+            _say("auto-redirect: off")
+        else:
+            await self._set_redirect(step, REDIRECT_CONFIG_ALIAS, "auto-redirect")
+        if browser == TOUCH_FLOW_ALIAS or not await self._touch_flow_exists():
             return
+        step = await self._redirector(TOUCH_FLOW_ALIAS)
+        if step is not None:
+            await self._set_redirect(
+                step, f"{REDIRECT_CONFIG_ALIAS}-touch", f"auto-redirect ({TOUCH_FLOW_ALIAS})"
+            )
+
+    async def _set_redirect(self, step: dict[str, Any], alias: str, label: str) -> None:
         config_id = step.get("authenticationConfig")
         config: dict[str, Any] | None = None
         if config_id:
@@ -458,10 +485,7 @@ class _CompanyLogin:
                 await self.admin.call(
                     "POST",
                     f"{self.base}/authentication/executions/{step['id']}/config",
-                    json={
-                        "alias": REDIRECT_CONFIG_ALIAS,
-                        "config": {"defaultProvider": self.plan.alias},
-                    },
+                    json={"alias": alias, "config": {"defaultProvider": self.plan.alias}},
                 ),
                 201,
                 what="cannot set the Identity Provider Redirector default",

@@ -94,6 +94,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		cliClientID           string
 		cliApproveClientID    string
 		mcpClientID           string
+		webClientID           string
 		backplaneAudience     string
 		mcpResourceURI        string
 		tenantID              string
@@ -211,6 +212,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 				CLIClientID:                  cliClientID,
 				CLIApproveClientID:           cliApproveClientID,
 				MCPClientID:                  mcpClientID,
+				WebClientID:                  webClientID,
 				BackplaneAudience:            backplaneAudience,
 				MCPResourceURI:               mcpResourceURI,
 				TenantID:                     tenantID,
@@ -292,6 +294,8 @@ func newBootstrapClientsCmd() *cobra.Command {
 		"public client_id for the fresh browser sign-in of `meho approvals approve` (matches chart's `config.keycloakCliApproveClientId`)")
 	cmd.Flags().StringVar(&mcpClientID, "mcp-client-id", "meho-mcp",
 		"public client_id for the MCP browser-flow client")
+	cmd.Flags().StringVar(&webClientID, "web-client-id", "meho-web",
+		"the console's client_id; when the realm has it, it gets the login flow with the passkey touch level")
 	cmd.Flags().StringVar(&backplaneAudience, "backplane-audience", "meho-backplane",
 		"audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)")
 	cmd.Flags().StringVar(&mcpResourceURI, "mcp-resource-uri", "",

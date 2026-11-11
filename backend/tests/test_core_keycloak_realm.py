@@ -194,6 +194,9 @@ def test_clients(realm: dict[str, Any]) -> None:
 @pytest.mark.parametrize("client_id", _HUMAN_CLIENTS)
 def test_human_clients_read_claims_from_groups(realm: dict[str, Any], client_id: str) -> None:
     mappers = {m["name"]: m for m in _client(realm, client_id)["protocolMappers"]}
+    # The console also names the sign-in methods in its tokens (#6213).
+    if client_id == "meho-web":
+        assert mappers.pop("amr")["protocolMapper"] == "oidc-amr-mapper"
     assert set(mappers) == {
         "audience-meho-backplane",
         "meho-mcp-audience",
@@ -452,6 +455,100 @@ def test_approval_client_has_its_own_sign_in_flow(realm: dict[str, Any]) -> None
         ("conditional-user-configured", "REQUIRED"),
         ("auth-otp-form", "REQUIRED"),
     ]
-    # Only the approval client has a flow of its own.
+    # Only the approval client and the console have a flow of their own.
     bound = [c["clientId"] for c in realm["clients"] if c.get("authenticationFlowBindingOverrides")]
-    assert bound == ["meho-cli-approve"]
+    assert bound == ["meho-cli-approve", "meho-web"]
+
+
+_TOUCH = "meho approval touch"
+
+
+def _listed_steps(flows: dict[str, Any], alias: str, level: int = 0) -> list[tuple[Any, ...]]:
+    """The steps of *alias* as Keycloak lists them: a sub-flow's steps follow it."""
+    rows: list[tuple[Any, ...]] = []
+    for step in sorted(flows[alias]["authenticationExecutions"], key=lambda s: s["priority"]):
+        name = step.get("authenticator") or step["flowAlias"]
+        rows.append((level, name, step["requirement"], step.get("authenticatorConfig")))
+        if step["authenticatorFlow"]:
+            rows.extend(_listed_steps(flows, step["flowAlias"], level + 1))
+    return rows
+
+
+def _configs(realm: dict[str, Any]) -> dict[str, dict[str, str]]:
+    return {c["alias"]: c["config"] for c in realm["authenticatorConfig"]}
+
+
+def test_touch_level_is_mapped_in_the_realm(realm: dict[str, Any]) -> None:
+    """#6213: ``acr_values=meho-touch`` asks for level 2. Level 1 keeps its name "1"."""
+    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-touch": 2}
+
+
+def test_console_login_flow_has_level_1_and_the_touch_level(realm: dict[str, Any]) -> None:
+    """The console's flow: level 1 is today's login, level 2 is a passkey touch.
+
+    Level 1 has the steps of Keycloak's own browser flow: the login cookie,
+    the company login, the password form (which also takes a passkey) and
+    the one-time code, which a passkey login skips. Level 2 asks for a passkey
+    with user verification, and nothing else.
+    """
+    flows = {flow["alias"]: flow for flow in realm["authenticationFlows"]}
+    flow = flows[_TOUCH]
+    assert flow["topLevel"] is True
+    assert flow["builtIn"] is False
+    assert _listed_steps(flows, _TOUCH) == [
+        (0, "auth-cookie", "ALTERNATIVE", None),
+        (0, f"{_TOUCH} - levels", "ALTERNATIVE", None),
+        (1, f"{_TOUCH} - level 1", "CONDITIONAL", None),
+        (2, "conditional-level-of-authentication", "REQUIRED", f"{_TOUCH} - level 1"),
+        (2, f"{_TOUCH} - sign-in", "REQUIRED", None),
+        (3, "identity-provider-redirector", "ALTERNATIVE", None),
+        (3, f"{_TOUCH} - password", "ALTERNATIVE", None),
+        (4, "auth-username-password-form", "REQUIRED", None),
+        (4, f"{_TOUCH} - one-time code", "CONDITIONAL", None),
+        (5, "conditional-user-configured", "REQUIRED", None),
+        (5, "conditional-credential", "REQUIRED", f"{_TOUCH} - skip code after passkey"),
+        (5, "auth-otp-form", "REQUIRED", None),
+        (1, f"{_TOUCH} - level 2", "CONDITIONAL", None),
+        (2, "conditional-level-of-authentication", "REQUIRED", f"{_TOUCH} - level 2"),
+        (2, "webauthn-authenticator-passwordless", "REQUIRED", f"{_TOUCH} - passkey"),
+    ]
+    configs = _configs(realm)
+    assert configs[f"{_TOUCH} - level 1"] == {"loa-condition-level": "1", "loa-max-age": "36000"}
+    # Maximum age 0: the touch counts for this one login only, so every
+    # request for the touch level asks for a new passkey signature.
+    assert configs[f"{_TOUCH} - level 2"] == {"loa-condition-level": "2", "loa-max-age": "0"}
+    assert configs[f"{_TOUCH} - skip code after passkey"] == {
+        "credentials": "webauthn-passwordless",
+        "included": "false",
+    }
+
+
+def test_passkey_step_names_itself_in_amr_with_a_maximum_age(realm: dict[str, Any]) -> None:
+    """Keycloak writes a step into ``amr`` only when its setting has a maximum age."""
+    config = _configs(realm)[f"{_TOUCH} - passkey"]
+    assert config["default.reference.value"] == "hwk"
+    assert int(config["default.reference.maxAge"]) > 0
+
+
+def test_every_step_setting_is_used_once(realm: dict[str, Any]) -> None:
+    used = [
+        step["authenticatorConfig"]
+        for flow in realm["authenticationFlows"]
+        for step in flow["authenticationExecutions"]
+        if step.get("authenticatorConfig")
+    ]
+    assert sorted(used) == sorted(_configs(realm))
+
+
+def test_only_the_console_uses_the_touch_flow(realm: dict[str, Any]) -> None:
+    """The CLI, MCP and approval logins keep their flows; the console gets the touch flow."""
+    flows = {flow["alias"]: flow for flow in realm["authenticationFlows"]}
+    web = _client(realm, "meho-web")
+    assert web["authenticationFlowBindingOverrides"] == {"browser": flows[_TOUCH]["id"]}
+    for client_id in ("meho-cli", "meho-mcp"):
+        assert "authenticationFlowBindingOverrides" not in _client(realm, client_id)
+    amr = next(m for m in web["protocolMappers"] if m["name"] == "amr")
+    assert amr["protocolMapper"] == "oidc-amr-mapper"
+    assert amr["config"]["id.token.claim"] == "true"
+    # MEHO reads the touch level from acr, which the acr scope puts in the tokens.
+    assert "acr" in web["defaultClientScopes"]

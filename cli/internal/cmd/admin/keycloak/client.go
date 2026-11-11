@@ -142,15 +142,17 @@ func newAdminClient(
 // "already exists" (409 / 404 on GET-by-id) or a real failure.
 //
 // pathRelative is appended after /admin/realms/{realm}/ — leading
-// slash is stripped so callers can pass either form.
+// slash is stripped so callers can pass either form. An empty
+// pathRelative is the realm itself.
 func (c *adminClient) do(
 	ctx context.Context,
 	method, pathRelative string,
 	body any,
 ) (int, []byte, error) {
-	endpoint := fmt.Sprintf(
-		"%s/admin/realms/%s/%s",
-		c.baseURL, c.realm, strings.TrimLeft(pathRelative, "/"))
+	endpoint := fmt.Sprintf("%s/admin/realms/%s", c.baseURL, c.realm)
+	if p := strings.TrimLeft(pathRelative, "/"); p != "" {
+		endpoint += "/" + p
+	}
 
 	var reader io.Reader
 	if body != nil {

@@ -13,6 +13,12 @@ other steps than the file is kept as it is, the stage says so in one line,
 and no client is bound to it: a flow that is not the one of the file must
 not guard the approval sign-in.
 
+A flow whose steps need settings (``authenticatorConfig`` in the realm file,
+such as the levels of ``meho approval touch``) is not made here: the stage
+makes steps without settings, and such a step without its settings would
+change how people log in. The stage says so in one line and binds no client
+to it. The Keycloak operation of the flow adds it to a running realm.
+
 Reading and changing login flows needs the ``manage-realm`` role. The
 ``meho-admin`` account of the realm file has it only when the company login
 is on (docs/codebase/core-bootstrap.md, "Rights"). Without it the stage says
@@ -184,6 +190,34 @@ async def _make_flow(
     return flow_id
 
 
+def _needs_settings(flow: Mapping[str, Any], by_alias: Mapping[str, Any]) -> bool:
+    """Whether a step of *flow* or of one of its sub-flows has settings in the file."""
+    for step in flow.get("authenticationExecutions") or []:
+        if step.get("authenticatorConfig"):
+            return True
+        if step.get("authenticatorFlow") and _needs_settings(by_alias[step["flowAlias"]], by_alias):
+            return True
+    return False
+
+
+def _flows_to_check(
+    flows: list[Mapping[str, Any]], by_alias: Mapping[str, Any]
+) -> list[Mapping[str, Any]]:
+    """The top-level flows this stage makes and checks; it names the ones it leaves out."""
+    top = []
+    for flow in flows:
+        if not flow.get("topLevel"):
+            continue
+        if _needs_settings(flow, by_alias):
+            _say(
+                f"login flow {flow['alias']}: not checked here (its steps need settings); "
+                "no client is bound to it by this stage"
+            )
+            continue
+        top.append(flow)
+    return top
+
+
 async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str, str]:
     """Make the top-level login flows of the realm file that the realm lacks.
 
@@ -193,7 +227,8 @@ async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str
     this step. A flow with other steps is left out, so no client is bound
     to it.
     """
-    top = [flow for flow in flows if flow.get("topLevel")]
+    by_alias = {flow["alias"]: flow for flow in flows}
+    top = _flows_to_check(flows, by_alias)
     if not top:
         return {}
     reply = await admin.call("GET", f"{_BASE}/flows")
@@ -205,7 +240,6 @@ async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str
         item["alias"]: item["id"]
         for item in expect(reply, 200, what="cannot list the login flows").data
     }
-    by_alias = {flow["alias"]: flow for flow in flows}
     ids: dict[str, str] = {}
     for flow in top:
         alias = flow["alias"]

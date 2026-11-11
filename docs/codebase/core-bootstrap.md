@@ -280,6 +280,11 @@ stage (`core/company_login.py`, `ensure_company_login`) does this, in order:
    Keycloak never shows its own login page. With `false`, that default is
    removed and the Keycloak login form shows again: the way in with the
    local accounts when the company login is down.
+   The same is done on the console's own login flow `meho approval
+   touch` (config alias `meho-company-login-redirect-touch`) when the
+   realm has it (#6213), so the console still goes straight to the
+   company login. Its output line is `auto-redirect (meho approval
+   touch): ...`.
 
 What is not done:
 
@@ -402,6 +407,13 @@ Steps of the realm stage, in order:
    to read login flows)` and the Job goes on; the client is then made
    without its own flow. A fresh install gets the flow and the binding from
    the realm import, so this matters only for a realm made before #5515.
+   A flow whose steps need settings (`authenticatorConfig` in the realm
+   file) is not made here, and no client is bound to it; the step prints
+   `not checked here (its steps need settings); no client is bound to it
+   by this stage`. Today that is `meho approval touch`, the console's
+   flow with the passkey touch level (#6213): made without its settings
+   it would change the console login. A running realm gets it through
+   the operation `keycloak.authflow.ensure_approval_touch`.
 4. **CI login**, when on.
    Then the **company login**, when on (see "The company login").
 5. **First login.** Read `<release>-core-first-login`; make it when missing

@@ -326,7 +326,8 @@ data:
       "webAuthnPolicyPasswordlessResidentKey": "required",
       "attributes": {
         "adminEventsExpiration": "15552000",
-        "CreateDefaultClientScopes": "true"
+        "CreateDefaultClientScopes": "true",
+        "acr.loa.map": "{\"meho-touch\":2}"
       },
       "clientScopes": [
         {
@@ -488,6 +489,215 @@ data:
               "userSetupAllowed": false
             }
           ]
+        },
+        {
+          "id": "c41e7a90-2f5d-4b8a-9e36-7d0b1a5f8c24",
+          "alias": "meho approval touch",
+          "description": "Console login of meho-web. Level 1 is the normal login. Level 2 (acr meho-touch) asks for a passkey touch every time; MEHO asks for it before a dangerous or destructive approval.",
+          "providerId": "basic-flow",
+          "topLevel": true,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-cookie",
+              "authenticatorFlow": false,
+              "requirement": "ALTERNATIVE",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "ALTERNATIVE",
+              "priority": 20,
+              "flowAlias": "meho approval touch - levels",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "3e8b5f12-7c4a-4d91-b0e6-2a9f6c1d8e57",
+          "alias": "meho approval touch - levels",
+          "description": "Level 1, then level 2 when it is asked for.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticatorFlow": true,
+              "requirement": "CONDITIONAL",
+              "priority": 10,
+              "flowAlias": "meho approval touch - level 1",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "CONDITIONAL",
+              "priority": 20,
+              "flowAlias": "meho approval touch - level 2",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "8d2f4a6b-1e9c-4b37-a5d0-6f3e2c7b9a18",
+          "alias": "meho approval touch - level 1",
+          "description": "The normal login: company login or password, then the one-time code when the person has one.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-level-of-authentication",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "authenticatorConfig": "meho approval touch - level 1",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "flowAlias": "meho approval touch - sign-in",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "5b7e1c3d-9a2f-4e68-8c41-0d6a3f2e5b79",
+          "alias": "meho approval touch - sign-in",
+          "description": "Company login, or the password form.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "identity-provider-redirector",
+              "authenticatorFlow": false,
+              "requirement": "ALTERNATIVE",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "ALTERNATIVE",
+              "priority": 20,
+              "flowAlias": "meho approval touch - password",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "a1c9e5f3-6b2d-4087-9e4a-7f1b3d8c2e60",
+          "alias": "meho approval touch - password",
+          "description": "The password form (it also takes a passkey), then the one-time code.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-username-password-form",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "CONDITIONAL",
+              "priority": 20,
+              "flowAlias": "meho approval touch - one-time code",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "2f6d8b4a-3c1e-4a95-b7d2-9e0c5a1f4b83",
+          "alias": "meho approval touch - one-time code",
+          "description": "Asks for the one-time code when the person has set one up and did not use a passkey.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-user-configured",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "conditional-credential",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "authenticatorConfig": "meho approval touch - skip code after passkey",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "auth-otp-form",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 30,
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "7e4a2c9f-5d1b-4f36-8a0e-3b6d9c2f1e74",
+          "alias": "meho approval touch - level 2",
+          "description": "The passkey touch: a passkey with user verification, every time.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-level-of-authentication",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "authenticatorConfig": "meho approval touch - level 2",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "webauthn-authenticator-passwordless",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "authenticatorConfig": "meho approval touch - passkey",
+              "userSetupAllowed": false
+            }
+          ]
+        }
+      ],
+      "authenticatorConfig": [
+        {
+          "alias": "meho approval touch - level 1",
+          "config": {
+            "loa-condition-level": "1",
+            "loa-max-age": "36000"
+          }
+        },
+        {
+          "alias": "meho approval touch - level 2",
+          "config": {
+            "loa-condition-level": "2",
+            "loa-max-age": "0"
+          }
+        },
+        {
+          "alias": "meho approval touch - skip code after passkey",
+          "config": {
+            "credentials": "webauthn-passwordless",
+            "included": "false"
+          }
+        },
+        {
+          "alias": "meho approval touch - passkey",
+          "config": {
+            "default.reference.value": "hwk",
+            "default.reference.maxAge": "120"
+          }
         }
       ],
       "clients": [
@@ -993,6 +1203,9 @@ data:
             "use.refresh.tokens": "true",
             "client.use.lightweight.access.token.enabled": "false"
           },
+          "authenticationFlowBindingOverrides": {
+            "browser": "c41e7a90-2f5d-4b8a-9e36-7d0b1a5f8c24"
+          },
           "redirectUris": [
             "${MEHO_REALM_PUBLIC_URL}/ui/auth/callback"
           ],
@@ -1122,6 +1335,16 @@ data:
                 "access.token.claim": "true",
                 "introspection.token.claim": "true",
                 "userinfo.token.claim": "false"
+              }
+            },
+            {
+              "name": "amr",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-amr-mapper",
+              "config": {
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true"
               }
             }
           ]

@@ -29,6 +29,7 @@ the end, then return to the trail.
 | `meho-cli-approve` | **Public** client, authorization-code + PKCE on a loopback address only, with its own login flow | The fresh sign-in of `meho approvals approve`. Only its tokens can approve on the command line. |
 | `meho approval sign-in` | Login flow, bound to `meho-cli-approve` | Always asks for the password (and the one-time code, when the person has one) |
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
+| `meho-mcp-code`, `meho-mcp-desktop` | **Public** clients, copies of `meho-mcp` | The Claude Code plugin and the Claude Desktop extension, each with a login of its own, when `MCP_CLIENT_PER_TOOL_KIND` is on. See [The MCP clients of the AI tools](#the-mcp-clients-of-the-ai-tools). |
 | `meho-web` | Confidential client, authorization-code + PKCE | The MEHO web UI. Redirect URI `https://<host>/ui/auth/callback`. |
 | `meho approval touch` | Login flow, bound to `meho-web`, with two levels | Level 1 is the normal console login. Level 3 (`meho-touch`) asks for a passkey touch every time. See [The passkey touch level](#the-passkey-touch-level). |
 | `meho-admin`, `meho-check-runner` | Confidential service clients | MEHO manages clients and users in the realm (`meho-admin`), and runs scheduled checks (`meho-check-runner`) |
@@ -116,9 +117,10 @@ sign-in:
 - the sign-in is at most 15 minutes old (the `auth_time` claim). Inside
   these 15 minutes one sign-in may approve several waiting changes. Each
   approval is still a separate decision about one request;
-- the sign-in asked for the password (the `acr` claim is set and is not
-  `0`). Keycloak gives `acr` `1` to a sign-in that asked for the
-  password, and `0` to one that did not;
+- the sign-in asked for the password or a passkey (the `acr` claim is
+  set and is not `0`). Keycloak gives `acr` `1` to a sign-in that asked
+  for the password or a passkey, and `0` to one that came only from the
+  browser's remembered login;
 - an operation marked `destructive` needs a sign-in of its own, at most
   5 minutes old. After it, that sign-in approves nothing more.
 
@@ -130,7 +132,8 @@ window. When the token runs out, the CLI says so and asks for a new
 sign-in. Reject needs no new sign-in.
 
 The web interface applies the same age rules to the sign-in behind the
-console session, and it checks that this sign-in asked for the password.
+console session, and it checks that this sign-in asked for the password
+or a passkey.
 When the sign-in is too old, the console shows **Sign in to approve**
 and asks for the password again (see
 [The web console session](#the-web-console-session)).
@@ -773,6 +776,43 @@ The eight mappers and four default scopes apply identically. Which MCP
 client uses which flow — and everything else client-side — is the
 [Connect clients](../clients/index.md) section's territory.
 
+## The MCP clients of the AI tools
+
+MEHO can give Claude Code and Claude Desktop a login client each. Then
+the audit log tells the two tools apart, and each tool keeps a saved
+login of its own.
+
+| Client | Used by | Header the tool sends |
+|---|---|---|
+| `meho-mcp-code` | The Claude Code plugin | `Meho-Tool: claude-code` |
+| `meho-mcp-desktop` | The Claude Desktop extension | `Meho-Tool: claude-desktop` |
+
+**Built-in login setup and `bootstrap-clients`.** Both make the two
+clients for you, with the same settings as `meho-mcp`. The built-in setup
+adds them to a running realm at the next upgrade.
+
+**Your own Keycloak.** Add the two clients by hand:
+
+1. Make each client exactly like `meho-mcp` (the table above): public,
+   standard flow with PKCE `S256`, the same loopback redirect URIs, the
+   eight mappers, the four default scopes, `offline_access` and the three
+   `mcp:*` scopes as optional scopes, and the 48-hour offline idle limit.
+   Only the client ID and the name differ.
+2. Give neither client a fixed tenant or role. A person gets their tenant
+   and role from their group, as with `meho-mcp`.
+
+**Then turn the switch on.** Set `MCP_CLIENT_PER_TOOL_KIND=true` on the
+backplane. `GET /api/v1/auth-config` then lists
+`"mcp_clients": {"claude-code": "meho-mcp-code", "claude-desktop": "meho-mcp-desktop"}`.
+The plugin and the extension read it at start. Each person signs in
+once more in each tool. Turn the switch on only after the realm has both
+clients: a tool that signs in with a missing client gets a Keycloak error.
+
+With the switch off (the default), both tools keep `meho-mcp`, as before.
+Older plugins and other MCP clients keep `meho-mcp` in any case. MEHO
+accepts tokens of all three clients on `/mcp`. None of them can approve
+a request: an approval needs `meho-cli-approve` or the web console.
+
 ## How long each login lasts
 
 | Client | Who uses it | Login | It ends |
@@ -780,6 +820,7 @@ client uses which flow — and everything else client-side — is the
 | `meho-cli` | `meho login` (the default) | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
 | `meho-cli` | `meho login --offline=false` | Short login | At the realm's SSO Session Idle limit (30 minutes by default). |
 | `meho-mcp` | The Claude Code plugin, the Claude Desktop bundle, a plain HTTP entry in Claude Code's `.mcp.json` | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
+| `meho-mcp-code`, `meho-mcp-desktop` | The Claude Code plugin and the Claude Desktop extension, when `MCP_CLIENT_PER_TOOL_KIND` is on | Same as `meho-mcp` | Same as `meho-mcp` |
 | `meho-web` | The web console | Browser session | At the realm's SSO Session limits. |
 
 The 7-day maximum is set in MEHO's built-in login setup (realm setting
@@ -860,7 +901,7 @@ The two MEHO settings are `UI_SESSION_SLIDING_EXTENSION_SECONDS`
 **Approving in the console needs a recent sign-in.** The console session
 may be hours old, but an approval needs the sign-in behind it to be at
 most 15 minutes old (`FRESH_SIGN_IN_MAX_AGE_SECONDS`) and to have asked
-for the password (the `acr` claim). A `destructive` operation needs a
+for the password or a passkey (the `acr` claim). A `destructive` operation needs a
 sign-in of its own, at most 5 minutes old. When the sign-in is too old,
 the request shows **Sign in to approve** in place of **Approve**. That
 link starts a console login with `prompt=login` and `max_age=0`, so
@@ -962,8 +1003,9 @@ Keycloak 26.7 replaced the old setting **Require discoverable credential**
 - **Approvals in the console need the same recent sign-in.** The console
   checks the sign-in behind the console session: at most 15 minutes old,
   5 minutes for a `destructive` operation, and it must have asked for the
-  password. When it is older, the request shows **Sign in to approve**,
-  and that login asks for the password also in a remembered browser (see
+  password or a passkey. When it is older, the request shows **Sign in to
+  approve**, and that login asks for the password or a passkey also in a
+  remembered browser (see
   [The web console session](#the-web-console-session)). Deny needs no new
   sign-in.
 - **The console keeps its own limit.** MEHO ends a console session after
@@ -996,10 +1038,24 @@ clicks **Sign in with Passkey**, or picks the passkey that the browser
 offers in the user name field. When a passkey was used, Keycloak skips the
 one-time code.
 
-A passkey also works for the fresh sign-in of an approval: the password
-page shows **Sign in with Passkey** too. If you set
-`APPROVAL_ONE_TIME_CODE_ACR_VALUES`, MEHO records a passkey approval as a
-normal fresh sign-in, because the code step did not run.
+A passkey also counts as the fresh sign-in of an approval. MEHO checks
+the same things as after a password: the sign-in time in the token, and
+that Keycloak asked for the password or a passkey (`acr` is `1`). So one
+tap with Face ID, Touch ID, a fingerprint or Windows Hello is enough:
+
+- **In the console**, **Sign in to approve** opens the normal login page.
+  A passkey there skips the one-time code.
+- **On the command line**, `meho approvals approve` uses its own login
+  flow, `meho approval sign-in`. Its password page shows **Sign in with
+  Passkey** too. This flow has no step that skips the code after a
+  passkey, so a person who has set up a one-time code still types the
+  code after the passkey.
+
+If you set `APPROVAL_ONE_TIME_CODE_ACR_VALUES`, MEHO records a passkey
+approval as a normal fresh sign-in, not as a one-time code.
+
+The steps to add a passkey on each kind of device are on the page
+[MEHO on your phone and laptop](../guides/phone-and-laptop.md#sign-in-with-a-passkey).
 
 **Lost passkey.** The person logs in with password and code, as before.
 Or an admin removes the passkey in the Keycloak admin console (Users → the

@@ -1144,6 +1144,22 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_logout(self, operator, target, params)
 
+    async def user_get(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.get``."""
+        from meho_backplane.connectors.keycloak.ops_user_state import keycloak_user_get
+
+        return await keycloak_user_get(self, operator, target, params)
+
+    async def user_sessions(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.sessions``."""
+        from meho_backplane.connectors.keycloak.ops_user_state import keycloak_user_sessions
+
+        return await keycloak_user_sessions(self, operator, target, params)
+
     async def user_disable(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1304,6 +1320,7 @@ class KeycloakConnector(HttpConnector):
             READ_OPS,
             WHEN_TO_USE_BY_GROUP,
         )
+        from meho_backplane.connectors.keycloak.ops_user_state import USER_STATE_OPS
         from meho_backplane.connectors.keycloak.ops_write import (
             WHEN_TO_USE_WRITE_BY_GROUP,
             WRITE_OPS,
@@ -1331,6 +1348,7 @@ class KeycloakConnector(HttpConnector):
             *PASSKEY_CODE_SKIP_OPS,
             *TOUCH_OPS,
             *IDENTITY_PROVIDER_OPS,
+            *USER_STATE_OPS,
             *FLOW_READ_OPS,
         ):
             handler = getattr(cls, op.handler_attr, None)

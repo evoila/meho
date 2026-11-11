@@ -43,8 +43,10 @@ changes the browser sign-in flow for passkeys, and
 `keycloak.authflow.ensure_approval_touch` gives the console client the
 login flow with the passkey touch level. Three more safe reads show the
 login setup: `keycloak.auth_flow.step.list`, `keycloak.required_action.list`
-and `keycloak.events.config.get` (read surface **fourteen**). In total the connector
-registers 38 operations: 14 `safe` reads and 24 writes that wait for
+and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
+`keycloak.user.sessions`, show one user's state after a logout or a password
+reset (read surface **sixteen**). In total the connector registers 40
+operations: 16 `safe` reads and 24 writes that wait for
 approval (7 `caution`, 13 `dangerous`, 4 `destructive`).
 
 Registry v2 triple: `(product="keycloak", version="26.x",
@@ -247,7 +249,9 @@ rejects a whitespace-only secret rather than setting an empty password.
 
 Ten `safety_level="safe"` / `requires_approval=False` read ops in this
 table (an eleventh, `keycloak.identity_provider.list`, is described with the
-approval sign-in flow; three more are in "Login setup reads" below), all
+approval sign-in flow; three more are in "Login setup reads" below, and two
+more, `keycloak.user.get` and `keycloak.user.sessions`, are described with the
+user reads below), all
 tagged `read-only`, all dispatching via the admin-auth path. The realm is
 the target's `managed_realm` (no per-op realm param):
 
@@ -258,6 +262,8 @@ the target's `managed_realm` (no per-op realm param):
 | `keycloak.client.get` | `GET .../clients/{id}` | one client (flows, redirect URIs, mappers) |
 | `keycloak.client_scope.list` | `GET .../client-scopes` | `{rows, total}` |
 | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | `{rows, total}`, no credentials |
+| `keycloak.user.get` | `GET .../users/{user-id}` and `.../credentials` | one user's state, credential type and date only |
+| `keycloak.user.sessions` | `GET .../users/{user-id}/sessions` | `{count, sessions}`, no session id, no token |
 | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | realm + client role mappings |
 | `keycloak.role.list` | `GET .../roles` | `{rows, total}` — realm role catalogue |
 | `keycloak.role.users` | `GET .../roles/{role-name}/users` | `{rows, total}`, no credentials — role members |
@@ -314,6 +320,31 @@ and masks secret-named fields by name as well.
 `tests/test_connectors_keycloak_trace_mask.py` dispatches
 `keycloak.client.get` with the recorder on and checks that a made-up client
 secret is in neither the stored trace nor the agent copy.
+
+## User state reads (`ops_user_state.py`)
+
+Two `safe` reads in the `user` group. Both take `id` (the user's UUID) or
+`username` (an exact match, not the "contains" search of `user.list`). A user
+that does not exist raises `KeycloakUserNotFoundError` ("user not found").
+
+- `keycloak.user.get` reads `GET .../users/{user-id}` and
+  `GET .../users/{user-id}/credentials`. The result is `{id, username,
+  enabled, emailVerified, requiredActions, notBefore, createdTimestamp,
+  credentialDates: [{type, createdDate}]}`. Only these fields are copied out
+  (an allow-list): never `secretData`, `credentialData` or `value`. The list
+  is named `credentialDates` because MEHO hides every answer field named
+  `credentials`. For a `password` credential, `createdDate` is when the
+  password was last set.
+- `keycloak.user.sessions` reads `GET .../users/{user-id}/sessions`. The
+  result is `{userId, count, sessions: [{started, lastAccess, ipAddress,
+  clients}]}`. No session id and no token. A user with no session gives
+  `count: 0`. Offline sessions are not read.
+
+All times are ISO 8601 in UTC. Keycloak gives `notBefore` in seconds and the
+other times in milliseconds; a `notBefore` of 0 (never set) is `null`. Use
+both after `keycloak.user.logout` or `keycloak.user.reset_password` to check
+the result. A failed read, or a body of the wrong shape, is an error, never
+an empty answer.
 
 ## Write ops (G3.13-T4, extended by #3280)
 

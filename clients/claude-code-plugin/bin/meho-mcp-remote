@@ -174,16 +174,36 @@ if [ -z "$entry" ] || [ ! -f "$entry" ]; then
   exit 1
 fi
 
+# The login client of Claude Code (#6210, lib/tool-client.mjs). When MEHO
+# lists a client for the claude-code tool kind in GET /api/v1/auth-config
+# (switch MCP_CLIENT_PER_TOOL_KIND), the shim signs in with that client and
+# sends the header "Meho-Tool: claude-code". mcp-remote keeps one saved login
+# per URL and header values, so Claude Code then has a saved login of its own,
+# apart from Claude Desktop. MEHO_MCP_CLIENT_ID still wins when set. When MEHO
+# lists nothing or does not answer, the shim keeps the client above and sends
+# no header.
+client_info="{\"client_id\": \"$client_id\"}"
+tool_args=()
+if tool_out="$(node "$plugin_root/lib/tool-client.mjs" claude-code "$url" "${MEHO_MCP_CLIENT_ID:-}")"; then
+  tool_header="${tool_out%%$'\n'*}"
+  client_info="${tool_out#*$'\n'}"
+  if [ -n "$tool_header" ]; then
+    tool_args=(--header "$tool_header")
+  fi
+fi
+
 # Run mcp-remote through the login guard (lib/login-guard.mjs, #3961). The
 # guard loads the vendored entry in the same process and hands it the same
 # argv as before: the URL plus the static-OAuth client id and scope
-# metadata, and the Meho-Tenant header when MEHO_TENANT is set. On top, it
+# metadata, the Meho-Tenant header when MEHO_TENANT is set, and the Meho-Tool
+# header when MEHO lists a client for Claude Code. On top, it
 # stops a connect that does not finish within MEHO_MCP_LOGIN_TIMEOUT seconds
 # (default 300), so an unfinished browser login never holds the callback
 # port forever. And when the login expires
 # during a session, the failed call gets a clear message that says what to
 # do. mcp-remote owns this process's stdio from here.
 exec node "$plugin_root/lib/login-guard.mjs" "$entry" "$url" \
-  --static-oauth-client-info "{\"client_id\": \"$client_id\"}" \
+  --static-oauth-client-info "$client_info" \
   --static-oauth-client-metadata "{\"scope\": \"$scopes\"}" \
-  ${tenant_args[@]+"${tenant_args[@]}"}
+  ${tenant_args[@]+"${tenant_args[@]}"} \
+  ${tool_args[@]+"${tool_args[@]}"}

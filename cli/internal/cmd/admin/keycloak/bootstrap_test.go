@@ -707,9 +707,10 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	// Three clients created (CLI, approval sign-in, MCP).
-	if len(fake.clients) != 3 {
-		t.Errorf("expected 3 clients, got %d", len(fake.clients))
+	// Five clients created (CLI, approval sign-in, MCP, and the MCP
+	// clients of Claude Code and Claude Desktop).
+	if len(fake.clients) != 5 {
+		t.Errorf("expected 5 clients, got %d", len(fake.clients))
 	}
 	if res.ApproveClientID != "meho-cli-approve" {
 		t.Errorf("ApproveClientID = %q, want meho-cli-approve", res.ApproveClientID)
@@ -908,9 +909,9 @@ func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
 		t.Errorf("expected 0 users when skipped, got %d",
 			len(fake.users))
 	}
-	// All three clients still landed.
-	if len(fake.clients) != 3 {
-		t.Errorf("expected 3 clients, got %d", len(fake.clients))
+	// All five clients still landed.
+	if len(fake.clients) != 5 {
+		t.Errorf("expected 5 clients, got %d", len(fake.clients))
 	}
 }
 
@@ -1494,8 +1495,10 @@ func TestBootstrap_MCPClientHasOfflineAccessOptionalScope(t *testing.T) {
 	// pre-checks via listClientOptionalScopes; PUTting again would be
 	// harmless against real Keycloak but indicates a regression in
 	// the skip-if-already-present path).
+	// meho-mcp and the two clients of the AI tool kinds get the scopes.
 	putsAfterFirst := fake.calls["PUT /clients/{uuid}/optional-client-scopes/{sid}"]
-	if want := len(requiredMCPOptionalScopes()); putsAfterFirst != want {
+	mcpClients := 1 + len(toolMCPClients)
+	if want := mcpClients * len(requiredMCPOptionalScopes()); putsAfterFirst != want {
 		t.Errorf("first run PUT'd optional scopes %d times; want %d",
 			putsAfterFirst, want)
 	}
@@ -1919,7 +1922,8 @@ func TestBootstrapClientsCmd_RemovedFlagsStop(t *testing.T) {
 // makes the client create fail with HTTP 500.
 func TestBootstrap_ClientDescriptionsFitKeycloak(t *testing.T) {
 	opts := fullOpts().withDefaults()
-	for _, c := range []*clientRep{opts.desiredCLIClient(), opts.desiredCLIApproveClient(), opts.desiredMCPClient()} {
+	clients := []*clientRep{opts.desiredCLIClient(), opts.desiredCLIApproveClient(), opts.desiredMCPClient()}
+	for _, c := range append(clients, opts.desiredToolMCPClients()...) {
 		if n := len(c.Description); n > 255 {
 			t.Errorf("%s description is %d characters, want at most 255", c.ClientID, n)
 		}

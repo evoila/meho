@@ -2397,10 +2397,11 @@ type AuditTraceResult struct {
 // empty-string from absent-key and emits the same actionable
 // public-client error in both cases.
 type AuthConfigResponse struct {
-	Audience           string  `json:"audience"`
-	CliApproveClientId *string `json:"cli_approve_client_id,omitempty"`
-	CliClientId        string  `json:"cli_client_id"`
-	KeycloakIssuer     string  `json:"keycloak_issuer"`
+	Audience           string             `json:"audience"`
+	CliApproveClientId *string            `json:"cli_approve_client_id,omitempty"`
+	CliClientId        string             `json:"cli_client_id"`
+	KeycloakIssuer     string             `json:"keycloak_issuer"`
+	McpClients         *map[string]string `json:"mcp_clients,omitempty"`
 }
 
 // AuthModel Per-target identity model per v0.1-spec L447-454.
@@ -8522,8 +8523,10 @@ type PreviewOperationResponseStatus string
 //
 // Members:
 //
-//   - :attr:`USER` — a human operator authenticated via the interactive
-//     device-code flow. Default when no claim is present.
+//   - :attr:`USER` — a person who signed in. There are three ways: the
+//     command line (“meho-cli“ client, device code), an MCP client
+//     (“meho-mcp“ client, sign-in in the browser), and the web console
+//     (“meho-web“ client). Default when no claim is present.
 //   - :attr:`SERVICE` — a non-interactive service account client that
 //     uses client-credentials flow but is not a MEHO-managed agent.
 //   - :attr:`AGENT` — a Keycloak client registered by
@@ -9370,8 +9373,10 @@ type RunnerPrincipal struct {
 	//
 	// Members:
 	//
-	// * :attr:`USER` — a human operator authenticated via the interactive
-	//   device-code flow. Default when no claim is present.
+	// * :attr:`USER` — a person who signed in. There are three ways: the
+	//   command line (``meho-cli`` client, device code), an MCP client
+	//   (``meho-mcp`` client, sign-in in the browser), and the web console
+	//   (``meho-web`` client). Default when no claim is present.
 	// * :attr:`SERVICE` — a non-interactive service account client that
 	//   uses client-credentials flow but is not a MEHO-managed agent.
 	// * :attr:`AGENT` — a Keycloak client registered by

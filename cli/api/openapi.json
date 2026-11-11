@@ -148,7 +148,7 @@
           "auth"
         ],
         "summary": "Auth Config",
-        "description": "Return Keycloak issuer, audience, and the CLI's two public client ids.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
+        "description": "Return Keycloak issuer, audience, and the public client ids.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
         "operationId": "auth_config_api_v1_auth_config_get",
         "responses": {
           "200": {
@@ -27470,6 +27470,13 @@
             "type": "string",
             "title": "Cli Approve Client Id",
             "default": ""
+          },
+          "mcp_clients": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Mcp Clients"
           }
         },
         "type": "object",
@@ -37301,7 +37308,7 @@
           "runner"
         ],
         "title": "PrincipalKind",
-        "description": "Discriminator that distinguishes what authenticated this request.\n\nG11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,\naudit, and the approval gate can tell a human operator apart from\na service account or an agent without re-examining the JWT payload.\n\nValues are the literal strings the Keycloak ``principal_kind``\nprotocol mapper emits on the agent client (or that the v0.3 token\nexchange layer will emit). Existing tokens that carry no\n``principal_kind`` claim default to :attr:`USER` \u2014 the graceful-\nfallback contract means all pre-G11.2 human-operator flows are\nunaffected.\n\nMembers:\n\n* :attr:`USER` \u2014 a human operator authenticated via the interactive\n  device-code flow. Default when no claim is present.\n* :attr:`SERVICE` \u2014 a non-interactive service account client that\n  uses client-credentials flow but is not a MEHO-managed agent.\n* :attr:`AGENT` \u2014 a Keycloak client registered by\n  ``meho agent-principal register``; the token carries\n  ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and\n  G11.2-T3 (per-principal permission model) branch on this value\n  to apply agent-specific authz.\n* :attr:`RUNNER` \u2014 a satellite runner's service principal registered\n  by ``meho runner-principal register`` (Initiative #2415, #2502);\n  the token carries ``principal_kind=runner`` plus a ``runner_id``\n  claim. A runner is a dumb, push-only executor with a **read-only**\n  credential scope: its token is fail-closed 403'd on every\n  authenticated route outside the gateway allowlist prefixes\n  (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)\n  and on the MCP surface. The unforgeable discriminator is what the\n  negative cage keys on, so a runner client missing any other mapper\n  still cannot roam the read API."
+        "description": "Discriminator that distinguishes what authenticated this request.\n\nG11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,\naudit, and the approval gate can tell a human operator apart from\na service account or an agent without re-examining the JWT payload.\n\nValues are the literal strings the Keycloak ``principal_kind``\nprotocol mapper emits on the agent client (or that the v0.3 token\nexchange layer will emit). Existing tokens that carry no\n``principal_kind`` claim default to :attr:`USER` \u2014 the graceful-\nfallback contract means all pre-G11.2 human-operator flows are\nunaffected.\n\nMembers:\n\n* :attr:`USER` \u2014 a person who signed in. There are three ways: the\n  command line (``meho-cli`` client, device code), an MCP client\n  (``meho-mcp`` client, sign-in in the browser), and the web console\n  (``meho-web`` client). Default when no claim is present.\n* :attr:`SERVICE` \u2014 a non-interactive service account client that\n  uses client-credentials flow but is not a MEHO-managed agent.\n* :attr:`AGENT` \u2014 a Keycloak client registered by\n  ``meho agent-principal register``; the token carries\n  ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and\n  G11.2-T3 (per-principal permission model) branch on this value\n  to apply agent-specific authz.\n* :attr:`RUNNER` \u2014 a satellite runner's service principal registered\n  by ``meho runner-principal register`` (Initiative #2415, #2502);\n  the token carries ``principal_kind=runner`` plus a ``runner_id``\n  claim. A runner is a dumb, push-only executor with a **read-only**\n  credential scope: its token is fail-closed 403'd on every\n  authenticated route outside the gateway allowlist prefixes\n  (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)\n  and on the MCP surface. The unforgeable discriminator is what the\n  negative cage keys on, so a runner client missing any other mapper\n  still cannot roam the read API."
       },
       "PromoteBody": {
         "properties": {

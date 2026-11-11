@@ -92,8 +92,8 @@ FRESH_SIGN_IN_REMEDIATION: Final[str] = (
 
 #: The text the web interface shows when the console sign-in is too old.
 WEB_FRESH_SIGN_IN_REMEDIATION: Final[str] = (
-    "Sign in again to approve. An approval needs a recent sign-in that asked "
-    "for your password, and a destructive operation needs a sign-in of its own."
+    "Sign in again to approve. An approval needs a recent sign-in with your "
+    "password or a passkey, and a destructive operation needs a sign-in of its own."
 )
 
 

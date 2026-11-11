@@ -164,6 +164,30 @@ plugin keeps that login when one renewal fails:
 - Only one browser login runs at a time on the computer. Another session
   that starts meanwhile waits and then uses the new login.
 
+### A login of its own for Claude Code
+
+When your MEHO admin turns on `MCP_CLIENT_PER_TOOL_KIND`, Claude Code and
+Claude Desktop no longer share one login:
+
+- At start, the plugin asks MEHO which login client Claude Code uses
+  (`GET /api/v1/auth-config`). MEHO names `meho-mcp-code`.
+- The plugin signs in with `meho-mcp-code` and sends the header
+  `Meho-Tool: claude-code`. The header gives Claude Code a saved login of
+  its own, apart from Claude Desktop.
+- The audit log names the client (`meho-mcp-code`), so it tells Claude
+  Code from Claude Desktop.
+- The first session after the change asks for one browser login.
+
+With the switch off, with an older MEHO, or when MEHO does not answer
+within 5 seconds, the plugin keeps `meho-mcp` and sends no header, as
+before. `MEHO_MCP_CLIENT_ID` always wins when you set it; then the plugin
+does not ask MEHO and sends no header. The realm needs the
+`meho-mcp-code` client: see
+[the MCP clients of the AI tools](../install/keycloak-realm.md#the-mcp-clients-of-the-ai-tools).
+
+All sessions of one tool kind on one computer still share one saved
+login.
+
 When the login has really ended (not used for the idle limit, or ended by
 an admin in Keycloak), the next MEHO call fails at once with "Your MEHO
 login has expired. Run /mcp, pick meho, and reconnect to log in again." A

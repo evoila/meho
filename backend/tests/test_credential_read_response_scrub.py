@@ -14,8 +14,11 @@ These tests pin the contract:
 
 * the caller-bound answer of ``vault.kv.read`` hides every value under
   ``data`` by default and keeps the key names and ``version``;
-* ``params.reveal_secret=true`` from a person opts into the raw value AND
-  stamps the choice on the audit row (queryable), while ``reveal_secret``
+* ``params.reveal_secret=true`` from a person waits for another person's
+  approval. The approve runs nothing; the read runs once when the person
+  who asked fetches the value, within the fetch window. That answer holds
+  the raw value, the request row never does, and the choice is stamped on
+  the audit row (queryable), while ``reveal_secret``
   never reaches the op's ``parameter_schema`` (it is stripped as a
   dispatch control) nor the ``params_hash``;
 * the audit row's ``raw_payload`` stores a keyed fingerprint in place of
@@ -28,14 +31,20 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select
+import respx
+from fastapi import HTTPException
+from httpx import ASGITransport
+from sqlalchemy import select, update
 
+from meho_backplane.api.v1 import approvals as approvals_api
+from meho_backplane.api.v1.approval_reveal import reveal_approved_request
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.connectors import OperationResult
@@ -43,13 +52,37 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import ApprovalRequest, AuditLog
+from meho_backplane.main import app
 from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations import dispatcher as dispatcher_module
+from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations.approval_queue import (
+    ApprovalNotFoundError,
+    ResultAccessForbiddenError,
+    approve_request,
+    read_approval_result,
+    resume_dispatch_after_approval,
+)
+from meho_backplane.operations.approved_reveal import (
+    WAITING_FOR_REQUESTER,
+    RevealFetchRefusedError,
+    fetch_approved_reveal,
+    reveal_fetch_window,
+)
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
+from tests._oidc_jwt_helpers import (
+    make_rsa_keypair,
+    mint_token,
+    mock_discovery_and_jwks,
+    public_jwks,
+)
+from tests._result_store_helpers import MemoryResultStore
 
 # Assembled from fragments so gitleaks' built-in rules don't false-positive
 # on the test source.
@@ -136,14 +169,29 @@ async def _module_vault_read_handler(
     return {"data": {"password": _PASSWORD_SECRET, "username": "root"}, "version": 3}
 
 
-async def _register_vault_read(embedding_service: AsyncMock) -> None:
+_MANY_ROWS = 80
+
+
+async def _module_vault_read_many_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``vault.kv.read`` stand-in whose answer is a collection over the JSONFlux limit."""
+    rows = [{"name": f"key-{n}", "password": f"{_PASSWORD_SECRET}-{n}"} for n in range(_MANY_ROWS)]
+    return {"data": rows, "version": 3}
+
+
+async def _register_vault_read(
+    embedding_service: AsyncMock, handler: Any = _module_vault_read_handler
+) -> None:
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
         product="vault",
         version="1.x",
         impl_id="vault",
         op_id="vault.kv.read",
-        handler=_module_vault_read_handler,
+        handler=handler,
         summary="Read a KV v2 secret.",
         description="Read a secret.",
         parameter_schema={
@@ -163,6 +211,65 @@ async def _audit_row(op_id: str) -> AuditLog:
         rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
     assert len(rows) == 1, f"expected exactly one audit row for {op_id}, got {len(rows)}"
     return rows[0]
+
+
+async def _ok_rows(op_id: str) -> list[AuditLog]:
+    """The audit rows of the runs of *op_id*, without the rows of a wait for approval."""
+    async with get_sessionmaker()() as fresh:
+        rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    return [row for row in rows if row.payload.get("result_status") == "ok"]
+
+
+_REVIEWER = _make_operator().model_copy(update={"sub": "reviewer-2467"})
+
+
+async def _parked_reveal(op_id: str = "vault.kv.read", secret: str = _PASSWORD_SECRET) -> UUID:
+    """A person's call of *op_id* with ``reveal_secret`` waits for approval."""
+    parked = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=None,
+        params={"path": "app/db", "reveal_secret": True},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+    assert secret not in parked.model_dump_json()
+    return UUID(parked.extras["approval_request_id"])
+
+
+async def _approved_reveal() -> UUID:
+    """A person's reveal of ``vault.kv.read`` waits; another person approves it.
+
+    The approve runs nothing: the approver's answer holds no value.
+    """
+    request_id = await _parked_reveal()
+    async with get_sessionmaker()() as session:
+        approved = await approve_request(session, request_id, operator=_REVIEWER)
+        await session.commit()
+    answer = await resume_dispatch_after_approval(operator=_REVIEWER, request=approved, params=None)
+    assert answer.status == WAITING_FOR_REQUESTER, answer
+    assert _PASSWORD_SECRET not in answer.model_dump_json()
+    return request_id
+
+
+async def _reveal_after_approval() -> OperationResult:
+    """The approved reveal runs once, when the person who asked fetches the value."""
+    return await fetch_approved_reveal(_make_operator(), await _approved_reveal())
+
+
+async def _request_row(request_id: UUID) -> ApprovalRequest:
+    async with get_sessionmaker()() as fresh:
+        row = await fresh.get(ApprovalRequest, request_id)
+    assert row is not None
+    return row
+
+
+def _whole_row(row: ApprovalRequest) -> str:
+    """Every column of *row*, as one string to search for the test secret."""
+    return json.dumps(
+        {column.name: getattr(row, column.key) for column in ApprovalRequest.__mapper__.columns},
+        default=str,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -231,28 +338,233 @@ async def test_credential_read_scrub_is_principal_independent(
 async def test_reveal_secret_true_returns_raw_and_stamps_audit(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """``reveal_secret=true`` -> raw value returned AND stamped on the audit row."""
+    """``reveal_secret=true`` -> after approval, raw value returned AND stamped on the audit row."""
     await _register_vault_read(stub_embedding_service)
 
-    result = await dispatch(
-        operator=_make_operator(),
-        connector_id="vault-1.x",
-        op_id="vault.kv.read",
-        target=None,
-        params={"path": "app/db", "reveal_secret": True},
-    )
+    result = await _reveal_after_approval()
     assert result.status == "ok", result.error
     # The caller opted in: the raw value comes back.
     assert result.result["data"]["password"] == _PASSWORD_SECRET
     assert result.result["data"]["username"] == "root"
 
-    row = await _audit_row("vault.kv.read")
+    (row,) = await _ok_rows("vault.kv.read")
     # The reveal is queryable on the audit row.
     assert row.payload["reveal_secret"] is True
     # raw_payload stores a fingerprint, also when the caller got the value.
     assert isinstance(row.raw_payload, dict)
     assert row.raw_payload["data"]["password"].startswith(_FINGERPRINT)
     assert _PASSWORD_SECRET not in str(row.raw_payload)
+
+
+async def test_approving_a_reveal_runs_nothing(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The approve runs no read: no run, no stored result, no value anywhere."""
+    await _register_vault_read(stub_embedding_service)
+
+    request_id = await _approved_reveal()
+
+    assert await _ok_rows("vault.kv.read") == []
+    row = await _request_row(request_id)
+    assert row.status == "approved"
+    assert row.resumed_at is None
+    assert row.resume_result is None
+    assert _PASSWORD_SECRET not in _whole_row(row)
+
+
+async def test_after_the_fetch_the_request_row_holds_no_secret_value(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The person who asked gets the value; the request row and its stored result do not."""
+    await _register_vault_read(stub_embedding_service)
+
+    request_id = await _approved_reveal()
+    result = await fetch_approved_reveal(_make_operator(), request_id)
+    assert result.status == "ok", result.error
+    assert result.result["data"]["password"] == _PASSWORD_SECRET
+
+    row = await _request_row(request_id)
+    assert _PASSWORD_SECRET not in _whole_row(row)
+    async with get_sessionmaker()() as session:
+        stored = await read_approval_result(
+            session, operator=_make_operator(), request_id=request_id
+        )
+        await session.commit()
+    assert stored.resume_result is not None
+    assert stored.resume_result["status"] == "ok"
+    assert stored.resume_result["result"] is None
+    assert _PASSWORD_SECRET not in json.dumps(stored.resume_result)
+    async with get_sessionmaker()() as session:
+        with pytest.raises(ResultAccessForbiddenError):
+            await read_approval_result(session, operator=_REVIEWER, request_id=request_id)
+
+
+async def test_a_large_reveal_is_not_kept_in_the_result_cache(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reveal over the JSONFlux limit comes back whole and leaves no stored copy."""
+    store = MemoryResultStore()
+    monkeypatch.setattr(dispatcher_module, "_DEFAULT_REDUCER", JsonFluxReducer(store=store))
+    await _register_vault_read(stub_embedding_service, _module_vault_read_many_handler)
+
+    request_id = await _approved_reveal()
+    result = await fetch_approved_reveal(_make_operator(), request_id)
+    assert result.status == "ok", result.error
+    assert result.handle is None
+    assert len(result.result["data"]) == _MANY_ROWS
+    assert result.result["data"][-1]["password"] == f"{_PASSWORD_SECRET}-{_MANY_ROWS - 1}"
+
+    assert store.client.values == {}
+    assert _PASSWORD_SECRET not in _whole_row(await _request_row(request_id))
+    async with get_sessionmaker()() as fresh:
+        audit = (await fresh.execute(select(AuditLog))).scalars().all()
+    stored = json.dumps([(row.payload, row.raw_payload) for row in audit], default=str)
+    assert _PASSWORD_SECRET not in stored
+
+
+async def test_a_second_fetch_is_refused(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The permission works once: the second fetch is refused and runs nothing."""
+    await _register_vault_read(stub_embedding_service)
+
+    request_id = await _approved_reveal()
+    first = await fetch_approved_reveal(_make_operator(), request_id)
+    assert first.status == "ok", first.error
+
+    with pytest.raises(RevealFetchRefusedError) as refused:
+        await fetch_approved_reveal(_make_operator(), request_id)
+    assert refused.value.code == "already_used"
+    assert "already fetched" in refused.value.message
+    assert len(await _ok_rows("vault.kv.read")) == 1
+
+
+async def test_a_fetch_after_the_time_limit_is_refused(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """After the fetch window the permission is gone; the person asks again."""
+    await _register_vault_read(stub_embedding_service)
+
+    request_id = await _approved_reveal()
+    late = datetime.now(UTC) + reveal_fetch_window() + timedelta(seconds=1)
+    with pytest.raises(RevealFetchRefusedError) as refused:
+        await fetch_approved_reveal(_make_operator(), request_id, now=late)
+    assert refused.value.code == "window_passed"
+    assert await _ok_rows("vault.kv.read") == []
+
+    # Within the window the same request still works.
+    soon = datetime.now(UTC) + reveal_fetch_window() - timedelta(seconds=30)
+    result = await fetch_approved_reveal(_make_operator(), request_id, now=soon)
+    assert result.status == "ok", result.error
+
+
+async def test_a_fetch_before_the_approval_is_refused(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A waiting request gives no value; the fetch says it is not approved yet."""
+    await _register_vault_read(stub_embedding_service)
+    parked = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=None,
+        params={"path": "app/db", "reveal_secret": True},
+    )
+    with pytest.raises(RevealFetchRefusedError) as refused:
+        await fetch_approved_reveal(_make_operator(), UUID(parked.extras["approval_request_id"]))
+    assert refused.value.code == "not_approved"
+    assert await _ok_rows("vault.kv.read") == []
+
+
+async def test_another_person_or_tenant_cannot_fetch(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Only the person who asked fetches: the approver and another tenant get no value."""
+    await _register_vault_read(stub_embedding_service)
+
+    request_id = await _approved_reveal()
+    with pytest.raises(ResultAccessForbiddenError):
+        await fetch_approved_reveal(_REVIEWER, request_id)
+    other_tenant = _make_operator().model_copy(
+        update={"tenant_id": UUID("00000000-0000-0000-0000-000000009999")}
+    )
+    with pytest.raises(ApprovalNotFoundError):
+        await fetch_approved_reveal(other_tenant, request_id)
+    assert await _ok_rows("vault.kv.read") == []
+
+    # The permission is still there for the person who asked.
+    result = await fetch_approved_reveal(_make_operator(), request_id)
+    assert result.status == "ok", result.error
+
+
+async def test_a_fetch_with_changed_params_is_refused(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The permission is for the stored params: changed params run nothing."""
+    await _register_vault_read(stub_embedding_service)
+
+    request_id = await _approved_reveal()
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == request_id)
+            .values(params={"path": "app/other"})
+        )
+        await session.commit()
+    with pytest.raises(RevealFetchRefusedError) as refused:
+        await fetch_approved_reveal(_make_operator(), request_id)
+    assert refused.value.code == "params_changed"
+    assert await _ok_rows("vault.kv.read") == []
+
+
+async def test_each_fetch_is_audited_and_the_read_stores_fingerprints(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Every fetch leaves an ``approval.reveal`` row; the read row has fingerprints only."""
+    await _register_vault_read(stub_embedding_service)
+
+    request_id = await _approved_reveal()
+    await fetch_approved_reveal(_make_operator(), request_id)
+    with pytest.raises(RevealFetchRefusedError):
+        await fetch_approved_reveal(_make_operator(), request_id)
+
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.reveal")))
+            .scalars()
+            .all()
+        )
+    assert sorted(row.payload["outcome"] for row in rows) == ["already_used", "run"]
+    (read_row,) = await _ok_rows("vault.kv.read")
+    assert read_row.payload["reveal_secret"] is True
+    assert read_row.raw_payload["data"]["password"].startswith(_FINGERPRINT)
+    every_row = json.dumps([r.payload for r in rows] + [read_row.raw_payload], default=str)
+    assert _PASSWORD_SECRET not in every_row
+
+
+async def test_preview_of_a_reveal_reports_the_wait_of_the_real_call(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Preview and the real call agree: a reveal waits, a hidden read runs at once."""
+    await _register_vault_read(stub_embedding_service)
+    call = {
+        "operator": _make_operator(),
+        "connector_id": "vault-1.x",
+        "op_id": "vault.kv.read",
+        "target": None,
+    }
+
+    hidden = await preview_dispatch(**call, params={"path": "app/db"})
+    assert (hidden["safety_level"], hidden["requires_approval"]) == ("safe", False)
+    assert hidden["policy_verdict"] == "auto-execute"
+
+    revealed = await preview_dispatch(**call, params={"path": "app/db", "reveal_secret": True})
+    assert (revealed["safety_level"], revealed["requires_approval"]) == ("caution", True)
+    assert revealed["policy_verdict"] == "needs-approval"
+    assert revealed["status"] != "error", revealed
+
+    parked = await dispatch(**call, params={"path": "app/db", "reveal_secret": True})
+    assert parked.status == "awaiting_approval", parked.error
 
 
 async def test_reveal_secret_does_not_reach_op_schema_or_hash(
@@ -275,25 +587,13 @@ async def test_reveal_secret_does_not_reach_op_schema_or_hash(
         target=None,
         params={"path": "app/db"},
     )
-    revealed = await dispatch(
-        operator=operator,
-        connector_id="vault-1.x",
-        op_id="vault.kv.read",
-        target=None,
-        params={"path": "app/db", "reveal_secret": True},
-    )
+    revealed = await _reveal_after_approval()
     # Neither dispatch 422'd on the strict schema.
     assert scrubbed.status == "ok", scrubbed.error
     assert revealed.status == "ok", revealed.error
 
-    # Both audit rows share one params_hash despite the differing reveal.
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (
-            (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.read")))
-            .scalars()
-            .all()
-        )
+    # Both run rows share one params_hash despite the differing reveal.
+    rows = await _ok_rows("vault.kv.read")
     assert len(rows) == 2
     hashes = {row.payload["params_hash"] for row in rows}
     assert len(hashes) == 1, "reveal choice must not perturb params_hash"
@@ -636,3 +936,171 @@ async def test_read_op_http_error_body_hides_the_value_of_a_pair_with_an_escaped
     assert _PASSWORD_SECRET not in stored
     assert row.payload["result_status"] == "error"
     assert _REDACTED in json.dumps(row.payload["error"])
+
+
+async def test_rest_reveal_route_gives_the_value_once_to_the_person_who_asked(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``POST /api/v1/approvals/{id}/reveal``: 200 once, then 409; 403 and 404 for others."""
+    await _register_vault_read(stub_embedding_service)
+    request_id = await _approved_reveal()
+
+    with pytest.raises(HTTPException) as forbidden:
+        await reveal_approved_request(request_id, operator=_REVIEWER)
+    assert forbidden.value.status_code == 403
+    with pytest.raises(HTTPException) as missing:
+        await reveal_approved_request(uuid4(), operator=_make_operator())
+    assert missing.value.status_code == 404
+
+    body = await reveal_approved_request(request_id, operator=_make_operator())
+    assert body.status == "ok", body.error
+    assert body.result is not None
+    assert body.result["data"]["password"] == _PASSWORD_SECRET
+
+    with pytest.raises(HTTPException) as again:
+        await reveal_approved_request(request_id, operator=_make_operator())
+    assert again.value.status_code == 409
+    assert str(again.value.detail).startswith("reveal_already_used:")
+
+
+# ---------------------------------------------------------------------------
+# The approve answer over HTTP holds no value, on every approve route
+# ---------------------------------------------------------------------------
+
+#: The approve routes and bodies of the person who approves: ``/approve`` and
+#: ``/decide``, each without and with ``async``.
+_APPROVE_CALLS = [
+    pytest.param("approve", {"params": {"path": "app/db"}}, id="approve"),
+    pytest.param("approve", {"params": {"path": "app/db"}, "async": True}, id="approve-async"),
+    pytest.param("decide", {"decision": "approved"}, id="decide"),
+    pytest.param("decide", {"decision": "approved", "async": True}, id="decide-async"),
+]
+
+
+class _NoBackgroundRun:
+    """Stands in for the background run service: an approve of a reveal must not use it."""
+
+    async def submit_approval_resume(self, *_args: Any, **_kwargs: Any) -> UUID:
+        raise AssertionError("an approve of a reveal must start no background run")
+
+
+async def _approve_over_http(request_id: UUID, route: str, body: dict[str, Any]) -> httpx.Response:
+    """The reviewer approves *request_id* through the REST *route*."""
+    key = make_rsa_keypair("kid-reveal-approve")
+    token = mint_token(
+        key,
+        sub=_REVIEWER.sub,
+        name="Reviewer",
+        email=None,
+        tenant_id=str(_REVIEWER.tenant_id),
+        tenant_role=TenantRole.OPERATOR.value,
+        fresh_sign_in=True,
+    )
+    with respx.mock as mocked:
+        mock_discovery_and_jwks(mocked, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="https://testserver"
+        ) as client:
+            return await client.post(
+                f"/api/v1/approvals/{request_id}/{route}",
+                json=body,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+
+@pytest.mark.parametrize(("route", "body"), _APPROVE_CALLS)
+async def test_http_approve_of_a_read_reveal_holds_no_value(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    body: dict[str, Any],
+) -> None:
+    """``/approve`` and ``/decide``, sync and async: the answer body holds no value."""
+    monkeypatch.setattr(approvals_api, "get_operation_run_service", _NoBackgroundRun)
+    await _register_vault_read(stub_embedding_service)
+    request_id = await _parked_reveal()
+
+    response = await _approve_over_http(request_id, route, body)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["dispatch_status"] == WAITING_FOR_REQUESTER
+    assert response.json()["dispatch_result"] is None
+    assert _PASSWORD_SECRET not in response.text
+    assert await _ok_rows("vault.kv.read") == []
+    assert _PASSWORD_SECRET not in _whole_row(await _request_row(request_id))
+
+    result = await fetch_approved_reveal(_make_operator(), request_id)
+    assert result.result["data"]["password"] == _PASSWORD_SECRET
+
+
+_MINTED_SECRET_ID = "minted" + "-secret-id-6034"
+_MINT_OP = "vault.auth.approle.generate_secret_id"
+_mint_runs: list[int] = []
+
+
+async def _module_mint_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Stand-in for an operation that creates a credential and returns it."""
+    _mint_runs.append(1)
+    return {"secret_id": _MINTED_SECRET_ID, "secret_id_accessor": "accessor-1"}
+
+
+async def _register_mint(embedding_service: AsyncMock) -> None:
+    _mint_runs.clear()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=_MINT_OP,
+        handler=_module_mint_handler,
+        summary="Create an AppRole SecretID.",
+        description="Create a SecretID.",
+        parameter_schema={"type": "object", "properties": {"path": {"type": "string"}}},
+        safety_level="caution",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=embedding_service,
+    )
+
+
+@pytest.mark.parametrize(("route", "body"), _APPROVE_CALLS)
+async def test_approving_a_credential_create_with_a_reveal_runs_it_only_for_the_requester(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    body: dict[str, Any],
+) -> None:
+    """An operation that creates a credential and asked for ``reveal_secret``.
+
+    The approve runs nothing, and the approver's answer and the request row
+    hold no value. The person who asked runs it once and gets the value; a
+    second fetch is refused.
+    """
+    monkeypatch.setattr(approvals_api, "get_operation_run_service", _NoBackgroundRun)
+    await _register_mint(stub_embedding_service)
+    request_id = await _parked_reveal(_MINT_OP, _MINTED_SECRET_ID)
+
+    response = await _approve_over_http(request_id, route, body)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["dispatch_status"] == WAITING_FOR_REQUESTER
+    assert _MINTED_SECRET_ID not in response.text
+    assert _mint_runs == []
+    assert _MINTED_SECRET_ID not in _whole_row(await _request_row(request_id))
+
+    with pytest.raises(ResultAccessForbiddenError):
+        await fetch_approved_reveal(_REVIEWER, request_id)
+    result = await fetch_approved_reveal(_make_operator(), request_id)
+    assert result.status == "ok", result.error
+    assert result.result["secret_id"] == _MINTED_SECRET_ID
+    assert _mint_runs == [1]
+
+    with pytest.raises(RevealFetchRefusedError) as refused:
+        await fetch_approved_reveal(_make_operator(), request_id)
+    assert refused.value.code == "already_used"
+    assert _mint_runs == [1]
+    assert _MINTED_SECRET_ID not in _whole_row(await _request_row(request_id))

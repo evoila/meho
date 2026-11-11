@@ -727,10 +727,20 @@ class Settings(BaseModel):
         Write a ``client`` block into every audit row: the login client
         (``azp``), the channel (``web`` or ``token``), the principal kind
         and a short hash of the sign-in session. An approval request and an
-        approval decision also name the client of the person. Default
+        approval decision also name the client of the person, and a new
+        MCP session writes one ``mcp.session_open`` row with the client
+        name and version the tool sent about itself. Default
         ``False``: the rows stay as before. See
         :mod:`meho_backplane.auth.client_identity`. Env var
         ``AUDIT_CLIENT_IDENTITY``.
+    mcp_client_per_tool_kind:
+        List one login client per AI tool kind in ``GET /api/v1/auth-config``
+        (``mcp_clients``): ``meho-mcp-code`` for Claude Code and
+        ``meho-mcp-desktop`` for Claude Desktop. The Claude Code plugin and
+        the Claude Desktop extension then sign in with their own client and
+        keep separate saved logins. Default ``False``: the field is empty and
+        both tools keep the shared ``meho-mcp`` client. Turn it on only when
+        the realm has the two clients. Env var ``MCP_CLIENT_PER_TOOL_KIND``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1289,6 +1299,13 @@ class Settings(BaseModel):
         is ``destructive``. Such an approval also needs a sign-in that has
         approved nothing else. Default ``300`` (five minutes). Set via
         ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    approval_presence_touch_valid_seconds:
+        How long a started passkey touch for an approval stays valid
+        (#6214). When a person clicks Approve, MEHO makes a one-time touch
+        challenge for that request. The person must finish the touch in
+        this time; after it the challenge is void and the person clicks
+        Approve again. Default ``120`` (two minutes), from 30 to 600. Set
+        via ``APPROVAL_PRESENCE_TOUCH_VALID_SECONDS``.
     approval_one_time_code_acr_values:
         The ``acr`` values that mean "the person entered a one-time code
         from their authenticator app" (#3979). An approve whose token
@@ -1836,6 +1853,8 @@ class Settings(BaseModel):
     operation_search_store_query_text: bool = False
     # Off by default; with it off the audit rows stay as before.
     audit_client_identity: bool = False
+    # Off by default; with it off auth-config lists no per-tool login client.
+    mcp_client_per_tool_kind: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -1903,6 +1922,8 @@ class Settings(BaseModel):
     # sign-in each time: turning approval off (#4711) and a destructive
     # approve.
     per_action_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
+    # #6214 -- how long a started passkey touch for an approval stays valid.
+    approval_presence_touch_valid_seconds: int = Field(default=120, ge=30, le=600)
     # #3979 -- the acr values that mean a one-time code step. Empty = off.
     approval_one_time_code_acr_values: tuple[str, ...] = ()
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
@@ -1930,6 +1951,10 @@ class Settings(BaseModel):
     # #5026 -- an approved run that started and stored no result after this
     # many minutes is listed for operators to check ("outcome unknown").
     approval_outcome_unknown_after_minutes: int = Field(default=15, ge=1, le=1440)
+    # An approved secret reveal runs only when the person who asked fetches
+    # the value, once, and only within this many seconds after the approval
+    # (``operations.approved_reveal``).
+    approval_reveal_fetch_window_seconds: int = Field(default=900, ge=60, le=86400)
     # #3151 — op-id patterns a service-principal standing grant may never
     # cover (delete-shaped ops are the floor of what runs unattended, never
     # grantable). See ``operations.service_grants``.
@@ -3124,6 +3149,9 @@ def get_settings() -> Settings:
         audit_client_identity=parse_bool_env(
             os.environ.get("AUDIT_CLIENT_IDENTITY", "false"),
         ),
+        mcp_client_per_tool_kind=parse_bool_env(
+            os.environ.get("MCP_CLIENT_PER_TOOL_KIND", "false"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
@@ -3221,6 +3249,10 @@ def get_settings() -> Settings:
         ),
         per_action_sign_in_max_age_seconds=int(
             os.environ.get("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", "300"),
+        ),
+        # #6214 -- how long a started passkey touch stays valid.
+        approval_presence_touch_valid_seconds=int(
+            os.environ.get("APPROVAL_PRESENCE_TOUCH_VALID_SECONDS", "120"),
         ),
         # #3979 -- which acr values mean a one-time code step.
         approval_one_time_code_acr_values=tuple(

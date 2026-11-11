@@ -365,7 +365,9 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
     """MCP-layer runtime visibility for ``/ready``.
 
     ``short_tool_texts`` is the ``MCP_SHORT_TOOL_TEXTS`` switch (#4172), so
-    a benchmark knows its state. ``protocol_version`` is the spec revision
+    a benchmark knows its state. ``client_per_tool_kind`` is the
+    ``MCP_CLIENT_PER_TOOL_KIND`` switch: when on, Claude Code and Claude
+    Desktop sign in with their own login client. ``protocol_version`` is the spec revision
     the server pins (:data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`),
     so a deploy operator can answer "which MCP revision will this server
     negotiate with my clients?" from a single GET without a login.
@@ -410,6 +412,7 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
         "configured": True,
         "protocol_version": PROTOCOL_VERSION,
         "short_tool_texts": settings.mcp_short_tool_texts,
+        "client_per_tool_kind": settings.mcp_client_per_tool_kind,
         "missing_env": [],
     }
 

@@ -134,9 +134,9 @@ ADVISORY_LOCK_BUSY_TOTAL: Counter = Counter(
 #: :func:`meho_backplane.main._start_background_tasks`:
 #: ``topology_scheduler``, ``memory_expiry``, ``topology_history``,
 #: ``announcement_retention``, ``evidence_retention``, ``grant_expiry``,
-#: ``approval_expiry``, ``scheduler``, ``sensor_runner``,
-#: ``sensor_watchdog``, ``agent_run_reaper``, ``event_drain``,
-#: ``gateway_deadman``. A loop that never calls :func:`note_loop_tick` is
+#: ``approval_expiry``, ``approval_presence_cleanup``, ``scheduler``,
+#: ``sensor_runner``, ``sensor_watchdog``, ``agent_run_reaper``,
+#: ``event_drain``, ``gateway_deadman``. A loop that never calls :func:`note_loop_tick` is
 #: invisible to the staleness alert — exactly the silent-stall class this
 #: family exists to catch — so any new lifespan loop must both stamp here
 #: and be added to this list.

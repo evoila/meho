@@ -109,7 +109,7 @@ class PhpipamConnector(HttpConnector):
     Registered as ``("phpipam", "1.x", "phpipam-rest")``, so the connector ID
     is ``phpipam-rest-1.x``, plus the wildcard row ``("phpipam", "", "")``.
     phpIPAM's API reports no product version, so ``supported_version_range``
-    stays ``None``.
+    stays ``None`` and ``version_range_reason`` says why.
     """
 
     product = "phpipam"
@@ -117,6 +117,9 @@ class PhpipamConnector(HttpConnector):
     impl_id = "phpipam-rest"
     summary = "Lists phpIPAM subnets and free addresses, and reserves or releases an IP address."
     supported_version_range: str | None = None
+    version_range_reason = (
+        "The phpIPAM API reports no version. The connector is built from the 1.8.2 API reference."
+    )
     priority = 1
 
     def __init__(self, *, credentials_loader: PhpipamCredentialsLoader | None = None) -> None:

@@ -91,6 +91,11 @@ _SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
 #: backend of :func:`meho_backplane.agent.models.settings_model_resolver`.
 AGENT_MODEL_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai", "bedrock", "vcf-paif")
 
+#: The values ``AGENT_GRANT_REQUIRED`` accepts (#6189). ``off`` keeps the
+#: risk-level default for an agent with no matching grant; ``observe``
+#: keeps it and logs what ``on`` would refuse; ``on`` refuses the call.
+AGENT_GRANT_REQUIRED_MODES: Final[tuple[str, ...]] = ("off", "observe", "on")
+
 #: Truthy spellings accepted by :func:`_parse_bool`. Anything else
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
@@ -718,6 +723,14 @@ class Settings(BaseModel):
         was working on. The records exist only when
         ``REQUEST_USAGE_RETENTION_DAYS`` is set, and the same daily job
         deletes them. Env var ``OPERATION_SEARCH_STORE_QUERY_TEXT``.
+    audit_client_identity:
+        Write a ``client`` block into every audit row: the login client
+        (``azp``), the channel (``web`` or ``token``), the principal kind
+        and a short hash of the sign-in session. An approval request and an
+        approval decision also name the client of the person. Default
+        ``False``: the rows stay as before. See
+        :mod:`meho_backplane.auth.client_identity`. Env var
+        ``AUDIT_CLIENT_IDENTITY``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1383,6 +1396,16 @@ class Settings(BaseModel):
         switched (G11.5-T6 #1080). Case-insensitive; whitespace
         between values ignored. An empty string (the default) means no
         tenants are disabled. Set via ``AGENT_RUNS_DISABLED_TENANTS``.
+    agent_grant_required:
+        What happens when an agent login calls an operation and none of
+        its grants matches (#6189). ``off`` (the default): the risk-level
+        default, as before (``safe`` runs at once, every other level waits
+        for approval). ``observe``: the same, and MEHO logs
+        ``agent_no_grant_would_deny`` for each call that ``on`` would
+        refuse. ``on``: the call is refused on every risk level with the
+        code ``agent_no_grant``. People, service accounts and runners are
+        not affected. Any other value stops the start. Set via
+        ``AGENT_GRANT_REQUIRED``.
     vcf_paif_base_url:
         Base URL of the VCF Private AI Foundation OpenAI-compatible
         endpoint (G11.5-T4 #1078), **including** the fixed sub-path
@@ -1819,6 +1842,8 @@ class Settings(BaseModel):
     audit_wrapper_rows_retired: bool = False
     # #4750: off by default; the search record keeps only the query hash.
     operation_search_store_query_text: bool = False
+    # Off by default; with it off the audit rows stay as before.
+    audit_client_identity: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -2178,6 +2203,9 @@ class Settings(BaseModel):
     # exactly like the global switch. An empty string (the default) is
     # "no tenants disabled". Set via ``AGENT_RUNS_DISABLED_TENANTS``.
     agent_runs_disabled_tenants: str = ""
+    # #6189 — "no grant, no rights" for agent logins. See the class
+    # docstring; read by ``auth/permissions.py::resolve_verdict``.
+    agent_grant_required: str = "off"
     # G11.5-T4 #1078 — VCF Private AI Foundation backend. PAIF is the
     # air-gapped enterprise target: OpenAI-compatible wire format under
     # a fixed ``/api/v1/compatibility/openai/v1/`` sub-path, OpenID
@@ -2263,6 +2291,12 @@ class Settings(BaseModel):
     # ``CHECKS_INVESTIGATOR_AGENT`` / ``CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS``.
     checks_investigator_agent: str = "checks-investigator"
     checks_investigation_poll_timeout_seconds: int = Field(default=600, ge=1, le=86400)
+    # #6180 (Initiative #6179): with this switch on, a confirmed Sensor change
+    # and a Dashboard change are written to the event outbox
+    # (``check.sensor.changed`` / ``check.dashboard.changed``), so event
+    # triggers can match them. Off by default: nothing is written and nothing
+    # else changes. Set via ``CHECKS_AGENT_EVENTS``.
+    checks_agent_events: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     # #2717 (Initiative #2716) — mail.* typed connector: one deployment-level
     # SMTP block shared by the agent-callable ``mail.send`` op and the checks
     # notifier's ``send_email()`` transport. ``mail_smtp_host`` empty (the
@@ -2579,6 +2613,19 @@ class Settings(BaseModel):
         if value not in AGENT_MODEL_BACKENDS:
             allowed = ", ".join(AGENT_MODEL_BACKENDS)
             raise ValueError(f"AGENT_MODEL_BACKEND must be one of: {allowed}. Got: {value!r}")
+        return value
+
+    @field_validator("agent_grant_required")
+    @classmethod
+    def _agent_grant_required_must_be_known(cls, value: str) -> str:
+        """Stop the start when ``AGENT_GRANT_REQUIRED`` is not off, observe or on.
+
+        A typo must not leave agents with rights the operator meant to
+        take away, so an unknown value fails at startup.
+        """
+        if value not in AGENT_GRANT_REQUIRED_MODES:
+            allowed = ", ".join(AGENT_GRANT_REQUIRED_MODES)
+            raise ValueError(f"AGENT_GRANT_REQUIRED must be one of: {allowed}. Got: {value!r}")
         return value
 
     @field_validator("result_cache_redis_url")
@@ -3083,6 +3130,9 @@ def get_settings() -> Settings:
         operation_search_store_query_text=parse_bool_env(
             os.environ.get("OPERATION_SEARCH_STORE_QUERY_TEXT", "false"),
         ),
+        audit_client_identity=parse_bool_env(
+            os.environ.get("AUDIT_CLIENT_IDENTITY", "false"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
@@ -3351,6 +3401,7 @@ def get_settings() -> Settings:
             "AGENT_RUNS_DISABLED_TENANTS",
             "",
         ),
+        agent_grant_required=os.environ.get("AGENT_GRANT_REQUIRED", "").strip().lower() or "off",
         vcf_paif_base_url=os.environ.get("VCF_PAIF_BASE_URL", "").strip(),
         vcf_paif_model=os.environ.get(
             "VCF_PAIF_MODEL",
@@ -3388,6 +3439,7 @@ def get_settings() -> Settings:
         checks_investigation_poll_timeout_seconds=int(
             os.environ.get("CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS", "600"),
         ),
+        checks_agent_events=parse_bool_env(os.environ.get("CHECKS_AGENT_EVENTS", "false")),
         mail_smtp_host=os.environ.get("MAIL_SMTP_HOST", "").strip(),
         mail_smtp_port=int(os.environ.get("MAIL_SMTP_PORT", "587")),
         mail_smtp_starttls=parse_bool_env(

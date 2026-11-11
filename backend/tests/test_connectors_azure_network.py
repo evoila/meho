@@ -497,6 +497,8 @@ async def test_the_network_reads_are_stored_as_safe_typed_operations(
                 select(EndpointDescriptor).where(
                     EndpointDescriptor.impl_id == AZURE_IMPL_ID,
                     EndpointDescriptor.op_id.startswith("azure.network."),
+                    # The public DNS operations have their own group and test file.
+                    EndpointDescriptor.op_id.not_like("azure.network.dns.%"),
                 )
             )
         )

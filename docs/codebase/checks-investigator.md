@@ -203,6 +203,15 @@ must answer in. Containment beyond the fence is unchanged: the investigator
 has no mail tool and any change op it attempts parks for operator approval and
 is never executed.
 
+## Changes as events (#6180)
+
+With `CHECKS_AGENT_EVENTS` on, a Dashboard change also becomes an event that
+event triggers can match. `_investigate_group` publishes one
+`check.dashboard.changed` event per cause group right after the known-noise
+check (the event is sent also when the group is known noise). Every other
+claimed edge publishes one event in `_process_transition`. The investigator
+call itself is unchanged. Payloads: `docs/codebase/events.md`, "Check events".
+
 ## Agent-name convention (opt-in per tenant)
 
 The wiring is **off** until a tenant creates an *enabled* agent definition

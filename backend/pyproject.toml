@@ -610,6 +610,7 @@ addopts = ["-m", "not load"]
 markers = [
     "slow: opt-in network/IO-heavy tests; gate via MEHO_RUN_SLOW_TESTS=1.",
     "load: opt-in resolver/cache microbenchmarks; gate via MEHO_RUN_LOAD_TESTS=1.",
+    "slow_runner_tolerant: compares real elapsed time with a wide fixed limit (tests/_time_limits.py); required CI jobs turn the limit off, the non-required 'Python timing tests' job checks it.",
 ]
 # Note: ``authlib.deprecate`` calls ``warnings.simplefilter("always",
 # AuthlibDeprecationWarning)`` at import time, so the

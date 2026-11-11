@@ -41,8 +41,8 @@ func newSegmentListCmd() *cobra.Command {
 			"connector_id=\"nsx-rest-4.2\". Renders id / display_name /\n" +
 			"transport_zone_path for human eyes; --json emits the full envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho nsx segment list --target rdc-nsx\n" +
-			"  meho nsx segment list --target rdc-nsx --json",
+		Example: "  meho nsx segment list --target nsx-lab\n" +
+			"  meho nsx segment list --target nsx-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

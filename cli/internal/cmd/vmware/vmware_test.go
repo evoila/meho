@@ -602,7 +602,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/about", "rdc-vcenter", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/about", "vcenter-lab", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 				return
 			}
 			tgt, _ := raw["target"].(map[string]any)
-			if tgt == nil || tgt["name"] != "rdc-vcenter" {
+			if tgt == nil || tgt["name"] != "vcenter-lab" {
 				t.Errorf("target should wrap slug as {name: ...}; got %v", raw["target"])
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "x"})
@@ -660,7 +660,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := conn.Call(context.Background(), srv.URL, "x", "rdc-vcenter", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "x", "vcenter-lab", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -706,7 +706,7 @@ func TestResolveNameAlreadyMoid(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	moid, err := resolveName(context.Background(), srv.URL, "rdc-vcenter", "vm", "vm-101")
+	moid, err := resolveName(context.Background(), srv.URL, "vcenter-lab", "vm", "vm-101")
 	if err != nil {
 		t.Fatalf("resolveName moid passthrough: %v", err)
 	}
@@ -741,7 +741,7 @@ func TestResolveNameSingleMatch(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	moid, err := resolveName(context.Background(), srv.URL, "rdc-vcenter", "vm", "web-prod-01")
+	moid, err := resolveName(context.Background(), srv.URL, "vcenter-lab", "vm", "web-prod-01")
 	if err != nil {
 		t.Fatalf("resolveName: %v", err)
 	}
@@ -764,7 +764,7 @@ func TestResolveNameNotFound(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	_, err := resolveName(context.Background(), srv.URL, "rdc-vcenter", "vm", "ghost-vm")
+	_, err := resolveName(context.Background(), srv.URL, "vcenter-lab", "vm", "ghost-vm")
 	if err == nil {
 		t.Fatalf("expected not-found error")
 	}
@@ -787,7 +787,7 @@ func TestResolveNameAmbiguous(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	_, err := resolveName(context.Background(), srv.URL, "rdc-vcenter", "vm", "web-01")
+	_, err := resolveName(context.Background(), srv.URL, "vcenter-lab", "vm", "web-01")
 	if err == nil {
 		t.Fatalf("expected ambiguous error")
 	}
@@ -812,7 +812,7 @@ func TestResolveNameDispatcherError(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	_, err := resolveName(context.Background(), srv.URL, "rdc-vcenter", "vm", "web-01")
+	_, err := resolveName(context.Background(), srv.URL, "vcenter-lab", "vm", "web-01")
 	if err == nil {
 		t.Fatalf("expected dispatcher-error wrap")
 	}

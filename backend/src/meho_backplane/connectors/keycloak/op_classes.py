@@ -23,7 +23,11 @@ declare_op_classes(
     # its params are empty, so it is a plain write too.
     # ``.ensure_approval_touch`` makes the console's touch flow and binds it;
     # its params hold only a client id.
+    # ``.disable`` and ``.enable`` turn a user off and on. Their params hold
+    # only a user id or username, so they are plain writes.
     write=(
+        "keycloak.user.disable",
+        "keycloak.user.enable",
         "keycloak.authflow.ensure_approval_flow",
         "keycloak.authflow.ensure_passkey_code_skip",
         "keycloak.authflow.ensure_approval_touch",

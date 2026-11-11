@@ -285,6 +285,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
 from meho_backplane.broadcast.reflex import build_reflex_advisory
@@ -395,6 +396,7 @@ from meho_backplane.operations._preview import (
     build_proposed_effect,
     describe_preview_provenance,
 )
+from meho_backplane.operations._preview_steps import agent_no_grant_step_reason
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
     preview_dispatch,
@@ -1121,6 +1123,29 @@ def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView |
 def _agent_acts(operator: Operator) -> bool:
     """True when an agent makes this call: an agent principal, or a hosted agent run."""
     return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
+
+
+async def _agent_no_grant_step_refusal(
+    *, operator: Operator, op_id: str, connector_id: str, target: Any
+) -> str | None:
+    """Refuse a multi-step call up front when a write step has no grant (#6189).
+
+    Only for an agent with ``AGENT_GRANT_REQUIRED`` not ``off`` and only at
+    the top level: the steps of the call are checked here, with the same
+    list the preview checks, so the call never stops half-way at a step the
+    switch refuses. With ``observe`` the check only writes the
+    ``agent_no_grant_would_deny`` line of each uncovered step and returns
+    ``None``, so the verdict stays as it was.
+    """
+    if (
+        get_settings().agent_grant_required == "off"
+        or not _agent_acts(operator)
+        or composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+    ):
+        return None
+    return await agent_no_grant_step_reason(
+        operator=operator, op_id=op_id, connector_id=connector_id, target=target
+    )
 
 
 def _reveal_waits_for_approval(operator: Operator, reveal_secret: bool) -> bool:
@@ -3663,36 +3688,38 @@ async def dispatch(
     for it and record it when it does not finish.
     """
     if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
-        return await _dispatch_now(
-            operator=operator,
-            connector_id=connector_id,
-            op_id=op_id,
-            target=target,
-            params=params,
-            _approved=_approved,
-            preview_hash=preview_hash,
-            idempotency_key=idempotency_key,
-        )
+        with agent_no_grant_log_scope():
+            return await _dispatch_now(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+                _approved=_approved,
+                preview_hash=preview_hash,
+                idempotency_key=idempotency_key,
+            )
     if is_draining() and not _approved:
         _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
         return shutting_down_result(op_id)
-    async with track_operation(
-        op_id=op_id,
-        connector_id=connector_id,
-        operator_sub=operator.sub,
-        tenant_id=operator.tenant_id,
-        approved_run=_approved,
-    ):
-        return await _dispatch_now(
-            operator=operator,
-            connector_id=connector_id,
+    with agent_no_grant_log_scope(new=True):
+        async with track_operation(
             op_id=op_id,
-            target=target,
-            params=params,
-            _approved=_approved,
-            preview_hash=preview_hash,
-            idempotency_key=idempotency_key,
-        )
+            connector_id=connector_id,
+            operator_sub=operator.sub,
+            tenant_id=operator.tenant_id,
+            approved_run=_approved,
+        ):
+            return await _dispatch_now(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+                _approved=_approved,
+                preview_hash=preview_hash,
+                idempotency_key=idempotency_key,
+            )
 
 
 async def _dispatch_now(
@@ -3967,6 +3994,12 @@ async def _dispatch_now(
             ):
                 _log.info("reveal_secret_waits_for_approval", op_id=op_id)
                 verdict = PermissionVerdict.NEEDS_APPROVAL
+            if verdict is not PermissionVerdict.DENY:
+                step_refusal = await _agent_no_grant_step_refusal(
+                    operator=operator, op_id=op_id, connector_id=connector_id, target=target
+                )
+                if step_refusal is not None:
+                    verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)

@@ -28,6 +28,7 @@ from meho_backplane.instance_settings.service import (
     dump_settings_yaml,
     export_settings,
 )
+from tests._time_limits import check_time_limit
 
 _HEAD = "apiVersion: meho.evoila.com/v1\nkind: Settings\nspec:\n  tenants:\n    - targets:\n"
 _FILE_CHARS = 256 * 1024
@@ -75,7 +76,7 @@ def test_a_large_file_of_secret_starts_is_checked_fast(unit: str) -> None:
     # Healthy time is a few milliseconds. The limit is wide so a busy runner
     # does not fail it; a check that grows with the square of the size takes
     # minutes on this file.
-    assert elapsed < _CHECK_LIMIT_S
+    check_time_limit(elapsed, _CHECK_LIMIT_S, f"the check took {elapsed:.2f} s")
 
 
 @pytest.mark.slow_runner_tolerant
@@ -101,7 +102,7 @@ async def test_the_event_loop_stays_free_while_a_large_file_is_checked(unit: str
     finally:
         done.set()
         await beat
-    assert largest_gap < _LOOP_GAP_LIMIT_S
+    check_time_limit(largest_gap, _LOOP_GAP_LIMIT_S, f"the event loop paused {largest_gap:.2f} s")
 
 
 @pytest.mark.parametrize(

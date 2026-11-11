@@ -50,6 +50,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, Tenant
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
+from tests._time_limits import check_time_limit
 
 _CONNECTOR_ID = "net-probe-1.x"
 _OP_ID = "net.fingerprint"
@@ -671,7 +672,8 @@ def test_extract_title_is_fast_on_a_64_kib_page_of_repeated_tags(piece: str) -> 
     start = time.perf_counter()
     extract_title(body)
     # Healthy time is well under 10 ms; a slow pattern takes many seconds.
-    assert time.perf_counter() - start < 2.0
+    elapsed = time.perf_counter() - start
+    check_time_limit(elapsed, 2.0, f"extract_title took {elapsed:.2f} s")
 
 
 def test_two_products_with_the_same_score_give_unknown() -> None:

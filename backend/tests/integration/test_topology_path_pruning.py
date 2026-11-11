@@ -46,6 +46,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphNode
 from meho_backplane.topology.query import _PATH_SQL, find_path
+from tests._time_limits import check_time_limit
 from tests.fixtures.topology_10k_nodes import MeshSpec, seed_mesh_graph
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 
@@ -459,12 +460,16 @@ async def test_worst_case_find_path_time_backstop_on_dense_mesh(
     worst_ms = await _median_path_ms(op, "worst-0-0", "worst-island", max_hops=_MAX_HOPS_CEILING)
 
     ratio = worst_ms / baseline_ms
-    assert ratio < _WORST_TIME_RATIO_CEILING, (
+    check_time_limit(
+        ratio,
+        _WORST_TIME_RATIO_CEILING,
         f"worst-case find_path hops-32/hops-8 time ratio {ratio:.1f} exceeds "
         f"{_WORST_TIME_RATIO_CEILING} (hops-8 {baseline_ms:.1f} ms, hops-32 "
-        f"{worst_ms:.1f} ms)"
+        f"{worst_ms:.1f} ms)",
     )
-    assert worst_ms < _WORST_ABS_CEILING_MS, (
+    check_time_limit(
+        worst_ms,
+        _WORST_ABS_CEILING_MS,
         f"worst-case find_path took {worst_ms:.1f} ms (median), over the "
-        f"{_WORST_ABS_CEILING_MS:.0f} ms catastrophic-regression backstop"
+        f"{_WORST_ABS_CEILING_MS:.0f} ms catastrophic-regression backstop",
     )

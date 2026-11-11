@@ -857,6 +857,40 @@ async def test_upgrade_adds_the_approval_sign_in_client(capfd: pytest.CaptureFix
     assert "client meho-cli-approve: created" in out
 
 
+async def test_upgrade_adds_the_clients_of_the_ai_tools(capfd: pytest.CaptureFixture[str]) -> None:
+    """A running realm without ``meho-mcp-code`` and ``meho-mcp-desktop`` gets both.
+
+    They come as copies of ``meho-mcp``: the same settings, mappers and
+    scopes. ``meho-mcp`` itself and its mappers stay as they were.
+    """
+    tool_clients = ("meho-mcp-code", "meho-mcp-desktop")
+    old = _realm_as_imported()
+    old["clients"] = [c for c in old["clients"] if c["clientId"] not in tool_clients]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+    kept_mapper_ids = {m["name"]: m["id"] for m in kc.clients["meho-mcp"]["protocolMappers"]}
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    mcp = kc.clients["meho-mcp"]
+    for client_id in tool_clients:
+        client = kc.clients[client_id]
+        assert client["publicClient"] is True
+        assert client["attributes"]["pkce.code.challenge.method"] == "S256"
+        assert client["redirectUris"] == mcp["redirectUris"]
+        assert sorted(client["defaultClientScopes"]) == sorted(mcp["defaultClientScopes"])
+        assert sorted(client["optionalClientScopes"]) == sorted(mcp["optionalClientScopes"])
+        assert sorted(m["name"] for m in client["protocolMappers"]) == sorted(
+            m["name"] for m in mcp["protocolMappers"]
+        )
+    assert {m["name"]: m["id"] for m in mcp["protocolMappers"]} == kept_mapper_ids
+    out = capfd.readouterr().out
+    for client_id in tool_clients:
+        assert f"client {client_id}: created" in out
+    assert "client meho-mcp: kept" in out
+    assert "client meho-mcp: created" not in out
+
+
 async def test_upgrade_binds_an_existing_approval_client_to_its_flow(
     capfd: pytest.CaptureFixture[str],
 ) -> None:

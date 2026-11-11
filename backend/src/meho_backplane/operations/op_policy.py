@@ -158,9 +158,13 @@ class OpKey:
 class EffectivePolicy:
     """The risk level and approval flag that apply after overrides.
 
-    ``category``, ``labels`` and ``rule_ref`` (the classification entry
-    that set them) are filled only with the ``POLICY_CLASSIFICATION``
-    switch on; otherwise they are ``None``, empty and ``None``.
+    ``category``, ``labels``, ``rule_ref`` (the classification entry
+    that set them) and ``always_wait`` are filled only with the
+    ``POLICY_CLASSIFICATION`` switch on; otherwise they are ``None``,
+    empty, ``None`` and ``False``. ``always_wait`` is ``True`` when a
+    classification entry makes the operation always wait, or two entries
+    conflict: then a person approves each call, and no standing grant or
+    run approval clears it.
     """
 
     safety_level: str
@@ -168,6 +172,7 @@ class EffectivePolicy:
     category: str | None = None
     labels: Mapping[str, str] = field(default_factory=dict)
     rule_ref: str | None = None
+    always_wait: bool = False
 
 
 def _approval(code_approval: bool, overrides: Iterable[OperationPolicyOverride]) -> bool:
@@ -298,6 +303,7 @@ def _with_classification(policy: EffectivePolicy, classified: Classification) ->
         category=classified.category,
         labels=dict(classified.labels),
         rule_ref=classified.rule_ref,
+        always_wait=classified.always_wait,
     )
 
 
@@ -322,7 +328,9 @@ async def apply_effective_policy(
 
     The row is expunged first, so the changed values are never written
     back: the stored row keeps the classification. *group_keys* is passed
-    to :func:`effective_policy_map`.
+    to :func:`effective_policy_map`. ``row.policy_always_wait`` (not a
+    column) gets :attr:`EffectivePolicy.always_wait`, so the grant checks
+    see it.
     """
     policies = await effective_policy_map(
         session, tenant_id=tenant_id, rows=[row], group_keys=group_keys
@@ -331,6 +339,7 @@ async def apply_effective_policy(
     session.expunge(row)
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
+    row.policy_always_wait = policy.always_wait
     return row
 
 

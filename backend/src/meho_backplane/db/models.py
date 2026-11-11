@@ -2010,6 +2010,12 @@ class EndpointDescriptor(Base):
         nullable=False,
         default=False,
     )
+    #: Not a column. ``True`` on a row that
+    #: :func:`~meho_backplane.operations.op_policy.apply_effective_policy`
+    #: returned when a classification entry makes the operation always
+    #: wait (or two entries conflict). Then no standing grant and no run
+    #: approval clears a call: a person approves each one.
+    policy_always_wait = False
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,

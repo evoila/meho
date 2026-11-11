@@ -415,8 +415,9 @@ def _referenced_refusal(
     """The ``referenced`` refusal: the count first, then every referrer.
 
     When the list is longer than :data:`_REFERRERS_TEXT_BUDGET`, it names the
-    referrers that fit and says how many more there are. The approval card
-    (``preview_operation``) lists every one of them.
+    referrers that fit, says how many more there are, and points to
+    ``pfsense.config.show``: every referrer names *name* in the config it
+    returns.
     """
     labels = [
         f"{r['kind']}({r.get('id') or '?'}{': ' + r['descr'] if r.get('descr') else ''})"
@@ -432,8 +433,8 @@ def _referenced_refusal(
     listing = ", ".join(shown)
     if len(shown) < len(labels):
         listing += (
-            f", and {len(labels) - len(shown)} more (preview_operation for this call "
-            "lists every one)"
+            f", and {len(labels) - len(shown)} more: run pfsense.config.show and "
+            f"search its config_xml for {name!r} to find every one"
         )
     return PfSenseRefusedError(
         op_id,

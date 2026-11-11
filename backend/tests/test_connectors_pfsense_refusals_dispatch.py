@@ -342,6 +342,21 @@ async def test_referenced_refusal_too_long_to_list_says_how_many_more() -> None:
     assert result.status == "error", result
     remediation = result.extras["remediation"]
     assert "referenced by 200 object(s)" in remediation
-    assert "more (preview_operation for this call lists every one)" in remediation
+    assert "more: run pfsense.config.show and search its config_xml for 'WEB_SERVERS'" in (
+        remediation
+    )
     assert not remediation.endswith("...<truncated>")
     assert not recorder.playback_ran
+
+    # Follow the message: the read op it names returns every referrer,
+    # also the ones the message leaves out.
+    trackers = [str(1600000000 + i) for i in range(200)]
+    omitted = [t for t in trackers if f"filter_rule({t}:" not in remediation]
+    assert omitted, "the message names every referrer, so nothing is left to look up"
+    read, _ = await _run("pfsense.config.show", config, {})
+    assert read.status == "ok", read
+    assert read.handle is None
+    assert isinstance(read.result, dict)
+    config_xml = read.result["config_xml"]
+    for tracker in omitted:
+        assert f"<tracker>{tracker}</tracker>" in config_xml, tracker

@@ -342,7 +342,8 @@ call** (#5138): it raises `PfSenseRefusedError`, so the call gets
 characters, so the error's `remediation` field carries the whole text, up to
 2048 characters. For `referenced` it lists every referrer; when the list is
 longer than that, it names the first ones and says how many more there are,
-and `preview_operation` for the same call lists every one. Each delete is read-back-verified. `pfsense.alias.member.remove` is the odd one out: it is a
+and tells the caller to search the `config_xml` of `pfsense.config.show` for
+the name to find every one. Each delete is read-back-verified. `pfsense.alias.member.remove` is the odd one out: it is a
 **read-modify-write on a shared object**, not a delete — it removes ONE member
 from the alias's `<address>` (and its positionally-aligned `<detail>`) while
 keeping the alias and every other member. `member_not_found` (the member is

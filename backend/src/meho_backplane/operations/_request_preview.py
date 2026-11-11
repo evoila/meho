@@ -71,6 +71,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import resolve_connector_or_label
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
@@ -97,7 +98,10 @@ from meho_backplane.operations._lookup import (
 from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES, has_preview_builder
-from meho_backplane.operations._preview_steps import preview_step_verdict
+from meho_backplane.operations._preview_steps import (
+    agent_no_grant_step_reason,
+    preview_step_verdict,
+)
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -108,6 +112,7 @@ from meho_backplane.operations._validate import (
 )
 from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.redaction import apply_connector_boundary_redaction
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "PARAMS_DIGEST_KEY",
@@ -555,7 +560,10 @@ async def _governance_fields(
     person's call that runs at once). A call that would run at once is
     also checked step by step (:func:`preview_step_verdict`, #5492): a
     multi-step operation reads as covered only when its write steps are
-    too. All four are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
+    too. With ``AGENT_GRANT_REQUIRED=on`` a call that would run or wait
+    reads as ``deny`` when a write step has no grant
+    (:func:`agent_no_grant_step_reason`), as the dispatcher refuses it.
+    All four are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
     the hash does not change.
     """
     verdict, reason = await policy_gate(
@@ -565,7 +573,15 @@ async def _governance_fields(
         connector_id=connector_id,
         decide_only=True,
     )
-    if verdict is PermissionVerdict.AUTO_EXECUTE:
+    step_refusal = None
+    if verdict is not PermissionVerdict.DENY and get_settings().agent_grant_required == "on":
+        # The same up-front check the dispatcher runs (#6189).
+        step_refusal = await agent_no_grant_step_reason(
+            operator=operator, op_id=descriptor.op_id, connector_id=connector_id, target=target
+        )
+    if step_refusal is not None:
+        verdict, reason = PermissionVerdict.DENY, step_refusal
+    elif verdict is PermissionVerdict.AUTO_EXECUTE:
         steps = await preview_step_verdict(
             operator=operator, op_id=descriptor.op_id, connector_id=connector_id, target=target
         )
@@ -826,27 +842,29 @@ async def preview_dispatch(
     if isinstance(resolved, dict):
         return resolved  # the op or the target did not resolve (see _resolve_descriptor)
     descriptor, connector_id = resolved
-    envelope = await _park_check_envelope(
-        operator=operator,
-        descriptor=descriptor,
-        connector_id=connector_id,
-        op_id=op_id,
-        target=target,
-        params=params,
-    ) or await _preview_resolved_op(
-        operator=operator,
-        connector_id=connector_id,
-        op_id=op_id,
-        descriptor=descriptor,
-        target=target,
-        params=params,
-    )
-    governance = await _governance_fields(
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        connector_id=connector_id,
-    )
+    # The park check and the governance fields each run the policy gate.
+    with agent_no_grant_log_scope():
+        envelope = await _park_check_envelope(
+            operator=operator,
+            descriptor=descriptor,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+        ) or await _preview_resolved_op(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+        )
+        governance = await _governance_fields(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+        )
     return {**envelope, **governance}
 
 

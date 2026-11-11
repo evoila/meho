@@ -79,14 +79,20 @@ class _SlowOperation:
         self.request_id = request_id
         self.envelope = envelope
         self.release = threading.Event()
+        self.finished = threading.Event()
         self.calls = 0
 
     async def __call__(self, **_: object) -> dict[str, Any]:
         self.calls += 1
         assert await claim_resume(self.request_id)
-        while not self.release.is_set():
+        # The cap keeps a route that waits for this operation from hanging the
+        # test: the approve then returns late and ``finished`` is already set.
+        for _ in range(250):
+            if self.release.is_set():
+                break
             await asyncio.sleep(0.02)
         await persist_resume_result(self.request_id, self.envelope, parked_op_id=_OP_ID)
+        self.finished.set()
         return self.envelope
 
 
@@ -162,7 +168,7 @@ def _has_ended(body: str) -> bool:
 
 
 def test_slow_operation_answers_at_once_then_shows_ran_ok() -> None:
-    """The approve answers within 2 seconds with "running"; the page later shows "ran OK"."""
+    """The approve answers before the operation ends; the page later shows "ran OK"."""
     client, csrf = _client()
     rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
     operation = _SlowOperation(rid, _OK)
@@ -174,9 +180,10 @@ def test_slow_operation_answers_at_once_then_shows_ran_ok() -> None:
         patch(_RESUME_DISPATCH, operation),
         client,
     ):
-        card, seconds = _approve(client, csrf, rid)
+        card, _ = _approve(client, csrf, rid)
 
-        assert seconds < 2
+        # No clock: the operation waits for the test, so it cannot have ended yet.
+        assert not operation.finished.is_set()
         assert "Approved. The operation is running." in card
         assert "Closing does not stop the operation." in card
         assert f'hx-get="/ui/approvals/{rid}/run"' in card

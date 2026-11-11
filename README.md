@@ -321,7 +321,7 @@ helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
 With the built-in parts, `your-values.yaml` needs only the values listed
 under [Helm chart values reference](#helm-chart-values-reference).
 To bring your own parts, see
-[`deploy/values-examples/values-rdc-example.yaml`](./deploy/values-examples/values-rdc-example.yaml)
+[`deploy/values-examples/values-example-lab.yaml`](./deploy/values-examples/values-example-lab.yaml)
 for the shape `your-values.yaml` should follow and
 [`deploy/values-examples/README.md`](./deploy/values-examples/README.md)
 for the **External Secrets Operator (ESO) sync patterns** the chart

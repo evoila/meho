@@ -268,6 +268,50 @@ they store the row, so a row returned by the query API and the stored row
 agree on the `(op_id, op_class, result_status)` trio. Since #3758 no
 automatic Broadcast event is published for a row; the row is the record.
 
+### The `client` block: which login client made the call
+
+Switch: `AUDIT_CLIENT_IDENTITY` (`Settings.audit_client_identity`), off by
+default. With it off, no row gets the block and every row stays as before.
+
+With it on, every audit row gets one payload block `client`:
+
+```json
+{"azp": "meho-cli", "channel": "token", "principal_kind": "user", "sid_hash": "3f1c0a9b2d4e5f60"}
+```
+
+| Key | What it is |
+|---|---|
+| `azp` | The login client the token was made for (the `azp` claim). `null` when the token has none. |
+| `channel` | `web` for a call from a person's web console session, `token` for every call that came with a token (command line, MCP, REST, a service login). |
+| `principal_kind` | `user`, `agent`, `service` or `runner`. |
+| `sid_hash` | The first 16 hex characters of the SHA-256 of the `sid` claim (the sign-in session). It groups the rows of one sign-in. MEHO never stores the raw `sid`. `null` when the token has no `sid`. |
+
+One helper builds the block: `auth/client_identity.py`. The writers:
+
+- MCP rows (`mcp/audit.py:write_mcp_audit_row`), operation rows
+  (`operations/_audit.py:write_audit_row`) and approval rows
+  (`operations/approval_queue.py:_write_audit_row`) take the block from the
+  `Operator` they already have. The block always comes from the checked
+  login: a `client` key that came another way is replaced.
+- The REST request row (`audit.py:_write_audit_row`) is written by the audit
+  middleware, which has no `Operator`. The login check of the request
+  (`middleware.py:verify_jwt_and_bind`, and for the web console
+  `ui/auth/refresh.py:_verify_session_token`) keeps the block in a context
+  variable, and the middleware reads it. The middleware resets it at the
+  start of each request. A request without a checked login has no block.
+- A console page checks its stored token in the session middleware
+  (`ui/auth/revalidation.py:revalidate_read_session`), which runs before
+  the audit middleware's reset. So that check keeps the block per session,
+  next to the time of the last check. The session context
+  (`UISessionContext.client`) carries it, and the page dependency
+  `require_ui_session` binds it again. A page view that does not check the
+  token again (it was checked within the last few minutes) reuses the kept
+  block. With the switch on, the first page view after login checks the
+  token once to build the block.
+
+`meho audit show` prints it as `via: <client> (<channel>)` (`-` when the row
+has no block). The console audit detail shows it as "Via".
+
 ### `AuditQueryResult` — page
 
 `rows: list[AuditEntry]` plus `next_cursor: str | None`. `next_cursor` is None

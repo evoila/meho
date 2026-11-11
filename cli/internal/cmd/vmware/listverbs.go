@@ -112,7 +112,7 @@ func newDatacenterCmd() *cobra.Command {
 			"\"vmware-rest-9.0\" connector. Renders moid / name for human eyes;\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		example:  "  meho vmware datacenter list --target rdc-vcenter\n  meho vmware datacenter list --target rdc-vcenter --json",
+		example:  "  meho vmware datacenter list --target vcenter-lab\n  meho vmware datacenter list --target vcenter-lab --json",
 		opID:     "GET:/vcenter/datacenter",
 		moidKey:  "datacenter",
 		zeroText: "  (0 datacenters)",
@@ -135,7 +135,7 @@ func newDatastoreCmd() *cobra.Command {
 			"\"vmware-rest-9.0\" connector. Renders moid / name for human eyes;\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		example:  "  meho vmware datastore list --target rdc-vcenter\n  meho vmware datastore list --target rdc-vcenter --json",
+		example:  "  meho vmware datastore list --target vcenter-lab\n  meho vmware datastore list --target vcenter-lab --json",
 		opID:     "GET:/vcenter/datastore",
 		moidKey:  "datastore",
 		zeroText: "  (0 datastores)",
@@ -158,7 +158,7 @@ func newNetworkCmd() *cobra.Command {
 			"\"vmware-rest-9.0\" connector. Renders moid / name for human eyes;\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		example:  "  meho vmware network list --target rdc-vcenter\n  meho vmware network list --target rdc-vcenter --json",
+		example:  "  meho vmware network list --target vcenter-lab\n  meho vmware network list --target vcenter-lab --json",
 		opID:     "GET:/vcenter/network",
 		moidKey:  "network",
 		zeroText: "  (0 networks)",

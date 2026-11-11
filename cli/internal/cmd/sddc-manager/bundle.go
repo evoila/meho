@@ -35,8 +35,8 @@ func newBundleListCmd() *cobra.Command {
 		Short: "List LCM bundles (VCF update packages, async patches)",
 		Long: "list dispatches GET:/v1/bundles against connector_id=\"sddc-rest-9.0\".\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho sddc-manager bundle list --target rdc-sddc-manager\n" +
-			"  meho sddc-manager bundle list --target rdc-sddc-manager --json | jq '.result.elements[].version'",
+		Example: "  meho sddc-manager bundle list --target sddc-manager-lab\n" +
+			"  meho sddc-manager bundle list --target sddc-manager-lab --json | jq '.result.elements[].version'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

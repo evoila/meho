@@ -41,8 +41,8 @@ func newDatacenterListCmd() *cobra.Command {
 			"datacenter; a datacenter with no vCenter has one row of its own.\n" +
 			"The datacenter_id is the identifier for `vcf-fleet vcenter list <id>`.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho vcf-fleet datacenter list --target rdc-fleet\n" +
-			"  meho vcf-fleet datacenter list --target rdc-fleet --json | jq '.result.rows[].datacenter_id'",
+		Example: "  meho vcf-fleet datacenter list --target fleet-lab\n" +
+			"  meho vcf-fleet datacenter list --target fleet-lab --json | jq '.result.rows[].datacenter_id'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

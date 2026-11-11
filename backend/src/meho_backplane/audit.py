@@ -145,6 +145,11 @@ from meho_backplane.audit_cutover import (
     rest_request_is_routine,
     wrapper_row_class,
 )
+from meho_backplane.auth.client_identity import (
+    CLIENT_PAYLOAD_KEY,
+    request_client_block,
+    reset_request_client,
+)
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.broadcast import (
     compute_effective_broadcast_detail,
@@ -427,7 +432,14 @@ async def _write_audit_row(
     *event_class* comes from :func:`~meho_backplane.audit_cutover.wrapper_row_class`:
     ``legacy_request`` before the cutover (#3733), a decision or execution
     class after it (#3757).
+
+    With ``AUDIT_CLIENT_IDENTITY`` on, the ``client`` block the login check
+    bound for this request (:mod:`meho_backplane.auth.client_identity`) is
+    added to *payload*. A request without a checked login has none.
     """
+    client = request_client_block()
+    if client is not None:
+        payload[CLIENT_PAYLOAD_KEY] = client
     sessionmaker = get_sessionmaker()
     # work_ref I1-T1 #1655 -- read the external change-ticket reference
     # off the contextvar. The ``work_ref`` column is added by migration
@@ -817,6 +829,9 @@ class AuditMiddleware:
     async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Audit one HTTP request: bind the work-ref, run the inner app, write the row."""
         start = time.monotonic()
+        # The ``client`` block of an earlier request on this task must not
+        # reach this request's row (AUDIT_CLIENT_IDENTITY).
+        reset_request_client()
 
         # work_ref I1-T2 (#1657), widened by #3804: bind the inbound
         # ``Meho-Work-Ref`` header onto :data:`work_ref_var` for the WHOLE

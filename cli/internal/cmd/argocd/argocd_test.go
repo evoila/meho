@@ -251,7 +251,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "argocd.app.list", "rdc-argocd", nil)
+	r, err := dispatchOp(context.Background(), srv.URL, "argocd.app.list", "argocd-lab", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 				return
 			}
 			tgt, _ := raw["target"].(map[string]any)
-			if tgt == nil || tgt["name"] != "rdc-argocd" {
+			if tgt == nil || tgt["name"] != "argocd-lab" {
 				t.Errorf("target should wrap slug as {name: ...}; got %v", raw["target"])
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "argocd.app.list"})
@@ -282,7 +282,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "argocd.app.list", "rdc-argocd", nil); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "argocd.app.list", "argocd-lab", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -309,7 +309,7 @@ func TestDispatchOpForwardsParams(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "argocd.app.get", "rdc-argocd",
+	r, err := dispatchOp(context.Background(), srv.URL, "argocd.app.get", "argocd-lab",
 		map[string]any{"name": "platform-bootstrap"})
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
@@ -350,7 +350,7 @@ func TestAllOpsUseCanonicalOpIDs(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	for _, opID := range expectedOps {
-		if _, err := dispatchOp(context.Background(), srv.URL, opID, "rdc-argocd", nil); err != nil {
+		if _, err := dispatchOp(context.Background(), srv.URL, opID, "argocd-lab", nil); err != nil {
 			t.Fatalf("dispatchOp %s: %v", opID, err)
 		}
 	}

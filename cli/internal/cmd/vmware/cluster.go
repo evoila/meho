@@ -42,8 +42,8 @@ func newClusterListCmd() *cobra.Command {
 			"ha_enabled for human eyes; --json emits the full OperationResult\n" +
 			"envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vmware cluster list --target rdc-vcenter\n" +
-			"  meho vmware cluster list --target rdc-vcenter --json",
+		Example: "  meho vmware cluster list --target vcenter-lab\n" +
+			"  meho vmware cluster list --target vcenter-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -120,8 +120,8 @@ func newClusterPatchCmd() *cobra.Command {
 			"Pre-merge of T6 (#509), the dispatcher returns \"operation not\n" +
 			"found\" which surfaces in the standard error trailer.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vmware cluster patch dc-prod-01 --target rdc-vcenter --spec @patch.json\n" +
-			"  meho vmware cluster patch domain-c123 --target rdc-vcenter --json",
+		Example: "  meho vmware cluster patch dc-prod-01 --target vcenter-lab --spec @patch.json\n" +
+			"  meho vmware cluster patch domain-c123 --target vcenter-lab --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

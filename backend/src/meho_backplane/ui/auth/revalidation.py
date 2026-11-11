@@ -59,8 +59,11 @@ missing anchor therefore only ever adds a check (one in-memory
 signature check on a JWKS cache hit), never skips one. Creating a
 session row seeds its anchor -- the login callback creates rows only
 from a token it verified -- so the first reads after login stay
-token-free. Multi-replica deployments revalidate per replica, which
-only tightens the bound.
+token-free. With ``AUDIT_CLIENT_IDENTITY`` on, the first read checks the
+token once: the check builds the ``client`` block that the audit rows of
+the session's page views carry, and the map keeps it next to the anchor.
+Multi-replica deployments revalidate per replica, which only tightens the
+bound.
 
 References
 ----------
@@ -78,11 +81,12 @@ from __future__ import annotations
 import heapq
 import time
 import uuid
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 from fastapi import HTTPException
 
+from meho_backplane.auth.client_identity import build_client_block
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.refresh import verify_access_token_with_refresh
 from meho_backplane.ui.auth.session_ref import session_ref
@@ -95,6 +99,7 @@ __all__ = [
     "mark_session_validated",
     "reset_read_revalidation_cache_for_testing",
     "revalidate_read_session",
+    "session_client_block",
 ]
 
 
@@ -112,10 +117,22 @@ _MAX_TRACKED_SESSIONS: Final[int] = 4096
 #: -- see the module docstring's anchor rationale.
 _last_validated: dict[uuid.UUID, float] = {}
 
+#: session id -> the ``client`` block of the last token check of the
+#: session in this process (AUDIT_CLIENT_IDENTITY). Kept and dropped
+#: together with the anchor, so every page view of the session can name
+#: its login client without a new token check.
+_client_blocks: dict[uuid.UUID, dict[str, Any]] = {}
+
 
 def reset_read_revalidation_cache_for_testing() -> None:
     """Drop every revalidation anchor. Test-only."""
     _last_validated.clear()
+    _client_blocks.clear()
+
+
+def session_client_block(session_id: uuid.UUID) -> dict[str, Any] | None:
+    """The ``client`` block of the session's last token check, or ``None``."""
+    return _client_blocks.get(session_id)
 
 
 def mark_session_validated(session_id: uuid.UUID) -> None:
@@ -137,6 +154,13 @@ def _mark_validated(session_id: uuid.UUID, now_mono: float) -> None:
         return
     for sid in heapq.nsmallest(excess, _last_validated, key=_last_validated.__getitem__):
         del _last_validated[sid]
+        _client_blocks.pop(sid, None)
+
+
+def _forget(session_id: uuid.UUID) -> None:
+    """Drop the anchor and the ``client`` block of a session."""
+    _last_validated.pop(session_id, None)
+    _client_blocks.pop(session_id, None)
 
 
 async def revalidate_read_session(
@@ -179,20 +203,24 @@ async def revalidate_read_session(
     threshold = float(settings.ui_session_read_revalidation_seconds)
     now_mono = time.monotonic()
     anchor = _last_validated.get(decrypted.id)
-    if anchor is not None and now_mono - anchor < threshold:
+    # With AUDIT_CLIENT_IDENTITY on, a session without a kept ``client``
+    # block (the first read after login) is checked once to build it.
+    keep_client = settings.audit_client_identity
+    has_block = decrypted.id in _client_blocks or not keep_client
+    if anchor is not None and now_mono - anchor < threshold and has_block:
         return decrypted
 
     log = structlog.get_logger(__name__)
     try:
-        refreshed, _operator = await verify_access_token_with_refresh(
+        refreshed, operator = await verify_access_token_with_refresh(
             decrypted,
             expected_audience=settings.keycloak_audience,
         )
     except TenantRemovedError:
-        _last_validated.pop(decrypted.id, None)
+        _forget(decrypted.id)
         raise
     except HTTPException as exc:
-        _last_validated.pop(decrypted.id, None)
+        _forget(decrypted.id)
         # No token material -- only the classifier's detail code.
         log.warning(
             "ui_read_session_revalidation_failed",
@@ -202,4 +230,6 @@ async def revalidate_read_session(
         )
         return None
     _mark_validated(decrypted.id, now_mono)
+    if keep_client:
+        _client_blocks[decrypted.id] = build_client_block(operator)
     return refreshed

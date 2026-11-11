@@ -44,7 +44,7 @@ func newClientScopeCreateCmd() *cobra.Command {
 			"already-exists is an idempotent success.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak client-scope create --target rdc-keycloak -f scope-roles.json",
+		Example:       "  meho keycloak client-scope create --target keycloak-lab -f scope-roles.json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -88,8 +88,8 @@ func newClientScopeListCmd() *cobra.Command {
 			"optional scopes. --json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho keycloak client-scope list --target rdc-keycloak\n" +
-			"  meho keycloak client-scope list --target rdc-keycloak --json | jq '.result.rows[].name'",
+		Example: "  meho keycloak client-scope list --target keycloak-lab\n" +
+			"  meho keycloak client-scope list --target keycloak-lab --json | jq '.result.rows[].name'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

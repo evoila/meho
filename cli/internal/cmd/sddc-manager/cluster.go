@@ -37,8 +37,8 @@ func newClusterListCmd() *cobra.Command {
 		Long: "list dispatches sddc.cluster.list against connector_id=\"sddc-rest-9.0\".\n" +
 			"Pass --domain to filter to a specific domain.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho sddc-manager cluster list --target rdc-sddc-manager\n" +
-			"  meho sddc-manager cluster list --domain domain-mgmt --target rdc-sddc-manager",
+		Example: "  meho sddc-manager cluster list --target sddc-manager-lab\n" +
+			"  meho sddc-manager cluster list --domain domain-mgmt --target sddc-manager-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

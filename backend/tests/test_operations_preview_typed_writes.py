@@ -24,10 +24,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 import meho_backplane.connectors.keycloak.ops_write_preview as keycloak_preview
+import meho_backplane.mcp.tools.operations  # noqa: F401 — registers the tool
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.registry import tool_for_settings
-from meho_backplane.mcp.tools import operations as _operation_tools  # noqa: F401 — registers the tool
 from meho_backplane.mcp.tools._preview_typed_writes_text import (
     PREVIEW_OPERATION_TYPED_WRITES_SHORT,
     TYPED_WRITE_TEXT_SWAPS,

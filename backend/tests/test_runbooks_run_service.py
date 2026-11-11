@@ -73,7 +73,9 @@ from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
+from meho_backplane.runbooks.engine import PreviousStepNotVerifiedError
 from meho_backplane.runbooks.run_service import (
     DeprecatedTemplateError,
     MissingParamsError,
@@ -2062,3 +2064,139 @@ async def test_retry_on_operation_call_step_runs_the_check_again(
     assert row.state == "verified"
     assert [a["passed"] for a in row.attempts] == [False, True]
     assert row.attempts[0]["verify_response"]["actual"] == {"ok": False}
+
+
+@pytest.mark.asyncio
+async def test_retry_keeps_result_of_step_failed_before_upgrade(db_session: AsyncSession) -> None:
+    """A step failed before the attempts column existed keeps its result on retry."""
+    tenant_id = uuid.uuid4()
+    run_id = await _start_failed_confirm_run(tenant_id)
+    # An upgraded row: the failed result is there, the attempts list is not.
+    row = await _step_row(db_session, run_id, "step-1")
+    row.attempts = None
+    await db_session.commit()
+
+    with pytest.raises(PreviousStepFailedError):
+        await RunbookRunService().next_step(tenant_id, OPERATOR, run_id, _confirm("no", retry=True))
+
+    row = await _step_row(db_session, run_id, "step-1")
+    assert [a["passed"] for a in row.attempts] == [False, False]
+    assert row.attempts[0]["at"] is None
+    assert row.attempts[1]["at"] is not None
+    assert [a["verify_response"]["answer"] for a in row.attempts] == ["no", "no"]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_retries_keep_every_attempt(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry that started before another one finished adds its attempt too.
+
+    The first retry reads the failed step, then a second retry runs from
+    start to end before the first one writes. The first one must write on
+    top of the second one's attempt, not on what it read at the start.
+    """
+    tenant_id = uuid.uuid4()
+    run_id = await _start_failed_confirm_run(tenant_id)
+    run_service = RunbookRunService()
+    real_resolve = RunbookRunService._resolve_verify_response
+    calls = {"n": 0}
+
+    async def _resolve_with_overlap(self: RunbookRunService, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            with pytest.raises(PreviousStepFailedError):
+                await run_service.next_step(tenant_id, OPERATOR, run_id, _confirm("no", retry=True))
+        return await real_resolve(self, **kwargs)
+
+    monkeypatch.setattr(RunbookRunService, "_resolve_verify_response", _resolve_with_overlap)
+
+    with pytest.raises(PreviousStepFailedError):
+        await run_service.next_step(tenant_id, OPERATOR, run_id, _confirm("no", retry=True))
+
+    row = await _step_row(db_session, run_id, "step-1")
+    assert [a["passed"] for a in row.attempts] == [False, False, False]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_retry_after_a_passed_retry_refuses(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When an overlapping retry already passed the step, the late one changes nothing."""
+    tenant_id = uuid.uuid4()
+    run_id = await _start_failed_confirm_run(tenant_id)
+    run_service = RunbookRunService()
+    real_resolve = RunbookRunService._resolve_verify_response
+    calls = {"n": 0}
+
+    async def _resolve_with_overlap(self: RunbookRunService, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await run_service.next_step(tenant_id, OPERATOR, run_id, _confirm("yes", retry=True))
+        return await real_resolve(self, **kwargs)
+
+    monkeypatch.setattr(RunbookRunService, "_resolve_verify_response", _resolve_with_overlap)
+
+    with pytest.raises(PreviousStepNotVerifiedError):
+        await run_service.next_step(tenant_id, OPERATOR, run_id, _confirm("yes", retry=True))
+
+    first = await _step_row(db_session, run_id, "step-1")
+    assert first.state == "verified"
+    assert [a["passed"] for a in first.attempts] == [False, True]
+    assert (await _step_row(db_session, run_id, "step-2")).state == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_next_step_write_locks_the_run_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The write phase loads the run with a row lock, so overlapping writes queue up."""
+    tenant_id = uuid.uuid4()
+    run_id = await _start_failed_confirm_run(tenant_id)
+    real_load = RunbookRunService._load_run_or_raise
+    locks: list[bool] = []
+
+    async def _spy(self: RunbookRunService, *args: Any, for_update: bool = False) -> Any:
+        locks.append(for_update)
+        return await real_load(self, *args, for_update=for_update)
+
+    monkeypatch.setattr(RunbookRunService, "_load_run_or_raise", _spy)
+    await RunbookRunService().next_step(tenant_id, OPERATOR, run_id, _confirm("yes", retry=True))
+
+    assert locks == [False, True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["agent_run", "mcp_session"])
+async def test_confirm_audit_rows_carry_the_session_id(
+    db_session: AsyncSession, source: str
+) -> None:
+    """Failed and passed confirm attempts both name the session they ran in."""
+    session_id = uuid.uuid4()
+    token = None
+    if source == "agent_run":
+        token = agent_session_id_var.set(session_id)
+    else:
+        structlog.contextvars.bind_contextvars(mcp_session_id=str(session_id))
+    try:
+        tenant_id = uuid.uuid4()
+        run_id = await _start_failed_confirm_run(tenant_id)
+        await RunbookRunService().next_step(
+            tenant_id, OPERATOR, run_id, _confirm("yes", retry=True)
+        )
+    finally:
+        if token is not None:
+            agent_session_id_var.reset(token)
+        structlog.contextvars.unbind_contextvars("mcp_session_id")
+
+    rows = (
+        (
+            await db_session.execute(
+                select(AuditLog)
+                .where(AuditLog.run_id == run_id)
+                .where(AuditLog.path == "runbook.confirm")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert sorted(r.payload["passed"] for r in rows) == [False, True]
+    assert {r.agent_session_id for r in rows} == {session_id}

@@ -142,13 +142,12 @@ Detail payloads land in ``extras``. Codes:
   ``unsupported_feature`` (fix the target config) from
   ``unreplaced_auto_shim`` (register the per-product subclass).
 * ``connector_http_403`` -- the connector raised
-  :exc:`httpx.HTTPStatusError` with a ``403`` status: the credential
-  reached the upstream and was authenticated but rejected on
-  authorization (e.g. a GitHub App with ``issues: read`` but not
-  ``issues: write``). G0.24-T4 (#1649), extending #1627's pattern to
-  the transport-error sibling. The ``error`` names the likely
-  insufficient-permission cause (connector-agnostically -- any upstream
-  403); ``extras`` carries ``http_status=403``, the upstream
+  :exc:`httpx.HTTPStatusError` with a ``403`` status: the upstream
+  refused the call (e.g. a GitHub App with ``issues: read`` but not
+  ``issues: write``, or a vendor that answers a wrong password or a
+  locked account with 403). G0.24-T4 (#1649), extending #1627's pattern
+  to the transport-error sibling. The ``error`` names both causes
+  (connector-agnostically -- any upstream 403); ``extras`` carries ``http_status=403``, the upstream
   ``upstream_message``, and any standard GitHub permission headers
   (``permission_headers``) that were present. The sibling
   ``connector_http_422`` (#1649) covers a ``422`` invalid-payload
@@ -1602,8 +1601,9 @@ async def _run_branch_with_error_handling(
 
     G0.24-T4 (#1649) adds ``connector_http_403`` / ``connector_http_422``
     catches for an upstream ``403`` / ``422`` :exc:`httpx.HTTPStatusError`
-    -- an insufficient-permission rejection (the credential authenticated
-    but lacks the op's required scope) and an invalid-payload rejection
+    -- a refused call (a missing permission, or a wrong password or
+    locked account on vendors that answer that with 403) and an
+    invalid-payload rejection
     (the upstream parsed the request but rejected its content), whose
     useful upstream body + GitHub permission headers / ``errors[]``
     validation array used to flatten into the same opaque

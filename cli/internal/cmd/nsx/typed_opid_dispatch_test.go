@@ -98,7 +98,7 @@ func assertVerbDispatchesOpID(t *testing.T, args []string, wantOp string) {
 	primeToken(t, srv.URL)
 
 	root := NewRootCmd()
-	root.SetArgs(append(args, "--target", "rdc-nsx", "--backplane", srv.URL))
+	root.SetArgs(append(args, "--target", "nsx-lab", "--backplane", srv.URL))
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&bytes.Buffer{})
 	if err := root.Execute(); err != nil {

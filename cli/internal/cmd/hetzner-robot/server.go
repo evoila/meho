@@ -39,8 +39,8 @@ func newServerListCmd() *cobra.Command {
 			"JSON array and may be wrapped in a JSONFlux handle.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot server list --target rdc-robot\n" +
-			"  meho hetzner-robot server list --target rdc-robot --json | jq '.result[].server.server_ip'",
+		Example: "  meho hetzner-robot server list --target robot-lab\n" +
+			"  meho hetzner-robot server list --target robot-lab --json | jq '.result[].server.server_ip'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -127,8 +127,8 @@ func newServerInfoCmd() *cobra.Command {
 			"<server-ip> is the primary IP from 'meho hetzner-robot server list'.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot server info 1.2.3.4 --target rdc-robot\n" +
-			"  meho hetzner-robot server info 1.2.3.4 --target rdc-robot --json",
+		Example: "  meho hetzner-robot server info 1.2.3.4 --target robot-lab\n" +
+			"  meho hetzner-robot server info 1.2.3.4 --target robot-lab --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

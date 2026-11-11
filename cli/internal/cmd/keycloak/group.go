@@ -110,8 +110,8 @@ func newGroupListCmd() *cobra.Command {
 			"OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho keycloak group list --target rdc-keycloak --attributes\n" +
-			"  meho keycloak group list --target rdc-keycloak --search role- --json | jq '.result.rows[].id'",
+		Example: "  meho keycloak group list --target keycloak-lab --attributes\n" +
+			"  meho keycloak group list --target keycloak-lab --search role- --json | jq '.result.rows[].id'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -190,7 +190,7 @@ func newGroupCreateCmd() *cobra.Command {
 			"approval; a 409 already-exists is idempotent (already_exists=true).\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho keycloak group create --target rdc-keycloak --name role-tenant-2 " +
+		Example: "  meho keycloak group create --target keycloak-lab --name role-tenant-2 " +
 			"--attribute tenant_id=t-2 --attribute tenant_role=admin",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -242,7 +242,7 @@ func newGroupUpdateAttributesCmd() *cobra.Command {
 			"Requires approval.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho keycloak group update-attributes --target rdc-keycloak --name role-tenant " +
+		Example: "  meho keycloak group update-attributes --target keycloak-lab --name role-tenant " +
 			"--attribute tenant_role=admin",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -317,7 +317,7 @@ func groupMemberWriteCmd(verb, opID string) *cobra.Command {
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n"+
 			"3=unreachable, 4=unexpected.", verb, opID),
 		Example: fmt.Sprintf(
-			"  meho keycloak group member %s --target rdc-keycloak --group-name role-tenant --username operator-a",
+			"  meho keycloak group member %s --target keycloak-lab --group-name role-tenant --username operator-a",
 			verb),
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -392,7 +392,7 @@ func newGroupMemberListCmd() *cobra.Command {
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak group member list --target rdc-keycloak --id 77777777-7777-7777-7777-777777777777",
+		Example:       "  meho keycloak group member list --target keycloak-lab --id 77777777-7777-7777-7777-777777777777",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -102,7 +102,7 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
    tenant memory entry; suppress iff its metadata `re_escalate` is falsey. A
    missing entry (novel red) or `re_escalate=true` (still actionable) does not
    suppress. Decided on metadata only — no LLM call to decide.
-4. **In-flight dedupe** (`_has_in_flight_run`). A non-terminal `agent_run`
+4. **In-flight dedupe** (`has_in_flight_run` in `agent/in_flight.py`, shared with the event matcher). A non-terminal `agent_run`
    with the same `(tenant_id, work_ref)` suppresses a duplicate fire (rides
    `agent_run_tenant_work_ref_idx`).
 5. **Invoke** (`_fire_investigation`). Resolve `(client_id, secret)` from the
@@ -203,6 +203,15 @@ must answer in. Containment beyond the fence is unchanged: the investigator
 has no mail tool and any change op it attempts parks for operator approval and
 is never executed.
 
+## Changes as events (#6180)
+
+With `CHECKS_AGENT_EVENTS` on, a Dashboard change also becomes an event that
+event triggers can match. `_investigate_group` publishes one
+`check.dashboard.changed` event per cause group right after the known-noise
+check (the event is sent also when the group is known noise). Every other
+claimed edge publishes one event in `_process_transition`. The investigator
+call itself is unchanged. Payloads: `docs/codebase/events.md`, "Check events".
+
 ## Agent-name convention (opt-in per tenant)
 
 The wiring is **off** until a tenant creates an *enabled* agent definition
@@ -298,7 +307,7 @@ principal, so no execution path inherits the role.
   transition is claimed under a transaction-scoped per-`(tenant, dashboard)`
   advisory lock, and the memo transition is an atomic compare-and-swap whose
   `rowcount` is the claim token, so exactly one caller fires even across
-  replicas (#2575). The in-flight `work_ref` dedupe (`_has_in_flight_run`) and
+  replicas (#2575). The in-flight `work_ref` dedupe (`has_in_flight_run` (`agent/in_flight.py`, shared with the event matcher)) and
   the noise-suppression memory layer remain as the cross-edge / cross-tick
   backstops. The residual timing gap is intrinsic to the persist-hook seam: a
   member that has not yet committed when the winning claim reads the membership

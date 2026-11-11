@@ -48,15 +48,15 @@ func newAboutCmd() *cobra.Command {
 			"confirms the ADC + impersonation chain is working, returns the\n" +
 			"project_number needed in some GCP API paths, and resolves the\n" +
 			"parent organization ID.\n\n" +
-			"--target names the gcloud target slug (e.g. rdc-gcp-dev).\n\n" +
+			"--target names the gcloud target slug (e.g. gcp-dev-lab).\n\n" +
 			"Exit codes mirror meho operation call:\n" +
 			"  - 0   status == ok\n" +
 			"  - 1   status == error / denied\n" +
 			"  - 2   auth_expired (run `meho login`)\n" +
 			"  - 3   unreachable (network / DNS / TLS)\n" +
 			"  - 4   unexpected response shape",
-		Example: "  meho gcloud about --target rdc-gcp-dev\n" +
-			"  meho gcloud about --target rdc-gcp-dev --json | jq .result",
+		Example: "  meho gcloud about --target gcp-dev-lab\n" +
+			"  meho gcloud about --target gcp-dev-lab --json | jq .result",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -140,7 +140,7 @@ func assertVerbDispatchesOpID(
 	primeToken(t, srv.URL)
 
 	root := NewRootCmd()
-	root.SetArgs(append(args, "--target", "rdc-sddc-manager", "--backplane", srv.URL))
+	root.SetArgs(append(args, "--target", "sddc-manager-lab", "--backplane", srv.URL))
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&bytes.Buffer{})
 	if err := root.Execute(); err != nil {

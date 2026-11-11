@@ -2254,7 +2254,7 @@ class Settings(BaseModel):
     # (``check.sensor.changed`` / ``check.dashboard.changed``), so event
     # triggers can match them. Off by default: nothing is written and nothing
     # else changes. Set via ``CHECKS_AGENT_EVENTS``.
-    checks_agent_events: bool = False
+    checks_agent_events: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     # #2717 (Initiative #2716) — mail.* typed connector: one deployment-level
     # SMTP block shared by the agent-callable ``mail.send`` op and the checks
     # notifier's ``send_email()`` transport. ``mail_smtp_host`` empty (the

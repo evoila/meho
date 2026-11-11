@@ -128,8 +128,10 @@ _TRACKER = "https://github.com/evoila/meho/issues"
 class MaturityInfo(TypedDict):
     """One :data:`FEATURE_MATURITY` entry.
 
-    ``target_ga`` and ``tracking`` are present on non-GA entries only
-    (mirroring how ``docs`` is present only where a setup doc exists).
+    ``target_ga`` is present on non-GA entries only, and ``tracking``
+    only where an open issue lists the known gaps (mirroring how ``docs``
+    is present only where a setup doc exists). A non-GA entry without
+    ``tracking`` has no open tracker.
     ``target_ga`` may be ``None`` on ``experimental`` entries: those sit
     outside the 1.0 promise (#2664 entry criteria; several are explicit
     1.0 non-goals in #2661), so advertising a committed milestone would
@@ -148,12 +150,11 @@ class MaturityInfo(TypedDict):
 #:
 #: ``tracking`` points at the open issue where the feature's road to
 #: promotion is visible today: the concrete gap issue where one exists
-#: (#2668 background-execution credential identity for sensors and the
-#: scheduler, #2667 first-class GSM chart values, #2656 the v0.25.0
-#: hosted-agent-run hardening line), the clean-room eval (#2665) for
+#: (first-class GSM chart values), the clean-room eval for
 #: beta features whose promotion gate is the eval score itself, and the
-#: 1.0 Goal (#2661, which schedules the v0.28 re-triage) for
-#: experimental features with no committed path.
+#: 1.0 Goal (which schedules the v0.28 re-triage) for
+#: experimental features with no committed path. A feature with no open
+#: tracker has no ``tracking`` key.
 FEATURE_MATURITY: dict[str, MaturityInfo] = {
     # GA-track (provisional): the read/governance/knowledge plane the
     # 2026-07-21 grounding review found provably working in the field.
@@ -168,7 +169,6 @@ FEATURE_MATURITY: dict[str, MaturityInfo] = {
     "sensors": {
         "maturity": "beta",
         "target_ga": "v1.0.0",
-        "tracking": f"{_TRACKER}/2668",
     },
     "topology": {
         "maturity": "beta",
@@ -183,7 +183,6 @@ FEATURE_MATURITY: dict[str, MaturityInfo] = {
     "scheduler": {
         "maturity": "beta",
         "target_ga": "v1.0.0",
-        "tracking": f"{_TRACKER}/2668",
     },
     "ui_console": {
         "maturity": "beta",
@@ -214,7 +213,6 @@ FEATURE_MATURITY: dict[str, MaturityInfo] = {
     "agent_runtime": {
         "maturity": "experimental",
         "target_ga": None,
-        "tracking": f"{_TRACKER}/2656",
     },
     "doc_collections": {
         "maturity": "experimental",
@@ -534,6 +532,22 @@ def _vault_tenant_scope_block(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _policy_block(settings: Settings) -> dict[str, Any]:
+    """The policy switches, so ``/ready`` shows which are on.
+
+    ``classification`` is the ``POLICY_CLASSIFICATION`` switch: category,
+    labels and "always wait" on connectors, operation groups and
+    operations (:mod:`meho_backplane.policy.classification`). It is off by
+    default. Nothing is missing when it is off, so ``configured`` is always
+    ``True`` and ``missing_env`` is always empty.
+    """
+    return {
+        "configured": True,
+        "classification": settings.policy_classification,
+        "missing_env": [],
+    }
+
+
 def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
     """Return the ``features`` block exposed under ``/ready``.
 
@@ -567,8 +581,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
 
         {
           "agent_runtime":  {"configured": <bool>, "missing_env": [...], "docs": "...",
-                             "maturity": "experimental", "target_ga": null,
-                             "tracking": "https://github.com/evoila/meho/issues/2656"},
+                             "maturity": "experimental", "target_ga": null},
           "ui_surface":     {"configured": <bool>, "missing_env": [...], "docs": "...",
                              "maturity": "beta", "target_ga": "v1.0.0",
                              "tracking": "https://github.com/evoila/meho/issues/2665"},
@@ -586,7 +599,9 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
                                  "docs": "docs/codebase/connectors-vault-tenant-scope.md",
                                  "maturity": "ga"},
           "mcp":            {"configured": true,   "protocol_version": "...",
-                             "short_tool_texts": <bool>, "missing_env": []}
+                             "short_tool_texts": <bool>, "missing_env": []},
+          "policy":         {"configured": true, "classification": <bool>,
+                             "missing_env": []}
         }
     """
     block: dict[str, dict[str, Any]] = {
@@ -597,6 +612,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
         "approval_custody": _approval_custody_block(settings),
         "vault_tenant_scope": _vault_tenant_scope_block(settings),
         "mcp": _mcp_block(settings),
+        "policy": _policy_block(settings),
     }
     for entry_name, feature_key in _READY_ENTRY_FEATURE.items():
         block[entry_name].update(FEATURE_MATURITY[feature_key])

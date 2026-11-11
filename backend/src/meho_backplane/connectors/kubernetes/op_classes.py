@@ -7,7 +7,7 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes
+from meho_backplane.op_classes import declare_no_secret_value, declare_op_classes
 
 declare_op_classes(
     credential_read=(
@@ -34,3 +34,7 @@ declare_op_classes(
         "k8s.job.create",
     ),
 )
+
+# The compare read returns only "same" or "different", never a value. So it
+# runs without waiting for approval (meho_backplane.operations.credential_read).
+declare_no_secret_value(("k8s.secret.compare_to_ref",))

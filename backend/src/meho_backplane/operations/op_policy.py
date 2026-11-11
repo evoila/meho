@@ -44,6 +44,9 @@ The rules:
 * **Caller address.** An operation with a parameter that holds an address
   MEHO connects to (:mod:`meho_backplane.operations.caller_address`) is at
   least ``caution`` and waits for approval. No override removes this.
+* **Credential read.** An operation that shows a secret value
+  (:mod:`meho_backplane.operations.credential_read`) is at least
+  ``caution`` and waits for approval. No override removes this.
 
 * **Classification.** With the ``POLICY_CLASSIFICATION`` switch on, an
   operation also gets a category, labels and the rule that set them, and
@@ -78,6 +81,7 @@ from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
 )
+from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.policy.classification import Classification
 from meho_backplane.policy.store import classification_enabled, classify_rows, classify_step
 
@@ -260,11 +264,11 @@ async def effective_policy_map(
     """Return the effective policy of every row in *rows* for *tenant_id*.
 
     The order: the classification (with the ``POLICY_CLASSIFICATION``
-    switch on) after the overrides, and the floors last. The
-    caller-address floor runs last: an operation with a parameter that
-    holds an address MEHO connects to stays at least ``caution`` with
-    approval, also when an override turned approval off, and also for a
-    row stored before the marker floor existed.
+    switch on) after the overrides, and the two floors last: a credential
+    read and an operation with a parameter that holds an address MEHO
+    connects to stay at least ``caution`` with approval, also when an
+    override turned approval off, and also for a row stored before the
+    floor existed.
 
     *group_keys* maps a row id to its group key when the caller already
     joined the group; the classification loads the others. It is not
@@ -285,7 +289,7 @@ async def effective_policy_map(
         )
         policies = [_with_classification(p, c) for p, c in zip(policies, classified, strict=True)]
     return {
-        OpKey.of(row): _with_caller_address_floor(row, policy)
+        OpKey.of(row): _with_floors(row, policy)
         for row, policy in zip(rows, policies, strict=True)
     }
 
@@ -309,12 +313,17 @@ def _with_classification(policy: EffectivePolicy, classified: Classification) ->
     )
 
 
-def _with_caller_address_floor(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:
-    """Raise *policy* for a row with a caller-address parameter."""
-    safety_level, requires_approval = raise_for_caller_address(
-        row.parameter_schema,
+def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:
+    """Raise *policy* for a credential read and for a caller-address parameter."""
+    safety_level, requires_approval = raise_for_credential_read(
+        row.op_id,
         safety_level=policy.safety_level,
         requires_approval=policy.requires_approval,
+    )
+    safety_level, requires_approval = raise_for_caller_address(
+        row.parameter_schema,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
     )
     return replace(policy, safety_level=safety_level, requires_approval=requires_approval)
 
@@ -895,7 +904,7 @@ async def list_overrides(
 async def _scope_policy(session: AsyncSession, row: OperationPolicyOverride) -> EffectivePolicy:
     """Return the effective policy of *row*'s operation in *row*'s scope.
 
-    Like dispatch, the caller-address floor runs last, so the report never
+    Like dispatch, the two floors run last, so the report never
     lists approval as off for an operation that still waits for it. With no
     descriptor (the operation is gone) the lowest values apply, so only the
     overrides count.
@@ -906,7 +915,7 @@ async def _scope_policy(session: AsyncSession, row: OperationPolicyOverride) -> 
     if descriptor is None:
         return effective_policy("safe", False, overrides)
     policy = effective_policy(descriptor.safety_level, descriptor.requires_approval, overrides)
-    return _with_caller_address_floor(descriptor, policy)
+    return _with_floors(descriptor, policy)
 
 
 async def _classification(

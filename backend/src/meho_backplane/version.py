@@ -21,6 +21,15 @@ comes from the allowlist file the overlay image build writes, read once at
 start (:func:`~meho_backplane.connector_packages.installed_connector_packages`).
 It is empty for the plain public image.
 
+It also lists ``agent_switches``: each setting that changes what an AI
+agent sees, keyed by its env name, with its value (for example
+``"SEARCH_CLEAR_LEAD": false``). A setting is on the list when its field in
+:class:`~meho_backplane.settings.Settings` carries the
+:data:`~meho_backplane.settings.AGENT_FACING` mark. A benchmark run reads
+this list to record which switches were on. The list holds only names and
+``true`` / ``false``. It does not show settings per tenant or per agent
+definition.
+
 Reading the values from environment variables (rather than baking them
 into a generated ``_version.py``) keeps the runtime image generic and
 the build pipeline simple: the same wheel can be re-tagged with
@@ -37,9 +46,11 @@ from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
+from meho_backplane.settings import AGENT_FACING, Settings, get_settings
 
 __all__ = [
     "VersionResponse",
+    "agent_switches",
     "build_git_sha",
     "deployed_version_label",
     "router",
@@ -66,6 +77,22 @@ class VersionResponse(BaseModel):
     build_date: str
     chart_version: str | None
     connector_packages: list[ConnectorPackage] = []
+    agent_switches: dict[str, bool] = {}
+
+
+def agent_switches(settings: Settings) -> dict[str, bool]:
+    """Return each agent-facing setting of *settings*, keyed by env name, sorted.
+
+    A setting is agent-facing when its field carries the
+    :data:`~meho_backplane.settings.AGENT_FACING` mark. The env name is the
+    field name in upper case, the name ``get_settings`` reads it from.
+    """
+    marked = sorted(
+        name
+        for name, field in Settings.model_fields.items()
+        if isinstance(field.json_schema_extra, dict) and field.json_schema_extra == AGENT_FACING
+    )
+    return {name.upper(): getattr(settings, name) for name in marked}
 
 
 def build_git_sha() -> str:
@@ -144,16 +171,18 @@ def running_release_id() -> str | None:
 
 @router.get("/version", response_model=VersionResponse)
 async def version() -> VersionResponse:
-    """Return the build-identity payload and the installed connector packages.
+    """Return the build identity, the connector packages and the agent switches.
 
     Each build field falls back to ``"unknown"`` when its env var is unset
     or empty, which keeps local development frictionless without ever
     pretending an unknown build is a known one. ``connector_packages`` is
-    empty for the plain public image.
+    empty for the plain public image. ``agent_switches`` lists each
+    agent-facing setting with its value.
     """
     return VersionResponse(
         git_sha=build_git_sha(),
         build_date=os.environ.get("BUILD_DATE") or _UNKNOWN,
         chart_version=os.environ.get("CHART_VERSION") or None,
         connector_packages=list(installed_connector_packages()),
+        agent_switches=agent_switches(get_settings()),
     )

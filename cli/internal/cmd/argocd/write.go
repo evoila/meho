@@ -156,7 +156,7 @@ func newAppSyncCmd() *cobra.Command {
 			"terminal phase (Succeeded/Failed/Error). The dispatch parks for human\n" +
 			"approval before it touches the cluster.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho argocd app sync --target rdc-argocd --name guestbook --prune",
+		Example: "  meho argocd app sync --target argocd-lab --name guestbook --prune",
 		Args:    cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			params := map[string]any{"name": appName}
@@ -203,7 +203,7 @@ func newAppRollbackCmd() *cobra.Command {
 			"int64 history id of a prior deployed revision (status.history[].id), then\n" +
 			"polls operationState to a terminal phase. Parks for human approval first.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho argocd app rollback --target rdc-argocd --name guestbook --id 7",
+		Example: "  meho argocd app rollback --target argocd-lab --name guestbook --id 7",
 		Args:    cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			params := map[string]any{"name": appName, "id": rollbackID}
@@ -246,7 +246,7 @@ func newAppSetCmd() *cobra.Command {
 			"ApplicationSpec read from --spec-file and captures the spec before/after\n" +
 			"into proposed_effect for the reviewer. Parks for human approval first.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho argocd app set --target rdc-argocd --name guestbook --spec-file spec.json",
+		Example: "  meho argocd app set --target argocd-lab --name guestbook --spec-file spec.json",
 		Args:    cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			spec, se := loadJSONObject(specFile)
@@ -286,7 +286,7 @@ func newAppRefreshCmd() *cobra.Command {
 			"a refresh that reveals drift can trigger an immediate auto-sync. Parks\n" +
 			"for human approval first.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho argocd app refresh --target rdc-argocd --name guestbook",
+		Example: "  meho argocd app refresh --target argocd-lab --name guestbook",
 		Args:    cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			params := map[string]any{"name": appName}
@@ -320,7 +320,7 @@ func newAppDeleteCmd() *cobra.Command {
 			"snapshots that cascade list into proposed_effect for the reviewer. Parks\n" +
 			"for human approval first.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho argocd app delete --target rdc-argocd --name guestbook",
+		Example: "  meho argocd app delete --target argocd-lab --name guestbook",
 		Args:    cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			params := map[string]any{"name": appName}
@@ -357,7 +357,7 @@ func newAppProjectCreateCmd() *cobra.Command {
 			"tenancy/authorization boundary for its Applications. Parks for human\n" +
 			"approval first.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho argocd appproject create --target rdc-argocd --project-file proj.json --upsert",
+		Example: "  meho argocd appproject create --target argocd-lab --project-file proj.json --upsert",
 		Args:    cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			project, se := loadJSONObject(projectFile)
@@ -392,7 +392,7 @@ func newAppProjectUpdateCmd() *cobra.Command {
 			"PUTs an AppProject read from --project-file and captures the project spec\n" +
 			"before/after into proposed_effect. Parks for human approval first.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho argocd appproject update --target rdc-argocd --project-file proj.json",
+		Example: "  meho argocd appproject update --target argocd-lab --project-file proj.json",
 		Args:    cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			project, se := loadJSONObject(projectFile)

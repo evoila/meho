@@ -91,6 +91,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
+from meho_backplane.auth.client_identity import (
+    CLIENT_PAYLOAD_KEY,
+    apply_client_block,
+    build_client_block,
+    channel_of,
+    client_identity_enabled,
+)
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
@@ -1335,6 +1342,10 @@ async def _write_audit_row(
         payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
+    # The login client of the person who acted on this row (the requester on
+    # a "request" row, the reviewer on a "decision" row), when
+    # AUDIT_CLIENT_IDENTITY is on.
+    apply_client_block(payload, operator)
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -1414,6 +1425,9 @@ class ResumeRequester(NamedTuple):
     #: The requester's ``principal_kind`` (#3885). ``None`` on a row parked
     #: before migration 0149.
     kind: str | None = None
+    #: The requester's ``client`` block from the stored effect
+    #: (AUDIT_CLIENT_IDENTITY). ``None`` when the request has none.
+    client: dict[str, Any] | None = None
 
 
 #: The requester of the approval request whose composite is being re-run
@@ -1568,6 +1582,14 @@ async def create_pending_request(
         }
         if target_id is not None:
             proposed_effect["target_id"] = str(target_id)
+    # The requester's login client and channel (AUDIT_CLIENT_IDENTITY), so
+    # every approval surface can say through which tool the change was asked
+    # for. A re-park on behalf of an earlier requester keeps that requester's
+    # block: *operator* is then the reviewer, not the requester.
+    if client_identity_enabled():
+        client = build_client_block(operator) if requester is None else requester.client
+        if client is not None:
+            proposed_effect = {**proposed_effect, CLIENT_PAYLOAD_KEY: client}
 
     # RFC 8693 ``act`` (#1481): the agent principal acting on the human
     # subject's behalf on a delegated run, read from the same
@@ -1579,7 +1601,10 @@ async def create_pending_request(
     # dead code — ``Operator`` has no such field, so it was always ``None``.
     principal_act: str | None = resolve_actor_sub()
     if requester is not None:
-        principal_sub, principal_act, principal_name, principal_kind = requester
+        principal_sub = requester.sub
+        principal_act = requester.act
+        principal_name = requester.name
+        principal_kind = requester.kind
     else:
         principal_sub = operator.sub
         principal_name = await principal_display_name(session, operator)
@@ -1786,6 +1811,33 @@ async def _check_sign_in_use(
     return destructive
 
 
+#: The longest ``User-Agent`` value stored on a decision row.
+_USER_AGENT_MAX_LENGTH: Final[int] = 256
+
+
+def _approver_client_fields(operator: Operator, user_agent: str | None) -> dict[str, Any]:
+    """Name the approver's login client on the decision row (AUDIT_CLIENT_IDENTITY).
+
+    ``approver_azp`` and ``approver_channel`` come from the checked login.
+    ``approver_user_agent`` is the ``User-Agent`` header of a REST approve,
+    cut to 256 characters. The tool sends it about itself and MEHO cannot
+    check it, so it is marked ``"self_declared": true``. Empty when the
+    switch is off.
+    """
+    if not client_identity_enabled():
+        return {}
+    fields: dict[str, Any] = {
+        "approver_azp": operator.azp,
+        "approver_channel": channel_of(operator),
+    }
+    if user_agent:
+        fields["approver_user_agent"] = {
+            "value": user_agent[:_USER_AGENT_MAX_LENGTH],
+            "self_declared": True,
+        }
+    return fields
+
+
 # code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
 # the four preconditions + the params/reason contract; the executable body is ~15
 # lines. Splitting it would scatter one linear approve flow for a line-count win.
@@ -1797,6 +1849,7 @@ async def approve_request(
     params: dict[str, Any] | None = None,
     reason: str = "",
     approval_auth: ApprovalAuth | None = None,
+    user_agent: str | None = None,
 ) -> ApprovalRequest:
     """Approve a pending request.
 
@@ -1866,6 +1919,9 @@ async def approve_request(
             Inside the approval window one sign-in may approve several
             requests; a ``destructive`` request needs a sign-in of its own
             (#5515). Every production approve path passes it.
+        user_agent: The ``User-Agent`` header of a REST approve. With
+            ``AUDIT_CLIENT_IDENTITY`` on it is stored on the decision row,
+            marked as what the tool says about itself. ``None`` elsewhere.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -1931,6 +1987,7 @@ async def approve_request(
         extra["reason"] = reason
     if approval_auth is not None:
         extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
+    extra.update(_approver_client_fields(operator, user_agent))
     _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()
@@ -2864,12 +2921,14 @@ async def _refuse_resume_params_unavailable(
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
-    """The requester saved on *request* (#4217)."""
+    """The requester saved on *request* (#4217), with the requester's ``client`` block."""
+    client = (request.proposed_effect or {}).get(CLIENT_PAYLOAD_KEY)
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
         request.principal_name,
         request.principal_kind,
+        client if isinstance(client, dict) else None,
     )
 
 

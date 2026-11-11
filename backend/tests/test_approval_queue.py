@@ -46,6 +46,7 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.delegation import actor_delegation
@@ -2933,6 +2934,7 @@ async def test_decide_approve_redispatches_direct_op_with_stored_params(
     response = await decide_approval_request(
         approval_request_id,
         DecideRequestBody(decision="approved"),
+        Request({"type": "http", "headers": []}),
         operator=reviewer,
     )
 
@@ -3020,6 +3022,7 @@ async def test_decide_redispatches_agent_run_request_when_claim_free(
     response = await decide_approval_request(
         approval_request_id,
         DecideRequestBody(decision="approved"),
+        Request({"type": "http", "headers": []}),
         operator=reviewer,
     )
 
@@ -3065,6 +3068,7 @@ async def test_decide_agent_run_request_no_ops_when_claim_already_taken(
     response = await decide_approval_request(
         approval_request_id,
         DecideRequestBody(decision="approved"),
+        Request({"type": "http", "headers": []}),
         operator=reviewer,
     )
 

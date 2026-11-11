@@ -11855,13 +11855,14 @@ type TraceView struct {
 // the tenant picker. “can_switch_tenant“ makes the sidebar tenant box
 // a switch.
 type UISessionContext struct {
-	CanSwitchTenant *bool              `json:"can_switch_tenant,omitempty"`
-	OperatorSub     string             `json:"operator_sub"`
-	SessionId       openapi_types.UUID `json:"session_id"`
-	TenantChosen    *bool              `json:"tenant_chosen,omitempty"`
-	TenantId        openapi_types.UUID `json:"tenant_id"`
-	TenantName      *string            `json:"tenant_name"`
-	TenantSlug      *string            `json:"tenant_slug"`
+	CanSwitchTenant *bool                   `json:"can_switch_tenant,omitempty"`
+	Client          *map[string]interface{} `json:"client"`
+	OperatorSub     string                  `json:"operator_sub"`
+	SessionId       openapi_types.UUID      `json:"session_id"`
+	TenantChosen    *bool                   `json:"tenant_chosen,omitempty"`
+	TenantId        openapi_types.UUID      `json:"tenant_id"`
+	TenantName      *string                 `json:"tenant_name"`
+	TenantSlug      *string                 `json:"tenant_slug"`
 }
 
 // UsageReport Top-level shape returned by :func:`compute_usage` + the API route.

@@ -104,8 +104,8 @@ func newReadCmd() *cobra.Command {
 			"Exit codes mirror meho operation call: 0=ok, 1=error/denied,\n" +
 			"2=auth_expired, 3=unreachable, 4=unexpected or still waiting,\n" +
 			"5=not the person who sent the request.",
-		Example: "  meho secret read --target rdc-vault secret app/db --field password | sshpass -f /dev/stdin ssh root@host\n" +
-			"  PW=$(meho secret read --target rdc-vault secret app/db --field password)\n" +
+		Example: "  meho secret read --target vault-lab secret app/db --field password | sshpass -f /dev/stdin ssh root@host\n" +
+			"  PW=$(meho secret read --target vault-lab secret app/db --field password)\n" +
 			"  PW=$(meho secret read --approval 3f2b9c1e-0000-4000-8000-000000000000 --field password)",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if approvalID != "" {

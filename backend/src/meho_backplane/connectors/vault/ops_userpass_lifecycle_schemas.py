@@ -99,7 +99,7 @@ VAULT_AUTH_USERPASS_DISABLE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "preconditions": (
         "A person must approve the call. The login must exist on the mount. The Vault "
         "login of MEHO needs write access to the identity entity paths, and sudo on "
-        "sys/leases/revoke-prefix when revoke_tokens is true."
+        "sys/leases/lookup and sys/leases/revoke-prefix when revoke_tokens is true."
     ),
     "output_shape": (
         "{username, mount, disabled, changed, entity_id, entity_created, "

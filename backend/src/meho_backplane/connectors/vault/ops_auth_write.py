@@ -88,6 +88,7 @@ from meho_backplane.connectors.vault.ops_userpass_write_schemas import (
     VAULT_AUTH_USERPASS_WRITE_RESPONSE_SCHEMA,
 )
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
+from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
 from meho_backplane.connectors.vault.userpass_password import (
     apply_credential_source,
     select_credential_source,
@@ -128,12 +129,20 @@ async def vault_auth_userpass_write(
     (params_hash only) and the broadcast feed (aggregate-only). The response
     is value-free: it echoes the username, mount, assigned policies and
     where a stored password lives, never the password.
+
+    A KV path goes through the same tenant check as ``vault.kv.*`` before
+    any Vault call: read access for ``password_secret_ref``, write access
+    for ``generate_password``.
     """
     username: str = str(params["username"]).strip()
     mount: str = str(params.get("mount", "userpass")).strip()
     token_policies = params.get("token_policies")
     plan = select_credential_source(params)
     inline = str(params["password"]) if plan.source == "request" else None
+    if plan.source != "request":
+        enforce_tenant_scope(
+            operator, mount=plan.mount, path=plan.path, read_only=plan.source == "kv_path"
+        )
 
     async with vault_client_for_target(operator, target) as client:
         try:

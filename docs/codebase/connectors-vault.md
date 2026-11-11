@@ -374,8 +374,10 @@ target registration) is documented in
 
   Vault has no switch on the userpass login itself, so both ops use the
   identity entity behind the login's alias (alias name is the lower case
-  username, on the mount accessor from `sys/auth`). `disable` creates the
-  entity and the alias when they are missing; `enable` does nothing for a
+  username, on the mount accessor from `sys/auth`). `disable` creates a new
+  entity and the alias when they are missing. It sends no entity name, so
+  Vault picks a unique one: an entity found by name may belong to another
+  login, so it is never reused. `enable` does nothing for a
   login without an entity (Vault makes an enabled one at the first login).
   A login that does not exist raises `VaultUserpassUserNotFoundError`; no
   entity is made for it. A disabled entity makes the login fail with
@@ -385,8 +387,10 @@ target registration) is documented in
   of its login request, and revoke-prefix revokes tokens by that path (read
   in the Vault source: `vault/request_handling.go`, `vault/expiration.go`;
   the endpoint needs `sudo`). Vault revokes in the background, so the result
-  says `revoke_requested`. The given spelling and the lower case spelling of
-  the username are both revoked. Both ops refuse a `username` with `/` and a
+  says `revoke_requested`. A login typed as `ALICE` has its own path, so the
+  op lists `sys/leases/lookup/auth/<mount>/login/` (also `sudo`) and revokes
+  every spelling of the username found there, plus the given and the lower
+  case spelling. Both ops refuse a `username` with `/` and a
   `mount` with `..`.
 - **`auth` group, JWT/OIDC login roles** (`ops_auth_jwt.py` /
   `ops_auth_jwt_schemas.py`, #3694). The JWT/OIDC login method is how

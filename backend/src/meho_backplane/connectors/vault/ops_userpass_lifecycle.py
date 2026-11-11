@@ -12,20 +12,22 @@ Vault has no switch on the userpass login itself. The switch is on the
 identity entity that the login's alias points to. The alias is found by its
 name and the mount accessor. Vault writes the alias name in lower case, so
 the name here is lower case too. When a login has no entity yet, ``disable``
-creates the entity and the alias first, so the switch holds from the next
-login on. ``enable`` does nothing for a login without an entity: Vault makes
-one at the first login, enabled.
+creates a new entity (Vault picks its name) and the alias first, so the switch
+holds from the next login on. It never reuses an entity found by name: a name
+does not prove that the entity belongs to this login. ``enable`` does nothing
+for a login without an entity: Vault makes one at the first login, enabled.
 
 Vault's documentation says that the tokens of a disabled entity cannot be
 used, but are not revoked. To revoke them, ``revoke_tokens`` calls
-``sys/leases/revoke-prefix`` with the path ``auth/<mount>/login/<username>/``.
+``sys/leases/revoke-prefix`` with the path ``auth/<mount>/login/<name>/``.
 Vault stores each login token under the path of its login request, and
 revoke-prefix revokes tokens by that path (Vault source:
 ``vault/request_handling.go`` and ``vault/expiration.go``; the docs name the
-endpoint). The call needs ``sudo`` on that path and Vault does the work in the
-background, so the result says "requested". A token made by a login typed
-with other capital letters sits under that spelling, so both the given and
-the lower case spelling are revoked; the rest cannot be used anyway.
+endpoint). A login typed with other capital letters (``ALICE``) has its own
+path, so the op first lists ``sys/leases/lookup/auth/<mount>/login/`` and
+revokes every spelling of the username it finds there. Both calls need
+``sudo``, and Vault revokes in the background, so the result says
+"requested".
 """
 
 from __future__ import annotations
@@ -90,25 +92,40 @@ def _find_entity(client: Any, alias_name: str, accessor: str) -> dict[str, Any] 
 
 
 def _create_entity(client: Any, alias_name: str, accessor: str, mount: str) -> str:
-    """Create the entity and its alias for a login that has none; return the id."""
-    name = f"{mount.replace('/', '-')}-{alias_name}"
-    try:
-        existing = client.secrets.identity.read_entity_by_name(name=name)
-    except hvac.exceptions.InvalidPath:
-        existing = None
-    if isinstance(existing, dict) and existing.get("data", {}).get("id"):
-        entity_id = str(existing["data"]["id"])
-    else:
-        created = client.secrets.identity.create_or_update_entity_by_name(name=name)
-        entity_id = str(created["data"]["id"])
+    """Create a new entity and its alias for a login that has none; return the id.
+
+    No name is sent, so Vault picks a unique one. Sending a name would update
+    an entity that already has it, which may belong to someone else.
+    """
+    created = client.secrets.identity.create_or_update_entity(
+        name=None, metadata={"userpass_mount": mount, "userpass_username": alias_name}
+    )
+    entity_id = str(created["data"]["id"])
     client.secrets.identity.create_or_update_entity_alias(
         name=alias_name, canonical_id=entity_id, mount_accessor=accessor
     )
     return entity_id
 
 
+def _login_spellings(client: Any, mount: str, username: str) -> list[str]:
+    """Return every spelling of *username* that holds a login token on *mount*."""
+    try:
+        payload = client.sys.list_leases(prefix=f"auth/{mount}/login/")
+    except hvac.exceptions.InvalidPath:
+        return []
+    data = payload.get("data") if isinstance(payload, dict) else None
+    keys = data.get("keys") if isinstance(data, dict) else None
+    wanted = username.lower()
+    return [
+        str(key).rstrip("/")
+        for key in keys or []
+        if str(key).endswith("/") and str(key).rstrip("/").lower() == wanted
+    ]
+
+
 def _revoke_tokens(client: Any, mount: str, username: str) -> None:
-    for name in dict.fromkeys((username, username.lower())):
+    names = (username, username.lower(), *_login_spellings(client, mount, username))
+    for name in dict.fromkeys(names):
         client.sys.revoke_prefix(prefix=f"auth/{mount}/login/{name}/")
 
 

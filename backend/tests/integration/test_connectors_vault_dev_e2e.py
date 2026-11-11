@@ -2200,21 +2200,24 @@ async def test_userpass_disable_blocks_login_and_enable_restores_it(
 
 
 @pytest.mark.asyncio
-async def test_userpass_disable_with_revoke_tokens_ends_an_open_token(
+async def test_userpass_disable_with_revoke_tokens_ends_open_tokens_for_good(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """The revoke path ``auth/<mount>/login/<user>/`` ends a token the user already holds."""
+    """Revoked tokens stay dead after enable, also one from a login typed in capitals."""
     target, addr = vault_e2e
     root = _root_client(addr)
     password = "revoke-user-pw-9f3a-test"
     root.auth.userpass.create_or_update_user(
         username="revoke-user", password=password, policies=["default"], mount_point="userpass"
     )
-    token = _root_client(addr).auth.userpass.login(
-        username="revoke-user", password=password, mount_point="userpass"
-    )["auth"]["client_token"]
-    holder = hvac.Client(url=addr, token=token)
-    assert holder.is_authenticated()
+    holders = []
+    for typed in ("revoke-user", "REVOKE-USER"):
+        token = _root_client(addr).auth.userpass.login(
+            username=typed, password=password, mount_point="userpass"
+        )["auth"]["client_token"]
+        holder = hvac.Client(url=addr, token=token)
+        assert holder.is_authenticated()
+        holders.append(holder)
 
     result = await _dispatch_approved(
         target,
@@ -2223,11 +2226,20 @@ async def test_userpass_disable_with_revoke_tokens_ends_an_open_token(
         "op-revoke",
     )
     assert result.status == "ok", result.error
-    # Vault revokes in the background; allow a short wait.
+    on = await _dispatch_approved(
+        target, "vault.auth.userpass.enable", {"username": "revoke-user"}, "op-revoke-on"
+    )
+    assert on.status == "ok", on.error
+
+    # Vault revokes in the background; allow a short wait. The login is enabled
+    # again here, so a token that still works was not revoked.
     import asyncio
 
     for _ in range(20):
-        if not holder.is_authenticated():
+        if not any(holder.is_authenticated() for holder in holders):
             break
         await asyncio.sleep(0.25)
-    assert not holder.is_authenticated()
+    assert [holder.is_authenticated() for holder in holders] == [False, False]
+    assert _root_client(addr).auth.userpass.login(
+        username="revoke-user", password=password, mount_point="userpass"
+    )["auth"]["client_token"]

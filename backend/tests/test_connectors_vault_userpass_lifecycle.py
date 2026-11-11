@@ -40,6 +40,7 @@ from meho_backplane.connectors.vault.ops_userpass_lifecycle import (
 from meho_backplane.connectors.vault.ops_userpass_write_schemas import (
     VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA,
 )
+from meho_backplane.connectors.vault.tenant_scope import VaultTenantScopeError
 from meho_backplane.connectors.vault.userpass_password import (
     PasswordSecretError,
     generate_password_value,
@@ -62,6 +63,7 @@ class _Fake:
         self.entities: dict[str, dict[str, Any]] = {}
         self.aliases: dict[tuple[str, str], str] = {}
         self.revoked: list[str] = []
+        self.lease_keys: list[str] = []
         self.mounts = {"userpass/": {"accessor": ACCESSOR}}
         self.user_writes: list[dict[str, Any]] = []
         self.kv_writes: list[dict[str, Any]] = []
@@ -122,6 +124,11 @@ class _Fake:
     def revoke_prefix(self, prefix: str) -> None:
         self.revoked.append(prefix)
 
+    def list_leases(self, prefix: str) -> dict[str, Any]:
+        if not self.lease_keys:
+            raise hvac.exceptions.InvalidPath()
+        return {"data": {"keys": list(self.lease_keys)}}
+
     # --- identity
     def lookup_entity(
         self, alias_name: str | None = None, alias_mount_accessor: str | None = None, **_kw: Any
@@ -137,9 +144,19 @@ class _Fake:
                 return {"data": {"id": entity_id, **entity}}
         raise hvac.exceptions.InvalidPath()
 
-    def create_or_update_entity_by_name(self, name: str, **_kw: Any) -> dict[str, Any]:
+    def create_or_update_entity(
+        self, name: str | None, metadata: dict[str, str] | None = None, **_kw: Any
+    ) -> dict[str, Any]:
+        # Like Vault: a known name updates that entity; no name makes a new one.
+        for entity_id, entity in self.entities.items():
+            if name is not None and entity["name"] == name:
+                return {"data": {"id": entity_id}}
         entity_id = f"entity-{len(self.entities) + 1}"
-        self.entities[entity_id] = {"name": name, "disabled": False}
+        self.entities[entity_id] = {
+            "name": name or f"entity_{entity_id}",
+            "disabled": False,
+            "metadata": metadata,
+        }
         return {"data": {"id": entity_id}}
 
     def create_or_update_entity_alias(
@@ -172,11 +189,29 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Fake]:
 
     monkeypatch.setattr(ops_auth_write, "vault_client_for_target", _client)
     monkeypatch.setattr(ops_userpass_lifecycle, "vault_client_for_target", _client)
+    # The write handler reads the tenant prefix from the settings.
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.delenv("VAULT_KV_TENANT_SCOPE_PREFIX", raising=False)
+    get_settings.cache_clear()
     yield f
+    get_settings.cache_clear()
 
 
-def _write(params: dict[str, Any]) -> Any:
-    return vault_auth_userpass_write(None, None, params)  # type: ignore[arg-type]
+def _operator(tenant: int = 0) -> Operator:
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt="fake.jwt.value",
+        tenant_id=UUID(int=tenant),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+def _write(params: dict[str, Any], operator: Operator | None = None) -> Any:
+    return vault_auth_userpass_write(operator or _operator(), None, params)
 
 
 def _no_secret(result: Any) -> None:
@@ -226,6 +261,40 @@ async def test_bad_credential_source_is_refused(fake: _Fake, params: dict[str, A
     with pytest.raises(ValueError):
         await _write(params)
     assert fake.users == {}
+
+
+_TENANT = UUID(int=7)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"username": "a", "password_secret_ref": "tenants/other/login"},
+        {"username": "a", "generate_password": {"path": "tenants/other/login"}},
+    ],
+)
+async def test_kv_path_of_another_tenant_is_refused_before_any_vault_call(
+    fake: _Fake, params: dict[str, Any]
+) -> None:
+    fake.kv[("secret", "tenants/other/login")] = [{"password": SENTINEL}]
+    with pytest.raises(VaultTenantScopeError):
+        await _write(params, _operator(7))
+    assert fake.users == {} and fake.user_writes == [] and fake.kv_writes == []
+    assert fake.kv[("secret", "tenants/other/login")] == [{"password": SENTINEL}]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"username": "a", "password_secret_ref": f"tenants/{_TENANT}/login"},
+        {"username": "a", "generate_password": {"path": f"tenants/{_TENANT}/login"}},
+    ],
+)
+async def test_kv_path_of_the_own_tenant_is_allowed(fake: _Fake, params: dict[str, Any]) -> None:
+    fake.kv[("secret", f"tenants/{_TENANT}/login")] = [{"password": SENTINEL}]
+    result = await _write(params, _operator(7))
+    assert result["written"] is True
+    assert fake.users["a"]["_password"] == SENTINEL
 
 
 def test_schema_needs_exactly_one_credential_source() -> None:
@@ -391,6 +460,42 @@ async def test_disable_revokes_tokens_also_on_a_repeat(fake: _Fake) -> None:
     assert fake.revoked == ["auth/userpass/login/alice/"]
 
 
+async def test_disable_revokes_every_spelling_that_holds_a_token(fake: _Fake) -> None:
+    fake.users["alice"] = {}
+    fake.lease_keys = ["ALICE/", "Alice/", "alice/", "alicex/", "bob/"]
+    await _call(vault_auth_userpass_disable, {"username": "alice", "revoke_tokens": True})
+    assert sorted(fake.revoked) == [
+        "auth/userpass/login/ALICE/",
+        "auth/userpass/login/Alice/",
+        "auth/userpass/login/alice/",
+    ]
+
+
+async def test_disable_never_reuses_an_entity_found_by_name(fake: _Fake) -> None:
+    fake.users["alice"] = {}
+    fake.entities["unrelated"] = {"name": "userpass-alice", "disabled": False}
+    result = await _call(vault_auth_userpass_disable, {"username": "alice"})
+    assert result["entity_id"] != "unrelated"
+    assert fake.entities["unrelated"]["disabled"] is False
+    assert fake.aliases[("alice", ACCESSOR)] == result["entity_id"]
+
+
+async def test_mounts_with_colliding_names_get_their_own_entities(fake: _Fake) -> None:
+    fake.mounts = {
+        "team/userpass/": {"accessor": "auth_userpass_0002"},
+        "team-userpass/": {"accessor": "auth_userpass_0003"},
+    }
+    fake.users["alice"] = {}
+    one = {"username": "alice", "mount": "team/userpass"}
+    two = {"username": "alice", "mount": "team-userpass"}
+    off = await _call(vault_auth_userpass_disable, one)
+    other = await _call(vault_auth_userpass_disable, two)
+    assert off["entity_id"] != other["entity_id"]
+    await _call(vault_auth_userpass_enable, two)
+    assert fake.entities[off["entity_id"]]["disabled"] is True
+    assert fake.entities[other["entity_id"]]["disabled"] is False
+
+
 async def test_unknown_login_is_an_error_and_creates_nothing(fake: _Fake) -> None:
     with pytest.raises(VaultUserpassUserNotFoundError):
         await _call(vault_auth_userpass_disable, {"username": "nobody"})
@@ -427,7 +532,10 @@ async def test_non_default_mount_uses_its_own_accessor(fake: _Fake) -> None:
         vault_auth_userpass_disable, {"username": "alice", "mount": "team/userpass"}
     )
     assert fake.aliases[("alice", "auth_userpass_0002")] == result["entity_id"]
-    assert fake.entities[result["entity_id"]]["name"] == "team-userpass-alice"
+    assert fake.entities[result["entity_id"]]["metadata"] == {
+        "userpass_mount": "team/userpass",
+        "userpass_username": "alice",
+    }
 
 
 # --- through the dispatcher (redaction, audit, registration) ------------------

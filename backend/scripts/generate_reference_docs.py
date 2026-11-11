@@ -183,7 +183,7 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
     (
         "VMware vCenter and vSphere",
         "vmware-rest-9.0, vmware-rest-8.0",
-        "8.0, 9.x",
+        "8.0 Update 1 or newer, 9.x",
         "Reads and manages virtual machines, hosts, clusters, storage and networks.",
     ),
     (
@@ -333,7 +333,7 @@ _VERSIONS_PARAGRAPH = (
     "itself. Outside the range, MEHO refuses the call with "
     "`unqualified_target_version`, and a Sensor on that connector can "
     "read `unknown`. So pick the connector whose version matches the "
-    "target, for example `vmware-rest-8.0` for vCenter 8.0.x and "
+    "target, for example `vmware-rest-8.0` for vCenter 8.0 Update 1 to Update 3 and "
     "`vmware-rest-9.0` for vCenter 9.0.x."
 )
 

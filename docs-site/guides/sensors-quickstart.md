@@ -75,8 +75,10 @@ same operation on the connector version that matches the target, and
 runs it there when it exists and is turned on.
 
 So pin the connector whose version matches the target. To see the
-target's version, run `meho targets describe <name>`. A sensor cannot
-be changed: delete it and create it again with the right connector.
+target's version, run `meho targets describe <name>`. To move a sensor
+to the right connector, change it with
+`meho sensor edit <sensor_id> --connector-id <id>` (see
+[Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
 
 ## Step 2 — create the sensor
 
@@ -521,10 +523,10 @@ The quickstart above is the core loop. A few surfaces extend it:
   offending rows — the specific objects or series that broke the check —
   so a notification or an investigation names *what* breached, not just
   *that* something did. A healthy tick's evidence is unchanged.
-- **A broadcast feed.** Every dashboard rollup transition is also
-  published to the tenant broadcast feed, so operators and agents can
-  watch check-state changes the way they watch every other action
-  (`meho_broadcast_recent`, `meho_broadcast_watch`, `GET /api/v1/feed`).
+- **Where a change shows.** A dashboard change is shown in the console
+  and the checks API, and it can send a mail (see notifications above).
+  It is not posted to the activity feed. The feed carries notes that
+  agents and people post.
 - **The investigator.** The diagnose-only agent above turns a red
   dashboard into a structured, retrievable finding — read-only by
   design.

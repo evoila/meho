@@ -1010,27 +1010,47 @@ approve` sends `acr_values=meho-approve` (`cli/internal/auth/freshsignin.go`).
 Keycloak's level condition is true on the first pass of a sign-in, so the
 flow reaches level 2 also without the request. A sign-in through a
 company login does not run the flow's steps: Keycloak gives it no level,
-so `acr` stays `"1"`. Keycloak shows a company login's button on every
-password page of the realm and has no per-client setting to hide it.
+so `acr` stays `"1"`.
 
-`APPROVAL_SIGN_IN_LEVEL` (`off` | `observe` | `required`, default
-`observe` for one release) decides what
-`check_fresh_approval_sign_in` does with a token of the approval client
-whose `acr` is not one of those names (`has_approval_level`):
+`APPROVAL_SIGN_IN_LEVEL` (`off` | `observe` | `auto` | `required`,
+default `auto`) decides what `check_fresh_approval_sign_in` does with a
+token of the approval client whose `acr` is not one of those names
+(`has_approval_level`). The routes resolve the setting first with
+`sign_in_level_in_force` (`auth/approval_sign_in_flow.py`): `auto` is
+`required` while `read_approval_sign_in` says `ok` (the answer is kept
+for a minute), else `observe`. A caller that passes no resolved value
+gets an unresolved `auto` as `required` (fail closed).
 
 - `off`: accepted as before;
 - `observe`: accepted, the warning `approval_sign_in_level_missing` is
   logged, and `approval_auth.level_missing` is `true` in the
   `approval.decision` audit row (next to the `acr` it saw);
-- `required`: the same `401` as an old sign-in. The refusal log
+- `required`: the same `401` as an old sign-in. When the level is the
+  one missing part, the detail ends with `LEVEL_MISSING_REMEDIATION`
+  ("Your sign-in did not reach the approval level. An admin must check
+  approvals.sign_in in /api/v1/health."). The refusal log
   `approval_sign_in_not_fresh` carries `approval_level`.
 
 The web path (`check_fresh_web_approval_sign_in`) does not check the
-level. `/api/v1/health` shows the value in `approvals.sign_in_level`. The
+level. `/api/v1/health` shows the value in `approvals.sign_in_level`,
+what is in force in `approvals.sign_in_level_in_force`, and
+`approvals.sign_in_level_warning` whenever the level is not required in
+practice; `meho doctor` shows the last two in its line `approval level`.
+`approvals.sign_in` is `ok` only when the realm really gives the level:
+the flow steps, the level step settings (`loa-condition-level` 2,
+`loa-max-age` 0), `acr.loa.map` with `meho-approve` = 2 and no other name
+on level 2, no own `acr.loa.map` on the client, and the binding. Direct
+grant or device grant on the client is `other_grant_on`. The
 realm stage (`core/keycloak_flows.py:ensure_levels`, and step settings in
 `ensure_flows`), `meho admin keycloak bootstrap-clients` and
 `keycloak.authflow.ensure_approval_flow` all add `meho-approve` to
-`acr.loa.map` and keep the names already there. The flow got a new name
+`acr.loa.map` and keep the names already there. All three stop before
+they write when another name already has level 2, or when the approval
+client has its own `acr.loa.map` (shared rules in
+`core/keycloak_levels.py`; the Go copy is in `flows.go`). The realm stage
+makes only the login flows that the realm file binds to a client other
+than `meho-web` (`stage_flows`), so it never makes or binds a flow of the
+console client, such as the passkey touch flow. The flow got a new name
 with the level, so an upgraded realm gets the new flow and the client is
 bound to it; the earlier flow `meho approval sign-in` stays unused.
 

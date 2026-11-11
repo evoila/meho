@@ -803,8 +803,11 @@ Two ops in their own modules, registered by the same walk:
        difference. Nothing is written.
   3. Name the level: read the realm, add `"meho-approve": 2` to its
      `acr.loa.map` (other names stay), and write the whole attribute map
-     back (Keycloak drops attributes a write leaves out). A map that is
-     not a JSON object stops the op with `levels_not_object`.
+     back (Keycloak drops attributes a write leaves out). These checks run
+     before anything is written: a map that is not a JSON object stops
+     the op with `levels_not_object`, another name on level 2 with
+     `level_taken`, and an own `acr.loa.map` on the client with
+     `client_level_map`.
   4. Bind: read the client, put `authenticationFlowBindingOverrides.browser`
      on top (other overrides and every other field stay), write it back,
      and read it again. A binding that does not read back is an error

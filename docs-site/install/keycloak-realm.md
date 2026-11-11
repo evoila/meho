@@ -27,7 +27,7 @@ the end, then return to the trail.
 | `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`config.keycloakAudience` in the chart values). |
 | `meho-cli` | **Public** client, device-code grant | `meho login` |
 | `meho-cli-approve` | **Public** client, authorization-code + PKCE on a loopback address only, with its own login flow | The fresh sign-in of `meho approvals approve`. Only its tokens can approve on the command line. |
-| `meho approval sign-in level` | Login flow, bound to `meho-cli-approve` | Always asks for the password (and the one-time code, when the person has one). Gives the approval level `meho-approve`. |
+| `meho approval sign-in level` | Login flow, bound to `meho-cli-approve` | Asks for the password (and the one-time code, when the person has one). Gives the approval level `meho-approve`. |
 | `acr.loa.map` | Realm attribute (**Realm settings → General → ACR to LoA mapping**) | Names the sign-in levels: `meho-approve` is level 2. |
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
 | `meho-mcp-code`, `meho-mcp-desktop` | **Public** clients, copies of `meho-mcp` | The Claude Code plugin and the Claude Desktop extension, each with a login of its own, when `MCP_CLIENT_PER_TOOL_KIND` is on. See [The MCP clients of the AI tools](#the-mcp-clients-of-the-ai-tools). |
@@ -121,7 +121,8 @@ sign-in:
   set and is not `0`). Keycloak gives `acr` `1` to a sign-in that asked
   for the password or a passkey, and `0` to one that came only from the
   browser's remembered login;
-- with `APPROVAL_SIGN_IN_LEVEL=required`, the sign-in came through the
+- when MEHO requires the approval level (by default, as soon as MEHO's
+  check of the approval sign-in is `ok`), the sign-in came through the
   approval flow: `acr` is `meho-approve` (or the higher `meho-touch`).
   See [The approval level](#the-approval-level);
 - an operation marked `destructive` needs a sign-in of its own, at most
@@ -165,7 +166,7 @@ scope puts `auth_time` into the access token, and the `acr` scope puts
 refused.
 
 **Its own login flow (required).** The approval client signs in with its
-own flow, which always asks for the password. The flow also gives the
+own flow, which asks for the password. The flow also gives the
 sign-in its own level, the approval level, so MEHO can tell an approval
 sign-in from any other sign-in (see [The approval level](#the-approval-level)).
 Every install needs it.
@@ -215,7 +216,13 @@ Keycloak that ships with the MEHO chart creates the client on the next
 upgrade (the realm finishing job adds a client that is missing, and sets
 the two token settings on an existing one). The job also makes the login
 flow, adds the name `meho-approve` to the realm's sign-in levels, and
-binds the client to the flow, on every upgrade. For this its account
+binds the client to the flow, on every upgrade. The job stops with a
+clear message, and changes no level, when another name already has
+level 2 in the realm's sign-in levels, or when `meho-cli-approve` has its
+own sign-in levels (**Clients → `meho-cli-approve` → Advanced → ACR to
+LoA mapping**). `meho admin keycloak bootstrap-clients` stops in the same
+two cases. The job only makes the login flows that the realm file binds
+to a client other than `meho-web`. For this its account
 `meho-admin` needs the realm-management role `manage-realm`. A new
 install gets it from the realm file. On an older install without it, the
 job stops with a message that names the role. The fix is in
@@ -238,17 +245,20 @@ tool) shows the state in `approvals.sign_in.state`:
 
 | State | Meaning |
 |---|---|
-| `ok` | The flow has exactly the steps above, and `meho-cli-approve` uses it. |
+| `ok` | The realm gives the approval level: the flow has exactly the steps above, its level step has level `2` and maximum age `0`, the realm's sign-in levels name `meho-approve` as level 2 and no other name has level 2, and `meho-cli-approve` uses the flow. |
 | `flow_missing` | The realm has no flow `meho approval sign-in level`. |
 | `not_bound` | The flow is right, but `meho-cli-approve` is missing, has no own browser flow, or uses another flow. `detail` says which. |
-| `flow_differs` | The flow has other steps. `detail` names the first difference. MEHO does not bind the client to such a flow. |
-| `not_checked` | MEHO could not read it. `detail` says why, for example `no_right_to_read_login_flows`. |
+| `flow_differs` | The flow has other steps, its level step has no or other settings, the realm's sign-in levels do not name `meho-approve` as the only level 2, or `meho-cli-approve` has its own sign-in levels. `detail` names the first difference. MEHO does not bind the client to such a flow. |
+| `other_grant_on` | `meho-cli-approve` also allows direct grant or device grant. Such a sign-in skips the approval flow. Turn both off. |
+| `not_checked` | MEHO could not read it. `detail` says why, for example `no_right_to_read_login_flows` or `no_right_to_read_realm`. |
 
 `meho doctor` shows the same state in its line `approval sign-in`, with
-the fix. MEHO keeps the answer for one minute, so a fix shows up within a
-minute. MEHO reads the realm with its Keycloak admin client
-(`keycloakAdmin` in the chart). Reading login flows needs the
-realm-management role `view-realm` (or `manage-realm`) on that client.
+the fix, and in its line `approval level` whether MEHO requires the
+approval level now. MEHO keeps the answer for one minute, so a fix shows
+up within a minute. MEHO reads the realm with its Keycloak admin client
+(`keycloakAdmin` in the chart). Reading login flows and the realm's
+sign-in levels needs the realm-management role `view-realm` (or
+`manage-realm`) on that client.
 On your own Keycloak, give it `view-realm`. Without it the state is
 `not_checked`.
 
@@ -260,7 +270,7 @@ Two backplane settings control the check:
 | `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` (chart `config.perActionSignInMaxAgeSeconds`) | `300` | How old the sign-in may be for an action that needs a fresh sign-in each time: approving a `destructive` operation, and turning approval off or lowering a risk level for an operation. |
 | `KEYCLOAK_CLI_APPROVE_CLIENT_ID` (chart `config.keycloakCliApproveClientId`) | `meho-cli-approve` | The only client whose tokens can approve on the command line or REST. Empty: only the web interface can approve. |
 | `APPROVAL_ONE_TIME_CODE_ACR_VALUES` (chart `config.approvalOneTimeCodeAcrValues`) | empty (off) | Comma-separated `acr` values that mean "the person entered a one-time code". |
-| `APPROVAL_SIGN_IN_LEVEL` (chart `config.approvalSignInLevel`) | `observe` | Does an approve on the command line or REST need the approval level? `off`, `observe` or `required`. See [The approval level](#the-approval-level). |
+| `APPROVAL_SIGN_IN_LEVEL` (chart `config.approvalSignInLevel`) | `auto` | Does an approve on the command line or REST need the approval level? `auto`, `off`, `observe` or `required`. See [The approval level](#the-approval-level). |
 
 **Optional one-time code record.** `APPROVAL_ONE_TIME_CODE_ACR_VALUES`
 works as before: an approve whose `acr` is one of its values is recorded
@@ -269,7 +279,7 @@ as a one-time code approval. It fits with the approval level like this:
 - The approval flow gives `meho-approve` whether or not the person typed
   a code. So do not put `meho-approve` into this setting: MEHO would
   record a sign-in without a code as a one-time code approval.
-- With `APPROVAL_SIGN_IN_LEVEL=required`, only `meho-approve` and
+- When MEHO requires the approval level, only `meho-approve` and
   `meho-touch` approve. A flow of your own that gives another `acr` for
   the code (for example `otp`) is then refused. Use such a flow only
   with `off` or `observe`.
@@ -280,8 +290,7 @@ The sign-in must still be recent: an `acr` value alone never approves.
 
 Keycloak puts the level of a sign-in into the token's `acr` claim. With
 no names for levels, every sign-in that asked for a password gets `1`,
-whatever flow ran. So MEHO could not tell an approval sign-in from any
-other sign-in. The realm therefore names its levels:
+whatever flow ran. The realm therefore names its levels:
 
 | Level | `acr` | Given by |
 |---|---|---|
@@ -292,35 +301,29 @@ other sign-in. The realm therefore names its levels:
 A higher level counts where a lower one is asked for. `meho approvals
 approve` asks Keycloak for the level (`acr_values=meho-approve`).
 
-The level comes only from the steps of the approval flow: MEHO's own
-password form and the one-time code, at every sign-in. A sign-in through
-a company login does not run these steps, so it does not get the level.
-This is also true when it starts on the approval page: Keycloak shows the
-button of a company login on every password page of the realm, and it
-has no setting to hide it for one client. Such a sign-in comes back with
-`acr` `1`.
-
 The setting `APPROVAL_SIGN_IN_LEVEL` says what MEHO does with an approve
 on the command line or REST whose token lacks the level:
 
 | Value | What MEHO does |
 |---|---|
+| `auto` (default) | Acts as `required` while MEHO's check of the approval sign-in (`approvals.sign_in.state`) is `ok`, else as `observe`. |
 | `off` | Approves as before. |
-| `observe` (default) | Approves as before, logs `approval_sign_in_level_missing`, and the audit row of the approval has `level_missing: true` next to the `acr` it saw. |
-| `required` | Refuses with the same `401` and message as an old sign-in. `meho approvals approve` then opens a new sign-in. |
+| `observe` | Approves as before, logs `approval_sign_in_level_missing`, and the audit row of the approval has `level_missing: true` next to the `acr` it saw. |
+| `required` | Refuses with the same `401` and message as an old sign-in, plus: "Your sign-in did not reach the approval level. An admin must check approvals.sign_in in /api/v1/health." `meho approvals approve` then opens a new sign-in. |
 
-`/api/v1/health` shows the value in `approvals.sign_in_level`.
+`/api/v1/health` shows the value in `approvals.sign_in_level`, what MEHO
+does now in `approvals.sign_in_level_in_force` (`off`, `observe` or
+`required`), and a warning in `approvals.sign_in_level_warning` whenever
+MEHO does not require the level: the value is `off` or `observe`, or it
+is `auto` and `approvals.sign_in.state` is not `ok`.
 
-- `observe` is the default for this release only. In the next release
-  `required` becomes the default. Before that, check that every install
-  has the flow: `approvals.sign_in.state` is `ok`.
-- **With a company login in front of MEHO's Keycloak, set `required`
-  now.**
+- With the default `auto`, MEHO requires the level as soon as the realm
+  gives it. Fix what `approvals.sign_in` names until it is `ok`.
 - Under `required`, a missing flow or binding refuses every approve on
   the command line and REST: the client then signs in through the
   realm's normal flow and gets `acr` `1`. `approvals.sign_in` names the
   cause.
-- Known limit: under `required`, a person who has only a company account
+- Known limit: when MEHO requires the level, a person who has only a company account
   (no MEHO password) cannot approve on the command line. They approve in
   the web interface.
 - The web interface does not use this check. It has its own checks.
@@ -350,6 +353,11 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
   names the first difference. Fix the flow by hand, then run it again.
 - `meho-cli-approve` is missing: MEHO stops before it changes anything.
   Create the client first.
+- Another name already has level 2 in the realm's sign-in levels
+  (`level_taken`), or `meho-cli-approve` has its own sign-in levels
+  (`client_level_map`): MEHO stops before it changes anything. Give the
+  other name another level, or remove the client's own levels, then run
+  it again.
 
 MEHO reads the client back after the change. `browser_flow_id` in the
 result is the flow the client now uses. Its other settings stay as they

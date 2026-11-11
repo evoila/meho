@@ -399,7 +399,12 @@ Steps of the realm stage, in order:
    (`meho-approve`: 2) to the realm and keeps the names it has (output:
    `sign-in levels: set (...)` or `kept (...)`); it writes the whole
    attribute map back, because Keycloak drops realm attributes a write
-   leaves out. A run
+   leaves out. It stops before it writes when another name already has
+   level 2, or when a client the file binds to a flow
+   (`meho-cli-approve`) has its own `acr.loa.map`. The stage makes only
+   the flows that the file binds to a client other than `meho-web`
+   (`stage_flows`): it never makes or binds a flow of the console client,
+   such as the passkey touch flow, which has its own explicit step. A run
    that stops half-way (a timeout, a restart) can leave a flow with
    missing steps or steps that are still off; the next run adds the
    missing steps and sets the requirements of the file (output:

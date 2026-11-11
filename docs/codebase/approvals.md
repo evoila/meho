@@ -810,11 +810,10 @@ model, or resume endpoint):
    once. See [targets.md](targets.md) and [topology.md](topology.md).
    `meho targets import` sends one write per row, so each row makes its
    own approval request. For a large file, a person imports it in the web
-   console, or runs the import with `--work-ref`. Then a second person
-   goes through all its rows with
+   console, or runs the import with `--work-ref`. Then a person goes
+   through all its rows with
    `meho approvals approve --filter-work-ref <ref> --in-order`, which asks
-   for a yes at each row. The person who ran the import cannot approve
-   its rows.
+   for a yes at each row.
 
    Only `verify_access_token_with_refresh`
    (`backend/src/meho_backplane/ui/auth/refresh.py`) sets

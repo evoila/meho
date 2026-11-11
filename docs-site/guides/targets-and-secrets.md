@@ -310,9 +310,8 @@ file, use one of these:
 
 - Import the file in the operator console. A person in the console
   writes at once.
-- Give the import a change ticket. Then a second person goes through
-  all its rows with one command. It shows each row and asks for a yes.
-  The person who ran the import cannot approve its rows.
+- Give the import a change ticket. Then a person goes through all its
+  rows with one command. It shows each row and asks for a yes.
 
   ```bash
   meho --work-ref gh:acme/ops#42 targets import targets.yaml

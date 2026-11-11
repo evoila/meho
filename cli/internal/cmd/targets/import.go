@@ -127,11 +127,10 @@ const importManyRowsNote = "Each row of the file makes its own approval " +
 	"request. A file with 50 rows makes 50 requests, and a person approves " +
 	"each one. For a large file, import it in the web console, where it is " +
 	"written at once. Or give the import a change ticket, for example " +
-	"`meho --work-ref gh:acme/ops#42 targets import <file>`. Then a second " +
-	"person goes through all its rows with one command: " +
+	"`meho --work-ref gh:acme/ops#42 targets import <file>`. Then a person " +
+	"goes through all its rows with one command: " +
 	"`meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order`. " +
-	"It shows each row and asks for a yes. The person who ran the import " +
-	"cannot approve its rows.\n\n"
+	"It shows each row and asks for a yes.\n\n"
 
 // --- Plan model --------------------------------------------------------
 

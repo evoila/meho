@@ -42,6 +42,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.mongodb import MongoDbConnector
 from meho_backplane.settings import get_settings
 
+from .._container_ready import wait_until_ready
 from .._vault_fakes import install_fake_client
 
 
@@ -120,10 +121,29 @@ def mongo_container() -> Iterator[_Container]:
             user=mongo.username,
             password=mongo.password,
         )
+        wait_until_ready(lambda: _ping(coords), what=f"mongodb ({image})", timeout=60)
         _seed(coords)
         yield coords
     finally:
         mongo.stop()
+
+
+def _ping(c: _Container) -> None:
+    """One real round trip: succeeds only when the server takes connections."""
+    from pymongo import MongoClient
+
+    client: MongoClient[dict[str, object]] = MongoClient(
+        host=c.host,
+        port=c.port,
+        username=c.user,
+        password=c.password,
+        authSource="admin",
+        serverSelectionTimeoutMS=1000,
+    )
+    try:
+        client.admin.command("ping")
+    finally:
+        client.close()
 
 
 def _seed(c: _Container) -> None:

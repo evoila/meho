@@ -1025,17 +1025,31 @@ A kind whose client id is not set is left out.
   the client only while `AUDIT_CLIENT_IDENTITY` is on.
 - **"Sign out this tool"** asks for a confirm, then posts
   `POST /ui/account/tools/sign-out` with the form field `tool` (the tool
-  kind key, never a client id). MEHO calls
-  `DELETE /admin/realms/{realm}/users/{user id}/consents/{client id}` with
-  the Keycloak admin client (it needs the realm role `manage-users`). The
-  user id is the person of the session, never a form field. Keycloak ends
-  the person's saved login for that one client. Their other tools keep
-  working.
-- After the Keycloak call succeeded, MEHO writes the audit row
-  `auth.tool_sign_out` (method `INTERNAL`, payload `client_id` and
-  `tool`). A failed call (an error answer, no answer, no admin client)
-  shows an error line and writes no row. A 404 (no saved login of this
-  person for this client) says "Nothing changed" and writes no row.
+  kind key, never a client id). With the Keycloak admin client (it needs
+  the realm role `manage-users`), `end_tool_logins` ends both kinds of
+  login of the person for that one client:
+  - it reads the person's ordinary logins
+    (`GET /admin/realms/{realm}/users/{user id}/sessions`) first, so a
+    failed read changes nothing;
+  - `DELETE .../users/{user id}/consents/{client id}` ends the consent
+    and the offline login. MEHO's login clients ask for no consent, so
+    this call leaves ordinary logins alone (404 when there is no offline
+    login);
+  - `DELETE /admin/realms/{realm}/sessions/{id}` ends each ordinary login
+    that holds only this client.
+
+  Keycloak ends an ordinary login only as a whole. A login that this
+  client shares with another client (both signed in through one browser
+  login) is kept, so the other tool keeps working; the result line names
+  that tool. The user id is the person of the session, never a form
+  field. `tests/integration/test_keycloak_tool_sign_out.py` checks against
+  a real Keycloak that only the signed-out tool stops renewing.
+- After at least one login ended, MEHO writes the audit row
+  `auth.tool_sign_out` (method `INTERNAL`, payload `client_id`, `tool`,
+  `offline_login_ended`, `sessions_ended`, `shared_with`). A failed call
+  (an error answer, no answer, no admin client) shows an error line and
+  writes no row. No login at all says "Nothing changed"; only shared
+  logins says so too and names the other tools. Neither writes a row.
 - The tool's last access token works until it ends: about five minutes on
   the built-in realm (300 seconds plus 30 seconds leeway). The card says
   so. Signing out is not a block: the tool can sign in again.

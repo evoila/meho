@@ -6,15 +6,26 @@
 Each tool kind signs in with its own Keycloak login client: the web
 console, the command line, Claude Code (``meho-mcp-code``), Claude Desktop
 (``meho-mcp-desktop``) and any other MCP client (``meho-mcp``). So
-Keycloak can end the saved login of one (person, client) pair, and the
+Keycloak can end the logins of one (person, client) pair, and the
 person's other tools keep working.
 
 * :func:`tool_kinds` -- the tool kinds MEHO knows, with their login client.
 * :func:`last_use_by_client` -- the last audit row of the person per login
   client. Audit rows name the client only while ``AUDIT_CLIENT_IDENTITY``
   is on, so with it off no tool has a last use.
-* :func:`sign_out_tool` -- ends the person's saved login for one client
-  (``DELETE /users/{user id}/consents/{client id}``) and then writes the
+* :func:`end_tool_logins` -- the Keycloak part. It ends both kinds of
+  login of the person for one client:
+
+  - the consent and offline login
+    (``DELETE /users/{user id}/consents/{client id}``);
+  - each ordinary (online) login that holds only this client
+    (``GET /users/{user id}/sessions``, then ``DELETE /sessions/{id}``).
+
+  Keycloak can end an ordinary login only as a whole. A login that this
+  client shares with another client (both signed in through one browser
+  login) is kept, so the other tool keeps working. The answer names those
+  other clients, and the page tells the person.
+* :func:`sign_out_tool` -- runs :func:`end_tool_logins` and then writes the
   audit row ``auth.tool_sign_out``. A failed Keycloak call writes no row.
 
 The tool's last access token keeps working until it expires: at most about
@@ -30,7 +41,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Final
 
@@ -40,7 +51,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.auth_config import MCP_TOOL_CLIENTS
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
+from meho_backplane.auth.keycloak_admin import (
+    KeycloakAdminClient,
+    KeycloakConsentNotFoundError,
+)
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.request_usage.collector import current_request_id
@@ -51,6 +65,8 @@ __all__ = [
     "OTHER_MCP_CLIENT_ID",
     "TOOL_SIGN_OUT_AUDIT_PATH",
     "ToolKind",
+    "ToolLoginsEnded",
+    "end_tool_logins",
     "last_use_by_client",
     "sign_out_tool",
     "tool_kinds",
@@ -130,24 +146,80 @@ async def last_use_by_client(
     return {str(client): last for client, last in result.all() if last is not None}
 
 
+@dataclass(frozen=True)
+class ToolLoginsEnded:
+    """What :func:`end_tool_logins` ended, and what it kept."""
+
+    offline_login_ended: bool
+    sessions_ended: int
+    shared_with: tuple[str, ...]
+    audit_id: uuid.UUID | None = None
+
+    @property
+    def ended_any(self) -> bool:
+        return self.offline_login_ended or self.sessions_ended > 0
+
+
+async def end_tool_logins(
+    kc: KeycloakAdminClient, *, user_id: str, client_id: str
+) -> ToolLoginsEnded:
+    """End the logins of user *user_id* for login client *client_id* only.
+
+    Ends the consent and offline login, and each ordinary login that holds
+    no other client. Keeps each ordinary login that also holds another
+    client, and names those other clients in ``shared_with``. Raises
+    :class:`~meho_backplane.auth.keycloak_admin.KeycloakConsentNotFoundError`
+    when the person has no login of this client at all.
+    """
+    own_sessions: list[str] = []
+    shared_with: set[str] = set()
+    for session in await kc.list_user_sessions(user_id):
+        clients = {str(c) for c in (session.get("clients") or {}).values()}
+        if client_id not in clients:
+            continue
+        others = clients - {client_id}
+        if others:
+            shared_with.update(others)
+        elif session.get("id"):
+            own_sessions.append(str(session["id"]))
+    try:
+        await kc.revoke_user_client_consent(user_id, client_id)
+        offline_login_ended = True
+    except KeycloakConsentNotFoundError:
+        offline_login_ended = False
+    sessions_ended = 0
+    for session_id in own_sessions:
+        if await kc.delete_user_session(session_id):
+            sessions_ended += 1
+    if not offline_login_ended and sessions_ended == 0 and not shared_with:
+        raise KeycloakConsentNotFoundError(
+            f"Keycloak has no login of this person for client {client_id!r}"
+        )
+    return ToolLoginsEnded(offline_login_ended, sessions_ended, tuple(sorted(shared_with)))
+
+
 async def sign_out_tool(
     *,
     operator_sub: str,
     tenant_id: uuid.UUID,
     kind: ToolKind,
     settings: Settings,
-) -> uuid.UUID:
-    """End the saved login of *operator_sub* for *kind* and write the audit row.
+) -> ToolLoginsEnded:
+    """End the logins of *operator_sub* for *kind* and write the audit row.
 
     *operator_sub* is the Keycloak user id of the person. The Keycloak
-    call runs first; the audit row is written only after it succeeded.
-    Every :class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminError`
-    (also "not configured" and "nothing to sign out") reaches the caller,
-    and then no row is written. Returns the id of the audit row.
+    calls run first; the audit row is written only after they succeeded
+    and ended at least one login. Every
+    :class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminError` (also
+    "not configured" and "nothing to sign out") reaches the caller, and
+    then no row is written. When only shared logins exist, nothing ends,
+    no row is written, and ``audit_id`` is ``None``.
     """
     started = time.monotonic()
     async with KeycloakAdminClient.from_settings(settings) as kc:
-        await kc.revoke_user_client_consent(operator_sub, kind.client_id)
+        ended = await end_tool_logins(kc, user_id=operator_sub, client_id=kind.client_id)
+    if not ended.ended_any:
+        return ended
     audit_id = await write_internal_audit_row(
         event_class=AuditEventClass.OPERATION_EXECUTION,
         operator_sub=operator_sub,
@@ -158,12 +230,19 @@ async def sign_out_tool(
         status_code=200,
         request_id=current_request_id(),
         duration_ms=(time.monotonic() - started) * 1000,
-        payload={"client_id": kind.client_id, "tool": kind.key},
+        payload={
+            "client_id": kind.client_id,
+            "tool": kind.key,
+            "offline_login_ended": ended.offline_login_ended,
+            "sessions_ended": ended.sessions_ended,
+            "shared_with": list(ended.shared_with),
+        },
     )
     _log.info(
         "tool_sign_out",
         operator_sub=operator_sub,
         tenant_id=str(tenant_id),
         client_id=kind.client_id,
+        sessions_ended=ended.sessions_ended,
     )
-    return audit_id
+    return replace(ended, audit_id=audit_id)

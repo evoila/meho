@@ -10,9 +10,10 @@ off, the account page has no such section and the route answers 404.
   each tool kind, its login client and its last use from the audit rows.
 * ``POST /ui/account/tools/sign-out`` -- form field ``tool`` (a tool kind
   key such as ``claude-desktop``, never a client id). Ends the signed-in
-  person's saved login for that one client
+  person's logins for that one client
   (:func:`~meho_backplane.auth.tool_sign_out.sign_out_tool`) and answers
-  the section again with one result line. The person comes from the
+  the section again with one result line. A login the tool shares with
+  another tool is kept, and the line says so. The person comes from the
   session, never from the form, so a person can sign out only their own
   tools. An unknown key, or a kind without a sign-out button (the web
   console), answers 404.
@@ -60,12 +61,26 @@ SIGNED_OUT_TEXT = (
     "{label} is signed out. It stops within about five minutes, when its "
     "last access token ends. If it signs in again, it gets a new login."
 )
-NOTHING_TO_SIGN_OUT_TEXT = "Keycloak has no saved login of {label} for you. Nothing changed."
+SHARED_KEPT_TEXT = (
+    " {label} also shares one browser login with {others}. MEHO did not end "
+    "that login, so {others} keep working. While it lasts, {label} can still "
+    "get new access tokens through it. To stop that too, end the login in "
+    "your Keycloak account page."
+)
+SHARED_ONLY_TEXT = (
+    "{label} has no login of its own: it shares one browser login with "
+    "{others}. MEHO did not end it, so {others} keep working. Nothing "
+    "changed. To stop {label}, end that login in your Keycloak account page."
+)
+NOTHING_TO_SIGN_OUT_TEXT = "Keycloak has no login of {label} for you. Nothing changed."
 NOT_CONFIGURED_TEXT = (
     "MEHO cannot sign out tools: the Keycloak admin client is not set up. "
     "Ask your MEHO admin. Nothing changed."
 )
-FAILED_TEXT = "Keycloak did not sign out {label}. Nothing changed. Try again later."
+FAILED_TEXT = (
+    "Keycloak could not sign out {label}. Try again later. If it keeps "
+    "failing, ask your MEHO admin."
+)
 
 
 @dataclass(frozen=True)
@@ -121,10 +136,16 @@ def _find_kind(key: str) -> ToolKind:
     raise HTTPException(status_code=404, detail="Not Found")
 
 
+def _labels(client_ids: tuple[str, ...]) -> str:
+    """Name the tools of *client_ids*, for a result line."""
+    names = {k.client_id: k.label for k in tool_kinds(get_settings())}
+    return ", ".join(names.get(c, c) for c in client_ids)
+
+
 async def _do_sign_out(session_ctx: UISessionContext, kind: ToolKind) -> _Result:
     """Run the sign-out and turn its outcome into one result line."""
     try:
-        await sign_out_tool(
+        ended = await sign_out_tool(
             operator_sub=session_ctx.operator_sub,
             tenant_id=session_ctx.tenant_id,
             kind=kind,
@@ -142,7 +163,13 @@ async def _do_sign_out(session_ctx: UISessionContext, kind: ToolKind) -> _Result
             reason=type(exc).__name__,
         )
         return _Result("error", FAILED_TEXT.format(label=kind.label))
-    return _Result("success", SIGNED_OUT_TEXT.format(label=kind.label))
+    others = _labels(ended.shared_with)
+    if not ended.ended_any:
+        return _Result("info", SHARED_ONLY_TEXT.format(label=kind.label, others=others))
+    text = SIGNED_OUT_TEXT.format(label=kind.label)
+    if ended.shared_with:
+        text += SHARED_KEPT_TEXT.format(label=kind.label, others=others)
+    return _Result("success", text)
 
 
 def build_account_tools_router() -> APIRouter:

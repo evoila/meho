@@ -12,6 +12,7 @@ Location-header parse on ``create_client`` and the orphan-rollback
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -367,3 +368,53 @@ async def test_revoke_user_client_consent_network_error_raises() -> None:
         async with _client() as kc:
             with pytest.raises(KeycloakAdminError, match="ConnectError"):
                 await kc.revoke_user_client_consent(_INTERNAL_ID, "meho-cli")
+
+
+@pytest.mark.asyncio
+async def test_list_user_sessions_returns_the_logins() -> None:
+    body = [{"id": "s-1", "clients": {"uuid-1": "meho-cli"}}, "not-a-session"]
+    with respx.mock as r:
+        _mock_token(r)
+        route = r.get(f"{_ADMIN_URL}/users/{_INTERNAL_ID}/sessions").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        async with _client() as kc:
+            sessions = await kc.list_user_sessions(_INTERNAL_ID)
+    assert route.call_count == 1
+    assert sessions == [{"id": "s-1", "clients": {"uuid-1": "meho-cli"}}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [httpx.Response(403), httpx.Response(200, json={"a": 1})])
+async def test_list_user_sessions_failure_raises(answer: httpx.Response) -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        r.get(url__regex=r"/sessions$").mock(return_value=answer)
+        async with _client() as kc:
+            with pytest.raises(KeycloakAdminError):
+                await kc.list_user_sessions(_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_delete_user_session_quotes_the_path_and_reports_404() -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        route = r.delete(url__regex=r"/sessions/").mock(
+            side_effect=[httpx.Response(204), httpx.Response(404)]
+        )
+        async with _client() as kc:
+            assert await kc.delete_user_session("../users/x") is True
+            assert await kc.delete_user_session("gone") is False
+    raw = route.calls[0].request.url.raw_path.decode()
+    assert raw == "/admin/realms/meho/sessions/..%2Fusers%2Fx"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [httpx.Response(403), httpx.ConnectError("refused")])
+async def test_delete_user_session_failure_raises(answer: Any) -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        r.delete(url__regex=r"/sessions/").mock(side_effect=[answer])
+        async with _client() as kc:
+            with pytest.raises(KeycloakAdminError):
+                await kc.delete_user_session("s-1")

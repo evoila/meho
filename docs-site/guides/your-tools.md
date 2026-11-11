@@ -29,7 +29,9 @@ or go to `/ui/account`. The card **Your tools** lists each tool kind:
 1. Click **Sign out this tool** next to the tool.
 2. Read the box and click **Sign out**.
 
-MEHO asks Keycloak to end your saved login for that one tool. Then:
+MEHO asks Keycloak to end the logins of that one tool: the offline
+login (it keeps a tool signed in for a long time) and each ordinary
+login. Then:
 
 - **The tool stops within about five minutes.** Its last access token
   works until it ends: at most about five and a half minutes on MEHO's
@@ -41,9 +43,17 @@ MEHO asks Keycloak to end your saved login for that one tool. Then:
 - **The audit log records it** with the entry `auth.tool_sign_out` and
   the login client.
 
-If Keycloak has no saved login of that tool for you, the card says
-"Nothing changed". If the call to Keycloak fails, the card shows an error,
-nothing changes and the audit log gets no sign-out entry. Try again later.
+Sometimes two tools share one login. This happens when both signed in
+through the same browser login, for example Claude Desktop and the
+command line. Keycloak can end such a login only for both tools at once.
+So MEHO keeps it, and your other tool keeps working. The card names the
+other tool. While that login lasts, the signed-out tool can still get new
+access tokens through it. To stop that too, end the login in your
+Keycloak account page.
+
+If Keycloak has no login of that tool for you, the card says "Nothing
+changed". If the call to Keycloak fails, the card shows an error and the
+audit log gets no sign-out entry. Try again later.
 
 The web console has no button here. To sign out a browser, use the card
 **Active sessions** on the same page.

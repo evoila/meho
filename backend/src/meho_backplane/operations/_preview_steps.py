@@ -26,6 +26,12 @@ Each step is checked with the same :func:`policy_gate` the step gate runs,
 with the same declared facts (``dangerous``, no ``requires_approval``,
 the level every shipped write step uses), and with ``decide_only=True``,
 so nothing is written and no grant is used.
+
+With ``AGENT_GRANT_REQUIRED=on`` (#6189) the dispatcher checks the same
+list for an agent call before anything runs
+(:func:`agent_no_grant_step_reason`): a write step that no grant covers
+refuses the whole call with ``agent_no_grant``, so it never stops
+half-way.
 """
 
 from __future__ import annotations
@@ -36,12 +42,64 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.operations._validate import policy_gate
+from meho_backplane.operations.deny_reasons import AGENT_NO_GRANT, is_agent_no_grant
 from meho_backplane.operations.governed_subops import governed_subops_for
 
-__all__ = ["preview_step_verdict"]
+__all__ = ["agent_no_grant_step_reason", "preview_step_verdict"]
 
 _READ_PREFIXES: Final[tuple[str, ...]] = ("GET:", "HEAD:")
 _STEP_SAFETY_LEVEL: Final = "dangerous"
+
+
+def _write_steps(op_id: str) -> list[str]:
+    """Every listed write step of *op_id*, at every level, each once.
+
+    A step can itself be a multi-step operation with its own list (for
+    example a host evacuation runs a VM migration, which runs a relocate
+    step). Its steps are listed too. Each operation is visited once, so a
+    list that loops back cannot run forever. Plain ``GET`` / ``HEAD``
+    reads are left out.
+    """
+    steps: list[str] = []
+    seen: set[str] = {op_id}
+    pending: list[str] = [op_id]
+    while pending:
+        surface = governed_subops_for(pending.pop(0))
+        if surface is None:
+            continue
+        for step_op_id in surface.sub_op_ids:
+            if step_op_id in seen:
+                continue
+            seen.add(step_op_id)
+            # A step with its own list: check its steps too.
+            pending.append(step_op_id)
+            if not step_op_id.upper().startswith(_READ_PREFIXES):
+                steps.append(step_op_id)
+    return steps
+
+
+async def _step_verdict(
+    *, operator: Operator, step_op_id: str, connector_id: str, target: Any
+) -> tuple[PermissionVerdict, str | None]:
+    """The gate's answer for one write step, as the step gate would give it."""
+    product, version, impl_id = parse_connector_id(connector_id)
+    step = EndpointDescriptor(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=step_op_id,
+        source_kind="composite",
+        safety_level=_STEP_SAFETY_LEVEL,
+        requires_approval=False,
+        parameter_schema={},
+    )
+    return await policy_gate(
+        operator=operator,
+        descriptor=step,
+        target=target,
+        connector_id=connector_id,
+        decide_only=True,
+    )
 
 
 async def preview_step_verdict(
@@ -55,55 +113,48 @@ async def preview_step_verdict(
 
     ``None`` also when the operation lists no steps. A denied step gives
     ``DENY``; else a step that waits gives ``NEEDS_APPROVAL``. The reason
-    names the steps.
-
-    A step can itself be a multi-step operation with its own list (for
-    example a host evacuation runs a VM migration, which runs a relocate
-    step). Its steps are checked too, at every level. Each operation is
-    checked once, so a list that loops back cannot run forever.
+    names the steps. The steps come from :func:`_write_steps`.
     """
-    if governed_subops_for(op_id) is None:
-        return None
-    product, version, impl_id = parse_connector_id(connector_id)
     waiting: list[str] = []
-    seen: set[str] = {op_id}
-    pending: list[str] = [op_id]
-    while pending:
-        surface = governed_subops_for(pending.pop(0))
-        if surface is None:
-            continue
-        for step_op_id in surface.sub_op_ids:
-            if step_op_id in seen:
-                continue
-            seen.add(step_op_id)
-            # A step with its own list: check its steps too.
-            pending.append(step_op_id)
-            if step_op_id.upper().startswith(_READ_PREFIXES):
-                continue
-            step = EndpointDescriptor(
-                product=product,
-                version=version,
-                impl_id=impl_id,
-                op_id=step_op_id,
-                source_kind="composite",
-                safety_level=_STEP_SAFETY_LEVEL,
-                requires_approval=False,
-                parameter_schema={},
-            )
-            verdict, reason = await policy_gate(
-                operator=operator,
-                descriptor=step,
-                target=target,
-                connector_id=connector_id,
-                decide_only=True,
-            )
-            if verdict is PermissionVerdict.DENY:
-                return verdict, f"the step {step_op_id} is denied: {reason or 'denied'}"
-            if verdict is PermissionVerdict.NEEDS_APPROVAL:
-                waiting.append(step_op_id)
+    for step_op_id in _write_steps(op_id):
+        verdict, reason = await _step_verdict(
+            operator=operator, step_op_id=step_op_id, connector_id=connector_id, target=target
+        )
+        if verdict is PermissionVerdict.DENY:
+            return verdict, f"the step {step_op_id} is denied: {reason or 'denied'}"
+        if verdict is PermissionVerdict.NEEDS_APPROVAL:
+            waiting.append(step_op_id)
     if not waiting:
         return None
     return PermissionVerdict.NEEDS_APPROVAL, (
         f"these steps have no grant: {', '.join(waiting)}. When the call "
         "runs one of them, that step waits for approval"
     )
+
+
+async def agent_no_grant_step_reason(
+    *,
+    operator: Operator,
+    op_id: str,
+    connector_id: str,
+    target: Any,
+) -> str | None:
+    """The refusal for a write step that no grant of the agent covers, or ``None``.
+
+    With ``AGENT_GRANT_REQUIRED=on`` such a step is refused when the call
+    reaches it, so the multi-step operation would stop half-way. The
+    dispatcher calls this before it stores an approval request or runs a
+    step, with the same step list the preview checks, and refuses the
+    whole call instead. The reason starts with ``agent_no_grant:``.
+    """
+    for step_op_id in _write_steps(op_id):
+        verdict, reason = await _step_verdict(
+            operator=operator, step_op_id=step_op_id, connector_id=connector_id, target=target
+        )
+        if verdict is PermissionVerdict.DENY and reason and is_agent_no_grant(reason):
+            return (
+                f"{AGENT_NO_GRANT}: the operation {op_id!r} has a write step "
+                f"{step_op_id} that no grant covers, so MEHO refuses the call "
+                f"before any step runs ({reason})"
+            )
+    return None

@@ -25,14 +25,18 @@ admin client and says one of:
   ``no_right_to_read_clients``, ``keycloak_timeout``,
   ``keycloak_unexpected_answer`` or ``keycloak_unreachable``.
 
-A failed read is never ``ok``. Reading login flows needs ``view-realm`` or
-``manage-realm`` on the admin client; the built-in realm gives
-``meho-admin`` ``manage-realm``.
+A failed read is never ``ok``. The answer of a read is kept for
+:data:`_KEEP_S` seconds, so ``/api/v1/health`` and ``meho_status``, which
+are called often, do not log in to Keycloak on every call.
+
+Reading login flows needs ``view-realm`` or ``manage-realm`` on the admin
+client; the built-in realm gives ``meho-admin`` ``manage-realm``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -61,6 +65,9 @@ ApprovalSignInState = Literal["ok", "flow_missing", "flow_differs", "not_bound",
 #: holds up the health answer for long.
 _READ_TIMEOUT_S = 5.0
 
+#: A read answer is kept this many seconds (per admin URL and client).
+_KEEP_S = 60.0
+
 
 class ApprovalSignInStatus(BaseModel):
     """The state of the approval sign-in flow and its binding (#6280)."""
@@ -71,6 +78,10 @@ class ApprovalSignInStatus(BaseModel):
     flow: str = APPROVAL_FLOW_ALIAS
     client: str
     detail: str | None = None
+
+
+#: The kept answers: (admin URL, client) -> (when read, in monotonic seconds; the answer).
+_kept: dict[tuple[str, str], tuple[float, ApprovalSignInStatus]] = {}
 
 
 class _NoRightError(Exception):
@@ -120,8 +131,19 @@ async def _state(kc: KeycloakAdminClient, client_id: str) -> tuple[ApprovalSignI
 
 
 async def read_approval_sign_in(settings: Settings | None = None) -> ApprovalSignInStatus:
-    """Read the approval sign-in flow and its binding; never raises."""
+    """The approval sign-in flow and its binding, read at most every :data:`_KEEP_S` s."""
     settings = settings or get_settings()
+    key = (settings.keycloak_admin_url, settings.keycloak_cli_approve_client_id)
+    kept = _kept.get(key)
+    if kept is not None and time.monotonic() - kept[0] < _KEEP_S:
+        return kept[1]
+    status = await _read(settings)
+    _kept[key] = (time.monotonic(), status)
+    return status
+
+
+async def _read(settings: Settings) -> ApprovalSignInStatus:
+    """Read the approval sign-in flow and its binding; never raises."""
     client_id = settings.keycloak_cli_approve_client_id
 
     def not_checked(reason: str) -> ApprovalSignInStatus:

@@ -979,7 +979,10 @@ the backplane's Keycloak admin client and puts the state into
 | `not_bound` | The flow is right, but the client is missing, has no own browser flow, or uses another flow (`detail`). |
 | `not_checked` | The read failed; `detail` is a reason word: `keycloak_admin_not_configured`, `no_right_to_read_login_flows`, `no_right_to_read_clients`, `keycloak_timeout` (5 seconds for the whole check), `keycloak_unexpected_answer` or `keycloak_unreachable`. |
 
-A failed read is never `ok`. The expected steps are the ones of
+A failed read is never `ok`. The answer is kept for 60 seconds per
+admin URL and client (`_KEEP_S`), because `/api/v1/health` and
+`meho_status` are called often; a fix in Keycloak shows up within a
+minute. The expected steps are the ones of
 `keycloak.authflow.ensure_approval_flow` (`approval_flow_difference` in
 `connectors/keycloak/ops_authflow.py`), so the check, the operation and the
 realm file agree. `meho doctor` turns the state into its line `approval

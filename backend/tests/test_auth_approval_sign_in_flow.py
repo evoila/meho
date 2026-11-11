@@ -47,8 +47,10 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("KEYCLOAK_DISCOVERY_URL", raising=False)
     monkeypatch.delenv("KEYCLOAK_CLI_APPROVE_CLIENT_ID", raising=False)
     get_settings.cache_clear()
+    approval_sign_in_flow._kept.clear()
     yield
     get_settings.cache_clear()
+    approval_sign_in_flow._kept.clear()
 
 
 def _step(level: int, name: str, requirement: str, *, flow: bool = False) -> dict[str, Any]:
@@ -284,6 +286,25 @@ async def test_the_status_never_holds_the_admin_secret_or_token() -> None:
         dumped = (await _read(**realm)).model_dump_json()
         assert "made-up-admin-secret" not in dumped
         assert "made-up-token" not in dumped
+
+
+async def test_the_answer_is_kept_for_a_short_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Health is called often: a second call within the time reads Keycloak no more."""
+    now = [1000.0]
+    monkeypatch.setattr(approval_sign_in_flow.time, "monotonic", lambda: now[0])
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock)
+        first = await read_approval_sign_in()
+        calls = mock.calls.call_count
+        now[0] += approval_sign_in_flow._KEEP_S - 1
+        assert await read_approval_sign_in() == first
+        assert mock.calls.call_count == calls
+
+        _mount(mock, clients=[_client(None)])
+        now[0] += 2
+        again = await read_approval_sign_in()
+    # After the time, the check reads Keycloak again and sees the change.
+    assert (first.state, again.state) == ("ok", "not_bound")
 
 
 # --- /api/v1/health carries the state --------------------------------------------

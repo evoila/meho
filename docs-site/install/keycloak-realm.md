@@ -224,7 +224,8 @@ tool) shows the state in `approvals.sign_in.state`:
 | `not_checked` | MEHO could not read it. `detail` says why, for example `no_right_to_read_login_flows`. |
 
 `meho doctor` shows the same state in its line `approval sign-in`, with
-the fix. MEHO reads the realm with its Keycloak admin client
+the fix. MEHO keeps the answer for one minute, so a fix shows up within a
+minute. MEHO reads the realm with its Keycloak admin client
 (`keycloakAdmin` in the chart). Reading login flows needs the
 realm-management role `view-realm` (or `manage-realm`) on that client.
 On your own Keycloak, give it `view-realm`. Without it the state is

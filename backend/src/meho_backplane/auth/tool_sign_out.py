@@ -220,6 +220,8 @@ async def end_tool_logins(
             await kc.revoke_user_client_consent(user_id, client_id)
             offline_login_ended = True
         except KeycloakConsentNotFoundError:
+            # No offline login: ordinary logins may still exist, and the
+            # check after the loop raises when nothing ended at all.
             pass
         for session_id in own_sessions:
             if await kc.delete_user_session(session_id):

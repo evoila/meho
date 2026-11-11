@@ -934,6 +934,9 @@ data:
   TEAM_KNOWLEDGE_RECALL: "false"
   KB_SIMILAR_CHECK: "false"
   MCP_SHORT_TOOL_TEXTS: "false"
+  # Category, labels and "always wait" on connectors, groups and
+  # operations. Off by default.
+  POLICY_CLASSIFICATION: "false"
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
   # shared, upkeep on, once a week).

@@ -215,6 +215,7 @@ async def test_approvals_default_posture_and_missing_key() -> None:
         "approval_custody",
         "mcp",
         "vault_tenant_scope",
+        "policy",
     }
     assert by_name["approval_custody"].configured is False
     assert by_name["approval_custody"].missing_env == ["APPROVAL_HANDOFF_ENCRYPTION_KEY"]

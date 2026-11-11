@@ -31,7 +31,7 @@
 // operator front-end over the same auth/policy/audit/JSONFlux path the
 // agent surface uses.
 //
-// `meho vault kv read --target rdc-vault secret <path>` replaces the
+// `meho vault kv read --target vault-lab secret <path>` replaces the
 // consumer's `_secret-read.sh secret/<mount>/<path>` wrapper.
 package vault
 

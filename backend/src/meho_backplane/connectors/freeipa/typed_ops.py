@@ -4,15 +4,16 @@
 """Operation table, group texts and registrar of the FreeIPA connector.
 
 The connector has typed operations only: FreeIPA has no OpenAPI description.
-Seventeen operations read (``safe``). Seventeen change something: host
+Seventeen operations read (``safe``). Twenty-five change something: host
 groups, their members, automember rules and hosts; sudo commands, sudo rules
-and access rules; password policies. Each change waits until a second person
-approves. They are registered at start-up with ``source_kind="typed"``, so
-they work on a fresh install with nothing to ingest. The read bodies live in
+and access rules; password policies; users, groups and role members. Each
+change waits until a second person approves. They are registered at start-up
+with ``source_kind="typed"``, so they work on a fresh install with nothing to
+ingest. The read bodies live in
 :mod:`meho_backplane.connectors.freeipa.reads`, the write bodies in
-:mod:`.writes` and :mod:`.access_writes`; their metadata in
-:mod:`.ops_directory`, :mod:`.ops_access`, :mod:`.ops_host_writes` and
-:mod:`.ops_access_writes`.
+:mod:`.writes`, :mod:`.access_writes` and :mod:`.identity_writes`; their
+metadata in :mod:`.ops_directory`, :mod:`.ops_access`, :mod:`.ops_host_writes`,
+:mod:`.ops_access_writes` and :mod:`.ops_identity_writes`.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from meho_backplane.connectors.freeipa.ops_access import ACCESS_OPS
 from meho_backplane.connectors.freeipa.ops_access_writes import ACCESS_WRITE_OPS
 from meho_backplane.connectors.freeipa.ops_directory import DIRECTORY_OPS
 from meho_backplane.connectors.freeipa.ops_host_writes import HOST_WRITE_OPS
+from meho_backplane.connectors.freeipa.ops_identity_writes import IDENTITY_WRITE_OPS
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -63,9 +65,11 @@ FREEIPA_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     GROUP_IDENTITY: (
         "Use to read the users, user groups and roles of a FreeIPA domain, and its password "
         "policies: find users, read one user with its groups, read a group's or a role's "
-        "members, read a group's or the global password policy. One change: set values of a "
-        "group's or the global password policy (freeipa.pwpolicy.set), which waits until a "
-        "second person approves."
+        "members, read a group's or the global password policy. Changes: create a user (with "
+        "no password), set the date a user's password runs out, disable or delete a user, "
+        "create a group, add users to a group, add users, groups, hosts or host groups to a "
+        "role (they get the role's rights), delete a role, and set values of a group's or the "
+        "global password policy. Every change waits until a second person approves."
     ),
     GROUP_ACCESS: (
         "Use to read and change who may do what on which host in a FreeIPA domain: sudo rules, "
@@ -83,6 +87,7 @@ FREEIPA_TYPED_OPS: tuple[FreeipaTypedOp, ...] = (
     *ACCESS_OPS,
     *HOST_WRITE_OPS,
     *ACCESS_WRITE_OPS,
+    *IDENTITY_WRITE_OPS,
 )
 
 

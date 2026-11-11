@@ -50,9 +50,9 @@ func newAlertListCmd() *cobra.Command {
 			"  --params '{\"activeOnly\":true}'                  - only active alerts\n" +
 			"  --params '{\"alertCriticality\":\"CRITICAL\"}'      - severity-scoped\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-operations alert list --target rdc-vrops\n" +
-			"  meho vcf-operations alert list --target rdc-vrops --params '{\"activeOnly\":true}'\n" +
-			"  meho vcf-operations alert list --target rdc-vrops --json",
+		Example: "  meho vcf-operations alert list --target vrops-lab\n" +
+			"  meho vcf-operations alert list --target vrops-lab --params '{\"activeOnly\":true}'\n" +
+			"  meho vcf-operations alert list --target vrops-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

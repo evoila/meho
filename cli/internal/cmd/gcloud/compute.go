@@ -67,9 +67,9 @@ func newComputeInstancesListCmd() *cobra.Command {
 			"JSONFlux reducer — large projects may return a handle instead\n" +
 			"of inline rows when the reducer is active.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho gcloud compute instances list --target rdc-gcp-dev\n" +
-			"  meho gcloud compute instances list --target rdc-gcp-dev --zone europe-west3-a\n" +
-			"  meho gcloud compute instances list --target rdc-gcp-dev --json | jq '.result.total'",
+		Example: "  meho gcloud compute instances list --target gcp-dev-lab\n" +
+			"  meho gcloud compute instances list --target gcp-dev-lab --zone europe-west3-a\n" +
+			"  meho gcloud compute instances list --target gcp-dev-lab --json | jq '.result.total'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -183,8 +183,8 @@ func newComputeNetworksListCmd() *cobra.Command {
 			"and creation_timestamp. Use as the first step in a network\n" +
 			"topology audit before drilling into subnets.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho gcloud compute networks list --target rdc-gcp-dev\n" +
-			"  meho gcloud compute networks list --target rdc-gcp-dev --json",
+		Example: "  meho gcloud compute networks list --target gcp-dev-lab\n" +
+			"  meho gcloud compute networks list --target gcp-dev-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -289,9 +289,9 @@ func newComputeSubnetsListCmd() *cobra.Command {
 			"to a specific region. Each row carries region, name, cidr_range,\n" +
 			"network (parent VPC URL), purpose, and private_ip_google_access.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho gcloud compute subnets list --target rdc-gcp-dev\n" +
-			"  meho gcloud compute subnets list --target rdc-gcp-dev --region europe-west3\n" +
-			"  meho gcloud compute subnets list --target rdc-gcp-dev --json",
+		Example: "  meho gcloud compute subnets list --target gcp-dev-lab\n" +
+			"  meho gcloud compute subnets list --target gcp-dev-lab --region europe-west3\n" +
+			"  meho gcloud compute subnets list --target gcp-dev-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

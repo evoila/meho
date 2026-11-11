@@ -37,8 +37,8 @@ func newSSHKeyListCmd() *cobra.Command {
 			"Use the fingerprint when referencing a key in a reinstall request.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot ssh-key list --target rdc-robot\n" +
-			"  meho hetzner-robot ssh-key list --target rdc-robot --json | jq '.result[].key.fingerprint'",
+		Example: "  meho hetzner-robot ssh-key list --target robot-lab\n" +
+			"  meho hetzner-robot ssh-key list --target robot-lab --json | jq '.result[].key.fingerprint'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -14,29 +14,29 @@ You can add your own connectors the same way as the enterprise pack: see [Write 
 
 These connectors are in the public image, generated from the in-process connector registry. Each row is one registered implementation. The **Docs** column links to the connector's page in the source repository.
 
-MEHO has two kinds of connector, both first-class and indistinguishable to an agent. **Generic** connectors are built by ingesting a vendor's protocol spec (OpenAPI, GraphQL, WSDL, proto); **typed** connectors are hand-coded against a vendor SDK or transport where no usable spec exists. The **Kind** column is populated only where MEHO's published connector-spec catalog states it, and is blank otherwise — it is a property of how a connector's operations are sourced, not something this table infers.
+MEHO has two kinds of connector, both first-class and indistinguishable to an agent. **Generic** connectors are built by ingesting a vendor's OpenAPI file (version 3.0 or 3.1; the command line converts a Swagger 2.0 file first); **typed** connectors are hand-coded against a vendor SDK or transport where no usable spec exists. The **Kind** column is populated only where MEHO's published connector-spec catalog states it, and is blank otherwise — it is a property of how a connector's operations are sourced, not something this table infers.
 
 | Connector | Product | What it does | Supported versions | Kind | Docs |
 | --- | --- | --- | --- | --- | --- |
 | `argocd-api-3.x` | `argocd` | — | >=2.0,<4.0 | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-argocd.md) |
-| `azure-arm-2026.10` | `azure` | Reads Azure subscriptions (VMs, Kubernetes clusters, networks, storage, costs, security and policy), changes tags and starts patch checks. | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-azure.md) |
+| `azure-arm-2026.10` | `azure` | Reads Azure subscriptions (VMs, Kubernetes clusters, networks, storage, costs, security and policy), changes tags and starts patch checks. | Azure has no product version. Each call names the API version of its resource type. | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-azure.md) |
 | `bind9-ssh-9.x` | `bind9` | — | — | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-bind9.md) |
-| `entra-graph-1.0` | `entra` | Reads Microsoft Entra ID users, groups, app registrations, service principals and role assignments. | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-entra.md) |
-| `freeipa-jsonrpc-4.x` | `freeipa` | Reads FreeIPA users, groups, hosts and access rules; creates host groups and rules, deletes hosts and host groups, and sets the password policy. | >=4.9,<5.0 | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-freeipa.md) |
-| `gcloud-rest-1.0` | `gcloud` | — | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-gcloud.md) |
-| `gh-rest-3` | `gh` | Reads GitHub repositories, issues, pull requests and projects, and creates issues, comments, repositories and commits. | — | generic | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-github.md) |
+| `entra-graph-1.0` | `entra` | Reads Microsoft Entra ID users, groups, app registrations, service principals and role assignments. | Entra ID has no product version. The connector calls Microsoft Graph v1.0. | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-entra.md) |
+| `freeipa-jsonrpc-4.x` | `freeipa` | Reads FreeIPA users, groups, hosts and access rules; creates users, groups, host groups and rules, adds members, deletes hosts, users and roles, and sets the password policy. | >=4.9,<5.0 | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-freeipa.md) |
+| `gcloud-rest-1.0` | `gcloud` | — | Google Cloud has no product version. Each call uses the versioned path of its API. | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-gcloud.md) |
+| `gh-rest-3` | `gh` | Reads GitHub repositories, issues, pull requests and projects, and creates issues, comments, repositories and commits. | GitHub.com has no product version. Each call sends REST API version 2022-11-28. | generic | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-github.md) |
 | `harbor-rest-2.x` | `harbor` | — | >=2.0,<3.0 | generic | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-harbor.md) |
-| `hetzner-rest-2026.04` | `hetzner` | — | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hetzner-robot.md) |
+| `hetzner-rest-2026.04` | `hetzner` | — | Hetzner Robot has no product version. The connector version 2026.04 is a date. | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hetzner-robot.md) |
 | `hyperv-ssh-2022.x` | `hyperv` | — | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hyperv.md) |
 | `k8s-1.x` | `k8s` | — | — | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-kubernetes.md) |
 | `keycloak-admin-26.x` | `keycloak` | — | >=26.0,<27.0 | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-keycloak.md) |
-| `linux-ssh-1.x` | `linux` | — | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-linux.md) |
+| `linux-ssh-1.x` | `linux` | — | Any Linux host that runs systemd fits. A rule for the distribution applies, not a range. | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-linux.md) |
 | `loki-api-3.x` | `loki` | — | >=2.9,<4.0 | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-loki.md) |
 | `mongodb-wire-7` | `mongodb` | — | >=5,<9 | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mongodb.md) |
 | `msad-ssh-2022.x` | `msad` | — | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-msad.md) |
 | `mssql-tds-2022.x` | `mssql` | — | >=13,<17 | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mssql.md) |
 | `pfsense-ssh-2.7` | `pfsense` | — | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-pfsense.md) |
-| `phpipam-rest-1.x` | `phpipam` | Lists phpIPAM subnets and free addresses, and reserves or releases an IP address. | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-phpipam.md) |
+| `phpipam-rest-1.x` | `phpipam` | Lists phpIPAM subnets and free addresses, and reserves or releases an IP address. | The phpIPAM API reports no version. The connector is built from the 1.8.2 API reference. | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-phpipam.md) |
 | `postgres-wire-16` | `postgres` | — | >=13,<18 | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-postgres.md) |
 | `prometheus-api-2.x` | `prometheus` | — | — | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-prometheus.md) |
 | `proxmox-api-8.x` | `proxmox` | — | >=7.0,<9.0 | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-proxmox.md) |

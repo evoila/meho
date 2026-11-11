@@ -29,7 +29,7 @@
 //
 // The verb tree replaces the consumer's `scripts/bind9-dns.sh`
 // wrapper (the 2026-05-04 / 2026-05-05 credential-leak surface
-// documented in evoila-bosnia/claude-rdc-hetzner-dc#86). The atomic-
+// documented in the lab repo). The atomic-
 // apply rollback contract — invalid `apply_*` / bad `record.add`
 // leaves `/etc/bind/` byte-identical — is enforced by the backend's
 // `_atomic.py` primitive (#589); the CLI exposes the result envelope

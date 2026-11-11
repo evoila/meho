@@ -44,8 +44,8 @@ func newRepoListCmd() *cobra.Command {
 			"app condition. --json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho argocd repo list --target rdc-argocd\n" +
-			"  meho argocd repo list --target rdc-argocd --json | jq '.result.items[].connectionState'",
+		Example: "  meho argocd repo list --target argocd-lab\n" +
+			"  meho argocd repo list --target argocd-lab --json | jq '.result.items[].connectionState'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

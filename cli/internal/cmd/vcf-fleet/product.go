@@ -41,7 +41,7 @@ func newProductListCmd() *cobra.Command {
 			"status, version, and node breakdown. Requires an environmentId\n" +
 			"from `vcf-fleet environment list`.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho vcf-fleet product list env-vrops-prod --target rdc-fleet",
+		Example:       "  meho vcf-fleet product list env-vrops-prod --target fleet-lab",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -297,6 +297,14 @@ evidence dict every surface already renders — the latest-result projection, th
 per-tick `sensor_results` rows, the sensor detail view, notification mails
 (clipped), and the investigator briefing — so no consumer needed a change.
 
+### Changes as events (#6180)
+
+With `CHECKS_AGENT_EVENTS` on, `_persist_outcome` writes one
+`check.sensor.changed` event in the same transaction as `last_state` when the
+confirmed state changed. A reading held by the re-check window writes none.
+With the switch off nothing is written. Payload: `docs/codebase/events.md`,
+"Check events".
+
 ### Per-tick evidence history (#2756)
 
 `meho_backplane.db.models.SensorResult` (`sensor_results` table, migration

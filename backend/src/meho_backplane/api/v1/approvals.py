@@ -84,7 +84,7 @@ import uuid
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi import status as http_status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -766,6 +766,7 @@ async def _capture_operator_decision(
     reason: str,
     operator: Operator,
     approval_auth: ApprovalAuth | None,
+    user_agent: str | None = None,
 ) -> ApprovalRequest:
     """Commit a ``/decide`` operator decision + publish, mapping errors to HTTP.
 
@@ -788,6 +789,7 @@ async def _capture_operator_decision(
                     params=None,
                     reason=reason,
                     approval_auth=approval_auth,
+                    user_agent=user_agent,
                 )
             else:
                 request = await reject_request(
@@ -1076,6 +1078,7 @@ async def _record_approval_decision(
     operator: Operator,
     body: ApproveRequestBody,
     approval_auth: ApprovalAuth,
+    user_agent: str | None = None,
 ) -> ApprovalRequest:
     """Commit + audit the approval decision, publish the event, map errors.
 
@@ -1096,6 +1099,7 @@ async def _record_approval_decision(
                 params=body.params,
                 reason=body.reason,
                 approval_auth=approval_auth,
+                user_agent=user_agent,
             )
             await session.commit()
         # Publish AFTER commit (G11.2-T5): a phantom event cannot
@@ -1174,6 +1178,7 @@ async def _record_approval_decision(
 async def approve_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: ApproveRequestBody,
+    http_request: Request,
     operator: Operator = _require_approvals_access,
     approval_auth: ApprovalAuth = _require_fresh_sign_in,
 ) -> ApproveResponseBody | JSONResponse:
@@ -1220,7 +1225,11 @@ async def approve_approval_request(
         audit_approval_request_id=str(request_id),
     )
     request = await _record_approval_decision(
-        request_id, operator=operator, body=body, approval_auth=approval_auth
+        request_id,
+        operator=operator,
+        body=body,
+        approval_auth=approval_auth,
+        user_agent=http_request.headers.get("user-agent"),
     )
 
     # Async governed dispatch (#3079): hand the resume to the background
@@ -1705,6 +1714,7 @@ class DecideResponseBody(BaseModel):
 async def decide_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: DecideRequestBody,
+    http_request: Request,
     operator: Operator = _require_approvals_access,
 ) -> DecideResponseBody | JSONResponse:
     """Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).
@@ -1762,6 +1772,7 @@ async def decide_approval_request(
         reason=body.reason,
         operator=operator,
         approval_auth=approval_auth,
+        user_agent=http_request.headers.get("user-agent"),
     )
 
     # Every approval drives the execute (#1503, #2293): stored params

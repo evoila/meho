@@ -87,6 +87,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "broadcast_retention_hours",
         "check_runner_client_id",
         "check_runner_client_secret",
+        "checks_agent_events",
         "checks_alert_advisory_window_minutes",
         "checks_evidence_prune_enabled",
         "checks_evidence_prune_interval_seconds",

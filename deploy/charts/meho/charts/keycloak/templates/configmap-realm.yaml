@@ -9,15 +9,16 @@
 # pod's environment during the import (see the StatefulSet).
 #
 # With the company login on, the bootstrap Job sets up the identity provider
-# as meho-admin, which then needs two more realm-management roles. They are
+# as meho-admin, which then needs one more realm-management role. It is
 # added here, so the realm file itself stays the one of an install without
-# the company login (docs/codebase/core-bootstrap.md).
+# the company login (docs/codebase/core-bootstrap.md). The realm file
+# already gives meho-admin manage-realm: the Job needs it for the login flows.
 {{- $realm := .Files.Get "files/meho-realm.json" }}
 {{- if .Values.companyLogin.enabled }}
 {{- $doc := fromJson $realm }}
 {{- $account := index $doc.users 0 }}
 {{- $roles := index $account.clientRoles "realm-management" }}
-{{- $_ := set $account.clientRoles "realm-management" (concat $roles (list "manage-identity-providers" "manage-realm")) }}
+{{- $_ := set $account.clientRoles "realm-management" (concat $roles (list "manage-identity-providers")) }}
 {{- $realm = toPrettyJson $doc }}
 {{- end }}
 apiVersion: v1

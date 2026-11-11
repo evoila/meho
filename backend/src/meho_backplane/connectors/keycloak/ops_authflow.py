@@ -65,6 +65,7 @@ __all__ = [
     "ENSURE_APPROVAL_FLOW_OP_ID",
     "WHEN_TO_USE_AUTHFLOW_BY_GROUP",
     "KeycloakApprovalFlowError",
+    "approval_flow_difference",
     "get_admin_list_strict",
     "keycloak_authflow_ensure_approval_flow",
 ]
@@ -176,6 +177,16 @@ def _difference(steps: list[dict[str, Any]]) -> str | None:
     if len(steps) > len(_STEPS):
         return f"the flow has {len(steps)} steps; wanted {len(_STEPS)}"
     return None
+
+
+def approval_flow_difference(rows: list[Any]) -> str | None:
+    """The first difference of the listed steps *rows* to the approval flow.
+
+    *rows* is the answer of ``GET .../authentication/flows/<alias>/executions``.
+    ``None`` when the steps are the ones of the realm file. The health check
+    uses it too (``meho_backplane.auth.approval_sign_in_flow``).
+    """
+    return _difference(_listed_steps(rows))
 
 
 async def _read_steps(

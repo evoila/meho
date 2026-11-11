@@ -961,6 +961,37 @@ request field, header or command-line flag can set it.
   [Approve needs a fresh approval sign-in](#rest-backendsrcmeho_backplaneapiv1approvalspy).
 - **Reject** needs no fresh sign-in, on every surface.
 
+**The approval sign-in flow is checked (#6280).** The client
+`meho-cli-approve` must sign in through its own Keycloak login flow
+`meho approval sign-in`: the password form, then the one-time code step
+when the person has a code app. No other step. The built-in realm has it
+from the realm file; the bootstrap Job makes it and binds the client on
+every upgrade, and stops when `meho-admin` lacks `manage-realm`
+(docs/codebase/core-bootstrap.md). On a customer's own Keycloak an admin
+sets it up by hand or with `keycloak.authflow.ensure_approval_flow`.
+`auth/approval_sign_in_flow.py:read_approval_sign_in` reads the realm with
+the backplane's Keycloak admin client and puts the state into
+`/api/v1/health` (and `meho_status`) as `approvals.sign_in`:
+
+| `state` | Meaning |
+|---|---|
+| `ok` | The flow has exactly the steps of the realm file, and the client's browser flow is this flow. |
+| `flow_missing` | The realm has no flow with that name. |
+| `flow_differs` | The flow has other steps; `detail` names the first difference. The realm stage and the operation never bind the client to it. |
+| `not_bound` | The flow is right, but the client is missing, has no own browser flow, or uses another flow (`detail`). |
+| `not_checked` | The read failed; `detail` is a reason word: `keycloak_admin_not_configured`, `no_right_to_read_login_flows`, `no_right_to_read_clients`, `keycloak_timeout` (5 seconds for the whole check), `keycloak_unexpected_answer` or `keycloak_unreachable`. |
+
+A failed read is never `ok`. The answer is kept for 60 seconds per
+admin URL and client (`_KEEP_S`), because `/api/v1/health` and
+`meho_status` are called often; a fix in Keycloak shows up within a
+minute. The expected steps are the ones of
+`keycloak.authflow.ensure_approval_flow` (`approval_flow_difference` in
+`connectors/keycloak/ops_authflow.py`), so the check, the operation and the
+realm file agree. `meho doctor` turns the state into its line `approval
+sign-in` (`cli/internal/cmd/doctor_approval.go`): `ok` passes, every other
+state is a warning with the fix. The check only reports; the approve path
+does not read it.
+
 Every approval records who approved (`reviewed_by`), whether it was a
 self-approval (`self_approved`), which rule allowed it (`approval_rule`)
 and how the person proved they were present (`approval_auth`: channel

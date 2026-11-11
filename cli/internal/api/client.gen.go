@@ -8550,8 +8550,10 @@ type PreviewOperationResponseStatus string
 //
 // Members:
 //
-//   - :attr:`USER` — a human operator authenticated via the interactive
-//     device-code flow. Default when no claim is present.
+//   - :attr:`USER` — a person who signed in. There are three ways: the
+//     command line (“meho-cli“ client, device code), an MCP client
+//     (“meho-mcp“ client, sign-in in the browser), and the web console
+//     (“meho-web“ client). Default when no claim is present.
 //   - :attr:`SERVICE` — a non-interactive service account client that
 //     uses client-credentials flow but is not a MEHO-managed agent.
 //   - :attr:`AGENT` — a Keycloak client registered by
@@ -9398,8 +9400,10 @@ type RunnerPrincipal struct {
 	//
 	// Members:
 	//
-	// * :attr:`USER` — a human operator authenticated via the interactive
-	//   device-code flow. Default when no claim is present.
+	// * :attr:`USER` — a person who signed in. There are three ways: the
+	//   command line (``meho-cli`` client, device code), an MCP client
+	//   (``meho-mcp`` client, sign-in in the browser), and the web console
+	//   (``meho-web`` client). Default when no claim is present.
 	// * :attr:`SERVICE` — a non-interactive service account client that
 	//   uses client-credentials flow but is not a MEHO-managed agent.
 	// * :attr:`AGENT` — a Keycloak client registered by

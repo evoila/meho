@@ -365,7 +365,9 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
     ``short_tool_texts`` is the ``MCP_SHORT_TOOL_TEXTS`` switch (#4172), so
     a benchmark knows its state. ``client_per_tool_kind`` is the
     ``MCP_CLIENT_PER_TOOL_KIND`` switch: when on, Claude Code and Claude
-    Desktop sign in with their own login client. ``protocol_version`` is the spec revision
+    Desktop sign in with their own login client, and ``/ready`` adds
+    ``tool_clients`` (:func:`~meho_backplane.auth.tool_clients.tool_clients_report`:
+    are these clients in Keycloak). ``protocol_version`` is the spec revision
     the server pins (:data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`),
     so a deploy operator can answer "which MCP revision will this server
     negotiate with my clients?" from a single GET without a login.
@@ -392,18 +394,10 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
     by :func:`~meho_backplane.mcp.server._initialize`) gives them the
     converse — which clients are pinned to a different revision.
     """
-    # Function-local import to break the
+    # Function-local import: it breaks the cycle
     # ``features -> mcp.schemas -> mcp/__init__ -> mcp.handlers ->
-    # broadcast -> health -> features`` cycle. ``health.py`` imports
-    # ``build_features_block`` at module top-level (the ``/ready``
-    # route hands the result to ``JSONResponse``), and ``mcp/__init__.py``
-    # eagerly imports ``handlers`` to register the T3 JSON-RPC methods
-    # — both can't sit above this module without re-entering it
-    # during initial import. ``mcp.schemas`` itself is a leaf module
-    # (no imports from elsewhere in the package), so reaching for it
-    # function-locally is cheap and safe; the per-request cost of one
-    # already-cached ``import`` is negligible against the rest of
-    # ``/ready``'s probe-fanout work.
+    # broadcast -> health -> features``. ``mcp/__init__.py`` imports its
+    # handlers eagerly, and ``health.py`` imports this module at the top.
     from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 
     return {

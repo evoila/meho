@@ -466,6 +466,36 @@ class KeycloakAdminClient:
             )
         return internal_id
 
+    async def client_exists(self, client_id: str) -> bool:
+        """Return ``True`` when the realm has a client with this ``clientId``.
+
+        Calls ``GET /clients?clientId=<id>``. Without ``search=true`` Keycloak
+        matches the id exactly and answers a list: one entry, or none. Any
+        other answer raises :class:`KeycloakAdminError`, so a failed lookup
+        never reads as "the client is missing".
+        """
+        assert self._http is not None
+        assert self._token
+        try:
+            resp = await self._http.get(
+                f"{self._admin_url}/clients",
+                params={"clientId": client_id},
+                headers=self._auth_headers(),
+            )
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak client lookup network error: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code != 200:
+            raise KeycloakAdminError(f"Keycloak client lookup failed: HTTP {resp.status_code}")
+        try:
+            found: Any = resp.json()
+        except ValueError as exc:
+            raise KeycloakAdminError("Keycloak client lookup returned no JSON") from exc
+        if not isinstance(found, list):
+            raise KeycloakAdminError("Keycloak client lookup returned no list")
+        return any(isinstance(c, dict) and c.get("clientId") == client_id for c in found)
+
     async def read(self, path: str, params: dict[str, str] | None = None) -> tuple[int, Any]:
         """GET *path* under the realm's admin URL: the status and the JSON body.
 

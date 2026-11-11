@@ -137,8 +137,9 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     #3937) + ``DIAG_OPS`` (the read ``pfsense.diag.ping``, #3965) +
     ``OPENVPN_OPS`` (``pfsense.openvpn.address.next_free`` and
     ``pfsense.openvpn.csc.sync``) + ``OPENVPN_USER_OPS``
-    (``pfsense.openvpn.user.create`` / ``pfsense.openvpn.user.delete``, #3993).
-    Twenty-eight ops total.
+    (``pfsense.openvpn.user.create`` / ``pfsense.openvpn.user.delete``, #3993) +
+    ``OPENVPN_RULE_OPS`` (``pfsense.openvpn.rule.sync``, #3993).
+    Twenty-nine ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -158,6 +159,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     from meho_backplane.connectors.pfsense.ops_filter_rule import FILTER_RULE_OPS
     from meho_backplane.connectors.pfsense.ops_mgmt_flow import MGMT_FLOW_OPS
     from meho_backplane.connectors.pfsense.ops_openvpn import OPENVPN_OPS
+    from meho_backplane.connectors.pfsense.ops_openvpn_rule import OPENVPN_RULE_OPS
     from meho_backplane.connectors.pfsense.ops_openvpn_user import OPENVPN_USER_OPS
     from meho_backplane.connectors.pfsense.ops_read import READ_OPS
     from meho_backplane.connectors.pfsense.ops_user_write import USER_WRITE_OPS
@@ -175,6 +177,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
         *DIAG_OPS,
         *OPENVPN_OPS,
         *OPENVPN_USER_OPS,
+        *OPENVPN_RULE_OPS,
     )
 
 

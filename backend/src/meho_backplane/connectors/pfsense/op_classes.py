@@ -17,7 +17,12 @@ declare_op_classes(
     # User flag writes (#3937): ``.disable`` / ``.enable`` are not write
     # suffixes, and a suffix would also relabel the flat ``meho_`` mirror.
     # The params carry only a user name, so plain ``write``.
-    write=("pfsense.openvpn.csc.sync", "pfsense.user.disable", "pfsense.user.enable"),
+    write=(
+        "pfsense.openvpn.csc.sync",
+        "pfsense.openvpn.rule.sync",
+        "pfsense.user.disable",
+        "pfsense.user.enable",
+    ),
 )
 
 # The SSH login on pfSense is ``admin``, which is root (uid 0). Every config
@@ -39,6 +44,7 @@ declare_root_shell(
         "pfsense.alias.member.remove",
         "pfsense.nat.delete",
         "pfsense.openvpn.csc.sync",
+        "pfsense.openvpn.rule.sync",
         "pfsense.openvpn.user.create",
         "pfsense.openvpn.user.delete",
     )

@@ -67,7 +67,7 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (28 ops total). T1 shipped
+  composition function, and the `PFSENSE_OPS` tuple (29 ops total). T1 shipped
   `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
   appends `pfsense.dhcp.leases`; #3090 appends the two write ops via the
   `ops_write` module; #3232 appends the first two destructive deletes and #3313
@@ -79,8 +79,8 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   `pfsense.filter.rule.delete` via the `ops_filter_rule` module; #3937
   appends `pfsense.user.disable` and `pfsense.user.enable` via the
   `ops_user_write` module; #3965 appends `pfsense.diag.ping` via the
-  `ops_diag` module; #3993 appends the four VPN onboarding ops via the
-  `ops_openvpn` and `ops_openvpn_user` modules.
+  `ops_diag` module; #3993 appends the five VPN onboarding ops via the
+  `ops_openvpn`, `ops_openvpn_user` and `ops_openvpn_rule` modules.
 
 - **Diagnostics** (`ops_diag.py`, #3965) — the handler `pfsense_diag_ping`,
   the input checks (`_validate_host`, `_validate_source`, `_validate_count`),
@@ -985,7 +985,7 @@ Tests: `backend/tests/test_connectors_pfsense_topology.py`.
 
 ## VPN onboarding (#3993)
 
-Four ops give a person VPN access on a pfSense firewall with OpenVPN servers
+Five ops give a person VPN access on a pfSense firewall with OpenVPN servers
 in the mode `server_user` (users log in with a local user name and password;
 the user has no certificate). They are in the group `vpn`.
 
@@ -994,11 +994,13 @@ the user has no certificate). They are in the group `vpn`.
 | `pfsense.openvpn.address.next_free` | Finds the lowest address offset that is free on every user-login server. Read only. | `safe` |
 | `pfsense.openvpn.user.create` | Makes the user. The password is made on the firewall and written to Vault. | `dangerous`, approval |
 | `pfsense.openvpn.csc.sync` | Creates or extends client overrides (fixed address and pushed routes). Has a compare-only mode. | `caution` |
+| `pfsense.openvpn.rule.sync` | Adds the missing tagged per-user pass rules on the OpenVPN rule tab. Has a compare-only mode. | `dangerous`, approval |
 | `pfsense.openvpn.user.delete` | Removes the user and the overrides with its name. | `dangerous`, approval |
 
 Code: `openvpn_config.py` (parsers and the rendered-file read, shared),
 `ops_openvpn.py` (next free address and the override sync),
-`ops_openvpn_user.py` (user create and delete). Checked against the pfSense
+`ops_openvpn_user.py` (user create and delete), `ops_openvpn_rule.py` (the
+per-user rule sync). Checked against the pfSense
 2.7.2 sources `openvpn.inc`, `vpn_openvpn_csc.php` and
 `system_usermanager.php`.
 
@@ -1024,26 +1026,52 @@ Code: `openvpn_config.py` (parsers and the rendered-file read, shared),
   the address of an existing entry, and does not restart OpenVPN. The
   fragment calls `openvpn_resync_csc()` for each entry, like the web page, so
   the override lives in the configuration and survives a resync. An override
-  shared by several servers is not changed (`shared_entry`).
+  shared by several servers is not changed (`shared_entry`). The plan comes
+  from one read of `config.xml` and the fragment runs later, so the fragment
+  first checks that the overrides are still as the plan saw them (same
+  number, no override yet for a new entry, same address and routes on an
+  entry it extends). When one changed, for example a route added in the web
+  page meanwhile, it writes nothing and the op fails with "run again".
 - **User create.** The handler checks the Vault path against the tenant path
   first. An existing user is left alone (`exists`). The fragment makes a
   24-character password (letters and digits, `random_int`), sets it with
   `local_user_set_password()`, adds the user to the group `all` and prints the
-  password once. The handler writes it to Vault (a patch of one field; a new
-  secret when the path does not exist). It is never in the answer, the
-  approval, an error or a log. When the Vault write fails, the user is removed
-  again. The broadcast class is `credential_mint`.
+  new `uid` and the password once. When the name was taken since the first
+  read, it changes nothing and says so; the op answers `exists` and touches
+  that user in no way. The handler writes the password to Vault first (a
+  patch of one field; a new secret when the path does not exist), and only
+  then reads `config.xml` again. So a failed or surprising read-back never
+  leaves a user whose password nobody has: the error says where the password
+  is. The password is never in the answer, the approval, an error or a log.
+  When the Vault write fails, the user is removed again, by name and `uid`;
+  overrides with the name stay. The broadcast class is `credential_mint`.
 - **User delete.** Refused for `not_found`, `ambiguous` and the built-in admin
   account. It asks every enabled user-login server for its connected clients
-  (management socket, `status 2`) and refuses while the user is connected
+  (management socket, `status 2`). A session counts when the login name
+  (`Username` column) or the certificate name (`Common Name`) is the user, so
+  a server that also checks a certificate is covered. It refuses while the
+  user is connected
   (`connected`) or when that cannot be read (`connection_unknown`), unless
   `force` is true. The approval card shows the user and the overrides that go
   with it. Read-back checks that the user and its overrides are gone and
   everything else is unchanged.
-- **Not covered here.** The per-user firewall rules: use
-  `pfsense.filter.rule.add` / `pfsense.filter.rule.delete` (#3850) for each
-  rule. A sync of tagged rules is not built. DNS host entries for VPN clients
-  (the web page also reloads the resolver) are not touched.
+- **Per-user rule sync.** One `pass` rule per user, source and destination
+  on the OpenVPN rule tab (interface `openvpn`), tagged with the description
+  `meho-vpn-user:<name>`. Only tagged rules count. A wanted rule that a
+  tagged rule already does is `unchanged`; else `create`. A tagged rule of a
+  named user that nobody asked for is `not_wanted`: reported with its
+  `ridentifier`, never removed (use `pfsense.filter.rule.delete`). An unknown
+  user is `refused` and stops the call. With `compare_only` it writes
+  nothing. Otherwise it saves a rollback copy
+  (`/cf/conf/meho-rollback-rule-sync-<time>.xml`), and one fragment checks
+  that the tagged rules are still as the plan saw them, adds the new rules
+  at the bottom of the OpenVPN tab (a new `pass` rule never goes above an
+  existing `block` rule there), then `filter_rules_sort()`,
+  `write_config()` and `filter_configure()`. The read-back checks each new
+  rule and that nothing else changed. Each new rule gets a new 9-digit
+  `ridentifier`.
+- **Not covered here.** DNS host entries for VPN clients (the web page also
+  reloads the resolver) are not touched.
 
 ## References
 
@@ -1082,8 +1110,8 @@ Code: `openvpn_config.py` (parsers and the rendered-file read, shared),
   `pfsense.route.static.add`, and the read `pfsense.diag.ping`.
   FreeBSD `ping(8)`: https://man.freebsd.org/cgi/man.cgi?query=ping&sektion=8.
 - Task #3993: the VPN onboarding ops (`pfsense.openvpn.address.next_free`,
-  `pfsense.openvpn.csc.sync`, `pfsense.openvpn.user.create`,
-  `pfsense.openvpn.user.delete`).
+  `pfsense.openvpn.csc.sync`, `pfsense.openvpn.rule.sync`,
+  `pfsense.openvpn.user.create`, `pfsense.openvpn.user.delete`).
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.
 - `SshConnector` adapter: `backend/src/meho_backplane/connectors/adapters/ssh.py`.

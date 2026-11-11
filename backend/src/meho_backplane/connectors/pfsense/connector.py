@@ -298,6 +298,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "``pfsense.openvpn.user.create`` (the password goes to Vault and is never "
         "shown; needs approval) and give the user a fixed address and routes with "
         "``pfsense.openvpn.csc.sync`` (run it with ``compare_only`` first). "
+        "``pfsense.openvpn.rule.sync`` adds the tagged pass rules each user needs "
+        "(needs approval; also has ``compare_only``). "
         "``pfsense.openvpn.user.delete`` removes a VPN user and its overrides "
         "(needs approval; refused while the user is connected unless ``force``)."
     ),
@@ -900,6 +902,24 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_openvpn_csc_sync(self, target, params, operator)
+
+    async def openvpn_rule_sync(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.openvpn.rule.sync`` (#3993).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn_rule.pfsense_openvpn_rule_sync`.
+        Adds the missing tagged per-user VPN pass rules (can compare only).
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn_rule import (
+            pfsense_openvpn_rule_sync as _pfsense_openvpn_rule_sync,
+        )
+
+        return await _pfsense_openvpn_rule_sync(self, target, params, operator)
 
     async def openvpn_user_create(
         self,

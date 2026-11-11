@@ -1062,13 +1062,13 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_twenty_eight_entries() -> None:
+def test_pfsense_ops_has_twenty_nine_entries() -> None:
     """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232)
     + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary
     + user.list / route.static.list (#3954) + filter.rule.add / .delete (#3850)
     + user.disable / user.enable (#3937) + diag.ping (#3965)
-    + address.next_free / csc.sync / user.create / user.delete (#3993) = 28."""
-    assert len(PFSENSE_OPS) == 28
+    + address.next_free / csc.sync / user.create / user.delete / rule.sync (#3993) = 29."""
+    assert len(PFSENSE_OPS) == 29
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1104,6 +1104,7 @@ _DANGEROUS_OP_IDS = {
     "pfsense.filter.rule.add",
     "pfsense.openvpn.user.create",
     "pfsense.openvpn.user.delete",
+    "pfsense.openvpn.rule.sync",
 }
 
 # Reads whose parameter holds an address the firewall connects to: caution
@@ -1176,6 +1177,7 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.openvpn.csc.sync",
         "pfsense.openvpn.user.create",
         "pfsense.openvpn.user.delete",
+        "pfsense.openvpn.rule.sync",
     }
     assert op_ids == expected
 

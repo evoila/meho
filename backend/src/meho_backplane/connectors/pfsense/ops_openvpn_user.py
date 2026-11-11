@@ -29,15 +29,20 @@ The create steps
    for a new user: makes a 24-character password from letters and digits
    with ``random_int``, sets it through ``local_user_set_password()``,
    takes the next ``uid``, adds the user to the ``all`` group,
-   ``local_user_set()`` and ``write_config()``. It prints the password once
-   on standard output. The staged script holds no password.
-4. ``config.xml`` is read again: the user must be there once and no other
-   user may have changed.
-5. The password is written to Vault (``patch`` of the one field; a new
-   secret when the path does not exist yet). When that write fails, the
-   handler removes the user it just made, so no user is left whose password
-   nobody knows, and raises. When the removal fails too, the error says
-   so and names the user.
+   ``local_user_set()`` and ``write_config()``. It prints the new ``uid``
+   and the password once on standard output. The staged script holds no
+   password. When a user with the name appeared since step 2, the fragment
+   changes nothing and prints ``MEHO_VPN_EXISTS``: the handler then answers
+   ``exists`` and touches that user in no way.
+4. The password is written to Vault (``patch`` of the one field; a new
+   secret when the path does not exist yet), before any other check. When
+   that write fails, the handler removes the user it just made (found by
+   name AND the printed ``uid``; overrides with the name stay), so no user
+   is left whose password nobody knows, and raises. When the removal fails
+   too, the error says so and names the user.
+5. ``config.xml`` is read again: the user must be there once, with the
+   printed ``uid``, and no other user may have changed. When this read or
+   check fails, the password is already in Vault; the error says so.
 
 The password is held only in memory. It is never part of the result, an
 error message, the approval input or a log line; the exception chain of a
@@ -101,6 +106,7 @@ __all__ = [
     "OPENVPN_USER_OPS",
     "build_user_create_playback",
     "build_user_delete_playback",
+    "build_user_undo_playback",
     "pfsense_openvpn_user_create",
     "pfsense_openvpn_user_delete",
     "register_pfsense_openvpn_user_preview_builders",
@@ -112,6 +118,11 @@ _PASSWORD_MARKER: Final = "MEHO_VPN_PASSWORD="
 _PASSWORD_RE: Final = re.compile(
     rf"{_PASSWORD_MARKER}([A-Za-z0-9]{{{_PASSWORD_LENGTH}}})(?![A-Za-z0-9])"
 )
+_CREATED_MARKER: Final = "MEHO_VPN_CREATED_UID="
+_CREATED_RE: Final = re.compile(rf"^{_CREATED_MARKER}([0-9]{{1,10}})\s*$", re.MULTILINE)
+_EXISTS_MARKER: Final = "MEHO_VPN_EXISTS"
+_EXISTS_RE: Final = re.compile(rf"^{_EXISTS_MARKER}\s*$", re.MULTILINE)
+_UID_RE: Final = re.compile(r"^[0-9]{1,10}$")
 
 _MOUNT_RE: Final = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _VAULT_PATH_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
@@ -159,7 +170,9 @@ def build_user_create_playback(name: str, descr: str) -> str:
     """Return the fragment that makes ONE local user with a random password.
 
     Adds a user only when no user has that name. The password is made with
-    ``random_int`` and printed once as ``MEHO_VPN_PASSWORD=<value>``.
+    ``random_int`` and printed once as ``MEHO_VPN_PASSWORD=<value>``, after
+    ``MEHO_VPN_CREATED_UID=<uid>``. When the name is taken, it prints
+    ``MEHO_VPN_EXISTS`` and changes nothing.
     """
     name = _validate_user_name(name)
     users = "$config['system']['user']"
@@ -207,7 +220,10 @@ def build_user_create_playback(name: str, descr: str) -> str:
         "  $userindex = index_users();",
         "  local_user_set($meho_user);",
         f"  write_config({_php_squote(f'meho: add VPN user {name}')});",
+        f"  echo '{_CREATED_MARKER}' . $meho_user['uid'] . \"\\n\";",
         f"  echo '{_PASSWORD_MARKER}' . $meho_pw . \"\\n\";",
+        "} else {",
+        f"  echo '{_EXISTS_MARKER}' . \"\\n\";",
         "}",
     ]
     return "\n".join(lines) + "\n"
@@ -218,13 +234,44 @@ def build_user_delete_playback(name: str) -> str:
 
     Acts only when exactly one user has the name and it is not uid 0.
     """
+    return _build_user_remove_playback(name, uid=None)
+
+
+def build_user_undo_playback(name: str, uid: str) -> str:
+    """Return the fragment that removes the user this call just made, and nothing else.
+
+    Acts only when exactly one user has the name AND it has *uid* (not 0).
+    The client overrides with the name stay: they may be older than the user.
+    """
+    if not isinstance(uid, str) or not _UID_RE.fullmatch(uid):
+        raise ValueError(f"uid must be a number; got {uid!r}")
+    return _build_user_remove_playback(name, uid=uid)
+
+
+def _build_user_remove_playback(name: str, *, uid: str | None) -> str:
     name = _validate_user_name(name)
     users = "$config['system']['user']"
     csc = "$config['openvpn']['openvpn-csc']"
+    guard = f"$meho_found === 1 && (string){users}[$meho_idx]['uid'] !== '0'"
+    if uid is not None:
+        guard += f" && (string){users}[$meho_idx]['uid'] === {_php_squote(uid)}"
+    overrides = [
+        f"  if (isset({csc}) && is_array({csc})) {{",
+        f"    foreach ({csc} as $meho_j => $meho_e) {{",
+        "      if (isset($meho_e['common_name'])",
+        "          && (string)$meho_e['common_name'] === $meho_name) {",
+        "        openvpn_delete_csc($meho_e);",
+        f"        unset({csc}[$meho_j]);",
+        "      }",
+        "    }",
+        f"    {csc} = array_values({csc});",
+        "  }",
+    ]
+    what = "delete VPN user" if uid is None else "undo new VPN user"
     lines = [
         "global $config, $userindex;",
         "require_once('auth.inc');",
-        "require_once('openvpn.inc');",
+        *(["require_once('openvpn.inc');"] if uid is None else []),
         f"$meho_name = {_php_squote(name)};",
         "$meho_found = 0;",
         "$meho_idx = null;",
@@ -236,23 +283,14 @@ def build_user_delete_playback(name: str) -> str:
         "    }",
         "  }",
         "}",
-        f"if ($meho_found === 1 && (string){users}[$meho_idx]['uid'] !== '0') {{",
+        f"if ({guard}) {{",
         f"  $meho_user = {users}[$meho_idx];",
-        f"  if (isset({csc}) && is_array({csc})) {{",
-        f"    foreach ({csc} as $meho_j => $meho_e) {{",
-        "      if (isset($meho_e['common_name'])",
-        "          && (string)$meho_e['common_name'] === $meho_name) {",
-        "        openvpn_delete_csc($meho_e);",
-        f"        unset({csc}[$meho_j]);",
-        "      }",
-        "    }",
-        f"    {csc} = array_values({csc});",
-        "  }",
+        *(overrides if uid is None else []),
         "  local_user_del($meho_user);",
         f"  unset({users}[$meho_idx]);",
         f"  {users} = array_values({users});",
         "  $userindex = index_users();",
-        f"  write_config({_php_squote(f'meho: delete VPN user {name}')});",
+        f"  write_config({_php_squote(f'meho: {what} {name}')});",
         "}",
     ]
     return "\n".join(lines) + "\n"
@@ -351,40 +389,86 @@ async def pfsense_openvpn_user_create(
         script_body=build_user_create_playback(name, descr),
         operator=operator,
     )
+    created = _CREATED_RE.search(played)
+    if created is None:
+        if _EXISTS_RE.search(played):
+            return {
+                **result,
+                "status": "exists",
+                "nothing_to_do": True,
+                "guidance": (
+                    "a user with this name was made by someone else while this call ran; "
+                    "it and its password were left alone"
+                ),
+            }
+        raise RuntimeError(
+            f"openvpn.user.create: the firewall did not say whether it made {name!r}; "
+            "nothing was undone. Check with pfsense.user.list."
+        )
+    uid = created.group(1)
     match = _PASSWORD_RE.search(played)
-    password = match.group(1) if match else None
+    if match is None:
+        await _undo_create(
+            self, target, name, uid, operator, "the firewall did not return a password"
+        )
+    try:
+        await _store_password(operator, mount, path, field, match.group(1))
+    except RuntimeError as exc:
+        await _undo_create(self, target, name, uid, operator, str(exc))
+    stored = {**result["vault"], "stored": True}
+    await _verify_create(self, target, operator, name, uid, before, f"{mount}/{path}")
+    return {**result, "applied": True, "verified": True, "vault": stored}
 
-    after = _user_rows(await _read_config_xml(self, target, operator))
+
+async def _verify_create(
+    self: PfSenseConnector,
+    target: Any,
+    operator: Operator | None,
+    name: str,
+    uid: str,
+    before: list[dict[str, Any]],
+    where: str,
+) -> None:
+    """Read ``config.xml`` again; raise when it does not show just the new user.
+
+    The password is already in Vault here, so every error says where it is.
+    """
+    stored = f"The user was made and its password is stored in Vault at {where}"
+    try:
+        after = _user_rows(await _read_config_xml(self, target, operator))
+    except Exception as exc:
+        raise RuntimeError(
+            f"openvpn.user.create: {stored}, but config.xml could not be read again to "
+            f"check it ({type(exc).__name__}). Check {name!r} with pfsense.user.list."
+        ) from None
     made = [r for r in after if r["name"] == name]
-    if len(made) != 1 or _other_users(after, name) != _other_users(before, name):
+    if len(made) != 1 or made[0]["uid"] != uid:
         raise RuntimeError(
             f"openvpn.user.create verification failed for {name!r}: config.xml does not hold "
-            "exactly the one new user after write_config; check config.xml"
+            f"exactly the one new user with uid {uid} after write_config. {stored}."
         )
-    if password is None:
-        await _undo_create(self, target, name, operator, "the firewall did not return a password")
-    try:
-        await _store_password(operator, mount, path, field, password or "")
-    except RuntimeError as exc:
-        await _undo_create(self, target, name, operator, str(exc))
-    return {
-        **result,
-        "applied": True,
-        "verified": True,
-        "vault": {**result["vault"], "stored": True},
-    }
+    if _other_users(after, name) != _other_users(before, name):
+        raise RuntimeError(
+            f"openvpn.user.create verification failed for {name!r}: other users changed "
+            f"while the op ran. {stored}. Check the pfSense config history."
+        )
 
 
 async def _undo_create(
-    self: PfSenseConnector, target: Any, name: str, operator: Operator | None, why: str
+    self: PfSenseConnector,
+    target: Any,
+    name: str,
+    uid: str,
+    operator: Operator | None,
+    why: str,
 ) -> NoReturn:
-    """Remove the user that was just made, then raise. Never returns."""
+    """Remove the user this call made (by name and uid), then raise. Never returns."""
     try:
         await _apply_playback(
             self,
             target,
             script_name=f"meho_openvpn_user_undo_{re.sub(r'[^A-Za-z0-9]', '_', name)}",
-            script_body=build_user_delete_playback(name),
+            script_body=build_user_undo_playback(name, uid),
             operator=operator,
         )
     except Exception:
@@ -399,7 +483,36 @@ async def _undo_create(
 # pfsense.openvpn.user.delete
 # ---------------------------------------------------------------------------
 
-_CLIENT_LIST_RE: Final = re.compile(r"^CLIENT_LIST,([^,]*),")
+_CLIENT_HEADER: Final = "HEADER,CLIENT_LIST,"
+_CLIENT_ROW: Final = "CLIENT_LIST,"
+
+
+def _sessions_of(out: str, name: str) -> int | None:
+    """Count the rows of ``status 2`` output where *name* is the login name or the common name.
+
+    The ``HEADER,CLIENT_LIST`` line says which column is ``Username``. On a
+    server that checks a certificate too, the certificate's common name can
+    differ from the login name, so both columns count. Returns ``None`` when
+    a client row is there but the header names no ``Username`` column.
+    """
+    lines = [line.strip() for line in out.splitlines()]
+    username_col: int | None = None
+    for line in lines:
+        if line.startswith(_CLIENT_HEADER):
+            columns = line.split(",")[1:]
+            if "Username" in columns:
+                username_col = columns.index("Username")
+    count = 0
+    for line in lines:
+        if not line.startswith(_CLIENT_ROW):
+            continue
+        if username_col is None:
+            return None
+        row = line.split(",")
+        username = row[username_col] if len(row) > username_col else None
+        if name in (row[1], username):
+            count += 1
+    return count
 
 
 async def _connected_sessions(
@@ -423,10 +536,10 @@ async def _connected_sessions(
         out = proc.stdout if isinstance(proc.stdout, str) else ""
         if proc.exit_status != 0 or not re.search(r"^END\s*$", out, re.MULTILINE):
             return None
-        for line in out.splitlines():
-            found = _CLIENT_LIST_RE.match(line.strip())
-            if found and found.group(1) == name:
-                total += 1
+        sessions = _sessions_of(out, name)
+        if sessions is None:
+            return None
+        total += sessions
     return total
 
 

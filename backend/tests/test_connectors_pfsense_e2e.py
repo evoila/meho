@@ -316,7 +316,12 @@ _DELETE_OP_IDS: frozenset[str] = frozenset(
 #: The approval-gated firewall rule add (#3850): ``dangerous`` +
 #: ``requires_approval``, covered by ``test_connectors_pfsense_filter_rule_ops.py``.
 _DANGEROUS_OP_IDS: frozenset[str] = frozenset(
-    {"pfsense.filter.rule.add", "pfsense.openvpn.user.create", "pfsense.openvpn.user.delete"}
+    {
+        "pfsense.filter.rule.add",
+        "pfsense.openvpn.user.create",
+        "pfsense.openvpn.user.delete",
+        "pfsense.openvpn.rule.sync",
+    }
 )
 
 #: The parameterized read op (meho-internal#252). ``safe`` like the rest of
@@ -439,7 +444,7 @@ async def pfsense_e2e(
 
 
 def test_pfsense_ops_registration_count() -> None:
-    """All 28 pfSense ops registered (11 read/identity + 2 write + 6 delete +
+    """All 29 pfSense ops registered (11 read/identity + 2 write + 6 delete +
     1 approval-gated rule add + 1 parameterized mgmt-flow read + 2 user writes,
     #3937)."""
     op_ids = {op.op_id for op in PFSENSE_OPS}
@@ -452,7 +457,7 @@ def test_pfsense_ops_registration_count() -> None:
         | _USER_WRITE_OP_IDS
     ) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 28, f"Expected 28 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 29, f"Expected 29 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:

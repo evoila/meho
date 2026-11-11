@@ -34,6 +34,14 @@ How the sync works
    reports success only when every named entry has the wanted values and
    nothing else in the file changed.
 
+The plan is made from one read of ``config.xml``; the fragment runs
+later. So the fragment first checks that the overrides are still as the
+plan saw them: the same number of overrides, no override for a new
+entry, and the same address and routes on each entry it updates. When
+one differs (for example a route was added in the web page meanwhile),
+it writes nothing and prints ``MEHO_CSC_CHANGED``; the handler then
+fails and asks for a new run.
+
 The sync never deletes an entry, never removes a route (a route list is
 only added to), never changes the address of an existing entry (that is
 reported as ``address_conflict``), and does not restart OpenVPN. The
@@ -100,9 +108,11 @@ __all__ = [
     "pfsense_openvpn_address_next_free",
     "pfsense_openvpn_csc_sync",
     "plan_csc_sync",
+    "save_rollback_copy",
 ]
 
 _VPNID_RE: Final = re.compile(r"^[0-9]{1,5}$")
+_CHANGED_MARKER: Final = "MEHO_CSC_CHANGED="
 _MAX_ENTRIES: Final = 100
 _MAX_ROUTES: Final = 50
 
@@ -336,6 +346,7 @@ def _plan_one(
         claimed[(vpnid, want)] = name
         return {
             **row,
+            "_expect": {"tunnel": "", "routes": ""},
             "action": "create",
             "tunnel_network": f"{want}/{prefix}",
             "routes_added": list(entry["routes"]),
@@ -389,7 +400,8 @@ def _plan_existing(
             f"the override of {name!r} is shared by several servers or all servers; "
             "change it in the pfSense web page",
         )
-    return {**shown, "action": "update"}
+    expect = {"tunnel": current.tunnel_raw, "routes": ",".join(current.routes)}
+    return {**shown, "_expect": expect, "action": "update"}
 
 
 def plan_csc_sync(
@@ -418,20 +430,74 @@ def _php_change(row: dict[str, Any]) -> str:
         f"'tunnel' => {_php_squote(row['tunnel_network'] or '')}, "
         f"'routes' => {_php_squote(','.join(row['routes']))}, "
         f"'descr' => {_php_squote(row['description'])}, "
+        f"'was_tunnel' => {_php_squote(row['_expect']['tunnel'])}, "
+        f"'was_routes' => {_php_squote(row['_expect']['routes'])}, "
         f"'create' => {create}),"
     )
 
 
-def build_csc_sync_playback(plan: list[dict[str, Any]]) -> str:
+# The check of the fragment, before it writes: is each override still as
+# the plan saw it? ``$meho_hits`` are the overrides of the name that apply
+# to the server (an empty server list means all servers), the same rule as
+# ``CscEntry.applies_to``. Values are compared the way the parser reads
+# them: trimmed, and a route list split at commas.
+_PHP_STALE_CHECK: Final = [
+    "function meho_csv($meho_v) {",
+    "  return implode(',', array_values(array_filter(array_map('trim',",
+    "    explode(',', (string)$meho_v)), 'strlen')));",
+    "}",
+    "function meho_hits($meho_list, $meho_c) {",
+    "  $meho_hits = array();",
+    "  foreach ($meho_list as $meho_i => $meho_e) {",
+    "    if (!isset($meho_e['common_name'])",
+    "        || (string)$meho_e['common_name'] !== $meho_c['name']) {",
+    "      continue;",
+    "    }",
+    "    $meho_list_ids = isset($meho_e['server_list']) ? meho_csv($meho_e['server_list']) : '';",
+    "    if ($meho_list_ids === ''",
+    "        || in_array($meho_c['vpnid'], explode(',', $meho_list_ids), true)) {",
+    "      $meho_hits[] = $meho_i;",
+    "    }",
+    "  }",
+    "  return $meho_hits;",
+    "}",
+    "$meho_stale = array();",
+    "if (count($meho_csc) !== $meho_count) {",
+    "  $meho_stale[] = 'count';",
+    "}",
+    "foreach ($meho_changes as $meho_c) {",
+    "  $meho_hits = meho_hits($meho_csc, $meho_c);",
+    "  $meho_ok = false;",
+    "  if ($meho_c['create']) {",
+    "    $meho_ok = count($meho_hits) === 0;",
+    "  } elseif (count($meho_hits) === 1) {",
+    "    $meho_e = $meho_csc[$meho_hits[0]];",
+    "    $meho_ok = isset($meho_e['server_list'])",
+    "      && meho_csv($meho_e['server_list']) === $meho_c['vpnid']",
+    "      && $meho_c['was_tunnel'] === trim(isset($meho_e['tunnel_network'])",
+    "        ? (string)$meho_e['tunnel_network'] : '')",
+    "      && $meho_c['was_routes'] === meho_csv(isset($meho_e['local_network'])",
+    "        ? $meho_e['local_network'] : '');",
+    "  }",
+    "  if (!$meho_ok) {",
+    "    $meho_stale[] = $meho_c['name'] . '@' . $meho_c['vpnid'];",
+    "  }",
+    "}",
+]
+
+
+def build_csc_sync_playback(plan: list[dict[str, Any]], csc_count: int) -> str:
     """Return the raw-PHP fragment that creates or updates the planned overrides.
 
-    Only rows with action ``create`` or ``update`` are written. The fragment
-    finds an override by user name AND exact server list, adds a new one only
-    when none matches, and edits an existing one only when exactly one
-    matches. It touches ``tunnel_network`` and ``local_network`` and, for a
-    new entry, ``server_list``, ``common_name`` and ``description``. It
-    calls ``openvpn_resync_csc()`` for each edited entry (writes that user's
-    file) and ``write_config()`` once. It never deletes and restarts nothing.
+    Only rows with action ``create`` or ``update`` are written. First the
+    fragment checks that the overrides are still as the plan saw them
+    (*csc_count* overrides, see ``_PHP_STALE_CHECK``). When one is not, it
+    prints ``MEHO_CSC_CHANGED=<name@vpnid ...>`` and writes nothing. Else it
+    adds each new override and edits each planned one. It touches
+    ``tunnel_network`` and ``local_network`` and, for a new entry,
+    ``server_list``, ``common_name`` and ``description``. It calls
+    ``openvpn_resync_csc()`` for each edited entry (writes that user's file)
+    and ``write_config()`` once. It never deletes and restarts nothing.
     """
     rows = [r for r in plan if r["action"] in ("create", "update")]
     path = "$config['openvpn']['openvpn-csc']"
@@ -441,23 +507,23 @@ def build_csc_sync_playback(plan: list[dict[str, Any]]) -> str:
         "$meho_changes = array(",
         *[_php_change(r) for r in rows],
         ");",
-        "if (!isset($config['openvpn']) || !is_array($config['openvpn'])) {",
+        f"$meho_count = {int(csc_count)};",
+        f"$meho_csc = (isset({path}) && is_array({path})) ? {path} : array();",
+        *_PHP_STALE_CHECK,
+        "if (count($meho_stale) > 0) {",
+        f"  echo '{_CHANGED_MARKER}' . implode(' ', $meho_stale) . \"\\n\";",
+        "  $meho_changes = array();",
+        "}",
+        "if (count($meho_changes) > 0 && (!isset($config['openvpn'])",
+        "    || !is_array($config['openvpn']))) {",
         "  $config['openvpn'] = array();",
         "}",
-        f"if (!isset({path}) || !is_array({path})) {{",
+        f"if (count($meho_changes) > 0 && (!isset({path}) || !is_array({path}))) {{",
         f"  {path} = array();",
         "}",
         "$meho_done = 0;",
         "foreach ($meho_changes as $meho_c) {",
-        "  $meho_hits = array();",
-        f"  foreach ({path} as $meho_i => $meho_e) {{",
-        "    if (isset($meho_e['common_name'])",
-        "        && (string)$meho_e['common_name'] === $meho_c['name']",
-        "        && isset($meho_e['server_list'])",
-        "        && (string)$meho_e['server_list'] === $meho_c['vpnid']) {",
-        "      $meho_hits[] = $meho_i;",
-        "    }",
-        "  }",
+        f"  $meho_hits = meho_hits({path}, $meho_c);",
         "  if ($meho_c['create'] && count($meho_hits) === 0) {",
         "    $meho_new = array('server_list' => $meho_c['vpnid'],",
         "      'common_name' => $meho_c['name'], 'description' => $meho_c['descr']);",
@@ -552,6 +618,28 @@ def _verify_sync(before: str, after: str, plan: list[dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def save_rollback_copy(
+    self: PfSenseConnector, target: Any, operator: Operator | None, label: str, op: str
+) -> str:
+    """Copy ``config.xml`` to ``/cf/conf/meho-rollback-<label>-<time>.xml`` (mode 0600).
+
+    Returns the path. Raises when the copy cannot be made or differs.
+    """
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    copy_path = f"/cf/conf/meho-rollback-{label}-{stamp}.xml"
+    saved = await self._run_command(
+        target,
+        f"umask 077 && cp /cf/conf/config.xml {copy_path} "
+        f"&& cmp -s /cf/conf/config.xml {copy_path}",
+        operator=operator,
+    )
+    if saved.exit_status != 0:
+        raise RuntimeError(
+            f"{op}: could not save the rollback copy of config.xml; nothing was changed"
+        )
+    return copy_path
+
+
 def _summary(plan: list[dict[str, Any]]) -> dict[str, int]:
     return {
         a: sum(1 for r in plan if r["action"] == a)
@@ -560,7 +648,7 @@ def _summary(plan: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _public_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in row.items() if k != "description"}
+    return {k: v for k, v in row.items() if k not in ("description", "_expect")}
 
 
 @serialized_config_write
@@ -575,9 +663,8 @@ async def pfsense_openvpn_csc_sync(
     compare_only = bool(params.get("compare_only", False))
     before = await _read_config_xml(self, target, operator)
     rendered = await read_rendered_addresses(self, target, operator)
-    plan = plan_csc_sync(
-        entries, parse_openvpn_servers(before), parse_csc_entries(before), rendered
-    )
+    csc = parse_csc_entries(before)
+    plan = plan_csc_sync(entries, parse_openvpn_servers(before), csc, rendered)
     counts = _summary(plan)
     result: dict[str, Any] = {
         "op_class": "write",
@@ -602,25 +689,21 @@ async def pfsense_openvpn_csc_sync(
     if compare_only:
         return result
 
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    copy_path = f"/cf/conf/meho-rollback-csc-sync-{stamp}.xml"
-    saved = await self._run_command(
-        target,
-        f"umask 077 && cp /cf/conf/config.xml {copy_path} "
-        f"&& cmp -s /cf/conf/config.xml {copy_path}",
-        operator=operator,
-    )
-    if saved.exit_status != 0:
-        raise RuntimeError(
-            "openvpn.csc.sync: could not save the rollback copy of config.xml; nothing was changed"
-        )
-    await _apply_playback(
+    copy_path = await save_rollback_copy(self, target, operator, "csc-sync", "openvpn.csc.sync")
+    played = await _apply_playback(
         self,
         target,
         script_name=f"meho_openvpn_csc_sync_{secrets.token_hex(4)}",
-        script_body=build_csc_sync_playback(plan),
+        script_body=build_csc_sync_playback(plan, len(csc)),
         operator=operator,
     )
+    stale = re.search(rf"^{_CHANGED_MARKER}(.*)$", played, re.MULTILINE)
+    if stale is not None:
+        raise RuntimeError(
+            "openvpn.csc.sync: the client overrides changed after the plan was made "
+            f"({stale.group(1).strip()}); nothing was written. Run the op again "
+            f"(the rollback copy {copy_path} is not needed)."
+        )
     _verify_sync(before, await _read_config_xml(self, target, operator), plan)
     return {
         **result,
@@ -907,8 +990,8 @@ OPENVPN_OPS: tuple[PfSenseOp, ...] = (
                     "``nothing_to_do`` or ``refused`` (``entries`` then says why)."
                 ),
                 "next_step": (
-                    "Check the user with ``pfsense.user.list``. The per-user firewall rules "
-                    "are added with ``pfsense.filter.rule.add``."
+                    "Check the user with ``pfsense.user.list``. Add the per-user firewall "
+                    "rules with ``pfsense.openvpn.rule.sync``."
                 ),
             }
         ),

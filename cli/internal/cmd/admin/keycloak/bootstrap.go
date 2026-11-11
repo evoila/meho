@@ -487,7 +487,7 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 	c := &clientRep{
 		ClientID:                  o.CLIClientID,
 		Name:                      "MEHO CLI + MCP-OAuth-2.1 device-code public client",
-		Description:               "Public OAuth client for RFC 8628 device-code flow used by `meho login` and any MCP-OAuth-2.1 client targeting <backplane-url>/mcp. Audience-mapped to " + o.BackplaneAudience + ". Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
+		Description:               "Public OAuth client for the RFC 8628 device-code flow of `meho login`. MCP clients sign in through `meho-mcp`, not this client. Audience-mapped to " + o.BackplaneAudience + ". Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
 		Enabled:                   boolPtr(true),
 		PublicClient:              boolPtr(true),
 		StandardFlowEnabled:       boolPtr(true),

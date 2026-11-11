@@ -1049,6 +1049,7 @@ meho bind9 config apply-views <local-views.conf> <zones-dir> [flags]
 - `--primary-path` — which staged file's content the audit row captures (defaults to first key sorted)
 - `--target` — target slug to dispatch against
 - `--verify-fqdn` — sample FQDN to dig-verify post-reload (optional)
+- `--verify-source` — server address the --verify-fqdn dig is sent from, to reach one view (optional)
 
 #### `meho bind9 config backup`
 
@@ -4719,9 +4720,10 @@ meho secret move [flags]
 Pipe a single raw secret field to stdout (pipe-only, audited)
 
 ```
-meho secret read <mount> <path> [flags]
+meho secret read <mount> <path> | read --approval <id> [flags]
 ```
 
+- `--approval` — id of an approved read request: run it once and write its --field value instead of sending a new read
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--field` — key within the secret's data map whose raw value is written to stdout (required)
 - `--target` — Vault target slug to dispatch against (resolved server-side)

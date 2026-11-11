@@ -36,7 +36,7 @@ func newAuthCmd() *cobra.Command {
 			"connector_id=\"vault-1.x\". Read-only; result carries the\n"+
 			"userpass roster (set-shaped — large rosters return a JSONFlux\n"+
 			"handle + sample, drill in with the result verbs).",
-		"  meho vault auth userpass-list --target rdc-vault",
+		"  meho vault auth userpass-list --target vault-lab",
 	))
 	cmd.AddCommand(newAuthReadVerbCmd(
 		"userpass-read", "<user>", "username", opAuthUserpassRead,
@@ -45,7 +45,7 @@ func newAuthCmd() *cobra.Command {
 			"connector_id=\"vault-1.x\". <user> is the userpass username (no\n"+
 			"mount prefix). Read-only; result carries the user's policies +\n"+
 			"token ttls.",
-		"  meho vault auth userpass-read --target rdc-vault svc-deploy",
+		"  meho vault auth userpass-read --target vault-lab svc-deploy",
 	))
 	cmd.AddCommand(newAuthListVerbCmd(
 		"approle-list", opAuthApproleList,
@@ -53,7 +53,7 @@ func newAuthCmd() *cobra.Command {
 		"approle-list dispatches op_id=\"vault.auth.approle.list\" against\n"+
 			"connector_id=\"vault-1.x\". Read-only; result carries the\n"+
 			"approle role-name roster.",
-		"  meho vault auth approle-list --target rdc-vault",
+		"  meho vault auth approle-list --target vault-lab",
 	))
 	cmd.AddCommand(newAuthReadVerbCmd(
 		"approle-read", "<role>", "role_name", opAuthApproleRead,
@@ -62,7 +62,7 @@ func newAuthCmd() *cobra.Command {
 			"connector_id=\"vault-1.x\". <role> is the AppRole role name (no\n"+
 			"mount prefix). Read-only; result carries the role's policies +\n"+
 			"token/secret-id ttls.",
-		"  meho vault auth approle-read --target rdc-vault ci-runner",
+		"  meho vault auth approle-read --target vault-lab ci-runner",
 	))
 	return cmd
 }

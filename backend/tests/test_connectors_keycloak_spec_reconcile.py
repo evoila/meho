@@ -68,7 +68,7 @@ one, that test fails and the constant must be promoted into
 :data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
 to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
 34 by the #3851 user logout, to 37 by the #3886 realm delete, to 45 by the login flow
-ops, and to 48 by the passkey step op) were
+ops, to 48 by the passkey step op, and to 49 by the user disable / enable PUT) were
 served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -102,12 +102,15 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_CLIENT_PROTOCOL_MAPPERS_PATH": ("POST",),
     "_CLIENT_SCOPES_PATH": ("GET", "POST"),
     "_USERS_PATH": ("GET", "POST"),
-    # Governed user delete (#3944): the delete plus its 404 read-back.
-    "_USER_PATH": ("GET", "DELETE"),
+    # Governed user delete (#3944): the delete plus its 404 read-back. The PUT
+    # is the user disable / enable write (#4940).
+    "_USER_PATH": ("GET", "PUT", "DELETE"),
     "_USER_ROLE_MAPPINGS_PATH": ("GET",),
     "_USER_ROLE_MAPPINGS_REALM_PATH": ("POST",),
     "_USER_RESET_PASSWORD_PATH": ("PUT",),
     "_USER_LOGOUT_PATH": ("POST",),
+    "_USER_SESSIONS_PATH": ("GET",),
+    "_USER_CREDENTIALS_PATH": ("GET",),
     "_ROLES_PATH": ("GET",),
     "_ROLE_PATH": ("GET",),
     "_ROLE_USERS_PATH": ("GET",),
@@ -131,6 +134,9 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_AUTH_FLOW_ADD_SUBFLOW_PATH": ("POST",),
     "_AUTH_CONFIG_PATH": ("GET",),
     "_IDENTITY_PROVIDERS_PATH": ("GET",),
+    # Safe reads of the login setup: required actions and the event settings.
+    "_REQUIRED_ACTIONS_PATH": ("GET",),
+    "_EVENTS_CONFIG_PATH": ("GET",),
     # The passkey step op: copy the browser flow, configure and move the step.
     "_AUTH_FLOW_COPY_PATH": ("POST",),
     "_AUTH_EXECUTION_CONFIG_PATH": ("POST",),
@@ -199,10 +205,12 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/authentication/config/{id}",
         "GET:/admin/realms/{realm}/authentication/flows",
         "GET:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
+        "GET:/admin/realms/{realm}/authentication/required-actions",
         "GET:/admin/realms/{realm}/client-scopes",
         "GET:/admin/realms/{realm}/clients",
         "GET:/admin/realms/{realm}/clients/{client-uuid}",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/client-secret",
+        "GET:/admin/realms/{realm}/events/config",
         "GET:/admin/realms/{realm}/groups",
         "GET:/admin/realms/{realm}/groups/count",
         "GET:/admin/realms/{realm}/groups/{group-id}",
@@ -215,8 +223,10 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/users",
         "GET:/admin/realms/{realm}/users/count",
         "GET:/admin/realms/{realm}/users/{user-id}",
+        "GET:/admin/realms/{realm}/users/{user-id}/credentials",
         "GET:/admin/realms/{realm}/users/{user-id}/groups",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings",
+        "GET:/admin/realms/{realm}/users/{user-id}/sessions",
         "POST:/admin/realms",
         "POST:/admin/realms/{realm}/authentication/executions/{executionId}/config",
         "POST:/admin/realms/{realm}/authentication/executions/{executionId}/raise-priority",
@@ -236,6 +246,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "PUT:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
         "PUT:/admin/realms/{realm}/clients/{client-uuid}",
         "PUT:/admin/realms/{realm}/groups/{group-id}",
+        "PUT:/admin/realms/{realm}/users/{user-id}",
         "PUT:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
         "PUT:/admin/realms/{realm}/users/{user-id}/reset-password",
     ]

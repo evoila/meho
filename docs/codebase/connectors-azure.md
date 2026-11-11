@@ -5,14 +5,23 @@ subscription. The connector logs in to Microsoft Entra ID with a login (a
 service principal) from Vault, keeps the access token in its own cache, and
 calls Azure Resource Manager (Azure's management API) with it.
 
-The connector has 71 operations in 12 groups. The group `account` holds
+The connector has 86 operations in 14 groups. The group `account` holds
 `azure.about`, `azure.location.list` and `azure.operation.status`. The other
 groups are the families (inventory, compute, network, storage, cost and
 more), each with its own section at the end of this page. Every family builds
 on the login, the cache, the retry budget, the paging helper and the polling
-helper described here. Two operations change something in Azure and wait for
-a person's approval (`caution`): `azure.tag.update` and
-`azure.patching.assessment.start`. All the others are `safe` reads.
+helper described here. Eleven operations change something in Azure and wait
+for a person's approval:
+
+- `caution`: `azure.tag.update`, `azure.patching.assessment.start`,
+  `azure.migrate.import.start`, `azure.migrate.group.create`,
+  `azure.migrate.group.update` and `azure.migrate.assessment.create`.
+- `dangerous`: `azure.network.dns.recordset.upsert`,
+  `azure.storage.blob.link.create`, `azure.role.assignment.create` and
+  `azure.role.assignment.delete`.
+- `destructive`: `azure.network.dns.recordset.delete`.
+
+All the others are `safe` reads.
 
 Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 `backend/src/meho_backplane/connectors/_shared/microsoft_login.py`.
@@ -25,7 +34,7 @@ Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 | Connector ID | `azure-arm-2026.10` (implementation `azure-arm`, version `2026.10`) |
 | Registration | the versioned row plus the wildcard row `("azure", "", "")` |
 | Kind | typed operations only; nothing is ingested from a spec |
-| Operations | 79 in 12 groups: `account`, `aks`, `arc`, `automation`, `avs`, `compute`, `cost`, `inventory`, `migrate`, `network`, `security`, `storage` |
+| Operations | 86 in 14 groups: `account`, `aks`, `arc`, `automation`, `avs`, `compute`, `cost`, `dns`, `inventory`, `migrate`, `monitor`, `network`, `security`, `storage` |
 | Spec path check | `backend/tests/test_connectors_azure_spec_reconcile.py` against the shelf folder `azure-arm-2026.10` |
 | Onboarding | [`docs/cross-repo/azure-onboarding.md`](../cross-repo/azure-onboarding.md) |
 
@@ -1035,95 +1044,6 @@ subscription. `Microsoft.Automation` must be registered on the subscription;
 when it is not, the call fails with `AzureProviderNotRegisteredError`, and
 MEHO never registers it.
 
-### Writes: CSV import, groups and assessments (Task #5094)
-
-Five more operations are in the same group. Four start work on the
-customer's side. They are `caution` and wait for a person's approval. The
-fifth, `azure.migrate.job.list`, is a `safe` read. The login needs the
-"Azure Migrate Decide and Plan Expert" role on the project's resource
-group. Whether that role also covers the import site is not proven yet; the
-lab proof must say what was missing, if anything.
-
-| Operation | Parameters | What it sends |
-|---|---|---|
-| `azure.migrate.import.start` | `resource_group`, `project`, `csv`, optional `site`, `repeat_key` | reads the project; makes the import site if missing (`PUT .../importSites/{site}`); `PUT .../importcollectors/{site}-collector`; `POST .../importSites/{site}/importUri`; `PATCH` of the site tags; uploads the file; `GET .../importJobs/{job}` until the job ends |
-| `azure.migrate.job.list` | `resource_group`, `project`, optional `site` | `GET .../importSites/{site}/importJobs` |
-| `azure.migrate.group.create` | `resource_group`, `project`, `group`, optional `machines`, `group_type` | `PUT .../groups/{group}`, then `POST .../groups/{group}/updateMachines` (Add) |
-| `azure.migrate.group.update` | `resource_group`, `project`, `group`, optional `add`, `remove` | `POST .../updateMachines`, Add first, then Remove |
-| `azure.migrate.assessment.create` | the group names, `assessment`, `region`, `sizing`, optional `currency` (EUR), `pricing`, `hybrid_benefit`, `comfort_factor` | reads the assessment; `PUT .../assessments/{assessment}` when it does not exist; reads it until Azure has computed it |
-
-Files: `migrate_write_ops.py` (operation table, guidance, `MigrateWriteOps`),
-`migrate_write_schemas.py`, `migrate_writes.py` (groups, assessments, the
-shared `arm_write` and `poll_until`), `migrate_import.py` (the import flow),
-`migrate_csv.py` (file checks), `migrate_jobs.py` (site names, job rows, the
-job list), `migrate_upload.py` (the upload). `migrate.py` adds the table and
-the mixin to its own.
-
-#### How a retry never makes duplicate work
-
-- Group and assessment names are the caller's. The same call sends the same
-  `PUT`. `updateMachines` changes nothing for a machine already in (or out
-  of) the group.
-- An assessment that exists with the same settings is not sent again: MEHO
-  follows it. One that exists with other settings is refused, never changed.
-  Every setting MEHO sends is compared with Azure's own field, also the fixed
-  ones (offer, pricing tier, percentile, time range).
-- The import keeps its record in Azure, in the tags of the import site: one
-  tag `meho-csv-<first 16 characters of the file's SHA-256>` with the job
-  name. MEHO writes it after it got the upload link and before it uploads.
-  A retry finds the tag, reads that job and uploads nothing. If the tag
-  cannot be written, nothing is uploaded. An existing site is never written
-  again (a `PUT` would replace its tags).
-- One PostgreSQL lock per import site (`advisory_lock`, shared by every
-  worker) covers the steps from reading the tags to the end of the upload.
-  Two imports to the same site then never erase each other's tag, and the
-  same file is never uploaded twice at once. When the lock stays busy for
-  two minutes, MEHO sends nothing and answers with a conflict.
-- A tag whose job still waits for its file (`WaitingForBlobUpload`) is
-  followed, not sent again: the first upload may still be under way, or its
-  answer was lost (`outcome: earlier_upload_waiting`). Only a clear refusal
-  from Azure Storage means the file did not arrive; then MEHO removes the
-  tag, so the same call again uploads the file.
-- `repeat_key` imports the same file again on purpose. The tag name gets
-  `-<first 8 characters of the key's SHA-256>`, so each key has its own
-  record, and a retry with the same key after a lost answer uploads nothing.
-  A job that stays in `WaitingForBlobUpload` also needs a new key.
-- A lost answer or a 5xx on the upload is not an error: the call follows the
-  job (`outcome: upload_unconfirmed`). The upload is never sent twice by the
-  same call.
-- A read that fails after a write was sent does not hide the write: the result
-  carries `poll_error`, and `azure.migrate.job.list`,
-  `azure.migrate.assessment.list` or `azure.operation.status` show the
-  outcome. A group call that fails in its second step says that the first
-  step ran.
-
-#### The upload link
-
-`importUri` returns a signed link (a secret) and the job id. MEHO checks that
-the link is plain https to a blob host of the target's cloud, then uploads
-through `send` with a caller object that gives no `Authorization` header:
-MEHO's Azure token never goes to the link. The link is in no result, error,
-log or audit text. The trace mask (`trace_mask.py`) hides `uri`,
-`blobSasUri`, `errorSasUri` and `sasUri` in every Azure answer, and the shared
-`url_secret` rule hides the `sig` value of any link. The audit row holds a
-hash of the parameters, never the file; the result names the file by its
-SHA-256, size and row count.
-
-#### Limits and open points
-
-- At most 20,000 rows and 8 MiB per file. Header columns must include server
-  name, cores, memory and OS name. Azure checks every row; its reasons for
-  bad rows come back in `bad_rows` (at most 100, secrets filtered).
-- `machines`, `add` and `remove` take the machine `name` from
-  `azure.migrate.machine.list` (the API description says "machine names").
-  At most 1000 per call.
-- Not proven yet, to check in the lab: that CSV import works through the API
-  without the portal; what the import site needs in its `PUT` body (MEHO
-  sends the project's region only); whether importing the same file again
-  updates or duplicates machines (MEHO already refuses a repeat of the same
-  file unless a new `repeat_key` is set); whether the group type `Import` is
-  needed for imported servers; the exact upload host.
-
 ### Not in this group yet
 
 Starting a job, publishing a runbook and changing a schedule are writes for
@@ -1132,8 +1052,8 @@ need approval.
 
 ### Proven live
 
-Nothing yet. The lab login does not exist yet, so every read and write is
-proven with mocked HTTP only, with answers shaped like the examples in Azure's pinned
+Nothing yet. The lab login does not exist yet, so every read is proven with
+mocked HTTP only, with answers shaped like the examples in Azure's pinned
 API description file. Open points for the lab proof:
 
 - that Azure accepts the job filter as MEHO sends it (the query string
@@ -1530,6 +1450,31 @@ link:
 - The Azure sensor recipes read two of these fields by path, so they are
   contracts: `budgets[*].percent_used` and Advisor's `count`.
 
+### Sensor recipes
+
+`sensor_templates.py` holds three `POST /api/v1/sensors` bodies and one
+dashboard file (format `meho-dashboard/1`) that groups them. It follows
+`connectors/audit/sensor_template.py`.
+
+- Budget: `azure.cost.budget.list`, the `max` of `$.budgets[*].percent_used`,
+  degraded at 80 and critical at 100 (`gte`). It reads the current budget
+  period, because Azure resets the spend at each period. Every day.
+- Policy: `azure.policy.compliance.summary`, `$.non_compliant_resources`,
+  degraded above the baseline and critical above the baseline plus 10
+  (`gt`). Every 6 hours.
+- Advisor: `azure.advisor.recommendation.list` with `impact=High`, `$.count`,
+  the same baseline rule. Every day.
+- The baseline is a parameter (`baseline=`): the count on the day the sensor
+  is made. It must be a whole number, 0 or more.
+- In the dashboard file each sensor name starts with the dashboard name
+  (`<dashboard>-budget-used`). Import finds sensors by name, so two
+  subscriptions need two dashboard names and then share no sensor.
+- No budget, a budget with no percent, or a count Azure did not give is
+  `unknown`, not `ok`.
+- The how-to is in `docs-site/guides/sensors-quickstart.md`. Its JSON is
+  `azure_dashboard_recipe(policy_baseline=12, advisor_baseline=3)`. Lab proof
+  is still to do.
+
 Text from Azure (resource group and budget names, Advisor's problem and
 solution, price names) is data. The guidance for the AI says so.
 
@@ -1620,6 +1565,138 @@ proof must still show:
   <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/assign-access-acm-data>
 - The evidenced exclusion of the price list from the spec path check:
   `docs/decisions/spec-reconcile-guards-standard.md`.
+
+## dns
+
+Public DNS zones (`Microsoft.Network/dnsZones`), not the private zones of the
+network family. Five operations in the group `dns`: three `safe` reads and two
+writes that wait for a person's approval.
+
+Modules: `dns.py` (group text, guidance for the AI, the operation table, the
+`DnsOps` mixin and the registration of the approval cards), `dns_schemas.py`
+(parameter and response schemas), `dns_parse.py` (name checks and the body of
+a write), `dns_rows.py` (rows from Azure's answers), `dns_reads.py` and
+`dns_writes.py` (the bodies).
+
+| Operation | Risk level | What it does | Parameters |
+|---|---|---|---|
+| `azure.network.dns.zone.list` | `safe` | every public zone: resource group, record set count, name servers | none |
+| `azure.network.dns.recordset.list` | `safe` | every record set of one zone, of every type: name, type, TTL, etag, values as texts | `resource_group`, `zone` |
+| `azure.network.dns.recordset.show` | `safe` | one record set with its records in Azure's fields, metadata and etag | `resource_group`, `zone`, `record_type`, `name` |
+| `azure.network.dns.recordset.upsert` | `dangerous`, waits for approval | creates a record set, or changes one | the four above, `ttl`, `records`, optional `etag` |
+| `azure.network.dns.recordset.delete` | `destructive`, waits for approval | deletes one record set | the four above and `etag` |
+
+All calls use API version `2018-05-01`:
+
+- `GET /subscriptions/{id}/providers/Microsoft.Network/dnsZones`
+- `GET .../resourceGroups/{rg}/providers/Microsoft.Network/dnsZones/{zone}/recordsets`
+- `GET`, `PUT`, `DELETE .../dnsZones/{zone}/{recordType}/{name}`
+
+The built-in role "DNS Zone Contributor" on the zone's resource group is
+enough for all of them. The subscription in every path is the target's.
+
+### Why a delete is in this program
+
+The Initiative says "no resource deletes". A stale public record was found on
+a consumer lab: an A record pointed to an address outside the consumer's own
+hosting, so a server the consumer does not control could answer under its
+name. MEHO had no DNS operation, so the delete ran outside MEHO's approval
+queue and audit log. The delete is in scope because the alternative is the
+same delete without governance. It is limited to one record set, it is
+`destructive`, a second person must approve it, and the approval card shows
+the current values.
+
+### The delete
+
+- `etag` is required. The caller reads the record set with
+  `azure.network.dns.recordset.show` and passes its etag.
+- The approval card (`delete_card`, shown when the call waits for approval)
+  reads the record set then and shows its name, type, TTL, etag and values,
+  with "permanent: Azure DNS keeps no copy of a deleted record set". When the
+  record set has another etag than the one in the call, there is no card and
+  the call is refused, so nobody approves values that are gone.
+- When the call runs, MEHO reads the record set again. A different etag: it
+  deletes nothing. The same etag: it sends `DELETE` with `If-Match: <etag>`,
+  so Azure refuses too when the record set changed in between.
+- The answer holds `previous`: the record set as it was just before the
+  delete. That is the copy to recreate it from. The audit row of the call
+  also holds these values as `state_before`. The approval request (the card
+  above) and the answer hold them too.
+- No record set (404 on the read, or 204 on the delete): nothing is deleted
+  and `already_absent` is true.
+- MEHO never deletes `SOA`, or the `NS` record set at the zone name (`@`).
+
+### The write
+
+- Types: `A`, `AAAA`, `CAA`, `CNAME`, `MX`, `PTR`, `SRV`, `TXT`. `NS` and
+  `SOA` are left out: they say which servers answer for the zone.
+- `records` has one entry per record: an address text for `A` and `AAAA`
+  (checked as IPv4 or IPv6), a name text for `CNAME` (exactly one) and `PTR`,
+  a text of at most 255 characters for `TXT`, and an object for `MX`
+  (`preference`, `exchange`), `SRV` (`priority`, `weight`, `port`, `target`)
+  and `CAA` (`flags`, `tag`, `value`).
+- Without `etag` the call sends `If-None-Match: *`: it creates a record set
+  and Azure refuses when the name and type exist. With `etag` it sends
+  `If-Match`: it replaces the records and TTL of that version. A write never
+  overwrites by accident. `etag` must be one specific etag: `*` (any version)
+  is refused by the schema and by the code.
+- The change runs only as the approved run of a request whose card shows the
+  current record set. When the card is missing, or its read failed, MEHO sends
+  nothing and says so. The audit row holds the old values (`state_before`,
+  from the card) and the new ones (`state_after`).
+- Azure answers 412 when the etag does not match. MEHO shows it as an error
+  that says nothing was changed. A lost answer is not sent again (a write is
+  repeated only after a 429 or a 401). Look with `show` before you try again.
+- A change replaces the whole record set, also what the card does not list
+  (for example metadata). Caches may serve the old values
+  until the old TTL runs out.
+- The approval card (`upsert_card`) shows the current values next to the new
+  ones, and whether the call only creates.
+
+### Names in paths
+
+`zone`, `resource_group`, `name` and `record_type` are checked before they go
+into a path (letters, digits, `_`, `-`, `.`, and `@` and `*` in a record
+name; a name never starts or ends with a period). The names are percent
+encoded in the path, so none can move it to another zone or subscription.
+
+### What is not secret
+
+DNS record values are public data, so the rows are not masked. MEHO reads no
+other field than the ones listed here.
+
+### Proven live
+
+Nothing yet. The operations are built from Microsoft's documented answers and
+tested with mocked HTTP (`backend/tests/test_connectors_azure_dns.py`). The
+lab proof must still show:
+
+- the record sets of a test zone list the same as the portal;
+- a test record is created, then deleted, with approval, and the approval
+  request of the delete holds its old values (the card, and `previous` in the
+  answer), and the audit row shows them as `state_before`;
+- the audit row, the approval card and the answer hold the values and no
+  other field of the zone.
+
+### Known limits
+
+- The zone list shows public zones only (`dnsZones`). Private zones are in
+  `azure.network.privatedns.list`.
+- A TXT record is one string of at most 255 characters per record. Longer
+  text must be split into several records by the caller.
+- Azure DNS has no change history. `previous` in the delete answer and the
+  approval card are the only copy.
+
+### References
+
+- Zones - List (API version 2018-05-01):
+  <https://learn.microsoft.com/en-us/rest/api/dns/zones/list>
+- Record Sets - List By Dns Zone:
+  <https://learn.microsoft.com/en-us/rest/api/dns/record-sets/list-by-dns-zone>
+- Record Sets - Create Or Update:
+  <https://learn.microsoft.com/en-us/rest/api/dns/record-sets/create-or-update>
+- Record Sets - Delete:
+  <https://learn.microsoft.com/en-us/rest/api/dns/record-sets/delete>
 
 ## inventory
 
@@ -1842,8 +1919,12 @@ meho targets import subscriptions.yaml
 ## migrate
 
 The `migrate` group reads what Azure Migrate knows about the servers a team
-plans to move to Azure. Every operation is a read (`safe`, no approval) and
-changes nothing in Azure.
+plans to move to Azure, and can add servers and plan their move. It has 11
+operations. Seven are reads (`safe`, no approval). Four change something in
+Azure and wait for a person's approval (`caution`):
+`azure.migrate.import.start`, `azure.migrate.group.create`,
+`azure.migrate.group.update` and `azure.migrate.assessment.create`. They are
+described in "Writes: CSV import, groups and assessments" below.
 
 Azure Migrate keeps its data with two providers, each with its own pinned
 API version:
@@ -1979,6 +2060,95 @@ the Azure Migrate project. Azure Migrate has no read-only role of its own.
 subscription; when they are not, the call fails with
 `AzureProviderNotRegisteredError`, and MEHO never registers them.
 
+### Writes: CSV import, groups and assessments (Task #5094)
+
+Five operations of the group start or follow work. Four start work on the
+customer's side. They are `caution` and wait for a person's approval. The
+fifth, `azure.migrate.job.list`, is a `safe` read. The login needs the
+"Azure Migrate Decide and Plan Expert" role on the project's resource
+group. Whether that role also covers the import site is not proven yet; the
+lab proof must say what was missing, if anything.
+
+| Operation | Parameters | What it sends |
+|---|---|---|
+| `azure.migrate.import.start` | `resource_group`, `project`, `csv`, optional `site`, `repeat_key` | reads the project; makes the import site if missing (`PUT .../importSites/{site}`); `PUT .../importcollectors/{site}-collector`; `POST .../importSites/{site}/importUri`; `PATCH` of the site tags; uploads the file; `GET .../importJobs/{job}` until the job ends |
+| `azure.migrate.job.list` | `resource_group`, `project`, optional `site` | `GET .../importSites/{site}/importJobs` |
+| `azure.migrate.group.create` | `resource_group`, `project`, `group`, optional `machines`, `group_type` | `PUT .../groups/{group}`, then `POST .../groups/{group}/updateMachines` (Add) |
+| `azure.migrate.group.update` | `resource_group`, `project`, `group`, optional `add`, `remove` | `POST .../updateMachines`, Add first, then Remove |
+| `azure.migrate.assessment.create` | the group names, `assessment`, `region`, `sizing`, optional `currency` (EUR), `pricing`, `hybrid_benefit`, `comfort_factor` | reads the assessment; `PUT .../assessments/{assessment}` when it does not exist; reads it until Azure has computed it |
+
+Files: `migrate_write_ops.py` (operation table, guidance, `MigrateWriteOps`),
+`migrate_write_schemas.py`, `migrate_writes.py` (groups, assessments, the
+shared `arm_write` and `poll_until`), `migrate_import.py` (the import flow),
+`migrate_csv.py` (file checks), `migrate_jobs.py` (site names, job rows, the
+job list), `migrate_upload.py` (the upload). `migrate.py` adds the table and
+the mixin to its own.
+
+#### How a retry never makes duplicate work
+
+- Group and assessment names are the caller's. The same call sends the same
+  `PUT`. `updateMachines` changes nothing for a machine already in (or out
+  of) the group.
+- An assessment that exists with the same settings is not sent again: MEHO
+  follows it. One that exists with other settings is refused, never changed.
+  Every setting MEHO sends is compared with Azure's own field, also the fixed
+  ones (offer, pricing tier, percentile, time range).
+- The import keeps its record in Azure, in the tags of the import site: one
+  tag `meho-csv-<first 16 characters of the file's SHA-256>` with the job
+  name. MEHO writes it after it got the upload link and before it uploads.
+  A retry finds the tag, reads that job and uploads nothing. If the tag
+  cannot be written, nothing is uploaded. An existing site is never written
+  again (a `PUT` would replace its tags).
+- One PostgreSQL lock per import site (`advisory_lock`, shared by every
+  worker) covers the steps from reading the tags to the end of the upload.
+  Two imports to the same site then never erase each other's tag, and the
+  same file is never uploaded twice at once. When the lock stays busy for
+  two minutes, MEHO sends nothing and answers with a conflict.
+- A tag whose job still waits for its file (`WaitingForBlobUpload`) is
+  followed, not sent again: the first upload may still be under way, or its
+  answer was lost (`outcome: earlier_upload_waiting`). Only a clear refusal
+  from Azure Storage means the file did not arrive; then MEHO removes the
+  tag, so the same call again uploads the file.
+- `repeat_key` imports the same file again on purpose. The tag name gets
+  `-<first 8 characters of the key's SHA-256>`, so each key has its own
+  record, and a retry with the same key after a lost answer uploads nothing.
+  A job that stays in `WaitingForBlobUpload` also needs a new key.
+- A lost answer or a 5xx on the upload is not an error: the call follows the
+  job (`outcome: upload_unconfirmed`). The upload is never sent twice by the
+  same call.
+- A read that fails after a write was sent does not hide the write: the result
+  carries `poll_error`, and `azure.migrate.job.list`,
+  `azure.migrate.assessment.list` or `azure.operation.status` show the
+  outcome. A group call that fails in its second step says that the first
+  step ran.
+
+#### The upload link
+
+`importUri` returns a signed link (a secret) and the job id. MEHO checks that
+the link is plain https to a blob host of the target's cloud, then uploads
+through `send` with a caller object that gives no `Authorization` header:
+MEHO's Azure token never goes to the link. The link is in no result, error,
+log or audit text. The trace mask (`trace_mask.py`) hides `uri`,
+`blobSasUri`, `errorSasUri` and `sasUri` in every Azure answer, and the shared
+`url_secret` rule hides the `sig` value of any link. The audit row holds a
+hash of the parameters, never the file; the result names the file by its
+SHA-256, size and row count.
+
+#### Limits and open points
+
+- At most 20,000 rows and 8 MiB per file. Header columns must include server
+  name, cores, memory and OS name. Azure checks every row; its reasons for
+  bad rows come back in `bad_rows` (at most 100, secrets filtered).
+- `machines`, `add` and `remove` take the machine `name` from
+  `azure.migrate.machine.list` (the API description says "machine names").
+  At most 1000 per call.
+- Not proven yet, to check in the lab: that CSV import works through the API
+  without the portal; what the import site needs in its `PUT` body (MEHO
+  sends the project's region only); whether importing the same file again
+  updates or duplicates machines (MEHO already refuses a repeat of the same
+  file unless a new `repeat_key` is set); whether the group type `Import` is
+  needed for imported servers; the exact upload host.
+
 ### Not in this group yet
 
 - `azure.migrate.report.link` (a short-lived download link for an assessment
@@ -2011,7 +2181,105 @@ API description files. Open points for the lab proof:
 
 ## monitor
 
-Not built yet (Task #5090).
+The monitor family tells how busy Azure VMs really are, from Azure Monitor
+platform metrics (CPU use and free memory, one sample per hour, kept 93 days).
+Both operations are in the group `monitor`, are `safe` and need no approval:
+they only read.
+
+| Operation | Reads | Parameters |
+|---|---|---|
+| `azure.vm.metric.list` | the hourly CPU and free memory of one VM, and memory used when the memory size is known | `vm_id`; `from`, `to` (default: the last 7 days, at most 93) |
+| `azure.vm.utilization.summary` | CPU and memory use of many VMs: average, 95th percentile, maximum, samples, coverage | `vm_ids` or `resource_group` (default: every VM of the subscription); `days` (default 30, at most 93) |
+
+Code: `monitor.py` (group text, guidance for the AI, parameter schemas, the
+operation table and the mixin), `monitor_reads.py` (the single-VM body),
+`monitor_summary.py` (the summary body), `monitor_calls.py` (window and ID
+checks, the batch call, the memory size), `monitor_rows.py` (reading Azure's
+answer, the numbers) and `monitor_schemas.py` (the response schemas). The paths
+and API versions are in `_paths.py`, section `monitor`.
+
+### Missing samples are unknown, never zero
+
+Azure returns no point for an hour in which it has no sample, for example while
+a VM was deallocated. MEHO keeps such an hour as `null` (in
+`azure.vm.metric.list`) or leaves it out of every number (in the summary). It
+never counts an hour as zero use. The window is a whole number of hours that
+ends at the last full hour, so the number of samples expected is exactly
+`days x 24`.
+
+The summary gives each VM `samples_expected`, `samples_found` (the hours with a
+CPU sample), `coverage_percent` and `sufficient`. A VM below 80% coverage has
+`sufficient: false` and a `reason`. The `memory` block has its own coverage,
+`sufficient` and `reason`: a VM can have enough CPU samples and no memory
+samples (Azure does not always have them). The numbers are still shown when
+some samples exist; a caller must check `sufficient` before it sizes a VM.
+`sufficient` compares the sample counts, not the rounded `coverage_percent`:
+403 of 504 samples (79.96%) shows as 80.0 but is not sufficient.
+
+### The numbers
+
+- CPU average is the mean of the hourly averages. `p95_percent` is the
+  nearest-rank 95th percentile of the hourly averages. `maximum_percent` is the
+  highest hourly maximum.
+- Memory used is `100 x (1 - free memory / memory of the VM size)` per hour,
+  kept between 0 and 100. Its average and p95 come from the hourly average of
+  free memory. Its maximum comes from the hourly lowest free memory, which is
+  the peak of use. This is why MEHO asks Azure for the aggregations Average,
+  Minimum and Maximum.
+- `azure.vm.metric.list` gives each hour the average, lowest and highest free
+  memory in bytes (`memory_available_bytes_average`, `_minimum`, `_maximum`).
+  `memory_samples_found` counts the hours with a free-memory sample, also when
+  the memory size is unknown and memory used cannot be worked out.
+- The memory of a size comes from `azure.vm.size.list` logic (one Resource SKUs
+  read per region). When that read fails, or the size is not in it, the memory
+  numbers are `null` and `memory.reason` says why; the CPU numbers still count.
+  A missing login or role is never hidden this way: a 403 fails the call.
+- `method` in the result states all of this in a few sentences, together with
+  `window_from`, `window_to` and `interval`.
+
+### How the metrics are read
+
+- One VM: one `GET {vmId}/providers/Microsoft.Insights/metrics` on Resource
+  Manager (API version 2023-10-01, `timespan`, `interval=PT1H`), after the VM
+  and the memory of its size were read.
+- Many VMs: one paged VM list, one Resource SKUs read per region, then the
+  metrics batch read (`POST /subscriptions/{id}/metrics:getBatch`, API version
+  2024-02-01), 50 VMs per call, the VMs of one region and one type per call.
+  Nothing is read per VM. At most 1000 VMs are read per call; more are left
+  out and `truncated` and `omission` say so.
+- The batch read goes to the regional host `{region}.metrics.monitor.azure.com`
+  and needs a token for another API (`https://metrics.monitor.azure.com/.default`).
+  The token cache keeps one token per scope, so this token never goes to
+  Resource Manager and the Resource Manager token never goes to this host. MEHO
+  sends the token only to a region in which the target's own subscription has a
+  VM (the region name is checked to be letters and digits), through the same URL
+  check as every call. This read is proven for the public cloud only, so another
+  cloud is refused with a clear message.
+- When Azure does not answer one batch (a 5xx after the retries, throttling, a
+  lost connection), the VMs of that batch come back `sufficient: false` with a
+  reason that says the VM is unknown, not idle. `batches_failed` counts them.
+  A 403 (the login lacks the Monitoring Reader role) fails the whole call.
+- The login needs the Monitoring Reader role (or Reader) on the subscription.
+
+### Known limits
+
+- Platform metrics only. Memory use needs the platform metric Available Memory
+  Bytes, which Azure does not provide for every VM; such a VM has no memory
+  numbers.
+- The live proof against a real subscription is still to do (the lab proof of
+  the Task).
+
+### References
+
+- Metrics - List (2023-10-01):
+  <https://learn.microsoft.com/en-us/rest/api/monitor/metrics/list>
+- Metrics Data Plane - Batch (2024-02-01):
+  <https://learn.microsoft.com/en-us/rest/api/monitor/metrics-data-plane/batch>
+- Supported metrics of virtual machines:
+  <https://learn.microsoft.com/en-us/azure/azure-monitor/reference/supported-metrics/microsoft-compute-virtualmachines-metrics>
+- Pinned API description files: `Microsoft.Insights/Insights/stable/2023-10-01/metrics_API.json`
+  and `monitor/data-plane/Insights/stable/2024-02-01/metricBatch.json` in
+  <https://github.com/Azure/azure-rest-api-specs>.
 
 ## network
 

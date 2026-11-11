@@ -226,8 +226,10 @@ class PrincipalKind(StrEnum):
 
     Members:
 
-    * :attr:`USER` — a human operator authenticated via the interactive
-      device-code flow. Default when no claim is present.
+    * :attr:`USER` — a person who signed in. There are three ways: the
+      command line (``meho-cli`` client, device code), an MCP client
+      (``meho-mcp`` client, sign-in in the browser), and the web console
+      (``meho-web`` client). Default when no claim is present.
     * :attr:`SERVICE` — a non-interactive service account client that
       uses client-credentials flow but is not a MEHO-managed agent.
     * :attr:`AGENT` — a Keycloak client registered by
@@ -425,6 +427,10 @@ class Operator(BaseModel):
     #: the URL; see :mod:`meho_backplane.mcp.profiles`. It only hides
     #: tools. It gives no right and takes no right from the person.
     mcp_tool_profile: str | None = None
+    #: The MCP client asked for the short tool texts with ``?texts=short``
+    #: (#6293). Only the MCP route sets it, from the URL; see
+    #: :mod:`meho_backplane.mcp.short_texts`. It changes only tool texts.
+    mcp_short_tool_texts: bool = False
 
     @property
     def may_self_approve(self) -> bool:

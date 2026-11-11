@@ -28,8 +28,8 @@ func newAboutCmd() *cobra.Command {
 			"and renders the VCF version, release date, and component BOM.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho sddc-manager about --target rdc-sddc-manager\n" +
-			"  meho sddc-manager about --target rdc-sddc-manager --json | jq .result",
+		Example: "  meho sddc-manager about --target sddc-manager-lab\n" +
+			"  meho sddc-manager about --target sddc-manager-lab --json | jq .result",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

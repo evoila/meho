@@ -38,8 +38,8 @@ func newClusterStatusCmd() *cobra.Command {
 			"\"nsx-rest-4.2\". Renders the overall mgmt_cluster_status and\n" +
 			"control_cluster_status fields; --json emits the full envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho nsx cluster status --target rdc-nsx\n" +
-			"  meho nsx cluster status --target rdc-nsx --json",
+		Example: "  meho nsx cluster status --target nsx-lab\n" +
+			"  meho nsx cluster status --target nsx-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

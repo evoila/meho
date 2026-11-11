@@ -899,10 +899,10 @@ async def test_register_composite_dispatches_end_to_end_with_parent_audit(
         product="vault",
         version="1.x",
         impl_id="vault",
-        op_id="vault.kv.read",
+        op_id="vault.kv.versions",
         handler=typed_sub_op_handler,
-        summary="Read a secret.",
-        description="Read a secret.",
+        summary="Read the versions of a secret.",
+        description="Read the versions of a secret.",
         parameter_schema={"type": "object"},
         when_to_use=None,
         embedding_service=stub_embedding_service,
@@ -938,9 +938,8 @@ async def test_register_composite_dispatches_end_to_end_with_parent_audit(
         target=target,
         params={
             "sub_connector_id": "vault-1.x",
-            "sub_op_id": "vault.kv.read",
-            # vault.kv.read hides values by default; the echo needs them.
-            "sub_params": {"path": "/secret/data/foo", "reveal_secret": True},
+            "sub_op_id": "vault.kv.versions",
+            "sub_params": {"path": "/secret/data/foo"},
         },
     )
     assert result.status == "ok", result.error
@@ -956,7 +955,7 @@ async def test_register_composite_dispatches_end_to_end_with_parent_audit(
             (
                 await fresh.execute(
                     select(AuditLog).where(
-                        AuditLog.path.in_({"vault.composite.read_one", "vault.kv.read"})
+                        AuditLog.path.in_({"vault.composite.read_one", "vault.kv.versions"})
                     )
                 )
             )
@@ -964,7 +963,7 @@ async def test_register_composite_dispatches_end_to_end_with_parent_audit(
             .all()
         )
     parent_rows = [r for r in rows if r.path == "vault.composite.read_one"]
-    child_rows = [r for r in rows if r.path == "vault.kv.read"]
+    child_rows = [r for r in rows if r.path == "vault.kv.versions"]
     assert len(parent_rows) == 1
     assert len(child_rows) == 1
     parent = parent_rows[0]

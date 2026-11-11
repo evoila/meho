@@ -101,3 +101,43 @@ def test_vcf_api_contract_manifest_rejects_missing_or_fictitious_evidence(
 
     with pytest.raises(validator.ManifestError, match=message):
         validator.validate_manifest(data)
+
+
+def _live_verified_manifest() -> dict[str, object]:
+    data = deepcopy(_manifest())
+    row = data["release_rows"][11]["components"]["sddc_manager"]
+    row["evidence_level"] = "live-verified"
+    row["live_observation"] = "A read call returned the domain list."
+    return data
+
+
+def _live_tests(connector_id: str, version: str) -> dict[str, object]:
+    return {
+        "connectors": {
+            connector_id: {
+                "product": "Demo",
+                "tests": [{"product_version": version, "level": "read"}],
+            }
+        }
+    }
+
+
+def test_live_verified_row_without_a_live_test_is_refused() -> None:
+    data = _live_verified_manifest()
+    version = data["release_rows"][11]["components"]["sddc_manager"]["version"]
+
+    for live_tests in (
+        None,
+        {"connectors": {}},
+        _live_tests("sddc-rest-9.0", "0.0.0"),
+        _live_tests("nsx-rest-4.2", version),
+    ):
+        with pytest.raises(validator.ManifestError, match="has no live test"):
+            validator.validate_manifest(data, live_tests)
+
+
+def test_live_verified_row_with_a_matching_live_test_passes() -> None:
+    data = _live_verified_manifest()
+    version = data["release_rows"][11]["components"]["sddc_manager"]["version"]
+
+    validator.validate_manifest(data, _live_tests("sddc-rest-9.0", version))

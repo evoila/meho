@@ -125,7 +125,7 @@ func TestPathEscapeRoundTrip(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"rdc-vcenter", "rdc-vcenter"},
+		{"vcenter-lab", "vcenter-lab"},
 		{"vc.prod", "vc.prod"},
 		{"weird name with space", "weird%20name%20with%20space"},
 		{"slash/in/name", "slash%2Fin%2Fname"},
@@ -161,11 +161,11 @@ func TestDecodeDetailStringFallback(t *testing.T) {
 // renders as a one-line "did you mean" hint listing near-miss names.
 func TestFormatNotFoundStructuredDetail(t *testing.T) {
 	body := `{"detail":{"error":"no_target","query":"rdc-vc","matches":[
-        {"id":"00000000-0000-0000-0000-000000000001","name":"rdc-vcenter","aliases":["vc-prod"],"product":"vcenter","host":"vc.example"},
-        {"id":"00000000-0000-0000-0000-000000000002","name":"rdc-vsphere","aliases":[],"product":"vcenter","host":"vs.example"}
+        {"id":"00000000-0000-0000-0000-000000000001","name":"vcenter-lab","aliases":["vc-prod"],"product":"vcenter","host":"vc.example"},
+        {"id":"00000000-0000-0000-0000-000000000002","name":"vsphere-lab","aliases":[],"product":"vcenter","host":"vs.example"}
     ]}}`
 	got := formatNotFound(body)
-	for _, want := range []string{"Target not found", `"rdc-vc"`, "rdc-vcenter", "rdc-vsphere"} {
+	for _, want := range []string{"Target not found", `"rdc-vc"`, "vcenter-lab", "vsphere-lab"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("formatNotFound missing %q in %q", want, got)
 		}

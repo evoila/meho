@@ -72,7 +72,7 @@ to point it at a tenant:
 | `MEHO_MCP_URL` | Full MCP endpoint, e.g. `https://meho.internal.example/mcp`. Takes precedence. |
 | `MEHO_INSTANCE` | Backplane base URL, e.g. `https://meho.internal.example`. The wrapper appends `/mcp`. |
 | `MEHO_CA_CERT` | Path to an internal-CA bundle; exported as `NODE_EXTRA_CA_CERTS` for the Node-based shim. Only needed on internal-CA deploys. |
-| `MEHO_MCP_CLIENT_ID` | Pre-registered public OAuth client id the shim presents to Keycloak (default `meho-mcp`). Override only if the realm registers the client under a different name. |
+| `MEHO_MCP_CLIENT_ID` | Pre-registered public OAuth client id the shim presents to Keycloak. Unset: the client MEHO names for Claude Code (see below), or else `meho-mcp`. Set it only if the realm registers the client under a different name; then the shim does not ask MEHO and sends no `Meho-Tool` header. |
 | `MEHO_MCP_SCOPES` | Space-separated OAuth scopes the shim requests (default `mcp:read mcp:execute offline_access`: the working surface plus a [login that lasts](#how-long-the-login-lasts)). It replaces the whole list. Set it to opt into [elevated operator mode](#elevated-operator-mode-opt-in). Empty or whitespace-only falls back to the default. |
 | `MEHO_TENANT` | The MEHO tenant this session works in: a tenant name or ID, sent as the `Meho-Tenant` header. Leave it unset if your login has one tenant. See [Work in one tenant](#work-in-one-tenant). Empty or whitespace-only sends no header. |
 | `MEHO_MCP_LOGIN_TIMEOUT` | Seconds the shim waits for the connection, including a browser login, before it stops (default `300`, at most `86400`). See [When the login expires or is not finished](#when-the-login-expires-or-is-not-finished). |
@@ -180,6 +180,14 @@ missing, Keycloak refuses the login with `invalid_scope`.
   Keycloak realm blocks (default Trusted Hosts policy → `403 "Host not
   trusted"`). The `meho-mcp` client must already exist on the realm; see
   `docs/cross-repo/mcp-client-setup.md`.
+- A login of its own for Claude Code (#6210, `lib/tool-client.mjs`). At
+  start the shim reads `GET <backplane>/api/v1/auth-config`. When MEHO lists
+  a client for `claude-code` in `mcp_clients` (switch
+  `MCP_CLIENT_PER_TOOL_KIND`), the shim uses it (`meho-mcp-code`) and sends
+  the header `Meho-Tool: claude-code`. `mcp-remote` keeps one saved login per
+  URL and header values, so Claude Code then has a saved login apart from
+  Claude Desktop. Without a listed client, or when MEHO does not answer
+  within 5 seconds, the shim keeps `meho-mcp` and sends no header.
 - If the backplane URL is not configured, `bin/meho-mcp-remote` exits with a
   message naming the variables to set.
 
@@ -229,8 +237,8 @@ of a login:
   again." Then the shim stops, and `/mcp` shows `meho` as failed. Do what the
   message says; the reconnect opens the browser login. If Claude Code stops
   waiting before you finish it, finish it anyway and reconnect once more.
-- **A renewal fails, but the login has not ended.** All sessions on the
-  computer share one saved login, and the shim keeps it
+- **A renewal fails, but the login has not ended.** All sessions of one
+  tool kind on the computer share one saved login, and the shim keeps it
   (`lib/token-renewal.mjs`). A network error or a server error is tried
   again for about 30 seconds; if the login server still does not answer,
   the call fails with "The MEHO login server did not answer" and the shim

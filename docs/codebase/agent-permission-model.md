@@ -252,6 +252,41 @@ claim for audit parent-linkage (#3446), is never matched against this table).
    | `destructive` | `needs-approval` (#3980) |
    | unknown | `deny` (fail-closed) |
 
+   The switch `AGENT_GRANT_REQUIRED` (#6189) changes this step for an
+   agent login. Other logins never reach this table.
+
+   | `AGENT_GRANT_REQUIRED` | No matching row |
+   |---|---|
+   | `off` (default) | the table above, as before |
+   | `observe` | the table above, and MEHO logs `agent_no_grant_would_deny` (agent, op id, target, risk level) once for each call that `on` would refuse. A call that checks the grant twice (a destructive call checks its preview hash again; a preview with a check before the wait for approval runs the gate twice) still logs one line (`agent_no_grant_log_scope`). |
+   | `on` | `deny` on every risk level, also `safe`. The reason starts with `agent_no_grant:`, names the agent and the op, and says how an admin adds a grant. `result_denied` returns `error_code="agent_no_grant"`, and the audit row of the refusal has `reason_code="agent_no_grant"`. Steps 4 and 5 are skipped: nothing can loosen a `deny`. |
+
+   A matching row works as before, also with the switch on. Any other
+   value of the switch stops MEHO at start.
+
+   A multi-step operation with the switch `on`: before the call waits for
+   approval or runs a step, the dispatcher checks every listed write step
+   of the operation for the agent (`agent_step_refusal` in
+   `operations/_preview_steps.py`, the same list the preview checks). When
+   one step has no grant, the whole call is refused with `agent_no_grant`,
+   no approval request is stored, and no step runs. When a `deny` grant
+   meets a step, the call is refused in the same place, with the grant's
+   own reason and the code `agent_grant_denied` (#6285). So the call never
+   stops half-way at a step the agent's grants refuse. The preview runs the same
+   check, also when the operation itself would wait for approval, so it
+   says `deny` with the same reason. With `observe` the dispatcher runs
+   the check too: each uncovered write step logs one
+   `agent_no_grant_would_deny` line, and the call runs or waits as before.
+   A step with a `deny` grant is left to the step gate, as before.
+
+   The check reads the step list of the operation
+   (`operations/governed_subops.py`). A CI check
+   (`tests/test_agent_grant_step_check.py`) makes sure that every
+   multi-step operation that changes something declares its steps
+   (`register_governed_subops`), or declares that it has no step that
+   MEHO checks on its own (`declare_no_governed_subops`). It fails and
+   names the operation when one does neither.
+
 4. **Apply safety-level ceiling.** A row's verdict can only tighten to the
    op's ceiling, never loosen beyond it:
 

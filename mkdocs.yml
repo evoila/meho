@@ -105,6 +105,7 @@ nav:
       - One person in several tenants: guides/several-tenants.md
       - Topology: guides/topology.md
       - Broadcast: guides/broadcast.md
+      - MEHO on your phone and laptop: guides/phone-and-laptop.md
       - Memory and knowledge: guides/memory-and-knowledge.md
       - Agent sessions: guides/agent-sessions.md
       - Audit forensics: guides/audit-forensics.md

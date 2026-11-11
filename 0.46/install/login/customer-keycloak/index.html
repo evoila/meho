@@ -2318,6 +2318,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../../guides/phone-and-laptop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MEHO on your phone and laptop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../../guides/memory-and-knowledge/" class="md-nav__link">
         
   
@@ -3344,6 +3372,21 @@ person keeps the username from your Keycloak.</p>
 <p>Your Keycloak's own checks stay in place: its password policy, MFA and
 blocked accounts. They run when MEHO's Keycloak sends the person to
 yours.</p>
+<p><strong>Passkeys.</strong> With a company login, the person signs in at your
+Keycloak, so passkeys (Face ID, Touch ID, a fingerprint or Windows
+Hello) are turned on there, not in MEHO's realm. In your Keycloak 26.4
+or newer, in the realm of your people, set the passkey rows of the
+table in
+<a href="../../keycloak-realm/#remember-the-browser-and-passkeys">Remember the browser, and passkeys</a>:
+<strong>Enable Passkeys</strong> on, and in the <strong>Webauthn Passwordless Policy</strong>
+<strong>User verification requirement</strong> and <strong>Discoverable credential</strong> at
+<strong>Required</strong>. A realm made before Keycloak 26.4 also needs the step that
+skips the one-time code after a passkey (see
+<a href="../../keycloak-realm/#a-realm-that-already-runs">A realm that already runs</a>).
+Your people then add a passkey on your Keycloak's account page. For a
+company login of another kind (Entra ID, authentik), turn passkeys on in
+that system. When you use your Keycloak in place of MEHO's, set the same
+rows in the realm <code>meho</code>.</p>
 <h2 id="the-rules">The rules<a class="headerlink" href="#the-rules" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>One MEHO group per person.</strong> Put each person in one of your MEHO

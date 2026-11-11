@@ -128,6 +128,8 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "OFFAZURE_IMPORT_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
     "OFFAZURE_MASTER_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
     # monitor (Task #5090)
+    "METRICS_PATH": (("GET",), "METRICS_API_VERSION"),
+    "METRICS_BATCH_PATH": (("POST",), "METRICS_BATCH_API_VERSION"),
     # network (Task #5085)
     "VIRTUAL_NETWORKS_PATH": (("GET",), "NETWORK_API_VERSION"),
     "VIRTUAL_NETWORK_PATH": (("GET",), "NETWORK_API_VERSION"),
@@ -149,6 +151,7 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     "POLICY_STATES_SUMMARY_PATH": (("POST",), "POLICY_INSIGHTS_API_VERSION"),
     "POLICY_ASSIGNMENTS_PATH": (("GET",), "POLICY_ASSIGNMENTS_API_VERSION"),
     "ROLE_ASSIGNMENTS_PATH": (("GET",), "AUTHORIZATION_API_VERSION"),
+    "ROLE_ASSIGNMENT_PATH": (("PUT", "DELETE"), "AUTHORIZATION_API_VERSION"),
     "ROLE_DEFINITIONS_PATH": (("GET",), "AUTHORIZATION_API_VERSION"),
     "ACTIVITY_LOG_PATH": (("GET",), "ACTIVITY_LOG_API_VERSION"),
     # storage (Task #5086)
@@ -158,6 +161,7 @@ _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
     # fixed query part, so List Blobs compares as GET /{container}.
     "BLOB_LIST_PATH": (("GET",), "BLOB_API_VERSION"),
     "BLOB_PATH": (("GET", "HEAD"), "BLOB_API_VERSION"),
+    "USER_DELEGATION_KEY_PATH": (("POST",), "BLOB_API_VERSION"),
 }
 
 _PARAMETER = re.compile(r"\{[^}]*\}")
@@ -313,6 +317,8 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
         + "vmwaresites@2023-06-06",
         "# monitor (Task #5090)",
+        "GET:/{}/providers/microsoft.insights/metrics@2023-10-01",
+        "POST:/subscriptions/{}/metrics:getbatch@2024-02-01",
         "# network (Task #5085)",
         "GET:/subscriptions/{}/providers/microsoft.network/expressroutecircuits@2026-01-01",
         "GET:/subscriptions/{}/providers/microsoft.network/loadbalancers@2026-01-01",
@@ -325,6 +331,7 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/virtualnetworkgateways@2026-01-01",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/virtualnetworks/{}@2026-01-01",
         "# security (Task #5089)",
+        "DELETE:/{}/providers/microsoft.authorization/roleassignments/{}@2022-04-01",
         "GET:/subscriptions/{}/providers/microsoft.authorization/policyassignments@2026-07-01",
         "GET:/subscriptions/{}/providers/microsoft.insights/eventtypes/management/values@2015-04-01",
         "GET:/subscriptions/{}/providers/microsoft.security/alerts@2022-01-01",
@@ -336,12 +343,14 @@ def test_the_checked_paths_are_pinned() -> None:
         "GET:/{}/providers/microsoft.security/assessments@2020-01-01",
         "GET:/{}/providers/microsoft.security/pricings@2024-01-01",
         "POST:/subscriptions/{}/providers/microsoft.policyinsights/policystates/{}/summarize@2024-10-01",
+        "PUT:/{}/providers/microsoft.authorization/roleassignments/{}@2022-04-01",
         "# storage (Task #5086)",
         "GET:/subscriptions/{}/providers/microsoft.storage/storageaccounts@2026-09-01",
         "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.storage/storageaccounts/{}/blobservices/default/containers@2026-09-01",
         "GET:/{}/{}@2026-10-06",
         "GET:/{}@2026-10-06",
         "HEAD:/{}/{}@2026-10-06",
+        "POST:/@2026-10-06",
     ]
     blocks: list[tuple[str, list[str]]] = []
     for line in pinned:

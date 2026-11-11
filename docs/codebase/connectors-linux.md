@@ -144,20 +144,84 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 
 | op_id | group | Params | Returns |
 |---|---|---|---|
-| `linux.about` | `system` | — | `{vendor, product, version, kernel, os_pretty, hostname, init_system}` |
-| `linux.file.read` | `file` | `path`, `max_bytes?` | `{path, content, truncated, size_bytes, exists}` |
+| `linux.about` | `system` | — | `{vendor, product, version, kernel, os_pretty, hostname, init_system, uptime_seconds, load_1m, load_5m, load_15m}` |
+| `linux.file.read` | `file` | `path`, `max_bytes?` | `{path, content, truncated, size_bytes, exists, zero_length}` |
 | `linux.log.tail` | `log` | `path`, `lines?` | `{rows, total, path}` |
 | `linux.service.status` | `service` | `unit` | `{unit, active, enabled, sub_state}` |
 | `linux.sysctl.read` | `system` | `key` | `{key, value}` |
 | `linux.dns.lookup` | `network` | `name` | `{name, found, addresses, exit_code}` |
 | `linux.firewall.show` | `firewall` | — | `{rows, total, backend}` |
 | `linux.mount.list` | `storage` | — | `{rows, total}` (each row `kind` = `mount` / `export`) |
+| `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
+| `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
+| `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
 
 `linux.about` is the identity canary (its handler wraps `fingerprint`).
+`linux.firewall.show` reads the rules as root. When the login is not root,
+it runs the read under sudo through `_sudo.py`, with the `sudo_password`
+(or `password`) of the target's secret. When the secret holds no password,
+it sends an empty one: a login that may use sudo without a password still
+reads, and any other login gets `permission_denied`. It checks the exit status and keeps the error text. A
+read that fails is an error that starts with `permission_denied` or
+`read_failed`, never `rows: []`. `backend: none` means only that the host
+has neither `nft` nor `iptables-save`.
 `linux.mount.list` inspects the mount table (`findmnt` / `mount`) plus NFS
 exports (`exportfs -s` / `showmount -e`); each row carries a `kind`
-discriminator. Block-topology and capacity reporting (`df` / `lsblk`) is
-out of scope — a separate op if a concrete need arises.
+discriminator. Block topology (`lsblk`) is out of scope.
+
+`linux.about` also returns `uptime_seconds` and the 1, 5 and 15 minute load
+(`load_1m`, `load_5m`, `load_15m`). They come from `/proc/uptime` and
+`/proc/loadavg`, read in the same fixed round-trip as the identity; a value
+the host does not answer is `null`.
+
+`linux.file.read` sets `zero_length: true` when a `/proc` or `/sys` file read
+back with no content. Those files always report size 0, so empty content is
+the kernel's empty answer, not an empty file. An empty regular file has
+`size_bytes: 0` and `zero_length: false`.
+
+### Journal, filesystem usage and directory listing (`ops_inspect.py`)
+
+Three reads for storage and NFS diagnosis, in `ops_inspect.py` (handlers
+and checks) and `ops_inspect_ops.py` (op rows).
+
+- `linux.journal.tail` runs `journalctl -o json --all --no-pager -n <lines>`
+  (default 200, same cap as `log.tail`). `--all` keeps fields over 4096
+  bytes; without it `journalctl` prints them as `null`. `unit` uses the
+  unit-name check of `service.status`; `since` / `until` allow letters,
+  digits, space and `: + . _ -` (max 64 characters) and are passed as
+  `--since=<quoted>`; `priority` is `0`-`7` or a syslog level name.
+  The command prints the exit code of `journalctl` after its output,
+  because a pipe returns only the exit code of its last command. The
+  output is cut at 8 MiB (`head` keeps one byte more, so a cut right
+  after a line break is still seen), and then `awk` (in the C locale, so
+  it counts bytes) keeps only the lines that fit the cap whole, so a cut
+  never splits a UTF-8 character. The rows are oldest first, so a cut
+  drops the newest rows. A cut ends with a cut marker and sets
+  `truncated`. A
+  message over 4096 characters is cut and its row has
+  `message_truncated: true`. No `journalctl` (exit 127), a `journalctl`
+  exit code other than 0, an output with neither the exit code nor the
+  cut marker, or no rows with text on stderr (for example no permission
+  to read the journal) is an error, never an empty list. Rows with
+  stderr text carry a `warning`.
+- `linux.fs.usage` runs `df -B1 --output=source,fstype,size,used,avail,itotal,iused`
+  for one path. `/` itself is allowed here only. A `-` inode count is
+  `null`. A df failure or an answer that cannot be read is an error.
+- `linux.dir.list` runs one command: it changes into the directory with
+  `cd -P`, prints the real path, then `find -mindepth 1 -maxdepth <depth>`
+  with NUL-ended records. `depth` is 1 or 2. Hidden names are left out
+  unless `include_hidden`. At most 5000 rows; more sets `truncated`.
+  `incomplete` is true when `find` exited non-zero (part of the tree could
+  not be read). A missing directory is `exists: false`. The real path the
+  host reports goes through the same allow-list check as the typed path.
+
+The paths of `fs.usage` and `dir.list` must lie under the **directory
+allow-list**: `LINUX_READ_ROOTS` plus `/srv`, `/mnt`, `/media`, `/data`,
+`/export`, `/exports`, `/opt`, plus any absolute roots in the
+`LINUX_DIR_LIST_ROOTS` environment variable of the backplane (separated by
+`:`; `/` is refused and a wrong entry raises an error). The key and
+password deny list of `file.read` applies too. Overlap with the host
+readiness reads: `linux.fs.usage` is the one `df` read.
 
 ### DNS lookup on the host (`linux.dns.lookup`)
 
@@ -230,7 +294,12 @@ connection files, `/etc/wireguard`, `/etc/ipsec.secrets`,
 `/etc/ipsec.d/private`, `/etc/sssd/sssd.conf`, `/var/lib/sss/secrets`,
 `/run/secrets`, any `*.key`, `*.keytab`, `*.p12`, `*.pfx`, `id_rsa`, `id_dsa`,
 `id_ecdsa`, `id_ed25519` or `.pgpass` file, every Ceph keyring (`*.keyring`
-and the bare `keyring` file of a monitor or OSD directory), every backup of
+and the bare `keyring` file of a monitor or OSD directory), DNSSEC
+`*.private` keys, the Postfix `sasl_passwd` file and its map, the cloud-init
+user and vendor data (`*user-data*`, `*vendor-data*`, the combined
+`cloud-config.txt`, `obj.pkl` under `/var/lib/cloud`, and
+`instance-data-sensitive.json`), `wpa_supplicant` files, `htpasswd` files,
+`.netrc`, every backup of
 `shadow` and `gshadow` (`shadow-`, `shadow.bak`, `shadow~`), and every path
 that contains `secret` or `credential`. The match ignores upper and lower
 case. Public files next to them (`/etc/passwd`, `*.pub`, `/etc/ssl/certs`,
@@ -320,9 +389,10 @@ in `ops_write.py`; the root-elevation primitive lives in `_sudo.py`.
 |---|---|---|---|---|
 | `linux.file.write` | `file` | `dangerous` + approval | `path`, `content`, `validate_command?`, `backup?` | `{written, path, backup_path, validated, rolled_back}` |
 | `linux.service.control` | `service` | `caution` (no approval) | `action`, `unit`, `daemon_reload?` | `{unit, action, daemon_reload, ok}` |
-| `linux.script.run` | `exec` | `dangerous` + approval | `script`, `interpreter?`, `arguments?`, `working_directory?`, `env?`, `secret_env?`, `timeout_seconds?`, `use_sudo?` | `{stdout, total, stderr, exit_code, interpreter, used_sudo}` |
+| `linux.script.run` | `exec` | `dangerous` + approval | `script`, `interpreter?`, `arguments?`, `working_directory?`, `env?`, `secret_env?`, `timeout_seconds?`, `use_sudo?`, `script_ref?`, `expected_sha256?` | `{stdout, total, stderr, exit_code, interpreter, used_sudo}` |
 | `linux.sysctl.write` | `system` | `dangerous` + approval | `key`, `value` | `{key, value, applied, dropin_path}` |
-| `linux.firewall.load` | `firewall` | `dangerous` + approval | `ruleset`, `backend?` | `{applied, backend, validated}` |
+| `linux.firewall.load` | `firewall` | `dangerous` + approval | `ruleset`, `backend?`, `rollback_after_seconds?` | `{applied, backend, validated}`, plus `{rollback_id, rollback_due_at}` with the timer |
+| `linux.firewall.confirm` | `firewall` | `caution` + approval | `rollback_id`, `install_path?` | `{confirmed, rollback_id, installed, install_path}` |
 
 ### Tier rationale
 
@@ -345,6 +415,76 @@ first-boot script can be re-run (or a multi-step fix applied) *through* the
 backplane rather than around it. It returns `stdout` as a list of lines so
 a large output spills to a `result_query` handle through the JSONFlux
 reducer rather than flooding agent context; `stderr` is capped inline.
+
+### Firewall changes with a timed way back
+
+A rule with good syntax can still cut the SSH path to the host. Then only
+a console login can fix it. So `linux.firewall.load` takes an optional
+`rollback_after_seconds` (60 to 1800). Without it, the load works as
+before. With it, one root script (`ops_firewall_rollback.py`) runs these
+steps in this order:
+
+1. Take the host lock (`flock` on `/var/lib/meho/firewall-rollback/.lock`).
+   Refuse when another timed change still waits for its confirm or its
+   timer. Only one timed change can wait at a time. To tell, the script
+   asks systemd whether the other timer still waits or its restore runs,
+   and it also checks the saved end time. So a change of the host clock
+   does not let a second change start.
+2. Save the live rules to `/var/lib/meho/firewall-rollback/<rollback_id>/`
+   (a root-only folder) and check the syntax of the saved file. The nft
+   copy starts with `flush ruleset`, so loading it replaces the rules. For
+   iptables, each table that the new rules use but the live rules do not
+   goes into the saved copy as an empty table. So loading the saved copy
+   also clears a table that the new rules added.
+3. Check the syntax of the new rules.
+4. Start a timer with `systemd-run --on-active=<seconds>`. When it ends, it
+   takes the lock, loads the saved rules and writes a `restored` mark.
+   It waits for the lock as long as a load or a confirm holds it, and it
+   loads nothing without the lock.
+5. Load the new rules.
+
+If the save or the timer fails, the script stops before any change and the
+call is an error. A host without systemd or `flock` is refused. If the load
+itself fails (iptables can stop after some tables are in), the script loads
+the saved rules at once. Only when that works does it stop the timer. If it
+does not work, the timer stays and tries again when it ends. The answer
+adds `rollback_id` and `rollback_due_at` (UTC, from the host clock).
+
+`linux.firewall.confirm` keeps the new rules:
+
+- It opens a **new** SSH connection, not one from the pool. A pooled
+  connection stays open under the new rules, so it proves nothing.
+- It holds the same lock as the load and the timer, so it never runs at
+  the same time as the restore.
+- It refuses an unknown `rollback_id`, a timer that already ran, and a
+  timer that ends in less than 20 seconds. It checks the time left again
+  right before it stops the timer. The error says whether the old rules
+  are back or coming back.
+- It writes a `keep` mark, then stops the timer. The restore does nothing
+  when it finds `keep`, so a restore that started just before the stop
+  cannot undo the confirm. With `install_path` it first checks the new
+  rules, then writes them to that file, so they survive a reboot. The path
+  must be inside the write roots of `linux.file.write`. An existing file
+  keeps its mode.
+
+`linux.firewall.confirm` is `caution` with `requires_approval=true`. The
+operation contract check asks every operation that is not `safe` to wait
+for approval, and a call made with a token waits for a person's approval
+anyway. So a person approves the confirm too. Pick a timer long enough for
+the checks and for that approval. If the approval comes too late, the
+confirm refuses and the old rules come back by themselves.
+
+### File mode and owner (`file.write`)
+
+`file.write` writes the new content to a temp file in the same folder,
+then renames it over the old file. The temp file starts as `0600`. When the
+file already exists, the script copies the old file's mode and owner onto
+the temp file before the rename. So a `0644 root:root` file stays
+`0644 root:root`, and a daemon that reads it as a non-root user can still
+read it. If the copy fails, the script stops before the rename: the old
+file stays as it was and the op returns `written: false`. A new file is
+created `0600` and owned by root. If a non-root service must read a new
+file, change its mode afterwards.
 
 ### Root elevation
 
@@ -375,18 +515,45 @@ differently, by design:
   credential-class exclusion in `_is_previewable`), because the request-time
   preview's `redacted_body` slot cannot scrub a structured secret. Their
   reviewer preview is instead a **bespoke park-time `proposed_effect`**
-  (`register_preview_builder`, fail-soft) that echoes only shape — path +
-  content byte size + backup path + validate command for `file.write`;
-  interpreter + script byte size + argument byte size + env-var **names** +
-  the `secret_env` **reference mapping** (`ENV → <vault-path>#<field>`, the
-  non-secret Vault pointers) + working directory + sudo intent + timeout for
-  `script.run` — and **never** the `content` / script body / argument values /
-  env values / resolved `secret_env` values.
+  (`register_preview_builder`, fail-soft). For `file.write` it echoes only
+  shape — path + content byte size + backup path + validate command, never
+  the `content`. For `script.run` it shows interpreter + argument byte size +
+  env-var **names** + the `secret_env` **reference mapping**
+  (`ENV → <vault-path>#<field>`, the non-secret Vault pointers) + working
+  directory + sudo intent + timeout, and **the script itself** (see "What the
+  approver of `script.run` reads" below) — never the argument values / env
+  values / resolved `secret_env` values.
 - `linux.sysctl.write` and `linux.firewall.load` carry no secret, so they
   register **no** bespoke builder and stay previewable via
   `preview_operation` on the generic params-echo default. For
   `firewall.load` this is the point: the reviewer sees the full ruleset
   before approving.
+
+### What the approver of `script.run` reads
+
+For `script.run` the script body is the change that waits for approval, so
+the approver reads it. `linux/script_preview.py` builds these preview fields:
+
+| Field | What it holds |
+|---|---|
+| `script` | The script text. Values that look like secrets are replaced by a marker, in two passes. First the shell-aware command-line hider that the `k8s.job.create` preview uses (`redaction/command_line.py`, `hide_shell_script`): the value of a `NAME=VALUE` whose name holds a secret word (`PGPASSWORD=...`, `export AWS_SECRET_ACCESS_KEY=...`), the value after a secret flag (`--password x`), the password in `curl -u user:password` and in a URL, tokens with a known vendor prefix. In a script, `-p` is a secret flag only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also with the value glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are. This list is narrower than the `k8s.job.create` rule, where `-p` is a secret flag after any program. A password glued to `-u` (`curl -uuser:password`) is hidden in a script too. A new line ends a command, but a line continuation (a `\` at the end of a line) does not: the value of a flag may be on the next line. Then the packaged default redaction policy (`docs/codebase/redaction.md`): a bearer token, a JWT, a private key block, a quoted `"password": "..."` pair. Any change counts as hidden. Cut at 64 KiB. |
+| `script_bytes` | The size of the full script in UTF-8 bytes. |
+| `script_sha256` | The SHA-256 of the full script as it runs, to compare with a reviewed copy. Left out when values were hidden: with the rest of the text in view, the hash would let a reader test guesses of the hidden value. |
+| `script_values_hidden`, `script_truncated` | `true` when the shown text differs from the script that runs. |
+| `script_unavailable` | Set, with no text and no hash, when the redaction pass fails. |
+| `script_ref` | The optional `script_ref` param: where the reviewed copy lives. |
+| `script_check` | `matches` or `does not match`, when the caller sent the optional `expected_sha256` param. |
+
+When `expected_sha256` is set and the script does not match it, the handler
+refuses to run the script. The preview lives only in the approval row's
+`proposed_effect`; the audit row keeps only the params hash, and the
+broadcast stays aggregate-only for this `credential_write` op.
+
+The console approval modal shows the text as code in a "Script to run"
+block (`ui/templates/approvals/_script.html`), with the hash, the reviewed
+copy and the check. `meho approvals show` and the `meho approvals approve`
+prompt print the same block, one line per script line
+(`cli/internal/cmd/approvals/script.go`).
 
 ### Approval + secret hygiene
 
@@ -437,9 +604,17 @@ host), exactly the un-governed footgun this connector exists to retire.
   `vault_credentials_read_error`. `#<field>` names the field within that
   secret. Each
   `ENV_NAME` must be a valid POSIX identifier, must not start with a digit,
-  must not collide with a reserved wrapper variable (`tmp` / `args` / `f`) or
-  with a name already declared in `env`, and the mapping is bounded (≤ 32
-  entries).
+  must not be a reserved name (see "Reserved env names" below) or a name
+  already declared in `env`, and the mapping is bounded (≤ 32 entries).
+- **Checked before the call waits for approval.** The `secret_env` schema
+  carries `propertyNames` (the POSIX name pattern and a `not` rule for the
+  reserved names) and `maxProperties: 32`.
+  The dispatcher checks the schema before the policy gate, so a bad or
+  reserved name or too many entries fail at once with `invalid_params`, and
+  no approval is asked for. The pattern ends with `(?![\s\S])`, not `$`, so a
+  name with a trailing newline also fails here. The handler
+  (`_validate_secret_env`) still checks every rule at run time. The clash
+  with `env` and the reference shape are checked only there.
 - **Resolution at execution time only.** The value is resolved when the handler
   runs — the `_approved=True` resume path (or a non-parking dispatch) — never at
   park time. Each field is read through the connector's single Vault seam
@@ -459,8 +634,38 @@ host), exactly the un-governed footgun this connector exists to retire.
   command is built or run (no partial execution). The error names the `ENV`
   and the `<vault-path>#<field>` reference — never a resolved value.
 
-`env` behaviour is unchanged. `secret_env` is `script.run`-scoped; the
-connector has no `command.run` verb to extend it to.
+`secret_env` is `script.run`-scoped; the connector has no `command.run` verb
+to extend it to.
+
+### Reserved env names (`env` and `secret_env`)
+
+The approver of `script.run` sees the script and the env **names**, not the
+env values. So an env value must not change which code runs. `env` and
+`secret_env` refuse the same reserved names:
+
+- the wrapper's own shell variables: `tmp`, `args`, `f`;
+- names that control how a shell starts or splits words: `ENV`,
+  `SHELLOPTS`, `BASHOPTS`, `PS4`, `IFS`, `GLOBIGNORE`, `CDPATH`,
+  `PROMPT_COMMAND`, `ZDOTDIR`, `HOME`;
+- bash variables whose assigned value bash evaluates as arithmetic:
+  `HISTCMD`, `OPTIND`, `RANDOM`, `SRANDOM`. An arithmetic value can run a
+  command, so the wrapper's own `export` line would run it;
+- names that control where commands and libraries are found: `PATH`,
+  `GCONV_PATH`;
+- Java start options: `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`,
+  `_JAVA_OPTIONS`;
+- every name that starts with `BASH_` (for example `BASH_ENV`), `LD_` (the
+  dynamic loader, for example `LD_PRELOAD`), `PYTHON`, `PERL`, `RUBY` or
+  `NODE_`.
+
+Names are case-sensitive, so `TMP` or `bash_env` stay allowed. Both schemas
+carry the list under `propertyNames` → `not`, so the dispatcher refuses a
+reserved name with `invalid_params` before the call waits for approval. The
+handler (`_check_env_name`, used by `_validate_env` and
+`_validate_secret_env`) checks the same list again at run time. The list
+lives in `_RESERVED_ENV_NAMES` and `_RESERVED_ENV_PREFIXES` in
+`connectors/linux/ops_write.py`. A script that needs one of these names sets
+it in its own body, where the approver reads it.
 
 ## Key types
 
@@ -480,6 +685,8 @@ connector has no `command.run` verb to extend it to.
   `ops_host.py` (service.status / sysctl.read / dns.lookup),
   `ops_firewall.py` (firewall.show), `ops_storage.py` (mount.list) — each
   ships its handler, command builder, output parser, and `LinuxOp` rows.
+- `ops_firewall_rollback.py` — the timed load of `firewall.load` and the
+  `firewall.confirm` op (`FIREWALL_ROLLBACK_OPS`).
 - `ops_write.py` — the five write verbs (`WRITE_OPS`), `LINUX_WRITE_ROOTS`
   / `confine_write_path`, the `secret_env` checks and the two park-time
   preview builders (`register_linux_write_previews`).

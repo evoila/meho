@@ -83,6 +83,7 @@ from meho_backplane.audit_cutover import (
 )
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
@@ -213,12 +214,13 @@ async def write_agent_tool_row(
             "reason_code": error.reason_code,
             "reason": error.reason,
         }
-    if operator.name:
-        payload["principal_name"] = operator.name
     payload.update(tenant_role_source_payload(operator))
     _apply_contextvar_lineage_mirrors(payload)
     audit_id = uuid.uuid4()
     async with get_sessionmaker()() as session:
+        principal_name = await principal_display_name(session, operator)
+        if principal_name:
+            payload["principal_name"] = principal_name
         session.add(
             AuditLog(
                 id=audit_id,

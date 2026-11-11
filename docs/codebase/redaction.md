@@ -83,6 +83,7 @@ All types are Pydantic v2 frozen models, defined in
 | `SecretFinder` | `patterns.py` | A named pattern written as code: `secret_spans(text)` returns the spans to replace. `patterns.secret_spans(pattern, text)` gives the spans of any named pattern, regex or finder |
 | `BindKeySecretFinder` | `bind_secret.py` | The `bind_key_secret` finder: reads BIND comments and quoted strings the way BIND does |
 | `UrlSecretFinder` | `url_secret.py` | The `url_secret` finder: reports the user part and the secret query values of each URL in a text |
+| `hide_command_text` / `hide_shell_script` | `command_line.py` | Hide secret values on a command line or in a shell script, word by word (`PGPASSWORD=...`, `--password x`, `curl -u user:...`). Used by the `k8s.job.create` / `k8s.cronjob.run` and `linux.script.run` approval previews. In a script, `-p` is a secret flag only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` and a command with the word `login` (`docker login`) |
 
 `PATTERN_NAMES` (`patterns.py`) is the source of truth for the named
 catalogue; the policy schema validates `rule.pattern` against it at
@@ -146,9 +147,8 @@ production traffic cannot reach that branch.
 
 The `api_key` rule skips a value that already is a complete
 `[REDACTED:...]` placeholder (`password: [REDACTED:param_name]`), so an
-earlier pass (the engine itself, or the shared API file check of
-`connectors-shared-api-file-secrets.md`) is not redacted a second time
-and loses its label. Only a complete placeholder is skipped: a name
+earlier pass (the engine itself, or a connector's own scrub) is not
+redacted a second time and loses its label. Only a complete placeholder is skipped: a name
 between `[REDACTED:` and `]`, and the value ends there. A value that
 only starts like one (`[REDACTED:made-up`) or goes on after the `]`
 (`[REDACTED:x]made-up`) is redacted whole.
@@ -247,8 +247,21 @@ an error body, where a quote sits between the name and the `:`.
 The name rule is the shared `broadcast.events.is_secret_param_name`
 (`password`, `encryptedPassword`, `sessionToken`, `client_secret`,
 `licenseKey`, `psk`, `sharedKey`, `secret_key`, ...), the one the
-broadcast scrub and the approval echo use. The full word list is in
-[connectors-shared-api-file-secrets.md](connectors-shared-api-file-secrets.md#what-counts-as-a-secret-name).
+broadcast scrub and the approval echo use. The full word list:
+
+- anywhere in the name: `password`, `passwords`, `passwd`, `pwd`,
+  `passphrase`, `passphrases`, `apikey`, `kubeconfig`;
+- at the end of the name: `secret`, `secrets`, `token`, `credential`,
+  `credentials`, `psk` (the pre-shared key of a VPN session);
+- the pairs `api_key`, `access_key`, `private_key`, `encryption_key`,
+  `license_key`, `licence_key`, `license_keys`, `licence_keys`,
+  `product_key`, `secret_id`, `secret_value`, `secret_data` anywhere in
+  the name;
+- the pairs `secret_key`, `shared_key`, `preshared_key`,
+  `connection_string`, `connection_strings` only at the end of the name
+  (`secret_key_ref` is the name of a Kubernetes Secret and stays plain).
+
+Names are read in snake, camel and kebab case.
 Numbers, booleans and `null` stay, except in the trace scrub: there a number
 under a secret name is hidden too, as in the normal answer. A value an earlier step already masked
 (`[REDACTED:...]`, a trace marker, `***`) stays, so its label is kept.

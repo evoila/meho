@@ -78,7 +78,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 from fastapi import APIRouter, Depends, Request
@@ -89,6 +89,11 @@ from meho_backplane.auth.current_tenant import tenant_not_chosen_detail
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
+from meho_backplane.mcp.profiles import (
+    UnknownToolProfileError,
+    parse_tool_profile,
+    profile_admits,
+)
 from meho_backplane.mcp.registry import all_tools_for
 from meho_backplane.mcp.schemas import (
     INTERNAL_ERROR,
@@ -119,6 +124,9 @@ from meho_backplane.request_usage.collector import (
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.untrusted_text import VENDOR_TEXT_BAND
 from meho_backplane.version import deployed_version_label
+
+if TYPE_CHECKING:
+    from meho_backplane.conventions.preamble import PreambleAssembly
 
 __all__ = [
     "RESOURCES_SUBSCRIBE_ENABLED",
@@ -164,6 +172,12 @@ RESOURCES_SUBSCRIBE_ENABLED: Final[bool] = False
 #: The broadcast write tool. The ``initialize`` instructions name the
 #: broadcast tools only when the session's tool list has this one (#4113).
 BROADCAST_ANNOUNCE_TOOL: Final[str] = "meho_broadcast_announce"
+
+#: A docs tool and a runbook tool. The ``initialize`` instructions keep
+#: the docs collection list and the runbook band only when the session's
+#: tool profile keeps these tools (#4172).
+DOCS_SEARCH_TOOL: Final[str] = "search_docs"
+RUNBOOK_NEXT_TOOL: Final[str] = "meho_runbook_next"
 
 
 #: Module-level structlog logger. Defined up here (rather than next to
@@ -398,6 +412,36 @@ def _session_can_announce(operator: Operator) -> bool:
     return any(defn.name == BROADCAST_ANNOUNCE_TOOL for defn in all_tools_for(operator))
 
 
+async def _session_preamble(operator: Operator) -> PreambleAssembly:
+    """Assemble the tenant preamble bands that fit *operator*'s tool list.
+
+    ``sub`` (G12.4-T2 #1316) drives the per-run priming band;
+    ``capabilities`` (G4.6-T4 #1553) drives the doc-collection catalogue
+    band. An operator with no in-progress runs and no entitled collections
+    sees a byte-identical preamble to the pre-band shape (each band helper
+    returns ``text=""`` and the assembler omits that section).
+
+    #4172: the bands follow the session's tool profile. A profile without
+    the runbook tools gets no runbook band, and a profile without the docs
+    tools gets no docs collection list, because both bands tell the agent
+    to call tools it cannot see. The broadcast band follows the tool list
+    (#4113). Without a profile nothing changes.
+    """
+    # Imported here to break the import cycle (see _session_instructions).
+    from meho_backplane.auth.agent_admission import is_agent_caller
+    from meho_backplane.conventions.preamble import assemble_preamble_detailed
+
+    profile = operator.mcp_tool_profile
+    return await assemble_preamble_detailed(
+        operator.tenant_id,
+        operator.sub,
+        capabilities=operator.capabilities if profile_admits(profile, DOCS_SEARCH_TOOL) else None,
+        include_broadcast=_session_can_announce(operator),
+        broadcast_can_post=is_agent_caller(operator),
+        include_runbook_priming=profile_admits(profile, RUNBOOK_NEXT_TOOL),
+    )
+
+
 async def _session_instructions(operator: Operator) -> str | None:
     """Assemble the ``initialize.instructions`` payload for *operator*.
 
@@ -437,31 +481,27 @@ async def _session_instructions(operator: Operator) -> str | None:
     :func:`_session_can_announce`). A ``read_only`` session cannot call
     the broadcast tools, so its instructions do not name them.
 
-    #5729: the caller's newest Memory notes follow the preamble
+    #5770: a session that is not an agent gets the reader form of that band
+    (read the feed, do not post), because MEHO refuses its announcements.
+
+    #5729: with the ``TEAM_KNOWLEDGE_RECALL`` setting on (off by default),
+    the caller's newest Memory notes follow the preamble
     (:func:`meho_backplane.recall.memory_band`).
+
+    #4172: the bands follow the session's tool profile; see
+    :func:`_session_preamble`.
     """
     # Imported inside the function to break the import cycle (mcp.server
     # → conventions.preamble → db → ... → mcp.server). The cost of one
     # function-local import per ``initialize`` call is negligible (the
     # module is already loaded by the time any handshake arrives).
-    from meho_backplane.conventions.preamble import assemble_preamble_detailed
     from meho_backplane.conventions.schemas import (
         DEFAULT_MAX_PREAMBLE_TOKENS,
         estimate_tokens,
     )
     from meho_backplane.recall import memory_band
 
-    # ``sub`` (G12.4-T2 #1316) drives the per-run priming band;
-    # ``capabilities`` (G4.6-T4 #1553) drives the doc-collection catalogue
-    # band. An operator with no in-progress runs and no entitled collections
-    # sees a byte-identical preamble to the pre-band shape (each band helper
-    # returns ``text=""`` and the assembler omits that section).
-    preamble = await assemble_preamble_detailed(
-        operator.tenant_id,
-        operator.sub,
-        capabilities=operator.capabilities,
-        include_broadcast=_session_can_announce(operator),
-    )
+    preamble = await _session_preamble(operator)
     if preamble.dropped_slugs:
         # Loud, not silent -- the dropped-slug list is part of the
         # contract per the issue body's acceptance criterion. WARNING
@@ -1332,6 +1372,15 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # and for the call-time role re-check on tools/call / resources/read.
     # Built-in lifecycle handlers (initialize, ping, notifications/
     # initialized) accept the parameter but don't read it.
+    # Tool profile (#4172): ``?profile=<name>`` on the MCP URL. An unknown
+    # name is a bad URL, refused before the body is read, so a typo never
+    # quietly gives the full tool list.
+    try:
+        profile = parse_tool_profile(request.query_params.getlist("profile"))
+    except UnknownToolProfileError as exc:
+        return _error_response(None, INVALID_REQUEST, str(exc), status_code=400)
+    if profile is not None:
+        operator = operator.model_copy(update={"mcp_tool_profile": profile})
     raw_body = await _read_body_capped(request)
     if isinstance(raw_body, JSONResponse):
         return raw_body

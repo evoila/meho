@@ -44,7 +44,7 @@ func runDecisionText(t *testing.T, decide mockHandler, verb string, jsonOut bool
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	cmd.SetContext(context.Background())
-	err = runDecision(cmd, stubID, verb, "", jsonOut, srv.URL)
+	err = runDecision(cmd, stubID, verb, "", decisionOpts{JSONOut: jsonOut, BackplaneOverride: srv.URL})
 	return stdout.String(), &stderr, err
 }
 
@@ -72,7 +72,7 @@ func refused(detail string) mockHandler {
 // was the person's own change.
 func TestApproveOfOwnChangePrintsTheSelfApprovalLine(t *testing.T) {
 	cases := map[string]string{
-		ruleSAOperatorSelf: "self-approved as a MEHO-SA-Operator",
+		ruleSAOperatorSelf: "self-approved as a MEHO-SA-Operator or MEHO-Admin",
 		ruleBreakGlassSelf: "self-approved because APPROVAL_ALLOW_SELF_APPROVAL is on",
 	}
 	for rule, want := range cases {
@@ -176,6 +176,7 @@ func TestPrintDetailShowsMayApprove(t *testing.T) {
 		{ptr(true), ptr("own_change"), "May approve:  yes, your own change (a self-approval"},
 		{ptr(false), ptr("own_change"), "May approve:  no, it is your own change"},
 		{ptr(false), ptr("wrong_group"), "May approve:  no, another person's dangerous or destructive change needs a MEHO-SA-Operator or a MEHO-Admin"},
+		{ptr(false), ptr("rights_change"), "May approve:  no, it is a change of rights and another admin must approve it"},
 		{ptr(false), ptr("something_new"), "May approve:  no (something_new)"},
 	}
 	for _, c := range cases {
@@ -196,12 +197,34 @@ func TestPrintDetailShowsMayApprove(t *testing.T) {
 	}
 }
 
+// TestPrintDetailShowsRightsChange checks the "Rights change" line of show.
+func TestPrintDetailShowsRightsChange(t *testing.T) {
+	cases := []struct {
+		mark *bool
+		want bool
+	}{
+		{ptr(true), true},
+		{ptr(false), false},
+		{nil, false},
+	}
+	for _, c := range cases {
+		d := newApprovalView(t, "pending", "")
+		d.RightsChange = c.mark
+		cmd, stdout, _ := newCapturingCmd(t)
+		printDetail(cmd, &d)
+		got := strings.Contains(stdout.String(), "Rights change: another admin must approve")
+		if got != c.want {
+			t.Errorf("mark %v: got %v, want %v:\n%s", c.mark, got, c.want, stdout.String())
+		}
+	}
+}
+
 // TestInOrderStepPrintsTheSelfApprovalLine checks the in-order output.
 func TestInOrderStepPrintsTheSelfApprovalLine(t *testing.T) {
 	var buf bytes.Buffer
 	line := selfApprovalLine(&api.DecideResponseBody{SelfApproved: ptr(true), ApprovalRule: ptr(ruleSAOperatorSelf)})
 	printInOrderStep(&buf, inOrderStep{Step: 1, ID: stubID, OpID: "op", Outcome: stepApproved, SelfApproval: line}, 1)
-	if !strings.Contains(buf.String(), "self-approved as a MEHO-SA-Operator") {
+	if !strings.Contains(buf.String(), "self-approved as a MEHO-SA-Operator or MEHO-Admin") {
 		t.Errorf("in-order step has no self-approval line:\n%s", buf.String())
 	}
 }
@@ -223,7 +246,7 @@ func TestSelfApprovalLineNeedsTheServerAnswer(t *testing.T) {
 
 // TestApproveHelpExplainsWhoMayApprove checks the --help texts.
 func TestApproveHelpExplainsWhoMayApprove(t *testing.T) {
-	for _, want := range []string{"MEHO-SA-Operator may approve their own change", "self-approval line", approveWebHint} {
+	for _, want := range []string{"MEHO-SA-Operator or a MEHO-Admin may approve their own change", "self-approval line", approveWebHint} {
 		if !strings.Contains(newApproveCmd().Long, want) {
 			t.Errorf("approve --help is missing %q", want)
 		}

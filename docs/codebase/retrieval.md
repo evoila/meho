@@ -312,11 +312,12 @@ passage texts and heading titles are wrapped as untrusted text.
 
 Before anyone changes a retrieval default (model, prefixes, reranker),
 the change must win on a held-out benchmark. The benchmark lives in the
-existing eval package and runs only offline. It adds no route, index,
+eval package (`backend/scripts/retrieval_eval/`, test tooling outside
+the product package) and runs only offline. It adds no route, index,
 model, migration or setting, and nothing in it can change a production
 default.
 
-**Fixtures** (`retrieval/eval/kb_passage_fixtures.yaml`, loaded by
+**Fixtures** (`backend/scripts/retrieval_eval/kb_passage_fixtures.yaml`, loaded by
 `load_kb_passage_fixtures` in `corpus.py`). Synthetic long Markdown
 entries and queries, all made up. The file has a `version`; the loader
 refuses a version the code does not know. Each query has a `scenario`
@@ -432,15 +433,20 @@ never holds a query or a body, and it never averages across groups.
   search candidate (one whole-body hit, no passages) until the entry is
   written again. `meho kb ingest` rewrites every file, also unchanged
   ones, so running it once builds the passages.
-- **Retrieval eval counts passages.** `retrieval/eval/runner.py` asks
-  for `k` rows and folds passages of one entry into one slug, so fewer
-  than `k` slugs can come back.
+- **Retrieval eval is a CI script, not a product feature.** The eval
+  runner, metrics and question files live in
+  `backend/scripts/retrieval_eval/`, outside the wheel. Two callers use
+  it: the `eval-gate` workflow (`scripts/ci/run_eval_gate.py`, a stub
+  search scored against `ci/eval-baseline.json`) and the kb and memory
+  acceptance tests (the real search). MEHO has no eval route, CLI verb
+  or console tab.
+- **Retrieval eval counts passages.** `backend/scripts/retrieval_eval/runner.py`
+  asks for `k` rows and folds passages of one entry into one slug, so
+  fewer than `k` slugs can come back.
 - **Retrieval eval runs as the caller.** `eval_all` / `eval_surface`
   take `principal_sub` and pass it to every `retrieve` call, so the
-  answer of `POST /api/v1/retrieve/eval`, the console Eval tab and the
-  retire checklist (`compute_retire_checklist`) lists no user memory of
-  another person. The memory surface with the real retriever and no
-  `principal_sub` raises `ValueError`.
+  result lists no user memory of another person. The memory surface
+  with the real retriever and no `principal_sub` raises `ValueError`.
 - **Per-query re-embed.** Every retrieval calls `encode_one(query)`;
   there is no embedding cache in v0.2. v0.2.next may add an LRU once
   cache-hit ratios are measured.

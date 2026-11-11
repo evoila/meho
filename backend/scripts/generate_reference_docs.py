@@ -140,13 +140,10 @@ def _catalog_kind_by_triple() -> dict[tuple[str, str, str], str]:
     statement of a connector's ingest kind: a row that names an
     ``upstream`` spec URL or ships a bundled ``spec_resource`` is a
     generic (spec-ingested) connector; a row with neither is a typed
-    (hand-coded) one. The mechanism-fixture row (``product="_fixture"``)
-    is not a shippable connector and is skipped.
+    (hand-coded) one.
     """
     kinds: dict[tuple[str, str, str], str] = {}
     for entry in load_catalog().entries:
-        if entry.product == "_fixture":
-            continue
         generic = bool(getattr(entry, "upstream", None)) or bool(
             getattr(entry, "spec_resource", None)
         )
@@ -378,7 +375,8 @@ def render_connector_index() -> str:
         "",
         "MEHO has two kinds of connector, both first-class and "
         "indistinguishable to an agent. **Generic** connectors are built by "
-        "ingesting a vendor's protocol spec (OpenAPI, GraphQL, WSDL, proto); "
+        "ingesting a vendor's OpenAPI file (version 3.0 or 3.1; the command line "
+        "converts a Swagger 2.0 file first); "
         "**typed** connectors are hand-coded against a vendor SDK or "
         "transport where no usable spec exists. The **Kind** column is "
         "populated only where MEHO's published connector-spec catalog states "

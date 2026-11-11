@@ -725,3 +725,72 @@ def test_no_truststore_without_a_ca_bundle_or_with_the_login_off(extra: list[str
     (container,) = pod["containers"]
     assert "KC_TRUSTSTORE_PATHS" not in _env(container)
     assert [v["name"] for v in pod["volumes"]] == ["realm"]
+
+
+_TRUSTED_CA = [
+    "--set",
+    "coreKeycloak.trustedCaBundle.configMapName=directory-ca",
+    "--set",
+    "coreKeycloak.trustedCaBundle.key=root.pem",
+]
+
+
+def test_trusted_ca_bundle_works_without_the_company_login() -> None:
+    pod = _pod(_keycloak_docs(*_TRUSTED_CA))
+    (container,) = pod["containers"]
+    assert _env(container)["KC_TRUSTSTORE_PATHS"]["value"] == (
+        "/opt/keycloak/conf/trusted-ca/root.pem"
+    )
+    mount = next(m for m in container["volumeMounts"] if m["name"] == "trusted-ca")
+    assert mount == {
+        "name": "trusted-ca",
+        "mountPath": "/opt/keycloak/conf/trusted-ca",
+        "readOnly": True,
+    }
+    volume = next(v for v in pod["volumes"] if v["name"] == "trusted-ca")
+    assert volume["configMap"] == {
+        "name": "directory-ca",
+        "items": [{"key": "root.pem", "path": "root.pem"}],
+    }
+    assert [v["name"] for v in pod["volumes"]] == ["realm", "trusted-ca"]
+
+
+def test_trusted_ca_bundle_and_company_login_ca_are_both_trusted() -> None:
+    pod = _pod(
+        _keycloak_docs(
+            *_COMPANY_ON,
+            "--set",
+            "coreKeycloak.companyLogin.caBundle.configMapName=company-ca",
+            *_TRUSTED_CA,
+        )
+    )
+    (container,) = pod["containers"]
+    assert _env(container)["KC_TRUSTSTORE_PATHS"]["value"] == (
+        "/opt/keycloak/conf/company-login-ca/ca.crt,/opt/keycloak/conf/trusted-ca/root.pem"
+    )
+    assert [v["name"] for v in pod["volumes"]] == ["realm", "company-login-ca", "trusted-ca"]
+    mounts = [m["mountPath"] for m in container["volumeMounts"]]
+    assert "/opt/keycloak/conf/company-login-ca" in mounts
+    assert "/opt/keycloak/conf/trusted-ca" in mounts
+
+
+def test_trusted_ca_bundle_with_the_company_login_on_but_no_company_ca() -> None:
+    pod = _pod(_keycloak_docs(*_COMPANY_ON, *_TRUSTED_CA))
+    (container,) = pod["containers"]
+    assert _env(container)["KC_TRUSTSTORE_PATHS"]["value"] == (
+        "/opt/keycloak/conf/trusted-ca/root.pem"
+    )
+    assert [v["name"] for v in pod["volumes"]] == ["realm", "trusted-ca"]
+
+
+def test_trusted_ca_bundle_with_an_empty_name_is_off() -> None:
+    pod = _pod(_keycloak_docs("--set", "coreKeycloak.trustedCaBundle.key=root.pem"))
+    (container,) = pod["containers"]
+    assert "KC_TRUSTSTORE_PATHS" not in _env(container)
+    assert [v["name"] for v in pod["volumes"]] == ["realm"]
+
+
+def test_trusted_ca_bundle_rejects_an_unknown_key() -> None:
+    result = _run("--set", "coreKeycloak.trustedCaBundle.name=directory-ca")
+    assert result.returncode != 0
+    assert "trustedCaBundle" in result.stderr

@@ -255,6 +255,11 @@ path "secret/data/agents/+/credentials" {
 path "secret/metadata/agents/+/credentials" {
   capabilities = ["read"]
 }
+# Only with the agent session store on: the object storage keys at
+# config.sessionStore.credentialsVaultPath (docs-site/guides/agent-sessions.md).
+path "secret/data/services/session-store" {
+  capabilities = ["read"]
+}
 # The dead-token probe (evoila/meho#2652) reads lookup-self after a 403
 # on the write. The built-in `default` policy already grants this, but
 # granting it explicitly keeps the probe sound for a token minted with

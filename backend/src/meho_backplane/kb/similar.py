@@ -20,6 +20,11 @@ embeddings). Only an entry whose best passage scores at least
 ``KB_SIMILAR_MIN_SCORE`` (setting ``kb_similar_min_score``) is kept. At
 most :data:`SIMILAR_LIMIT` entries are listed.
 
+The search runs only when the ``KB_SIMILAR_CHECK`` setting (``kb_similar_check``)
+is on. It is off by default: then nothing counts as similar, so a create
+is written as before and a dry run lists no entries. It stays off until
+model tests show it helps.
+
 The check is advice at write time, not a lock: a similar entry that
 another writer saves after the check is not caught. The weekly upkeep
 merges such duplicates later.
@@ -52,6 +57,7 @@ from meho_backplane.kb.service import (
     add_shared_hits,
 )
 from meho_backplane.kb.shared import visible_to
+from meho_backplane.kb.stale_revision import refuse_stale_revision
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
 from meho_backplane.settings import get_settings
 
@@ -143,6 +149,7 @@ async def check_new_entry(
     may_set_curation_keys: bool | None = None,
     create_anyway: bool = False,
     dry_run: bool = False,
+    expected_revision: uuid.UUID | None = None,
 ) -> KbSimilarCheck | None:
     """Return the answer to give instead of writing, or ``None`` to write.
 
@@ -158,7 +165,9 @@ async def check_new_entry(
     defaults to *may_change_any*, like the create), the shared scope
     (``KbSharedNotAllowedError``, ``KbSharedSlugError``), and the owner
     rule for an existing slug when *may_change_any* is off
-    (``KbEntryNotOwnedError``). *may_change_any* and *actor_sub* also
+    (``KbEntryNotOwnedError``), and *expected_revision*: an existing
+    slug needs its current revision, a new slug needs none
+    (``KbStaleRevisionError``). *may_change_any* and *actor_sub* also
     decide ``may_change`` of each listed entry (see
     :func:`find_similar_entries`).
     """
@@ -175,21 +184,27 @@ async def check_new_entry(
         or {}
     )
     existing = await _existing_metadata(tenant_id, slug)
+    if existing is not None and not may_change_any:
+        _refuse_if_not_own(slug, existing, actor_sub)
+    if existing is not None or expected_revision is not None:
+        await refuse_stale_revision(tenant_id, slug, expected_revision)
     if existing is not None:
-        if not may_change_any:
-            _refuse_if_not_own(slug, existing, actor_sub)
         if not dry_run:
             return None
         return _answer(slug, "dry_run", True, True, [], _NEXT_STEP_WOULD_UPDATE)
     if create_anyway and not dry_run:
         return None
 
-    similar = await find_similar_entries(
-        tenant_id,
-        body,
-        header,
-        actor_sub=actor_sub,
-        may_change_any=may_change_any,
+    similar = (
+        await find_similar_entries(
+            tenant_id,
+            body,
+            header,
+            actor_sub=actor_sub,
+            may_change_any=may_change_any,
+        )
+        if get_settings().kb_similar_check
+        else []
     )
     if dry_run:
         would_write = create_anyway or not similar

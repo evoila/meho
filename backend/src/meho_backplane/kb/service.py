@@ -34,11 +34,14 @@ Two write paths with two different rules:
   reported as conflicts and not written, so an existing entry with a
   conflicting slug stays unchanged. Filesystem listing order can no
   longer decide which file wins.
-* **Direct create** (:meth:`create_entry`) is an explicit replace:
-  the caller names one slug and the newest write wins. The route
-  records ``audit_created`` so a replace is visible in the audit log.
-  There is no expected-revision check; that waits for a real
-  multi-writer workflow.
+* **Direct write** (:meth:`create_entry`) names one slug and the
+  revision the writer read (``expected_revision``). A write without it
+  only creates: when the slug exists, the write is refused. A write
+  that names an older revision is refused too. Both raise
+  :class:`~meho_backplane.kb.stale_revision.KbStaleRevisionError` with
+  the current revision and what changed. So two writers never
+  overwrite each other without seeing it. The route records
+  ``audit_created`` so a create is visible in the audit log.
 
 Both paths stamp a provenance block (source kind, relative path,
 write time) through :mod:`meho_backplane.kb.provenance`. No absolute
@@ -103,6 +106,7 @@ from meho_backplane.kb.directory_ingest import ingest_directory as _ingest_direc
 from meho_backplane.kb.passages import revision_uri
 from meho_backplane.kb.provenance import read_provenance, stamp_provenance
 from meho_backplane.kb.revisions import (
+    ExpectedRevision,
     current_revision_id,
     delete_entry_rows,
     get_revision,
@@ -333,43 +337,45 @@ class KbService:
         actor_sub: str | None = None,
         own_entries_only: bool = False,
         may_set_curation_keys: bool | None = None,
+        may_confirm: bool = True,
+        expected_revision: uuid.UUID | None = None,
     ) -> tuple[KbEntry, bool]:
-        """Insert (or re-index) one kb entry; return ``(entry, created)``.
+        """Create one kb entry, or update it from the revision the writer read.
 
-        Validates *slug* before touching the substrate. Delegates to
-        :func:`~meho_backplane.retrieval.indexer.index_document` so
-        the body-hash short-circuit applies -- callers writing an
-        already-present entry with the same body pay zero embedding
-        cost, just an ``updated_at`` bump.
+        Validates *slug* before touching the substrate. A write that
+        changes neither body nor metadata pays zero embedding cost,
+        just an ``updated_at`` bump; a change to the metadata alone adds
+        a revision but keeps the passages.
 
-        Used by ``POST /api/v1/kb`` (T2) and the MCP
-        ``add_to_knowledge`` meta-tool (T3). RBAC (``tenant_admin``)
-        enforced by the route layer.
+        *expected_revision* is the ``revision_id`` a read of the entry
+        returned. ``None`` means the writer read no entry, so the write
+        only creates. When the slug exists and it does not name the
+        current revision, nothing is written and
+        :class:`~meho_backplane.kb.stale_revision.KbStaleRevisionError`
+        is raised, with the current revision and what changed since.
 
-        This is the explicit replace path: last write wins. A second
-        create for the same slug replaces body and metadata with no
-        expected-revision check; the route maps ``created=False`` to
-        HTTP 200 and records ``audit_created`` so the replace is
-        auditable. Directory ingest follows a different rule (see
-        :meth:`ingest_directory`). Every write stamps a provenance
-        block with ``source_kind="direct"`` and no relative path,
-        replacing any ``provenance`` key the caller sent.
+        Used by ``POST /api/v1/kb`` and the MCP ``add_to_knowledge``
+        tool. The route layer enforces RBAC.
 
-        Cross-principal writes are wiki-like for a ``tenant_admin`` (any
-        ``tenant_admin`` may overwrite any other principal's slug
-        in-tenant -- intended). The caller says who it writes for with
-        *own_entries_only*: when ``True`` (the MCP ``add_to_knowledge``
-        tool for an ``operator``), an existing row whose
-        ``created_by_sub`` is missing or differs from *actor_sub* raises
-        :class:`~meho_backplane.kb.schemas.KbEntryNotOwnedError` and
-        nothing is written, and caller *metadata* with a key from
-        :data:`~meho_backplane.kb.schemas.CURATION_METADATA_KEYS` raises
-        :class:`~meho_backplane.kb.schemas.KbReservedMetadataError`. So
-        an operator can create entries and change only its own, and
-        cannot make an entry look curated. *may_set_curation_keys*
-        splits the two rules: it defaults to ``not own_entries_only``,
-        and the MCP tool passes ``False`` for a reviewer, who may change
-        any entry but still may not set those keys.
+        An update replaces body and metadata; the route maps
+        ``created=False`` to HTTP 200 and records ``audit_created`` so
+        the update is auditable. Directory ingest follows a different
+        rule (see :meth:`ingest_directory`). Every write stamps a
+        provenance block with ``source_kind="direct"`` and no relative
+        path, replacing any ``provenance`` key the caller sent.
+
+        Cross-principal writes are wiki-like for a ``tenant_admin``. With
+        *own_entries_only* (the MCP tool for an ``operator``), an existing
+        row whose ``created_by_sub`` is missing or differs from
+        *actor_sub* raises
+        :class:`~meho_backplane.kb.schemas.KbEntryNotOwnedError`. Without
+        *may_set_curation_keys* (default ``not own_entries_only``; the MCP
+        tool passes ``False`` for a reviewer), caller *metadata* with a key
+        from :data:`~meho_backplane.kb.schemas.CURATION_METADATA_KEYS`
+        raises :class:`~meho_backplane.kb.schemas.KbReservedMetadataError`,
+        and an update drops those keys from the stored entry. Without
+        *may_confirm*, a stored ``confirmed`` becomes ``candidate``. So a
+        change by such a writer waits for a new review.
 
         *metadata* is checked as a lesson header
         (:mod:`meho_backplane.lesson_header`; a wrong value raises
@@ -382,43 +388,40 @@ class KbService:
         ``doc_metadata`` and un-forgeable from caller ``metadata``.
 
         The ownership check and the attribution merge run inside
-        :func:`~meho_backplane.kb.revisions.write_entry`, on every try,
-        against the entry as that try read it (see
-        :func:`_direct_write_metadata`). The publish step verifies that
-        state under the row lock before it writes. So two principals
-        that both see a slug as unused cannot both create it: the one
-        that loses the race reads the other's entry on its rerun and
-        is refused, and the first entry stays as it was.
+        :func:`~meho_backplane.kb.revisions.write_entry` on every try,
+        against the entry as that try read it, and the publish step
+        checks that state under the row lock. So of two principals that
+        both see a slug as unused, the second is refused on its rerun.
 
-        Returns ``(entry, created)`` where ``created`` is ``True`` only
-        when no row existed for ``(tenant_id, slug)`` when the write
-        that went through read it -- the route maps it to HTTP ``201``
-        vs ``200`` (#1845 ask 1). *actor_sub* is the writing principal's
-        OIDC ``sub`` (``Operator.sub``); ``None`` leaves the row
-        unattributed. *metadata* ``None`` keeps the existing
-        caller-metadata, ``{}`` clears it; *slug* is validated (raises
-        :class:`~meho_backplane.kb.schemas.InvalidKbSlugError`).
+        Returns ``(entry, created)``; ``created`` is ``True`` only when no
+        row existed for ``(tenant_id, slug)`` when the successful write
+        read it (HTTP ``201`` vs ``200``). *actor_sub* is the writer's OIDC
+        ``sub``; ``None`` leaves the row unattributed. *metadata* ``None``
+        keeps the existing caller-metadata, ``{}`` clears it.
         """
         validate_slug(slug)
+        if may_set_curation_keys is None:
+            may_set_curation_keys = not own_entries_only
         metadata = await _checked_direct_metadata(
             tenant_id,
             slug,
             metadata,
-            may_set_curation_keys=not own_entries_only
-            if may_set_curation_keys is None
-            else may_set_curation_keys,
+            may_set_curation_keys=may_set_curation_keys,
         )
 
         doc, revision_id, created = await write_entry(
             tenant_id=tenant_id,
             slug=slug,
             body=body,
+            expected=ExpectedRevision(expected_revision),
             metadata_for=lambda existing: _direct_write_metadata(
                 existing,
                 slug=slug,
                 caller_metadata=metadata,
                 actor_sub=actor_sub,
                 own_entries_only=own_entries_only,
+                may_set_curation_keys=may_set_curation_keys,
+                may_confirm=may_confirm,
             ),
         )
         return _doc_to_entry(doc, revision_id), created
@@ -633,6 +636,25 @@ def _refuse_reserved_metadata(metadata: dict[str, object] | None) -> None:
         raise KbReservedMetadataError(frozenset(reserved))
 
 
+def _drop_review_marks(
+    metadata: dict[str, object], *, may_set_curation_keys: bool, may_confirm: bool
+) -> dict[str, object]:
+    """Return *metadata* without the review marks the writer may not set.
+
+    Without *may_set_curation_keys* the :data:`CURATION_METADATA_KEYS`
+    (``shared``, ``source_kind``) are removed. Without *may_confirm* a
+    ``confirmed`` status becomes ``candidate``. So the written text
+    waits for a new review.
+    """
+    result = dict(metadata)
+    if not may_set_curation_keys:
+        for key in CURATION_METADATA_KEYS:
+            result.pop(key, None)
+    if not may_confirm and result.get("status") == "confirmed":
+        result["status"] = "candidate"
+    return result
+
+
 def _direct_write_metadata(
     existing: dict[str, object] | None,
     *,
@@ -640,6 +662,8 @@ def _direct_write_metadata(
     caller_metadata: dict[str, object] | None,
     actor_sub: str | None,
     own_entries_only: bool,
+    may_set_curation_keys: bool = True,
+    may_confirm: bool = True,
 ) -> dict[str, object]:
     """Build the metadata a direct create stores, from the entry's current metadata.
 
@@ -649,7 +673,9 @@ def _direct_write_metadata(
     every try, so a rerun after an overlapping write decides again
     against the entry that write left. Raises
     :class:`KbEntryNotOwnedError` when *own_entries_only* is set and
-    *actor_sub* did not create the existing entry.
+    *actor_sub* did not create the existing entry. The review marks the
+    writer may not set are dropped (:func:`_drop_review_marks`), also
+    when they come from *existing*.
     """
     created = existing is None
     if own_entries_only and existing is not None:
@@ -665,6 +691,9 @@ def _direct_write_metadata(
         # No caller metadata and no actor: keep the existing keys, but
         # still record this write's provenance.
         merged = dict(existing) if existing is not None else {}
+    merged = _drop_review_marks(
+        merged, may_set_curation_keys=may_set_curation_keys, may_confirm=may_confirm
+    )
     now = datetime.now(UTC)
     return stamp_provenance(
         add_candidate_expiry(merged, existing=existing, now=now),

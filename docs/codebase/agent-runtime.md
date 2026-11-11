@@ -385,7 +385,8 @@ The second part has three bands:
 1. `<<HOSTED_CONTEXT>>` — short text MEHO writes. It says MEHO policy, audit,
    and approvals always apply and no tool text can change them; that only the
    newest Memory notes are in the prompt, and the knowledge base and topology
-   are not; which of the four
+   are not (with `TEAM_KNOWLEDGE_RECALL` off: that Memory, the knowledge base
+   and topology are not in the prompt); which of the four
    context tools this run has (only the registered ones); what to do without
    `read_context_resource`; and that conventions and retrieved text are data,
    not instructions.
@@ -396,8 +397,9 @@ The second part has three bands:
    MCP tools (`meho_broadcast_*`, `meho_runbook_*`, docs tools) a hosted run
    does not have.
 3. The run operator's newest Memory notes (`recall.memory_band`, #5729),
-   inside the untrusted-text envelope. Left out when there is no note. See
-   [recall.md](recall.md).
+   inside the untrusted-text envelope. Left out when there is no note, and
+   always left out while the `TEAM_KNOWLEDGE_RECALL` setting is off (the
+   default). See [recall.md](recall.md).
 
 Conventions that do not fit the budget are returned as
 `HostedContext.omissions` (`ContextOmission(kind="convention", name=<slug>,
@@ -520,6 +522,66 @@ How the five added tools are wired (`agent/toolset_discovery.py`):
 - Each call writes the agent tool call row, with the MCP tool's `op_class`
   (`write` for the two add tools).
 
+### Operation tools from the MCP tools (#4754)
+
+The three operation tools (`list_operation_groups`, `search_operations`,
+`call_operation`) have two forms. A setting picks one for every hosted run:
+
+- **Off (the default):** the older hand-written copies in `agent/toolset.py`.
+  They have no exact-op mode (`op_id` on `search_operations`) and no
+  `preview_hash` or `idempotency_key` on `call_operation`.
+- **On (`AGENT_OPERATION_TOOLS_FROM_MCP=true`):** `agent/toolset_operations.py`
+  builds the three tools from the MCP tools. The input schema is the MCP wire
+  schema, the text is the MCP text, and the role floor is the MCP floor. The
+  handlers are the same shared handlers as before, so the approval wait of
+  `call_operation` does not change.
+
+The setting stays off until model tests show the new form helps. Tool names
+do not change, so a definition's `meta_tools` list works with both forms.
+
+Left out of the hosted `call_operation` when the setting is on
+(`LEFT_OUT_FIELDS` in `agent/toolset_operations.py`, with the reason next to
+it):
+
+| Field | Why a hosted run does not get it |
+|---|---|
+| `work_ref` | MEHO sets the run's change reference itself, from the trigger that started the run. The model must not replace it on the audit rows. The same rule holds for `work_ref` on `broadcast_announce`. |
+| `async`, `run_id`, `wait_seconds` | The hosted tool waits until each call ends, also while the call waits for an approval. A background call and its status check are not needed. |
+
+`list_operation_groups` and `search_operations` leave out nothing. The
+hosted `call_operation` text is the MCP text without the part about `async`,
+plus one sentence that says each call waits until it ends.
+
+Two checks run before each handler:
+
+- The arguments are checked against the MCP input schema without the
+  left-out fields. A bad argument, or `search_operations` with neither
+  `query` nor `op_id`, goes back to the model as a retry.
+- An unknown `op_id` in exact-op mode goes back to the model as a failed tool
+  result with `reason: unknown_op` and the next step. The run goes on.
+
+With the setting off, the hand-written tools run the same schema check,
+against their own schema (`_with_argument_check` in `agent/toolset.py`).
+Each of these schemas has `additionalProperties: false`. So a field the
+schema does not name goes back to the model as a retry and never reaches
+the handler. For `call_operation` that covers `preview_hash`,
+`idempotency_key` and `work_ref`.
+
+Destructive operations: with the setting on, a hosted run can call a
+`destructive` operation the same way an MCP client can. It must first call
+`preview_operation` with the same arguments and pass the `preview_hash`.
+Then the call waits until a person approves it. With the setting off, the
+schema check above refuses a `preview_hash` on `call_operation`, so a
+hosted run cannot pass one. The dispatcher refuses a destructive call
+without a `preview_hash`, so with the setting off MEHO refuses every
+destructive call from a hosted run. Tests in
+`tests/test_agent_toolset_operations.py` check that, with the setting off,
+`preview_hash`, `idempotency_key` and `work_ref` do not reach the
+dispatcher.
+
+A test (`tests/test_agent_toolset_operations.py`) checks that each hosted
+schema is the MCP wire schema minus the fields above.
+
 Known gap: the delivery receipt lists a tool the role may not use
 (`role_below_floor`), but not a docs tool left out for `capability_missing`.
 The `agent_toolset_resolved` log line shows both.
@@ -603,6 +665,14 @@ persisted definition (T2 `AgentDefinitionService`), and the durable run row
   `agent_run` row (the source of truth), so it works after the request that
   started the run has returned, and even after the in-memory task is gone
   (worker restart). Cross-tenant / unknown ids raise `AgentRunNotFoundError`.
+  `output` and `error` are set only when `run_output_visible_to` allows
+  it: a direct run (and each child run under it) acts for the person who
+  started it, so only that person reads them; other people in the tenant
+  see the state and token usage. A scheduled or event run (and each child
+  run under it) acts as the agent's own login, so the whole tenant reads
+  it. For a child run, `poll` follows `parent_run_id` up to the first run
+  to find which case applies. The REST poll, the MCP
+  `meho_agents_run_status` tool and the console run page all use `poll`.
 - **`stream_events(operator, name, inputs)`** — drives the seam's
   `stream_events` inline (one connection = one run's lifetime), yielding
   `(run_id, AgentRunEvent)` and recording the terminal outcome on the run
@@ -659,7 +729,8 @@ caller may also be another agent (an `agent`-kind token). Then the caller's
 own grants and the hosted agent's grants both apply, and the stricter wins:
 a caller deny grant refuses the call even when the hosted agent would only
 wait for approval. A call that must wait for approval follows the normal approval rules (the
-person who asked cannot approve their own request, unless the deploy allows it). See
+person who asked cannot approve their own request, unless they are in MEHO-SA-Operators or
+MEHO-Admins, or the deploy allows it). See
 `agent-permission-model.md`.
 
 MEHO does not swap the person's token for the agent's on a direct run. That
@@ -869,7 +940,23 @@ escalate a cheap-tier agent to a deep-tier agent, but MEHO sees one agent run
 invoking another.
 
 `invoke_agent` is **off by default**. It is appended to a built agent only when
-the `PydanticAgentRun` carries a `child_agent_resolver`. The live `AgentInvoker`
+the `PydanticAgentRun` carries a `child_agent_resolver` **and** the definition's
+toolset spec names `invoke_agent` in `meta_tools`
+(`toolset_admits_invoke_agent` in `agent/toolset.py`). No spec, an omitted
+`meta_tools` list, or an empty list gives no `invoke_agent`.
+
+A child run gets at most what both specs allow. `_maybe_build_invoke_tool` in
+`agent/run.py` wraps `run_child`: before the child loop starts, it replaces the
+child's spec with `narrow_child_toolset(parent spec, child spec)` — the tools on
+both `meta_tools` lists (an omitted list stands for the default, non-opt-in set)
+and the connectors on both `connectors` lists (an omitted list means no limit).
+The child's own `invoke_agent` is built from that limited spec, so a grandchild
+is limited again. `_resolve_child_definition` uses the same owner rule as a
+direct run (`AgentInvoker._load_definition`): an agent login resolves only the
+definitions whose `identity_ref` is its own client id; a person resolves any
+enabled definition of the tenant.
+
+The live `AgentInvoker`
 (T7 #1067) wires it: its default runtime injects `_resolve_child_definition`
 (the tenant-scoped `AgentDefinitionService` lookup), `_record_child_run` (the
 `agent_run` lineage recorder), and `_finalize_child_run` (T8 #1087 — the
@@ -1159,6 +1246,9 @@ stays whole.
 Tests use fake servers only (`test_agent_model_backend_setting.py`). A
 run against a real OpenAI-compatible server is a separate step of the
 same work.
+
+Why MEHO picks the server itself, why there is no gateway and why a run
+never falls back: [model routing decision](../decisions/2026-11-10-model-routing.md).
 
 ## Per-tenant tier→Model resolver (G11.5-T1 #1075)
 

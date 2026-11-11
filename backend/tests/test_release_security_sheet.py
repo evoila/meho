@@ -216,6 +216,94 @@ def test_one_image_under_two_names_is_one_scan(tmp_path: Path) -> None:
     assert "digest-" not in sheet
 
 
+def _nothing_to_check(ref: str, **metadata: Any) -> dict[str, Any]:
+    """A Trivy report of an image without an OS and without packages (like busybox).
+
+    Trivy 0.70 leaves "Results" out, and its "Metadata" has no "OS".
+    """
+    return {
+        "SchemaVersion": 2,
+        "ArtifactName": ref,
+        "ArtifactType": "container_image",
+        "Metadata": {
+            "ImageID": "sha256:" + "f" * 64,
+            "DiffIDs": ["sha256:" + "9" * 64],
+            **metadata,
+        },
+    }
+
+
+@pytest.mark.parametrize("results", [None, []], ids=["no Results", "empty Results"])
+def test_image_with_nothing_to_check_is_a_passed_scan(
+    tmp_path: Path, results: list[Any] | None
+) -> None:
+    """Issue #6082: busybox has no OS and no packages, so Trivy reports no target."""
+    busybox = "sha256:" + "d" * 64
+    images = (
+        _IMAGES
+        + f"docker.io/library/busybox:1.37 {busybox}\n"
+        + f"docker.io/library/busybox:digest-{busybox[7:]} {busybox}\n"
+    )
+    report = _nothing_to_check("docker.io/library/busybox@" + busybox)
+    if results is not None:
+        report["Results"] = results
+    proc, sheet = _run(_data(tmp_path, images_txt=images, trivy={**_scans(), "b.json": report}))
+    assert proc.returncode == 0, proc.stderr
+    assert sheet is not None
+    assert f"| `docker.io/library/busybox:1.37` | `{busybox}` | 0 | 0 | 0 | 0 | 0 |" in sheet
+    assert (
+        "Trivy read these images, but found no operating system and no packages in them "
+        "that it can check, so it has no findings for them: `docker.io/library/busybox:1.37`."
+    ) in sheet
+    assert "**CRITICAL and HIGH findings:**\n\nNone." in sheet
+
+
+def test_clean_scans_have_no_nothing_to_check_line(tmp_path: Path) -> None:
+    proc, sheet = _run(_data(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    assert sheet is not None
+    assert "no packages in them" not in sheet
+
+
+@pytest.mark.parametrize(
+    ("report", "message"),
+    [
+        (
+            {"SchemaVersion": 2, "ArtifactName": _PG_REF},
+            "has no scanned target and no image ID or layers",
+        ),
+        (
+            {"SchemaVersion": 2, "ArtifactName": _PG_REF, "Metadata": {}},
+            "has no scanned target and no image ID or layers",
+        ),
+        (
+            _nothing_to_check(_PG_REF, ImageID=""),
+            "has no scanned target and no image ID or layers",
+        ),
+        (
+            _nothing_to_check(_PG_REF, DiffIDs=[]),
+            "has no scanned target and no image ID or layers",
+        ),
+        (
+            _nothing_to_check(_PG_REF, OS={"Family": "debian", "Name": "12.12"}),
+            "found an operating system in the image but has no scanned target",
+        ),
+        (
+            {**_nothing_to_check(_PG_REF), "Results": {}},
+            "has a 'Results' value that is not a list",
+        ),
+    ],
+    ids=["no metadata", "empty metadata", "no image id", "no layers", "os found", "bad results"],
+)
+def test_scan_that_did_not_read_the_image_still_stops(
+    tmp_path: Path, report: dict[str, Any], message: str
+) -> None:
+    proc, sheet = _run(_data(tmp_path, trivy=_scans(pg=report)))
+    assert proc.returncode == 2
+    assert f"trivy/image-2.json {message}" in proc.stderr
+    assert sheet is None
+
+
 def test_clean_scan_says_none(tmp_path: Path) -> None:
     proc, sheet = _run(_data(tmp_path))
     assert proc.returncode == 0, proc.stderr

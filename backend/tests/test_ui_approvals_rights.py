@@ -11,13 +11,16 @@ self-approval, the outcome card says so.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from unittest.mock import AsyncMock, patch
 
 import respx
+from sqlalchemy import update
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.models import ApprovalRequestStatus
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.operations.approval_rights import WEB_APPROVAL_HINT
 from tests.test_ui_approvals import (
     _RESOLVE_OPERATOR,
@@ -76,7 +79,7 @@ def test_an_sa_operator_sees_they_may_approve_their_own_change() -> None:
 
     assert 'data-approve-right="yes"' in body
     assert 'data-approve-reason="own_change"' in body
-    assert "You may approve it as a MEHO-SA-Operator." in body
+    assert "MEHO-SA-Operators and MEHO-Admins may approve their own changes." in body
     assert "disabled" not in _approve_button(body)
     # The armed approve confirm says it is a self-approval.
     assert 'data-approval-confirm="self-approval"' in body
@@ -166,6 +169,49 @@ def test_an_operator_cannot_approve_their_own_destructive_change() -> None:
     assert "disabled" in _approve_button(body)
 
 
+def _rights_change_request() -> uuid.UUID:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        principal_sub=_REVIEWER_SUB,
+        op_id="demo.change",
+        proposed_effect={"op_id": "demo.change", "safety_level": "caution"},
+    )
+
+    async def _mark() -> None:
+        async with get_sessionmaker()() as session:
+            await session.execute(
+                update(ApprovalRequest).where(ApprovalRequest.id == rid).values(rights_change=True)
+            )
+            await session.commit()
+
+    asyncio.run(_mark())
+    return rid
+
+
+def test_a_marked_request_says_another_admin_must_approve() -> None:
+    rid = _rights_change_request()
+
+    body = _modal(_operator(tenant_id=_TENANT_A, role=TenantRole.TENANT_ADMIN), rid)
+
+    assert "data-approval-rights-change" in body
+    assert "Another admin must approve" in body
+    assert 'data-approve-reason="rights_change"' in body
+    assert "This is a change of rights. Another admin must approve it." in body
+    assert "disabled" in _approve_button(body)
+
+
+def test_a_marked_request_may_be_approved_by_another_admin() -> None:
+    rid = _rights_change_request()
+    admin = _operator(tenant_id=_TENANT_A, role=TenantRole.TENANT_ADMIN, sub="second-admin")
+
+    body = _modal(admin, rid)
+
+    assert "data-approval-rights-change" in body
+    assert 'data-approve-right="yes"' in body
+    assert 'data-approve-reason="ok"' in body
+
+
 def test_the_button_matches_what_the_click_does() -> None:
     """Disabled for a person the approve refuses; enabled for a person it allows."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -195,7 +241,7 @@ def test_a_self_approval_shows_a_confirmation_after_the_click() -> None:
     assert response.status_code == 200, response.text  # type: ignore[attr-defined]
     body = response.text  # type: ignore[attr-defined]
     assert 'data-testid="approval-self-approved"' in body
-    assert "You approved your own change as a MEHO-SA-Operator." in body
+    assert "You approved your own change, as a member of MEHO-SA-Operators or MEHO-Admins." in body
     assert "The audit log records it as a self-approval." in body
 
 

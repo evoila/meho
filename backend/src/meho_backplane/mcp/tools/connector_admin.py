@@ -102,12 +102,21 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors import get_connector_v2, resolve_target_version
+from meho_backplane.connectors.resolver import (
+    AmbiguousConnectorResolution,
+    NoMatchingConnector,
+    connector_serves_target,
+    resolve_connector,
+)
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
     ToolSurface,
     register_mcp_tool,
 )
+from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
     _OP_CLASS_READ,
@@ -124,6 +133,7 @@ from meho_backplane.mcp.tools._connector_shared import (
     raise_invalid_params_for_edit_value_error,
     raise_invalid_params_for_legacy_tenant_copy,
 )
+from meho_backplane.operations._catalog_guard import catalog_refuses_target
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
@@ -136,6 +146,11 @@ from meho_backplane.operations.ingest import (
     list_ingested_connectors,
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.targets.resolver import (
+    AmbiguousTargetError,
+    TargetNotFoundError,
+    resolve_target,
+)
 
 __all__ = [
     "CONNECTOR_LIST_NAME",
@@ -225,6 +240,9 @@ async def list_connector_rows(
     has already been checked against the tool's JSON Schema. ``product``
     keeps only rows with exactly that product; empty text means no
     filter. ``detail`` picks short rows (the default) or full rows.
+    ``target`` (a target name or alias) keeps only the rows that fit that
+    target and adds a ``target_fit`` summary
+    (:func:`connectors_for_target`); it never chooses a connector.
 
     Split from :func:`reduce_connector_list` so the hosted agent can
     drop the rows outside its connector allow-list *before* the list is
@@ -233,14 +251,190 @@ async def list_connector_rows(
     status: ConnectorStatusFilter = arguments.get("status", "all")
     product = (arguments.get("product") or "").strip()
     detail = arguments.get("detail", "short")
-    connectors = await list_ingested_connectors(operator=operator, status=status)
+    target_name = (arguments.get("target") or "").strip()
+    connectors = [
+        item
+        for item in await list_ingested_connectors(operator=operator, status=status)
+        if not product or item.product == product
+    ]
+    if not target_name:
+        return {"connectors": [_connector_row(item, detail) for item in connectors]}
+    target = await _load_target(operator, target_name)
+    target_fit, fitting = connectors_for_target(target, connectors)
     return {
-        "connectors": [
-            _connector_row(item, detail)
-            for item in connectors
-            if not product or item.product == product
-        ],
+        "connectors": [_connector_row(item, detail) for item in fitting],
+        "target_fit": target_fit,
     }
+
+
+#: The plain-text ``hint`` sent with each ``target_fit.result`` word. The
+#: four words are the outcomes the connector resolver already has.
+_TARGET_FIT_HINTS: Final[dict[str, str]] = {
+    "compatible": (
+        "These connectors fit the target's product and version. This list "
+        "does not choose one: call_operation picks the connector by target "
+        "each time it runs."
+    ),
+    "fingerprint_unknown": (
+        "MEHO does not know the target's version yet. These connectors are "
+        "for the target's product and may fit. Probe the target, or set its "
+        "version, then ask again."
+    ),
+    "no_connector": "No connector in MEHO fits the target's product and version.",
+    "ambiguous": (
+        "More than one connector fits equally well, so a call on this target "
+        "fails. Set preferred_impl_id on the target to one of these "
+        "connectors, then call again."
+    ),
+}
+
+#: Hints for the two cases where the resolver finds a connector but no
+#: listed row is inside its declared version range.
+_FALLBACK_HINT: Final[str] = (
+    "The target's version is outside the version range these connectors "
+    "declare. A call still runs, through the connector's entry that accepts "
+    "every version, so some operations may not work on this version."
+)
+_NOT_LISTED_HINT: Final[str] = (
+    "No connector in this list fits the target. The `status` or `product` "
+    "filter may hide the one a call would use: ask again without them."
+)
+_REFUSED_HINT: Final[str] = (
+    "The connectors for the target's product do not accept the target's "
+    "version, so a call on this target fails."
+)
+
+
+def _registry_key(item: ConnectorListItem) -> tuple[str, str, str]:
+    return (item.product, item.version, item.impl_id)
+
+
+def connectors_for_target(
+    target: Any,
+    connectors: list[ConnectorListItem],
+) -> tuple[dict[str, Any], list[ConnectorListItem]]:
+    """Return the ``target_fit`` summary and the *connectors* that fit *target*.
+
+    The answer comes from the resolver that runs when ``call_operation``
+    is called with this target (:func:`resolve_connector`, which
+    :func:`~meho_backplane.connectors.resolve_connector_or_label` wraps),
+    so the list and the call never disagree. Nothing is chosen here: the
+    rows are candidates, and the call still picks by target.
+
+    * ``fingerprint_unknown`` — the target has a product but no version
+      (:func:`resolve_target_version` is ``None``). Rows of that product
+      may fit; a versioned connector cannot be checked yet.
+    * ``no_connector`` — the resolver finds no connector. No rows.
+    * ``ambiguous`` — two or more connectors are still tied after the
+      resolver's tie-break. The rows are the tied connectors.
+    * ``compatible`` — the resolver finds one. The rows are every listed
+      connector that fits the target (:func:`connector_serves_target`), or,
+      when none does, the listed rows of the class the resolver picked
+      (it picked the class's entry that accepts every version). A row
+      whose catalog refuses the target in its own check (the check a call
+      runs, :func:`~meho_backplane.operations._catalog_guard.catalog_refuses_target`)
+      is left out.
+
+    ``compatible`` never comes with an empty list: when the class the
+    resolver picked is not listed either, or every row's catalog refuses
+    the target, the answer is ``no_connector`` with a hint that says why.
+    """
+    product = getattr(target, "product", None) or None
+    version = resolve_target_version(target)
+    fitting: list[ConnectorListItem]
+    hint: str | None = None
+    if product is not None and version is None:
+        result = "fingerprint_unknown"
+        fitting = [item for item in connectors if item.product == product]
+    else:
+        try:
+            resolved = resolve_connector(target)
+        except NoMatchingConnector:
+            result, fitting = "no_connector", []
+        except AmbiguousConnectorResolution as exc:
+            tied = set(exc.candidates)
+            result = "ambiguous"
+            fitting = [item for item in connectors if _registry_key(item) in tied]
+        else:
+            result, hint, fitting = _compatible_rows(resolved, target, connectors)
+    summary = {
+        "target": getattr(target, "name", None),
+        "product": product,
+        "version": version,
+        "preferred_impl_id": getattr(target, "preferred_impl_id", None) or None,
+        "result": result,
+        "hint": hint or _TARGET_FIT_HINTS[result],
+    }
+    return summary, fitting
+
+
+def _compatible_rows(
+    resolved: type[Any],
+    target: Any,
+    connectors: list[ConnectorListItem],
+) -> tuple[str, str | None, list[ConnectorListItem]]:
+    """Return ``(result, hint, rows)`` when the resolver found *resolved*.
+
+    ``hint`` is ``None`` for the plain ``compatible`` hint. A row whose
+    catalog refuses the target (:func:`_catalog_refuses`) is left out; when
+    that leaves no row, the answer is ``no_connector``.
+    """
+    hint: str | None = None
+    serving = [item for item in connectors if connector_serves_target(*_registry_key(item), target)]
+    if not serving:
+        serving = [
+            item for item in connectors if get_connector_v2(*_registry_key(item)) is resolved
+        ]
+        hint = _FALLBACK_HINT
+    fitting = [item for item in serving if not _catalog_refuses(item, target)]
+    if fitting:
+        return "compatible", hint, fitting
+    if serving:
+        return "no_connector", _REFUSED_HINT, []
+    return "no_connector", _NOT_LISTED_HINT, []
+
+
+def _catalog_refuses(item: ConnectorListItem, target: Any) -> bool:
+    """True when the catalog's own target check refuses *target*.
+
+    The same check a call on an ingested operation of the catalog runs, so
+    a row the call would refuse with ``unqualified_target_version`` is not
+    shown as fitting.
+    """
+    product, version, impl_id = _registry_key(item)
+    return catalog_refuses_target(
+        product=product, version=version, impl_id=impl_id, source_kind="ingested", target=target
+    )
+
+
+async def _load_target(operator: Operator, name: str) -> Any:
+    """Look the target up by name or alias in the caller's tenant.
+
+    Reads the row only. A miss is ``-32602`` with the ``no_target`` /
+    ``ambiguous_target`` code and the near-miss names, as for
+    ``call_operation``. The lookup binds the target into the log context;
+    a list is not a call on the target, so the binding is undone after.
+    """
+    with structlog.contextvars.bound_contextvars(target_id=None, target_name=None):
+        async with get_sessionmaker()() as session:
+            try:
+                return await resolve_target(session, operator.tenant_id, name)
+            except (TargetNotFoundError, AmbiguousTargetError) as exc:
+                detail: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
+                code = str(detail.get("error", "no_target"))
+                message = (
+                    f"no target matches {name!r} in the tenant"
+                    if code == "no_target"
+                    else f"{name!r} matches more than one target in the tenant"
+                )
+                raise McpInvalidParamsError(
+                    f"{CONNECTOR_LIST_NAME}: {code}: {message}",
+                    data={
+                        "error_code": code,
+                        "query": name,
+                        "matches": detail.get("matches", []),
+                    },
+                ) from exc
 
 
 async def reduce_connector_list(operator: Operator, result: dict[str, Any]) -> dict[str, Any]:
@@ -248,9 +442,12 @@ async def reduce_connector_list(operator: Operator, result: dict[str, Any]) -> d
 
     Same pattern as ``list_targets``: the spill is keyed to the caller's
     tenant and subject, which is the key ``result_query`` reads back with.
+    A ``target_fit`` summary is not part of the rows: it stays next to the
+    handle.
     """
+    rows = {key: value for key, value in result.items() if key != "target_fit"}
     summary, handle = await _CONNECTOR_LIST_REDUCER.reduce(
-        result,
+        rows,
         None,
         {
             "op_id": CONNECTOR_LIST_NAME,
@@ -261,7 +458,8 @@ async def reduce_connector_list(operator: Operator, result: dict[str, Any]) -> d
     )
     if handle is None:
         return result
-    return {**summary, "handle": handle.model_dump(mode="json")}
+    kept = {"target_fit": result["target_fit"]} if "target_fit" in result else {}
+    return {**summary, **kept, "handle": handle.model_dump(mode="json")}
 
 
 async def _list_handler(
@@ -617,8 +815,9 @@ register_mcp_tool(
             "for review; 'enabled' = reviewed and ready to use; "
             "'disabled' = every group is turned off. With no `status`, "
             "it lists every connector. Do not pass `status` unless the "
-            "user asks for connectors in one review state. Read-only; "
-            "visible to operator and tenant_admin roles."
+            "user asks for connectors in one review state. `target` keeps "
+            "only those that fit it. Read-only; visible to operator and "
+            "tenant_admin roles."
         ),
         inputSchema={
             "type": "object",
@@ -642,6 +841,10 @@ register_mcp_tool(
                         "exact value of a row's `product` field. Leave "
                         "it out to list every product."
                     ),
+                },
+                "target": {
+                    "type": "string",
+                    "description": "A target name, not its id.",
                 },
                 "detail": {
                     "type": "string",
@@ -757,7 +960,11 @@ register_mcp_tool(
         description=(
             "Edit one operation's per-op overrides (tenant_admin only). "
             "Editable fields: custom_description (operator-authored "
-            "agent-facing description), safety_level (safe / caution / "
+            "agent-facing description: while the backplane switch "
+            "AGENT_READS_CUSTOM_DESCRIPTION is on, agents see it in place "
+            "of the original description in search_operations hits, in the "
+            "exact-op contract and in keyword search; null brings the "
+            "original back), safety_level (safe / caution / "
             "dangerous / destructive), requires_approval (gate the "
             "operation behind out-of-band approval), is_enabled (per-op "
             "enable/disable that survives connector-level enable/disable "

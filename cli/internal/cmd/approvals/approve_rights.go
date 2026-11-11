@@ -16,8 +16,8 @@ import (
 // approveRightsHelp is the part of `meho approvals approve --help` that
 // explains who may approve (#3329). The server decides; the CLI only
 // shows its answer.
-const approveRightsHelp = "Who may approve: a MEHO-SA-Operator may approve their " +
-	"own change. Then approve prints a self-approval line, and the audit " +
+const approveRightsHelp = "Who may approve: a MEHO-SA-Operator or a MEHO-Admin may " +
+	"approve their own change. Then approve prints a self-approval line, and the audit " +
 	"log records the self-approval. Another person's dangerous or " +
 	"destructive change needs a MEHO-SA-Operator or a MEHO-Admin. MEHO " +
 	"refuses an approval you may not make (403); approve then prints " +
@@ -34,6 +34,7 @@ const (
 	reasonOwnChange        = "own_change"
 	reasonWrongGroup       = "wrong_group"
 	reasonRoleTooLow       = "role_too_low"
+	reasonRightsChange     = "rights_change"
 	reasonNoApprovalAccess = "no_approval_access"
 	reasonNotAPerson       = "not_a_person"
 	reasonNotPending       = "not_pending"
@@ -54,7 +55,7 @@ func selfApprovalLine(resp *api.DecideResponseBody) string {
 	}
 	switch *resp.ApprovalRule {
 	case ruleSAOperatorSelf:
-		return "self-approved as a MEHO-SA-Operator: this is your own change, recorded in the audit log"
+		return "self-approved as a MEHO-SA-Operator or MEHO-Admin: this is your own change, recorded in the audit log"
 	case ruleBreakGlassSelf:
 		return "self-approved because APPROVAL_ALLOW_SELF_APPROVAL is on: this is your own change, recorded in the audit log"
 	default:
@@ -111,6 +112,8 @@ func approveRightText(may *bool, reason *string) string {
 		return "no, another person's dangerous or destructive change needs a MEHO-SA-Operator or a MEHO-Admin"
 	case reasonRoleTooLow:
 		return "no, the operation needs a higher role than yours"
+	case reasonRightsChange:
+		return "no, it is a change of rights and another admin must approve it"
 	case reasonNoApprovalAccess:
 		return "no, your role cannot decide approval requests"
 	case reasonNotAPerson:

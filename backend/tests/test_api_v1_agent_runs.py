@@ -154,6 +154,7 @@ async def _seed_definition(
     name: str = "triage",
     tenant_id: UUID = _TENANT_A,
     enabled: bool = True,
+    toolset: dict[str, Any] | None = None,
 ) -> None:
     await _seed_tenants()
     sessionmaker = get_sessionmaker()
@@ -165,7 +166,7 @@ async def _seed_definition(
                 identity_ref=f"agent:{name}",
                 model_tier="standard",
                 system_prompt="You triage incidents.",
-                toolset={},
+                toolset=toolset if toolset is not None else {},
                 turn_budget=5,
                 output_schema=None,
                 enabled=enabled,
@@ -1058,7 +1059,7 @@ async def test_child_run_status_shows_its_own_token_counts(client: TestClient) -
             usage=RequestUsage(input_tokens=300, output_tokens=30),
         )
 
-    await _seed_definition()
+    await _seed_definition(toolset={"meta_tools": ["invoke_agent"]})
     await _seed_definition(name="helper")
     reset_agent_invoker_for_testing(
         AgentInvoker(

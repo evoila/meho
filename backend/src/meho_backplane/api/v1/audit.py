@@ -141,11 +141,11 @@ from meho_backplane.audit_query import (
     query_audit,
     replay_session,
 )
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
-from meho_backplane.flight_recorder import load_trace
+from meho_backplane.flight_recorder import TraceView, load_trace, should_expose_to_agent
 
 __all__ = ["router"]
 
@@ -389,6 +389,25 @@ async def show(
     return result.rows[0]
 
 
+async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView | None:
+    """Load the trace of *audit_id* that *operator* may read, or ``None``.
+
+    A person gets every trace of the tenant. An agent login gets a trace
+    only when the tenant lets agents read traces, and never one marked
+    ``redaction_uncertain``. The tenant switch is checked first, so a
+    tenant that keeps traces from agents has no trace loaded for them.
+    """
+    is_agent = operator.principal_kind is PrincipalKind.AGENT
+    if is_agent and not await should_expose_to_agent(tenant_id=operator.tenant_id):
+        return None
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        view = await load_trace(session, audit_id=audit_id, tenant_id=operator.tenant_id)
+    if is_agent and view is not None and view.redaction_uncertain:
+        return None
+    return view
+
+
 @router.get("/{audit_id}/trace", response_model=AuditTraceResult)
 async def trace(
     audit_id: uuid.UUID,
@@ -399,28 +418,36 @@ async def trace(
     The **operator read surface** of the dispatch flight recorder
     (``docs/decisions/dispatch-flight-recorder.md``): the ordered, already
     redacted+capped spans a governed dispatch produced. Read-only — it renders
-    what the capture/redaction seams (#3213/#3214) stored and never
+    what the capture/redaction seams stored and never
     re-processes, un-redacts, or writes.
 
-    Operator plane keeps **full** access, independent of the agent gate: unlike
-    the agent read (a sibling task) this serves redaction-uncertain traces too,
-    surfacing ``trace.redaction_uncertain`` so an operator sees when a trace was
-    withheld from agents. Paired add-ons consume this same route with their
-    operator principal — no separate add-on surface.
+    A person keeps **full** access, independent of the agent gate: this serves
+    redaction-uncertain traces too, surfacing ``trace.redaction_uncertain`` so
+    an operator sees when a trace was withheld from agents. Paired add-ons
+    consume this same route with their operator principal — no separate add-on
+    surface.
+
+    An **agent** login gets the same rules as the agent read
+    (:mod:`meho_backplane.flight_recorder.agent_read`): no trace unless the
+    tenant lets agents read traces
+    (:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), and
+    never a trace marked ``redaction_uncertain``. Both answer
+    ``trace_present=False``, like a dispatch with no trace.
 
     Absence has two levels. A missing / cross-tenant **audit row** is a 404
     (never 403), matching :func:`show`: the existence check runs through the
-    tenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and
-    existence never leaks. An audit row that exists but carries **no trace** is
-    a 200 with ``trace_present=False`` — capture is a best-effort opt-in
+    tenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and the
+    answer is the same as for an id that does not exist. An audit row that
+    exists but carries **no trace** is a 200 with ``trace_present=False`` —
+    capture is a best-effort opt-in
     (F1/F7), so "no trace" is a normal observable state, not an error.
 
     Tenant isolation is enforced twice: the existence check is tenant-scoped,
     and :func:`~meho_backplane.flight_recorder.load_trace` additionally filters
     the trace header on ``tenant_id`` as defence in depth.
 
-    Only an ``operation_execution`` row resolves to the flight recorder
-    (#3747); any other class answers ``trace_present=False``.
+    Only an ``operation_execution`` row resolves to the flight recorder; any
+    other class answers ``trace_present=False``.
     """
     _bind_audit_overrides(_AUDIT_TRACE_OP_ID)
     # Audit-existence gate first: 404 (never 403) on a missing / cross-tenant
@@ -435,9 +462,7 @@ async def trace(
     event_class = audit.rows[0].event_class
     view = None
     if event_class == AuditEventClass.OPERATION_EXECUTION:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            view = await load_trace(session, audit_id=audit_id, tenant_id=operator.tenant_id)
+        view = await _load_trace_for(operator, audit_id)
 
     return AuditTraceResult(
         audit_id=audit_id,

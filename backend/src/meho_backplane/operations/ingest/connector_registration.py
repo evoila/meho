@@ -53,6 +53,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import structlog
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -331,8 +332,8 @@ def _profiled_class_name(product: str, version: str) -> str:
 
     The shape ``ProfiledRestConnector_<product>_<version>`` mirrors the
     ``requires_connector_class`` placeholder the profile-backed catalog rows
-    document (``ProfiledRestConnector_fixture_1_0`` for the ``fixture/1.0``
-    row). Non-alnum characters in *product* / *version* are replaced with
+    document (``ProfiledRestConnector_mehoauto_0_1_0`` for the
+    ``mehoauto/0.1.0`` row). Non-alnum characters in *product* / *version* are replaced with
     underscores so the result is a valid Python identifier even when the
     inputs carry dots or dashes.
     """
@@ -834,15 +835,20 @@ class _EnableTimeTarget:
     own ``version`` label stands in for the fingerprinted version
     (``fingerprint=None`` makes the resolver fall back to
     ``target.version``) and no operator preference participates.
+    ``tenant_id`` is the connector's scope, so a tenant's own login setup
+    counts for that tenant's connector (``None`` for the built-in scope).
     """
 
     product: str
     version: str
     fingerprint: None = None
     preferred_impl_id: None = None
+    tenant_id: UUID | None = None
 
 
-def resolved_auto_shim_class(*, product: str, version: str) -> str | None:
+def resolved_auto_shim_class(
+    *, product: str, version: str, tenant_id: UUID | None = None
+) -> str | None:
     """Return the auto-shim class name dispatch would resolve to, or ``None``.
 
     G0.23-T4 (#1630). Enable-time counterpart of the dispatch-time
@@ -886,7 +892,7 @@ def resolved_auto_shim_class(*, product: str, version: str) -> str | None:
     )
 
     try:
-        cls = resolve_connector(_EnableTimeTarget(product=product, version=version))
+        cls = resolve_connector(_EnableTimeTarget(product, version, tenant_id=tenant_id))
     except (NoMatchingConnector, AmbiguousConnectorResolution) as exc:
         _log.debug(
             "edit_op_auto_shim_probe_unresolved",
@@ -900,7 +906,9 @@ def resolved_auto_shim_class(*, product: str, version: str) -> str | None:
     return None
 
 
-def resolved_profiled_connector_class(*, product: str, version: str) -> str | None:
+def resolved_profiled_connector_class(
+    *, product: str, version: str, tenant_id: UUID | None = None
+) -> str | None:
     """Return the profiled connector class name dispatch would resolve to, or ``None``.
 
     G0.28-T5 (#1971). The profiled-tier counterpart of
@@ -932,7 +940,7 @@ def resolved_profiled_connector_class(*, product: str, version: str) -> str | No
     )
 
     try:
-        cls = resolve_connector(_EnableTimeTarget(product=product, version=version))
+        cls = resolve_connector(_EnableTimeTarget(product, version, tenant_id=tenant_id))
     except (NoMatchingConnector, AmbiguousConnectorResolution) as exc:
         _log.debug(
             "edit_op_profiled_probe_unresolved",
@@ -952,6 +960,7 @@ def resolve_authoring_kind(
     version: str,
     enabled_operation_count: int,
     has_code_shipped_op: bool = False,
+    tenant_id: UUID | None = None,
 ) -> tuple[ConnectorAuthoringKind, bool]:
     """Project the connector's authoring-mode ``(kind, dispatchable)`` for the wire.
 
@@ -1002,7 +1011,8 @@ def resolve_authoring_kind(
     rollup (#1636), standing in for "review gate cleared" without a
     second DB round-trip. *has_code_shipped_op* is the sibling rollup:
     ``True`` when any descriptor row carries a code-shipped
-    ``source_kind`` (``'typed'`` / ``'composite'``).
+    ``source_kind`` (``'typed'`` / ``'composite'``). *tenant_id*: see
+    :class:`_EnableTimeTarget`.
     """
     from meho_backplane.connectors.resolver import (
         AmbiguousConnectorResolution,
@@ -1011,7 +1021,7 @@ def resolve_authoring_kind(
     )
 
     try:
-        cls = resolve_connector(_EnableTimeTarget(product=product, version=version))
+        cls = resolve_connector(_EnableTimeTarget(product, version, tenant_id=tenant_id))
     except NoMatchingConnector:
         if has_code_shipped_op:
             _log.debug(

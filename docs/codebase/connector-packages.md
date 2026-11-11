@@ -233,6 +233,11 @@ Rules the code checks at start:
   the operation at `caution` or higher, and it waits for a person's
   approval. The operation contract check fails when an input looks like
   an address and has no marker.
+- Call the kit's `declare_root_shell(op_ids)` at import for every
+  operation that changes a host by running a command or script as root
+  (for example over SSH with `sudo`). A run approval never covers such
+  an operation: a person approves each call (see
+  [run-approvals.md](run-approvals.md)).
 
 MEHO does the rest for every operation: policy, approvals, audit, removal
 of secrets from results, and a result handle (a link to the stored result)

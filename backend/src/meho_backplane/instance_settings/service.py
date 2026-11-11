@@ -72,6 +72,7 @@ from meho_backplane.instance_settings.schema import (
     SettingsTarget,
     SettingsTenant,
     contains_secret,
+    find_over_long_strings,
     find_secret_shaped_values,
     format_validation_errors,
     parse_settings_file,
@@ -82,6 +83,7 @@ from meho_backplane.tenancy.ensure import ensure_tenant
 from meho_backplane.tenancy.policies import (
     set_announce_gate_enabled,
     set_flight_recorder_policy,
+    set_knowledge_wiki_collection,
     set_mail_recipient_allowlist,
     set_run_approval_target_kinds,
 )
@@ -133,10 +135,11 @@ class SettingsForbiddenError(Exception):
 
 
 class SettingsExportRefusedError(Exception):
-    """Stored data holds a secret, so the file is not written. The route answers 409.
+    """Stored data holds a secret or over-long text, so the file is not written.
 
-    ``mistakes`` names each path (never the value), so an admin can move the
-    secret into OpenBao and export again.
+    The route answers 409. ``mistakes`` names each path (never the value), so
+    an admin can move the secret into OpenBao, or shorten the text, and export
+    again.
     """
 
     def __init__(self, mistakes: list[str]) -> None:
@@ -159,6 +162,7 @@ def _policies_block(tenant: Tenant) -> dict[str, Any]:
         },
         "mail_recipient_allowlist": tenant.mail_recipient_allowlist,
         "run_approval_target_kinds": tenant.run_approval_target_kinds_enabled,
+        "knowledge_wiki_collection": tenant.knowledge_wiki_collection,
     }
 
 
@@ -283,11 +287,12 @@ async def export_settings(session: AsyncSession, tenant_ids: list[uuid.UUID]) ->
 
     Raises :class:`SettingsExportRefusedError` when stored data (a target's
     ``notes`` or ``extras``, a convention body, ...) holds something the import
-    would refuse as a secret: the file must never carry one.
+    would refuse: text longer than the import reads, or a secret. The file must
+    never carry a secret, and every file MEHO writes must import again.
     """
     blocks = await load_tenant_blocks(session, tenant_ids)
     spec = {"tenants": list(blocks.values())}
-    mistakes = find_secret_shaped_values(spec, ("spec",))
+    mistakes = find_over_long_strings(spec, ("spec",)) or find_secret_shaped_values(spec, ("spec",))
     if mistakes:
         raise SettingsExportRefusedError(mistakes)
     return {
@@ -449,6 +454,8 @@ def _plan_policies(
         desired["mail_recipient_allowlist"] = policies.mail_recipient_allowlist
     if "run_approval_target_kinds" in sent:
         desired["run_approval_target_kinds"] = bool(policies.run_approval_target_kinds)
+    if "knowledge_wiki_collection" in sent:
+        desired["knowledge_wiki_collection"] = policies.knowledge_wiki_collection
     return desired, desired
 
 
@@ -786,6 +793,7 @@ async def _apply_policies(
             )
             set_mail_recipient_allowlist(tenant, policies["mail_recipient_allowlist"])
             set_run_approval_target_kinds(tenant, policies["run_approval_target_kinds"])
+            set_knowledge_wiki_collection(tenant, policies["knowledge_wiki_collection"])
     except Exception as exc:
         _log.warning(
             "settings_import_policies_failed", tenant_id=str(tenant_plan.tenant_id), error=str(exc)

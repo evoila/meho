@@ -20,7 +20,10 @@ The data folder (``--data``) holds:
 * ``trivy/``: one Trivy JSON report per image of ``images.txt``, any file
   name ending in ``.json``. Each report's ``ArtifactName`` must be
   ``<image>@<digest>``. Two lines of ``images.txt`` with the same image and
-  digest (two tags of one image) share one report;
+  digest (two tags of one image) share one report. A report without
+  scanned targets is fine only when Trivy read the image (its ``Metadata``
+  has the image ID and the layers) and found no operating system: then the
+  image has nothing Trivy can check, and the sheet says so;
 * ``sbom.spdx.json``: the SBOM of the MEHO image (SPDX JSON);
 * ``ports.txt``: the output of ``firewall_port_list`` of the tag;
 * ``trivyignore``: the ``.trivyignore`` file of the tag;
@@ -161,12 +164,48 @@ def read_images(text: str) -> list[tuple[str, str]]:
     ]
 
 
-def _vulnerabilities(report: Any, label: str) -> list[dict[str, Any]]:
+def _read_the_image(report: dict[str, Any]) -> bool:
+    """True when the report shows that Trivy read the image: its ID and its layers."""
+    metadata = report.get("Metadata")
+    if not isinstance(metadata, dict):
+        return False
+    image_id = metadata.get("ImageID")
+    layers = metadata.get("DiffIDs")
+    return (
+        isinstance(image_id, str)
+        and bool(image_id)
+        and isinstance(layers, list)
+        and bool(layers)
+        and all(isinstance(layer, str) and layer for layer in layers)
+    )
+
+
+def _vulnerabilities(report: Any, label: str) -> list[dict[str, Any]] | None:
+    """The findings of one report, or None when the image has nothing to check.
+
+    Trivy leaves "Results" out when it found no operating system and no
+    package files in the image (for example busybox). That is a scan with
+    nothing to check, not a failed scan, but only when the report shows
+    that Trivy read the image and found no operating system.
+    """
     if not isinstance(report, dict) or report.get("SchemaVersion") != 2:
         raise InputError(f"{label} is not a Trivy JSON report (SchemaVersion 2).")
-    results = report.get("Results")
-    if not isinstance(results, list) or not results:
-        raise InputError(f"{label} has no scanned target, so the scan did not read the image.")
+    results = report.get("Results", [])
+    if not isinstance(results, list):
+        raise InputError(f"{label} has a 'Results' value that is not a list.")
+    if not results:
+        if not _read_the_image(report):
+            raise InputError(
+                f"{label} has no scanned target and no image ID or layers, "
+                "so the scan did not read the image."
+            )
+        metadata = report["Metadata"]
+        if metadata.get("OS"):
+            raise InputError(
+                f"{label} found an operating system in the image but has no scanned target, "
+                "so Trivy did not check its packages."
+            )
+        return None
     found: list[dict[str, Any]] = []
     for result in results:
         if not isinstance(result, dict):
@@ -184,11 +223,14 @@ def _vulnerabilities(report: Any, label: str) -> list[dict[str, Any]]:
 
 def read_scans(
     folder: Path, images: list[tuple[str, str]]
-) -> list[tuple[str, str, list[dict[str, Any]]]]:
-    """The findings of each image, from its Trivy report. Every image needs one."""
+) -> list[tuple[str, str, list[dict[str, Any]] | None]]:
+    """The findings of each image, from its Trivy report. Every image needs one.
+
+    The findings are None for an image that has nothing Trivy can check.
+    """
     if not folder.is_dir():
         raise InputError(f"cannot read {folder}: it is not a folder.")
-    by_ref: dict[str, list[dict[str, Any]]] = {}
+    by_ref: dict[str, list[dict[str, Any]] | None] = {}
     for path in sorted(folder.glob("*.json")):
         label = f"trivy/{path.name}"
         report = _read_json(path)
@@ -213,7 +255,7 @@ def _severity(item: dict[str, Any]) -> str:
     return value if value in SEVERITIES else "UNKNOWN"
 
 
-def vuln_parts(scans: list[tuple[str, str, list[dict[str, Any]]]]) -> dict[str, str]:
+def vuln_parts(scans: list[tuple[str, str, list[dict[str, Any]] | None]]) -> dict[str, str]:
     """The count tables and the list of CRITICAL and HIGH findings of all images."""
     with_fix: Counter[str] = Counter()
     without_fix: Counter[str] = Counter()
@@ -222,8 +264,12 @@ def vuln_parts(scans: list[tuple[str, str, list[dict[str, Any]]]]) -> dict[str, 
         "|---|---|" + "---|" * len(SEVERITIES),
     ]
     serious: list[tuple[str, dict[str, Any]]] = []
+    nothing_to_check: list[str] = []
     for ref, name, found in scans:
         counts: Counter[str] = Counter()
+        if found is None:
+            nothing_to_check.append(f"`{_cell(name)}`")
+            found = []
         for item in found:
             severity = _severity(item)
             counts[severity] += 1
@@ -237,6 +283,14 @@ def vuln_parts(scans: list[tuple[str, str, list[dict[str, Any]]]]) -> dict[str, 
         "|---|---|---|",
         *(f"| {sev} | {with_fix[sev]} | {without_fix[sev]} |" for sev in SEVERITIES),
     ]
+    if nothing_to_check:
+        per_image += [
+            "",
+            "Trivy read these images, but found no operating system and no packages "
+            "in them that it can check, so it has no findings for them: "
+            + ", ".join(nothing_to_check)
+            + ".",
+        ]
     values = {"vuln_counts": "\n".join(totals), "vuln_images": "\n".join(per_image)}
     if not serious:
         values["vuln_findings"] = "None."

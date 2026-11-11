@@ -127,6 +127,7 @@ __all__ = [
     "SchedulerVaultBrokerError",
     "SchedulerVaultNotConfiguredError",
     "read_agent_secret",
+    "read_service_secret",
     "renew_scheduler_token",
     "split_kv_v2_api_path",
     "vault_path_for_client_id",
@@ -634,6 +635,38 @@ async def read_agent_secret(identity_ref: str, *, tenant_id: uuid.UUID) -> str |
     if not secret:
         return None
     return secret
+
+
+async def read_service_secret(api_path: str, *, check: str) -> dict[str, str] | None:
+    """Read every field of one KV-v2 secret at *api_path* with the scheduler token.
+
+    For MEHO's own services that run without a person (for example the
+    session store's object storage keys). Returns the fields as strings, or
+    ``None`` when the path does not exist. Raises the same errors as
+    :func:`read_agent_secret`. No value is logged.
+    """
+    settings = get_settings()
+    mount, logical = split_kv_v2_api_path(api_path)
+
+    def _read(client: hvac.Client) -> object:
+        return client.secrets.kv.v2.read_secret_version(
+            path=logical,
+            mount_point=mount,
+            raise_on_deleted_version=False,
+        )
+
+    try:
+        payload, client = await _execute_with_self_heal(
+            settings, _read, check=check, api_path=api_path
+        )
+    except hvac.exceptions.InvalidPath:
+        return None
+    await _maybe_renew_scheduler_token(client)
+    outer = payload.get("data") if isinstance(payload, dict) else None
+    fields = outer.get("data") if isinstance(outer, dict) else None
+    if not isinstance(fields, dict):
+        return None
+    return {str(key): str(value) for key, value in fields.items() if value is not None}
 
 
 @dataclass(frozen=True)

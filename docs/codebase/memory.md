@@ -282,6 +282,9 @@ Contract for `meho://memory/id/{document_uuid}`:
   equals the natural key this operator would build for it (so for
   user scopes the owner is checked through the key, not only through
   metadata); the row has not expired.
+* The checks after the load live in `MemoryService.readable_entry`.
+  The console bulk route (`POST /ui/memory/bulk`) uses it too, with
+  `include_expired=True`.
 * Every miss returns `None`: unknown id, deleted row, other tenant,
   other owner, non-memory row, broken row, expired row. The MCP
   handler also maps a malformed id to the same answer. The wire error
@@ -443,6 +446,23 @@ with full snippets stay far below the default, so `partial` shows up
 only with a lowered limit or very long slugs or target names. There is
 no Memory-specific store, handle, or query grammar: the next step after
 a hit is always the selected read on its `locator`.
+
+### Retrievals and the weekly upkeep
+
+`search_memory` records each hit it delivers to a session in the
+`lesson_retrieval` table (`lessons/retrievals.py`; see
+[reflex-adoption.md](reflex-adoption.md#learning-numbers)). The weekly
+knowledge upkeep (`lessons/upkeep.py`, see
+[kb.md](kb.md#weekly-upkeep-lessonsupkeeppy)) sets `confirmed_at` again on a
+memory entry with `status: confirmed` that a session used. That write
+adds a revision with `written_by_sub = system:knowledge-upkeep`. The
+upkeep does not merge or retire memory entries: the expiry sweeper above
+already deletes expired ones.
+
+Only a reviewer or a tenant admin may write `status: confirmed` on a
+memory entry (`MemoryService.remember`, the rule of
+[kb.md](kb.md#lesson-header-and-shared-scope-lesson_headerpy-kbsharedpy)). Any other caller, such as an agent, gets
+a permission refusal (REST 403) and nothing is written.
 
 ### Promote path
 

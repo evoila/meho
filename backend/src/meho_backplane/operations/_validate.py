@@ -43,6 +43,7 @@ from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.op_classes import is_root_shell
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations.caller_address import has_caller_address
@@ -60,6 +61,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "TOKEN_CALL_WAIT",
+    "InstallKeyMissingError",
     "InvalidOpSchemaError",
     "ParamsCheck",
     "compute_audit_digest_hash",
@@ -76,6 +78,7 @@ __all__ = [
     "register_params_check",
     "validate_params",
     "waits_only_for_token_call",
+    "warn_if_params_hash_key_missing",
 ]
 
 #: A check of one op's params that its JSON schema cannot express. It gets
@@ -102,6 +105,13 @@ _VALUE_FINGERPRINT_PREFIX: Final[bytes] = b"meho-secret-value-v1\x00"
 #: same person may approve such a request with a click in the web interface
 #: (:func:`~meho_backplane.operations.approval_queue._check_self_approval`).
 TOKEN_CALL_WAIT: Final[str] = "token_call"
+
+
+class InstallKeyMissingError(RuntimeError):
+    """``PARAMS_HASH_KEY`` is not set, so :func:`derive_install_key` has no key."""
+
+    def __init__(self) -> None:
+        super().__init__("PARAMS_HASH_KEY is not set")
 
 
 class InvalidOpSchemaError(Exception):
@@ -170,12 +180,38 @@ def _database_url_key() -> bytes:
 def derive_install_key(label: bytes) -> bytes:
     """Return a key of this install for one purpose, named by *label*.
 
-    The key is HMAC-SHA256 of *label* under the server key of
-    :func:`_params_hash_key`, so every pod of an install gets the same key
-    and no two labels share one. The first-start destination check uses it
+    The key is HMAC-SHA256 of *label* under the key made from
+    ``PARAMS_HASH_KEY``, so every pod of an install gets the same key and
+    no two labels share one. The first-start destination check uses it
     (:mod:`meho_backplane.first_start`).
+
+    It needs ``PARAMS_HASH_KEY``: it never uses the key made from
+    ``DATABASE_URL``. Without ``PARAMS_HASH_KEY`` it raises
+    :class:`InstallKeyMissingError`.
     """
-    return hmac.new(_params_hash_key(), label, hashlib.sha256).digest()
+    own_key = get_settings().params_hash_key
+    if not own_key:
+        raise InstallKeyMissingError
+    return hmac.new(_derive_key(own_key), label, hashlib.sha256).digest()
+
+
+def warn_if_params_hash_key_missing(params_hash_key: str) -> bool:
+    """Log one warning when *params_hash_key* is empty; return whether it is set.
+
+    Called at start with ``settings.params_hash_key``. MEHO still starts:
+    the params hashes then use the key made from ``DATABASE_URL``, and the
+    first-start destination check does not run.
+    """
+    if params_hash_key:
+        return True
+    _log.warning(
+        "params_hash_key_missing",
+        reason=(
+            "PARAMS_HASH_KEY is not set; params hashes use a key made from "
+            "DATABASE_URL, and the first-start destination check does not run"
+        ),
+    )
+    return False
 
 
 def _keyed_params_hash(params: Any) -> str:
@@ -448,6 +484,10 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
     ``caution`` op unattended — but never a ``destructive`` one (the grant
     lookup in :func:`~meho_backplane.operations.service_grants.consult_and_record_grant`
     refuses the tier before matching a row).
+    An op a connector marked with
+    :func:`~meho_backplane.op_classes.declare_root_shell` parks at every
+    level, also ``safe``: a standing grant can still cover it, a run
+    approval never does.
 
     Returns the park reason, or ``None`` when the op stays auto-execute.
     """
@@ -472,6 +512,13 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
         return (
             "safety_level=caution mutating op; service-principal mutations park "
             "unless a standing grant covers them (#3152)"
+        )
+    if is_root_shell(descriptor.op_id):
+        # A marked op waits at every level, so a run approval never clears it.
+        return (
+            f"safety_level={descriptor.safety_level}; the operation runs a command as "
+            "root on the host, so it waits for approval unless a standing grant "
+            "covers it"
         )
     return None
 

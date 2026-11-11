@@ -20,8 +20,10 @@ from cryptography.fernet import Fernet
 
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.session_store import EncryptionKeyMissingError
+from meho_backplane.ui.routes.agents import run_token as run_token_module
 from meho_backplane.ui.routes.agents.run_token import (
     RUN_TOKEN_TTL_SECONDS,
+    claim_run_token,
     mint_run_token,
     verify_run_token,
 )
@@ -74,7 +76,7 @@ def test_token_does_not_carry_session_id_or_prompt() -> None:
 def test_decrypted_payload_holds_only_a_session_digest(_key: str) -> None:
     session_id = str(uuid.uuid4())
     payload = json.loads(Fernet(_key.encode()).decrypt(_mint(session_id).encode()))
-    assert set(payload) == {"sd", "name", "input", "work_ref"}
+    assert set(payload) == {"id", "sd", "name", "input", "work_ref"}
     assert session_id not in json.dumps(payload)
     assert session_id.replace("-", "") not in json.dumps(payload)
 
@@ -116,3 +118,45 @@ def test_missing_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
     with pytest.raises(EncryptionKeyMissingError):
         _mint(str(uuid.uuid4()))
+
+
+def test_each_token_has_its_own_id() -> None:
+    session_id = str(uuid.uuid4())
+    first = verify_run_token(session_id=session_id, token=_mint(session_id), now=_NOW + 5)
+    second = verify_run_token(session_id=session_id, token=_mint(session_id), now=_NOW + 5)
+    assert first is not None and second is not None
+    assert first.token_id
+    assert first.token_id != second.token_id
+
+
+def test_token_without_id_is_rejected(_key: str) -> None:
+    session_id = str(uuid.uuid4())
+    fernet = Fernet(_key.encode())
+    payload = json.loads(fernet.decrypt(_mint(session_id).encode()))
+    del payload["id"]
+    token = fernet.encrypt_at_time(json.dumps(payload).encode(), int(_NOW)).decode()
+    assert verify_run_token(session_id=session_id, token=token, now=_NOW + 5) is None
+
+
+class _FakeValkey:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int | None]] = []
+        self._keys: set[str] = set()
+
+    async def set(
+        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> bool | None:
+        self.calls.append((name, ex))
+        if nx and name in self._keys:
+            return None
+        self._keys.add(name)
+        return True
+
+
+async def test_claim_is_true_only_for_the_first_use(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeValkey()
+    monkeypatch.setattr(run_token_module, "get_broadcast_client", lambda: fake)
+    assert await claim_run_token("tok-1") is True
+    assert await claim_run_token("tok-1") is False
+    assert await claim_run_token("tok-2") is True
+    assert all(ex == RUN_TOKEN_TTL_SECONDS for _name, ex in fake.calls)

@@ -1441,6 +1441,31 @@ link:
 - The Azure sensor recipes read two of these fields by path, so they are
   contracts: `budgets[*].percent_used` and Advisor's `count`.
 
+### Sensor recipes
+
+`sensor_templates.py` holds three `POST /api/v1/sensors` bodies and one
+dashboard file (format `meho-dashboard/1`) that groups them. It follows
+`connectors/audit/sensor_template.py`.
+
+- Budget: `azure.cost.budget.list`, the `max` of `$.budgets[*].percent_used`,
+  degraded at 80 and critical at 100 (`gte`). It reads the current budget
+  period, because Azure resets the spend at each period. Every day.
+- Policy: `azure.policy.compliance.summary`, `$.non_compliant_resources`,
+  degraded above the baseline and critical above the baseline plus 10
+  (`gt`). Every 6 hours.
+- Advisor: `azure.advisor.recommendation.list` with `impact=High`, `$.count`,
+  the same baseline rule. Every day.
+- The baseline is a parameter (`baseline=`): the count on the day the sensor
+  is made. It must be a whole number, 0 or more.
+- In the dashboard file each sensor name starts with the dashboard name
+  (`<dashboard>-budget-used`). Import finds sensors by name, so two
+  subscriptions need two dashboard names and then share no sensor.
+- No budget, a budget with no percent, or a count Azure did not give is
+  `unknown`, not `ok`.
+- The how-to is in `docs-site/guides/sensors-quickstart.md`. Its JSON is
+  `azure_dashboard_recipe(policy_baseline=12, advisor_baseline=3)`. Lab proof
+  is still to do.
+
 Text from Azure (resource group and budget names, Advisor's problem and
 solution, price names) is data. The guidance for the AI says so.
 
@@ -1925,7 +1950,105 @@ API description files. Open points for the lab proof:
 
 ## monitor
 
-Not built yet (Task #5090).
+The monitor family tells how busy Azure VMs really are, from Azure Monitor
+platform metrics (CPU use and free memory, one sample per hour, kept 93 days).
+Both operations are in the group `monitor`, are `safe` and need no approval:
+they only read.
+
+| Operation | Reads | Parameters |
+|---|---|---|
+| `azure.vm.metric.list` | the hourly CPU and free memory of one VM, and memory used when the memory size is known | `vm_id`; `from`, `to` (default: the last 7 days, at most 93) |
+| `azure.vm.utilization.summary` | CPU and memory use of many VMs: average, 95th percentile, maximum, samples, coverage | `vm_ids` or `resource_group` (default: every VM of the subscription); `days` (default 30, at most 93) |
+
+Code: `monitor.py` (group text, guidance for the AI, parameter schemas, the
+operation table and the mixin), `monitor_reads.py` (the single-VM body),
+`monitor_summary.py` (the summary body), `monitor_calls.py` (window and ID
+checks, the batch call, the memory size), `monitor_rows.py` (reading Azure's
+answer, the numbers) and `monitor_schemas.py` (the response schemas). The paths
+and API versions are in `_paths.py`, section `monitor`.
+
+### Missing samples are unknown, never zero
+
+Azure returns no point for an hour in which it has no sample, for example while
+a VM was deallocated. MEHO keeps such an hour as `null` (in
+`azure.vm.metric.list`) or leaves it out of every number (in the summary). It
+never counts an hour as zero use. The window is a whole number of hours that
+ends at the last full hour, so the number of samples expected is exactly
+`days x 24`.
+
+The summary gives each VM `samples_expected`, `samples_found` (the hours with a
+CPU sample), `coverage_percent` and `sufficient`. A VM below 80% coverage has
+`sufficient: false` and a `reason`. The `memory` block has its own coverage,
+`sufficient` and `reason`: a VM can have enough CPU samples and no memory
+samples (Azure does not always have them). The numbers are still shown when
+some samples exist; a caller must check `sufficient` before it sizes a VM.
+`sufficient` compares the sample counts, not the rounded `coverage_percent`:
+403 of 504 samples (79.96%) shows as 80.0 but is not sufficient.
+
+### The numbers
+
+- CPU average is the mean of the hourly averages. `p95_percent` is the
+  nearest-rank 95th percentile of the hourly averages. `maximum_percent` is the
+  highest hourly maximum.
+- Memory used is `100 x (1 - free memory / memory of the VM size)` per hour,
+  kept between 0 and 100. Its average and p95 come from the hourly average of
+  free memory. Its maximum comes from the hourly lowest free memory, which is
+  the peak of use. This is why MEHO asks Azure for the aggregations Average,
+  Minimum and Maximum.
+- `azure.vm.metric.list` gives each hour the average, lowest and highest free
+  memory in bytes (`memory_available_bytes_average`, `_minimum`, `_maximum`).
+  `memory_samples_found` counts the hours with a free-memory sample, also when
+  the memory size is unknown and memory used cannot be worked out.
+- The memory of a size comes from `azure.vm.size.list` logic (one Resource SKUs
+  read per region). When that read fails, or the size is not in it, the memory
+  numbers are `null` and `memory.reason` says why; the CPU numbers still count.
+  A missing login or role is never hidden this way: a 403 fails the call.
+- `method` in the result states all of this in a few sentences, together with
+  `window_from`, `window_to` and `interval`.
+
+### How the metrics are read
+
+- One VM: one `GET {vmId}/providers/Microsoft.Insights/metrics` on Resource
+  Manager (API version 2023-10-01, `timespan`, `interval=PT1H`), after the VM
+  and the memory of its size were read.
+- Many VMs: one paged VM list, one Resource SKUs read per region, then the
+  metrics batch read (`POST /subscriptions/{id}/metrics:getBatch`, API version
+  2024-02-01), 50 VMs per call, the VMs of one region and one type per call.
+  Nothing is read per VM. At most 1000 VMs are read per call; more are left
+  out and `truncated` and `omission` say so.
+- The batch read goes to the regional host `{region}.metrics.monitor.azure.com`
+  and needs a token for another API (`https://metrics.monitor.azure.com/.default`).
+  The token cache keeps one token per scope, so this token never goes to
+  Resource Manager and the Resource Manager token never goes to this host. MEHO
+  sends the token only to a region in which the target's own subscription has a
+  VM (the region name is checked to be letters and digits), through the same URL
+  check as every call. This read is proven for the public cloud only, so another
+  cloud is refused with a clear message.
+- When Azure does not answer one batch (a 5xx after the retries, throttling, a
+  lost connection), the VMs of that batch come back `sufficient: false` with a
+  reason that says the VM is unknown, not idle. `batches_failed` counts them.
+  A 403 (the login lacks the Monitoring Reader role) fails the whole call.
+- The login needs the Monitoring Reader role (or Reader) on the subscription.
+
+### Known limits
+
+- Platform metrics only. Memory use needs the platform metric Available Memory
+  Bytes, which Azure does not provide for every VM; such a VM has no memory
+  numbers.
+- The live proof against a real subscription is still to do (the lab proof of
+  the Task).
+
+### References
+
+- Metrics - List (2023-10-01):
+  <https://learn.microsoft.com/en-us/rest/api/monitor/metrics/list>
+- Metrics Data Plane - Batch (2024-02-01):
+  <https://learn.microsoft.com/en-us/rest/api/monitor/metrics-data-plane/batch>
+- Supported metrics of virtual machines:
+  <https://learn.microsoft.com/en-us/azure/azure-monitor/reference/supported-metrics/microsoft-compute-virtualmachines-metrics>
+- Pinned API description files: `Microsoft.Insights/Insights/stable/2023-10-01/metrics_API.json`
+  and `monitor/data-plane/Insights/stable/2024-02-01/metricBatch.json` in
+  <https://github.com/Azure/azure-rest-api-specs>.
 
 ## network
 
@@ -2199,14 +2322,18 @@ logins' own role assignments, and the activity log of the last 7 days.
 
 The `storage` family reads Azure Storage: the storage accounts of the
 target's subscription, the containers of one account, the files (blobs) of
-one container, and one small text file. All four operations are in the group
-`storage`, all are `safe`, and none needs approval. Nothing changes in Azure,
-and MEHO never reads account keys, SAS tokens or connection strings.
+one container, and one small text file. These four reads are `safe` and need
+no approval; they change nothing in Azure and never read account keys, SAS
+tokens or connection strings. Three writes (#4169) sign a download link for
+one file and give or take away a blob data role; see "Writes" below. All
+seven operations are in the group `storage`.
 
 Files: `storage.py` (group text, guidance for the AI, operation table, and
 the `StorageOps` methods `AzureConnector` inherits), `storage_schemas.py`
 (parameter and response schemas), `storage_parse.py` (name checks, rows, the
-XML of the blob list, the text check) and `storage_reads.py` (the calls).
+XML of the blob list, the text check), `storage_reads.py` (the read calls),
+`storage_writes.py` (the write calls), `storage_sas.py` (the user delegation
+SAS, no HTTP) and `op_classes.py` (the link op is `credential_mint`).
 
 ### Operations
 
@@ -2340,6 +2467,68 @@ hold a SAS token, is never copied. MEHO never calls `listKeys`.
 - Spec path check: the blob paths are data-plane paths, relative to the
   account's host. The check cuts the fixed query part, so List Blobs compares
   as `GET /{container}`, which Get Container Properties also matches.
+
+### Writes
+
+| Operation | Calls | Parameters |
+|---|---|---|
+| `azure.storage.blob.link.create` | Blob host: `HEAD /{container}/{name}`, `POST /?restype=service&comp=userdelegationkey`; then Vault | `account`, `container`, `name`, `allowed_ip`, `hours` (1 to 24, default 4), `store_as` |
+| `azure.role.assignment.create` | Resource Manager: `PUT {scope}/providers/Microsoft.Authorization/roleAssignments/{name}` (api-version 2022-04-01); a `GET` of the scope's assignments after a 409 | `account`, `container` (optional), `principal_id`, `principal_type`, `role` |
+| `azure.role.assignment.delete` | Resource Manager: `GET` the scope's assignments (`$filter=atScope()`), then `DELETE` each match | `account`, `container` (optional), `principal_id`, `role` |
+
+All three are `dangerous` and wait for a person's approval. The scope is
+built from the account MEHO found in the target's subscription
+(`/subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Storage/storageAccounts/<account>`,
+plus `/blobServices/default/containers/<container>`), never from a path the
+caller gave.
+
+- **The link goes to Vault, not to the caller.** The caller is an AI agent,
+  and the secret broker's rule is that a secret value never reaches an
+  answer, a log, the broadcast or the audit row. MEHO writes the link to
+  `tenants/<tenant>/azure-blob-links/<store_as>`, field `url`, with the
+  operator's own Vault login, and answers with that ref, `expires_at`, a
+  keyed fingerprint and the length. A person reads it with `vault.kv.get`,
+  or `secret.move` hands it to the host. A second link with the same
+  `store_as` replaces the stored one; the earlier link still works until it
+  expires (a user delegation SAS cannot be revoked one by one).
+- **The link.** A user delegation SAS (Blob service version 2026-10-06, the
+  28-line string-to-sign of 2026-04-06 and later): read only (`sp=r`), one
+  file (`sr=b`), HTTPS only, one IPv4 address (`sip`; Azure takes no IPv6).
+  It starts 5 minutes before now, for a host whose clock is a little behind,
+  and the key lasts exactly as long as the link. The key value and the link
+  live only in memory; `UserDelegationKey` hides its value when printed. A
+  Vault write that fails names the path, not the link.
+- **Trace and broadcast.** The op is `credential_mint`: the flight recorder
+  keeps no body of the run, the broadcast is aggregate-only and vendor text
+  is withheld. The key answer is XML, which the recorder never stores
+  anyway.
+- **Roles.** Only Storage Blob Data Reader (`2a2b9908-6ea1-4ae2-8e65-a410df84e7d1`)
+  and Storage Blob Data Contributor (`ba92f5b4-2d11-453d-a403-e96b0029c9fe`);
+  any other role is refused before a call. The assignment name is
+  `uuid5(<fixed namespace>, "<scope>|<principal>|<role guid>")` in lower case,
+  so the same call again sends the same `PUT` (Azure answers 200) and never
+  makes a second assignment. `principalType` is always sent, which avoids
+  Azure's `PrincipalNotFound` right after a principal is made. When the
+  principal already has the role under another name (made outside MEHO),
+  Azure answers 409 `RoleAssignmentExists`; MEHO then answers
+  `already_assigned` with that assignment's id. Any other 409 is an error.
+  Delete removes every assignment of that principal and role made at exactly
+  the scope; a 204 or 404 counts as `not_found`. Azure's `atScope()` filter
+  also lists the assignments made above the scope, so MEHO compares each
+  one's own `scope`: inherited assignments are never touched or reported.
+- **File names.** A file whose name holds a control character (a line break,
+  for example) gets no link: the name is one line of the string-to-sign.
+- **Login roles for the lab.** User Access Administrator (or Role Based
+  Access Control Administrator) at the test scope for the role writes;
+  Storage Blob Data Reader (which holds
+  `generateUserDelegationKey/action`) or Storage Blob Delegator on the account
+  for the link.
+
+Proven live: not yet. The lab proof after the merge: the role writes
+recover (the same call twice, and a refused approval sends nothing); a search
+of the trace, the audit rows and the broadcast finds no link and no key; the
+link downloads from `allowed_ip` and is refused from another address and
+after `expires_at`; the run is logged and reported on #4169.
 
 ### Proven
 

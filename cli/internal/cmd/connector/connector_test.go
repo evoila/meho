@@ -774,6 +774,27 @@ func TestPrintIngestSummaryNonDryRun(t *testing.T) {
 	}
 }
 
+// TestPrintIngestSummaryLoginSetup — an ingest with a login type prints
+// what happened to it; an ingest without one prints no login_setup line.
+func TestPrintIngestSummaryLoginSetup(t *testing.T) {
+	replaced := api.IngestionResultModelLoginSetupReplaced
+	r := &api.IngestResponse{
+		Ingestion: api.IngestionResultModel{ConnectorId: "widget-rest-1.0", LoginSetup: &replaced},
+	}
+	var buf bytes.Buffer
+	printIngestSummary(&buf, ingestOptions{}, r)
+	if out := buf.String(); !strings.Contains(out, "login_setup: replaced (replaced the earlier") {
+		t.Errorf("render missing the login_setup line in:\n%s", out)
+	}
+
+	r.Ingestion.LoginSetup = nil
+	buf.Reset()
+	printIngestSummary(&buf, ingestOptions{}, r)
+	if out := buf.String(); strings.Contains(out, "login_setup") {
+		t.Errorf("render without a login type must not print login_setup; got:\n%s", out)
+	}
+}
+
 // TestPrintIngestSummaryGroupLines checks the per-group lines: groups
 // that gained ops or were created get a line, untouched groups do not,
 // a typed group that also holds ingested ops gets a warning, and a group

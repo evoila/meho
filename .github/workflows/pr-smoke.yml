@@ -183,6 +183,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Stage the Tailwind CLI for the image build
+        uses: ./.github/actions/stage-tailwind
+
       - name: Build + push PR-tagged image
         # PR-tagged image lives at `ghcr.io/evoila/meho:pr-<n>-<sha>`.
         # The `<sha>` suffix makes the tag immutable per push: a force-push

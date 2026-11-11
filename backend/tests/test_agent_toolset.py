@@ -1283,7 +1283,10 @@ async def test_child_receipt_log_names_the_child_run_id() -> None:
     parent_id, child_id = uuid4(), uuid4()
     operator = _tenant_operator(uuid4())
     parent_def = AgentDefinition(
-        name="parent", system_prompt="You delegate.", request_limit=5, toolset={"meta_tools": []}
+        name="parent",
+        system_prompt="You delegate.",
+        request_limit=5,
+        toolset={"meta_tools": ["invoke_agent"]},
     )
     child_def = AgentDefinition(
         name="child",

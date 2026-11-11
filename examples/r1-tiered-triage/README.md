@@ -68,11 +68,11 @@ the example stays current with the primitives.
 |---|---|
 | [`README.md`](./README.md) | This file. The one-paragraph framing. |
 | [`GUIDE.md`](./GUIDE.md) | The step-by-step operator recipe: principal registration, agent creation, scheduler wire-up, permission grants, budget seeding, end-to-end verification. |
-| [`agent.cheap-tier-classifier.json`](./agent.cheap-tier-classifier.json) | The cheap-tier `AgentDefinitionCreate` payload (`model_tier=fast`, `turn_budget=12`, escalate-only toolset). `meho agent create` consumes it. |
+| [`agent.cheap-tier-classifier.json`](./agent.cheap-tier-classifier.json) | The cheap-tier `AgentDefinitionCreate` payload (`model_tier=fast`, `turn_budget=12`; the toolset names `invoke_agent` plus the three tools the deep tier uses, because a child run gets only the tools both toolsets allow). `meho agent create` consumes it. |
 | [`agent.deep-tier-investigator.json`](./agent.deep-tier-investigator.json) | The deep-tier `AgentDefinitionCreate` payload (`model_tier=deep`, `turn_budget=25`, structured `PolicyDecision` output). |
 | [`scheduler.cron.json`](./scheduler.cron.json) | The `ScheduledTriggerCreate` payload (`*/15 * * * *`) that fires the cheap tier. `meho scheduler create` consumes it. |
-| [`permissions.json`](./permissions.json) | `AgentPermission` grants for both principals. Cheap tier: read broadcast + escalate to the deep tier (nothing else). Deep tier: read-only across discovery connectors; any write op routes through the approval gate. |
-| [`identity_budget_seed.py`](./identity_budget_seed.py) | Operator-run script that seeds the daily `identity_budget` row for each agent principal via `set_limits`. |
+| [`permissions.json`](./permissions.json) | `AgentPermission` grants for the agent login, one placeholder per tier. Cheap tier: read broadcast and hand events to the deep tier (nothing else). Deep tier: read-only across discovery connectors; any write op routes through the approval gate. |
+| [`identity_budget_seed.py`](./identity_budget_seed.py) | Operator-run script that seeds the daily `identity_budget` row for the agent login via `set_limits`. |
 | [`workflow.py`](./workflow.py) | The runnable closed-loop harness: loads known policy, runs the cheap tier, intercepts escalations via the `invoke_agent` recorder/finalizer hooks, persists each `PolicyDecision` to memory under `r1-policy-<alert_class>`. |
 | [`../../backend/tests/test_examples_r1_tiered_triage.py`](../../backend/tests/test_examples_r1_tiered_triage.py) | The CI exercise. Validates the runnable JSON against the live schemas, walks markdown links for rot, and drives the harness end-to-end against an in-memory SQLite + deterministic FunctionModel for the loop. |
 
@@ -83,11 +83,12 @@ the example stays current with the primitives.
   shipped).
 - A Keycloak realm wired per the
   [auth onramp recipe](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp).
-- An agent principal registered for **each** of the two agents
+- One agent principal registered for both agents
   ([G11.2-T1 #815](https://github.com/evoila/meho/issues/815)).
-  `meho agent-principal register` is the verb. The cheap and deep
-  tiers each get their own Keycloak `client_credentials` client and
-  their own `sub` claim.
+  `meho agent-principal register` is the verb. The cron trigger
+  runs the cheap tier as this agent login, and an agent login hands
+  off only to definitions it owns, so both definitions name it as
+  their `identity_ref`.
 - A tenant-admin role for setting up grants + seeding budgets.
 
 ## Verifying the example after install

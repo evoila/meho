@@ -102,13 +102,13 @@ approves it through the queue.
 | --- | --- | --- | --- |
 | `realm_write` | `keycloak.realm.create` | `POST /admin/realms` | dangerous |
 | `realm_write` | `keycloak.realm.update` | `PUT .../realms/{realm}` | caution |
-| `client_write` | `keycloak.client.create` | `POST .../realms/{realm}/clients` | caution |
-| `client_write` | `keycloak.client.update` | `PUT .../clients/{id}` | caution |
+| `client_write` | `keycloak.client.create` | `POST .../realms/{realm}/clients` | dangerous |
+| `client_write` | `keycloak.client.update` | `PUT .../clients/{id}` | dangerous |
 | `client_write` | `keycloak.client.delete` | `DELETE .../clients/{id}` | destructive |
 | `client_scope_write` | `keycloak.client_scope.create` | `POST .../client-scopes` | caution |
-| `protocol_mapper_write` | `keycloak.protocol_mapper.create` | `POST .../clients/{id}/protocol-mappers/models` | caution |
-| `user_write` | `keycloak.user.create` | `POST .../realms/{realm}/users` | caution |
-| `user_write` | `keycloak.user.reset_password` | `PUT .../users/{id}/reset-password` | caution |
+| `protocol_mapper_write` | `keycloak.protocol_mapper.create` | `POST .../clients/{id}/protocol-mappers/models` | dangerous |
+| `user_write` | `keycloak.user.create` | `POST .../realms/{realm}/users` | dangerous |
+| `user_write` | `keycloak.user.reset_password` | `PUT .../users/{id}/reset-password` | dangerous |
 | `user_write` | `keycloak.user.delete` | `DELETE .../users/{id}` | destructive |
 | `role_mapping_write` | `keycloak.role_mapping.assign` | `POST .../users/{id}/role-mappings/realm` | dangerous |
 | `group_write` | `keycloak.group.create` | `POST .../groups` (or `.../groups/{group-id}/children`) | dangerous |
@@ -201,9 +201,9 @@ asks for it. No grant lets a delete run without that approval. An agent
 can never approve: approval is a human decision in the web console or
 the CLI.
 
-One exception: a member of the `MEHO-SA-Operators` group may approve
-their own changes at every risk level, deletes included. Everyone else
-needs a second person.
+One exception: a member of the `MEHO-SA-Operators` or the `MEHO-Admins`
+group may approve their own changes at every risk level, deletes
+included. Everyone else needs a second person.
 
 1. **Preview first.** Call `preview_operation` with the same params. It
    shows what will be deleted and returns a `preview_hash`. Nothing is
@@ -211,7 +211,7 @@ needs a second person.
 2. **Ask for approval.** Call `call_operation` with the same params and
    the `preview_hash`. The request then waits until a person approves it.
    You cannot approve your own delete, unless you are in
-   `MEHO-SA-Operators`.
+   `MEHO-SA-Operators` or `MEHO-Admins`.
 3. **The delete runs** after the approval. MEHO reports `deleted: true`
    only after a read of the object answers 404.
 

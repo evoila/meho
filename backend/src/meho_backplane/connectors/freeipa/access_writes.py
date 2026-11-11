@@ -33,8 +33,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.freeipa._write_common import (
+    add_members,
     as_list,
-    check_done,
     description_option,
     result_dict,
 )
@@ -154,31 +154,6 @@ class FreeipaAccessWriteOps(_Base):
         answer = await self.call(target, operator, command, [name], description_option(params))
         return {"entry": result_dict(result_dict(answer.result).get("result"))}
 
-    async def _add_members(
-        self,
-        operator: Operator,
-        target: FreeipaTargetLike,
-        command: str,
-        params: dict[str, Any],
-        members: dict[str, str],
-    ) -> dict[str, Any]:
-        """Run an add-member command on the rule ``params["name"]``.
-
-        *members* maps each member parameter to the IPA option it is sent
-        as. Fails unless FreeIPA added every member sent.
-        """
-        sent = {option: list(params.get(key) or []) for key, option in members.items()}
-        options = {option: names or None for option, names in sent.items()}
-        answer = await self.call(target, operator, command, [params["name"]], options)
-        result = result_dict(answer.result)
-        check_done(
-            command,
-            result.get("failed"),
-            result.get("completed"),
-            sum(len(names) for names in sent.values()),
-        )
-        return {"entry": result_dict(result.get("result")), "completed": result.get("completed")}
-
     async def sudocmd_create(
         self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -196,8 +171,8 @@ class FreeipaAccessWriteOps(_Base):
     ) -> dict[str, Any]:
         """``freeipa.sudorule.user.add``: ``sudorule_add_user`` with users and user groups."""
         members = {"users": "user", "groups": "group"}
-        answer = await self._add_members(
-            operator, target, SUDORULE_ADD_USER_COMMAND, params, members
+        answer = await add_members(
+            self, operator, target, SUDORULE_ADD_USER_COMMAND, params, members
         )
         entry = answer["entry"]
         answer["external"] = [
@@ -211,8 +186,8 @@ class FreeipaAccessWriteOps(_Base):
     ) -> dict[str, Any]:
         """``freeipa.sudorule.host.add``: ``sudorule_add_host`` with hosts and host groups."""
         members = {"hosts": "host", "hostgroups": "hostgroup"}
-        answer = await self._add_members(
-            operator, target, SUDORULE_ADD_HOST_COMMAND, params, members
+        answer = await add_members(
+            self, operator, target, SUDORULE_ADD_HOST_COMMAND, params, members
         )
         answer["external"] = _external(answer["entry"], "externalhost", params.get("hosts", []))
         return answer
@@ -222,8 +197,8 @@ class FreeipaAccessWriteOps(_Base):
     ) -> dict[str, Any]:
         """``freeipa.sudorule.command.add``: ``sudorule_add_allow_command`` with sudo commands."""
         members = {"commands": "sudocmd"}
-        return await self._add_members(
-            operator, target, SUDORULE_ADD_ALLOW_COMMAND_COMMAND, params, members
+        return await add_members(
+            self, operator, target, SUDORULE_ADD_ALLOW_COMMAND_COMMAND, params, members
         )
 
     async def hbacrule_create(
@@ -237,22 +212,22 @@ class FreeipaAccessWriteOps(_Base):
     ) -> dict[str, Any]:
         """``freeipa.hbacrule.user.add``: ``hbacrule_add_user`` with users and user groups."""
         members = {"users": "user", "groups": "group"}
-        return await self._add_members(operator, target, HBACRULE_ADD_USER_COMMAND, params, members)
+        return await add_members(self, operator, target, HBACRULE_ADD_USER_COMMAND, params, members)
 
     async def hbacrule_host_add(
         self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``freeipa.hbacrule.host.add``: ``hbacrule_add_host`` with hosts and host groups."""
         members = {"hosts": "host", "hostgroups": "hostgroup"}
-        return await self._add_members(operator, target, HBACRULE_ADD_HOST_COMMAND, params, members)
+        return await add_members(self, operator, target, HBACRULE_ADD_HOST_COMMAND, params, members)
 
     async def hbacrule_service_add(
         self, operator: Operator, target: FreeipaTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """``freeipa.hbacrule.service.add``: ``hbacrule_add_service`` with services and groups."""
         members = {"services": "hbacsvc", "service_groups": "hbacsvcgroup"}
-        return await self._add_members(
-            operator, target, HBACRULE_ADD_SERVICE_COMMAND, params, members
+        return await add_members(
+            self, operator, target, HBACRULE_ADD_SERVICE_COMMAND, params, members
         )
 
     async def hbacrule_disable(

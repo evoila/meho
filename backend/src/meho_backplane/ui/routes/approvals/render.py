@@ -34,7 +34,6 @@ from meho_backplane.operations.approval_outcome_check import (
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
-    ApprovalResultState,
     ChainPosition,
     Delegation,
     approval_expired_reason,
@@ -43,6 +42,7 @@ from meho_backplane.operations.approval_queue import (
     pending_chain_positions,
     result_state_of_envelope,
 )
+from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
 
@@ -52,8 +52,7 @@ __all__ = [
     "parked_request_chain",
     "project_outcome",
     "project_request_to_view",
-    "project_run_result",
-    "project_stored_run_result",
+    "project_run_envelope",
     "set_csrf_cookie",
 ]
 
@@ -82,6 +81,12 @@ RESULT_STATE_PILL: Final[dict[str, tuple[str, str]]] = {
     "executed": ("ran OK", "badge-success"),
     "failed": ("run failed", "badge-error"),
     "uncertain": ("outcome unknown", "badge-warning"),
+    # The console's own background run of the approval is still going (#5110).
+    "running": ("running", "badge-info"),
+    # The background run ended, but no result was stored (#5110).
+    "ended_no_result": ("no result: check it", "badge-warning"),
+    # Another caller runs it, and it started too long ago with no result (#5110).
+    "started_no_result": ("no result", "badge-warning"),
 }
 
 
@@ -104,6 +109,11 @@ RESUME_REFUSAL_MESSAGES: dict[str, str] = {
         "The target of this request no longer exists: it was deleted or revoked "
         "after the request was made. The operation did not run. The requester "
         "must ask again."
+    ),
+    "approval_resume_params_unavailable": (
+        "The request was approved, but MEHO does not have the settings it needs "
+        "to run it. The operation did not run. The requester can run it again "
+        "and send the settings with it, or ask again."
     ),
     "preview_changed_since_approval": (
         "The preview of this request is not the one that was approved, so the "
@@ -134,27 +144,12 @@ def project_outcome(outcome: ResumeOutcome | None) -> dict[str, Any] | None:
     }
 
 
-def project_run_result(result: Any, *, parked_op_id: str) -> dict[str, Any] | None:
-    """Project the result of the run that an approve just started (#3543).
+def project_run_envelope(envelope: dict[str, Any], *, parked_op_id: str) -> dict[str, Any]:
+    """Project the result of an approved run into ``result_state`` + ``outcome`` (#3543).
 
-    Used by the decision-outcome fragment, which renders right after the
-    run returns. The request row in hand was read before the run, so the
-    outcome is read off the returned result, not off the row.
-
-    Returns ``None`` when another resumer (usually the waiting requester)
-    won the run claim (``already_resumed``). That result says nothing about
-    the run itself: the caller reads the stored result off the row instead
-    (:func:`project_stored_run_result`).
+    *envelope* is the run's result in its JSON form: the stored result of
+    the background run the console started (#5110).
     """
-    if getattr(result, "status", None) == "already_resumed":
-        return None
-    envelope = {
-        "status": getattr(result, "status", None),
-        "extras": getattr(result, "extras", None),
-        "audit_id": getattr(result, "audit_id", None),
-        "op_id": getattr(result, "op_id", None),
-        "result": getattr(result, "result", None),
-    }
     outcome = resume_outcome_from_envelope(
         with_approval_guidance(envelope, parked_op_id=parked_op_id)
     )
@@ -162,31 +157,6 @@ def project_run_result(result: Any, *, parked_op_id: str) -> dict[str, Any] | No
         "result_state": result_state_of_envelope(envelope).value,
         "outcome": project_outcome(outcome),
     }
-
-
-async def project_stored_run_result(request: ApprovalRequest) -> dict[str, Any]:
-    """Project the run of a request that another resumer claimed.
-
-    Used by the decision-outcome fragment when the resume answered
-    ``already_resumed``: another caller (usually the waiting requester) won
-    the run claim. That caller may have recorded a refusal (the target
-    changed or is gone, MEHO was updated) or a failed run, so the card must
-    not say the operation was re-dispatched. The row is read again. A
-    stored result gives ``result_state`` ``executed`` or ``failed`` with its
-    summary, the same as the detail modal shows. No stored result yet gives
-    ``result_state`` ``started`` and no outcome: the card says the run is
-    still going and where its result will show.
-    """
-    async with get_sessionmaker()() as db_session:
-        fresh = await get_request(db_session, tenant_id=request.tenant_id, request_id=request.id)
-    state = approval_result_state(fresh)
-    if state in (
-        ApprovalResultState.EXECUTED,
-        ApprovalResultState.FAILED,
-        ApprovalResultState.UNCERTAIN,
-    ):
-        return {"result_state": state.value, "outcome": project_outcome(resume_outcome(fresh))}
-    return {"result_state": ApprovalResultState.STARTED.value, "outcome": None}
 
 
 def project_request_to_view(
@@ -260,10 +230,11 @@ def project_request_to_view(
         "connector_id": row.connector_id,
         "principal_sub": row.principal_sub,
         "principal_act": row.principal_act,
-        "requester": subject_ref(row.principal_sub, row.principal_name),
+        "requester": subject_ref(row.principal_sub, row.principal_name, row.principal_kind),
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
         "proposed_effect": row.proposed_effect,
         "reveal_secret": bool(row.reveal_secret),
+        "rights_change": is_rights_change(row),
         "status": row.status,
         "reviewed_by": row.reviewed_by,
         "work_ref": row.work_ref,

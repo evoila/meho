@@ -17,8 +17,7 @@ Copyright (c) 2026 evoila Group
 > understand a relationship the probes can't see.
 
 This is **not**
-[`kb-migration.md`](./kb-migration.md) or
-[`retrieval-retirement.md`](./retrieval-retirement.md) — those cover
+[`kb-migration.md`](./kb-migration.md) — that covers
 moving content into MEHO. This page is about the graph that connects
 the resources already in MEHO so the blast-radius answer at
 `query_topology { kind: dependents, target: … }` is right before an

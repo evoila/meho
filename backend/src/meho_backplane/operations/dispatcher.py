@@ -119,6 +119,11 @@ Detail payloads land in ``extras``. Codes:
   target (:func:`descriptor_requires_target`, which includes every
   ``ingested`` op) is checked right after the descriptor lookup, before
   the policy gate, so it never surfaces as ``no_connector``.
+* ``target_connector_mismatch`` -- a typed/composite op whose handler is
+  a connector method, called on a target whose connector does not have
+  that method (a linux op on an rke2 target). Refused right after the
+  target check, before the policy gate and any wait for approval, with
+  one audit row (#5948, :mod:`~meho_backplane.operations._target_connector_match`).
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -213,6 +218,13 @@ Detail payloads land in ``extras``. Codes:
   that is *not* classified here is ``net.http_probe``'s mid-chain redirect
   re-gate -- the prior hop answered, so that stays a ``status="ok"``
   ``blocked_redirect`` observation and never reaches the dispatcher.
+* ``probe_pool_busy`` -- a ``net.*`` handler raised
+  :exc:`~meho_backplane.connectors.net.probe_pool.ProbePoolBusyError`: the
+  caller's tenant already had its share of the probe pool in use, or the
+  probe waited in the pool's queue longer than its own timeout. No socket
+  was opened. ``extras`` carries ``tenant_share`` / ``detail`` /
+  ``exception_class``. Narrowed out of the generic arm the same way as
+  ``connector_probe_refused``.
 * ``connector_error`` -- the connector / handler raised any other
   exception (any :exc:`httpx.HTTPStatusError` whose status is none of
   403 / 422 / the auth-class set, any non-TLS :exc:`httpx.ConnectError`
@@ -286,7 +298,10 @@ from meho_backplane.connectors import (
     resolve_connector_or_label,
     resolve_target_version,
 )
-from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
+from meho_backplane.connectors._shared.vault_creds import (
+    SecretRefReadError,
+    TargetSecretNotFoundError,
+)
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
@@ -312,6 +327,7 @@ from meho_backplane.operations._branches import (
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
     is_auth_failed_status,
+    is_probe_pool_busy,
     is_probe_refused,
     result_ambiguous_connector,
     result_announce_required,
@@ -339,12 +355,14 @@ from meho_backplane.operations._errors import (
     result_no_connector,
     result_preview_binding_required,
     result_preview_hash_mismatch,
+    result_probe_pool_busy,
     result_rate_limited,
     result_target_required,
     result_vault_credentials_read_error,
     result_write_capability_denied,
     wrap_ok_result,
 )
+from meho_backplane.operations._errors_target_secret import result_target_secret_not_found
 from meho_backplane.operations._handler_resolve import (
     forget_target_if_changed,
     get_or_create_connector_instance,
@@ -390,6 +408,7 @@ from meho_backplane.operations._secret_values import (
     reveal_hidden_values,
     split_reveal_secret,
 )
+from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -577,7 +596,9 @@ async def _restore_saved_ingest_profiles(target: Any) -> None:
     A row whose key already has a class is skipped, so the read is cheap
     on the usual path. A database error is logged and the resolver runs
     on the classes this replica already has. A target without a product
-    slug is left to the resolver, which reports the miss.
+    slug is left to the resolver, which reports the miss. Only the built-in
+    rows and the rows of the target's tenant are read: the resolver sees no
+    other tenant's login setup.
     """
     from meho_backplane.operations.ingest.ingest_auth_store import (
         restore_ingested_profiled_connectors,
@@ -586,8 +607,11 @@ async def _restore_saved_ingest_profiles(target: Any) -> None:
     product = getattr(target, "product", None)
     if not isinstance(product, str) or not product:
         return
+    tenant_id = getattr(target, "tenant_id", None)
     try:
-        await restore_ingested_profiled_connectors(product=product)
+        await restore_ingested_profiled_connectors(
+            product=product, tenant_id=tenant_id if isinstance(tenant_id, uuid.UUID) else None
+        )
     except SQLAlchemyError:
         _log.warning("ingested_profile_restore_before_call_failed", exc_info=True)
 
@@ -1937,6 +1961,22 @@ async def _run_branch_with_error_handling(
             params_hash=params_hash,
             duration_ms=duration_ms,
         )
+    except TargetSecretNotFoundError as missing_exc:
+        # Vault has no secret at the target's own secret_ref. Name the target,
+        # the ref and the fix, never the hvac text.
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_target_secret_not_found(
+                op_id, missing_exc, tenant_id=operator.tenant_id, duration_ms=duration_ms
+            ),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
     except ConnectorResourceNotFoundError as not_found_exc:
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
@@ -1959,13 +1999,15 @@ async def _run_branch_with_error_handling(
         # than in a dedicated ``except``: the exception type is only
         # resolvable through a deferred import (``is_probe_refused``), because
         # importing ``connectors.net`` at module scope would close a cycle
-        # back through ``operations/__init__``.
+        # back through ``operations/__init__``. A probe refused because its
+        # tenant's share of the probe pool was in use is narrowed the same way.
         duration_ms = _elapsed_ms(started)
-        exc_result = (
-            result_connector_probe_refused(op_id, exc, duration_ms)
-            if is_probe_refused(exc)
-            else result_connector_error(op_id, exc, duration_ms)
-        )
+        if is_probe_refused(exc):
+            exc_result = result_connector_probe_refused(op_id, exc, duration_ms)
+        elif is_probe_pool_busy(exc):
+            exc_result = result_probe_pool_busy(op_id, exc, duration_ms)
+        else:
+            exc_result = result_connector_error(op_id, exc, duration_ms)
         return await _audit_error_and_return(
             exc_result,
             audit_id=audit_id,
@@ -3064,7 +3106,7 @@ async def _build_proposed_effect(
         # (#1855). ``safety_level`` is op-identity metadata read straight
         # off the descriptor -- not recomputed -- so a parked ``dangerous``
         # op (e.g. ``keycloak.realm.create``) and a ``caution`` op (e.g.
-        # ``keycloak.user.create``) produce severity-distinguishable
+        # ``keycloak.realm.update``) produce severity-distinguishable
         # approval rows even when neither registers a preview builder.
         # Stamped here (rather than in the per-op preview hook) so it
         # rides the identifier-only default too, keeping the
@@ -3735,6 +3777,18 @@ async def _dispatch_now(
     # before the catalog guard, the policy gate or a wait for approval.
     if target is None and descriptor_requires_target(descriptor):
         return result_target_required(op_id, _elapsed_ms(started))
+    # #5948: a connector-bound op whose handler the target's connector does
+    # not have (a linux op on an rke2 target) cannot run. Refused here, before
+    # the policy gate and any wait for approval, with its own audit row.
+    mismatch = await refuse_target_connector_mismatch(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if mismatch is not None:
+        return mismatch
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility

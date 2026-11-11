@@ -34,6 +34,7 @@ from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
     clear_registry,
+    get_tenant_connector,
     register_connector_v2,
 )
 from meho_backplane.db.engine import get_sessionmaker
@@ -440,7 +441,9 @@ async def test_tenant_connector_comes_back_and_is_deleted_in_its_scope(
     clear_registry()
 
     assert await restore_ingested_profiled_connectors() == 1
-    profile = _registered_profiled().profile
+    restored = get_tenant_connector(tenant_id, *_TRIPLE)
+    assert restored is not None
+    profile = restored.profile
     assert profile is not None
     assert profile.auth.scheme == "basic"
     assert profile.auth.secret_fields == ("username", "password")
@@ -450,6 +453,7 @@ async def test_tenant_connector_comes_back_and_is_deleted_in_its_scope(
     )
 
     assert await _saved_rows() == []
+    assert get_tenant_connector(tenant_id, *_TRIPLE) is None
 
 
 @pytest.mark.asyncio

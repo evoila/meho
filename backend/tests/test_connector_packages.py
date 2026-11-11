@@ -44,6 +44,7 @@ from meho_backplane.connectors.registry import (
     registered_product_tokens,
 )
 from meho_backplane.operations import typed_register
+from meho_backplane.settings import get_settings
 from meho_backplane.version import version as version_route
 
 _PKG = "fakemeho_conn"
@@ -319,6 +320,18 @@ def test_listed_package_is_imported_and_registers_its_operations(
     ]
 
 
+@pytest.fixture
+def settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the env ``get_settings`` needs: ``GET /version`` also lists the agent switches."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("settings_env")
 async def test_version_lists_a_listed_package(site: Path, tmp_path: Path) -> None:
     """``GET /version`` shows the package the start-up check accepted (#5036)."""
     _add_listed_package(site, tmp_path)
@@ -336,6 +349,7 @@ async def test_version_lists_a_listed_package(site: Path, tmp_path: Path) -> Non
     ]
 
 
+@pytest.mark.usefixtures("settings_env")
 async def test_version_lists_no_packages_without_an_allowlist(site: Path) -> None:
     """The plain public image has no allowlist file, so the list is empty (#5036)."""
     _connectors_pkg()

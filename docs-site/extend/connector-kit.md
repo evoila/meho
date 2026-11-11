@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.2**.
+The kit version this page describes: **1.3**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -107,6 +107,7 @@ part that starts with an underscore is private by its name too.
 | Approvals | `register_preview_builder` | Register a preview for one operation. |
 | Approvals | `PermissionPreflight` | The type of a check that runs while a change waits: may the caller make it? |
 | Approvals | `register_permission_preflight` | Register such a check for one operation. |
+| Approvals | `declare_root_shell` | Mark the operations that change a host by running a command or script as root, for example over SSH with `sudo`. A run approval of an automation run never covers them: a person approves each call. |
 | Audit | `compute_audit_digest_hash` | A hash made with a secret key of MEHO, for a value that lands in an audit or approval row. |
 
 Inside three classes, the kit also promises some parts:
@@ -179,6 +180,10 @@ The inputs of `register_typed_operation`:
   `when_to_use` and `llm_instructions`. An agent picks your operation
   from these texts, so write them with care.
 - `embedding_service`: pass on the value MEHO hands to your function.
+- **Tags:** add the tag `no-trace-body` to an operation whose request
+  body must not be kept in the trace (for example an operation that runs
+  code with given inputs). It changes nothing else: not the risk level,
+  not the approval, and not the error text of the vendor.
 
 **An input that holds an address.** Some operations connect to an
 address the caller gives: a URL, a host name, or a host and port. The

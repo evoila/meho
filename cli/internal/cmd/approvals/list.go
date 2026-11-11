@@ -64,10 +64,12 @@ func newListCmd() *cobra.Command {
 			"The APPROVE column says whether you may approve each " +
 			"pending request. MEHO works this out with the same checks " +
 			"as the approve: yes; yes:own_change (your own change, " +
-			"which a MEHO-SA-Operator may approve: a self-approval); " +
+			"which a MEHO-SA-Operator or a MEHO-Admin may approve: a " +
+			"self-approval); " +
 			"no:own_change; no:wrong_group (another person's dangerous " +
 			"or destructive change needs a MEHO-SA-Operator or a " +
-			"MEHO-Admin); no:role_too_low; no:no_approval_access; " +
+			"MEHO-Admin); no:role_too_low; no:rights_change (a change " +
+			"of rights: another admin must approve); no:no_approval_access; " +
 			"no:not_a_person. A request that is not pending shows -. " +
 			"In --json the same answer is may_approve and " +
 			"may_approve_reason.",
@@ -293,7 +295,7 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, 
 			output.SafeText(approveRightLabel(e.MayApprove, e.MayApproveReason)),
 			truncate(output.SafeText(e.ConnectorId), 24),
 			truncate(output.SafeText(e.OpId), 32),
-			truncate(principalScanLabel(e.PrincipalSub, e.PrincipalName), 20),
+			truncate(requesterScanLabel(e.PrincipalSub, e.PrincipalName, e.PrincipalKind), 20),
 			output.SafeText(e.CreatedAt),
 		)
 	}

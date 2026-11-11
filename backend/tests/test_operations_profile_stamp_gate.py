@@ -40,9 +40,13 @@ import pytest
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.connectors.profiled import ProfiledRestConnector
-from meho_backplane.connectors.registry import all_connectors_v2, clear_registry
+from meho_backplane.connectors.registry import (
+    all_connectors_v2,
+    clear_registry,
+    get_tenant_connector,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations._lookup import descriptor_exists_any_state, lookup_descriptor
@@ -52,12 +56,12 @@ from meho_backplane.operations.ingest._internals import (
     enable_time_auto_shim_warnings,
 )
 from meho_backplane.operations.ingest.boot_stamp import stamp_catalog_profiled_connectors
-from meho_backplane.operations.ingest.catalog import ConnectorSpecCatalog, ConnectorSpecEntry
 from meho_backplane.operations.ingest.connector_registration import (
     ensure_connector_class_registered,
     resolved_profiled_connector_class,
 )
 from meho_backplane.settings import get_settings
+from tests.fixtures.catalog import load_fixture_catalog
 
 _PRODUCT = "acme"
 _VERSION = "1.2"
@@ -220,8 +224,10 @@ async def test_stamp_leaves_ops_staged_and_disabled() -> None:
     )
 
     assert first is True
-    # The connector is now dispatchable (registered) ...
-    assert all_connectors_v2()[(_PRODUCT, _VERSION, _IMPL_ID)] is _AcmeProfiled
+    # The connector is now dispatchable for its tenant (registered in the
+    # tenant's own table; the shared key holds a bare stand-in) ...
+    assert get_tenant_connector(tenant_id, _PRODUCT, _VERSION, _IMPL_ID) is _AcmeProfiled
+    assert shim_kind(all_connectors_v2()[(_PRODUCT, _VERSION, _IMPL_ID)]) == "bare"
     # ... but every op stays disabled and every group stays staged.
     assert all(enabled is False for enabled in (await _ops_state(tenant_id=tenant_id)).values())
     assert await _group_states(tenant_id=tenant_id) == ["staged"]
@@ -520,7 +526,7 @@ _FIXTURE_IMPL_ID = "fixture-rest"
 
 
 async def _seed_staged_fixture_connector(*, tenant_id: uuid.UUID, ops: int = 3) -> None:
-    """Seed a staged (disabled-ops) group under the built-in fixture triple."""
+    """Seed a staged (disabled-ops) group under the test catalog's fixture triple."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         group_id = uuid.uuid4()
@@ -598,21 +604,7 @@ async def test_boot_stamp_registers_but_never_enables_ops() -> None:
     """
     tenant_id = uuid.uuid4()
     await _seed_staged_fixture_connector(tenant_id=tenant_id)
-    catalog = ConnectorSpecCatalog(
-        entries=(
-            ConnectorSpecEntry.model_validate(
-                {
-                    "product": "_fixture",
-                    "version": "1.0",
-                    "impl_id": "fixture-rest",
-                    "requires_connector_class": "ProfiledRestConnector_fixture_1_0",
-                    "upstream": None,
-                    "spec_resource": "_fixture_minimal.yaml",
-                    "profile_resource": "_fixture_minimal.yaml",
-                }
-            ),
-        )
-    )
+    catalog = load_fixture_catalog()
 
     registered = await stamp_catalog_profiled_connectors(catalog)
 
@@ -630,21 +622,7 @@ async def test_boot_stamp_registers_but_never_enables_ops() -> None:
 @pytest.mark.asyncio
 async def test_boot_stamp_writes_one_profile_stamp_audit_row() -> None:
     """The boot trigger records the dispatchability change as a single audit row."""
-    catalog = ConnectorSpecCatalog(
-        entries=(
-            ConnectorSpecEntry.model_validate(
-                {
-                    "product": "_fixture",
-                    "version": "1.0",
-                    "impl_id": "fixture-rest",
-                    "requires_connector_class": "ProfiledRestConnector_fixture_1_0",
-                    "upstream": None,
-                    "spec_resource": "_fixture_minimal.yaml",
-                    "profile_resource": "_fixture_minimal.yaml",
-                }
-            ),
-        )
-    )
+    catalog = load_fixture_catalog()
 
     await stamp_catalog_profiled_connectors(catalog)
 

@@ -49,6 +49,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("BACKPLANE_URL", _SITE)
+    monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-test-key-of-this-install")
     get_settings.cache_clear()
     first_start.reset_public_run_for_testing()
     yield
@@ -109,9 +110,94 @@ def test_clean_site_is_all_green(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
     body = _get()
     assert body["ok"] is True
-    assert [c["name"] for c in body["checks"]] == ["dns", "certificate", "clock", "reachability"]
-    assert [c["status"] for c in body["checks"]] == ["ok"] * 4
+    assert [c["name"] for c in body["checks"]] == [
+        "dns",
+        "certificate",
+        "network",
+        "clock",
+        "reachability",
+    ]
+    assert [c["status"] for c in body["checks"]] == ["ok"] * 5
     assert "points at this MEHO" in body["checks"][0]["message"]
+
+
+def _network_line(body: dict[str, Any]) -> dict[str, Any]:
+    return next(c for c in body["checks"] if c["name"] == "network")
+
+
+def test_public_address_gives_a_warning_not_a_red_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+
+    async def public(host: str, port: int) -> list[str]:
+        return ["198.51.100.7", "2001:4860:4860::8888"]
+
+    monkeypatch.setattr(first_start, "_resolve_host", public)
+    body = _get()
+    line = _network_line(body)
+    assert line["status"] == "warn"
+    assert "never on the internet" in line["message"]
+    assert _red(body) == []
+    assert body["ok"] is True
+
+
+def test_global_example_address_gives_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+
+    async def public(host: str, port: int) -> list[str]:
+        return ["8.8.8.8"]
+
+    monkeypatch.setattr(first_start, "_resolve_host", public)
+    assert _network_line(_get())["status"] == "warn"
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "10.1.2.3",
+        "172.16.0.5",
+        "192.168.1.1",
+        "100.64.0.9",
+        "127.0.0.1",
+        "169.254.1.1",
+        "192.0.2.10",
+        "fd00::1",
+        "fe80::1%eth0",
+    ],
+)
+def test_private_shared_and_local_addresses_give_no_warning(
+    monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    _patch_green(monkeypatch)
+
+    async def private(host: str, port: int) -> list[str]:
+        return [address]
+
+    monkeypatch.setattr(first_start, "_resolve_host", private)
+    assert _network_line(_get())["status"] == "ok"
+
+
+def test_one_public_address_among_private_ones_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+
+    async def mixed(host: str, port: int) -> list[str]:
+        return ["10.0.0.4", "8.8.4.4"]
+
+    monkeypatch.setattr(first_start, "_resolve_host", mixed)
+    assert _network_line(_get())["status"] == "warn"
+
+
+def test_network_line_is_skipped_when_the_name_does_not_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_green(monkeypatch)
+
+    async def nothing(host: str, port: int) -> list[str]:
+        raise OSError("no such host")
+
+    monkeypatch.setattr(first_start, "_resolve_host", nothing)
+    body = _get()
+    assert _network_line(body)["status"] == "skipped"
+    assert [c["name"] for c in _red(body)] == ["dns"]
 
 
 def test_wrong_host_name_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,6 +269,7 @@ def test_unreachable_target_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) 
 
 def test_public_answer_runs_fresh_after_a_repair(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
+    monkeypatch.setattr(first_start, "_PUBLIC_RESULT_HOLD_S", 0.0)
     up = {"esx-2": False}
 
     async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
@@ -211,8 +298,46 @@ async def test_overlapping_public_calls_share_one_run(monkeypatch: pytest.Monkey
     )
     assert first is second
     assert calls == 2  # two systems, one run
-    await first_start.run_public_first_start_checks()
-    assert calls == 4  # the next call runs again
+
+
+async def test_repeated_public_calls_in_the_hold_time_start_one_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_green(monkeypatch)
+    calls = 0
+
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        nonlocal calls
+        calls += 1
+        return "up"
+
+    monkeypatch.setattr(first_start, "_probe_one", probe)
+    first = await first_start.run_public_first_start_checks()
+    for _ in range(5):
+        assert await first_start.run_public_first_start_checks() is first
+    assert calls == 2  # two systems, one run
+    monkeypatch.setattr(first_start, "_PUBLIC_RESULT_HOLD_S", 0.0)
+    assert await first_start.run_public_first_start_checks() is not first
+    assert calls == 4  # after the hold time, the next call runs again
+
+
+async def test_public_run_that_fails_is_not_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+    runs = 0
+
+    async def failing_once() -> first_start.FirstStartResponse:
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            raise RuntimeError("first run failed")
+        return first_start.FirstStartResponse(ok=True, checks=[])
+
+    monkeypatch.setattr(first_start, "run_first_start_checks", failing_once)
+    with pytest.raises(RuntimeError):
+        await first_start.run_public_first_start_checks()
+    result = await first_start.run_public_first_start_checks()
+    assert result.ok is True
+    assert runs == 2
 
 
 async def test_names_show_only_when_asked_and_only_for_the_tenant(
@@ -232,10 +357,10 @@ async def test_names_show_only_when_asked_and_only_for_the_tenant(
     monkeypatch.setattr(first_start, "_live_targets", targets)
     monkeypatch.setattr(first_start, "_probe_one", probe)
     named = await first_start.run_first_start_checks(tenant_id=tenant, show_names=True)
-    assert "esx-2" in named.checks[3].message
+    assert "esx-2" in named.checks[4].message
     assert seen == [tenant]
     plain = await first_start.run_first_start_checks()
-    assert "esx-2" not in plain.checks[3].message
+    assert "esx-2" not in plain.checks[4].message
 
 
 def test_no_targets_is_green(monkeypatch: pytest.MonkeyPatch) -> None:

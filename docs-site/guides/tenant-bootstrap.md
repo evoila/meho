@@ -122,7 +122,8 @@ hyphen.
 
 MEHO checks that a person is in only one role group. It knows the role
 groups by name, from the `JWT_ROLE_GROUPS` setting. The default is the
-five `MEHO-*` groups that ship with MEHO.
+five `MEHO-*` groups that ship with MEHO. Upper and lower case do not
+count: `meho-acme-readers` is the same group as `MEHO-acme-Readers`.
 
 Add the new names to the setting, through `extraEnv` in your Helm
 values. The value replaces the default, so list the five default groups
@@ -158,7 +159,9 @@ meho keycloak user create --target keycloak-main -f alice.json \
   --password-secret-ref <vault-path-of-the-password> --temporary
 ```
 
-This step waits for approval too (risk level `caution`).
+This step waits for approval too (risk level `dangerous`). A
+MEHO-SA-Operator or an admin must approve it, the same as the group
+steps.
 
 ## Step 5: Put each person in exactly one group
 

@@ -824,7 +824,7 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
             as_admin = {"Authorization": f"Bearer {admin_token}"}
             as_approver = {"Authorization": f"Bearer {approver_token}"}
 
-            # The first admin asks for the write; it waits for a second person.
+            # The first admin asks for the write; it waits for approval.
             asked = await api.post(
                 "/api/v1/operations/call",
                 headers=as_admin,
@@ -865,16 +865,9 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
                 ),
             )
 
-            # The first admin cannot approve their own request.
-            own = await api.post(
-                f"/api/v1/approvals/{request_id}/decide",
-                headers=as_admin,
-                json={"decision": "approved"},
-            )
-            assert own.status_code == 403, own.text
-            assert _WRITES == []
-
-            # The second person approves it, and the write runs.
+            # The first admin may approve their own request too (#5969); the
+            # tests of the approval groups check that. Here the second person
+            # approves it, and the write runs.
             decided = await api.post(
                 f"/api/v1/approvals/{request_id}/decide",
                 headers=as_approver,

@@ -394,3 +394,101 @@ func TestAddCmdHelpMentionsBodyAndMetadata(t *testing.T) {
 		}
 	}
 }
+
+const testRevisionID = "11111111-2222-3333-4444-555555555555"
+
+// TestRunAddSendsExpectedRevision — the revision the operator read is
+// sent in the POST body.
+func TestRunAddSendsExpectedRevision(t *testing.T) {
+	var got map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(newKbEntry(t, "existing-slug", "new body"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runAdd(cmd, addOptions{
+		Slug: "existing-slug", BodyArg: "new body", ExpectedRevision: testRevisionID,
+		BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runAdd: %v; stderr=%s", err, stderr.String())
+	}
+	if got["expected_revision"] != testRevisionID {
+		t.Errorf("expected_revision on the wire = %v; want %s", got["expected_revision"], testRevisionID)
+	}
+}
+
+// TestRunAddRejectsBadExpectedRevision — a value that is not a UUID is
+// refused before any request.
+func TestRunAddRejectsBadExpectedRevision(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := runAdd(cmd, addOptions{Slug: "x", BodyArg: "y", ExpectedRevision: "not-a-uuid"})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(stderr.String(), "--expected-revision must be a revision id") {
+		t.Errorf("expected revision hint; got %q", stderr.String())
+	}
+}
+
+// TestRunAdd409ShowsCurrentRevisionAndChanges — a stale write shows the
+// current revision, who changed it, and what changed.
+func TestRunAdd409ShowsCurrentRevisionAndChanges(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprintf(w, `{"detail":{"error":"stale_revision","slug":"x","cause":"stale",`+
+			`"current_revision_id":%q,"current_revision_number":3,"changed_by":"someone",`+
+			`"changed_at":"2026-11-07T10:00:00Z","changed_metadata_keys":["tags"],`+
+			`"body_diff":"-old line\n+new line","body_diff_truncated":true}}`, testRevisionID)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runAdd(cmd, addOptions{Slug: "x", BodyArg: "y", BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	for _, want := range []string{
+		testRevisionID, "revision 3", "changed by: someone", "tags", "+new line",
+		"the list of changes was cut", "--expected-revision " + testRevisionID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q; got %q", want, stderr.String())
+		}
+	}
+}
+
+// TestRunAdd409WithoutDetailFallsBack — a 409 with another body is
+// still reported, with the raw body.
+func TestRunAdd409WithoutDetailFallsBack(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"detail":"other_conflict"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runAdd(cmd, addOptions{Slug: "x", BodyArg: "y", BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(stderr.String(), "HTTP 409") || !strings.Contains(stderr.String(), "other_conflict") {
+		t.Errorf("expected raw 409 body; got %q", stderr.String())
+	}
+}

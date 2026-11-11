@@ -22,6 +22,7 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from meho_backplane import op_classes
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -297,3 +298,25 @@ def test_destructive_entry_and_second_request_are_refused(client: TestClient, ke
     _request(client, key)
     second = client.post(_BASE, headers=_service(key), json=_BODY)
     assert second.status_code == 409
+
+
+def test_entry_that_runs_a_root_command_is_refused(
+    client: TestClient, key: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #6092 -- mark linux.script.run the way the linux-ssh connector does.
+    monkeypatch.setattr(op_classes, "_ROOT_SHELL", {*op_classes._ROOT_SHELL, "linux.script.run"})
+
+    body = {
+        **_BODY,
+        "entries": [
+            *_BODY["entries"],
+            {"connector_id": "linux-ssh-1.x", "op_id": "linux.script.run"},
+        ],
+    }
+    refused = client.post(_BASE, headers=_service(key), json=body)
+    assert refused.status_code == 422
+    detail = refused.json()["detail"]
+    assert detail.startswith("entries[1]: op 'linux.script.run' runs a command as root on the host")
+    assert "a person approves each call" in detail
+
+    _request(client, key)

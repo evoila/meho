@@ -69,6 +69,19 @@ clear-to-default. The CLI mirrors this by sending a **sparse** body (only the
 flags the operator set) rather than the generated update struct, whose pointer
 fields carry no `omitempty` and would marshal a nil to an unintended `null`.
 
+## Keeping a request body out of the trace
+
+A connector author puts the tag `no-trace-body` on an operation, for example
+one that runs code with given inputs. The trace then keeps no request body for
+any call of it (`classify_body_exclusion` returns family `marked-no-body`). The
+check runs after the secret families and before the destructive check, and
+matches the tag like the others (case and separators do not matter).
+
+The tag only hides more. It does not change the risk level, the approval rule,
+the standing-grant rule or the vendor error text (it is not in
+`SECRET_FAMILY_TAGS`). Use a secret tag when the vendor error text must be
+hidden too, and `destructive` only for a real delete.
+
 ## Audit
 
 Every applied change is folded into the request's `audit_log` row via `audit_*`

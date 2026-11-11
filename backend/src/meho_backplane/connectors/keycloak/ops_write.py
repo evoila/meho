@@ -14,12 +14,12 @@ op_id                               safety       Admin REST API
 ==================================  ===========  ===========================================
 ``keycloak.realm.create``           dangerous    ``POST /admin/realms``
 ``keycloak.realm.update``           caution      ``PUT .../realms/{realm}``
-``keycloak.client.create``          caution      ``POST .../realms/{realm}/clients``
-``keycloak.client.update``          caution      ``PUT .../clients/{id}``
+``keycloak.client.create``          dangerous    ``POST .../realms/{realm}/clients``
+``keycloak.client.update``          dangerous    ``PUT .../clients/{id}``
 ``keycloak.client_scope.create``    caution      ``POST .../client-scopes``
-``keycloak.protocol_mapper.create`` caution      ``POST .../clients/{id}/protocol-mappers/models``
-``keycloak.user.create``            caution      ``POST .../realms/{realm}/users``
-``keycloak.user.reset_password``    caution      ``PUT .../users/{id}/reset-password``
+``keycloak.protocol_mapper.create`` dangerous    ``POST .../clients/{id}/protocol-mappers/models``
+``keycloak.user.create``            dangerous    ``POST .../realms/{realm}/users``
+``keycloak.user.reset_password``    dangerous    ``PUT .../users/{id}/reset-password``
 ``keycloak.role_mapping.assign``    dangerous    ``POST .../users/{id}/role-mappings/realm``
 ``keycloak.user.logout``            caution      ``POST .../users/{id}/logout``
 ==================================  ===========  ===========================================

@@ -117,6 +117,7 @@ login, and the target update route calls it after a target change
 | Keycloak | `_admin_tokens` | target |
 | Profiled (ingested) connectors | `_session_tokens` | credential |
 | Azure, Entra ID | `_credentials`, `_tokens` | target + secret / login + scope |
+| FreeIPA | `_sessions` | credential |
 | phpIPAM | `_credentials`, `_tokens` | credential / target + secret |
 
 The VMware connectors are not in this repo
@@ -130,6 +131,26 @@ Not in the list, on purpose:
 - Google Cloud (`gcloud`) reads the target's secret on every call before
   its token cache, so every caller is checked on every call already.
 - The SSH connection pool keeps one connection per caller and target.
+
+### Who uses the SSH connection pool
+
+The pool lives on `SshConnector` (`connectors/adapters/ssh.py`). Its key
+is the target, the kind of caller, and the caller's `sub`. These use it:
+
+- **The nine connectors that subclass `SshConnector`**: `bind9`, `hyperv`,
+  `linux`, `msad`, `pfsense`, `rke2`, `windows_dns`, `winsrv`, `wsfc`.
+  Their operations call `_run_command` (or `_connect`), so they share
+  one pool per connector instance.
+- **`connectors/_shared/pwsh.py`**: the PowerShell helper that the Windows
+  connectors use. It runs its script through the connector's `_run_command`.
+- **`connectors/bind9/topology.py`**: reads the BIND files through
+  `_run_command`.
+- **`connectors/linux/_sudo.py`, `connectors/rke2/_sudo.py` and the bind9
+  sudo path**: run sudo commands on the pooled connection with `run_capped`.
+
+These do not use the pool. `ops_firewall_rollback.py` (linux) opens its
+own connection with `_dial`, so the rollback does not depend on a pooled
+login. `net.ssh_keyscan` only reads host keys and does not log in.
 
 ## Dependencies
 

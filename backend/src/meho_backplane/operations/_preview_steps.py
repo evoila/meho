@@ -24,8 +24,9 @@ The check then goes into that list too, at every level.
 
 Each step is checked with the same :func:`policy_gate` the step gate runs,
 with the same declared facts (``dangerous``, no ``requires_approval``,
-the level every shipped write step uses), and with ``decide_only=True``,
-so nothing is written and no grant is used.
+the level every shipped write step uses), raised by the classification
+like at the step gate, and with ``decide_only=True``, so nothing is
+written and no grant is used.
 
 With ``AGENT_GRANT_REQUIRED=on`` (#6189) the dispatcher checks the same
 list for an agent call before anything runs
@@ -60,6 +61,7 @@ from meho_backplane.operations.deny_reasons import (
     is_agent_no_grant,
 )
 from meho_backplane.operations.governed_subops import governed_subops_for, steps_declared
+from meho_backplane.operations.op_policy import apply_step_classification
 from meho_backplane.settings import get_settings
 
 __all__ = ["agent_acts", "agent_step_refusal", "preview_step_verdict"]
@@ -112,6 +114,7 @@ async def _step_verdict(
         requires_approval=False,
         parameter_schema={},
     )
+    await apply_step_classification(tenant_id=operator.tenant_id, step=step)
     return await policy_gate(
         operator=operator,
         descriptor=step,

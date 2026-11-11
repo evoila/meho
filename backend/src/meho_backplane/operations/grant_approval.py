@@ -57,7 +57,9 @@ The rights-change mark
 ----------------------
 
 Every change of rights carries one mark (``ApprovalRequest.rights_change``):
-the changes above in MEHO's own login realm, and any other request
+the changes above in MEHO's own login realm, every request of an
+operation registered with :func:`register_rights_change_op` (for example
+a change of an operation's category or labels), and any other request
 that was parked with the mark. :func:`check_rights_change_approval` applies
 it: the requester never approves their own change of rights, whatever
 their group, at every risk level and with the break-glass switch on, and
@@ -93,6 +95,7 @@ __all__ = [
     "is_rights_change",
     "is_rights_change_op",
     "register_grant_op",
+    "register_rights_change_op",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -152,6 +155,17 @@ def register_grant_op(
     *group_id_params* is empty for a change that names no group.
     """
     _GRANT_OPS[op_id] = _GrantOp(user_id_params, group_id_params)
+
+
+#: Operations that are always a change of rights, but not of one login or
+#: group: their requests carry the mark, and nothing else of this module
+#: applies to them.
+_RIGHTS_CHANGE_OPS: set[str] = set()
+
+
+def register_rights_change_op(op_id: str) -> None:
+    """Record that every request of *op_id* is a change of rights."""
+    _RIGHTS_CHANGE_OPS.add(op_id)
 
 
 @dataclass(frozen=True)
@@ -214,7 +228,7 @@ def is_rights_change_op(op_id: str) -> bool:
     approval list). The login realm is not known there, so every
     registered operation counts.
     """
-    return op_id in _GRANT_OPS
+    return op_id in _GRANT_OPS or op_id in _RIGHTS_CHANGE_OPS
 
 
 def is_rights_change(request: ApprovalRequest) -> bool:
@@ -223,7 +237,7 @@ def is_rights_change(request: ApprovalRequest) -> bool:
     A request parked before the ``rights_change`` column has no stored
     mark, so a registered change in the login realm counts too.
     """
-    if request.rights_change:
+    if request.rights_change or request.op_id in _RIGHTS_CHANGE_OPS:
         return True
     facts = grant_facts(request)
     return facts is not None and facts.login_realm

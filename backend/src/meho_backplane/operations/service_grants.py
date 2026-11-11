@@ -116,6 +116,7 @@ __all__ = [
     "GrantModel",
     "GrantValidationError",
     "ServicePrincipalGrantService",
+    "always_wait_grant_reason",
     "caller_address_grant_reason",
     "classify_orphaned_grants",
     "consult_and_record_grant",
@@ -358,6 +359,23 @@ def caller_address_grant_reason(descriptor: EndpointDescriptor | None) -> str | 
         return None
     return (
         f"op {descriptor.op_id!r} connects to an address the caller gives; "
+        "a standing grant never covers it, a person approves each call"
+    )
+
+
+def always_wait_grant_reason(descriptor: EndpointDescriptor | None) -> str | None:
+    """Return why a grant cannot cover *descriptor*, or ``None`` when it can.
+
+    A classification entry can make an operation always wait
+    (:attr:`~meho_backplane.db.models.EndpointDescriptor.policy_always_wait`,
+    set when the row is looked up). Then a person approves each call:
+    grant create refuses it, and :func:`consult_and_record_grant` never
+    lets a grant row clear it, also a grant made before the entry.
+    """
+    if descriptor is None or not descriptor.policy_always_wait:
+        return None
+    return (
+        f"op {descriptor.op_id!r} is classified to always wait; "
         "a standing grant never covers it, a person approves each call"
     )
 
@@ -703,7 +721,9 @@ class ServicePrincipalGrantService:
         descriptor = await _resolve_descriptor_for_classification(
             tenant_id, payload.connector_id, payload.op_id
         )
-        address_reason = caller_address_grant_reason(descriptor)
+        address_reason = caller_address_grant_reason(descriptor) or always_wait_grant_reason(
+            descriptor
+        )
         if address_reason is not None:
             raise GrantValidationError(address_reason)
         delete_reason = delete_grant_reason(
@@ -1381,7 +1401,8 @@ async def consult_and_record_grant(
     An op with a parameter marked ``x-meho-caller-address: true`` is refused
     before any lookup too (:func:`caller_address_grant_reason`), also before
     a delete grant. A grant row stored before the marker never auto-approves
-    the op: a person approves each call.
+    the op: a person approves each call. The same holds for an op that a
+    classification entry makes always wait (:func:`always_wait_grant_reason`).
 
     **Sandbox mode (#4622).** When the instance runs in sandbox mode and
     the op has any delete sign, a live **delete grant** from
@@ -1440,6 +1461,18 @@ async def consult_and_record_grant(
             principal_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
             reason=address_reason,
+        )
+        return None
+
+    wait_reason = always_wait_grant_reason(descriptor)
+    if wait_reason is not None:
+        _log.info(
+            "service_grant_refused_always_wait",
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            principal_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            reason=wait_reason,
         )
         return None
 

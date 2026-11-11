@@ -97,13 +97,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from meho_backplane.auth.client_identity import bind_request_client_block
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import SandboxDeleteGrant, Tenant
 from meho_backplane.health import ui_readiness_verdict
@@ -112,7 +113,7 @@ from meho_backplane.sandbox_mode import (
     sandbox_mode_active,
 )
 from meho_backplane.ui.audit import bind_ui_view_audit
-from meho_backplane.ui.auth.revalidation import revalidate_read_session
+from meho_backplane.ui.auth.revalidation import revalidate_read_session, session_client_block
 from meho_backplane.ui.auth.routes import (
     login_location,
     page_from_htmx_current_url,
@@ -206,6 +207,9 @@ class UISessionContext:
     tenant_name: str | None = None
     tenant_chosen: bool = True
     can_switch_tenant: bool = False
+    #: The ``client`` block of the session's last token check
+    #: (AUDIT_CLIENT_IDENTITY), or ``None``.
+    client: dict[str, Any] | None = None
 
 
 def _select_path(scope: Scope) -> str:
@@ -449,6 +453,7 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
         tenant_name=tenant_row[1] if tenant_row is not None else None,
         tenant_chosen=revalidated.tenant_chosen,
         can_switch_tenant=revalidated.can_switch_tenant,
+        client=session_client_block(revalidated.id),
     )
 
 
@@ -674,6 +679,9 @@ async def require_ui_session(request: Request) -> UISessionContext:
             operator_sub=session_context.operator_sub,
             tenant_id=str(session_context.tenant_id),
         )
+    # The audit middleware reset the ``client`` block after the session
+    # middleware's token check; bind it again (AUDIT_CLIENT_IDENTITY).
+    bind_request_client_block(session_context.client)
     return session_context
 
 

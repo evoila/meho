@@ -184,13 +184,13 @@ today's Vault KV-v2 read: a schemeless `targets/<id>` ref and an explicit
 `/api/v1/health` federation proof reads `secret/meho/test/federation`. The
 schema requires `vault.address` (and the Keycloak/Postgres/NetworkPolicy
 fields) for this backend. Full worked example:
-[`../deploy/values-examples/values-rdc-example.yaml`](../deploy/values-examples/values-rdc-example.yaml).
+[`../deploy/values-examples/values-example-lab.yaml`](../deploy/values-examples/values-example-lab.yaml).
 
 ```bash
 helm upgrade --install meho ./deploy/charts/meho/ \
   --namespace meho --create-namespace \
   --set image.tag=sha-<git-sha> \
-  -f values-rdc.yaml
+  -f values-site.yaml
 ```
 
 ### GSM / Vault-free

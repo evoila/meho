@@ -162,7 +162,7 @@ func newOperationCallCmd() *cobra.Command {
 		Long: "call wraps POST /api/v1/operations/call with connector_id=\n" +
 			"\"vmware-rest-9.0\" pre-baked. Use this verb when an op doesn't\n" +
 			"have a dedicated alias yet (e.g. `meho vmware operation call\n" +
-			"DELETE:/api/vcenter/vm/{vm} --target rdc-vcenter --params\n" +
+			"DELETE:/api/vcenter/vm/{vm} --target vcenter-lab --params\n" +
 			"'{\"vm\":\"vm-101\"}'`).\n\n" +
 			"--target names the vCenter target slug; --params accepts inline\n" +
 			"JSON or @<file>; --json emits the OperationResult envelope.\n\n" +
@@ -176,9 +176,9 @@ func newOperationCallCmd() *cobra.Command {
 			"  - 2   auth_expired\n" +
 			"  - 3   unreachable\n" +
 			"  - 4   unexpected response shape",
-		Example: "  meho vmware operation call GET:/vcenter/cluster --target rdc-vcenter\n" +
-			"  meho vmware operation call DELETE:/api/vcenter/vm/{vm} --target rdc-vcenter --params '{\"vm\":\"vm-101\"}'\n" +
-			"  meho vmware operation call vmware.composite.vm.create --target rdc-vcenter --params @new-vm.json",
+		Example: "  meho vmware operation call GET:/vcenter/cluster --target vcenter-lab\n" +
+			"  meho vmware operation call DELETE:/api/vcenter/vm/{vm} --target vcenter-lab --params '{\"vm\":\"vm-101\"}'\n" +
+			"  meho vmware operation call vmware.composite.vm.create --target vcenter-lab --params @new-vm.json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

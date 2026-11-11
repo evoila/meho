@@ -34,7 +34,7 @@ func newProjectListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "list",
 		Short:         "List tenant-plane projects on a VCFA appliance",
-		Example:       "  meho vcf-automation project list --target rdc-vcfa",
+		Example:       "  meho vcf-automation project list --target vcfa-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

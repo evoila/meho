@@ -374,7 +374,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/v1/node", "rdc-nsx", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/v1/node", "nsx-lab", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestDispatchFirewallPolicySendsScope(t *testing.T) {
 
 	const opID = "GET:/policy/api/v1/infra/domains/{domain-id}/security-policies"
 	params := map[string]any{"domain-id": "my-domain"}
-	if _, err := conn.Call(context.Background(), srv.URL, opID, "rdc-nsx", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, opID, "nsx-lab", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -465,7 +465,7 @@ func TestDispatchFirewallRuleListSendsPolicyAndScope(t *testing.T) {
 		"domain-id":          "default",
 		"security-policy-id": "policy-app-tier",
 	}
-	if _, err := conn.Call(context.Background(), srv.URL, opID, "rdc-nsx", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, opID, "nsx-lab", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }

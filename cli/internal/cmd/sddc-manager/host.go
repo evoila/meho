@@ -39,8 +39,8 @@ func newHostListCmd() *cobra.Command {
 			"Pass --domain or --cluster to filter. Large deployments may return\n" +
 			"hundreds of rows — use --json for machine-readable output.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho sddc-manager host list --target rdc-sddc-manager\n" +
-			"  meho sddc-manager host list --domain domain-wld01 --target rdc-sddc-manager",
+		Example: "  meho sddc-manager host list --target sddc-manager-lab\n" +
+			"  meho sddc-manager host list --domain domain-wld01 --target sddc-manager-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -19,7 +19,7 @@ import (
 // The `record add` invocation is the 1:1 replacement for the
 // consumer's `scripts/bind9-dns.sh --add-a-record ...` call (the
 // 2026-05-04 / 2026-05-05 credential-leak surface — evoila-bosnia/
-// claude-rdc-hetzner-dc#86); the verb shape matches the wrapper's
+// the lab repo); the verb shape matches the wrapper's
 // positional / flag conventions.
 func newRecordCmd() *cobra.Command {
 	cmd := &cobra.Command{

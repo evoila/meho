@@ -60,9 +60,9 @@ func newVMListCmd() *cobra.Command {
 			"--filter \"k=v\" is the escape hatch for filters the dedicated flags\n" +
 			"don't cover (clusters, hosts, datacenters, folders, etc.).\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vmware vm list --target rdc-vcenter\n" +
-			"  meho vmware vm list --target rdc-vcenter --power-state POWERED_ON\n" +
-			"  meho vmware vm list --target rdc-vcenter --json | jq '.result[].name'",
+		Example: "  meho vmware vm list --target vcenter-lab\n" +
+			"  meho vmware vm list --target vcenter-lab --power-state POWERED_ON\n" +
+			"  meho vmware vm list --target vcenter-lab --json | jq '.result[].name'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -265,8 +265,8 @@ func newVMInfoCmd() *cobra.Command {
 			"and a message naming the candidates so the operator can re-invoke\n" +
 			"with the moid directly.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vmware vm info web-prod-01 --target rdc-vcenter\n" +
-			"  meho vmware vm info vm-101 --target rdc-vcenter --json",
+		Example: "  meho vmware vm info web-prod-01 --target vcenter-lab\n" +
+			"  meho vmware vm info vm-101 --target vcenter-lab --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -380,8 +380,8 @@ func newVMCreateCmd() *cobra.Command {
 			"Pre-merge of T6 (#509), the dispatcher returns \"operation not\n" +
 			"found\" which surfaces in the standard error trailer.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vmware vm create --target rdc-vcenter --spec @new-vm.json\n" +
-			"  meho vmware vm create --target rdc-vcenter --spec '{\"name\":\"x\",\"power_on\":true}'",
+		Example: "  meho vmware vm create --target vcenter-lab --spec @new-vm.json\n" +
+			"  meho vmware vm create --target vcenter-lab --spec '{\"name\":\"x\",\"power_on\":true}'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

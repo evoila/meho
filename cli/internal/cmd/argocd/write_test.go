@@ -77,7 +77,7 @@ func TestWriteVerbsDispatchCanonicalOpIDs(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	for _, opID := range expected {
-		if _, err := dispatchOp(context.Background(), srv.URL, opID, "rdc-argocd", map[string]any{"name": "x"}); err != nil {
+		if _, err := dispatchOp(context.Background(), srv.URL, opID, "argocd-lab", map[string]any{"name": "x"}); err != nil {
 			t.Fatalf("dispatchOp %s: %v", opID, err)
 		}
 	}
@@ -102,7 +102,7 @@ func TestSyncForwardsSyncParams(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	cmd := newAppSyncCmd()
-	cmd.SetArgs([]string{"--target", "rdc-argocd", "--name", "guestbook", "--prune", "--backplane", srv.URL})
+	cmd.SetArgs([]string{"--target", "argocd-lab", "--name", "guestbook", "--prune", "--backplane", srv.URL})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	if err := cmd.Execute(); err != nil {
@@ -143,7 +143,7 @@ func TestAppSyncAwaitingApprovalRealPath(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{"--target", "rdc-argocd", "--name", "guestbook", "--backplane", srv.URL})
+	cmd.SetArgs([]string{"--target", "argocd-lab", "--name", "guestbook", "--backplane", srv.URL})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("awaiting_approval must not be an error (parked, exit 0); got %v", err)
 	}
@@ -181,7 +181,7 @@ func TestAppSyncAwaitingApprovalJSON(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--target", "rdc-argocd", "--name", "guestbook", "--json", "--backplane", srv.URL})
+	cmd.SetArgs([]string{"--target", "argocd-lab", "--name", "guestbook", "--json", "--backplane", srv.URL})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}

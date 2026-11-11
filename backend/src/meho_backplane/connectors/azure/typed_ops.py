@@ -63,6 +63,7 @@ from meho_backplane.connectors.azure import inventory
 from meho_backplane.connectors.azure import migrate
 
 # monitor (Task #5090)
+from meho_backplane.connectors.azure import monitor
 
 # network (Task #5085)
 from meho_backplane.connectors.azure import network
@@ -384,6 +385,7 @@ AZURE_TYPED_OPS: tuple[AzureTypedOp, ...] = (
     # migrate (Task #5093)
     *migrate.OPS,
     # monitor (Task #5090)
+    *monitor.OPS,
     # network (Task #5085)
     *network.OPS,
     # security (Task #5089)
@@ -414,6 +416,7 @@ AZURE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # migrate (Task #5093)
     **migrate.WHEN_TO_USE,
     # monitor (Task #5090)
+    **monitor.WHEN_TO_USE,
     # network (Task #5085)
     **network.WHEN_TO_USE,
     # security (Task #5089)

@@ -35,6 +35,7 @@ from typing import Any
 from meho_backplane.event_source.schemas import EventSourceKind
 from meho_backplane.events.normalizers import (
     alertmanager,
+    checks_events,
     generic_json,
     grafana,
     harbor,
@@ -106,6 +107,8 @@ def synthesize_event_prompt(event_kind: str, payload: Mapping[str, Any]) -> str:
     vendor = _REGISTRY.get(source_kind) if source_kind is not None else None
     if vendor is not None:
         body = vendor.build_prompt(payload)
+    elif event_kind.startswith(checks_events.CHECK_EVENT_PREFIX):
+        body = checks_events.build_prompt(event_kind, payload)
     else:
         body = _generic_prompt_body(event_kind, payload)
     return _PROMPT_PREAMBLE + wrap_untrusted_text(body)

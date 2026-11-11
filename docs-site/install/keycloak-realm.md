@@ -248,8 +248,7 @@ tool) shows the state in `approvals.sign_in.state`:
 | `ok` | The realm gives the approval level: the flow has exactly the steps above, its level step has level `2` and maximum age `0`, the realm's sign-in levels name `meho-approve` as level 2 and no other name has level 2, and `meho-cli-approve` uses the flow. |
 | `flow_missing` | The realm has no flow `meho approval sign-in level`. |
 | `not_bound` | The flow is right, but `meho-cli-approve` is missing, has no own browser flow, or uses another flow. `detail` says which. |
-| `flow_differs` | The flow has other steps, its level step has no or other settings, the realm's sign-in levels do not name `meho-approve` as the only level 2, or `meho-cli-approve` has its own sign-in levels. `detail` names the first difference. MEHO does not bind the client to such a flow. |
-| `other_grant_on` | `meho-cli-approve` also allows direct grant or device grant. Such a sign-in skips the approval flow. Turn both off. |
+| `flow_differs` | The flow has other steps, its level step has no or other settings, the realm's sign-in levels do not name `meho-approve` as the only level 2, `meho-cli-approve` has its own sign-in levels, or `meho-cli-approve` also allows direct grant or device grant (such a sign-in skips the approval flow; turn both off). `detail` names the first difference. MEHO does not bind the client to such a flow. |
 | `not_checked` | MEHO could not read it. `detail` says why, for example `no_right_to_read_login_flows` or `no_right_to_read_realm`. |
 
 `meho doctor` shows the same state in its line `approval sign-in`, with

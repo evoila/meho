@@ -83,12 +83,9 @@ func addApprovalSignInCheck(r *doctorReport, h *api.HealthResponse) {
 			fmt.Sprintf("the login flow %q or the approval level differs from MEHO's: %s", flow, detail),
 			"a Keycloak admin fixes what the line names: the flow's steps (the level step, the password form, "+
 				"the one-time code step), the level step's settings (level 2, maximum age 0), or the sign-in "+
-				"levels (acr.loa.map: meho-approve is level 2, no other name has level 2, the client has no own map); "+
+				"levels (acr.loa.map: meho-approve is level 2, no other name has level 2, the client has no own map), "+
+				"or turns off direct grant and device grant on the client "+s.Client+"; "+
 				"then runs keycloak.authflow.ensure_approval_flow; see "+approvalFlowDocs))
-	case api.ApprovalSignInStatusStateOtherGrantOn:
-		r.add(authed(approvalSignInCheckName, doctorWarn, "",
-			"the approval client also allows a sign-in that skips the login flow: "+detail,
-			"a Keycloak admin turns off direct grant and device grant on the client "+s.Client+"; see "+approvalFlowDocs))
 	case api.ApprovalSignInStatusStateNotChecked:
 		hint := ""
 		if detail == "no_right_to_read_login_flows" {

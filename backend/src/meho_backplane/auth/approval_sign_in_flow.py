@@ -22,12 +22,12 @@ admin client and says one of:
 * ``flow_missing``: the realm has no flow ``meho approval sign-in level``;
 * ``flow_differs``: the flow has other steps, its level step has no or other
   settings, the realm's ``acr.loa.map`` does not name level 2
-  ``meho-approve``, or the client has its own ``acr.loa.map``; ``detail``
-  names the first difference;
+  ``meho-approve``, the client has its own ``acr.loa.map``, or the client
+  also allows direct grant (password sent by the program) or device
+  grant, which skip the approval flow; ``detail`` names the first
+  difference;
 * ``not_bound``: the flow is right, but the client is missing, has no own
   browser flow, or is bound to another flow;
-* ``other_grant_on``: the client also allows direct grant (password sent by
-  the program) or device grant; such a sign-in skips the approval flow;
 * ``not_checked``: the check could not run; ``detail`` is a short reason
   word: ``keycloak_admin_not_configured``, ``no_right_to_read_login_flows``,
   ``no_right_to_read_realm``, ``no_right_to_read_clients``,
@@ -89,9 +89,7 @@ __all__ = [
     "sign_in_level_warning",
 ]
 
-ApprovalSignInState = Literal[
-    "ok", "flow_missing", "flow_differs", "not_bound", "other_grant_on", "not_checked"
-]
+ApprovalSignInState = Literal["ok", "flow_missing", "flow_differs", "not_bound", "not_checked"]
 
 #: What MEHO does with a token of the approval client that lacks the level.
 SignInLevelInForce = Literal["off", "observe", "required"]
@@ -190,9 +188,9 @@ def _client_state(
         return "flow_differs", own_map
     attributes = _object(client.get("attributes"))
     if client.get("directAccessGrantsEnabled") is True:
-        return "other_grant_on", f"the client {client_id} allows direct grant"
+        return "flow_differs", f"the client {client_id} allows direct grant"
     if str(attributes.get(_DEVICE_GRANT)).lower() == "true":
-        return "other_grant_on", f"the client {client_id} allows device grant"
+        return "flow_differs", f"the client {client_id} allows device grant"
     bound = (client.get("authenticationFlowBindingOverrides") or {}).get("browser")
     if not bound:
         return "not_bound", f"the client {client_id} has no own browser flow"

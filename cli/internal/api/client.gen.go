@@ -71,12 +71,11 @@ const (
 
 // Defines values for ApprovalSignInStatusState.
 const (
-	ApprovalSignInStatusStateFlowDiffers  ApprovalSignInStatusState = "flow_differs"
-	ApprovalSignInStatusStateFlowMissing  ApprovalSignInStatusState = "flow_missing"
-	ApprovalSignInStatusStateNotBound     ApprovalSignInStatusState = "not_bound"
-	ApprovalSignInStatusStateNotChecked   ApprovalSignInStatusState = "not_checked"
-	ApprovalSignInStatusStateOk           ApprovalSignInStatusState = "ok"
-	ApprovalSignInStatusStateOtherGrantOn ApprovalSignInStatusState = "other_grant_on"
+	ApprovalSignInStatusStateFlowDiffers ApprovalSignInStatusState = "flow_differs"
+	ApprovalSignInStatusStateFlowMissing ApprovalSignInStatusState = "flow_missing"
+	ApprovalSignInStatusStateNotBound    ApprovalSignInStatusState = "not_bound"
+	ApprovalSignInStatusStateNotChecked  ApprovalSignInStatusState = "not_checked"
+	ApprovalSignInStatusStateOk          ApprovalSignInStatusState = "ok"
 )
 
 // Defines values for AuditEventClass.

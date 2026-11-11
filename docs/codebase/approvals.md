@@ -1040,7 +1040,7 @@ practice; `meho doctor` shows the last two in its line `approval level`.
 the flow steps, the level step settings (`loa-condition-level` 2,
 `loa-max-age` 0), `acr.loa.map` with `meho-approve` = 2 and no other name
 on level 2, no own `acr.loa.map` on the client, and the binding. Direct
-grant or device grant on the client is `other_grant_on`. The
+grant or device grant on the client is `flow_differs` too. The
 realm stage (`core/keycloak_flows.py:ensure_levels`, and step settings in
 `ensure_flows`), `meho admin keycloak bootstrap-clients` and
 `keycloak.authflow.ensure_approval_flow` all add `meho-approve` to

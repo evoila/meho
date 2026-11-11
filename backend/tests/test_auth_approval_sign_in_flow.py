@@ -293,12 +293,12 @@ async def test_a_realm_that_does_not_give_the_level_is_flow_differs(
     ],
     ids=["direct grant", "device grant"],
 )
-async def test_a_client_with_another_grant_is_other_grant_on(
+async def test_a_client_with_another_grant_is_flow_differs(
     client: dict[str, Any], detail: str
 ) -> None:
     status = await _read(clients=[client])
     assert (status.state, status.detail) == (
-        "other_grant_on",
+        "flow_differs",
         f"the client meho-cli-approve {detail}",
     )
 

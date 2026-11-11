@@ -310,12 +310,13 @@ file, use one of these:
 
 - Import the file in the operator console. A person in the console
   writes at once.
-- Give the import a change ticket, then approve all its rows in one
-  command:
+- Give the import a change ticket. Then a second person goes through
+  all its rows with one command. It shows each row and asks for a yes.
+  The person who ran the import cannot approve its rows.
 
   ```bash
-  meho --work-ref CHG-1 targets import targets.yaml
-  meho approvals approve --filter-work-ref CHG-1 --in-order
+  meho --work-ref gh:acme/ops#42 targets import targets.yaml
+  meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order
   ```
 
 Then probe. The probe invokes the connector matched to the target's

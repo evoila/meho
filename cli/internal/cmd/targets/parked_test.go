@@ -120,7 +120,9 @@ func TestImportHelpSaysEachRowWaits(t *testing.T) {
 	for _, want := range []string{
 		"Each row of the file makes its own approval request.",
 		"import it in the web console",
-		"meho approvals approve --filter-work-ref CHG-1 --in-order",
+		"meho --work-ref gh:acme/ops#42 targets import <file>",
+		"meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order",
+		"The person who ran the import cannot approve its rows.",
 	} {
 		if !strings.Contains(long, want) {
 			t.Errorf("import help does not say %q:\n%s", want, long)

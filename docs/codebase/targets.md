@@ -76,10 +76,11 @@ re-run of a failed approved call by the requester, also a service login.
   makes its own approval request: a file with 50 rows makes 50 requests.
   For a large file, import it in the web console, where it is written at
   once. Or give the import a change ticket
-  (`meho --work-ref CHG-1 targets import <file>`): every request then
-  carries it, and a person approves all of them in one command,
-  `meho approvals approve --filter-work-ref CHG-1 --in-order`. The
-  command help says the same.
+  (`meho --work-ref gh:acme/ops#42 targets import <file>`): every
+  request then carries it. A second person goes through all of them with
+  one command, `meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order`.
+  It shows each row and asks for a yes. The person who ran the import
+  cannot approve its rows. The command help says the same.
 - Only a person in the web interface (`Operator.web_session`) writes at
   once. The console calls `create_target`, `update_target` and
   `delete_target` as functions with its web session, not through the

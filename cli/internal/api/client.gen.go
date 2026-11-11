@@ -155,6 +155,12 @@ const (
 	CapabilityKindMetaToolFamily CapabilityKind = "meta_tool_family"
 )
 
+// Defines values for CheckSourceKind.
+const (
+	CheckSourceKindDashboard CheckSourceKind = "dashboard"
+	CheckSourceKindSensor    CheckSourceKind = "sensor"
+)
+
 // Defines values for ConfirmVerifyResponseAnswer.
 const (
 	ConfirmVerifyResponseAnswerEscalate ConfirmVerifyResponseAnswer = "escalate"
@@ -3702,12 +3708,14 @@ type BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost struct {
 // BodyUiSchedulerCreateSubmitUiSchedulerCreatePost defines model for Body_ui_scheduler_create_submit_ui_scheduler_create_post.
 type BodyUiSchedulerCreateSubmitUiSchedulerCreatePost struct {
 	AgentDefinitionId *string `json:"agent_definition_id,omitempty"`
+	CheckSourceRef    *string `json:"check_source_ref"`
 	CronExpr          *string `json:"cron_expr"`
 	EventFilter       *string `json:"event_filter"`
 	FireAt            *string `json:"fire_at"`
 	InFlightPolicy    *string `json:"in_flight_policy,omitempty"`
 	Inputs            *string `json:"inputs"`
 	Kind              *string `json:"kind,omitempty"`
+	OnlyWorsening     *bool   `json:"only_worsening,omitempty"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.
 	//
@@ -3735,6 +3743,7 @@ type BodyUiSchedulerCreateSubmitUiSchedulerCreatePost struct {
 	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
 	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	StartOn    *string           `json:"start_on,omitempty"`
 	Timezone   *string           `json:"timezone,omitempty"`
 	WorkRef    *string           `json:"work_ref"`
 }
@@ -4206,6 +4215,21 @@ type CapabilityRead struct {
 type CatalogListResponse struct {
 	Catalog []ConnectorSpecEntry `json:"catalog"`
 }
+
+// CheckSource Pick a Sensor or a Dashboard as the source of an event trigger (#6182).
+//
+// MEHO turns it into the normal event filter at create. No *id* and no
+// *name* means "any Sensor" or "any Dashboard". *id* and *name* are not
+// allowed together: say which one you mean.
+type CheckSource struct {
+	Id            *openapi_types.UUID `json:"id"`
+	Kind          CheckSourceKind     `json:"kind"`
+	Name          *string             `json:"name"`
+	OnlyWorsening *bool               `json:"only_worsening,omitempty"`
+}
+
+// CheckSourceKind defines model for CheckSource.Kind.
+type CheckSourceKind string
 
 // ConfirmVerify Operator answers a yes/no prompt; only an affirmative advances.
 //
@@ -9709,9 +9733,16 @@ type SafetyOverlayEntrySafetyLevel string
 // the shared “work_ref_var“ ContextVar. Set-at-create-only: triggers
 // have no UPDATE path. Omit when the trigger carries no change ticket.
 type ScheduledTriggerCreate struct {
-	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
-	CronExpr          *string                 `json:"cron_expr"`
-	EventFilter       *map[string]interface{} `json:"event_filter"`
+	AgentDefinitionId openapi_types.UUID `json:"agent_definition_id"`
+
+	// CheckSource Pick a Sensor or a Dashboard as the source of an event trigger (#6182).
+	//
+	// MEHO turns it into the normal event filter at create. No *id* and no
+	// *name* means "any Sensor" or "any Dashboard". *id* and *name* are not
+	// allowed together: say which one you mean.
+	CheckSource *CheckSource            `json:"check_source,omitempty"`
+	CronExpr    *string                 `json:"cron_expr"`
+	EventFilter *map[string]interface{} `json:"event_filter"`
 
 	// FireAt One-off fire time (UTC); required for kind=one_off and must be null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
 	FireAt      *time.Time `json:"fire_at"`
@@ -9928,6 +9959,9 @@ type ScheduledTriggerRead struct {
 
 	// NextFireAt Next instant the trigger is eligible to fire (UTC) -- the column the tick loop scans; null for event triggers (dispatched on event arrival, not the clock). The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
 	NextFireAt *time.Time `json:"next_fire_at"`
+
+	// Notice Set only on the create answer, when the trigger will not fire yet (a check_source trigger while CHECKS_AGENT_EVENTS is off).
+	Notice *string `json:"notice"`
 
 	// SkipCount Consecutive ticks skipped since the last successful fire (0 when healthy; reset to 0 on the next fire). The scheduler parks the trigger ('status'='paused') once this reaches its internal consecutive-skip cap, so a permanently-unresolvable trigger stops silently re-tripping every tick. (#2327)
 	SkipCount int `json:"skip_count"`

@@ -104,6 +104,9 @@ async def _create_submit_handler(
     inputs: str | None = Form(default=None, max_length=_JSON_MAX),
     in_flight_policy: str = Form(default="fail_into_audit"),
     work_ref: str | None = Form(default=None, max_length=_WORK_REF_MAX),
+    start_on: str = Form(default="custom", max_length=16),
+    check_source_ref: str | None = Form(default=None, max_length=64),
+    only_worsening: bool = Form(default=False),
     session_ctx: UISessionContext = _require_session_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
@@ -121,6 +124,9 @@ async def _create_submit_handler(
         inputs=inputs,
         in_flight_policy=in_flight_policy,
         work_ref=work_ref,
+        start_on=start_on,
+        check_source_ref=check_source_ref,
+        only_worsening=only_worsening,
     )
 
 

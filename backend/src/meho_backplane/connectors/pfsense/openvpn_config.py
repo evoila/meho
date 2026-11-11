@@ -4,7 +4,7 @@
 """Read the OpenVPN servers and client overrides of a pfSense ``config.xml`` (#3993).
 
 Shared by the ops that onboard a VPN user
-(:mod:`~meho_backplane.connectors.pfsense.ops_openvpn` and
+(:mod:`~meho_backplane.connectors.pfsense.ops_openvpn_csc` and
 :mod:`~meho_backplane.connectors.pfsense.ops_openvpn_user`). Everything
 here is plain parsing: no SSH call except :func:`read_rendered_addresses`.
 

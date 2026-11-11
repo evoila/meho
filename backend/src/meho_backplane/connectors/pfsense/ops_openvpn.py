@@ -1,1050 +1,444 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: declarative op module (planner + PHP fragment + op metadata /
-# JSON schemas / llm_instructions) in the single-module-per-op-group shape of its
-# pfSense siblings; the functions are small and low-complexity.
 
-"""pfSense OpenVPN onboarding ops: the next free tunnel address and the client overrides (#3993).
+"""pfSense OpenVPN reads -- ``pfsense.openvpn.clients`` and ``pfsense.openvpn.log``.
 
-Two ops that help an operator give a person VPN access on a pfSense
-firewall (the user itself is made by
-:mod:`~meho_backplane.connectors.pfsense.ops_openvpn_user`):
+Two read ops for the first question of a "the VPN is slow" ticket.
 
-* ``pfsense.openvpn.address.next_free`` (read) -- the lowest address offset
-  that is free on EVERY OpenVPN server that logs users in with a user name
-  and password. It counts the client-specific overrides in ``config.xml``
-  AND the rendered files under ``/var/etc/openvpn/server*/csc/``, because
-  the two do not always agree.
-* ``pfsense.openvpn.csc.sync`` (change) -- creates or extends client-specific
-  overrides (one per user and server: the fixed tunnel address and the
-  routes pushed to the client). It has a compare-only mode.
+``pfsense.openvpn.clients``
+    The clients that are connected now, for each OpenVPN server on the
+    firewall. The op asks each server's management socket for
+    ``status 3`` (the tab-separated status format). It reads the column
+    names from the ``HEADER`` line, so a column added by a newer OpenVPN
+    does not break it. The protocol (``proto``) and port of each server
+    come from its generated config file, with a grep for those two
+    words only.
 
-How the sync works
+``pfsense.openvpn.log``
+    The OpenVPN log lines of one user (common name) in a time window,
+    each with an event type: ``connect``, ``disconnect``, ``restart``,
+    ``error`` or ``other``. A line counts only when it holds the whole
+    name: ``bob`` does not match the lines of ``bobby`` or ``bob.smith``.
+
+Bounded on purpose
 ------------------
 
-1. Every wanted entry is checked first (server exists and logs users in,
-   the address is inside the server's network and free, the existing entry
-   has no other address). One refused entry stops the whole call: nothing
-   is written, and outside compare-only mode the call fails with
-   :class:`~meho_backplane.connectors.pfsense.refusal.PfSenseRefusedError`
-   (code ``refused``) that names each refused entry.
-2. In compare-only mode the call returns the plan and stops: which entries
-   would be created, updated, or are already right.
-3. Otherwise the handler saves a copy of ``config.xml`` (the rollback copy,
-   mode 0600), plays back one fragment that edits only the named entries
-   and calls ``write_config()``, then reads ``config.xml`` again. It
-   reports success only when every named entry has the wanted values and
-   nothing else in the file changed.
+* No free text reaches the shell. The commands are fixed strings. The
+  only input in a command is the common name, which must match
+  ``[A-Za-z0-9._@-]{2,64}`` and is quoted with :func:`shlex.quote` on top.
+* The log read returns at most ``limit`` events (default 200, at most
+  1000) and reads at most the last 5000 matching lines. When lines may be
+  missing, the result says ``truncated: true``.
+* A failed log read raises. ``grep`` prints its exit status after its
+  lines, so an error (status 2) is not hidden by the pipe to ``tail``.
+  Status 1 (no line matched) is a normal, empty answer.
+* A server whose socket cannot be read is reported with
+  ``readable: false``. It is never shown as a server with no clients.
 
-The plan is made from one read of ``config.xml``; the fragment runs
-later. So the fragment first checks that the overrides are still as the
-plan saw them: the same number of overrides, no override for a new
-entry, and the same address and routes on each entry it updates. When
-one differs (for example a route was added in the web page meanwhile),
-it writes nothing and prints ``MEHO_CSC_CHANGED``; the handler then
-fails and asks for a new run.
+Time in the log
+---------------
 
-The sync never deletes an entry, never removes a route (a route list is
-only added to), never changes the address of an existing entry (that is
-reported as ``address_conflict``), and does not restart OpenVPN. The
-fragment calls ``openvpn_resync_csc()`` for each edited entry, the same
-call the pfSense web page makes: it writes that one user's file for the
-running servers. The override lives in the configuration, so the next
-resync keeps it.
+An OpenVPN log line starts with a syslog stamp (``Nov 10 12:34:56``) in the
+firewall's local time, with no year and no zone. The op reads the
+firewall's own date and UTC offset in the same command, adds the year and
+the offset, and compares the lines to the window as exact moments. The
+window (``since`` / ``until``) must carry a zone offset or ``Z``.
+A stamp that would lie in the future is placed in the year before
+(so December lines read in January are right). The offset is the one at call time, so a line
+from before a clock change can be off by one hour.
 
-Input safety
-------------
-
-User names pass the strict user-name allowlist. Addresses are parsed and
-re-emitted through :mod:`ipaddress`. Every value reaches the PHP fragment
-only through :func:`~meho_backplane.connectors.pfsense.ops_write._php_squote`
-inside a quoted heredoc. No fragment line starts with ``!`` or ``=``.
-
-Secrets
--------
-
-The ops read and write no secret field. The result carries names,
-addresses and routes only.
+The ops change nothing on the firewall.
 """
 
 from __future__ import annotations
 
-import ipaddress
 import re
-import secrets
-from collections.abc import Callable
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
-
-from defusedxml.ElementTree import ParseError, fromstring
-
-from meho_backplane.connectors.pfsense.openvpn_config import (
-    CscEntry,
-    OpenVpnServer,
-    parse_csc_entries,
-    parse_openvpn_servers,
-    read_rendered_addresses,
-    used_addresses,
-)
-from meho_backplane.connectors.pfsense.ops import PfSenseOp
-from meho_backplane.connectors.pfsense.ops_user_write import USER_NAME_RE, _validate_user_name
-from meho_backplane.connectors.pfsense.ops_write import (
-    _ALWAYS_REWRITTEN_SECTIONS,
-    _apply_playback,
-    _canonical,
-    _is_empty_container,
-    _php_squote,
-    _read_config_xml,
-    _validate_descr,
-    serialized_config_write,
-)
-from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+import shlex
+from datetime import UTC, datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.pfsense.connector import PfSenseConnector
 
 __all__ = [
-    "OPENVPN_OPS",
-    "build_csc_sync_playback",
-    "pfsense_openvpn_address_next_free",
-    "pfsense_openvpn_csc_sync",
-    "plan_csc_sync",
-    "save_rollback_copy",
+    "classify_log_line",
+    "parse_openvpn_log",
+    "parse_openvpn_status",
+    "pfsense_openvpn_clients",
+    "pfsense_openvpn_log",
 ]
 
-_VPNID_RE: Final = re.compile(r"^[0-9]{1,5}$")
-_CHANGED_MARKER: Final = "MEHO_CSC_CHANGED="
-_MAX_ENTRIES: Final = 100
-_MAX_ROUTES: Final = 50
+_LOG_FILE = "/var/log/openvpn.log"
+_DEFAULT_LIMIT = 200
+_MAX_LIMIT = 1000
+_MAX_LOG_LINES = 5000
+_MAX_RAW_CHARS = 500
 
-#: Offsets 0 (the network) and 1 (the server) are never given to a client.
-_FIRST_CLIENT_OFFSET: Final = 2
+# A common name: letters, digits, dot, underscore, at sign and dash. The
+# first character is a letter or digit so a value can never look like a
+# grep option. A name with other characters is refused, not cleaned.
+_COMMON_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{1,63}")
+# The characters a name can hold. A match must not touch one of them on
+# either side, so it is the whole name and not a part of a longer one.
+_NAME_CHARS = "A-Za-z0-9._@-"
+_GREP_STATUS = "@@GREP "
+
+_CLIENTS_CMD = (
+    "for d in /var/etc/openvpn/server*; do "
+    '[ -S "$d/sock" ] || continue; '
+    'echo "@@SERVER ${d##*/}"; '
+    "grep -E '^(proto|port) ' \"$d/config.ovpn\" | sed 's/^/@@CONF /'; "
+    "echo @@STATUS; "
+    "printf 'status 3\\nquit\\n' | nc -U -w 3 \"$d/sock\"; "
+    "echo @@END; "
+    "done"
+)
+
+_SYSLOG_RE = re.compile(
+    r"^(?P<mon>[A-Z][a-z]{2})\s+(?P<day>\d{1,2})\s+"
+    r"(?P<time>\d{2}:\d{2}:\d{2})\s+\S+\s+(?P<msg>.*)$"
+)
+_MONTHS = {
+    name: number
+    for number, name in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+        start=1,
+    )
+}
+_RESTART_RE = re.compile(r"SIGUSR1\[(?:soft|hard),([^\]]+)\]")
+_STOP_RE = re.compile(r"SIG(?:TERM|INT)\[(?:soft|hard),([^\]]+)\]")
+_ERROR_RE = re.compile(
+    r"TLS Error|TLS handshake failed|VERIFY ERROR|AUTH_FAILED|"
+    r"Authenticate/Decrypt packet error|TLS key negotiation failed",
+    re.IGNORECASE,
+)
+_INACTIVE_RE = re.compile(r"inactivity timeout", re.IGNORECASE)
 
 
-def _user_auth_servers(xml_text: str) -> list[OpenVpnServer]:
-    """Return the OpenVPN servers that log users in, or raise when one has no IPv4 network."""
-    servers = [s for s in parse_openvpn_servers(xml_text) if s.user_auth]
-    for server in servers:
-        if not server.vpnid:
-            raise RuntimeError("an OpenVPN user-auth server in config.xml has no vpnid")
-        if server.network is None:
-            raise RuntimeError(
-                f"OpenVPN server {server.vpnid} has no IPv4 tunnel network in config.xml; "
-                "cannot choose a client address for it"
-            )
+# ---------------------------------------------------------------------------
+# Input checks
+# ---------------------------------------------------------------------------
+
+
+def _validate_common_name(value: Any) -> str:
+    if not isinstance(value, str) or not _COMMON_NAME_RE.fullmatch(value.strip()):
+        raise ValueError(
+            "common_name must be 2 to 64 characters: letters, digits, '.', '_', '@' or '-', "
+            f"starting with a letter or digit; got {value!r}"
+        )
+    return value.strip()
+
+
+def _validate_moment(value: Any, field: str) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be an ISO 8601 time with a zone; got {value!r}")
+    try:
+        moment = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise ValueError(f"{field} must be an ISO 8601 time with a zone; got {value!r}") from None
+    if moment.tzinfo is None:
+        raise ValueError(
+            f"{field} must carry a zone offset or 'Z' (for example 2026-11-10T09:00:00Z); "
+            f"got {value!r}"
+        )
+    return moment
+
+
+def _validate_limit(value: Any) -> int:
+    if value is None:
+        return _DEFAULT_LIMIT
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_LIMIT:
+        raise ValueError(f"limit must be a whole number from 1 to {_MAX_LIMIT}; got {value!r}")
+    return value
+
+
+def _name_grep_pattern(common_name: str) -> str:
+    """The ``grep -E`` pattern for the whole name. Only ``.`` is special in it.
+
+    >>> _name_grep_pattern("j.doe")
+    '(^|[^A-Za-z0-9._@-])j\\\\.doe($|[^A-Za-z0-9._@-])'
+    """
+    escaped = common_name.replace(".", "\\.")
+    return f"(^|[^{_NAME_CHARS}]){escaped}($|[^{_NAME_CHARS}])"
+
+
+def _name_line_re(common_name: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![{_NAME_CHARS}]){re.escape(common_name)}(?![{_NAME_CHARS}])")
+
+
+# ---------------------------------------------------------------------------
+# Parsers
+# ---------------------------------------------------------------------------
+
+
+def _to_int(value: str) -> int | None:
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _client_row(header: list[str], cells: list[str]) -> dict[str, Any]:
+    by_name = dict(zip(header, cells, strict=False))
+    epoch = _to_int(by_name.get("Connected Since (time_t)", ""))
+    return {
+        "common_name": by_name.get("Common Name"),
+        "real_address": by_name.get("Real Address"),
+        "virtual_address": by_name.get("Virtual Address") or None,
+        "virtual_ipv6_address": by_name.get("Virtual IPv6 Address") or None,
+        "bytes_received": _to_int(by_name.get("Bytes Received", "")),
+        "bytes_sent": _to_int(by_name.get("Bytes Sent", "")),
+        "connected_since": (
+            datetime.fromtimestamp(epoch, tz=UTC).isoformat() if epoch is not None else None
+        ),
+        "username": by_name.get("Username") or None,
+    }
+
+
+def parse_openvpn_status(output: str) -> list[dict[str, Any]]:
+    """Parse the per-server blocks that ``_CLIENTS_CMD`` prints.
+
+    Returns one dict per server: ``{server, proto, port, readable,
+    clients}``. A server is ``readable`` only when its status ended with
+    the ``END`` marker and had a ``CLIENT_LIST`` header, so a dead socket
+    never looks like a server with no clients.
+
+    >>> out = (
+    ...     "@@SERVER server1\\n@@CONF proto udp4\\n@@CONF port 1194\\n@@STATUS\\n"
+    ...     "HEADER\\tCLIENT_LIST\\tCommon Name\\tReal Address\\tVirtual Address\\n"
+    ...     "CLIENT_LIST\\talice\\t203.0.113.5:4000\\t198.51.100.2\\n"
+    ...     "END\\n@@END\\n"
+    ... )
+    >>> parse_openvpn_status(out)[0]["clients"][0]["common_name"]
+    'alice'
+    """
+    servers: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    header: list[str] | None = None
+    saw_end = False
+    for raw in output.splitlines():
+        line = raw.rstrip("\r")
+        if line.startswith("@@SERVER "):
+            current = {
+                "server": line[len("@@SERVER ") :].strip(),
+                "proto": None,
+                "port": None,
+                "readable": False,
+                "clients": [],
+            }
+            header, saw_end = None, False
+            servers.append(current)
+        elif current is None:
+            continue
+        elif line.startswith("@@CONF "):
+            key, _, value = line[len("@@CONF ") :].partition(" ")
+            if key in ("proto", "port"):
+                current[key] = value.strip() or None
+        elif line == "@@END":
+            current["readable"] = header is not None and saw_end
+        elif line.startswith("HEADER\tCLIENT_LIST\t"):
+            header = line.split("\t")[2:]
+        elif line.startswith("CLIENT_LIST\t") and header is not None:
+            current["clients"].append(_client_row(header, line.split("\t")[1:]))
+        elif line == "END":
+            saw_end = True
     return servers
 
 
-# ---------------------------------------------------------------------------
-# pfsense.openvpn.address.next_free
-# ---------------------------------------------------------------------------
+def classify_log_line(message: str) -> dict[str, Any]:
+    """Return ``{event, reason}`` for the message part of one log line.
 
-
-def _client_address(server: OpenVpnServer, offset: int) -> ipaddress.IPv4Address:
-    assert server.network is not None
-    return server.network.network_address + offset
-
-
-def _max_offset(server: OpenVpnServer) -> int:
-    assert server.network is not None
-    return min(server.network.num_addresses - 2, 65534)
-
-
-async def pfsense_openvpn_address_next_free(
-    self: PfSenseConnector,
-    target: Any,
-    params: dict[str, Any],
-    operator: Operator | None = None,
-) -> dict[str, Any]:
-    """Handler for ``pfsense.openvpn.address.next_free`` (lowest offset free everywhere)."""
-    del params  # the op takes none
-    xml_text = await _read_config_xml(self, target, operator)
-    servers = _user_auth_servers(xml_text)
-    entries = parse_csc_entries(xml_text)
-    result: dict[str, Any] = {
-        "op_class": "read",
-        "resource": "openvpn_address",
-        "status": "no_user_auth_server",
-        "address_offset": None,
-        "servers": [],
-        "sources": {"config_entries": len(entries), "rendered_files": 0},
-        "warnings": [],
-    }
-    if not servers:
-        return result
-    rendered = await read_rendered_addresses(self, target, operator)
-    result["sources"]["rendered_files"] = len(rendered)
-    result["warnings"] = [
-        f"the override for {e.common_name!r} has a tunnel network that is not an IPv4 "
-        "address (an alias?); it is not counted"
-        for e in entries
-        if e.tunnel_raw and e.tunnel_interface is None
-    ]
-    used = {s.vpnid: used_addresses(s, entries, rendered) for s in servers}
-    limit = min(_max_offset(s) for s in servers)
-    for offset in range(_FIRST_CLIENT_OFFSET, limit + 1):
-        if all(_client_address(s, offset) not in used[s.vpnid] for s in servers):
-            return {
-                **result,
-                "status": "found",
-                "address_offset": offset,
-                "servers": [_server_row(s, offset) for s in servers],
-            }
-    return {**result, "status": "exhausted"}
-
-
-def _server_row(server: OpenVpnServer, offset: int) -> dict[str, Any]:
-    assert server.network is not None
-    address = _client_address(server, offset)
-    return {
-        "vpnid": server.vpnid,
-        "description": server.description,
-        "network": str(server.network),
-        "address": str(address),
-        "tunnel_network": f"{address}/{server.network.prefixlen}",
-    }
-
-
-# ---------------------------------------------------------------------------
-# pfsense.openvpn.csc.sync -- input
-# ---------------------------------------------------------------------------
-
-
-def _validate_routes(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or len(value) > _MAX_ROUTES:
-        raise ValueError(f"routes must be a list of at most {_MAX_ROUTES} IPv4 networks")
-    routes: list[str] = []
-    for item in value:
-        try:
-            net = ipaddress.IPv4Network(item, strict=False)
-        except (ValueError, TypeError) as exc:
-            raise ValueError(
-                f"routes must be IPv4 networks like '10.9.0.0/24'; got {item!r}"
-            ) from exc
-        if str(net) not in routes:
-            routes.append(str(net))
-    return routes
-
-
-def _validate_entry(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise ValueError("each entry must be an object")
-    unknown = set(raw) - {"name", "server_vpnid", "tunnel_address", "routes", "description"}
-    if unknown:
-        raise ValueError(f"unknown entry field(s): {', '.join(sorted(map(str, unknown)))}")
-    vpnid = raw.get("server_vpnid")
-    if not isinstance(vpnid, str) or not _VPNID_RE.fullmatch(vpnid):
-        raise ValueError(f"server_vpnid must be the number of an OpenVPN server; got {vpnid!r}")
-    address: ipaddress.IPv4Address | None = None
-    if raw.get("tunnel_address") is not None:
-        try:
-            address = ipaddress.IPv4Address(raw["tunnel_address"])
-        except (ValueError, TypeError) as exc:
-            raise ValueError(
-                f"tunnel_address must be an IPv4 address; got {raw['tunnel_address']!r}"
-            ) from exc
-    name = _validate_user_name(raw.get("name"))
-    return {
-        "name": name,
-        "server_vpnid": vpnid,
-        "tunnel_address": address,
-        "routes": _validate_routes(raw.get("routes")),
-        "description": _validate_descr(raw.get("description"), f"meho: vpn user {name}"),
-    }
-
-
-def _validate_entries(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or not value or len(value) > _MAX_ENTRIES:
-        raise ValueError(f"entries must be a list of 1 to {_MAX_ENTRIES} entries")
-    entries = [_validate_entry(raw) for raw in value]
-    seen: set[tuple[str, str]] = set()
-    for entry in entries:
-        key = (entry["name"], entry["server_vpnid"])
-        if key in seen:
-            raise ValueError(
-                f"entries holds {entry['name']!r} twice for server {entry['server_vpnid']}"
-            )
-        seen.add(key)
-    return entries
-
-
-# ---------------------------------------------------------------------------
-# pfsense.openvpn.csc.sync -- the plan (pure)
-# ---------------------------------------------------------------------------
-
-
-def _canonical_route(route: str) -> str:
-    try:
-        return str(ipaddress.IPv4Network(route, strict=False))
-    except ValueError:
-        return route
-
-
-def _address_refusal(
-    server: OpenVpnServer,
-    address: ipaddress.IPv4Address,
-    name: str,
-    used: dict[ipaddress.IPv4Address, set[str]],
-    claimed: dict[tuple[str, ipaddress.IPv4Address], str],
-) -> tuple[str, str] | None:
-    """Return ``(code, detail)`` when *address* may not go to *name* on *server*."""
-    assert server.network is not None
-    if address not in server.network:
-        return "address_outside_network", f"{address} is not inside {server.network}"
-    offset = int(address) - int(server.network.network_address)
-    if offset < _FIRST_CLIENT_OFFSET or offset > server.network.num_addresses - 2:
-        return "address_reserved", f"{address} is the network, server or broadcast address"
-    holders = used.get(address, set()) - {name}
-    if holders:
-        return "address_in_use", f"{address} is already used by {', '.join(sorted(holders))}"
-    other = claimed.get((server.vpnid, address))
-    if other is not None and other != name:
-        return "address_repeated", f"{address} is also wanted for {other} in this call"
-    return None
-
-
-def _plan_one(
-    entry: dict[str, Any],
-    servers: dict[str, OpenVpnServer],
-    csc: list[CscEntry],
-    rendered: list[tuple[str, str, ipaddress.IPv4Address]],
-    claimed: dict[tuple[str, ipaddress.IPv4Address], str],
-) -> dict[str, Any]:
-    name, vpnid, want = entry["name"], entry["server_vpnid"], entry["tunnel_address"]
-    row: dict[str, Any] = {
-        "name": name,
-        "server_vpnid": vpnid,
-        "action": "refused",
-        "reason": None,
-        "detail": None,
-        "tunnel_network": None,
-        "routes_added": [],
-        "routes": [],
-        "description": entry["description"],
-    }
-
-    def refuse(code: str, detail: str) -> dict[str, Any]:
-        return {**row, "reason": code, "detail": detail}
-
-    server = servers.get(vpnid)
-    if server is None:
-        return refuse("server_not_found", f"no OpenVPN server with vpnid {vpnid}")
-    if not server.user_auth or server.network is None:
-        return refuse("server_not_user_auth", f"server {vpnid} does not log users in by name")
-    existing = [e for e in csc if e.common_name == name and e.applies_to(vpnid)]
-    if len(existing) > 1:
-        return refuse("ambiguous_entry", f"{len(existing)} overrides match {name!r} on {vpnid}")
-    used = used_addresses(server, csc, rendered, ignore_name=name)
-    prefix = server.network.prefixlen
-    if not existing:
-        if want is None:
-            return refuse("tunnel_address_required", "a new entry needs tunnel_address")
-        bad = _address_refusal(server, want, name, used, claimed)
-        if bad is not None:
-            return refuse(*bad)
-        claimed[(vpnid, want)] = name
-        return {
-            **row,
-            "_expect": {"tunnel": "", "routes": ""},
-            "action": "create",
-            "tunnel_network": f"{want}/{prefix}",
-            "routes_added": list(entry["routes"]),
-            "routes": list(entry["routes"]),
-        }
-    return _plan_existing(row, entry, server, existing[0], used, claimed, refuse)
-
-
-def _plan_existing(
-    row: dict[str, Any],
-    entry: dict[str, Any],
-    server: OpenVpnServer,
-    current: CscEntry,
-    used: dict[ipaddress.IPv4Address, set[str]],
-    claimed: dict[tuple[str, ipaddress.IPv4Address], str],
-    refuse: Callable[[str, str], dict[str, Any]],
-) -> dict[str, Any]:
-    name, vpnid, want = entry["name"], entry["server_vpnid"], entry["tunnel_address"]
-    prefix = server.network.prefixlen if server.network is not None else 0
-    new_tunnel: str | None = None
-    if want is not None:
-        if current.tunnel_interface is not None and current.tunnel_interface.ip != want:
-            return refuse(
-                "address_conflict",
-                f"{name!r} already has {current.tunnel_interface.ip} on server {vpnid}; "
-                "the sync does not change an address",
-            )
-        if current.tunnel_interface is None and current.tunnel_raw:
-            return refuse(
-                "address_conflict", f"{name!r} has a tunnel network that is not an address"
-            )
-        if current.tunnel_interface is None:
-            bad = _address_refusal(server, want, name, used, claimed)
-            if bad is not None:
-                return refuse(*bad)
-            claimed[(vpnid, want)] = name
-            new_tunnel = f"{want}/{prefix}"
-    have = [_canonical_route(r) for r in current.routes]
-    added = [r for r in entry["routes"] if r not in have]
-    shown = {
-        **row,
-        "tunnel_network": new_tunnel or current.tunnel_raw or None,
-        "routes_added": added,
-        "routes": [*current.routes, *added],
-    }
-    if new_tunnel is None and not added:
-        return {**shown, "action": "unchanged"}
-    if current.server_list != [vpnid]:
-        return refuse(
-            "shared_entry",
-            f"the override of {name!r} is shared by several servers or all servers; "
-            "change it in the pfSense web page",
-        )
-    expect = {"tunnel": current.tunnel_raw, "routes": ",".join(current.routes)}
-    return {**shown, "_expect": expect, "action": "update"}
-
-
-def plan_csc_sync(
-    entries: list[dict[str, Any]],
-    servers: list[OpenVpnServer],
-    csc: list[CscEntry],
-    rendered: list[tuple[str, str, ipaddress.IPv4Address]],
-) -> list[dict[str, Any]]:
-    """Return one plan row per entry: create, update, unchanged or refused."""
-    by_id = {s.vpnid: s for s in servers}
-    claimed: dict[tuple[str, ipaddress.IPv4Address], str] = {}
-    return [_plan_one(entry, by_id, csc, rendered, claimed) for entry in entries]
-
-
-# ---------------------------------------------------------------------------
-# PHP fragment
-# ---------------------------------------------------------------------------
-
-
-def _php_change(row: dict[str, Any]) -> str:
-    create = "true" if row["action"] == "create" else "false"
-    return (
-        "  array("
-        f"'name' => {_php_squote(row['name'])}, "
-        f"'vpnid' => {_php_squote(row['server_vpnid'])}, "
-        f"'tunnel' => {_php_squote(row['tunnel_network'] or '')}, "
-        f"'routes' => {_php_squote(','.join(row['routes']))}, "
-        f"'descr' => {_php_squote(row['description'])}, "
-        f"'was_tunnel' => {_php_squote(row['_expect']['tunnel'])}, "
-        f"'was_routes' => {_php_squote(row['_expect']['routes'])}, "
-        f"'create' => {create}),"
-    )
-
-
-# The check of the fragment, before it writes: is each override still as
-# the plan saw it? ``$meho_hits`` are the overrides of the name that apply
-# to the server (an empty server list means all servers), the same rule as
-# ``CscEntry.applies_to``. Values are compared the way the parser reads
-# them: trimmed, and a route list split at commas.
-_PHP_STALE_CHECK: Final = [
-    "function meho_csv($meho_v) {",
-    "  return implode(',', array_values(array_filter(array_map('trim',",
-    "    explode(',', (string)$meho_v)), 'strlen')));",
-    "}",
-    "function meho_hits($meho_list, $meho_c) {",
-    "  $meho_hits = array();",
-    "  foreach ($meho_list as $meho_i => $meho_e) {",
-    "    if (!isset($meho_e['common_name'])",
-    "        || (string)$meho_e['common_name'] !== $meho_c['name']) {",
-    "      continue;",
-    "    }",
-    "    $meho_list_ids = isset($meho_e['server_list']) ? meho_csv($meho_e['server_list']) : '';",
-    "    if ($meho_list_ids === ''",
-    "        || in_array($meho_c['vpnid'], explode(',', $meho_list_ids), true)) {",
-    "      $meho_hits[] = $meho_i;",
-    "    }",
-    "  }",
-    "  return $meho_hits;",
-    "}",
-    "$meho_stale = array();",
-    "if (count($meho_csc) !== $meho_count) {",
-    "  $meho_stale[] = 'count';",
-    "}",
-    "foreach ($meho_changes as $meho_c) {",
-    "  $meho_hits = meho_hits($meho_csc, $meho_c);",
-    "  $meho_ok = false;",
-    "  if ($meho_c['create']) {",
-    "    $meho_ok = count($meho_hits) === 0;",
-    "  } elseif (count($meho_hits) === 1) {",
-    "    $meho_e = $meho_csc[$meho_hits[0]];",
-    "    $meho_ok = isset($meho_e['server_list'])",
-    "      && meho_csv($meho_e['server_list']) === $meho_c['vpnid']",
-    "      && $meho_c['was_tunnel'] === trim(isset($meho_e['tunnel_network'])",
-    "        ? (string)$meho_e['tunnel_network'] : '')",
-    "      && $meho_c['was_routes'] === meho_csv(isset($meho_e['local_network'])",
-    "        ? $meho_e['local_network'] : '');",
-    "  }",
-    "  if (!$meho_ok) {",
-    "    $meho_stale[] = $meho_c['name'] . '@' . $meho_c['vpnid'];",
-    "  }",
-    "}",
-]
-
-
-def build_csc_sync_playback(plan: list[dict[str, Any]], csc_count: int) -> str:
-    """Return the raw-PHP fragment that creates or updates the planned overrides.
-
-    Only rows with action ``create`` or ``update`` are written. First the
-    fragment checks that the overrides are still as the plan saw them
-    (*csc_count* overrides, see ``_PHP_STALE_CHECK``). When one is not, it
-    prints ``MEHO_CSC_CHANGED=<name@vpnid ...>`` and writes nothing. Else it
-    adds each new override and edits each planned one. It touches
-    ``tunnel_network`` and ``local_network`` and, for a new entry,
-    ``server_list``, ``common_name`` and ``description``. It calls
-    ``openvpn_resync_csc()`` for each edited entry (writes that user's file)
-    and ``write_config()`` once. It never deletes and restarts nothing.
+    >>> classify_log_line("alice/203.0.113.5:4000 SIGUSR1[soft,ping-restart] received")
+    {'event': 'restart', 'reason': 'ping-restart'}
     """
-    rows = [r for r in plan if r["action"] in ("create", "update")]
-    path = "$config['openvpn']['openvpn-csc']"
-    lines = [
-        "global $config;",
-        "require_once('openvpn.inc');",
-        "$meho_changes = array(",
-        *[_php_change(r) for r in rows],
-        ");",
-        f"$meho_count = {int(csc_count)};",
-        f"$meho_csc = (isset({path}) && is_array({path})) ? {path} : array();",
-        *_PHP_STALE_CHECK,
-        "if (count($meho_stale) > 0) {",
-        f"  echo '{_CHANGED_MARKER}' . implode(' ', $meho_stale) . \"\\n\";",
-        "  $meho_changes = array();",
-        "}",
-        "if (count($meho_changes) > 0 && (!isset($config['openvpn'])",
-        "    || !is_array($config['openvpn']))) {",
-        "  $config['openvpn'] = array();",
-        "}",
-        f"if (count($meho_changes) > 0 && (!isset({path}) || !is_array({path}))) {{",
-        f"  {path} = array();",
-        "}",
-        "$meho_done = 0;",
-        "foreach ($meho_changes as $meho_c) {",
-        f"  $meho_hits = meho_hits({path}, $meho_c);",
-        "  if ($meho_c['create'] && count($meho_hits) === 0) {",
-        "    $meho_new = array('server_list' => $meho_c['vpnid'],",
-        "      'common_name' => $meho_c['name'], 'description' => $meho_c['descr']);",
-        "    if ($meho_c['tunnel'] !== '') {",
-        "      $meho_new['tunnel_network'] = $meho_c['tunnel'];",
-        "    }",
-        "    if ($meho_c['routes'] !== '') {",
-        "      $meho_new['local_network'] = $meho_c['routes'];",
-        "    }",
-        f"    {path}[] = $meho_new;",
-        "    openvpn_resync_csc($meho_new);",
-        "    $meho_done++;",
-        "  } elseif (!$meho_c['create'] && count($meho_hits) === 1) {",
-        "    $meho_k = $meho_hits[0];",
-        "    if ($meho_c['tunnel'] !== '') {",
-        f"      {path}[$meho_k]['tunnel_network'] = $meho_c['tunnel'];",
-        "    }",
-        "    if ($meho_c['routes'] !== '') {",
-        f"      {path}[$meho_k]['local_network'] = $meho_c['routes'];",
-        "    }",
-        f"    openvpn_resync_csc({path}[$meho_k]);",
-        "    $meho_done++;",
-        "  }",
-        "}",
-        "if ($meho_done > 0) {",
-        f"  write_config({_php_squote('meho: sync OpenVPN client overrides')});",
-        "}",
-    ]
-    return "\n".join(lines) + "\n"
+    if "Peer Connection Initiated" in message:
+        return {"event": "connect", "reason": None}
+    restart = _RESTART_RE.search(message)
+    if restart:
+        return {"event": "restart", "reason": restart.group(1)}
+    if _INACTIVE_RE.search(message):
+        return {"event": "disconnect", "reason": "inactivity-timeout"}
+    stop = _STOP_RE.search(message)
+    if stop:
+        return {"event": "disconnect", "reason": stop.group(1)}
+    if _ERROR_RE.search(message):
+        return {"event": "error", "reason": None}
+    return {"event": "other", "reason": None}
 
 
-# ---------------------------------------------------------------------------
-# Verification
-# ---------------------------------------------------------------------------
-
-
-def _rest_of_config(xml_text: str, touched: set[tuple[str, str]]) -> dict[str, list[Any]]:
-    """Return the canonical top-level sections minus the touched overrides."""
+def _stamp_to_moment(mon: str, day: str, clock: str, now: datetime) -> datetime | None:
+    """Place a year-less syslog stamp in the year that is not in the future."""
+    month = _MONTHS.get(mon)
+    if month is None:
+        return None
+    hour, minute, second = (int(part) for part in clock.split(":"))
     try:
-        root = fromstring(xml_text)
-    except ParseError as exc:
-        raise RuntimeError("config.xml could not be parsed for the read-back") from exc
-    section = root.find("openvpn")
-    if section is not None:
-        for item in list(section.findall("openvpn-csc")):
-            key = (
-                (item.findtext("common_name") or "").strip(),
-                (item.findtext("server_list") or "").strip(),
-            )
-            if key in touched:
-                section.remove(item)
-        if _is_empty_container(section):
-            root.remove(section)
-    rest: dict[str, list[Any]] = {}
-    for child in root:
-        if child.tag not in _ALWAYS_REWRITTEN_SECTIONS:
-            rest.setdefault(child.tag, []).append(_canonical(child))
-    return rest
-
-
-def _verify_sync(before: str, after: str, plan: list[dict[str, Any]]) -> None:
-    written = [r for r in plan if r["action"] in ("create", "update")]
-    after_entries = parse_csc_entries(after)
-    for row in written:
-        hits = [
-            e
-            for e in after_entries
-            if e.common_name == row["name"] and e.server_list == [row["server_vpnid"]]
-        ]
-        wanted_routes = {_canonical_route(r) for r in row["routes"]}
-        if (
-            len(hits) != 1
-            or (row["tunnel_network"] and hits[0].tunnel_raw != row["tunnel_network"])
-            or not wanted_routes <= {_canonical_route(r) for r in hits[0].routes}
-        ):
-            raise RuntimeError(
-                f"openvpn.csc.sync verification failed for {row['name']!r} on server "
-                f"{row['server_vpnid']}: config.xml does not hold the wanted override after "
-                "write_config; the pfSsh.php playback did not persist"
-            )
-    touched = {(r["name"], r["server_vpnid"]) for r in written}
-    if _rest_of_config(before, touched) != _rest_of_config(after, touched):
-        raise RuntimeError(
-            "openvpn.csc.sync: the change was saved, but other parts of config.xml also "
-            "changed while the op ran. Check the pfSense config history before you run "
-            "the op again."
-        )
-
-
-# ---------------------------------------------------------------------------
-# Handler
-# ---------------------------------------------------------------------------
-
-
-async def save_rollback_copy(
-    self: PfSenseConnector, target: Any, operator: Operator | None, label: str, op: str
-) -> str:
-    """Copy ``config.xml`` to ``/cf/conf/meho-rollback-<label>-<time>.xml`` (mode 0600).
-
-    Returns the path. Raises when the copy cannot be made or differs.
-    """
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    copy_path = f"/cf/conf/meho-rollback-{label}-{stamp}.xml"
-    saved = await self._run_command(
-        target,
-        f"umask 077 && cp /cf/conf/config.xml {copy_path} "
-        f"&& cmp -s /cf/conf/config.xml {copy_path}",
-        operator=operator,
-    )
-    if saved.exit_status != 0:
-        raise RuntimeError(
-            f"{op}: could not save the rollback copy of config.xml; nothing was changed"
-        )
-    return copy_path
-
-
-def _summary(plan: list[dict[str, Any]]) -> dict[str, int]:
-    return {
-        a: sum(1 for r in plan if r["action"] == a)
-        for a in ("create", "update", "unchanged", "refused")
-    }
-
-
-def _public_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in row.items() if k not in ("description", "_expect")}
-
-
-def _refused_guidance(plan: list[dict[str, Any]]) -> str:
-    refused = "; ".join(
-        f"{r['name']} on server {r['server_vpnid']}: {r['reason']} ({r['detail']})"
-        for r in plan
-        if r["action"] == "refused"
-    )
-    return (
-        f"nothing was written. Refused entries: {refused}. Run with compare_only to see "
-        "the whole plan."
-    )
-
-
-@serialized_config_write
-async def pfsense_openvpn_csc_sync(
-    self: PfSenseConnector,
-    target: Any,
-    params: dict[str, Any],
-    operator: Operator | None = None,
-) -> dict[str, Any]:
-    """Handler for ``pfsense.openvpn.csc.sync`` -- create or extend client overrides."""
-    entries = _validate_entries(params.get("entries"))
-    compare_only = bool(params.get("compare_only", False))
-    before = await _read_config_xml(self, target, operator)
-    rendered = await read_rendered_addresses(self, target, operator)
-    csc = parse_csc_entries(before)
-    plan = plan_csc_sync(entries, parse_openvpn_servers(before), csc, rendered)
-    counts = _summary(plan)
-    result: dict[str, Any] = {
-        "op_class": "write",
-        "resource": "openvpn_csc",
-        "status": "compared",
-        "compare_only": compare_only,
-        "applied": False,
-        "verified": False,
-        "counts": counts,
-        "entries": [_public_row(r) for r in plan],
-        "rollback_copy": None,
-        "guidance": None,
-    }
-    if counts["refused"]:
-        if not compare_only:
-            raise PfSenseRefusedError(
-                "pfsense.openvpn.csc.sync", "refused", _refused_guidance(plan)
-            )
-        return {
-            **result,
-            "status": "refused",
-            "guidance": "at least one entry was refused; nothing was written (see entries)",
-        }
-    if counts["create"] + counts["update"] == 0:
-        return {**result, "status": "nothing_to_do", "verified": True}
-    if compare_only:
-        return result
-
-    copy_path = await save_rollback_copy(self, target, operator, "csc-sync", "openvpn.csc.sync")
-    played = await _apply_playback(
-        self,
-        target,
-        script_name=f"meho_openvpn_csc_sync_{secrets.token_hex(4)}",
-        script_body=build_csc_sync_playback(plan, len(csc)),
-        operator=operator,
-    )
-    stale = re.search(rf"^{_CHANGED_MARKER}(.*)$", played, re.MULTILINE)
-    if stale is not None:
-        raise RuntimeError(
-            "openvpn.csc.sync: the client overrides changed after the plan was made "
-            f"({stale.group(1).strip()}); nothing was written. Run the op again "
-            f"(the rollback copy {copy_path} is not needed)."
-        )
-    _verify_sync(before, await _read_config_xml(self, target, operator), plan)
-    return {
-        **result,
-        "status": "synced",
-        "applied": True,
-        "verified": True,
-        "rollback_copy": copy_path,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Op metadata
-# ---------------------------------------------------------------------------
-
-_NEXT_FREE_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "op_class": {"type": "string", "enum": ["read"]},
-        "resource": {"type": "string", "enum": ["openvpn_address"]},
-        "status": {"type": "string", "enum": ["found", "exhausted", "no_user_auth_server"]},
-        "address_offset": {"type": ["integer", "null"]},
-        "servers": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "vpnid": {"type": "string"},
-                    "description": {"type": "string"},
-                    "network": {"type": "string"},
-                    "address": {"type": "string"},
-                    "tunnel_network": {"type": "string"},
-                },
-                "required": ["vpnid", "description", "network", "address", "tunnel_network"],
-                "additionalProperties": False,
-            },
-        },
-        "sources": {
-            "type": "object",
-            "properties": {
-                "config_entries": {"type": "integer"},
-                "rendered_files": {"type": "integer"},
-            },
-            "required": ["config_entries", "rendered_files"],
-            "additionalProperties": False,
-        },
-        "warnings": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": [
-        "op_class",
-        "resource",
-        "status",
-        "address_offset",
-        "servers",
-        "sources",
-        "warnings",
-    ],
-    "additionalProperties": False,
-}
-
-_CSC_ENTRY_PARAMETER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "pattern": USER_NAME_RE.pattern,
-            "description": "The VPN user name (the override's common name).",
-        },
-        "server_vpnid": {
-            "type": "string",
-            "pattern": _VPNID_RE.pattern,
-            "description": "Number of the OpenVPN server, as ``next_free`` shows it.",
-        },
-        "tunnel_address": {
-            "type": "string",
-            "description": (
-                "Fixed IPv4 tunnel address of the user on this server. Needed for a new "
-                "entry. For an existing entry it must match the address it has."
-            ),
-        },
-        "routes": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": _MAX_ROUTES,
-            "description": "IPv4 networks to push to the client. Added to the existing list.",
-        },
-        "description": {
-            "type": "string",
-            "description": "Optional text for a NEW entry (one line, at most 200 characters).",
-        },
-    },
-    "required": ["name", "server_vpnid"],
-    "additionalProperties": False,
-}
-
-_CSC_SYNC_PARAMETER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "entries": {
-            "type": "array",
-            "items": _CSC_ENTRY_PARAMETER_SCHEMA,
-            "minItems": 1,
-            "maxItems": _MAX_ENTRIES,
-            "description": "The overrides you want, one per user and server.",
-        },
-        "compare_only": {
-            "type": "boolean",
-            "description": "When true, return the plan and write nothing. Default false.",
-        },
-    },
-    "required": ["entries"],
-    "additionalProperties": False,
-}
-
-_CSC_SYNC_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "op_class": {"type": "string", "enum": ["write"]},
-        "resource": {"type": "string", "enum": ["openvpn_csc"]},
-        "status": {
-            "type": "string",
-            "enum": ["compared", "synced", "nothing_to_do", "refused"],
-        },
-        "compare_only": {"type": "boolean"},
-        "applied": {"type": "boolean"},
-        "verified": {"type": "boolean"},
-        "counts": {
-            "type": "object",
-            "properties": {
-                "create": {"type": "integer"},
-                "update": {"type": "integer"},
-                "unchanged": {"type": "integer"},
-                "refused": {"type": "integer"},
-            },
-            "required": ["create", "update", "unchanged", "refused"],
-            "additionalProperties": False,
-        },
-        "entries": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "server_vpnid": {"type": "string"},
-                    "action": {
-                        "type": "string",
-                        "enum": ["create", "update", "unchanged", "refused"],
-                    },
-                    "reason": {"type": ["string", "null"]},
-                    "detail": {"type": ["string", "null"]},
-                    "tunnel_network": {"type": ["string", "null"]},
-                    "routes_added": {"type": "array", "items": {"type": "string"}},
-                    "routes": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": [
-                    "name",
-                    "server_vpnid",
-                    "action",
-                    "reason",
-                    "detail",
-                    "tunnel_network",
-                    "routes_added",
-                    "routes",
-                ],
-                "additionalProperties": False,
-            },
-        },
-        "rollback_copy": {"type": ["string", "null"]},
-        "guidance": {"type": ["string", "null"]},
-    },
-    "required": [
-        "op_class",
-        "resource",
-        "status",
-        "compare_only",
-        "applied",
-        "verified",
-        "counts",
-        "entries",
-        "rollback_copy",
-        "guidance",
-    ],
-    "additionalProperties": False,
-}
-
-
-def _guidance(texts: dict[str, Any]) -> dict[str, Any]:
-    """Return *texts* plus ``when_to_use``, the older name of ``when_to_call``."""
-    return {**texts, "when_to_use": texts["when_to_call"]}
-
-
-OPENVPN_OPS: tuple[PfSenseOp, ...] = (
-    PfSenseOp(
-        op_id="pfsense.openvpn.address.next_free",
-        handler_attr="openvpn_address_next_free",
-        summary="Find the next VPN tunnel address that is free on every user-login OpenVPN server.",
-        description=(
-            "Reads config.xml and the rendered override files, and returns the lowest "
-            "address offset that no client uses on any user-login OpenVPN server, with "
-            "the address it gives on each server. Read only. A failed read is an error."
-        ),
-        parameter_schema={
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-            "examples": [{}],
-        },
-        response_schema=_NEXT_FREE_RESPONSE_SCHEMA,
-        group_key="vpn",
-        tags=("read-only", "vpn", "pfsense"),
-        safety_level="safe",
-        requires_approval=False,
-        llm_instructions=_guidance(
-            {
-                "when_to_call": (
-                    "Call before you give a new person VPN access. It shows the tunnel "
-                    "address to use on each server. Both sources of used addresses count "
-                    "(the overrides in config.xml and the rendered files), because they do "
-                    "not always agree."
-                ),
-                "parameter_hints": {},
-                "output_shape": (
-                    "``{status, address_offset, servers: [{vpnid, description, network, "
-                    "address, tunnel_network}], sources, warnings}``. ``status`` is "
-                    "``found``, ``exhausted`` or ``no_user_auth_server``."
-                ),
-                "next_step": (
-                    "Create the user with ``pfsense.openvpn.user.create``, then pass each "
-                    "server's ``address`` as ``tunnel_address`` to "
-                    "``pfsense.openvpn.csc.sync`` (use ``compare_only`` first)."
-                ),
-            }
-        ),
-    ),
-    PfSenseOp(
-        op_id="pfsense.openvpn.csc.sync",
-        handler_attr="openvpn_csc_sync",
-        summary="Create or extend OpenVPN client overrides; can compare only.",
-        description=(
-            "Creates or extends client-specific overrides: one per user and server, with "
-            "the fixed tunnel address and the pushed routes. Checks every entry before it "
-            "writes. Never deletes, never removes a route, saves a rollback copy first, "
-            "and does not restart OpenVPN."
-        ),
-        parameter_schema={
-            **_CSC_SYNC_PARAMETER_SCHEMA,
-            "examples": [
-                {
-                    "entries": [
-                        {
-                            "name": "<vpn-user>",
-                            "server_vpnid": "1",
-                            "tunnel_address": "198.51.100.2",
-                            "routes": ["192.0.2.0/24"],
-                        }
-                    ],
-                    "compare_only": True,
-                }
-            ],
-        },
-        response_schema=_CSC_SYNC_RESPONSE_SCHEMA,
-        group_key="vpn",
-        tags=("write", "vpn", "pfsense"),
-        safety_level="caution",
-        requires_approval=True,
-        llm_instructions=_guidance(
-            {
-                "when_to_call": (
-                    "Use to give a VPN user a fixed address and routes on each server, or to "
-                    "add a route to an existing user. Safe to run twice: an entry that is "
-                    "already right is ``unchanged``. The approval card shows the plan."
-                ),
-                "preconditions": (
-                    "The user exists (``pfsense.openvpn.user.create``). Get each address "
-                    "from ``pfsense.openvpn.address.next_free``. Run with ``compare_only: "
-                    "true`` first and read the counts."
-                ),
-                "parameter_hints": {
-                    "entries": "Required. One object per user and server.",
-                    "compare_only": "Optional. true returns the plan and writes nothing.",
-                },
-                "output_shape": (
-                    "``{status, compare_only, applied, verified, counts, entries, "
-                    "rollback_copy, guidance}``. ``status`` is ``compared``, ``synced``, "
-                    "``nothing_to_do`` or, with ``compare_only``, ``refused`` (``entries`` "
-                    "then says why). Without ``compare_only`` a refused entry fails the call "
-                    "and the error names each refused entry."
-                ),
-                "next_step": (
-                    "Check the user with ``pfsense.user.list``. Add the per-user firewall "
-                    "rules with ``pfsense.openvpn.rule.sync``."
-                ),
-            }
-        ),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# Approval preview -- the plan
-# ---------------------------------------------------------------------------
-
-
-async def _csc_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    try:
-        entries = _validate_entries(ctx.params.get("entries"))
+        moment = datetime(now.year, month, int(day), hour, minute, second, tzinfo=now.tzinfo)
+        if moment > now + timedelta(days=1):
+            moment = moment.replace(year=now.year - 1)
     except ValueError:
         return None
-    preview: dict[str, Any] = {
-        "entries_requested": len(entries),
-        "compare_only": bool(ctx.params.get("compare_only", False)),
-        "counts": None,
-        "entries": None,
-    }
-    if ctx.connector_instance is None:
-        return preview
-    connector: PfSenseConnector = ctx.connector_instance  # type: ignore[assignment]
-    before = await _read_config_xml(connector, ctx.target, ctx.operator)
-    rendered = await read_rendered_addresses(connector, ctx.target, ctx.operator)
-    plan = plan_csc_sync(
-        entries, parse_openvpn_servers(before), parse_csc_entries(before), rendered
+    return moment
+
+
+def _parse_firewall_now(text: str) -> datetime | None:
+    """Parse ``date '+%Y-%m-%d %H:%M:%S %z'`` output, for example ``2026-11-10 09:30:00 +0100``."""
+    match = re.fullmatch(
+        r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) ([+-])(\d{2})(\d{2})", text.strip()
     )
-    return {**preview, "counts": _summary(plan), "entries": [_public_row(r) for r in plan]}
+    if match is None:
+        return None
+    year, month, day, hour, minute, second = (int(match.group(i)) for i in range(1, 7))
+    offset = timedelta(hours=int(match.group(8)), minutes=int(match.group(9)))
+    zone = timezone(-offset if match.group(7) == "-" else offset)
+    return datetime(year, month, day, hour, minute, second, tzinfo=zone)
 
 
-register_preview_builder("pfsense.openvpn.csc.sync", _csc_preview)
+def parse_openvpn_log(
+    lines: list[str],
+    now: datetime,
+    since: datetime | None,
+    until: datetime | None,
+) -> list[dict[str, Any]]:
+    """Turn log lines into events inside the window, oldest first.
+
+    A line that has no readable syslog stamp is kept only when no window
+    is set, with ``time: null``; with a window it cannot be placed, so it
+    is left out.
+    """
+    events: list[dict[str, Any]] = []
+    for line in lines:
+        match = _SYSLOG_RE.match(line)
+        moment = (
+            _stamp_to_moment(match.group("mon"), match.group("day"), match.group("time"), now)
+            if match
+            else None
+        )
+        if moment is None and (since is not None or until is not None):
+            continue
+        if moment is not None and (
+            (since is not None and moment < since) or (until is not None and moment > until)
+        ):
+            continue
+        message = match.group("msg") if match else line
+        events.append(
+            {
+                "time": moment.isoformat() if moment is not None else None,
+                **classify_log_line(message),
+                "line": line[:_MAX_RAW_CHARS],
+            }
+        )
+    return events
+
+
+# ---------------------------------------------------------------------------
+# Handlers
+# ---------------------------------------------------------------------------
+
+
+def _text(proc: Any, attr: str) -> str:
+    value = getattr(proc, attr, "") or ""
+    return value if isinstance(value, str) else ""
+
+
+def _first_line(text: str) -> str:
+    return (text.strip().splitlines() or [""])[0][:200]
+
+
+def _checked_grep_lines(text: str, detail: str) -> list[str]:
+    """Return the log lines, or raise when grep did not finish well.
+
+    Status 0 (lines found) and 1 (no line matched) are good. Any other
+    status, or no status line at all, means the read failed or stopped.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    status = (
+        lines.pop()[len(_GREP_STATUS) :] if lines and lines[-1].startswith(_GREP_STATUS) else None
+    )
+    if status not in ("0", "1"):
+        message = (
+            f"openvpn log read failed (grep exit {status})"
+            if status is not None
+            else "openvpn log read failed (the read did not finish)"
+        )
+        raise RuntimeError(f"{message}: {detail}" if detail else message)
+    return lines
+
+
+async def pfsense_openvpn_clients(
+    self: PfSenseConnector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``pfsense.openvpn.clients`` -- the connected clients now.
+
+    Returns ``{servers: [{server, proto, port, readable, clients}],
+    client_count}``. ``client_count`` counts only the servers that could
+    be read. Raises :exc:`RuntimeError` when the command fails.
+    """
+    proc = await self._run_command(target, _CLIENTS_CMD, operator=operator, timeout=30.0)
+    if proc.exit_status != 0:
+        detail = _first_line(_text(proc, "stderr"))
+        message = f"openvpn status read failed: exit {proc.exit_status}"
+        raise RuntimeError(f"{message}: {detail}" if detail else message)
+    servers = parse_openvpn_status(_text(proc, "stdout"))
+    return {
+        "servers": servers,
+        "client_count": sum(len(s["clients"]) for s in servers if s["readable"]),
+    }
+
+
+async def pfsense_openvpn_log(
+    self: PfSenseConnector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``pfsense.openvpn.log`` -- log events of one user in a window.
+
+    Returns ``{common_name, since, until, event_count, truncated,
+    events}``. Raises :exc:`ValueError` on bad input and
+    :exc:`RuntimeError` when the log cannot be read.
+    """
+    common_name = _validate_common_name(params.get("common_name"))
+    since = _validate_moment(params.get("since"), "since")
+    until = _validate_moment(params.get("until"), "until")
+    if since is not None and until is not None and since > until:
+        raise ValueError("since must not be later than until")
+    limit = _validate_limit(params.get("limit"))
+
+    # grep's status line comes last, so tail keeps it: 5000 lines plus that one.
+    cmd = (
+        f"date '+%Y-%m-%d %H:%M:%S %z'; "
+        f"[ -r {_LOG_FILE} ] || {{ echo '@@NOLOG'; exit 3; }}; "
+        f"{{ grep -E -e {shlex.quote(_name_grep_pattern(common_name))} {_LOG_FILE}; "
+        f'echo "{_GREP_STATUS}$?"; }} | tail -n {_MAX_LOG_LINES + 1}'
+    )
+    proc = await self._run_command(target, cmd, operator=operator, timeout=30.0)
+    stdout = _text(proc, "stdout")
+    detail = _first_line(_text(proc, "stderr"))
+    if proc.exit_status != 0:
+        reason = "the OpenVPN log file is not readable" if "@@NOLOG" in stdout else "read failed"
+        message = f"openvpn log read failed ({reason}): exit {proc.exit_status}"
+        raise RuntimeError(f"{message}: {detail}" if detail else message)
+    first, _, rest = stdout.partition("\n")
+    now = _parse_firewall_now(first)
+    if now is None:
+        raise RuntimeError("openvpn log read failed: the firewall date could not be read")
+    lines = _checked_grep_lines(rest, detail)
+    name_re = _name_line_re(common_name)
+    events = parse_openvpn_log([ln for ln in lines if name_re.search(ln)], now, since, until)
+    # 5000 lines means the tail cut older lines, so the window may be incomplete.
+    truncated = len(lines) >= _MAX_LOG_LINES or len(events) > limit
+    return {
+        "common_name": common_name,
+        "since": since.isoformat() if since else None,
+        "until": until.isoformat() if until else None,
+        "event_count": min(len(events), limit),
+        "truncated": truncated,
+        "events": events[-limit:],
+    }

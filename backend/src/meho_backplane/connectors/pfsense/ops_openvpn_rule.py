@@ -62,7 +62,7 @@ from meho_backplane.connectors.pfsense.ops_filter_rule import (
     _stored_rule_differences,
     parse_filter_rules_xml,
 )
-from meho_backplane.connectors.pfsense.ops_openvpn import save_rollback_copy
+from meho_backplane.connectors.pfsense.ops_openvpn_csc import save_rollback_copy
 from meho_backplane.connectors.pfsense.ops_user_write import (
     USER_NAME_RE,
     _user_rows,

@@ -1160,6 +1160,26 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_sessions(self, operator, target, params)
 
+    async def user_disable(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.disable``."""
+        from meho_backplane.connectors.keycloak.ops_write_user_enabled import (
+            keycloak_user_disable,
+        )
+
+        return await keycloak_user_disable(self, operator, target, params)
+
+    async def user_enable(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.enable``."""
+        from meho_backplane.connectors.keycloak.ops_write_user_enabled import (
+            keycloak_user_enable,
+        )
+
+        return await keycloak_user_enable(self, operator, target, params)
+
     async def user_check_login(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

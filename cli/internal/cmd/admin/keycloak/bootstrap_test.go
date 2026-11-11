@@ -51,6 +51,7 @@ type fakeKeycloak struct {
 	flows          map[string]*fakeFlow           // login flows, keyed by alias
 	stepConfigs    map[string]map[string]any      // step settings, keyed by config id
 	realm          map[string]any                 // the realm representation
+	noProviders    []string                       // steps this Keycloak does not have
 
 	// Counts requests per (method, path-template) so tests can assert
 	// idempotency: a re-run must not increment "POST /clients".
@@ -135,6 +136,16 @@ func (f *fakeKeycloak) flowSteps(alias string, level int) []map[string]any {
 // handleStepConfigs serves the settings of flow steps; false when sub
 // is not such a path.
 func (f *fakeKeycloak) handleStepConfigs(w http.ResponseWriter, r *http.Request, sub string) bool {
+	if sub == "authentication/authenticator-providers" && r.Method == http.MethodGet {
+		var list []map[string]string
+		for _, s := range touchFlowSteps() {
+			if s.Provider != "" && !slices.Contains(f.noProviders, s.Provider) {
+				list = append(list, map[string]string{"id": s.Provider})
+			}
+		}
+		writeJSON(w, http.StatusOK, list)
+		return true
+	}
 	if id, ok := strings.CutPrefix(sub, "authentication/config/"); ok && r.Method == http.MethodGet {
 		config, found := f.stepConfigs[id]
 		if !found {

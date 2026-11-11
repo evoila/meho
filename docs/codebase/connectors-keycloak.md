@@ -839,7 +839,10 @@ time). On the target's managed realm:
 
 1. Find the client. Missing: stop with `client_not_found`, nothing
    written.
-2. Find the flow. Missing: make it (`POST .../flows`), add each step and
+2. Find the flow. Missing: check that the Keycloak has every step
+   (`GET .../authentication/authenticator-providers`; Keycloak 26.4 added
+   `conditional-credential`), else stop with `missing_step` before any
+   write. Then make it (`POST .../flows`), add each step and
    sub-flow in order, read the steps back, set each requirement (a new
    step starts `DISABLED`; steps are matched by place, because the level
    condition is in the flow twice), and give the four steps with

@@ -16,7 +16,9 @@ What the op does, on the target's managed realm:
    is written.
 2. Find the flow ``meho approval touch``.
 
-   * It does not exist: make it with the steps of the realm file, set each
+   * It does not exist: check that this Keycloak has every step (Keycloak
+     26.4 added ``conditional-credential``; an older one stops the op before
+     any write). Make it with the steps of the realm file, set each
      requirement, and give the four steps with settings their settings
      (the two level conditions, the step that skips the one-time code
      after a passkey, and the passkey step's ``amr`` value with its
@@ -86,6 +88,7 @@ __all__ = [
 ]
 
 _DEFAULT_CLIENT_ID = "meho-web"
+_AUTHENTICATOR_PROVIDERS_PATH = "/admin/realms/{realm}/authentication/authenticator-providers"
 #: A wanted step as Keycloak lists it: level, name, requirement, settings.
 _Wanted = tuple[int, FlowNode]
 
@@ -93,7 +96,8 @@ _Wanted = tuple[int, FlowNode]
 class KeycloakTouchFlowError(RuntimeError):
     """The touch flow op stopped. ``code`` is a short, stable word.
 
-    ``client_not_found``: the client does not exist. ``other_steps``: a flow
+    ``client_not_found``: the client does not exist. ``missing_step``: this
+    Keycloak lacks a step of the flow. ``other_steps``: a flow
     with the name exists with another shape. ``loa_conflict``: the realm maps
     ``meho-touch`` to another level. ``check_failed``: something did not read
     back as written. ``flow_not_found``: the new flow cannot be found.
@@ -387,6 +391,26 @@ async def _bind(
     }
 
 
+async def _check_providers(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
+) -> None:
+    """Stop before any write when this Keycloak lacks a step of the flow.
+
+    Keycloak 26.4 added ``conditional-credential``; an older one would refuse
+    it half-way through making the flow.
+    """
+    path = fill_path(_AUTHENTICATOR_PROVIDERS_PATH, {"realm": realm})
+    rows = await get_admin_list_strict(connector, target, path, operator=operator)
+    have = {row.get("id") for row in rows if isinstance(row, dict)}
+    missing = sorted({node.name for _, node in wanted_steps() if node.children is None} - have)
+    if missing:
+        raise KeycloakTouchFlowError(
+            "missing_step",
+            f"this Keycloak has no step {', '.join(missing)} (Keycloak 26.4 or newer has "
+            "it). Nothing was changed.",
+        )
+
+
 async def _ensure_flow(
     connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
 ) -> tuple[str, bool, list[dict[str, Any]]]:
@@ -394,6 +418,7 @@ async def _ensure_flow(
     flow_id = await _find_flow_id(connector, operator, target, realm)
     created = flow_id is None
     if flow_id is None:
+        await _check_providers(connector, operator, target, realm)
         flow_id = await _make_flow(connector, operator, target, realm)
     rows = await _read_rows(connector, operator, target, realm)
     difference = _shape_difference(rows) or await _config_difference(

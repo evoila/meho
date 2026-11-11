@@ -256,11 +256,9 @@ class _Browser:
 
 
 def _page_text(page: str) -> str:
-    """The title and the visible text of a page, for a failure message."""
+    """The title and the text of a page without its tags, for a failure message."""
     title = re.search(r"<title>(.*?)</title>", page, re.S)
-    text = " ".join(
-        re.sub(r"<[^>]+>", " ", re.sub(r"<script.*?</script>", " ", page, flags=re.S)).split()
-    )
+    text = " ".join(re.sub(r"<[^>]+>", " ", page).split())
     return f"{title.group(1).strip() if title else '?'}: {text[:1500]}"
 
 
@@ -351,6 +349,9 @@ def test_max_age_0_asks_for_the_password_and_acr_values_for_the_passkey(
     person = _add_person_with_passkey(keycloak, "max-age-person")
     browser = _Browser(keycloak)
     _log_in_with_password(browser, person)
+    # Keycloak compares max_age with auth_time in whole seconds: a sign-in
+    # of this very second still counts as fresh.
+    time.sleep(2)
 
     fresh, _ = browser.start(max_age="0")
     assert _is_password_page(fresh)

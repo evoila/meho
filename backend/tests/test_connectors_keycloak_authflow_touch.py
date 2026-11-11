@@ -15,7 +15,8 @@ What is proven:
   realm's other names, the ``amr`` mapper and the binding; a second run
   writes nothing;
 * a flow with another shape or other settings stops the op and nothing is
-  written; a missing client stops it before anything is written; a realm
+  written; a missing client, or a Keycloak without a step of the flow (older
+  than 26.4), stops it before anything is written; a realm
   that maps ``meho-touch`` to another level stops it before the bind;
 * the binding keeps the client's other settings and is read back;
 * the op is ``caution`` with approval, a plain ``write`` on the feed, and
@@ -184,6 +185,7 @@ class FakeKeycloak:
             "browser": {"id": "browser-id", "top": True, "steps": []}
         }
         self.configs: dict[str, dict[str, Any]] = {}
+        self.providers = {node.name for _, node in wanted_steps() if node.children is None}
         self.writes: list[tuple[str, str, Any]] = []
         self._ids = itertools.count(1)
 
@@ -206,6 +208,11 @@ class FakeKeycloak:
         )
         mock.route(path__regex=rf"^{_ADMIN}/authentication/config/[^/]+$").mock(
             side_effect=self._config
+        )
+        mock.get(f"{_ADMIN}/authentication/authenticator-providers").mock(
+            side_effect=lambda _: httpx.Response(
+                200, json=[{"id": p, "displayName": p} for p in sorted(self.providers)]
+            )
         )
 
     def _new_id(self) -> str:
@@ -557,3 +564,17 @@ async def test_binding_that_does_not_read_back_is_an_error(kc: KeycloakConnector
         result = await _run({})
     assert result["status"] != "ok"
     assert "check_failed" in json.dumps(result)
+
+
+async def test_keycloak_without_a_step_of_the_flow_is_not_changed(kc: KeycloakConnector) -> None:
+    """Keycloak before 26.4 has no ``conditional-credential``: stop before any write."""
+    fake = FakeKeycloak(client=_client())
+    fake.providers.discard("conditional-credential")
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] != "ok"
+    text = json.dumps(result)
+    assert "missing_step" in text
+    assert "conditional-credential" in text
+    assert fake.writes == []

@@ -331,6 +331,10 @@ The flow, step by step (`meho approval touch`, type **Basic flow**):
 
 #### On your own Keycloak
 
+The flow needs Keycloak 26.4 or newer: older versions have no
+**Condition - credential** step. On an older Keycloak the helper and
+the operation below say so and change nothing.
+
 `meho admin keycloak bootstrap-clients` makes the flow with its
 settings and maps `meho-touch` to level 2. When the realm has the
 console client (`--web-client-id`, default `meho-web`), it also adds the
@@ -381,7 +385,8 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch 
   hand, or delete it and run again.
 - The realm maps `meho-touch` to another level: MEHO stops before it
   binds the flow.
-- `meho-web` is missing: MEHO stops before it changes anything.
+- `meho-web` is missing, or the Keycloak is older than 26.4: MEHO
+  stops before it changes anything.
 
 The way back: `keycloak.client.update` on `meho-web` with
 `{"authenticationFlowBindingOverrides": {"browser": ""}}`. The console

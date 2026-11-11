@@ -330,3 +330,27 @@ func TestBootstrap_DryRunMakesNoTouchFlow(t *testing.T) {
 		}
 	}
 }
+
+// A Keycloak older than 26.4 has no `conditional-credential` step. The
+// flow is not made at all, so no half-made flow stays behind.
+func TestBootstrap_TouchFlowNeedsEveryStep(t *testing.T) {
+	fake := newFakeKeycloak()
+	fake.noProviders = []string{"conditional-credential"}
+	console := seedConsoleClient(fake)
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if _, ok := fake.flows[touchFlowAlias]; ok {
+		t.Error("the touch flow was made")
+	}
+	if fake.calls["PUT /realm"] != 0 || len(fake.clients[console.ID].AuthenticationFlowBindingOverrides) != 1 {
+		t.Error("the realm or the console client was changed")
+	}
+	want := `[skip] login flow "meho approval touch" not made: this Keycloak has no step conditional-credential ` +
+		`(Keycloak 26.4 or newer has it); the console client is not bound`
+	if !slices.Contains(res.MapperEventsLog, want) {
+		t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
+	}
+}

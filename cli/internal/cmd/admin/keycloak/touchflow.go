@@ -10,7 +10,9 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
+	"strings"
 )
 
 // The console's login flow with the passkey touch level (#6213). It is
@@ -192,6 +194,33 @@ func touchConfigDifference(ctx context.Context, c *adminClient, have []map[strin
 	return "", nil
 }
 
+// missingTouchProviders names the steps of the flow this Keycloak does
+// not have. Keycloak 26.4 added `conditional-credential`; an older one
+// would refuse it half-way through making the flow.
+func missingTouchProviders(ctx context.Context, c *adminClient) ([]string, error) {
+	body, err := c.flowCall(ctx, http.MethodGet, "authentication/authenticator-providers", nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	var providers []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &providers); err != nil {
+		return nil, fmt.Errorf("decode the authenticator providers: %w", err)
+	}
+	have := map[string]bool{}
+	for _, p := range providers {
+		have[p.ID] = true
+	}
+	var missing []string
+	for _, s := range touchFlowSteps() {
+		if s.Provider != "" && !have[s.Provider] && !slices.Contains(missing, s.Provider) {
+			missing = append(missing, s.Provider)
+		}
+	}
+	return missing, nil
+}
+
 // reconcileTouchFlow returns the flow's id, or "" when the realm has a
 // flow with that name and another shape.
 func reconcileTouchFlow(ctx context.Context, c *adminClient) (string, []string, error) {
@@ -200,6 +229,15 @@ func reconcileTouchFlow(ctx context.Context, c *adminClient) (string, []string, 
 		return "", nil, err
 	}
 	if id == "" {
+		missing, err := missingTouchProviders(ctx, c)
+		if err != nil {
+			return "", nil, err
+		}
+		if len(missing) > 0 {
+			return "", []string{fmt.Sprintf(
+				"[skip] login flow %q not made: this Keycloak has no step %s (Keycloak 26.4 or newer has it); "+
+					"the console client is not bound", touchFlowAlias, strings.Join(missing, ", "))}, nil
+		}
 		return makeTouchFlow(ctx, c)
 	}
 	have, err := readTouchSteps(ctx, c)

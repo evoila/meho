@@ -341,7 +341,7 @@ def render_connector_index() -> str:
         if not version or not impl_id:
             continue
         connector_id = f"{impl_id}-{version}"
-        supported = cls.supported_version_range or "—"
+        supported = cls.supported_version_range or cls.version_range_reason or "—"
         kind = kinds.get((product, version, impl_id), "—")
         summary = cls.summary or "—"
         rows.append((product, connector_id, summary, supported, kind))

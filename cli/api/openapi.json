@@ -26908,7 +26908,7 @@
           "flow": {
             "type": "string",
             "title": "Flow",
-            "default": "meho approval sign-in"
+            "default": "meho approval sign-in level"
           },
           "client": {
             "type": "string",
@@ -26945,6 +26945,11 @@
           "sign_in": {
             "$ref": "#/components/schemas/ApprovalSignInStatus",
             "nullable": true
+          },
+          "sign_in_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Sign In Level"
           }
         },
         "type": "object",
@@ -26954,7 +26959,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`)."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe`` or ``required``."
       },
       "ApproveRequestBody": {
         "properties": {

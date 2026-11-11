@@ -389,9 +389,17 @@ Steps of the realm stage, in order:
    older realm the scope `offline_access` and the idle limit, and `meho
    login` gets a long login.
    Before the clients come the **login flows** of the realm file
-   (`core/keycloak_flows.py`, #5515). Today that is one flow, `meho
-   approval sign-in`: the password form, then the one-time code when the
-   person has set one up. A missing flow is made with its steps. A run
+   (`core/keycloak_flows.py`). Today that is one flow, `meho
+   approval sign-in level`: the level step (approval level 2, maximum age
+   0), the password form, then the one-time code when the person has set
+   one up. A missing flow is made with its steps. A step with settings in
+   the file (`authenticatorConfig`) gets them; a step whose settings have
+   other values makes the flow one with other steps. After the flows,
+   `ensure_levels` adds the level names of the file's `acr.loa.map`
+   (`meho-approve`: 2) to the realm and keeps the names it has (output:
+   `sign-in levels: set (...)` or `kept (...)`); it writes the whole
+   attribute map back, because Keycloak drops realm attributes a write
+   leaves out. A run
    that stops half-way (a timeout, a restart) can leave a flow with
    missing steps or steps that are still off; the next run adds the
    missing steps and sets the requirements of the file (output:
@@ -407,8 +415,8 @@ Steps of the realm stage, in order:
    binding is not changed. A client that names a flow in
    `authenticationFlowBindingOverrides` (only `meho-cli-approve`) is bound
    to it (output: `kept (login flow set)`). Reading and making login flows
-   needs `manage-realm`. Without it the Job stops (#6280) with
-   `login flow meho approval sign-in: meho-admin may not read or change
+   needs `manage-realm`. Without it the Job stops with
+   `login flow meho approval sign-in level: meho-admin may not read or change
    login flows, ...`, which names the role and the fix in
    docs-site/install/upgrades.md, "The bootstrap Job needs manage-realm".
    It never goes on with an approval client that may lack its own flow. A

@@ -10,7 +10,7 @@ import (
 )
 
 // approvalSignInCheckName names the doctor line for the approval
-// sign-in: the login flow `meho approval sign-in` that `meho approvals
+// sign-in: the login flow `meho approval sign-in level` that `meho approvals
 // approve` signs in through, and its binding to the approval client.
 const approvalSignInCheckName = "approval sign-in"
 
@@ -33,7 +33,7 @@ func addApprovalSignInCheck(r *doctorReport, h *api.HealthResponse) {
 		return
 	}
 	s := h.Approvals.SignIn
-	flow := "meho approval sign-in"
+	flow := "meho approval sign-in level"
 	if s.Flow != nil && *s.Flow != "" {
 		flow = *s.Flow
 	}
@@ -55,7 +55,7 @@ func addApprovalSignInCheck(r *doctorReport, h *api.HealthResponse) {
 	case api.ApprovalSignInStatusStateFlowDiffers:
 		r.add(authed(approvalSignInCheckName, doctorWarn, "",
 			fmt.Sprintf("the login flow %q has other steps than MEHO's: %s", flow, detail),
-			"a Keycloak admin sets the flow back to the password form and the one-time code step, "+
+			"a Keycloak admin sets the flow back to the level step, the password form and the one-time code step, "+
 				"or deletes it; then runs keycloak.authflow.ensure_approval_flow; see "+approvalFlowDocs))
 	case api.ApprovalSignInStatusStateNotChecked:
 		hint := ""

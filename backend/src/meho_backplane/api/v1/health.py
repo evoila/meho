@@ -343,7 +343,9 @@ class ApprovalsStatus(BaseModel):
     :func:`meho_backplane.features.build_features_block`; they are state
     words only, never a key value. ``sign_in`` is the state of the
     approval client's own login flow in Keycloak (#6280,
-    :mod:`meho_backplane.auth.approval_sign_in_flow`).
+    :mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
+    is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
+    ``observe`` or ``required``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -352,6 +354,7 @@ class ApprovalsStatus(BaseModel):
     effective_posture: str
     delegated_decision_posture: str
     sign_in: ApprovalSignInStatus | None = None
+    sign_in_level: str | None = None
 
 
 class FeatureStatus(BaseModel):
@@ -959,11 +962,13 @@ def _approvals_and_features() -> tuple[ApprovalsStatus, list[FeatureStatus]]:
     ``/ready`` uses. Only state words and setting *names* leave this
     function; the block itself never carries a key value.
     """
-    block = build_features_block(get_settings())
+    settings = get_settings()
+    block = build_features_block(settings)
     approvals = ApprovalsStatus(
         custody=block["approval_custody"]["custody"],
         effective_posture=block["approval_queue"]["effective_posture"],
         delegated_decision_posture=block["approval_queue"]["delegated_decision_posture"],
+        sign_in_level=settings.approval_sign_in_level,
     )
     features = [
         FeatureStatus(

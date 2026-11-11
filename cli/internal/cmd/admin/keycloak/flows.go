@@ -12,16 +12,36 @@ import (
 	"net/url"
 )
 
-// The approval client's own browser sign-in flow (#5515). It is the
-// same flow as in the chart's realm file
-// (deploy/charts/meho/charts/keycloak/files/meho-realm.json): the
-// password form, then the one-time code when the person has set one
-// up. It has no other step, so every sign-in of `meho approvals
-// approve` asks for the password.
+// The approval client's own browser sign-in flow (#5515, #6281). It is
+// the same flow as in the chart's realm file
+// (deploy/charts/meho/charts/keycloak/files/meho-realm.json): one
+// sub-flow at approval level 2 with the level step, the password form,
+// then the one-time code when the person has set one up. It has no
+// other step, so every sign-in of `meho approvals approve` asks for the
+// password. The level step gives the sign-in the approval level, named
+// meho-approve in the realm's acr.loa.map; no other flow gives it.
 const (
-	approvalFlowAlias     = "meho approval sign-in"
-	approvalCodeFlowAlias = "meho approval sign-in - one-time code"
+	approvalFlowAlias      = "meho approval sign-in level"
+	approvalLevelFlowAlias = "meho approval sign-in level - level 2"
+	approvalCodeFlowAlias  = "meho approval sign-in level - one-time code"
+	approvalLevelStep      = "conditional-level-of-authentication"
+	// approvalLevelName is the acr of a sign-in through the flow.
+	approvalLevelName = "meho-approve"
+	approvalLevel     = 2
+	levelMapAttribute = "acr.loa.map"
 )
+
+// approvalLevelSettings are the settings of the level step: level 2,
+// asked for again at every sign-in (maximum age 0).
+func approvalLevelSettings() map[string]string {
+	return map[string]string{"loa-condition-level": "2", "loa-max-age": "0"}
+}
+
+// approvalSubflowDescriptions are the descriptions of the sub-flows.
+var approvalSubflowDescriptions = map[string]string{
+	approvalLevelFlowAlias: "Level 2: the password, then the one-time code. Asked for again at every sign-in.",
+	approvalCodeFlowAlias:  "Asks for the one-time code when the person has set one up.",
+}
 
 // approvalFlowStep is one step of the approval flow: an authenticator,
 // or (with Subflow set) the one-time code sub-flow.
@@ -37,8 +57,10 @@ type approvalFlowStep struct {
 // the order of the flow.
 func approvalFlowSteps() []approvalFlowStep {
 	return []approvalFlowStep{
-		{Parent: approvalFlowAlias, Provider: "auth-username-password-form", Requirement: "REQUIRED"},
-		{Parent: approvalFlowAlias, Subflow: approvalCodeFlowAlias, Requirement: "CONDITIONAL"},
+		{Parent: approvalFlowAlias, Subflow: approvalLevelFlowAlias, Requirement: "CONDITIONAL"},
+		{Parent: approvalLevelFlowAlias, Provider: approvalLevelStep, Requirement: "REQUIRED"},
+		{Parent: approvalLevelFlowAlias, Provider: "auth-username-password-form", Requirement: "REQUIRED"},
+		{Parent: approvalLevelFlowAlias, Subflow: approvalCodeFlowAlias, Requirement: "CONDITIONAL"},
 		{Parent: approvalCodeFlowAlias, Provider: "conditional-user-configured", Requirement: "REQUIRED"},
 		{Parent: approvalCodeFlowAlias, Provider: "auth-otp-form", Requirement: "REQUIRED"},
 	}
@@ -122,7 +144,7 @@ func reconcileApprovalFlow(ctx context.Context, c *adminClient) (string, []strin
 	if created {
 		top := flowRep{
 			Alias:       approvalFlowAlias,
-			Description: "Sign-in of `meho approvals approve`: always asks for the password, and for the one-time code when the person has set one up. Provisioned by `meho admin keycloak bootstrap-clients`.",
+			Description: "Sign-in of `meho approvals approve`. It gives the approval level 2 (acr meho-approve) and nothing else gives it: the password form, then the one-time code when the person has set one up, every time. Provisioned by `meho admin keycloak bootstrap-clients`.",
 			ProviderID:  "basic-flow",
 			TopLevel:    true,
 		}
@@ -167,9 +189,19 @@ func reconcileApprovalFlow(ctx context.Context, c *adminClient) (string, []strin
 		events = append(events, fmt.Sprintf("[updated] login flow %q: finished the steps an earlier run left out", approvalFlowAlias))
 	}
 	if !maps.Equal(requirements, wantApprovalFlowSteps()) {
-		return "", append(events, fmt.Sprintf(
-			"[skip] login flow %q has other steps than the bootstrap makes; the approval client is not bound to it",
-			approvalFlowAlias)), nil
+		return "", append(events, otherStepsEvent()), nil
+	}
+	settings, err := ensureApprovalLevelSettings(ctx, c)
+	if err != nil {
+		return "", nil, err
+	}
+	switch settings {
+	case "differs":
+		return "", append(events, otherStepsEvent()), nil
+	case "set":
+		if len(events) == 0 {
+			events = append(events, fmt.Sprintf("[updated] login flow %q: finished the steps an earlier run left out", approvalFlowAlias))
+		}
 	}
 	if len(events) == 0 {
 		events = append(events, fmt.Sprintf("[skip] login flow %q exists", approvalFlowAlias))
@@ -245,7 +277,7 @@ func finishApprovalFlow(ctx context.Context, c *adminClient, have []map[string]a
 			path = flowExecutionsPath(s.Parent) + "/flow"
 			body = map[string]string{
 				"alias": s.Subflow, "type": "basic-flow",
-				"description": "Asks for the one-time code when the person has set one up.",
+				"description": approvalSubflowDescriptions[s.Subflow],
 			}
 		}
 		if _, ok := present[name]; ok {
@@ -284,4 +316,99 @@ func setApprovalFlowRequirements(ctx context.Context, c *adminClient) (bool, err
 		changed = true
 	}
 	return changed, nil
+}
+
+func otherStepsEvent() string {
+	return fmt.Sprintf(
+		"[skip] login flow %q has other steps than the bootstrap makes; the approval client is not bound to it",
+		approvalFlowAlias)
+}
+
+// ensureApprovalLevelSettings gives the level step of the approval flow
+// its settings when it has none. It returns "kept", "set", or "differs"
+// when the step has settings with other values (they are not changed:
+// the client is then not bound to the flow). A dry run that would make
+// the flow has no level step to read yet: that counts as "set".
+func ensureApprovalLevelSettings(ctx context.Context, c *adminClient) (string, error) {
+	steps, err := c.readApprovalFlowSteps(ctx)
+	if err != nil {
+		return "", err
+	}
+	var step map[string]any
+	for _, s := range steps {
+		if stepName(s) == approvalLevelStep {
+			step = s
+		}
+	}
+	if step == nil {
+		if c.dryRun {
+			return "set", nil
+		}
+		return "differs", nil
+	}
+	if configID, _ := step["authenticationConfig"].(string); configID != "" {
+		body, err := c.flowCall(ctx, http.MethodGet, "authentication/config/"+url.PathEscape(configID), nil, http.StatusOK)
+		if err != nil {
+			return "", err
+		}
+		var have struct {
+			Config map[string]string `json:"config"`
+		}
+		if err := json.Unmarshal(body, &have); err != nil {
+			return "", fmt.Errorf("decode the settings of the level step: %w", err)
+		}
+		for key, value := range approvalLevelSettings() {
+			if have.Config[key] != value {
+				return "differs", nil
+			}
+		}
+		return "kept", nil
+	}
+	stepID, _ := step["id"].(string)
+	body := map[string]any{"alias": approvalLevelFlowAlias, "config": approvalLevelSettings()}
+	path := "authentication/executions/" + url.PathEscape(stepID) + "/config"
+	if _, err := c.flowCall(ctx, http.MethodPost, path, body, http.StatusCreated); err != nil {
+		return "", err
+	}
+	return "set", nil
+}
+
+// ensureApprovalLevel names level 2 meho-approve in the realm attribute
+// acr.loa.map, next to the names the realm has (#6281). Keycloak puts
+// the name in the acr claim of a sign-in that reached the level. The
+// whole attribute map is written back: Keycloak drops the realm
+// attributes a write leaves out.
+func ensureApprovalLevel(ctx context.Context, c *adminClient) ([]string, error) {
+	body, err := c.flowCall(ctx, http.MethodGet, "", nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	var realm struct {
+		Attributes map[string]string `json:"attributes"`
+	}
+	if err := json.Unmarshal(body, &realm); err != nil {
+		return nil, fmt.Errorf("decode the realm: %w", err)
+	}
+	if realm.Attributes == nil {
+		realm.Attributes = map[string]string{}
+	}
+	levels := map[string]any{}
+	if raw := realm.Attributes[levelMapAttribute]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &levels); err != nil {
+			return nil, fmt.Errorf("the realm attribute %s is not a JSON object; fix it in the Keycloak admin console and run again", levelMapAttribute)
+		}
+	}
+	if level, ok := levels[approvalLevelName].(float64); ok && level == approvalLevel {
+		return []string{fmt.Sprintf("[skip] sign-in level %q exists", approvalLevelName)}, nil
+	}
+	levels[approvalLevelName] = approvalLevel
+	encoded, err := json.Marshal(levels)
+	if err != nil {
+		return nil, err
+	}
+	realm.Attributes[levelMapAttribute] = string(encoded)
+	if _, err := c.flowCall(ctx, http.MethodPut, "", map[string]any{"attributes": realm.Attributes}, http.StatusNoContent); err != nil {
+		return nil, err
+	}
+	return []string{fmt.Sprintf("[updated] sign-in level %q: level %d of the realm", approvalLevelName, approvalLevel)}, nil
 }

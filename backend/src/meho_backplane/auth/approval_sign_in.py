@@ -43,6 +43,19 @@ risk level) and the audit log, so they live in
 :func:`check_fresh_web_approval_sign_in` run before the request is read;
 they refuse a sign-in that is too old for both limits.
 
+The approval level (#6281). With no level mapping in the realm, every
+sign-in that asked for credentials carries ``acr`` ``"1"``, whatever flow
+ran. So the realm maps levels to names (``acr.loa.map``): level 2
+``meho-approve`` is given only by the approval sign-in flow, level 3
+``meho-touch`` only by the passkey touch. A higher level counts where a
+lower one is asked for (:data:`APPROVAL_LEVEL_ACRS`). The setting
+:attr:`~meho_backplane.settings.Settings.approval_sign_in_level` says what
+MEHO does with a token of the approval client that lacks the level:
+``off`` accepts it as before, ``observe`` accepts it, logs
+``approval_sign_in_level_missing`` and marks the audit row, ``required``
+refuses it with the same ``401``. The web interface does not use the
+approval client, so the level is not checked there.
+
 A refreshed token keeps the time of the first sign-in (RFC 9470 §6.1), so
 renewing a token never makes the window longer. The refusal is ``401``
 with the RFC 9470 §3 challenge, so the command line knows to open a new
@@ -65,6 +78,8 @@ from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
+    "APPROVAL_LEVEL_ACR",
+    "APPROVAL_LEVEL_ACRS",
     "FRESH_SIGN_IN_REMEDIATION",
     "WEB_FRESH_SIGN_IN_REMEDIATION",
     "ApprovalAuth",
@@ -75,6 +90,7 @@ __all__ = [
     "check_fresh_approval_sign_in",
     "check_fresh_web_approval_sign_in",
     "fresh_sign_in_required",
+    "has_approval_level",
     "has_fresh_web_approval_sign_in",
     "is_approval_sign_in",
 ]
@@ -84,6 +100,14 @@ ApprovalMethod = Literal["fresh_sign_in", "one_time_code"]
 
 #: The ``acr`` Keycloak gives a sign-in that did not ask for credentials.
 _NO_CREDENTIAL_ACR: Final[str] = "0"
+
+#: The ``acr`` the approval sign-in flow gives (level 2 in the realm's ``acr.loa.map``).
+APPROVAL_LEVEL_ACR: Final[str] = "meho-approve"
+
+#: The ``acr`` values that carry the approval level: the approval sign-in
+#: (level 2) and the higher passkey touch (level 3). Level 1 is any normal
+#: sign-in and has no name.
+APPROVAL_LEVEL_ACRS: Final[frozenset[str]] = frozenset({APPROVAL_LEVEL_ACR, "meho-touch"})
 
 #: The text a refused approve carries after its machine-readable prefix.
 FRESH_SIGN_IN_REMEDIATION: Final[str] = (
@@ -157,6 +181,10 @@ class ApprovalAuth:
     ``presence`` and ``binding`` are set only when the person also touched a
     passkey for this approve: what Keycloak said about the touch, and which
     requests the touch names. Both are ``None`` otherwise.
+
+    ``level_missing`` is ``True`` when ``APPROVAL_SIGN_IN_LEVEL`` is
+    ``observe`` and the token lacked the approval level (#6281); the audit
+    row then says so next to the ``acr`` it saw.
     """
 
     channel: ApprovalChannel
@@ -166,6 +194,7 @@ class ApprovalAuth:
     acr: str | None = None
     presence: TouchPresence | None = None
     binding: TouchBinding | None = None
+    level_missing: bool = False
 
     def sign_in_key(self, sub: str) -> str:
         """A short hash that names one sign-in of *sub*.
@@ -192,6 +221,8 @@ class ApprovalAuth:
         }
         if single_use:
             payload["single_use"] = True
+        if self.level_missing:
+            payload["level_missing"] = True
         if self.presence is not None:
             payload["presence"] = self.presence.audit_payload()
         if self.binding is not None:
@@ -232,6 +263,11 @@ def asked_for_credentials(operator: Operator) -> bool:
     return operator.acr is not None and operator.acr != _NO_CREDENTIAL_ACR
 
 
+def has_approval_level(operator: Operator) -> bool:
+    """Whether the token's ``acr`` is the approval level or a higher one (#6281)."""
+    return operator.acr in APPROVAL_LEVEL_ACRS
+
+
 def approval_sign_in_max_age(settings: Settings, *, destructive: bool) -> int:
     """How old a sign-in may be, in seconds, to approve a request of this risk level.
 
@@ -253,7 +289,12 @@ def _longest_sign_in_max_age(settings: Settings) -> int:
 
 
 def _approval_auth(
-    operator: Operator, settings: Settings, *, channel: ApprovalChannel, auth_time: int
+    operator: Operator,
+    settings: Settings,
+    *,
+    channel: ApprovalChannel,
+    auth_time: int,
+    level_missing: bool = False,
 ) -> ApprovalAuth:
     """The proof for a sign-in that passed the checks."""
     one_time_code = operator.acr is not None and (
@@ -265,6 +306,7 @@ def _approval_auth(
         auth_time=auth_time,
         sid=operator.sid,
         acr=operator.acr,
+        level_missing=level_missing,
     )
 
 
@@ -281,7 +323,9 @@ def check_fresh_approval_sign_in(
     credentials (:func:`asked_for_credentials`), and it must be young
     enough for some request: ``auth_time`` at most the longer of the two
     limits of :func:`approval_sign_in_max_age` old
-    (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`). This
+    (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`). With
+    ``APPROVAL_SIGN_IN_LEVEL=required`` the token must also carry the
+    approval level (:func:`has_approval_level`). This
     runs before the request is read; the limit of the request's own risk
     level is applied in
     :func:`~meho_backplane.operations.approval_queue.approve_request`. A
@@ -291,11 +335,14 @@ def check_fresh_approval_sign_in(
     """
     approval_client = is_approval_sign_in(operator, settings)
     credentials = asked_for_credentials(operator)
+    level = has_approval_level(operator)
+    level_refused = settings.approval_sign_in_level == "required" and not level
     auth_time = operator.auth_time
     if (
         auth_time is None
         or not approval_client
         or not credentials
+        or level_refused
         or not has_fresh_sign_in(
             operator, now=now, max_age_seconds=_longest_sign_in_max_age(settings)
         )
@@ -306,12 +353,20 @@ def check_fresh_approval_sign_in(
             has_auth_time=operator.auth_time is not None,
             approval_client=approval_client,
             asked_for_credentials=credentials,
+            approval_level=level,
         )
         raise fresh_sign_in_required(
             reason="fresh_sign_in_required",
             max_age_seconds=settings.fresh_sign_in_max_age_seconds,
         )
-    return _approval_auth(operator, settings, channel="rest", auth_time=auth_time)
+    level_missing = settings.approval_sign_in_level == "observe" and not level
+    if level_missing:
+        structlog.get_logger(__name__).warning(
+            "approval_sign_in_level_missing", operator_sub=operator.sub, acr=operator.acr
+        )
+    return _approval_auth(
+        operator, settings, channel="rest", auth_time=auth_time, level_missing=level_missing
+    )
 
 
 def has_fresh_web_approval_sign_in(

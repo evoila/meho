@@ -30,9 +30,10 @@ from meho_backplane.settings import get_settings
 _KC = "https://keycloak.test"
 _ADMIN = f"{_KC}/admin/realms/meho"
 _TOKEN = f"{_KC}/realms/meho/protocol/openid-connect/token"
-_FLOW = "meho approval sign-in"
-_SUB = "meho approval sign-in - one-time code"
-_STEPS_URL = f"{_ADMIN}/authentication/flows/meho%20approval%20sign-in/executions"
+_FLOW = "meho approval sign-in level"
+_LEVEL = "meho approval sign-in level - level 2"
+_SUB = "meho approval sign-in level - one-time code"
+_STEPS_URL = f"{_ADMIN}/authentication/flows/meho%20approval%20sign-in%20level/executions"
 _FLOW_ID = "flow-approval"
 
 
@@ -66,10 +67,12 @@ def _step(level: int, name: str, requirement: str, *, flow: bool = False) -> dic
 
 def _good_steps() -> list[dict[str, Any]]:
     return [
-        _step(0, "auth-username-password-form", "REQUIRED"),
-        _step(0, _SUB, "CONDITIONAL", flow=True),
-        _step(1, "conditional-user-configured", "REQUIRED"),
-        _step(1, "auth-otp-form", "REQUIRED"),
+        _step(0, _LEVEL, "CONDITIONAL", flow=True),
+        _step(1, "conditional-level-of-authentication", "REQUIRED"),
+        _step(1, "auth-username-password-form", "REQUIRED"),
+        _step(1, _SUB, "CONDITIONAL", flow=True),
+        _step(2, "conditional-user-configured", "REQUIRED"),
+        _step(2, "auth-otp-form", "REQUIRED"),
     ]
 
 
@@ -169,20 +172,32 @@ async def test_the_client_name_comes_from_the_settings(monkeypatch: pytest.Monke
     [
         (
             [*_good_steps(), _step(0, "auth-cookie", "ALTERNATIVE")],
-            "the flow has 5 steps; wanted 4",
+            "the flow has 7 steps; wanted 6",
         ),
         (
-            [_step(0, "identity-provider-redirector", "ALTERNATIVE"), *_good_steps()[1:]],
-            "step 1 is 'identity-provider-redirector'",
+            [*_good_steps()[:2], _step(1, "identity-provider-redirector", "ALTERNATIVE")],
+            "step 3 is 'identity-provider-redirector'",
         ),
         (
-            [_step(0, "auth-username-password-form", "ALTERNATIVE"), *_good_steps()[1:]],
-            "step 1 is 'auth-username-password-form' (ALTERNATIVE",
+            [
+                *_good_steps()[:2],
+                _step(1, "auth-username-password-form", "ALTERNATIVE"),
+                *_good_steps()[3:],
+            ],
+            "step 3 is 'auth-username-password-form' (ALTERNATIVE",
         ),
-        (_good_steps()[:2], "step 3 ('conditional-user-configured') is missing"),
-        ([], "step 1 ('auth-username-password-form') is missing"),
+        (_good_steps()[:4], "step 5 ('conditional-user-configured') is missing"),
+        ([], "step 1 ('meho approval sign-in level - level 2') is missing"),
+        (_good_steps()[2:], "step 1 is 'auth-username-password-form'"),
     ],
-    ids=["extra session step", "other sign-in system", "password optional", "no code", "empty"],
+    ids=[
+        "extra session step",
+        "other sign-in system",
+        "password optional",
+        "no code",
+        "empty",
+        "no level step",
+    ],
 )
 async def test_a_flow_with_other_steps_is_flow_differs(
     steps: list[dict[str, Any]], difference: str

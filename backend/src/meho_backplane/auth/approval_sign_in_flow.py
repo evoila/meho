@@ -7,15 +7,16 @@ On the command line and REST, only a token of the approval client
 (:attr:`~meho_backplane.settings.Settings.keycloak_cli_approve_client_id`,
 default ``meho-cli-approve``) approves a request
 (:mod:`meho_backplane.auth.approval_sign_in`). That client must sign in
-through its own login flow ``meho approval sign-in``: the password form, then
-the one-time code when the person has set one up. No other step.
+through its own login flow ``meho approval sign-in level``: the level step
+(approval level 2, ``meho-approve``, asked for at every sign-in), the password
+form, then the one-time code when the person has set one up. No other step.
 
 :func:`read_approval_sign_in` reads the realm with the backplane's Keycloak
 admin client and says one of:
 
 * ``ok``: the flow has exactly the steps of the realm file, and the client's
   browser sign-in is bound to it;
-* ``flow_missing``: the realm has no flow ``meho approval sign-in``;
+* ``flow_missing``: the realm has no flow ``meho approval sign-in level``;
 * ``flow_differs``: the flow has other steps; ``detail`` names the first
   difference;
 * ``not_bound``: the flow is right, but the client is missing, has no own

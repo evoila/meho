@@ -122,6 +122,9 @@ class FakeKeycloak:
         self.master_clients: dict[str, dict[str, Any]] = {}
         # Login flows by alias; each has its steps in ``executions``.
         self.flows: dict[str, dict[str, Any]] = {}
+        # Step settings by id, and the realm's attributes (with its sign-in levels).
+        self.configs: dict[str, dict[str, Any]] = {}
+        self.realm_attributes: dict[str, str] = {"frontendUrl": "https://kc.example.invalid"}
         self._add_flow({"alias": "browser", "providerId": "basic-flow", "topLevel": True})
         # Keycloak's built-in browser flow: the recovery code step is off.
         self._add_flow(
@@ -187,10 +190,17 @@ class FakeKeycloak:
         file_ids: dict[str, str] = {}
         for flow in realm.get("authenticationFlows", []):
             file_ids[flow["id"]] = self._add_flow(flow)["id"]
+        configs = {item["alias"]: item for item in realm.get("authenticatorConfig", [])}
         for flow in realm.get("authenticationFlows", []):
             for step in flow["authenticationExecutions"]:
                 self._add_step(flow["alias"], step.get("authenticator"), step.get("flowAlias"))
-                self.flows[flow["alias"]]["executions"][-1]["requirement"] = step["requirement"]
+                made = self.flows[flow["alias"]]["executions"][-1]
+                made["requirement"] = step["requirement"]
+                if step.get("authenticatorConfig"):
+                    config_id = str(uuid.uuid4())
+                    self.configs[config_id] = copy.deepcopy(configs[step["authenticatorConfig"]])
+                    made["config"] = config_id
+        self.realm_attributes.update(realm.get("attributes", {}))
         for client in realm.get("clients", []):
             client = copy.deepcopy(client)
             overrides = client.get("authenticationFlowBindingOverrides", {})
@@ -216,6 +226,7 @@ class FakeKeycloak:
                 "authenticator": authenticator,
                 "flowAlias": flow_alias,
                 "requirement": "DISABLED",
+                "config": None,
             }
         )
 
@@ -236,16 +247,17 @@ class FakeKeycloak:
                 )
                 steps += self.flow_steps(step["flowAlias"], level + 1)
             else:
-                steps.append(
-                    {
-                        "id": step["id"],
-                        "displayName": f"display of {step['authenticator']}",
-                        "providerId": step["authenticator"],
-                        "authenticationFlow": False,
-                        "requirement": step["requirement"],
-                        "level": level,
-                    }
-                )
+                listed = {
+                    "id": step["id"],
+                    "displayName": f"display of {step['authenticator']}",
+                    "providerId": step["authenticator"],
+                    "authenticationFlow": False,
+                    "requirement": step["requirement"],
+                    "level": level,
+                }
+                if step["config"]:
+                    listed["authenticationConfig"] = step["config"]
+                steps.append(listed)
         return steps
 
     def _add_client(self, rep: Mapping[str, Any]) -> str:
@@ -281,6 +293,8 @@ class FakeKeycloak:
                 "clients": self.clients,
                 "users": self.users,
                 "flows": self.flows,
+                "configs": self.configs,
+                "realm_attributes": self.realm_attributes,
                 "totp_action": self.totp_action,
                 "master_users": self.master_users,
             }
@@ -353,8 +367,16 @@ class FakeKeycloak:
             assert params == {"username": params["username"], "exact": "true"}
             user = self._users(match.group(1)).get(params["username"])
             return Reply(200, [{"id": user["id"], "username": user["username"]}] if user else [])
+        if path == "/admin/realms/meho":
+            if not self.flow_rights:
+                return Reply(403, {"error": "HTTP 403 Forbidden"})
+            return Reply(200, {"realm": "meho", "attributes": copy.deepcopy(self.realm_attributes)})
         if path.startswith("/admin/realms/meho/authentication/") and not self.flow_rights:
             return Reply(403, {"error": "HTTP 403 Forbidden"})
+        if match := re.fullmatch(r"/admin/realms/meho/authentication/config/([^/]+)", path):
+            if match.group(1) not in self.configs:
+                return Reply(404, {"error": "Could not find authenticator config"})
+            return Reply(200, {"id": match.group(1), **copy.deepcopy(self.configs[match.group(1)])})
         if path == "/admin/realms/meho/authentication/required-actions/CONFIGURE_TOTP":
             if not self.flow_rights:
                 return Reply(403, {"error": "HTTP 403 Forbidden"})
@@ -422,6 +444,19 @@ class FakeKeycloak:
             self._add_step(parent, body["provider"], None)
             step_id = self.flows[parent]["executions"][-1]["id"]
             return Reply(201, None, f"/admin/realms/meho/authentication/executions/{step_id}")
+        if match := re.fullmatch(
+            r"/admin/realms/meho/authentication/executions/([^/]+)/config", path
+        ):
+            step = next(
+                st
+                for flow in self.flows.values()
+                for st in flow["executions"]
+                if st["id"] == match.group(1)
+            )
+            config_id = str(uuid.uuid4())
+            self.configs[config_id] = copy.deepcopy(body)
+            step["config"] = config_id
+            return Reply(201, None, f"/admin/realms/meho/authentication/config/{config_id}")
         if path == "/admin/realms/meho/client-scopes":
             if body["name"] in self.scopes:
                 return Reply(409, {"errorMessage": "Client Scope name must be unique"})
@@ -482,6 +517,12 @@ class FakeKeycloak:
         raise AssertionError(f"unexpected POST {path}")
 
     def _put(self, path: str, body: Any, params: dict[str, str]) -> Reply:
+        if path == "/admin/realms/meho":
+            if not (self.flow_rights and self.flow_write_rights):
+                return Reply(403, {"error": "HTTP 403 Forbidden"})
+            # Keycloak sets the attributes of the body and drops the others.
+            self.realm_attributes = copy.deepcopy(body["attributes"])
+            return Reply(204, None)
         if path == "/admin/realms/meho/authentication/required-actions/CONFIGURE_TOTP":
             assert self.flow_rights
             assert body["alias"] == "CONFIGURE_TOTP"
@@ -805,13 +846,17 @@ async def test_an_existing_local_account_keeps_its_required_actions(realm_file: 
     assert kc.users["approver"]["requiredActions"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
 
 
-_APPROVAL_FLOW = "meho approval sign-in"
+_APPROVAL_FLOW = "meho approval sign-in level"
+_LEVEL_FLOW = f"{_APPROVAL_FLOW} - level 2"
 _APPROVAL_STEPS = [
-    ("auth-username-password-form", "REQUIRED", 0),
-    ("meho approval sign-in - one-time code", "CONDITIONAL", 0),
-    ("conditional-user-configured", "REQUIRED", 1),
-    ("auth-otp-form", "REQUIRED", 1),
+    (_LEVEL_FLOW, "CONDITIONAL", 0),
+    ("conditional-level-of-authentication", "REQUIRED", 1),
+    ("auth-username-password-form", "REQUIRED", 1),
+    (f"{_APPROVAL_FLOW} - one-time code", "CONDITIONAL", 1),
+    ("conditional-user-configured", "REQUIRED", 2),
+    ("auth-otp-form", "REQUIRED", 2),
 ]
+_LEVEL_SETTINGS = {"loa-condition-level": "2", "loa-max-age": "0"}
 
 
 def _steps(kc: FakeKeycloak, alias: str) -> list[tuple[str, str, int]]:
@@ -825,9 +870,20 @@ def _steps(kc: FakeKeycloak, alias: str) -> list[tuple[str, str, int]]:
     ]
 
 
+def _level_settings(kc: FakeKeycloak) -> dict[str, str]:
+    """The settings of the level step of the approval flow."""
+    step = kc.flows[_LEVEL_FLOW]["executions"][0]
+    assert step["authenticator"] == "conditional-level-of-authentication"
+    assert step["config"], "the level step has no settings"
+    config: dict[str, str] = kc.configs[step["config"]]["config"]
+    return config
+
+
 def _realm_before_the_approval_flow() -> dict[str, Any]:
     old = _realm_as_imported()
     del old["authenticationFlows"]
+    del old["authenticatorConfig"]
+    del old["attributes"]["acr.loa.map"]
     old["clients"] = [c for c in old["clients"] if c["clientId"] != "meho-cli-approve"]
     return old
 
@@ -836,6 +892,7 @@ def test_imported_realm_binds_the_approval_client_to_its_flow() -> None:
     kc = _fresh()
 
     assert _steps(kc, _APPROVAL_FLOW) == _APPROVAL_STEPS
+    assert _level_settings(kc) == _LEVEL_SETTINGS
     overrides = kc.clients["meho-cli-approve"]["authenticationFlowBindingOverrides"]
     assert overrides == {"browser": kc.flows[_APPROVAL_FLOW]["id"]}
 
@@ -853,11 +910,14 @@ async def test_upgrade_adds_the_approval_sign_in_client(capfd: pytest.CaptureFix
     assert client["optionalClientScopes"] == []
     assert client["redirectUris"] == ["http://127.0.0.1:*"]
     assert _steps(kc, _APPROVAL_FLOW) == _APPROVAL_STEPS
+    assert _level_settings(kc) == _LEVEL_SETTINGS
     assert client["authenticationFlowBindingOverrides"] == {
         "browser": kc.flows[_APPROVAL_FLOW]["id"]
     }
+    assert json.loads(kc.realm_attributes["acr.loa.map"]) == {"meho-approve": 2}
     out = capfd.readouterr().out
     assert f"login flow {_APPROVAL_FLOW}: created" in out
+    assert "sign-in levels: set (meho-approve)" in out
     assert "client meho-cli-approve: created" in out
 
 
@@ -901,9 +961,9 @@ async def test_a_login_flow_with_a_step_that_is_off_is_finished(
 
 
 #: The calls to the login flow API that make the approval flow: list the
-#: flows, create the flow, add its four steps, list the steps, set the four
-#: requirements.
-_FLOW_SETUP_CALLS = 11
+#: flows, create the flow, add its six steps, list the steps, set the six
+#: requirements, list the steps, add the settings of the level step.
+_FLOW_SETUP_CALLS = 17
 
 
 @pytest.mark.parametrize("stop_at", range(1, _FLOW_SETUP_CALLS + 1))
@@ -922,6 +982,7 @@ async def test_a_flow_setup_that_stopped_half_way_is_finished_on_the_next_run(
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
 
     assert _steps(kc, _APPROVAL_FLOW) == _APPROVAL_STEPS
+    assert _level_settings(kc) == _LEVEL_SETTINGS
     overrides = kc.clients["meho-cli-approve"]["authenticationFlowBindingOverrides"]
     assert overrides == {"browser": kc.flows[_APPROVAL_FLOW]["id"]}
     out = capfd.readouterr().out
@@ -973,13 +1034,13 @@ def _add_the_password_step_twice(kc: FakeKeycloak) -> None:
     kc.flows[_APPROVAL_FLOW]["executions"][-1]["requirement"] = "REQUIRED"
 
 
-def _swap_the_top_steps(kc: FakeKeycloak) -> None:
-    kc.flows[_APPROVAL_FLOW]["executions"].reverse()
+def _swap_the_level_steps(kc: FakeKeycloak) -> None:
+    kc.flows[_LEVEL_FLOW]["executions"].reverse()
 
 
 @pytest.mark.parametrize(
     "change",
-    [_move_the_code_step_to_the_top, _add_the_password_step_twice, _swap_the_top_steps],
+    [_move_the_code_step_to_the_top, _add_the_password_step_twice, _swap_the_level_steps],
     ids=["step-in-the-wrong-sub-flow", "step-twice", "steps-in-the-wrong-order"],
 )
 async def test_a_login_flow_with_the_right_names_in_the_wrong_shape_is_not_bound(
@@ -1029,6 +1090,111 @@ async def test_an_unfinished_flow_without_the_right_to_change_it_names_the_role(
     assert str(stopped.value).startswith(f"login flow {_APPROVAL_FLOW}")
     assert str(stopped.value).endswith(NO_FLOW_RIGHT)
     assert "HTTP 403" not in str(stopped.value)
+
+
+async def test_upgrade_from_the_flow_without_a_level_binds_the_new_flow(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A realm bound to the earlier flow ``meho approval sign-in`` gets the level flow (#6281).
+
+    The earlier flow is kept as it is; only the binding moves.
+    """
+    old = _realm_before_the_approval_flow()
+    old["authenticationFlows"] = [
+        {
+            "id": "earlier-flow",
+            "alias": "meho approval sign-in",
+            "providerId": "basic-flow",
+            "topLevel": True,
+            "authenticationExecutions": [
+                {"authenticator": "auth-username-password-form", "requirement": "REQUIRED"}
+            ],
+        }
+    ]
+    approve = next(
+        c for c in _realm_as_imported()["clients"] if c["clientId"] == "meho-cli-approve"
+    )
+    old["clients"].append(
+        {**approve, "authenticationFlowBindingOverrides": {"browser": "earlier-flow"}}
+    )
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+    earlier = copy.deepcopy(kc.flows["meho approval sign-in"])
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    overrides = kc.clients["meho-cli-approve"]["authenticationFlowBindingOverrides"]
+    assert overrides == {"browser": kc.flows[_APPROVAL_FLOW]["id"]}
+    assert kc.flows["meho approval sign-in"] == earlier
+    assert "client meho-cli-approve: kept (login flow set)" in capfd.readouterr().out
+
+
+async def test_sign_in_levels_keep_the_other_levels_and_attributes(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """The realm gets ``meho-approve``; a level another part added stays, and so do attributes."""
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    kc.realm_attributes["acr.loa.map"] = '{"meho-touch":3}'
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert json.loads(kc.realm_attributes["acr.loa.map"]) == {"meho-touch": 3, "meho-approve": 2}
+    assert kc.realm_attributes["frontendUrl"] == "https://kc.example.invalid"
+    assert "sign-in levels: set (meho-approve)" in capfd.readouterr().out
+    # The next run changes nothing.
+    kc.calls.clear()
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+    assert ("PUT", "/admin/realms/meho") not in kc.calls
+    assert "sign-in levels: kept (meho-approve)" in capfd.readouterr().out
+
+
+async def test_a_level_map_that_is_not_an_object_stops_the_stage() -> None:
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    kc.realm_attributes["acr.loa.map"] = "[2]"
+
+    with pytest.raises(RealmStageError, match=r"acr\.loa\.map is not a JSON object"):
+        await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+
+async def test_a_level_step_without_its_settings_gets_them(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A run that stopped before the settings: the next run adds them and binds the flow."""
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    kc.flows[_LEVEL_FLOW]["executions"][0]["config"] = None
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert _level_settings(kc) == _LEVEL_SETTINGS
+    out = capfd.readouterr().out
+    assert f"login flow {_APPROVAL_FLOW}: completed (an earlier run had not finished it)" in out
+    overrides = kc.clients["meho-cli-approve"]["authenticationFlowBindingOverrides"]
+    assert overrides == {"browser": kc.flows[_APPROVAL_FLOW]["id"]}
+
+
+async def test_a_level_step_with_other_settings_is_not_bound(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A level step that someone changed (another level, or a maximum age) binds no client."""
+    old = _realm_as_imported()
+    approve = next(c for c in old["clients"] if c["clientId"] == "meho-cli-approve")
+    del approve["authenticationFlowBindingOverrides"]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+    config_id = kc.flows[_LEVEL_FLOW]["executions"][0]["config"]
+    kc.configs[config_id]["config"]["loa-max-age"] = "36000"
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert (
+        f"login flow {_APPROVAL_FLOW}: kept, but its steps differ from the realm file; "
+        "no client is bound to it"
+    ) in capfd.readouterr().out
+    assert "authenticationFlowBindingOverrides" not in kc.clients["meho-cli-approve"]
+    assert kc.configs[config_id]["config"]["loa-max-age"] == "36000"
 
 
 async def test_upgrade_sets_the_token_settings_of_an_existing_approval_client(

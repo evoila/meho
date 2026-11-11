@@ -31,9 +31,9 @@ func TestApprovalSignInCheck(t *testing.T) {
 		hintAbsent bool
 	}{
 		{"ok", signInHealth(api.ApprovalSignInStatusStateOk, ""), doctorOK,
-			`signs in through the login flow "meho approval sign-in"`, "", true},
+			`signs in through the login flow "meho approval sign-in level"`, "", true},
 		{"flow missing", signInHealth(api.ApprovalSignInStatusStateFlowMissing, ""), doctorWarn,
-			`no login flow "meho approval sign-in"`, "keycloak.authflow.ensure_approval_flow", false},
+			`no login flow "meho approval sign-in level"`, "keycloak.authflow.ensure_approval_flow", false},
 		{"not bound", signInHealth(api.ApprovalSignInStatusStateNotBound, "the client meho-cli-approve has no own browser flow"), doctorWarn,
 			"has no own browser flow", "keycloak.authflow.ensure_approval_flow", false},
 		{"flow differs", signInHealth(api.ApprovalSignInStatusStateFlowDiffers, "the flow has 5 steps; wanted 4"), doctorWarn,
@@ -76,7 +76,7 @@ func TestDoctor_ReportsAnUnboundApprovalSignIn(t *testing.T) {
 	xdg := withTempXDG(t)
 	stub := &mcpStub{liveStatus: 200, tools: []string{"meho_status"}, listed: []string{"meho_status"},
 		signIn: map[string]any{
-			"state": "not_bound", "flow": "meho approval sign-in", "client": "meho-cli-approve",
+			"state": "not_bound", "flow": "meho approval sign-in level", "client": "meho-cli-approve",
 			"detail": "the client meho-cli-approve has no own browser flow",
 		}}
 	srv := httptest.NewServer(stub.handler(t))

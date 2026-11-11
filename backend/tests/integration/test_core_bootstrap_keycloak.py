@@ -1092,7 +1092,7 @@ async def test_an_older_install_gets_recovery_codes_once_meho_admin_may_change_l
     assert _recovery_settings(keycloak) == ("true", "ALTERNATIVE")
 
 
-_APPROVAL_FLOW = "meho approval sign-in"
+_APPROVAL_FLOW = "meho approval sign-in level"
 
 
 def _approval_flow_and_binding(kc: _Keycloak) -> tuple[str | None, str | None]:
@@ -1133,7 +1133,8 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
     flow_id, bound = _approval_flow_and_binding(keycloak)
     assert flow_id and bound == flow_id
     steps = httpx.get(
-        f"{admin}/authentication/flows/meho%20approval%20sign-in/executions", headers=headers
+        f"{admin}/authentication/flows/meho%20approval%20sign-in%20level/executions",
+        headers=headers,
     ).json()
     assert [
         (
@@ -1144,8 +1145,20 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
         )
         for s in steps
     ] == [
-        (0, "auth-username-password-form", "REQUIRED"),
-        (0, "meho approval sign-in - one-time code", "CONDITIONAL"),
-        (1, "conditional-user-configured", "REQUIRED"),
-        (1, "auth-otp-form", "REQUIRED"),
+        (0, "meho approval sign-in level - level 2", "CONDITIONAL"),
+        (1, "conditional-level-of-authentication", "REQUIRED"),
+        (1, "auth-username-password-form", "REQUIRED"),
+        (1, "meho approval sign-in level - one-time code", "CONDITIONAL"),
+        (2, "conditional-user-configured", "REQUIRED"),
+        (2, "auth-otp-form", "REQUIRED"),
     ]
+    # The level step got its settings back, and the realm names the level.
+    level_step = next(
+        s for s in steps if s.get("providerId") == "conditional-level-of-authentication"
+    )
+    settings = httpx.get(
+        f"{admin}/authentication/config/{level_step['authenticationConfig']}", headers=headers
+    ).json()
+    assert settings["config"] == {"loa-condition-level": "2", "loa-max-age": "0"}
+    realm = httpx.get(admin, headers=headers).json()
+    assert json.loads(realm["attributes"]["acr.loa.map"])["meho-approve"] == 2

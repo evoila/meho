@@ -159,9 +159,9 @@ release. The rollback contract has the full checklist.
 This applies to the built-in Keycloak (`coreKeycloak.enabled`).
 
 After every install and upgrade, the bootstrap Job keeps the approval
-sign-in up to date: it makes the login flow `meho approval sign-in` with
-the steps of the realm file, and binds the client `meho-cli-approve` to
-it. For this, its account `meho-admin` needs the realm-management role
+sign-in up to date: it makes the login flow `meho approval sign-in level`
+with the steps of the realm file, names the approval level in the realm,
+and binds the client `meho-cli-approve` to the flow. For this, its account `meho-admin` needs the realm-management role
 `manage-realm`. A new install gets the role from the realm file.
 
 An install whose first start was older, and had the company login off,
@@ -169,7 +169,7 @@ may lack the role. Then the Job stops, and its log names the role and
 this section:
 
 ```text
-core_bootstrap_failed: login flow meho approval sign-in: meho-admin may not read or change login flows, ...
+core_bootstrap_failed: login flow meho approval sign-in level: meho-admin may not read or change login flows, ...
 ```
 
 With `helm upgrade --atomic`, Helm rolls the release back when the Job
@@ -214,6 +214,7 @@ Read these when your upgrade crosses the version in question:
 | **v0.46.0** | The chart uses the `Recreate` update strategy: the old pod stops before the new one starts. An install made with an older chart has `RollingUpdate` and a `rollingUpdate` block on its live Deployment. | **Nothing to do.** Before a Helm 4 upgrade from such an install, the chart runs a short Job that removes the block. If an upgrade already failed with `spec.strategy.rollingUpdate: Forbidden`, see [Upgrade fails with `spec.strategy.rollingUpdate: Forbidden`](#upgrade-fails-with-specstrategyrollingupdate-forbidden). |
 | **v0.46.0** | Fifteen database migrations (`0138` to `0152`). They only add, and change no existing row. The upgrade ends every approval request that still waits. With the built-in Keycloak, four chart values must be empty or equal the chart's value: `config.uiKeycloakClientId`, `checkRunner.clientId`, `keycloakAdmin.url` and `keycloakAdmin.clientId`. The retrieval quality check and the retire checklist are removed. Machine logins no longer write targets or topology over REST. An operation from an API file runs only on a connector class that accepts such operations (`accepts_ingested_operations`); otherwise MEHO answers `ingested_ops_not_accepted`. | Back up the database, and decide waiting approval requests first. If you use connector packages, update them before this version or together with it, to a version that sets `accepts_ingested_operations = True` where it runs operations from an API file. With the built-in Keycloak, remove the four values or set the value the error message names. Machine logins use the operations `targets.register`, `targets.update`, `targets.remove` and `topology.*` through `call_operation`. On OpenShift, set the UBI OpenBao image in `coreVault.image`. Details: [CHANGELOG](https://github.com/evoila/meho/blob/main/CHANGELOG.md). |
 | **v0.47.0** | With the built-in Keycloak, the bootstrap Job keeps the approval sign-in flow and its binding to `meho-cli-approve` up to date on every upgrade. It needs the role `manage-realm` on `meho-admin`, and it stops when the role is missing. `/api/v1/health` shows the state of the approval sign-in (`approvals.sign_in`), and `meho doctor` shows it in one line. | **Built-in Keycloak, first started before v0.47.0 with the company login off:** give `meho-admin` the role `manage-realm` before the upgrade, as [The bootstrap Job needs `manage-realm`](#the-bootstrap-job-needs-manage-realm) says. Otherwise the upgrade stops at the Job. **Your own Keycloak:** give the backplane's Keycloak admin client the realm-management role `view-realm`, so MEHO can check the approval sign-in, and make sure the flow is set up ([The approval client](keycloak-realm.md#the-approval-client-meho-cli-approve)). |
+| **v0.47.0** | An approval sign-in carries its own level. The approval client `meho-cli-approve` signs in through the new login flow `meho approval sign-in level`, which gives the level `meho-approve` (level 2 in the realm attribute `acr.loa.map`). The new setting `APPROVAL_SIGN_IN_LEVEL` (chart `config.approvalSignInLevel`: `off`, `observe` or `required`, default `observe`) says whether an approve on the command line or REST needs this level. `/api/v1/health` shows it in `approvals.sign_in_level`. In the next release the default becomes `required`. | **Built-in Keycloak:** the bootstrap Job makes the flow, names the level and binds the client. **Your own Keycloak:** add the level and the flow by hand or with `keycloak.authflow.ensure_approval_flow` ([The approval level](keycloak-realm.md#the-approval-level)). Check that `approvals.sign_in.state` is `ok` on every install before the next release. **With a company login in front of Keycloak:** set `config.approvalSignInLevel: "required"` now. A person with only a company account then approves in the web interface. |
 
 The authoritative, always-current version of this table lives in
 [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes);

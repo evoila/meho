@@ -118,7 +118,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		Long: "bootstrap-clients provisions every realm resource " +
 			"`meho login` and the MCP browser-flow onramp need:\n\n" +
 			"  * the public device-code client (default name `meho-cli`)\n" +
-			"  * the public client of the fresh browser sign-in of `meho approvals approve` (default name `meho-cli-approve`): PKCE on a 127.0.0.1 loopback only, no device flow, no offline_access, no refresh token (its access token lasts 15 minutes), and its own login flow `meho approval sign-in` that always asks for the password (made if missing). Only its tokens can approve on the command line\n" +
+			"  * the public client of the fresh browser sign-in of `meho approvals approve` (default name `meho-cli-approve`): PKCE on a 127.0.0.1 loopback only, no device flow, no offline_access, no refresh token (its access token lasts 15 minutes), and its own login flow `meho approval sign-in level` that always asks for the password and gives the approval level `meho-approve` (made if missing; the level is named in the realm's acr.loa.map). Only its tokens can approve on the command line\n" +
 			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
 			"  * two copies of the MCP client with their own names: `meho-mcp-code` for Claude Code and `meho-mcp-desktop` for Claude Desktop. With `MCP_CLIENT_PER_TOOL_KIND=true` on the backplane, each tool signs in with its own client and keeps a saved login of its own\n" +
 			"  * 8 protocol mappers on the CLI and MCP clients (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver, platform-admin and meho-tenants); the approval client gets the same without meho-mcp-audience\n" +

@@ -467,12 +467,13 @@ def test_approval_sign_in_client(realm: dict[str, Any]) -> None:
 def test_approval_client_has_its_own_sign_in_flow(realm: dict[str, Any]) -> None:
     """``meho-cli-approve`` signs in with a flow that always asks for the password.
 
-    The flow has the password form and the one-time code step (when the
-    person has set one up), and no other step: no step that signs a person
-    in without the form.
+    The flow has one conditional sub-flow at approval level 2: the level
+    step, the password form and the one-time code step (when the person has
+    set one up). No other step: no step that signs a person in without the
+    form, and no step that sends the person to another sign-in system.
     """
     flows = {flow["alias"]: flow for flow in realm["authenticationFlows"]}
-    flow = flows["meho approval sign-in"]
+    flow = flows["meho approval sign-in level"]
     assert flow["topLevel"] is True
     assert flow["builtIn"] is False
     assert _client(realm, "meho-cli-approve")["authenticationFlowBindingOverrides"] == {
@@ -482,11 +483,18 @@ def test_approval_client_has_its_own_sign_in_flow(realm: dict[str, Any]) -> None
         (step.get("authenticator") or step["flowAlias"], step["requirement"])
         for step in flow["authenticationExecutions"]
     ]
-    assert steps == [
+    assert steps == [("meho approval sign-in level - level 2", "CONDITIONAL")]
+    level = flows["meho approval sign-in level - level 2"]
+    assert level["topLevel"] is False
+    assert [
+        (s.get("authenticator") or s["flowAlias"], s["requirement"])
+        for s in level["authenticationExecutions"]
+    ] == [
+        ("conditional-level-of-authentication", "REQUIRED"),
         ("auth-username-password-form", "REQUIRED"),
-        ("meho approval sign-in - one-time code", "CONDITIONAL"),
+        ("meho approval sign-in level - one-time code", "CONDITIONAL"),
     ]
-    code = flows["meho approval sign-in - one-time code"]
+    code = flows["meho approval sign-in level - one-time code"]
     assert code["topLevel"] is False
     assert [(s["authenticator"], s["requirement"]) for s in code["authenticationExecutions"]] == [
         ("conditional-user-configured", "REQUIRED"),
@@ -495,3 +503,33 @@ def test_approval_client_has_its_own_sign_in_flow(realm: dict[str, Any]) -> None
     # Only the approval client has a flow of its own.
     bound = [c["clientId"] for c in realm["clients"] if c.get("authenticationFlowBindingOverrides")]
     assert bound == ["meho-cli-approve"]
+
+
+def test_approval_level_is_level_2_and_asked_for_at_every_sign_in(realm: dict[str, Any]) -> None:
+    """The realm names level 2 ``meho-approve``; only the approval flow reaches it (#6281).
+
+    Level 1 is any normal sign-in and has no name, so a normal console, CLI
+    or MCP login keeps ``acr`` ``"1"``. Maximum age 0 means the level is
+    never taken from an earlier sign-in.
+    """
+    assert json.loads(realm["attributes"]["acr.loa.map"])["meho-approve"] == 2
+    level_step = next(
+        step
+        for flow in realm["authenticationFlows"]
+        for step in flow["authenticationExecutions"]
+        if step.get("authenticator") == "conditional-level-of-authentication"
+        and flow["alias"] == "meho approval sign-in level - level 2"
+    )
+    configs = {item["alias"]: item["config"] for item in realm["authenticatorConfig"]}
+    assert configs[level_step["authenticatorConfig"]] == {
+        "loa-condition-level": "2",
+        "loa-max-age": "0",
+    }
+    # No other flow of the realm file gives level 2.
+    levels = [
+        configs[step["authenticatorConfig"]]["loa-condition-level"]
+        for flow in realm["authenticationFlows"]
+        for step in flow["authenticationExecutions"]
+        if step.get("authenticator") == "conditional-level-of-authentication"
+    ]
+    assert levels.count("2") == 1

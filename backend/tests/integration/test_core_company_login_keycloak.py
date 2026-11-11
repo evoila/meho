@@ -38,8 +38,12 @@ tokens carry one issuer, whichever port the browser used.
    the company login, and the approval sign-in shows Keycloak's own
    password form.
 9. A person with a one-time code signs in for an approval with the password
-   and the code, never through the company login, and the token passes
-   MEHO's approval sign-in check.
+   and the code, never through the company login, and the token carries the
+   approval level ``meho-approve`` and passes MEHO's approval sign-in check,
+   also with ``APPROVAL_SIGN_IN_LEVEL=required``.
+10. A sign-in through the company login that starts on the approval page
+    comes back without the approval level, and MEHO refuses it with the
+    usual message under ``required`` (#6281).
 
 Set ``MEHO_TEST_CORE_KEYCLOAK_IMAGE`` to use a mirror of the subchart's
 image. Skips when Docker is missing or the container cannot start.
@@ -68,6 +72,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 import httpx
 import pytest
 import yaml
+from fastapi import HTTPException
 
 from meho_backplane.auth.approval_sign_in import check_fresh_approval_sign_in
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
@@ -100,7 +105,7 @@ _BROKER_CLIENT = "meho-broker"
 _CALLBACK = "http://127.0.0.1:43123/callback"
 _PERSON = "jane"
 _APPROVAL_CLIENT = "meho-cli-approve"
-_APPROVAL_FLOW = "meho approval sign-in"
+_APPROVAL_FLOW = "meho approval sign-in level"
 
 
 @dataclass
@@ -772,7 +777,7 @@ async def test_auto_redirect_off_works_while_the_company_login_does_not_answer(
 
 def _start_approval_sign_in(browser: _Browser, challenge: str) -> httpx.Response:
     """The request ``meho approvals approve`` sends: the approval client, PKCE,
-    ``prompt=login`` and ``max_age=0``."""
+    ``prompt=login``, ``max_age=0`` and ``acr_values=meho-approve``."""
     return browser.send(
         "GET",
         f"{browser.kc.base_url}/realms/meho/protocol/openid-connect/auth",
@@ -786,6 +791,7 @@ def _start_approval_sign_in(browser: _Browser, challenge: str) -> httpx.Response
             "code_challenge_method": "S256",
             "prompt": "login",
             "max_age": "0",
+            "acr_values": "meho-approve",
         },
     )
 
@@ -838,7 +844,11 @@ def _take_the_approval_flow_out(kc: _Keycloak) -> None:
     client["authenticationFlowBindingOverrides"] = {"browser": ""}
     httpx.put(f"{admin}/clients/{client['id']}", headers=headers, json=client).raise_for_status()
     assert _approval_client(kc).get("authenticationFlowBindingOverrides", {}) == {}
-    for alias in (_APPROVAL_FLOW, f"{_APPROVAL_FLOW} - one-time code"):
+    for alias in (
+        _APPROVAL_FLOW,
+        f"{_APPROVAL_FLOW} - level 2",
+        f"{_APPROVAL_FLOW} - one-time code",
+    ):
         flow_id = _flow_ids(kc).get(alias)
         if flow_id is not None:
             gone = httpx.delete(f"{admin}/authentication/flows/{flow_id}", headers=headers)
@@ -1021,9 +1031,10 @@ async def test_approval_sign_in_asks_for_the_password_and_the_code_and_passes_th
     claims = _approval_sign_in(keycloak, "code-person", password, code_secret)
 
     assert claims["azp"] == _APPROVAL_CLIENT
-    assert claims["acr"] == "1"
+    assert claims["acr"] == "meho-approve"
     assert isinstance(claims["auth_time"], int)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "required")
     get_settings.cache_clear()
     clear_jwks_cache()
     operator = await verify_jwt_for_audience(
@@ -1033,3 +1044,105 @@ async def test_approval_sign_in_asks_for_the_password_and_the_code_and_passes_th
     assert proof.channel == "rest"
     assert proof.method == "fresh_sign_in"
     assert proof.auth_time == claims["auth_time"]
+    assert proof.acr == "meho-approve"
+    assert proof.level_missing is False
+
+
+def _company_link(page: str) -> str | None:
+    """The address of the company login's button on a Keycloak page, or ``None``."""
+    link = re.search(r'href="([^"]*/broker/company/login[^"]*)"', page)
+    return html.unescape(link.group(1)) if link else None
+
+
+def _approval_sign_in_through_the_company_login(kc: _Keycloak) -> dict[str, Any] | None:
+    """Start on the approval page and sign in with the company login's button.
+
+    Returns the claims of the approval client's token, or ``None`` when the
+    approval page has no company login button.
+    """
+    verifier, challenge = _pkce()
+    browser = _Browser(kc)
+    seen: list[str] = []
+    code = ""
+    try:
+        page, _ = _follow_inside_the_realm(browser, _start_approval_sign_in(browser, challenge))
+        assert page.status_code == 200, page.headers.get("location")
+        link = _company_link(page.text)
+        if link is None:
+            return None
+        response = browser.send("GET", urljoin(str(page.url), link))
+        for _ in range(25):
+            if response.is_redirect:
+                location = urljoin(str(response.url), response.headers["location"])
+                seen.append(urlsplit(location).path)
+                if location.startswith(_CALLBACK):
+                    query = parse_qs(urlsplit(location).query)
+                    assert "code" in query, location
+                    code = query["code"][0]
+                    break
+                response = browser.send("GET", location)
+                continue
+            if response.status_code != 200 or "/realms/company/" not in str(response.url):
+                pytest.fail(
+                    f"{response.status_code} after {seen}: {_page_text(response.text)}\n"
+                    f"Keycloak log:\n{kc.logs()}"
+                )
+            response = browser.send(
+                "POST",
+                _form(response.text, "kc-form-login"),
+                data={"username": _PERSON, "password": kc.password, "credentialId": ""},
+            )
+    finally:
+        browser.close()
+    assert code, seen
+    assert any("/realms/meho/broker/company/" in path for path in seen), seen
+    token = httpx.post(
+        f"{kc.base_url}/realms/meho/protocol/openid-connect/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": _APPROVAL_CLIENT,
+            "code": code,
+            "redirect_uri": _CALLBACK,
+            "code_verifier": verifier,
+        },
+    )
+    assert token.status_code == 200, token.text
+    access = token.json()["access_token"]
+    payload = access.split(".")[1]
+    claims: dict[str, Any] = json.loads(
+        base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    )
+    claims["_raw"] = access
+    return claims
+
+
+async def test_a_company_login_from_the_approval_page_gets_no_approval_level(
+    keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The approval level comes only from the approval flow's own steps (#6281).
+
+    A person who uses the company login's button on the approval page signs
+    in, but the token has no approval level, so MEHO refuses the approve
+    under ``required`` with the usual message. A normal login keeps
+    ``acr`` ``"1"``.
+    """
+    normal = _company_login(keycloak)
+    assert normal["acr"] == "1"
+
+    claims = _approval_sign_in_through_the_company_login(keycloak)
+    if claims is None:
+        # Nothing to follow: the approval page does not offer the company login.
+        return
+    assert claims["azp"] == _APPROVAL_CLIENT
+    assert claims["acr"] not in {"meho-approve", "meho-touch"}
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "required")
+    get_settings.cache_clear()
+    clear_jwks_cache()
+    operator = await verify_jwt_for_audience(
+        f"Bearer {claims['_raw']}", expected_audience="meho-backplane"
+    )
+    with pytest.raises(HTTPException) as refused:
+        check_fresh_approval_sign_in(operator, get_settings())
+    assert refused.value.status_code == 401
+    assert "an approve needs a fresh approval sign-in" in str(refused.value.detail)

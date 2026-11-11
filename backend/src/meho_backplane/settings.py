@@ -1942,6 +1942,10 @@ class Settings(BaseModel):
     # #5026 -- an approved run that started and stored no result after this
     # many minutes is listed for operators to check ("outcome unknown").
     approval_outcome_unknown_after_minutes: int = Field(default=15, ge=1, le=1440)
+    # An approved secret reveal runs only when the person who asked fetches
+    # the value, once, and only within this many seconds after the approval
+    # (``operations.approved_reveal``).
+    approval_reveal_fetch_window_seconds: int = Field(default=900, ge=60, le=86400)
     # #3151 — op-id patterns a service-principal standing grant may never
     # cover (delete-shaped ops are the floor of what runs unattended, never
     # grantable). See ``operations.service_grants``.

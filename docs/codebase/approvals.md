@@ -342,13 +342,15 @@ Two kinds of rows carry a keyed hash of a call's params:
     (`reveal_secret: true`), the choice is stored in its own column,
     `approval_request.reveal_secret` (migration `0131`). It is not a
     parameter of the operation: it is not in the params, not in the
-    encrypted payload and not part of the hash. Every approved run reads
-    it from the row and honours it, also the re-run of a failed
-    credential write. A flag sent again with the params of a run comes off
-    before the hash check and does not change the stored choice (see
+    encrypted payload and not part of the hash. The run reads it from the
+    row and honours it. Such a request runs only once, when the person who
+    asked fetches the value, and never runs again (see "An approved secret
+    reveal runs when the person who asked fetches it" below). A flag sent
+    again with the params of a run comes off before the hash check and
+    does not change the stored choice (see
     [redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals)).
   - Every approval surface shows the choice, so the approver knows that
-    approving returns the secret values to the requester. REST
+    approving lets the requester see the secret values once. REST
     (`ApprovalRequestView.reveal_secret`) and MCP (`meho_approvals_list` /
     `meho_approvals_get`) carry the field (`false` when not asked). The
     console request window names it in the detail list on every status
@@ -1603,9 +1605,11 @@ encrypted custody (`execution_handle`), and the first run deletes it. A
 re-run of a credential write must send the params again. They must match
 `params_hash`. The requester's reveal choice (`reveal_secret: true` of the
 original call) is not in that custody: it is on the request row
-(`approval_request.reveal_secret`), so the re-run returns the values the
-requester asked for. A `reveal_secret` flag sent with the params comes off
-before the hash check and does not change the stored choice.
+(`approval_request.reveal_secret`). A request with that choice never runs
+again (`state_secret_reveal`): it runs once, when the person who asked
+fetches the value. A `reveal_secret` flag sent with the params of another
+re-run comes off before the hash check and does not change the stored
+choice.
 
 **Runs once.** The re-run has its own claim, because `resumed_at` stays
 the one-way latch of the first run. The claim is one conditional `UPDATE`:
@@ -1645,6 +1649,71 @@ in `refusal`, and `status_code` `409` or `422`.
 `tests/migrations/test_migration_0129_add_approval_request_rerun_count.py`,
 the credential-write re-run tests in `tests/test_secret_values_hidden.py`
 and `tests/migrations/test_migration_0131_add_approval_request_reveal_secret.py`.
+
+## An approved secret reveal runs when the person who asked fetches it
+
+Every request with `reveal_secret: true` that waits for a second
+person's approval follows one rule: a read that shows secret values (for
+example `vault.kv.read`), and an operation that creates a credential (for
+example a token or a secret id). The approval is a one-time permission
+for the person who asked, not a run. The code is in
+`operations/approved_reveal.py`.
+
+- **Approving runs nothing.** Every approve surface (REST `/approve` and
+  `/decide`, the console approve card, the in-order page) goes through
+  `resume_dispatch_after_approval`. For such a request it answers with
+  `status: "waiting_for_requester"` and claims nothing. The answer to the
+  approving person holds no value. An `async` approve starts no
+  background run. The CLI `meho approvals approve` prints the same.
+- **The request view says so too.** `ApprovalRequestView.waits_for_requester`
+  is `true` for such a request (`is_secret_reveal`). When the answer to
+  `meho approvals approve --wait` is lost on the network, the CLI reads
+  the request again. For such a request it does not wait for a run, and
+  prints how the person who asked gets the value.
+- **An approve in order stops at a change that has not happened.**
+  `ApprovalRequestView.reveal_changes_something` is `true` when such a
+  request may change something when it runs (`is_write_reveal`). Only
+  an op of class `read` or `credential_read` counts as a read. Every
+  other class counts as a change: a credential write, a token create,
+  and also class `other` (for example an apply, a scale or a reboot).
+  The console in-order page and `meho approvals approve --in-order` stop
+  at such a step, so the steps after it do not run before it. After a
+  read they go on: a read changes nothing. On a later in-order run, a
+  reveal approved earlier and not fetched yet still stops the run, with
+  a message that it waits for the person who asked.
+- **The audit class of the fetch.** The HTTP record of `POST
+  /api/v1/approvals/{id}/reveal` has class `credential_read`, never a
+  plain `read`: its answer holds a secret value, and the run may change
+  something.
+- **The person who asked fetches the value.** `POST
+  /api/v1/approvals/{id}/reveal` (`api/v1/approval_reveal.py`), the
+  console's "Show value" button (`POST /ui/vault/read/reveal`) and `meho
+  secret read --approval <id>` call `fetch_approved_reveal`. It runs the
+  operation through `resume_dispatch_after_approval(..., requester_fetch=True)`
+  and gives the value only in that one answer.
+- **Once, and only for a short time.** The fetch must win the one-resumer
+  claim, so a second fetch is refused (`reveal_already_used`). It must
+  come within `APPROVAL_REVEAL_FETCH_WINDOW_SECONDS` (default 900, 15
+  minutes) of the approval (`reveal_window_passed`). After that, the
+  person sends the request again. Such a request also never runs again
+  with "run again" (`state_secret_reveal`), also when its one run failed.
+- **Tied to the request.** Only the person who sent the request, in the
+  same tenant, may fetch (403 / 404). The stored params must still match
+  the stored hash (`reveal_params_changed`), and the usual checks of an
+  approved run hold (same release, same target, same preview).
+- **MEHO keeps no value.** The run result stored on the request
+  (`resume_result`) has no answer (`result: null`, `handle: null`,
+  `extras.secret_value_withheld: true`). The result cache keeps nothing
+  either: for a `reveal_secret: true` run the dispatcher sets
+  `secret_reveal` in the reducer context, and the reducer returns the
+  answer whole, with no handle, also when it is over the JSONFlux limit.
+  The audit row of the run keeps
+  fingerprints only, as for every reveal. Each fetch attempt writes one
+  `approval.reveal` audit row with its outcome (`run` or the refusal
+  code).
+- A refused fetch answers 409 with `detail` `reveal_<code>: <message>`.
+  Codes: `not_a_reveal`, `not_approved`, `already_used`,
+  `window_passed`, `params_changed`.
 
 ## Surfacing the approved dispatch's result to the originating consumer (#3209)
 

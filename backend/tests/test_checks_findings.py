@@ -288,16 +288,21 @@ async def test_run_that_did_not_succeed_writes_nothing(
     assert mails == []
 
 
+# Fixed values: parametrize ids must be the same in every xdist worker.
+_FIXED_EVENT = "11111111-1111-4111-8111-111111111111"
+_FIXED_RUN = "22222222-2222-4222-8222-222222222222"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "work_ref",
     [
         None,
         "checks:abcd1234:prod:target-vc-01",
-        f"event:{uuid4()}:{uuid4()}",
-        f"event:{uuid4()}:c:sensor:{uuid4()}",
-        f"event:{uuid4()}:c:dashboard:not-a-uuid:{_GROUP}",
-        f"event:{uuid4()}:c:dashboard:{uuid4()}",
+        f"event:{_FIXED_EVENT}:{_FIXED_RUN}",
+        f"event:{_FIXED_EVENT}:c:sensor:{_FIXED_RUN}",
+        f"event:{_FIXED_EVENT}:c:dashboard:not-a-uuid:{_GROUP}",
+        f"event:{_FIXED_EVENT}:c:dashboard:{_FIXED_RUN}",
     ],
 )
 async def test_run_key_of_another_form_writes_nothing(

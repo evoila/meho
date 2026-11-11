@@ -41,7 +41,7 @@ from meho_backplane.connectors.targets.ops import register_targets_registry_oper
 from meho_backplane.connectors.targets.update import register_targets_update_operation
 from meho_backplane.connectors.topology.ops import register_topology_graph_operations
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, GraphEdge, GraphNode, Tenant
+from meho_backplane.db.models import ApprovalRequest, AuditLog, GraphEdge, GraphNode, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import reset_dispatcher_caches
@@ -135,6 +135,32 @@ async def _approve_and_run(request_id: str) -> Any:
     return await resume_dispatch_after_approval(operator=approver, request=request)
 
 
+async def _assert_audit_names_requester_and_approver(request_id: str, op_id: str) -> None:
+    """The request names the token's person and the approver; the run's audit row links both."""
+    async with get_sessionmaker()() as session:
+        request = await session.get(ApprovalRequest, uuid.UUID(request_id))
+        assert request is not None
+        rows = list((await session.execute(select(AuditLog))).scalars().all())
+    assert request.principal_sub == "admin-1"
+    assert request.reviewed_by == "second-person"
+
+    # The run of the approved call has its own audit row. It names the
+    # approver, who ran it, and links back to the requester's row.
+    [run] = [
+        row
+        for row in rows
+        if row.method == "DISPATCH"
+        and row.payload.get("approval_request_id") == request_id
+        and row.id != request.request_audit_id
+    ]
+    assert run.path == op_id
+    assert run.operator_sub == "second-person"
+    assert request.request_audit_id is not None
+    assert run.parent_audit_id == request.request_audit_id
+    [requester_row] = [row for row in rows if row.id == request.request_audit_id]
+    assert requester_row.operator_sub == "admin-1"
+
+
 def _assert_waits(response: Any, op_id: str) -> str:
     assert response.status_code == 202, response.text
     body = response.json()
@@ -172,6 +198,7 @@ async def test_a_token_create_waits_and_runs_after_approval(client: TestClient) 
     result = await _approve_and_run(request_id)
     assert result.status == "ok", result
     assert (await _live_targets())["new-system"].port == 2222
+    await _assert_audit_names_requester_and_approver(request_id, "targets.register")
 
 
 async def test_a_token_create_that_fails_a_check_answers_at_once(client: TestClient) -> None:

@@ -858,7 +858,7 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
             monkeypatch.setattr(
                 approvals_module,
                 "check_fresh_approval_sign_in",
-                lambda operator, settings: ApprovalAuth(
+                lambda operator, settings, **_kwargs: ApprovalAuth(
                     channel="rest",
                     method="fresh_sign_in",
                     auth_time=int(time.time()),

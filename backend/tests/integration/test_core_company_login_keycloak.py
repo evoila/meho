@@ -62,7 +62,6 @@ import re
 import secrets
 import struct
 import time
-import warnings
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
@@ -75,7 +74,10 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from meho_backplane.auth.approval_sign_in import check_fresh_approval_sign_in
+from meho_backplane.auth.approval_sign_in import (
+    LEVEL_MISSING_REMEDIATION,
+    check_fresh_approval_sign_in,
+)
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.core.company_login import (
@@ -776,9 +778,10 @@ async def test_auto_redirect_off_works_while_the_company_login_does_not_answer(
     _login_form_shows(keycloak)
 
 
-def _start_approval_sign_in(browser: _Browser, challenge: str) -> httpx.Response:
+def _start_approval_sign_in(browser: _Browser, challenge: str, **extra: str) -> httpx.Response:
     """The request ``meho approvals approve`` sends: the approval client, PKCE,
-    ``prompt=login``, ``max_age=0`` and ``acr_values=meho-approve``."""
+    ``prompt=login``, ``max_age=0`` and ``acr_values=meho-approve``. *extra*
+    adds query parameters, such as ``kc_idp_hint``."""
     return browser.send(
         "GET",
         f"{browser.kc.base_url}/realms/meho/protocol/openid-connect/auth",
@@ -793,6 +796,7 @@ def _start_approval_sign_in(browser: _Browser, challenge: str) -> httpx.Response
             "prompt": "login",
             "max_age": "0",
             "acr_values": "meho-approve",
+            **extra,
         },
     )
 
@@ -1055,23 +1059,33 @@ def _company_link(page: str) -> str | None:
     return html.unescape(link.group(1)) if link else None
 
 
-def _approval_sign_in_through_the_company_login(kc: _Keycloak) -> dict[str, Any] | None:
-    """Start on the approval page and sign in with the company login's button.
+def _approval_sign_in_through_the_company_login(kc: _Keycloak, **extra: str) -> dict[str, Any]:
+    """Start on the approval page and sign in through the company login.
 
-    Returns the claims of the approval client's token, or ``None`` when the
-    approval page has no company login button.
+    Takes the company login's button on the approval page; the test fails
+    when the page has no such button. With ``kc_idp_hint`` in *extra*, a
+    redirect straight to the company login is followed too. Returns the
+    claims of the approval client's token.
     """
     verifier, challenge = _pkce()
     browser = _Browser(kc)
     seen: list[str] = []
     code = ""
     try:
-        page, _ = _follow_inside_the_realm(browser, _start_approval_sign_in(browser, challenge))
-        assert page.status_code == 200, page.headers.get("location")
-        link = _company_link(page.text)
-        if link is None:
-            return None
-        response = browser.send("GET", urljoin(str(page.url), link))
+        page, seen = _follow_inside_the_realm(
+            browser, _start_approval_sign_in(browser, challenge, **extra)
+        )
+        if page.is_redirect:
+            # Keycloak sent the person on to the company login at once.
+            response = page
+        else:
+            assert page.status_code == 200, page.headers.get("location")
+            link = _company_link(page.text)
+            if link is None:
+                pytest.fail(
+                    f"the approval page offers no company login button: {_page_text(page.text)}"
+                )
+            response = browser.send("GET", urljoin(str(page.url), link))
         for _ in range(25):
             if response.is_redirect:
                 location = urljoin(str(response.url), response.headers["location"])
@@ -1117,24 +1131,22 @@ def _approval_sign_in_through_the_company_login(kc: _Keycloak) -> dict[str, Any]
     return claims
 
 
+@pytest.mark.parametrize("extra", [{}, {"kc_idp_hint": "company"}], ids=["button", "kc_idp_hint"])
 async def test_a_company_login_from_the_approval_page_gets_no_approval_level(
-    keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
+    keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch, extra: dict[str, str]
 ) -> None:
     """The approval level comes only from the approval flow's own steps (#6281).
 
     A person who uses the company login's button on the approval page signs
     in, but the token has no approval level, so MEHO refuses the approve
-    under ``required`` with the usual message. A normal login keeps
-    ``acr`` ``"1"``.
+    under ``required`` with the usual message. The same holds when the
+    approval link asks for the company login with ``kc_idp_hint``. A
+    normal login keeps ``acr`` ``"1"``.
     """
     normal = _company_login(keycloak)
     assert normal["acr"] == "1"
 
-    claims = _approval_sign_in_through_the_company_login(keycloak)
-    if claims is None:
-        # Nothing to follow: the approval page does not offer the company login.
-        warnings.warn("the approval page offers no company login button", stacklevel=1)
-        return
+    claims = _approval_sign_in_through_the_company_login(keycloak, **extra)
     assert claims["azp"] == _APPROVAL_CLIENT
     assert claims["acr"] not in {"meho-approve", "meho-touch"}
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
@@ -1148,3 +1160,4 @@ async def test_a_company_login_from_the_approval_page_gets_no_approval_level(
         check_fresh_approval_sign_in(operator, get_settings())
     assert refused.value.status_code == 401
     assert "an approve needs a fresh approval sign-in" in str(refused.value.detail)
+    assert str(refused.value.detail).endswith(LEVEL_MISSING_REMEDIATION)

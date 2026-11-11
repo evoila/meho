@@ -51,6 +51,8 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations.approval_queue import (
+    ApprovalRoleFloorError,
+    RightsChangeApprovalError,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -816,8 +818,10 @@ async def test_no_secret_data_reaches_a_result_a_card_or_an_audit_row(
 ) -> None:
     """A recorded list with secretData and credentialData never comes out."""
     requester = _operator("kc-account-requester")
-    # A MEHO-SA-Operator may approve another person's high-risk change.
-    approver = _operator("kc-account-approver").model_copy(update={"self_approver": True})
+    # The change is in MEHO's own login realm, so another admin approves it.
+    approver = _operator("kc-account-approver").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN}
+    )
     remaining = [c for c in _CREDENTIALS if c["type"] != "otp"]
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
@@ -825,6 +829,7 @@ async def test_no_secret_data_reaches_a_result_a_card_or_an_audit_row(
         mock.get(_CREDENTIALS_PATH).mock(
             side_effect=[
                 httpx.Response(200, json=_CREDENTIALS),  # preview
+                httpx.Response(200, json=_CREDENTIALS),  # live card before the run
                 httpx.Response(200, json=_CREDENTIALS),  # run
                 httpx.Response(200, json=remaining),  # read back
             ]
@@ -876,3 +881,88 @@ async def test_no_secret_data_reaches_a_result_a_card_or_an_audit_row(
             assert sentinel not in blob, f"secret data appears in {label}"
         assert "secretData" not in blob, f"a secret field name appears in {label}"
         assert "credentialData" not in blob, f"a secret field name appears in {label}"
+
+
+# ---------------------------------------------------------------------------
+# A change of how a login signs in is a change of rights
+# ---------------------------------------------------------------------------
+
+_SIGN_IN_CHANGES = {
+    "keycloak.user.update": {"username": "jane.example", "changes": {"email": "j@example.com"}},
+    "keycloak.user.credential.delete": {"username": "jane.example", "credential_type": "otp"},
+}
+
+
+async def _park_sign_in_change(op_id: str, requester: Operator) -> uuid.UUID:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        _mount_user_lookup(mock)
+        mock.get(_CREDENTIALS_PATH).respond(200, json=_CREDENTIALS)
+        call = await call_operation(
+            requester,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": op_id,
+                "target": _TARGET_NAME,
+                "params": _SIGN_IN_CHANGES[op_id],
+            },
+        )
+    assert call["status"] == "awaiting_approval", call
+    return uuid.UUID(call["extras"]["approval_request_id"])
+
+
+async def _approve_as(request_id: uuid.UUID, approver: Operator) -> None:
+    async with get_sessionmaker()() as session:
+        await approve_request(session, request_id, operator=approver, params=None)
+        await session.commit()
+
+
+@pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
+async def test_a_sign_in_change_card_names_the_user_for_the_grant_check(
+    kc: KeycloakConnector, op_id: str
+) -> None:
+    request_id = await _park_sign_in_change(op_id, _operator())
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.rights_change is True
+    grant = row.proposed_effect["preview"]["grant"]
+    assert grant["user_id"] == _USER_UUID
+    assert grant["login_realm"] is True
+
+
+@pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
+async def test_the_user_a_sign_in_change_is_for_cannot_approve_it(
+    kc: KeycloakConnector, op_id: str
+) -> None:
+    request_id = await _park_sign_in_change(op_id, _operator())
+    affected = _operator(_USER_UUID).model_copy(update={"tenant_role": TenantRole.TENANT_ADMIN})
+
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve_as(request_id, affected)
+
+    assert "your own login" in exc.value.reason_text
+
+
+@pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
+async def test_a_self_approver_cannot_approve_their_own_sign_in_change(
+    kc: KeycloakConnector, op_id: str
+) -> None:
+    requester = _operator().model_copy(
+        update={"self_approver": True, "tenant_role": TenantRole.TENANT_ADMIN}
+    )
+    request_id = await _park_sign_in_change(op_id, requester)
+
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve_as(request_id, requester)
+
+
+@pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
+async def test_a_sign_in_change_needs_another_admin_not_a_self_approver(
+    kc: KeycloakConnector, op_id: str
+) -> None:
+    request_id = await _park_sign_in_change(op_id, _operator())
+    self_approver = _operator("kc-account-approver").model_copy(update={"self_approver": True})
+
+    with pytest.raises(ApprovalRoleFloorError):
+        await _approve_as(request_id, self_approver)

@@ -8,8 +8,8 @@ op_id                                         what the approver sees
 ============================================  ===================================================
 ``keycloak.role_mapping.client.assign``       user, client, role names, and the grant facts
 ``keycloak.role_mapping.client.remove``       user, client, role names
-``keycloak.user.update``                      user, and the new values of the fields to change
-``keycloak.user.credential.delete``           the credentials that will go and the ones that stay
+``keycloak.user.update``                      user, the new field values, and the grant facts
+``keycloak.user.credential.delete``           the credentials that go and stay, and grant facts
 ============================================  ===================================================
 
 The credential card reads the user's credentials when the request is
@@ -95,8 +95,13 @@ def _register() -> None:
         with_grant_facts("keycloak.role_mapping.client.assign", _client_role_preview("assign")),
     )
     register_preview_builder("keycloak.role_mapping.client.remove", _client_role_preview("remove"))
-    register_preview_builder("keycloak.user.update", _user_update_preview)
-    register_preview_builder("keycloak.user.credential.delete", _credential_delete_preview)
+    register_preview_builder(
+        "keycloak.user.update", with_grant_facts("keycloak.user.update", _user_update_preview)
+    )
+    register_preview_builder(
+        "keycloak.user.credential.delete",
+        with_grant_facts("keycloak.user.credential.delete", _credential_delete_preview),
+    )
 
 
 _register()

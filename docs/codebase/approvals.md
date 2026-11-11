@@ -1017,8 +1017,12 @@ login client (see the `client` block in [audit_query.md](audit_query.md)):
 ## Changes of rights: the login is never its own approver
 
 `operations/grant_approval.py` checks the Keycloak writes that change who
-has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign` and
-`keycloak.group.update_attributes`. The connector registers them
+has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign`,
+`keycloak.role_mapping.client.assign` and `keycloak.group.update_attributes`.
+It also checks two writes that change how a login signs in:
+`keycloak.user.update` (a new email or user name) and
+`keycloak.user.credential.delete` (a passkey or one-time code removed).
+The connector registers them
 (`connectors/keycloak/ops_write_grant.py`) and adds a `grant` block to the
 preview of the waiting request:
 

@@ -3,8 +3,12 @@
 
 """Park-time facts for the Keycloak writes that change who has rights.
 
-``keycloak.group.member.add``, ``keycloak.role_mapping.assign`` and
+``keycloak.group.member.add``, ``keycloak.role_mapping.assign``,
+``keycloak.role_mapping.client.assign`` and
 ``keycloak.group.update_attributes`` change what a login may do in MEHO.
+``keycloak.user.update`` (a new email or user name) and
+``keycloak.user.credential.delete`` (a passkey or one-time code removed)
+change how a login signs in, so they count as a change of rights too.
 When one of them waits for approval, :func:`with_grant_facts` adds a
 ``grant`` block to its preview:
 
@@ -62,6 +66,8 @@ GRANT_OPS: dict[str, tuple[tuple[str, ...], str | None, str | None]] = {
     "keycloak.group.member.add": (("user_id",), "group_id", "group_name"),
     "keycloak.role_mapping.assign": (("id",), None, None),
     "keycloak.role_mapping.client.assign": (("id",), None, None),
+    "keycloak.user.update": (("id",), None, None),
+    "keycloak.user.credential.delete": (("id",), None, None),
     "keycloak.group.update_attributes": ((), "id", "name"),
 }
 

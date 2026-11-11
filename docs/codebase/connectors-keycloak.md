@@ -643,6 +643,14 @@ Four writes in the group `account_write` (rows in
 `ops_write_account_schemas.py`, approval cards in
 `ops_write_account_preview.py`). All need approval.
 
+`client.assign`, `user.update` and `user.credential.delete` count as a
+change of rights (`GRANT_OPS` in `ops_write_grant.py`). `user.update` can
+change a person's email or user name, and `user.credential.delete` can
+remove their passkey or one-time code, so both change how a person signs
+in. For these three, the person the change is for never approves it. In
+MEHO's own login realm another admin must approve it; a person who may
+approve their own changes cannot approve these alone.
+
 - `keycloak.role_mapping.client.assign` and `.remove` (dangerous). Pass the
   user (`id`, or the exact `username`), `client_id` (the client's name, for
   example `realm-management`) and `roles` (role names of that client, for
@@ -653,8 +661,7 @@ Four writes in the group `account_write` (rows in
   has `not_applied`: the names whose state after the write is not the
   requested one, from a read of the user's roles on that client
   (`read_back_checked: false` and `not_applied: null` when that read fails;
-  the write itself ran). `assign` is also registered as a grant op
-  (`ops_write_grant.py`), so the person it is for never approves it.
+  the write itself ran).
 - `keycloak.user.update` (caution). The user is found by `id` or the current
   `username`; the new values go in `changes`, with only `username`, `email`,
   `firstName` and `lastName` allowed. The handler reads the user, puts the

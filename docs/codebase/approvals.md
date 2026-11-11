@@ -943,8 +943,8 @@ request field, header or command-line flag can set it.
 
 - **Web interface:** a click on **Approve**. The sign-in behind the
   console session must be recent (`FRESH_SIGN_IN_MAX_AGE_SECONDS`,
-  default 15 minutes) and must have asked for the password. A
-  `destructive` change needs a sign-in of its own, at most
+  default 15 minutes) and must have asked for the password or a
+  passkey. A `destructive` change needs a sign-in of its own, at most
   `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` old (default 5 minutes). When the
   sign-in is too old, the console offers **Sign in to approve**.
 - **Command line:** `meho approvals approve <id>` opens a browser
@@ -2998,6 +2998,15 @@ CLI) the token must prove it:
   flow `meho approval sign-in` has only the password form and the
   conditional one-time code step, so its tokens carry `"1"` or a mapped
   level. A token without `acr` is refused.
+- **A passkey sign-in counts (#6006).** A passkey (WebAuthn) sign-in is
+  not made from the session cookie, so Keycloak gives it `acr` `"1"` and
+  a new `auth_time`, like a password sign-in. The checks need no passkey
+  case: they never read `amr`. The password form of both the browser
+  flow and `meho approval sign-in` offers the passkey when the realm has
+  passkeys on. Only the browser flow has Keycloak's step that skips the
+  one-time code after a passkey, so on the command line a person with a
+  code still types it. `tests/test_approval_passkey_sign_in.py` pins a
+  passkey token on REST and in the console.
 - **One sign-in, several approvals.** Inside the window one sign-in may
   approve several requests. Each approval is still bound to one request
   id, so to its stored operation, parameters, target and version; the

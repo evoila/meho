@@ -34,7 +34,7 @@ the run. Now the assignee can fix the cause and try the step again.
 
 ## History
 
-`runbook_run_step_states.attempts` (JSON, migration 0157) lists every check
+`runbook_run_step_states.attempts` (JSON, migration 0158) lists every check
 attempt, oldest first: `at`, `passed` and `verify_response`. A retry adds
 an entry. No entry is replaced. `verify_response` still holds the latest
 result.

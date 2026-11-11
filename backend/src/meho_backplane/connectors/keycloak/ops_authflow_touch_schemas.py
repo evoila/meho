@@ -228,6 +228,13 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "true: this run added the 'amr' mapper to the client.",
         },
+        "amr_mapper_fixed": {
+            "type": "boolean",
+            "description": (
+                "true: the client had an 'amr' mapper that did not write the claim "
+                "into every token; this run turned those token settings on."
+            ),
+        },
         "redirect_default_copied": {
             "type": "boolean",
             "description": (
@@ -258,6 +265,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "flow_steps",
         "loa_map_changed",
         "amr_mapper_added",
+        "amr_mapper_fixed",
         "redirect_default_copied",
         "client_id",
         "client_uuid",
@@ -293,7 +301,8 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
             ),
             "preconditions": (
                 "The console client (default 'meho-web') must exist in the "
-                "target's managed realm. People who approve need a passkey."
+                "target's managed realm. The realm's passkey policy must ask for "
+                "user verification ('required'). People who approve need a passkey."
             ),
             "parameter_hints": {
                 "client_id": "Leave it out to use 'meho-web'.",
@@ -301,16 +310,19 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
             "output_shape": (
                 "``{realm, flow_alias, flow_id, flow_created, flow_steps: "
                 "[{level, step, requirement}], loa_map_changed, amr_mapper_added, "
-                "redirect_default_copied, client_id, client_uuid, browser_flow_id, "
-                "previous_browser_flow_id, binding_changed}``."
+                "amr_mapper_fixed, redirect_default_copied, client_id, client_uuid, "
+                "browser_flow_id, previous_browser_flow_id, binding_changed}``."
             ),
             "next_step": (
-                "All five change flags false: the realm already had everything. An "
+                "All six change flags false: the realm already had everything. An "
                 "error with 'other_steps' names the difference; a person fixes the "
                 "flow in the Keycloak admin console, or deletes it and runs again. "
                 "An error with 'loa_conflict' means the realm maps 'meho-touch' to "
-                "another level. A different browser flow on the client is replaced; "
-                "previous_browser_flow_id names it. The way back: keycloak.client.update with "
+                "another level. An error with 'verification_not_required' means the "
+                "realm's passkey policy does not ask for a PIN or fingerprint; a person "
+                "sets it to 'required' and runs again. A different browser flow on the "
+                "client is replaced; previous_browser_flow_id names it. The way back: "
+                "keycloak.client.update with "
                 '{"authenticationFlowBindingOverrides": {"browser": ""}}.'
             ),
         },

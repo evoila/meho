@@ -13,7 +13,10 @@ This op adds it with one governed request.
 What the op does, on the target's managed realm:
 
 1. Find the client (default ``meho-web``). No client: stop before anything
-   is written.
+   is written. The realm's passkey policy must ask for user verification
+   (``webAuthnPolicyPasswordlessUserVerificationRequirement`` is
+   ``required``). Otherwise a touch would pass without a PIN or fingerprint,
+   so the op stops before anything is written.
 2. Find the flow ``meho approval touch``.
 
    * It does not exist: check that this Keycloak has every step (Keycloak
@@ -32,7 +35,8 @@ What the op does, on the target's managed realm:
    ``meho-touch`` to another level stops the op; the flow is then made but
    not bound.
 4. Add the mapper ``amr`` (``oidc-amr-mapper``) to the client, unless it
-   has one.
+   has one. A mapper that does not write the claim into the ID token, the
+   access token and the token introspection gets those settings turned on.
 5. When the realm's browser flow sends people straight to the company login
    (a default on its Identity Provider Redirector step), give the redirect
    step of the touch flow the same default. Without it the console login
@@ -108,6 +112,8 @@ class KeycloakTouchFlowError(RuntimeError):
     with the name exists with another shape. ``loa_conflict``: the realm maps
     ``meho-touch`` to another level. ``check_failed``: something did not read
     back as written. ``flow_not_found``: the new flow cannot be found.
+    ``verification_not_required``: the realm's passkey policy does not ask
+    for user verification.
     """
 
     def __init__(self, code: str, message: str) -> None:
@@ -340,28 +346,91 @@ async def _ensure_loa_map(
     return True
 
 
+_POLICY_UV = "webAuthnPolicyPasswordlessUserVerificationRequirement"
+
+
+async def _check_verification(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
+) -> None:
+    """Stop before any write when the realm's passkey policy does not ask for user verification.
+
+    The touch step uses this policy. Without ``required`` a passkey can pass
+    without a PIN or fingerprint, and the touch would not prove the person.
+    """
+    realm_rep = await connector._get_admin_json(
+        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+    )
+    have = realm_rep.get(_POLICY_UV)
+    if have != "required":
+        raise KeycloakTouchFlowError(
+            "verification_not_required",
+            f"the realm's passkey policy has {_POLICY_UV} = {have!r}, not 'required', so a "
+            "touch could pass without a PIN or fingerprint. Set it to 'required' "
+            "(Authentication > Policies > Webauthn Passwordless Policy) and run again. "
+            "Nothing was changed.",
+        )
+
+
+def _amr_settings_ok(mapper: dict[str, Any]) -> bool:
+    config = mapper.get("config")
+    wanted: dict[str, str] = AMR_MAPPER["config"]
+    return isinstance(config, dict) and all(config.get(k) == v for k, v in wanted.items())
+
+
 async def _ensure_amr_mapper(
     connector: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
     realm: str,
     client_uuid: str,
-) -> bool:
-    """Add the ``amr`` mapper to the client unless it has one; whether it was added."""
+) -> tuple[bool, bool]:
+    """Give the client an ``amr`` mapper that writes into every token; ``(added, fixed)``.
+
+    A mapper that leaves the claim out of a token (``id.token.claim`` off, say)
+    gets the token settings turned on; it is then read again and checked.
+    """
     path = fill_path(
         _CLIENT_PROTOCOL_MAPPERS_PATH,
         {"realm": realm, "client-uuid": quote_segment(client_uuid)},
     )
-    mappers = await get_admin_list_strict(connector, target, path, operator=operator)
-    if any(
-        isinstance(m, dict) and m.get("protocolMapper") == AMR_MAPPER["protocolMapper"]
-        for m in mappers
-    ):
-        return False
+    mappers = [
+        m
+        for m in await get_admin_list_strict(connector, target, path, operator=operator)
+        if isinstance(m, dict) and m.get("protocolMapper") == AMR_MAPPER["protocolMapper"]
+    ]
+    if any(_amr_settings_ok(m) for m in mappers):
+        return False, False
+    if not mappers:
+        await connector._write_admin(
+            target,
+            "POST",
+            path,
+            operator=operator,
+            json=dict(AMR_MAPPER),
+            idempotent_conflict=False,
+        )
+        return True, False
+    mapper = mappers[0]
+    config = mapper.get("config")
+    merged = {**(config if isinstance(config, dict) else {}), **AMR_MAPPER["config"]}
+    mapper_path = f"{path}/{quote_segment(str(mapper['id']))}"
     await connector._write_admin(
-        target, "POST", path, operator=operator, json=dict(AMR_MAPPER), idempotent_conflict=False
+        target,
+        "PUT",
+        mapper_path,
+        operator=operator,
+        json={**mapper, "config": merged},
+        idempotent_conflict=False,
     )
-    return True
+    if not _amr_settings_ok(
+        await connector._get_admin_json(target, mapper_path, operator=operator)
+    ):
+        raise KeycloakTouchFlowError(
+            "check_failed",
+            "the client's 'amr' mapper does not read back with its token settings on. "
+            "The flow was not bound.",
+        )
+    return False, True
 
 
 async def _redirect_default(
@@ -546,9 +615,12 @@ async def keycloak_authflow_ensure_approval_touch(
         raise KeycloakTouchFlowError(
             "client_not_found", f"no client {client_id!r} in realm {realm!r}; nothing was changed"
         )
+    await _check_verification(self, operator, target, segment)
     flow_id, created, rows = await _ensure_flow(self, operator, target, segment)
     loa_changed = await _ensure_loa_map(self, operator, target, segment)
-    mapper_added = await _ensure_amr_mapper(self, operator, target, segment, client_uuid)
+    mapper_added, mapper_fixed = await _ensure_amr_mapper(
+        self, operator, target, segment, client_uuid
+    )
     redirect_copied = await _ensure_redirect(self, operator, target, segment, rows)
     client_path = fill_path(
         _CLIENT_PATH, {"realm": segment, "client-uuid": quote_segment(client_uuid)}
@@ -562,6 +634,7 @@ async def keycloak_authflow_ensure_approval_touch(
         "flow_steps": _listed(rows),
         "loa_map_changed": loa_changed,
         "amr_mapper_added": mapper_added,
+        "amr_mapper_fixed": mapper_fixed,
         "redirect_default_copied": redirect_copied,
         "client_id": client_id,
         "client_uuid": client_uuid,

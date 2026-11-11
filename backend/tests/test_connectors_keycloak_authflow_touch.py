@@ -18,6 +18,10 @@ What is proven:
   written; a missing client, or a Keycloak without a step of the flow (older
   than 26.4), stops it before anything is written; a realm
   that maps ``meho-touch`` to another level stops it before the bind;
+* a realm whose passkey policy does not ask for user verification stops the
+  op before anything is written;
+* an ``amr`` mapper that leaves the claim out of the ID token gets its token
+  settings turned on before the bind;
 * the binding keeps the client's other settings and is read back;
 * the op is ``caution`` with approval, a plain ``write`` on the feed, and
   waits for approval; its approval card names the client and the flow.
@@ -65,6 +69,7 @@ from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
 
 _OP = "keycloak.authflow.ensure_approval_touch"
+_POLICY_UV = "webAuthnPolicyPasswordlessUserVerificationRequirement"
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "kc-touch-test"
 _KC_HOST = "keycloak-touch.test.invalid"
@@ -174,13 +179,21 @@ async def _run(params: dict[str, Any]) -> dict[str, Any]:
 class FakeKeycloak:
     """Keeps flows, step settings, the realm and the client between requests."""
 
-    def __init__(self, *, client: dict[str, Any] | None, loa_map: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        client: dict[str, Any] | None,
+        loa_map: str | None = None,
+        verification: str | None = "required",
+    ) -> None:
         self.client = client
         self.mappers: list[dict[str, Any]] = [{"name": "tenant-id", "protocolMapper": "x"}]
         attributes = {"frontendUrl": ""}
         if loa_map is not None:
             attributes["acr.loa.map"] = loa_map
         self.realm: dict[str, Any] = {"realm": _REALM, "attributes": attributes}
+        if verification is not None:
+            self.realm[_POLICY_UV] = verification
         # alias -> {"id", "top", "steps": [step]}; a step is a dict with
         # "id", "provider" or "sub", "requirement", "config".
         self.flows: dict[str, dict[str, Any]] = {
@@ -199,6 +212,9 @@ class FakeKeycloak:
         mock.route(path=f"{_ADMIN}/clients/{_CLIENT_UUID}/protocol-mappers/models").mock(
             side_effect=self._mappers
         )
+        mock.route(
+            path__regex=rf"^{_ADMIN}/clients/{_CLIENT_UUID}/protocol-mappers/models/[^/]+$"
+        ).mock(side_effect=self._mapper)
         mock.route(path=f"{_ADMIN}/clients/{_CLIENT_UUID}").mock(side_effect=self._client)
         mock.route(path=_ADMIN).mock(side_effect=self._realm)
         mock.route(path=f"{_ADMIN}/authentication/flows").mock(side_effect=self._flows)
@@ -239,6 +255,14 @@ class FakeKeycloak:
             self.mappers.append({"id": self._new_id(), **self._log(request)})
             return httpx.Response(201)
         return httpx.Response(200, json=self.mappers)
+
+    def _mapper(self, request: httpx.Request) -> httpx.Response:
+        mapper_id = request.url.raw_path.decode().rsplit("/", 1)[1]
+        index = next(i for i, m in enumerate(self.mappers) if m.get("id") == mapper_id)
+        if request.method == "PUT":
+            self.mappers[index] = self._log(request)
+            return httpx.Response(204)
+        return httpx.Response(200, json=self.mappers[index])
 
     def _realm(self, request: httpx.Request) -> httpx.Response:
         if request.method == "PUT":
@@ -503,6 +527,7 @@ async def test_realm_without_the_flow_gets_all_of_it_and_a_second_run_changes_no
         "flow_created",
         "loa_map_changed",
         "amr_mapper_added",
+        "amr_mapper_fixed",
         "redirect_default_copied",
         "binding_changed",
     )
@@ -683,3 +708,88 @@ async def test_keycloak_without_a_step_of_the_flow_is_not_changed(kc: KeycloakCo
     assert "missing_step" in text
     assert "conditional-credential" in text
     assert fake.writes == []
+
+
+# ---------------------------------------------------------------------------
+# The passkey policy and the ``amr`` mapper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("verification", ["preferred", "discouraged", "not specified", None])
+async def test_passkey_policy_without_user_verification_stops_before_any_write(
+    kc: KeycloakConnector, verification: str | None
+) -> None:
+    """Without ``required`` a touch could pass without a PIN or fingerprint."""
+    fake = FakeKeycloak(client=_client(), verification=verification)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] != "ok"
+    text = json.dumps(result)
+    assert "verification_not_required" in text
+    assert _POLICY_UV in text
+    assert fake.writes == []
+    assert TOUCH_FLOW_ALIAS not in fake.flows
+
+
+def _amr_mapper_without_id_token() -> dict[str, Any]:
+    return {
+        "id": "amr-old",
+        "name": "amr",
+        "protocol": "openid-connect",
+        "protocolMapper": "oidc-amr-mapper",
+        "config": {
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+        },
+    }
+
+
+async def test_amr_mapper_without_the_id_token_claim_is_fixed_before_the_bind(
+    kc: KeycloakConnector,
+) -> None:
+    fake = FakeKeycloak(client=_client())
+    fake.mappers.append(_amr_mapper_without_id_token())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        first = await _run({})
+        writes_after_first = len(fake.writes)
+        second = await _run({})
+    assert first["status"] == "ok", first
+    assert first["result"]["amr_mapper_added"] is False
+    assert first["result"]["amr_mapper_fixed"] is True
+    amr = [m for m in fake.mappers if m.get("protocolMapper") == "oidc-amr-mapper"]
+    assert len(amr) == 1
+    assert amr[0]["id"] == "amr-old"
+    assert amr[0]["config"] == {
+        "id.token.claim": "true",
+        "access.token.claim": "true",
+        "introspection.token.claim": "true",
+        "userinfo.token.claim": "true",
+    }
+    assert ("PUT", f"{_ADMIN}/clients/{_CLIENT_UUID}/protocol-mappers/models/amr-old") in [
+        (m, p) for m, p, _ in fake.writes
+    ]
+    assert fake.writes[writes_after_first - 1][1] == f"{_ADMIN}/clients/{_CLIENT_UUID}"
+
+    assert second["status"] == "ok", second
+    assert second["result"]["amr_mapper_fixed"] is False
+    assert len(fake.writes) == writes_after_first
+
+
+async def test_amr_mapper_fix_that_does_not_read_back_is_not_bound(
+    kc: KeycloakConnector,
+) -> None:
+    fake = FakeKeycloak(client=_client())
+    fake.mappers.append(_amr_mapper_without_id_token())
+    path = f"{_ADMIN}/clients/{_CLIENT_UUID}/protocol-mappers/models/amr-old"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        # Keycloak accepts the PUT but keeps the old mapper.
+        mock.put(path).respond(204)
+        mock.get(path).respond(200, json=_amr_mapper_without_id_token())
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] != "ok"
+    assert "check_failed" in json.dumps(result)
+    assert fake.client == _client()

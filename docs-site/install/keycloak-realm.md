@@ -345,9 +345,15 @@ the operation below say so and change nothing.
 `meho admin keycloak bootstrap-clients` makes the flow with its
 settings and maps `meho-touch` to level 3. When the realm has the
 console client (`--web-client-id`, default `meho-web`), it also adds the
-`amr` mapper to it and binds the flow as its browser flow. The helper
+`amr` mapper to it, gives the flow the company login default of the
+realm's browser flow, and binds the flow as its browser flow. The helper
 does not make the console client. Without it, the helper says so; bind
 the flow by hand after you make the client.
+
+The helper and the operation below bind the flow only when the realm's
+**Webauthn Passwordless Policy** asks for user verification
+(**Required**, see the table at the end of this page). Otherwise a touch
+could pass without a PIN or a fingerprint. Set the policy and run again.
 
 By hand, in the Keycloak admin console:
 
@@ -392,6 +398,10 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch 
   hand, or delete it and run again.
 - The realm maps `meho-touch` to another level: MEHO stops before it
   binds the flow.
+- The realm's passkey policy does not ask for user verification: MEHO
+  stops and changes nothing.
+- `meho-web` has an `amr` mapper that does not write into the ID token:
+  MEHO turns its token settings on before it binds the flow.
 - The realm's browser flow sends people straight to the company login:
   MEHO gives the touch flow the same company login default before it
   binds the flow. So the console still goes straight to the company

@@ -82,14 +82,18 @@ func newFakeKeycloak() *fakeKeycloak {
 			// #912).
 			{ID: "scope-offline-access", Name: "offline_access"},
 		},
-		groups:      map[string]*groupRep{},
-		users:       map[string]*userRep{},
-		userGroups:  map[string][]string{},
-		passwords:   map[string]string{},
-		flows:       map[string]*fakeFlow{},
+		groups:     map[string]*groupRep{},
+		users:      map[string]*userRep{},
+		userGroups: map[string][]string{},
+		passwords:  map[string]string{},
+		// Keycloak always has the built-in browser flow.
+		flows:       map[string]*fakeFlow{"browser": {ID: "browser-flow", TopLevel: true}},
 		stepConfigs: map[string]map[string]any{},
-		realm:       map[string]any{"realm": "r", "attributes": map[string]any{"frontendUrl": ""}},
-		calls:       map[string]int{},
+		realm: map[string]any{
+			"realm": "r", "attributes": map[string]any{"frontendUrl": ""},
+			passkeyUVPolicy: "required",
+		},
+		calls: map[string]int{},
 	}
 }
 
@@ -146,13 +150,25 @@ func (f *fakeKeycloak) handleStepConfigs(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusOK, list)
 		return true
 	}
-	if id, ok := strings.CutPrefix(sub, "authentication/config/"); ok && r.Method == http.MethodGet {
+	if id, ok := strings.CutPrefix(sub, "authentication/config/"); ok {
 		config, found := f.stepConfigs[id]
-		if !found {
+		switch {
+		case !found:
 			http.NotFound(w, r)
-			return true
+		case r.Method == http.MethodGet:
+			writeJSON(w, http.StatusOK, config)
+		case r.Method == http.MethodPut:
+			f.calls["PUT /authentication/config/{id}"]++
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return true
+			}
+			f.stepConfigs[id] = body
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
 		}
-		writeJSON(w, http.StatusOK, config)
 		return true
 	}
 	rest, ok := strings.CutPrefix(sub, "authentication/executions/")

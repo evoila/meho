@@ -354,3 +354,188 @@ func TestBootstrap_TouchFlowNeedsEveryStep(t *testing.T) {
 		t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
 	}
 }
+
+// A realm whose passkey policy does not ask for user verification is
+// not changed: a touch there could pass without a PIN or a fingerprint.
+func TestBootstrap_TouchFlowNeedsUserVerification(t *testing.T) {
+	for _, policy := range []any{"preferred", "discouraged", "not specified", nil} {
+		t.Run(fmt.Sprint(policy), func(t *testing.T) {
+			fake := newFakeKeycloak()
+			if policy == nil {
+				delete(fake.realm, passkeyUVPolicy)
+			} else {
+				fake.realm[passkeyUVPolicy] = policy
+			}
+			console := seedConsoleClient(fake)
+
+			res, _, err := runBootstrapOnce(t, fake, fullOpts())
+			if err != nil {
+				t.Fatalf("Bootstrap: %v", err)
+			}
+			if _, ok := fake.flows[touchFlowAlias]; ok {
+				t.Error("the touch flow was made")
+			}
+			if fake.calls["PUT /realm"] != 0 || len(fake.clients[console.ID].AuthenticationFlowBindingOverrides) != 1 {
+				t.Error("the realm or the console client was changed")
+			}
+			if hasAMRMapper(fake, console.ID) {
+				t.Error("the console client got the amr mapper")
+			}
+			if !slices.ContainsFunc(res.MapperEventsLog, func(e string) bool {
+				return strings.HasPrefix(e, `[skip] login flow "meho approval touch" not made: the realm's passkey policy`)
+			}) {
+				t.Errorf("events miss the passkey policy line: %v", res.MapperEventsLog)
+			}
+		})
+	}
+}
+
+// seedBrowserRedirect gives the realm's browser flow a redirect step that
+// goes straight to the company login.
+func seedBrowserRedirect(fake *fakeKeycloak, provider string) {
+	fake.stepConfigs["browser-redirect"] = map[string]any{
+		"id": "browser-redirect", "alias": "meho-company-login-redirect",
+		"config": map[string]any{"defaultProvider": provider},
+	}
+	fake.flows["browser"].Steps = []*fakeFlowStep{
+		{ID: "cookie", Provider: "auth-cookie", Requirement: "ALTERNATIVE"},
+		{ID: "redirector", Provider: redirectorType, Requirement: "ALTERNATIVE", Config: "browser-redirect"},
+	}
+}
+
+// touchRedirectConfig returns the settings of the touch flow's redirect
+// step, or nil.
+func touchRedirectConfig(fake *fakeKeycloak) map[string]any {
+	for _, s := range fake.flowSteps(touchFlowAlias, 0) {
+		if s["providerId"] == redirectorType {
+			if id, _ := s["authenticationConfig"].(string); id != "" {
+				return fake.stepConfigs[id]
+			}
+		}
+	}
+	return nil
+}
+
+// With the company login redirect on, the console still goes straight
+// to the company login after the bind.
+func TestBootstrap_TouchFlowGetsTheCompanyLoginRedirect(t *testing.T) {
+	fake := newFakeKeycloak()
+	seedBrowserRedirect(fake, "company")
+	console := seedConsoleClient(fake)
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	got := touchRedirectConfig(fake)
+	if got == nil || got["alias"] != touchRedirectAlias ||
+		got["config"].(map[string]any)["defaultProvider"] != "company" {
+		t.Fatalf("touch flow redirect settings = %v, want %s going to company", got, touchRedirectAlias)
+	}
+	if fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"] != fake.flows[touchFlowAlias].ID {
+		t.Error("the console client is not bound to the touch flow")
+	}
+	want := `[updated] login flow "meho approval touch" goes straight to the company login "company", ` +
+		`like login flow "browser"`
+	if !slices.Contains(res.MapperEventsLog, want) {
+		t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
+	}
+
+	fake.calls = map[string]int{}
+	res, _, err = runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	if fake.calls["POST /authentication/executions/{id}/config"] != 0 || fake.calls["PUT /authentication/config/{id}"] != 0 {
+		t.Errorf("second run changed step settings: %v", fake.calls)
+	}
+	if slices.Contains(res.MapperEventsLog, want) {
+		t.Errorf("second run says it changed the redirect: %v", res.MapperEventsLog)
+	}
+}
+
+// A touch flow that goes to another company login gets the realm's one.
+func TestBootstrap_TouchFlowRedirectToAnotherCompanyLoginIsUpdated(t *testing.T) {
+	fake := newFakeKeycloak()
+	seedTouchFlow(fake)
+	seedBrowserRedirect(fake, "company")
+	seedConsoleClient(fake)
+	for _, s := range fake.flows[touchFlowAlias+" - sign-in"].Steps {
+		if s.Provider == redirectorType {
+			s.Config = "old"
+		}
+	}
+	fake.stepConfigs["old"] = map[string]any{
+		"id": "old", "alias": touchRedirectAlias, "config": map[string]any{"defaultProvider": "old-company"},
+	}
+
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if got := fake.stepConfigs["old"]["config"].(map[string]any)["defaultProvider"]; got != "company" {
+		t.Errorf("touch flow redirect goes to %v, want company", got)
+	}
+	if fake.calls["PUT /authentication/config/{id}"] != 1 {
+		t.Errorf("PUT of the step settings = %d, want 1", fake.calls["PUT /authentication/config/{id}"])
+	}
+}
+
+// A dry run says it would copy the redirect and changes nothing.
+func TestBootstrap_DryRunTouchFlowRedirect(t *testing.T) {
+	fake := newFakeKeycloak()
+	seedBrowserRedirect(fake, "company")
+	seedConsoleClient(fake)
+	opts := fullOpts()
+	opts.DryRun = true
+
+	res, _, err := runBootstrapOnce(t, fake, opts)
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	want := `[would update] login flow "meho approval touch" goes straight to the company login "company", ` +
+		`like login flow "browser"`
+	if !slices.Contains(res.MapperEventsLog, want) {
+		t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
+	}
+	if len(fake.stepConfigs) != 1 {
+		t.Errorf("a dry run changed step settings: %v", fake.stepConfigs)
+	}
+}
+
+// An amr mapper that leaves the claim out of the ID token gets its token
+// settings turned on before the bind.
+func TestBootstrap_AMRMapperWithoutIDTokenIsFixed(t *testing.T) {
+	fake := newFakeKeycloak()
+	console := seedConsoleClient(fake)
+	fake.mappers[console.ID] = []protocolMapperRep{{
+		ID: "amr-old", Name: "amr", Protocol: "openid-connect", ProtocolMapper: amrMapperType,
+		Config: map[string]string{
+			"id.token.claim": "false", "access.token.claim": "true", "userinfo.token.claim": "true",
+		},
+	}}
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	var amr []protocolMapperRep
+	for _, m := range fake.mappers[console.ID] {
+		if m.ProtocolMapper == amrMapperType {
+			amr = append(amr, m)
+		}
+	}
+	want := map[string]string{
+		"id.token.claim": "true", "access.token.claim": "true",
+		"introspection.token.claim": "true", "userinfo.token.claim": "true",
+	}
+	if len(amr) != 1 || amr[0].ID != "amr-old" || !maps.Equal(amr[0].Config, want) {
+		t.Errorf("amr mappers = %v, want amr-old with %v", amr, want)
+	}
+	if fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"] != fake.flows[touchFlowAlias].ID {
+		t.Error("the console client is not bound to the touch flow")
+	}
+	line := `[updated] mapper amr on client "meho-web" writes amr into every token`
+	if !slices.Contains(res.MapperEventsLog, line) {
+		t.Errorf("events miss %q: %v", line, res.MapperEventsLog)
+	}
+}

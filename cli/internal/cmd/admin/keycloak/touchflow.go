@@ -26,6 +26,12 @@ const (
 	touchLevel     = 3
 	loaMapKey      = "acr.loa.map"
 	amrMapperType  = "oidc-amr-mapper"
+	// The realm's passkey policy must ask for user verification, or a
+	// touch passes without a PIN or a fingerprint.
+	passkeyUVPolicy = "webAuthnPolicyPasswordlessUserVerificationRequirement"
+	redirectorType  = "identity-provider-redirector"
+	// The name core/company_login.py gives the touch flow's redirect settings.
+	touchRedirectAlias = "meho-company-login-redirect-touch"
 )
 
 // touchStep is one step of the touch flow, in the order Keycloak lists
@@ -101,9 +107,21 @@ func amrMapper() protocolMapperRep {
 
 // reconcileTouch makes the touch flow when the realm lacks it, maps
 // meho-touch to level 3, and binds the flow to the console client with
-// the `amr` mapper. A flow with another shape, or a realm that maps
-// meho-touch to another level, is kept as it is and no client is bound.
+// the `amr` mapper and the company login default of the realm's browser
+// flow. A flow with another shape, or a realm that maps meho-touch to
+// another level, is kept as it is and no client is bound. A realm whose
+// passkey policy does not ask for user verification is not changed.
 func reconcileTouch(ctx context.Context, c *adminClient, webClientID string) ([]string, error) {
+	realm, err := readRealm(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	if have, _ := realm[passkeyUVPolicy].(string); have != "required" {
+		return []string{fmt.Sprintf(
+			"[skip] login flow %q not made: the realm's passkey policy has %s = %q, not \"required\", "+
+				"so a touch could pass without a PIN or fingerprint; set it and run again",
+			touchFlowAlias, passkeyUVPolicy, have)}, nil
+	}
 	flowID, events, err := reconcileTouchFlow(ctx, c)
 	if err != nil || flowID == "" {
 		return events, err
@@ -337,16 +355,9 @@ func makeTouchFlow(ctx context.Context, c *adminClient) (string, []string, error
 // the names it maps already. ok is false when the realm maps meho-touch
 // to another level: then nothing is changed and no client is bound.
 func reconcileTouchLevel(ctx context.Context, c *adminClient) ([]string, bool, error) {
-	status, body, err := c.do(ctx, http.MethodGet, "", nil)
+	realm, err := readRealm(ctx, c)
 	if err != nil {
 		return nil, false, err
-	}
-	if status != http.StatusOK {
-		return nil, false, &errKeycloakAPI{method: http.MethodGet, url: "realm", statusCode: status, body: string(body)}
-	}
-	var realm map[string]any
-	if err := json.Unmarshal(body, &realm); err != nil {
-		return nil, false, fmt.Errorf("decode the realm: %w", err)
 	}
 	attributes, _ := realm["attributes"].(map[string]any)
 	if attributes == nil {
@@ -374,7 +385,7 @@ func reconcileTouchLevel(ctx context.Context, c *adminClient) ([]string, bool, e
 	}
 	attributes[loaMapKey] = string(text)
 	realm["attributes"] = attributes
-	status, body, err = c.do(ctx, http.MethodPut, "", realm)
+	status, body, err := c.do(ctx, http.MethodPut, "", realm)
 	if err != nil {
 		return nil, false, err
 	}
@@ -396,20 +407,14 @@ func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID string)
 		return []string{fmt.Sprintf(
 			"[skip] console client %q not found; bind it to login flow %q by hand", clientID, touchFlowAlias)}, nil
 	}
-	var events []string
-	mappers, err := c.listClientMappers(ctx, client.ID)
+	events, err := reconcileAMRMapper(ctx, c, client.ID, clientID)
 	if err != nil {
-		return nil, err
+		return events, err
 	}
-	hasAMR := false
-	for _, m := range mappers {
-		hasAMR = hasAMR || m.ProtocolMapper == amrMapperType
-	}
-	if !hasAMR {
-		if err := c.createClientMapper(ctx, client.ID, amrMapper()); err != nil {
-			return nil, err
-		}
-		events = append(events, fmt.Sprintf("[added] mapper amr on client %q", clientID))
+	redirectEvents, err := copyTouchRedirect(ctx, c, flowID)
+	events = append(events, redirectEvents...)
+	if err != nil {
+		return events, err
 	}
 	if client.AuthenticationFlowBindingOverrides["browser"] == flowID {
 		return append(events, fmt.Sprintf("[skip] client %q uses login flow %q", clientID, touchFlowAlias)), nil
@@ -424,4 +429,196 @@ func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID string)
 		return nil, err
 	}
 	return append(events, fmt.Sprintf("[updated] client %q uses login flow %q", clientID, touchFlowAlias)), nil
+}
+
+func readRealm(ctx context.Context, c *adminClient) (map[string]any, error) {
+	status, body, err := c.do(ctx, http.MethodGet, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, &errKeycloakAPI{method: http.MethodGet, url: "realm", statusCode: status, body: string(body)}
+	}
+	var realm map[string]any
+	if err := json.Unmarshal(body, &realm); err != nil {
+		return nil, fmt.Errorf("decode the realm: %w", err)
+	}
+	return realm, nil
+}
+
+// amrMapperOK says whether m writes `amr` into every token the mapper
+// of the bootstrap writes it into.
+func amrMapperOK(m protocolMapperRep) bool {
+	for k, v := range amrMapper().Config {
+		if m.Config[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// reconcileAMRMapper gives the console client an `amr` mapper that writes
+// into the ID token, the access token and the introspection. A mapper
+// with one of those off gets them turned on, and is read back.
+func reconcileAMRMapper(ctx context.Context, c *adminClient, clientUUID, clientID string) ([]string, error) {
+	mappers, err := c.listClientMappers(ctx, clientUUID)
+	if err != nil {
+		return nil, err
+	}
+	var amr []protocolMapperRep
+	for _, m := range mappers {
+		if m.ProtocolMapper == amrMapperType {
+			amr = append(amr, m)
+		}
+	}
+	if slices.ContainsFunc(amr, amrMapperOK) {
+		return nil, nil
+	}
+	if len(amr) == 0 {
+		if err := c.createClientMapper(ctx, clientUUID, amrMapper()); err != nil {
+			return nil, err
+		}
+		return []string{fmt.Sprintf("[added] mapper amr on client %q", clientID)}, nil
+	}
+	fixed := amr[0]
+	fixed.Config = maps.Clone(fixed.Config)
+	if fixed.Config == nil {
+		fixed.Config = map[string]string{}
+	}
+	maps.Copy(fixed.Config, amrMapper().Config)
+	if err := c.updateClientMapper(ctx, clientUUID, fixed.ID, fixed); err != nil {
+		return nil, err
+	}
+	event := fmt.Sprintf("[updated] mapper %s on client %q writes amr into every token", fixed.Name, clientID)
+	if c.dryRun {
+		return []string{event}, nil
+	}
+	if mappers, err = c.listClientMappers(ctx, clientUUID); err != nil {
+		return nil, err
+	}
+	if !slices.ContainsFunc(mappers, func(m protocolMapperRep) bool { return m.ID == fixed.ID && amrMapperOK(m) }) {
+		return nil, fmt.Errorf("mapper %s on client %q does not read back with its token settings on; "+
+			"the client is not bound to login flow %q", fixed.Name, clientID, touchFlowAlias)
+	}
+	return []string{event}, nil
+}
+
+// readAuthConfig reads the settings of a flow step by their id.
+func readAuthConfig(ctx context.Context, c *adminClient, id string) (map[string]any, error) {
+	body, err := c.flowCall(ctx, http.MethodGet, "authentication/config/"+url.PathEscape(id), nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	var rep map[string]any
+	if err := json.Unmarshal(body, &rep); err != nil {
+		return nil, fmt.Errorf("decode the step settings %q: %w", id, err)
+	}
+	return rep, nil
+}
+
+// redirectDefault returns the redirect step of steps, its settings, and
+// their company login default ("" when there is none).
+func redirectDefault(ctx context.Context, c *adminClient, steps []map[string]any) (
+	map[string]any, map[string]any, string, error,
+) {
+	i := slices.IndexFunc(steps, func(s map[string]any) bool { return s["providerId"] == redirectorType })
+	if i < 0 {
+		return nil, nil, "", nil
+	}
+	configID, _ := steps[i]["authenticationConfig"].(string)
+	if configID == "" {
+		return steps[i], nil, "", nil
+	}
+	rep, err := readAuthConfig(ctx, c, configID)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	config, _ := rep["config"].(map[string]any)
+	provider, _ := config["defaultProvider"].(string)
+	return steps[i], rep, provider, nil
+}
+
+// copyTouchRedirect gives the touch flow's redirect step the company
+// login default of the realm's browser flow. Without it, binding the
+// flow would stop the console from going straight to the company login.
+// The chart's setup step does the same at each upgrade
+// (backend/src/meho_backplane/core/company_login.py).
+func copyTouchRedirect(ctx context.Context, c *adminClient, flowID string) ([]string, error) {
+	realm, err := readRealm(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	browser, _ := realm["browserFlow"].(string)
+	if browser == "" {
+		browser = "browser"
+	}
+	if browser == touchFlowAlias {
+		return nil, nil
+	}
+	body, err := c.flowCall(ctx, http.MethodGet, flowExecutionsPath(browser), nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	var browserSteps []map[string]any
+	if err := json.Unmarshal(body, &browserSteps); err != nil {
+		return nil, fmt.Errorf("decode the steps of login flow %q: %w", browser, err)
+	}
+	_, _, wanted, err := redirectDefault(ctx, c, browserSteps)
+	if err != nil || wanted == "" {
+		return nil, err
+	}
+	event := fmt.Sprintf("[updated] login flow %q goes straight to the company login %q, like login flow %q",
+		touchFlowAlias, wanted, browser)
+	if c.dryRun && flowID == dryRunNewID {
+		return []string{event}, nil
+	}
+	steps, err := readTouchSteps(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	step, rep, have, err := redirectDefault(ctx, c, steps)
+	if err != nil {
+		return nil, err
+	}
+	if step == nil {
+		return nil, fmt.Errorf("login flow %q has no %s step", touchFlowAlias, redirectorType)
+	}
+	if have == wanted {
+		return nil, nil
+	}
+	if rep != nil {
+		config, _ := rep["config"].(map[string]any)
+		config = maps.Clone(config)
+		if config == nil {
+			config = map[string]any{}
+		}
+		config["defaultProvider"] = wanted
+		rep["config"] = config
+		id, _ := rep["id"].(string)
+		if _, err := c.flowCall(ctx, http.MethodPut,
+			"authentication/config/"+url.PathEscape(id), rep, http.StatusNoContent); err != nil {
+			return nil, err
+		}
+	} else {
+		stepID, _ := step["id"].(string)
+		config := map[string]any{"alias": touchRedirectAlias, "config": map[string]string{"defaultProvider": wanted}}
+		if _, err := c.flowCall(ctx, http.MethodPost,
+			"authentication/executions/"+url.PathEscape(stepID)+"/config", config, http.StatusCreated); err != nil {
+			return nil, err
+		}
+	}
+	if c.dryRun {
+		return []string{event}, nil
+	}
+	if steps, err = readTouchSteps(ctx, c); err != nil {
+		return nil, err
+	}
+	if _, _, have, err = redirectDefault(ctx, c, steps); err != nil {
+		return nil, err
+	}
+	if have != wanted {
+		return nil, fmt.Errorf("the company login default of login flow %q does not read back; "+
+			"the console client is not bound to it", touchFlowAlias)
+	}
+	return []string{event}, nil
 }

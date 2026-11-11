@@ -2478,13 +2478,19 @@ asks for the touch level; nothing in the backplane reads it yet.
   waits for approval). A customer's own Keycloak gets it from
   `meho admin keycloak bootstrap-clients`
   (`cli/internal/cmd/admin/keycloak/touchflow.go`). The three keep the
-  same flow; tests compare each with the realm file.
+  same flow; tests compare each with the realm file. The operation and
+  the CLI bind the flow only when the realm's passkey policy asks for
+  user verification (`webAuthnPolicyPasswordlessUserVerificationRequirement`
+  is `required`): otherwise a touch could pass without a PIN or a
+  fingerprint. They also turn on the token settings of an `amr` mapper
+  that leaves the claim out of the ID token.
 * **Company login:** the realm stage sets the redirect default of the
   company login on the realm's browser flow and on `meho approval
   touch` (`core/company_login.py`), so the console still goes straight
   to the company login when `autoRedirect` is on. The operation
-  `keycloak.authflow.ensure_approval_touch` copies that default from the
-  realm's browser flow onto the touch flow before it binds `meho-web`,
+  `keycloak.authflow.ensure_approval_touch` and `meho admin keycloak
+  bootstrap-clients` copy that default from the
+  realm's browser flow onto the touch flow before they bind `meho-web`,
   so a running realm keeps the redirect before the next upgrade too.
 * **Tests:** `tests/test_core_keycloak_realm.py` (the file),
   `tests/test_connectors_keycloak_authflow_touch.py` (the operation),

@@ -917,7 +917,10 @@ file gives a new one: the login flow `meho approval touch` with level 1
 time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's managed realm:
 
 1. Find the client. Missing: stop with `client_not_found`, nothing
-   written.
+   written. The realm's passkey policy must ask for user verification
+   (`webAuthnPolicyPasswordlessUserVerificationRequirement` is
+   `required`); otherwise a touch could pass without a PIN or fingerprint,
+   so the op stops with `verification_not_required`, nothing written.
 2. Find the flow. Missing: check that the Keycloak has every step
    (`GET .../authentication/authenticator-providers`; Keycloak 26.4 added
    `conditional-credential`), else stop with `missing_step` before any
@@ -934,7 +937,9 @@ time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's
    `merge_representation`, read back). Mapped to another level: stop
    with `loa_conflict` before the bind.
 4. Add the `amr` mapper (`oidc-amr-mapper`) to the client unless it has
-   one.
+   one. A mapper there that leaves the claim out of the ID token, the
+   access token or the introspection gets those settings turned on (a
+   `PUT` of that mapper, read back; `check_failed` otherwise).
 5. When the realm's browser flow has a company login default on its
    `identity-provider-redirector` step, give the touch flow's redirector
    the same `defaultProvider` (new config alias
@@ -947,7 +952,7 @@ time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's
    is replaced; `previous_browser_flow_id` names it.
 
 The result is `{realm, flow_alias, flow_id, flow_created, flow_steps,
-loa_map_changed, amr_mapper_added, redirect_default_copied, client_id, client_uuid,
+loa_map_changed, amr_mapper_added, amr_mapper_fixed, redirect_default_copied, client_id, client_uuid,
 browser_flow_id, previous_browser_flow_id, binding_changed}`. Errors
 raise `KeycloakTouchFlowError` with a stable `code`. A test keeps the
 op's flow equal to the realm file's. The approval card names the realm,

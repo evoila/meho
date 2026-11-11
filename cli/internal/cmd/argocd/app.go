@@ -60,9 +60,9 @@ func newAppListCmd() *cobra.Command {
 			"envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho argocd app list --target rdc-argocd\n" +
-			"  meho argocd app list --target rdc-argocd --project platform --project apps\n" +
-			"  meho argocd app list --target rdc-argocd --selector team=payments --json | jq '.result.items[].metadata.name'",
+		Example: "  meho argocd app list --target argocd-lab\n" +
+			"  meho argocd app list --target argocd-lab --project platform --project apps\n" +
+			"  meho argocd app list --target argocd-lab --selector team=payments --json | jq '.result.items[].metadata.name'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -163,8 +163,8 @@ func newAppGetCmd() *cobra.Command {
 			"lookup to one AppProject.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho argocd app get --target rdc-argocd --name platform-bootstrap\n" +
-			"  meho argocd app get --target rdc-argocd --name platform-bootstrap --json | jq '.result.status'",
+		Example: "  meho argocd app get --target argocd-lab --name platform-bootstrap\n" +
+			"  meho argocd app get --target argocd-lab --name platform-bootstrap --json | jq '.result.status'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -255,8 +255,8 @@ func newAppDiffCmd() *cobra.Command {
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho argocd app diff --target rdc-argocd --name platform-bootstrap\n" +
-			"  meho argocd app diff --target rdc-argocd --name platform-bootstrap --json | jq '.result.items'",
+		Example: "  meho argocd app diff --target argocd-lab --name platform-bootstrap\n" +
+			"  meho argocd app diff --target argocd-lab --name platform-bootstrap --json | jq '.result.items'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -361,8 +361,8 @@ func newAppResourceTreeCmd() *cobra.Command {
 			"envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho argocd app resource-tree --target rdc-argocd --name platform-bootstrap\n" +
-			"  meho argocd app resource-tree --target rdc-argocd --name platform-bootstrap --json | jq '.result.nodes'",
+		Example: "  meho argocd app resource-tree --target argocd-lab --name platform-bootstrap\n" +
+			"  meho argocd app resource-tree --target argocd-lab --name platform-bootstrap --json | jq '.result.nodes'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

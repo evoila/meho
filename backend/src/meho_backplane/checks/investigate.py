@@ -148,6 +148,7 @@ from meho_backplane.agent.run import BudgetExceededError
 from meho_backplane.auth.agent_token import AgentTokenError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.checks.assertions import CheckState
+from meho_backplane.checks.events import publish_dashboard_changed, target_name
 from meho_backplane.checks.notify import (
     DashboardNotice,
     FindingNotice,
@@ -497,6 +498,11 @@ async def _process_transition(
             _schedule_investigation(
                 tenant_id=tenant_id, dashboard=claim.dashboard, members=claim.non_green
             )
+        else:
+            # #6180: a recovery, or a change with no failing member. A worsening
+            # edge with failing members publishes one event per cause group in
+            # ``_investigate_group`` instead.
+            await _publish_dashboard_event(tenant_id, claim.dashboard)
         schedule_dashboard_notification(claim.notice)
     for notice in member_notices:
         schedule_dashboard_notification(notice)
@@ -555,7 +561,7 @@ async def _claim_dashboard_transition(
         current = fold([e for _, _, e in evaluations])
         previous_memo = dashboard.last_rollup_state
         previous = previous_memo or "ok"
-        worsening = _is_worsening(previous, current)
+        worsening = is_worsening(previous, current)
         dashboard_snapshot = _dashboard_snapshot(dashboard, previous, current)
         non_green = [
             _member_snapshot(s, ev)
@@ -622,7 +628,7 @@ async def _claim_member_changes(
     * the memo was already set -- a ``NULL`` memo (a link row from before
       migration 0116) is recorded silently, so an upgrade never mails for
       problems that are already visible;
-    * the edge is worsening (:func:`_is_worsening`): ``ok`` / ``skip`` ->
+    * the edge is worsening (:func:`is_worsening`): ``ok`` / ``skip`` ->
       ``degraded`` / ``critical``, or ``degraded`` -> ``critical``. A member
       recovering while the Dashboard stays non-green is memoised but not
       mailed (#5068 boundary).
@@ -639,7 +645,7 @@ async def _claim_member_changes(
         if current == previous:
             continue
         won = await _claim_member_state(session, link, expected=previous, new=current)
-        if not won or previous is None or not _is_worsening(previous, current):
+        if not won or previous is None or not is_worsening(previous, current):
             continue
         changes.append(
             MemberChange(
@@ -934,7 +940,7 @@ def _finding_notice(
     )
 
 
-def _is_worsening(previous: str, current: str) -> bool:
+def is_worsening(previous: str, current: str) -> bool:
     """Return ``True`` iff *current* is a strictly worse non-green state.
 
     Fires on ``ok``/``skip`` -> ``degraded``/``critical`` and ``degraded`` ->
@@ -945,6 +951,51 @@ def _is_worsening(previous: str, current: str) -> bool:
         "degraded",
         "critical",
     )
+
+
+async def _publish_dashboard_event(
+    tenant_id: uuid.UUID,
+    dashboard: _DashboardSnapshot,
+    *,
+    group: _CauseGroup | None = None,
+    known_noise: bool = False,
+) -> None:
+    """Publish one ``check.dashboard.changed`` event when the switch is on (#6180).
+
+    *group* set: one cause group of a worsening edge (``worsening: true``).
+    *group* ``None``: any other claimed edge (``worsening: false``, no cause
+    group). Never raises, so a failed publish cannot stop the investigator or
+    the notifier that run beside it.
+    """
+    if not get_settings().checks_agent_events:
+        return
+    try:
+        await publish_dashboard_changed(
+            tenant_id=tenant_id,
+            dashboard_id=dashboard.dashboard_id,
+            dashboard_name=dashboard.name,
+            previous_state=dashboard.previous_state,
+            state=dashboard.current_state,
+            worsening=group is not None,
+            group_key=group.key if group is not None else None,
+            members=[
+                {
+                    "sensor_id": str(member.sensor_id),
+                    "name": member.name,
+                    "state": member.effective_state,
+                    "target": target_name(member.target),
+                }
+                for member in (group.members if group is not None else ())
+            ],
+            known_noise=known_noise,
+        )
+    except Exception:
+        _log().warning(
+            "checks_dashboard_event_failed",
+            dashboard_id=str(dashboard.dashboard_id),
+            tenant_id=str(tenant_id),
+            exc_info=True,
+        )
 
 
 def _schedule_investigation(
@@ -1208,7 +1259,9 @@ async def _investigate_group(
     work_ref = f"{_WORK_REF_PREFIX}:{dashboard.dashboard_id.hex[:8]}:{dashboard.slug}:{group_key}"
     memory = MemoryService()
     try:
-        if await _is_suppressed(memory, operator, group_key):
+        suppressed = await _is_suppressed(memory, operator, group_key)
+        await _publish_dashboard_event(tenant_id, dashboard, group=group, known_noise=suppressed)
+        if suppressed:
             _log().info(
                 "checks_investigation_suppressed",
                 work_ref=work_ref,

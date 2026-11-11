@@ -112,7 +112,7 @@ func TestGroupWriteOpsDispatchCanonicalOpIDs(t *testing.T) {
 		"keycloak.group.member.remove",
 	}
 	for _, opID := range writeOps {
-		if _, err := dispatchOp(context.Background(), srv.URL, opID, "rdc-keycloak", nil); err != nil {
+		if _, err := dispatchOp(context.Background(), srv.URL, opID, "keycloak-lab", nil); err != nil {
 			t.Fatalf("dispatchOp %s: %v", opID, err)
 		}
 	}
@@ -145,7 +145,7 @@ func TestGroupCreateForwardsAttributes(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{
-		"--target", "rdc-keycloak",
+		"--target", "keycloak-lab",
 		"--name", "role-tenant-2",
 		"--attribute", "tenant_id=t-2",
 		"--attribute", "tenant_role=admin",
@@ -192,7 +192,7 @@ func TestGroupListForwardsAttributesFlag(t *testing.T) {
 	cmd := newGroupListCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--target", "rdc-keycloak", "--attributes", "--backplane", srv.URL})
+	cmd.SetArgs([]string{"--target", "keycloak-lab", "--attributes", "--backplane", srv.URL})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestGroupMemberAddForwardsRefs(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{
-		"--target", "rdc-keycloak",
+		"--target", "keycloak-lab",
 		"--group-name", "role-tenant",
 		"--username", "operator-a",
 		"--backplane", srv.URL,
@@ -253,7 +253,7 @@ func TestGroupMemberAddRequiresGroupAndUser(t *testing.T) {
 	cmd := newGroupMemberAddCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--target", "rdc-keycloak", "--backplane", "https://x.test"})
+	cmd.SetArgs([]string{"--target", "keycloak-lab", "--backplane", "https://x.test"})
 	if err := cmd.Execute(); err == nil {
 		t.Errorf("member add with no group/user ref should error")
 	}

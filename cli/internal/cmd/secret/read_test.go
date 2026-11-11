@@ -114,7 +114,7 @@ func TestSecretRead(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
 	cmd.SetArgs([]string{
-		"--target", "rdc-vault", "--field", field,
+		"--target", "vault-lab", "--field", field,
 		"--backplane", srv.URL, "secret", "app/db",
 	})
 	if err := cmd.Execute(); err != nil {
@@ -133,8 +133,8 @@ func TestSecretRead(t *testing.T) {
 		t.Errorf("op_id: got %q want %q", captured.OpID, opKVRead)
 	}
 	// The target slug rides in the standard {"name": …} dict.
-	if captured.Target == nil || captured.Target["name"] != "rdc-vault" {
-		t.Errorf("target should carry name=rdc-vault; got %v", captured.Target)
+	if captured.Target == nil || captured.Target["name"] != "vault-lab" {
+		t.Errorf("target should carry name=vault-lab; got %v", captured.Target)
 	}
 	// mount + path cross the wire; --field is client-side only.
 	if captured.Params["mount"] != "secret" || captured.Params["path"] != "app/db" {

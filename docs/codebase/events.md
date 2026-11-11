@@ -236,6 +236,37 @@ each other — the scheduler's lock holder does not block the drain's
 claim, and vice versa. The ASCII spellings make the keys easy to
 recognise in `pg_locks` during operator triage.
 
+## Check events (#6180)
+
+With `CHECKS_AGENT_EVENTS` on (default off), the checks path writes two kinds
+of event. With the switch off, no `check.*` row is ever written. The code is in
+`checks/events.py`. The matcher compares the trigger filter with the payload
+only, so every payload names its own event in `event` and its producer in
+`source.kind`. No raw evidence is in a payload.
+
+- `check.sensor.changed`: one event when a Sensor's confirmed state changes.
+  `checks/runner.py` `_persist_outcome` adds the row in the same transaction as
+  `last_state`. A reading held by the re-check window (`retry_times`) writes
+  none. Payload: `event`, `source {kind: "sensor", id, name}`, `tenant_id`,
+  `previous_state`, `state`, `severity`, `worsening`, `target` (the name only),
+  `connector_id`, `op_id`, `evaluated_at`, `coalesce_key`
+  (`sensor:<target name>`, or `sensor:<sensor id>` without a target).
+- `check.dashboard.changed`: written in its own transaction after the
+  Dashboard claim. A worsening edge with failing members gives one event per
+  cause group, also when the group is known noise (`known_noise: true`). Any
+  other claimed edge (a recovery, or no failing member) gives one event with
+  `worsening: false` and `cause_group: null`. Payload: `event`,
+  `source {kind: "dashboard", id, name}`, `tenant_id`, `previous_state`,
+  `state`, `worsening`, `cause_group {key, members: [{sensor_id, name, state,
+  target}]}`, `known_noise`, `coalesce_key`
+  (`dashboard:<dashboard id>:<group key>`, or `dashboard:<dashboard id>`).
+
+A filter such as `{"source": {"kind": "sensor"}}` matches a Sensor event and no
+webhook or `agent_run.completed` event. An input-less event trigger on a
+`check.*` event gets a prompt with the Dashboard or Sensor name, the change and
+the Sensor names (`events/normalizers/checks_events.py`), inside the
+untrusted-text wrapper. The old investigator call is unchanged by this switch.
+
 ## The subscription matcher
 
 `backend/src/meho_backplane/events/matcher.py` is the junction between a
@@ -669,6 +700,8 @@ All three are set through env vars (defaults shown in parens):
   the actual wake-up shorter than this interval; this bounds the
   *worst-case* poll latency when no producers fire and no listeners
   are connected.
+- `CHECKS_AGENT_EVENTS` (`false`) — publish `check.sensor.changed` and
+  `check.dashboard.changed` events (see "Check events").
 - `EVENTS_INGEST_RATE_PER_MINUTE` (`60`, `0` disables) — the default
   per-source fixed-window cap for the inbound ingest endpoint (#2881). A
   source overrides it via `event_source.extras["rate_per_minute"]`

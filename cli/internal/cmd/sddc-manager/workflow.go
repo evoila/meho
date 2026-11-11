@@ -37,8 +37,8 @@ func newWorkflowListCmd() *cobra.Command {
 		Long: "list dispatches sddc.task.list against connector_id=\"sddc-rest-9.0\".\n" +
 			"Pass --status to filter (Successful, Failed, In_Progress, Pending, Cancelled).\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho sddc-manager workflow list --target rdc-sddc-manager\n" +
-			"  meho sddc-manager workflow list --status In_Progress --target rdc-sddc-manager",
+		Example: "  meho sddc-manager workflow list --target sddc-manager-lab\n" +
+			"  meho sddc-manager workflow list --status In_Progress --target sddc-manager-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

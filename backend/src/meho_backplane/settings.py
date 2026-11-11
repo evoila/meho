@@ -718,6 +718,14 @@ class Settings(BaseModel):
         was working on. The records exist only when
         ``REQUEST_USAGE_RETENTION_DAYS`` is set, and the same daily job
         deletes them. Env var ``OPERATION_SEARCH_STORE_QUERY_TEXT``.
+    audit_client_identity:
+        Write a ``client`` block into every audit row: the login client
+        (``azp``), the channel (``web`` or ``token``), the principal kind
+        and a short hash of the sign-in session. An approval request and an
+        approval decision also name the client of the person. Default
+        ``False``: the rows stay as before. See
+        :mod:`meho_backplane.auth.client_identity`. Env var
+        ``AUDIT_CLIENT_IDENTITY``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1811,6 +1819,8 @@ class Settings(BaseModel):
     audit_wrapper_rows_retired: bool = False
     # #4750: off by default; the search record keeps only the query hash.
     operation_search_store_query_text: bool = False
+    # Off by default; with it off the audit rows stay as before.
+    audit_client_identity: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -2255,6 +2265,12 @@ class Settings(BaseModel):
     # ``CHECKS_INVESTIGATOR_AGENT`` / ``CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS``.
     checks_investigator_agent: str = "checks-investigator"
     checks_investigation_poll_timeout_seconds: int = Field(default=600, ge=1, le=86400)
+    # #6180 (Initiative #6179): with this switch on, a confirmed Sensor change
+    # and a Dashboard change are written to the event outbox
+    # (``check.sensor.changed`` / ``check.dashboard.changed``), so event
+    # triggers can match them. Off by default: nothing is written and nothing
+    # else changes. Set via ``CHECKS_AGENT_EVENTS``.
+    checks_agent_events: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     # #2717 (Initiative #2716) — mail.* typed connector: one deployment-level
     # SMTP block shared by the agent-callable ``mail.send`` op and the checks
     # notifier's ``send_email()`` transport. ``mail_smtp_host`` empty (the
@@ -3074,6 +3090,9 @@ def get_settings() -> Settings:
         operation_search_store_query_text=parse_bool_env(
             os.environ.get("OPERATION_SEARCH_STORE_QUERY_TEXT", "false"),
         ),
+        audit_client_identity=parse_bool_env(
+            os.environ.get("AUDIT_CLIENT_IDENTITY", "false"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
@@ -3379,6 +3398,7 @@ def get_settings() -> Settings:
         checks_investigation_poll_timeout_seconds=int(
             os.environ.get("CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS", "600"),
         ),
+        checks_agent_events=parse_bool_env(os.environ.get("CHECKS_AGENT_EVENTS", "false")),
         mail_smtp_host=os.environ.get("MAIL_SMTP_HOST", "").strip(),
         mail_smtp_port=int(os.environ.get("MAIL_SMTP_PORT", "587")),
         mail_smtp_starttls=parse_bool_env(

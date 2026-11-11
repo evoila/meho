@@ -38,8 +38,8 @@ func newAggregatedCmd() *cobra.Command {
 			"--time-range threads to params.timestamp_window the same way `query` consumes it.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho vcf-logs aggregated --target rdc-vrli --time-range 24h\n" +
-			"  meho vcf-logs aggregated \"text/CONTAINS+error+bin-width=3600\" --target rdc-vrli\n",
+		Example: "  meho vcf-logs aggregated --target vrli-lab --time-range 24h\n" +
+			"  meho vcf-logs aggregated \"text/CONTAINS+error+bin-width=3600\" --target vrli-lab\n",
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

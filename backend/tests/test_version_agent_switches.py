@@ -38,6 +38,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
     {
         "agent_operation_tools_from_mcp",
         "agent_reads_custom_description",
+        "checks_agent_events",
         "jsonflux_answer_ready",
         "kb_similar_check",
         "mcp_short_tool_texts",
@@ -74,6 +75,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "approval_handoff_encryption_key",
         "approval_one_time_code_acr_values",
         "approval_outcome_unknown_after_minutes",
+        "audit_client_identity",
         "audit_wrapper_rows_retired",
         "backplane_url",
         "bedrock_default_model",

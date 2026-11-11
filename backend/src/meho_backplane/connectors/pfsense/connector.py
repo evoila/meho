@@ -274,6 +274,14 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "prove that the path works. It is a ``safe`` read: no approval, no "
         "change on the firewall."
     ),
+    "openvpn": (
+        "Use for OpenVPN sessions on the firewall. ``pfsense.openvpn.clients`` "
+        "lists the clients that are connected now, per server, with addresses, "
+        "traffic and connect time. ``pfsense.openvpn.log`` reads the OpenVPN log "
+        "for one user in a time window and names each event (connect, "
+        "disconnect, restart, error). Both are ``safe`` reads that change "
+        "nothing. Start with the client list, then read the log for the user."
+    ),
     "users": (
         "Use for pfSense local-user questions: which local users exist, "
         "whether an account (for example a VPN user) is disabled, when it "
@@ -888,6 +896,40 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_diag_ping(self, target, params, operator)
+
+    async def openvpn_clients(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Handler shim for ``pfsense.openvpn.clients``.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn.pfsense_openvpn_clients`.
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn import (
+            pfsense_openvpn_clients as _pfsense_openvpn_clients,
+        )
+
+        return await _pfsense_openvpn_clients(self, target, params, operator)
+
+    async def openvpn_log(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Handler shim for ``pfsense.openvpn.log``.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn.pfsense_openvpn_log`.
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn import (
+            pfsense_openvpn_log as _pfsense_openvpn_log,
+        )
+
+        return await _pfsense_openvpn_log(self, target, params, operator)
 
     async def mgmt_flow_summary(
         self,

@@ -237,8 +237,10 @@ async def test_log_handler_keeps_only_lines_with_the_whole_name() -> None:
     lines = [
         "Nov 10 09:00:01 fw openvpn[1]: bob/203.0.113.5:4000 SIGTERM[soft,remote-exit] received",
         "Nov 10 09:00:02 fw openvpn[1]: bobby/203.0.113.6:4000 SIGTERM[soft,remote-exit] received",
-        "Nov 10 09:00:03 fw openvpn[1]: bob.smith/203.0.113.7:4000 [bob.smith] Peer Connection "
-        "Initiated",
+        (
+            "Nov 10 09:00:03 fw openvpn[1]: bob.smith/203.0.113.7:4000 [bob.smith] Peer Connection "
+            "Initiated"
+        ),
         "Nov 10 09:00:04 fw openvpn[1]: 203.0.113.5:4000 [bob] Peer Connection Initiated",
     ]
     connector, run = _connector(_proc(_DATE + "\n" + "\n".join(lines) + _GREP_OK))

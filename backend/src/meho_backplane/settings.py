@@ -1299,6 +1299,13 @@ class Settings(BaseModel):
         is ``destructive``. Such an approval also needs a sign-in that has
         approved nothing else. Default ``300`` (five minutes). Set via
         ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    approval_presence_touch_valid_seconds:
+        How long a started passkey touch for an approval stays valid
+        (#6214). When a person clicks Approve, MEHO makes a one-time touch
+        challenge for that request. The person must finish the touch in
+        this time; after it the challenge is void and the person clicks
+        Approve again. Default ``120`` (two minutes), from 30 to 600. Set
+        via ``APPROVAL_PRESENCE_TOUCH_VALID_SECONDS``.
     approval_one_time_code_acr_values:
         The ``acr`` values that mean "the person entered a one-time code
         from their authenticator app" (#3979). An approve whose token
@@ -1924,6 +1931,8 @@ class Settings(BaseModel):
     # sign-in each time: turning approval off (#4711) and a destructive
     # approve.
     per_action_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
+    # #6214 -- how long a started passkey touch for an approval stays valid.
+    approval_presence_touch_valid_seconds: int = Field(default=120, ge=30, le=600)
     # #3979 -- the acr values that mean a one-time code step. Empty = off.
     approval_one_time_code_acr_values: tuple[str, ...] = ()
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
@@ -3250,6 +3259,10 @@ def get_settings() -> Settings:
         ),
         per_action_sign_in_max_age_seconds=int(
             os.environ.get("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", "300"),
+        ),
+        # #6214 -- how long a started passkey touch stays valid.
+        approval_presence_touch_valid_seconds=int(
+            os.environ.get("APPROVAL_PRESENCE_TOUCH_VALID_SECONDS", "120"),
         ),
         # #3979 -- which acr values mean a one-time code step.
         approval_one_time_code_acr_values=tuple(

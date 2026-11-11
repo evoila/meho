@@ -233,6 +233,7 @@ __all__ = [
     "request_waits_only_for_token_call",
     "result_state_of_envelope",
     "resume_dispatch_after_approval",
+    "take_approval_lock",
     "withdraw_request",
 ]
 
@@ -1718,16 +1719,32 @@ async def create_pending_request(
     return request
 
 
-def _sign_in_lock_key(sign_in_key: str) -> int:
-    """Map a sign-in key to a stable, non-negative 63-bit advisory-lock key.
+def _approval_lock_key(scope: str, key: str) -> int:
+    """Map *key* under *scope* to a stable, non-negative 63-bit advisory-lock key.
 
     A blake2b digest under its own prefix, masked to 63 bits so it fits the
     ``bigint`` that ``pg_advisory_xact_lock`` takes. The same shape as the
     other advisory-lock keys in the code base.
     """
-    label = f"meho:approval-sign-in\0{sign_in_key}"
+    label = f"meho:{scope}\0{key}"
     digest = hashlib.blake2b(label.encode(), digest_size=8).digest()
     return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def take_approval_lock(session: AsyncSession, scope: str, key: str) -> None:
+    """Take the transaction-level advisory lock of an approval step.
+
+    Two approves that use the same proof (one sign-in, or one passkey touch)
+    can run at the same moment, on two replicas. Each takes this lock first,
+    so the second waits until the first commits or rolls back. PostgreSQL
+    releases the lock with the transaction. On other databases (the
+    single-writer SQLite test path) there is no lock.
+    """
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _approval_lock_key(scope, key)}
+        )
 
 
 def _is_destructive(request: ApprovalRequest) -> bool:
@@ -1783,11 +1800,7 @@ async def _check_sign_in_use(
             max_age_seconds=max_age,
         )
         raise ApprovalSignInTooOldError(request.id, max_age_seconds=max_age)
-    conn = await session.connection()
-    if conn.dialect.name == "postgresql":
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _sign_in_lock_key(key)}
-        )
+    await take_approval_lock(session, "approval-sign-in", key)
     since = datetime.fromtimestamp(approval_auth.auth_time - CLOCK_SKEW_SECONDS - 1, UTC)
     rows = await session.execute(
         select(AuditLog.payload).where(
